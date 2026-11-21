@@ -242,6 +242,7 @@ static const char* const link_benchmark_kind_names[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "static",
     [RUNTIME_KIND_STATIC_PIE] = "static-pie",
     [RUNTIME_KIND_SHARED] = "shared",
+    [RUNTIME_KIND_NO_PIE] = "no-pie",
 };
 
 static const char* const link_benchmark_kind_links[RUNTIME_KINDS] = {
@@ -249,6 +250,7 @@ static const char* const link_benchmark_kind_links[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "a static executable",
     [RUNTIME_KIND_STATIC_PIE] = "a static PIE",
     [RUNTIME_KIND_SHARED] = "a shared library",
+    [RUNTIME_KIND_NO_PIE] = "a position-dependent dynamic executable",
 };
 
 typedef struct LinkBenchmarkSettings LinkBenchmarkSettings;
@@ -717,6 +719,11 @@ static SnapshotResult link_benchmark_open(Runtime* runtime, const char* cache, R
     else if (kind == RUNTIME_KIND_SHARED)
     {
         result = runtime_open_shared(runtime, cache);
+    }
+    else if (kind == RUNTIME_KIND_NO_PIE)
+    {
+        // Only --kinds no-pie asks: the cache's opener alone takes the kind.
+        result = runtime_open_cache(runtime, cache, kind);
     }
     else
     {
@@ -1244,7 +1251,7 @@ static uint32_t link_benchmark_arguments(char** arguments, const char* linker, c
     }
     else
     {
-        arguments[count++] = "-pie";
+        arguments[count++] = runtime->kind == RUNTIME_KIND_NO_PIE ? "-no-pie" : "-pie";
         arguments[count++] = "-dynamic-linker";
         arguments[count++] = runtime->loader_path.pointer;
     }

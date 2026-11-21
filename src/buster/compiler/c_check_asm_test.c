@@ -666,9 +666,9 @@ static void check_test_asm_empty_column(CheckTest* test)
             if (ready)
             {
                 const bool statements = source == 2;
-                check_test_expect(test, (path.input.asm_ids != NULL) == (parser.options.scalar || statements) &&
+                check_test_expect(test, (path.input.asm_ids != NULL) == statements &&
                                        path.input.asm_count == (uint32_t)statements && path.input.asm_capacity == (uint32_t)(source != 0),
-                                  "only statements require asm IDs; declaration labels keep original capacity and the scalar dense oracle");
+                                  "only statements require asm IDs, by either option; declaration labels keep original capacity");
                 uint32_t marked = 0;
                 for (uint32_t token = 0; token <= parser.tokens.count; token += 1)
                 {

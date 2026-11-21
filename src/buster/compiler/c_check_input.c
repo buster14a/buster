@@ -1374,20 +1374,15 @@ static __attribute__((unused)) void check_input_set_attributes_at(CheckInput* in
 // The scans of the tokens with attributes (CheckInput.attributes, which a scan caches), in groups of 16 below `end`: the
 // first group from `first`, a multiple of 16, whose tokens may have attributes, or a token at or past `end`
 // (check_sparse_wide_next); and of a group's tokens, those that have attributes, a bit each (check_sparse_wide_group).
-// The vector path skips 256 tokens without attributes with a load; the scalar path, its twin, visits every group and
-// reads each token's attributes.
-static __attribute__((unused)) uint32_t check_input_attributed_next(CheckSparseWide attributes, uint32_t first, uint32_t end, bool scalar)
+// The first skips 256 tokens without attributes with a load.
+static __attribute__((unused)) uint32_t check_input_attributed_next(CheckSparseWide attributes, uint32_t first, uint32_t end)
 {
-    (void)scalar;
-
-    return check_sparse_wide_next(attributes, first, end, !BUSTER_SCALAR_PATH(scalar));
+    return check_sparse_wide_next(attributes, first, end);
 }
 
-static __attribute__((unused)) uint32_t check_input_attributed_group(CheckSparseWide attributes, uint32_t first, uint32_t end, bool scalar)
+static __attribute__((unused)) uint32_t check_input_attributed_group(CheckSparseWide attributes, uint32_t first, uint32_t end)
 {
-    (void)scalar;
-
-    return check_sparse_wide_group(attributes, first, end, !BUSTER_SCALAR_PATH(scalar));
+    return check_sparse_wide_group(attributes, first, end);
 }
 
 static uint32_t check_input_diagnostic_limit(const CheckInput* input, uint32_t token)
@@ -1426,9 +1421,9 @@ static bool check_input_source_builtin(uint32_t name)
 
 // The span of predefined names (c_intern.c's order) that holds those builtins: __builtin_COLUMN's to
 // __is_nothrow_destructible's, with __builtin_available, __builtin_bit_cast and __builtin_ptrauth_type_discriminator among
-// them. The token count tests a name against the span with one comparison (check_input_count_tokens, and its twin
-// check_input_syntax_of), where a comparison per builtin cost the count's vector loop 8.4 million instructions of a
-// sqlite3.c -c (#148); the span's other names only make a few more tokens visited and the table of constants larger.
+// them. The token count tests a name against the span with one comparison (check_input_count_tokens), where a comparison
+// per builtin cost the count's vector loop 8.4 million instructions of a sqlite3.c -c (#148); the span's other names only
+// make a few more tokens visited and the table of constants larger.
 #define BUSTER_CHECK_SOURCE_BUILTIN_FIRST ((uint32_t)C_NAME_BUILTIN_COLUMN)
 #define BUSTER_CHECK_SOURCE_BUILTIN_SPAN ((uint32_t)(C_NAME_IS_NOTHROW_DESTRUCTIBLE - C_NAME_BUILTIN_COLUMN + 1))
 _Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_IS_NOTHROW_DESTRUCTIBLE && C_NAME_IS_NOTHROW_DESTRUCTIBLE - C_NAME_BUILTIN_COLUMN < 16 &&
@@ -1442,11 +1437,6 @@ _Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_IS_NOTHROW_DESTRUCTIBLE && C_NAME_
                C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN < C_NAME_BUILTIN_VECTORELEMENTS &&
                C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR > C_NAME_BUILTIN_COLUMN && C_NAME_BUILTIN_PTRAUTH_TYPE_DISCRIMINATOR < C_NAME_BUILTIN_VECTORELEMENTS,
                "the builtins of constants the walk works out lie in one short span of predefined names");
-
-static bool check_input_source_builtin_span(uint32_t name)
-{
-    return name - BUSTER_CHECK_SOURCE_BUILTIN_FIRST < BUSTER_CHECK_SOURCE_BUILTIN_SPAN;
-}
 
 // Which tokens the two walks' vector paths visit (#529), and what they test there: CheckInputReader.visits, a byte a
 // token. Before the walk in source order (check_input_resolve_range), the reasons it may act at the token, a bit each,
@@ -1560,8 +1550,7 @@ _Static_assert(CHECK_INPUT_CODE_OPERAND << BUSTER_CHECK_EXPRESSION_CODE_SHIFT <=
 _Static_assert(BUSTER_CHECK_EXPRESSION_CODE_MASK >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT == BUSTER_CHECK_EXPRESSION_CODES - 1, "a counter per code the bits hold");
 
 // The walks' tests of a token's role and of its kind, a bit each, in tables that a pass looks 64 tokens up in at once
-// (_mm512_permutex2var_epi8 of a 128-byte table: roles and kinds are below 128). The scalar twins of the passes that read
-// them make the walks' own tests instead (check_input_visit_of, check_input_expression_class).
+// (_mm512_permutex2var_epi8 of a 128-byte table: roles and kinds are below 128).
 // The walk in source order acts at a token of the role (check_input_resolve_range).
 #define BUSTER_CHECK_ROLE_RESOLVE 0x01u
 // An identifier of the role is no name the walk in source order resolves: a member's, a tag's or an asm label's.
@@ -2236,12 +2225,6 @@ struct CheckInputReader
     // quadratic in its elements. The scalar reader walks the chains, as the twin of these counts.
     uint32_t* value_counts;
     uint32_t* value_next;
-    // The scalar reader's walks, by the chain head they started at (--scalar alone, #1665): the last value each walk reached
-    // and how many it counted, so that a walk of a chain that holds an already walked one steps over it rather than through
-    // it again, whose separators, each a child of the next, each walk the chains before them. A node's entry is cleared as
-    // it's made and where its chain is cut back to it; chains only grow at their ends otherwise, past what a hop lands on.
-    uint32_t* walk_ends;
-    uint32_t* walk_counts;
     // Under PPOptions.expression_numbering alone, a byte a token: 1 where the coded walk's class action left it to the
     // walk's visit (check_input_expression_numbering's barriers); null otherwise.
     uint8_t* expression_declined;
@@ -11088,9 +11071,9 @@ static uint32_t check_input_declaration_start(const Parser* parser, uint32_t fir
 }
 
 // The first token of the declaration whose declarator name is `name`. A declaration starts after the previous
-// terminator, block opening or body, but a struct or enum body among its own specifiers belongs to it. This is the
-// scalar oracle of the start column (check_input_declaration_starts), which the walk reads instead of walking back once
-// per candidate: an initializer's `&` and `(` names made that walk quadratic in the declaration's length.
+// terminator, block opening or body, but a struct or enum body among its own specifiers belongs to it. Where the reader
+// has the start column (check_input_declaration_starts), the walk reads it instead of walking back once per candidate:
+// an initializer's `&` and `(` names made that walk quadratic in the declaration's length.
 static uint32_t check_input_declaration_begin(const Parser* parser, uint32_t name)
 {
     uint32_t begin = name;
@@ -11130,52 +11113,14 @@ BUSTER_INLINE bool check_input_declaration_boundary(uint8_t role)
            role == PARSE_ROLE_CLOSE_BODY;
 }
 
-// The declaration-start column's scalar path, the twin of check_input_declaration_starts' vector path. `column[token]`
+// The declaration-start column and the struct and enum stack it builds through, from the parser's roles: `column[token]`
 // is the first token of the declaration whose declarator name is `token`, as check_input_declaration_begin gives it: the
 // largest of the token after the last boundary before it and the token after the last struct or enum body before it that
-// holds a boundary. A body's own terminator is the last boundary of a declaration that ends inside it, while its close
-// makes that body's boundary no part of a later declaration. `stack` holds one boundary count per open body, and the
-// prefixes' maximum is carried from token to token.
-static void check_input_declaration_starts_scalar(const Parser* parser, uint32_t* column, uint32_t* stack)
-{
-    const uint32_t count = parser->tokens.count;
-    const uint8_t* roles = parser->tree.roles;
-    uint32_t boundaries = 0;
-    uint32_t depth = 0;
-    uint32_t maximum = 0;
-    for (uint32_t token = 0; token < count; token += 1)
-    {
-        const uint8_t role = roles[token];
-        uint32_t start = 0;
-        if (role == PARSE_ROLE_OPEN_STRUCT || role == PARSE_ROLE_OPEN_ENUM)
-        {
-            stack[depth++] = boundaries;
-        }
-        else if (role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM)
-        {
-            // A body with a boundary in it starts the declarations after it at its close's successor, as the walk's
-            // break at the body's own boundary does; an empty one leaves the declaration before it current.
-            const uint32_t saved = depth != 0 ? stack[--depth] : boundaries;
-            start = saved != boundaries ? token + 1 : 0;
-        }
-        else if (check_input_declaration_boundary(role))
-        {
-            start = token + 1;
-            boundaries += 1;
-        }
-        column[token] = maximum;
-        maximum = start > maximum ? start : maximum;
-    }
-    column[count] = maximum;
-}
-
-// The declaration-start column's vector path, in one pass over the roles, 64 tokens at a time (#529): the boundaries'
-// mask; the struct and enum stack, which tells a body with a boundary in it from an empty one, as the ordered part, at
-// the block's openings and closings alone, each with the boundaries before it counted from the mask; and each 16
-// tokens' exclusive prefix maxima, written once. It wrote the column three times and tested every token's role a
-// token at a time for the stack. The scalar path above is its exact twin, and both give check_input_declaration_begin's
-// result.
-static void check_input_declaration_starts_vector(const Parser* parser, uint32_t* column, uint32_t* stack)
+// holds a boundary. In one pass over the roles, 64 tokens at a time (#529): the boundaries' mask; the struct and enum
+// stack, which tells a body with a boundary in it from an empty one, as the ordered part, at the block's openings and
+// closings alone, each with the boundaries before it counted from the mask; and each 16 tokens' exclusive prefix maxima,
+// written once. It wrote the column three times and tested every token's role a token at a time for the stack.
+static void check_input_declaration_starts(const Parser* parser, uint32_t* column, uint32_t* stack)
 {
     const uint32_t count = parser->tokens.count;
     const uint8_t* roles = parser->tree.roles;
@@ -11233,19 +11178,6 @@ static void check_input_declaration_starts_vector(const Parser* parser, uint32_t
         }
     }
     column[count] = (uint32_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(carry));
-}
-
-// The declaration-start column and the struct and enum stack it builds through, from the parser's roles.
-static void check_input_declaration_starts(const Parser* parser, uint32_t* column, uint32_t* stack, bool scalar)
-{
-    if (BUSTER_SCALAR_PATH(scalar))
-    {
-        check_input_declaration_starts_scalar(parser, column, stack);
-    }
-    else
-    {
-        check_input_declaration_starts_vector(parser, column, stack);
-    }
 }
 
 // The first token of the declaration whose declarator name is `name`: the start column where the reader has one
@@ -13861,36 +13793,12 @@ static void check_input_attribute_items(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count < 2 ? 0 : parser->tokens.count - 2;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_ATTRIBUTE);
+        uint64_t selected = check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_ATTRIBUTE);
         for (; selected != 0; selected &= selected - 1)
         {
             check_input_attribute_item(reader, first + (uint32_t)__builtin_ctzll(selected));
         }
     }
-}
-
-// Whether the walk in source order may act at `token` by its syntax alone, as the walk's own tests of its role, kind and
-// syntax bits (`syntax`, check_input_syntax_of's) and its successor's give it: the scalar path's mark, the twin of the
-// vector path's (check_input_count_tokens). A deferred body's tokens, which the walk skips from the body's opening, need
-// none: a deferred body starts at an OPEN_BODY (check_lazy_mask_valid), which is marked. A label's, a goto's and an
-// address of a label's names, which the walk ignores, are identifiers, the only operands the parser takes after a goto
-// or an && and before a label's colon.
-static bool check_input_visit_of(const Parser* parser, uint8_t syntax, uint32_t token)
-{
-    const uint8_t role = parser->tree.roles[token];
-    const uint8_t kind = parser->tokens.kinds[token];
-    const bool successor = token + 1 < parser->tokens.count;
-    const uint8_t next_role = successor ? parser->tree.roles[token + 1] : PARSE_ROLE_NONE;
-    const uint8_t next_kind = successor ? parser->tokens.kinds[token + 1] : PARSE_KIND_END;
-    const bool declaration = role == PARSE_ROLE_SPECIFIER || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_TYPEOF ||
-                             kind == PARSE_KIND_ATOMIC ||
-                             (kind == PARSE_KIND_EXTENSION && (next_role == PARSE_ROLE_SPECIFIER || next_kind == PARSE_KIND_STRUCT || next_kind == PARSE_KIND_ENUM));
-    const bool statement = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_BODY || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION ||
-                           role == PARSE_ROLE_RETURN || role == PARSE_ROLE_LABEL || role == PARSE_ROLE_OPEN_CASE || kind == PARSE_KIND_GOTO ||
-                           kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_ASM || (role == PARSE_ROLE_OPEN_GROUP && next_role == PARSE_ROLE_OPEN_BLOCK);
-    const bool query = role == PARSE_ROLE_OPEN_CAST || role == PARSE_ROLE_OPEN_SIZEOF || role == PARSE_ROLE_OPEN_COMPOUND;
-    const bool name = kind == PARSE_KIND_IDENTIFIER && role != PARSE_ROLE_MEMBER && role != PARSE_ROLE_TAG && role != PARSE_ROLE_LEAF_RIGHT;
-    return syntax != 0 || declaration || statement || query || name;
 }
 
 // The token the walk in source order visits after `token`, at most `end`: the next one on the scalar path, which visits
@@ -13905,7 +13813,7 @@ static uint32_t check_input_resolve_next(const CheckInputReader* reader, uint32_
 {
     const uint32_t stop = reader->resolve_limit > token && reader->resolve_limit < end ? reader->resolve_limit : end;
     uint32_t next = token + 1;
-    if (!reader->parser->options.scalar && next < stop)
+    if (next < stop)
     {
         const uint8_t* const visits = reader->visits;
         uint32_t line = next & ~63u;
@@ -13922,42 +13830,17 @@ static uint32_t check_input_resolve_next(const CheckInputReader* reader, uint32_
 }
 
 // Whether the walk in source order tests at `token` the columns a write marks with `reason` (BUSTER_CHECK_RESOLVE_*), or
-// the token's syntax for BUSTER_CHECK_RESOLVE_SYNTAX: at every token on the scalar path, and on the vector path where a
-// mark gives the reason, read when the walk tests the columns, after its earlier steps at the token, which may mark it.
-static bool check_input_resolve_tests(uint8_t mark, bool scalar, uint8_t reason)
+// the token's syntax for BUSTER_CHECK_RESOLVE_SYNTAX: where a mark gives the reason, read when the walk tests the
+// columns, after its earlier steps at the token, which may mark it.
+static bool check_input_resolve_tests(uint8_t mark, uint8_t reason)
 {
-    return scalar || (mark & reason) != 0;
+    return (mark & reason) != 0;
 }
 
 // check_input_resolve_tests of a reason other than the token's syntax, which few visits' marks give (on sqlite3.c, a
 // scope's end at a sixth of them and the others at fewer), so the hint expects it false (#1175). A macro, since a hint holds only as the first test of its branch's condition: clang drops
 // one that wraps a chain of && but for the chain's last test.
-#define BUSTER_CHECK_RESOLVE_RARE(mark, scalar, reason) __builtin_expect(check_input_resolve_tests((mark), (scalar), (reason)), 0)
-
-// Whether the walk in source order arrives at `token` where it acts for a reason that no mark gives the token
-// (CheckInputReader.visits): the vector path would skip the token or the test. The scalar path, which visits every
-// token and makes every test, counts such a token (CheckInput.visit_misses), by the walk's tests of the token's syntax
-// (check_input_visit_of) and of the columns it writes ahead of itself, each against its mark's reason.
-static bool check_input_resolve_missed(const CheckInputReader* reader, uint32_t token)
-{
-    bool missed = false;
-    if (token != reader->resolve_limit)
-    {
-        const uint8_t marks = reader->visits[token];
-        // The unit's count, a whole unit's last token, has no syntax.
-        const bool syntax = token < reader->parser->tokens.count && check_input_visit_of(reader->parser, reader->syntax[token], token);
-        const bool scope = reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < token;
-        const bool finish = reader->initializer_finish_heads[token] != BUSTER_CHECK_NONE;
-        const bool declaration = ((reader->initializers[token] & 3) != 0 && reader->initializer_declarations[token] != BUSTER_CHECK_NONE) ||
-                                 reader->declaration_bases[token] != 0;
-        const bool query = reader->designator_valid[token] == 2 || reader->specifier_finishes[token] != 0 || reader->selection_type_ends[token] != 0 ||
-                           reader->vararg_types[token] != 0 || reader->builtin_type_ends[token] != 0;
-        missed = (syntax && (marks & BUSTER_CHECK_RESOLVE_SYNTAX) == 0) || (reader->activate[token] != BUSTER_CHECK_NONE && (marks & BUSTER_CHECK_RESOLVE_ACTIVATE) == 0) ||
-                 (scope && (marks & BUSTER_CHECK_RESOLVE_SCOPE) == 0) || (finish && (marks & BUSTER_CHECK_RESOLVE_FINISH) == 0) ||
-                 (declaration && (marks & BUSTER_CHECK_RESOLVE_DECLARATION) == 0) || (query && (marks & BUSTER_CHECK_RESOLVE_QUERY) == 0);
-    }
-    return missed;
-}
+#define BUSTER_CHECK_RESOLVE_RARE(mark, reason) __builtin_expect(check_input_resolve_tests((mark), (reason)), 0)
 
 // Whether `token` belongs to a C89 file-scope declaration whose declarator has no specifier before it, as clang's
 // ParseImplicitInt takes `x;`, `main() {}`, `(x);` and `*p;` (block scope takes only a declaration a specifier starts,
@@ -14138,19 +14021,17 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
 
 // The walk from token `begin` to `end`, where it stops (the unit's count, for the whole unit). A lane's walk of a body
 // (CheckInputReader.lane) starts at its opening brace, whose activations the top level made, and ends at the token
-// after its closing brace, where its scopes end and nothing else of the token is its. The vector path visits only the
+// after its closing brace, where its scopes end and nothing else of the token is its. It visits only the
 // tokens marked (check_input_resolve_next): about a third of sqlite3.c's. At each token it visits, the walk first ends the
 // function it has left (function_end), which only a visit reads; and it makes only the tests the token's marks give
 // reasons for (check_input_resolve_tests): those of its syntax, and of the columns it writes ahead of itself.
 //
 // Most of those tests are rarely true at a visit, and each begins with its rare part, hinted (`__builtin_expect`, and
 // BUSTER_CHECK_RESOLVE_RARE for a mark's reason, #1175): without it, clang laid each one's body on the path and jumped
-// around it, 32 taken branches a visit on sqlite3.c's -fsyntax-only, a seventh of the whole run's. The scalar path is
-// expected where it is the host's only one.
+// around it, 32 taken branches a visit on sqlite3.c's -fsyntax-only, a seventh of the whole run's.
 static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
-    const bool scalar = parser->options.scalar;
     // C89's implicit declarations start at a name (check_input_starts_implicit_declaration), which a plain name's visit
     // leaves to the general one.
     const bool modern = parser->language.standard >= 1999;
@@ -14158,10 +14039,6 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
         visits += 1;
-        if (__builtin_expect(parser->options.scalar, 0))
-        {
-            reader->output->visit_misses += check_input_resolve_missed(reader, i);
-        }
         if (i == reader->resolve_limit)
         {
             check_input_pragma_report(reader);
@@ -14173,7 +14050,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         // read once and tested for each reason (#889).
         uint8_t mark = reader->visits[i];
         // A lane's opening and the token after its closing are the top level's, which finished their initializers.
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_FINISH) && !(reader->lane && (i == begin || i == end)))
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_FINISH) && !(reader->lane && (i == begin || i == end)))
         {
             for (uint32_t declaration = reader->initializer_finish_heads[i]; declaration != BUSTER_CHECK_NONE; declaration = reader->initializer_finish_next[declaration])
             {
@@ -14187,7 +14064,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             break;
         }
-        while (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_SCOPE) && reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < i)
+        while (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_SCOPE) && reader->scope_count != 0 && reader->scope_ends[reader->scope_count - 1] < i)
         {
             reader->scope_count -= 1;
             // A scope that declared nothing has nothing to end, and its restore is left out where the stream, which
@@ -14239,7 +14116,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         // - A token an earlier step ignored, a sixth of them, nearly all a declaration's later specifiers, which its
         //   declaration's step read: every step tests that the token isn't ignored, but a return's and a for's, so one of
         //   another role does nothing. The label's test would set its ignored mark again, which holds a bool.
-        if (!scalar && mark == BUSTER_CHECK_RESOLVE_SYNTAX)
+        if (mark == BUSTER_CHECK_RESOLVE_SYNTAX)
         {
             if (kind == PARSE_KIND_IDENTIFIER && role == PARSE_ROLE_OPERAND && syntax == 0 && modern)
             {
@@ -14255,11 +14132,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 continue;
             }
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, designator_valid, i) == 2 && !check_input_initializer_designator(reader, i))
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, designator_valid, i) == 2 && !check_input_initializer_designator(reader, i))
         {
             break;
         }
-        CheckInputSpecifierJob* job = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) ? BUSTER_CHECK_RARE(reader, specifier_finishes, i) : 0;
+        CheckInputSpecifierJob* job = check_input_resolve_tests(mark, BUSTER_CHECK_RESOLVE_QUERY) ? BUSTER_CHECK_RARE(reader, specifier_finishes, i) : 0;
         if (__builtin_expect(job != 0, 0) && !job->ready)
         {
             CheckValue value = { 0 };
@@ -14298,7 +14175,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             }
         }
         // The tests of the token's syntax, of a token its syntax marks on the vector path.
-        const bool syntactic = check_input_resolve_tests(mark, scalar, BUSTER_CHECK_RESOLVE_SYNTAX);
+        const bool syntactic = check_input_resolve_tests(mark, BUSTER_CHECK_RESOLVE_SYNTAX);
         if (syntactic)
         {
             check_input_resolve_ignored(reader, i, role, kind, parent);
@@ -14350,22 +14227,22 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 }
             }
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, selection_type_ends, i) != 0)
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, selection_type_ends, i) != 0)
         {
             check_input_selection_type(reader, i);
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_ACTIVATE) && !(reader->lane && i == begin))
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_ACTIVATE) && !(reader->lane && i == begin))
         {
             for (uint32_t token = reader->activate[i]; token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
             {
                 check_input_bind(reader, token, i);
             }
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && reader->vararg_types[i] != 0)
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_QUERY) && reader->vararg_types[i] != 0)
         {
             check_input_vararg_type(reader, i);
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, builtin_type_ends, i) != 0)
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, builtin_type_ends, i) != 0)
         {
             check_input_builtin_type(reader, i);
         }
@@ -14373,7 +14250,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             check_input_statement_attributes(reader, i);
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && (reader->initializers[i] & 3) != 0 &&
+        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_DECLARATION) && (reader->initializers[i] & 3) != 0 &&
             reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
         {
             const uint32_t declaration = reader->initializer_declarations[i];
@@ -14410,7 +14287,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             (__builtin_expect(kind == PARSE_KIND_EXTENSION, 0) && syntactic && !reader->ignored[i] && i + 1 < parser->tokens.count &&
              (parser->tree.roles[i + 1] == PARSE_ROLE_SPECIFIER || parser->tokens.kinds[i + 1] == PARSE_KIND_STRUCT || parser->tokens.kinds[i + 1] == PARSE_KIND_ENUM)) ||
             implicit ||
-            (BUSTER_CHECK_RESOLVE_RARE(mark, scalar, BUSTER_CHECK_RESOLVE_DECLARATION) && BUSTER_CHECK_RARE(reader, declaration_bases, i) != 0))
+            (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_DECLARATION) && BUSTER_CHECK_RARE(reader, declaration_bases, i) != 0))
         {
             if (kind == PARSE_KIND_LABEL && !reader->ignored[i])
             {
@@ -14658,10 +14535,6 @@ static inline __attribute__((always_inline)) uint32_t check_input_add_node(Check
     else
     {
         reader->value_next[node] = BUSTER_CHECK_NONE;
-        if (reader->walk_ends != NULL)
-        {
-            reader->walk_ends[node] = BUSTER_CHECK_NONE;
-        }
         reader->output->graph.source_positions[node] = check_input_expression_end(reader, token);
         // The reader's suppressions are nearly always there, and a floating-point environment of the unit's own rarely
         // (#1175): without the hints, clang jumped around each once a node.
@@ -15128,164 +15001,14 @@ static uint32_t check_input_intrinsic_arguments(CheckInputReader* reader, const 
 #include "c_check_region_input.c"
 
 
-// The class `code` of `token`, by its role and kind, as the columns the reader wrote before the walk refine it (#1038): a
-// separator is a comma operator's BINARY where expression_commas says so, and a BINARY that is an initializer's assignment
-// an INITIALIZE; a builtin's token of a class whose action leaves builtins to the walk (check_input_builtin_codes) and an
-// intrinsic's call are the walk's. Each class's action then tests none of these columns at the token as the walk reaches it, where
-// each was a load the walk's serial order waited for (an intrinsic's id, at a call, a miss in a column no other pass
-// reads). The scalar twin of check_input_expression_classes' folds.
-static uint8_t check_input_expression_fold(const CheckInputReader* reader, uint32_t token, uint8_t code)
-{
-    const uint32_t* intrinsics = reader->output->intrinsic_ids;
-    uint8_t result = code == CHECK_INPUT_CODE_SEPARATOR && reader->expression_commas[token] != 0 ? CHECK_INPUT_CODE_BINARY : code;
-    result = result == CHECK_INPUT_CODE_BINARY && reader->initializers[token] != 0 ? CHECK_INPUT_CODE_INITIALIZE : result;
-    result = result == CHECK_INPUT_CODE_GROUP && reader->initializers[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
-    result = check_input_builtin_codes[result] != 0 && reader->builtins[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
-    result = result == CHECK_INPUT_CODE_CALL && intrinsics != NULL && intrinsics[token] != 0 ? CHECK_INPUT_CODE_SCALAR : result;
-    return result;
-}
-
-// The walk's class of `token` (CheckInputExpressionCode), by its own tests in their order: the twin of
-// check_input_role_codes' lookups. `sparse` says a sparse column has an entry for it and `list` that its role is one an
-// ignored token passes its values on by. A type query that finishes at the token makes its class the walk's visit too.
-static uint8_t check_input_expression_code(const CheckInputReader* reader, uint32_t token, bool sparse, bool list)
-{
-    const uint8_t role = reader->parser->tree.roles[token];
-    const uint8_t kind = reader->parser->tokens.kinds[token];
-    const bool refused = kind == PARSE_KIND_STRING || kind == PARSE_KIND_GOTO || kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE ||
-                         kind == PARSE_KIND_LABEL || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT ||
-                         kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_ASM || kind == PARSE_KIND_ATTRIBUTE ||
-                         kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF ||
-                         kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION;
-    uint8_t code;
-    if (sparse || BUSTER_CHECK_RARE(reader, specifier_finishes, token) != 0)
-    {
-        code = CHECK_INPUT_CODE_SCALAR;
-    }
-    else if (reader->ignored[token])
-    {
-        code = list ? CHECK_INPUT_CODE_LIST : CHECK_INPUT_CODE_DROP;
-    }
-    else if (role == PARSE_ROLE_OPERAND)
-    {
-        code = kind == PARSE_KIND_IDENTIFIER ? CHECK_INPUT_CODE_IDENTIFIER :
-               kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ? CHECK_INPUT_CODE_LITERAL :
-               kind == PARSE_KIND_STRING ? CHECK_INPUT_CODE_STRING : CHECK_INPUT_CODE_SCALAR;
-    }
-    else if (role == PARSE_ROLE_RETURN && kind == PARSE_KIND_RETURN)
-    {
-        code = CHECK_INPUT_CODE_RETURN;
-    }
-    else if (role == PARSE_ROLE_PREFIX)
-    {
-        code = CHECK_INPUT_CODE_PREFIX;
-    }
-    else if ((role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA)
-    {
-        code = CHECK_INPUT_CODE_BINARY;
-    }
-    else if (role == PARSE_ROLE_SEPARATOR)
-    {
-        code = CHECK_INPUT_CODE_SEPARATOR;
-    }
-    else if (role == PARSE_ROLE_CLOSE_GROUP)
-    {
-        code = CHECK_INPUT_CODE_GROUP;
-    }
-    else if (role == PARSE_ROLE_CLOSE_CAST)
-    {
-        code = CHECK_INPUT_CODE_CAST;
-    }
-    else if (role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_ASSOCIATION || role == PARSE_ROLE_CLOSE_INITIALIZER)
-    {
-        code = CHECK_INPUT_CODE_LIST;
-    }
-    else if (role == PARSE_ROLE_CLOSE_TERNARY)
-    {
-        code = CHECK_INPUT_CODE_TERNARY;
-    }
-    else if (role == PARSE_ROLE_CLOSE_SUBSCRIPT)
-    {
-        code = CHECK_INPUT_CODE_SUBSCRIPT;
-    }
-    else if (role == PARSE_ROLE_MEMBER_OPERATOR)
-    {
-        code = CHECK_INPUT_CODE_MEMBER;
-    }
-    else if (role == PARSE_ROLE_POSTFIX)
-    {
-        code = CHECK_INPUT_CODE_POSTFIX;
-    }
-    else if (role == PARSE_ROLE_CLOSE_CONDITION)
-    {
-        code = CHECK_INPUT_CODE_CONDITION;
-    }
-    else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_FOR)
-    {
-        code = CHECK_INPUT_CODE_TERMINATOR;
-    }
-    else if (role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION)
-    {
-        code = CHECK_INPUT_CODE_CALL;
-    }
-    else if (role == PARSE_ROLE_RETURN || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_COMPOUND_BODY || role == PARSE_ROLE_RANGE || role == PARSE_ROLE_CLOSE_CASE || role == PARSE_ROLE_CLOSE_STRUCT ||
-             role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_ASM || role == PARSE_ROLE_LABEL ||
-             role == PARSE_ROLE_TAG || role == PARSE_ROLE_BITFIELD)
-    {
-        code = CHECK_INPUT_CODE_SCALAR;
-    }
-    else
-    {
-        code = refused ? CHECK_INPUT_CODE_SCALAR : CHECK_INPUT_CODE_DROP;
-    }
-    return check_input_expression_fold(reader, token, code);
-}
-
-// The expressions' walk's classes of `token` (BUSTER_CHECK_EXPRESSION_*), by the walk's own tests: the scalar twin of
-// check_input_expression_classes' vector path. The walk acts at a token with children, at one a sparse column has an
-// entry for, and at one whose role or kind its other tests take: for an ignored token, a role whose values it passes on
-// as a list. At any other token it writes the token's first value, NONE, and nothing else. The class code
-// (check_input_expression_code) only where `coded`, the coded walk's: the walk's action reads its ACTS and SPARSE bits
-// alone, so that --scalar's walk doesn't pay for the code's tests at every token.
-static uint8_t check_input_expression_class(const CheckInputReader* reader, uint32_t token, bool coded)
-{
-    const Parser* parser = reader->parser;
-    const uint8_t role = parser->tree.roles[token];
-    const uint8_t kind = parser->tokens.kinds[token];
-    const bool sparse = check_input_expression_sparse(reader, token);
-    const bool list = role == PARSE_ROLE_SPECIFIER || role == PARSE_ROLE_COMMA || role == PARSE_ROLE_SEPARATOR || role == PARSE_ROLE_CLOSE_ATTRIBUTE ||
-                      role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER || role == PARSE_ROLE_CLOSE_ATTRIBUTE_RIGHT || role == PARSE_ROLE_CLOSE_SPECIFIER;
-    const bool operation = role == PARSE_ROLE_OPERAND || role == PARSE_ROLE_RETURN || role == PARSE_ROLE_PREFIX || role == PARSE_ROLE_POSTFIX ||
-                           role == PARSE_ROLE_MEMBER_OPERATOR || (role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_ASSIGN) || role == PARSE_ROLE_COMMA ||
-                           role == PARSE_ROLE_SEPARATOR || role == PARSE_ROLE_ASSOCIATION || role == PARSE_ROLE_OPEN_TERNARY || role == PARSE_ROLE_CLOSE_TERNARY ||
-                           role == PARSE_ROLE_RANGE;
-    const bool closing = role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_SUBSCRIPT ||
-                         role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_FUNCTION || role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_CONDITION ||
-                         role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_CLOSE_INITIALIZER || role == PARSE_ROLE_CLOSE_COMPOUND_BODY ||
-                         role == PARSE_ROLE_CLOSE_CASE;
-    // The roles and kinds the walk refuses where it meets them, which a valid unit's reader ignores.
-    const bool refused = role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_ENUM || role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_ASM ||
-                         role == PARSE_ROLE_LABEL || role == PARSE_ROLE_TAG || role == PARSE_ROLE_BITFIELD || kind == PARSE_KIND_STRING || kind == PARSE_KIND_GOTO ||
-                         kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE || kind == PARSE_KIND_LABEL || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_CASE ||
-                         kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_ASM || kind == PARSE_KIND_ATTRIBUTE ||
-                         kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_TYPEOF ||
-                         kind == PARSE_KIND_GENERIC || kind == PARSE_KIND_TYPE_ARGUMENT || kind == PARSE_KIND_REAL_IMAG || kind == PARSE_KIND_EXTENSION;
-    const bool acts = reader->first_child[token] != BUSTER_CHECK_NONE || sparse || (reader->ignored[token] ? list : operation || closing || refused);
-    const uint8_t code = coded ? check_input_expression_code(reader, token, sparse, list) : CHECK_INPUT_CODE_OTHER;
-    return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
-}
-
-// The expressions' walk's classes of every token, into CheckInputReader.visits, as check_input_expression_class gives
-// them: on the vector path, 64 tokens' roles and kinds looked up in the tables (check_input_role_tests, check_input_role_codes)
-// and their sparse entries in a word of marks (CheckInputReader.sparse_marks, which every write of the sparse columns
-// keeps), 16 tokens' type queries and first children at a time; on the scalar path, its twin's, a token at a time,
-// with the class codes only for the coded walk (all but --scalar's, which reads none). Each token the walk doesn't
-// act at gets its first value, NONE, here, which the walk writes when it reaches it, and the walk's vector path skips
-// it. Nothing the walk does writes a column the classes read at a token it hasn't reached: the scalar path, which
-// reaches every token, counts each token it acts at, or tests a sparse column of, that its class left out
-// (CheckInput.visit_misses). A token of a declaration attested declarations skip (CheckInputReader.skips) takes no class
-// on either path: each such declaration is a whole file-scope tree whose tokens are ignored, whose leaves would drop and
-// whose other tokens would pass on their children's empty lists, so that no value of it reaches a token read (#2531).
+// The expressions' walk's classes of every token, into CheckInputReader.visits: 64 tokens' roles and kinds looked up in
+// the tables (check_input_role_tests, check_input_role_codes) and their sparse entries in a word of marks
+// (CheckInputReader.sparse_marks, which every write of the sparse columns keeps), 16 tokens' type queries and first
+// children at a time. Each token the walk doesn't act at gets its first value, NONE, here, which the walk writes when it
+// reaches it, and the walk skips it. Nothing the walk does writes a column the classes read at a token it hasn't
+// reached. A token of a declaration attested declarations skip (CheckInputReader.skips) takes no class: each such
+// declaration is a whole file-scope tree whose tokens are ignored, whose leaves would drop and whose other tokens would
+// pass on their children's empty lists, so that no value of it reaches a token read (#2531).
 // Returns the number of tokens the walk acts at.
 static uint32_t check_input_expression_classes(CheckInputReader* reader)
 {
@@ -15302,7 +15025,7 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
     const __m512i none = _mm512_set1_epi32((int32_t)BUSTER_CHECK_NONE);
     uint32_t result = 0;
     uint32_t token = 0;
-    for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && token < count; token += 64)
+    for (; token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
@@ -15386,21 +15109,6 @@ static uint32_t check_input_expression_classes(CheckInputReader* reader)
         _mm512_mask_storeu_epi8(reader->visits + token, lanes, classes);
         result += (uint32_t)__builtin_popcountll(acts);
     }
-    // The coded walk reads the class codes, on any path but --scalar's (check_input_expressions).
-    const bool coded = !parser->options.scalar;
-    for (; token < count; token += 1)
-    {
-        const bool passed = reader->skips != NULL && ((reader->skips[token >> 6] >> (token & 63)) & 1) != 0;
-        reader->visits[token] = passed ? 0 : check_input_expression_class(reader, token, coded);
-        if ((reader->visits[token] & BUSTER_CHECK_EXPRESSION_ACTS) == 0)
-        {
-            reader->first_value[token] = BUSTER_CHECK_NONE;
-        }
-        result += (reader->visits[token] & BUSTER_CHECK_EXPRESSION_ACTS) != 0;
-        // The twin reads the columns: a mark that says otherwise is one the vector path's classes would take amiss.
-        const bool marked = reader->sparse_marks != NULL && ((reader->sparse_marks[token >> 6] >> (token & 63)) & 1) != 0;
-        reader->output->visit_misses += reader->sparse_marks != NULL && marked != ((reader->visits[token] & BUSTER_CHECK_EXPRESSION_SPARSE) != 0);
-    }
     return result;
 }
 
@@ -15417,9 +15125,6 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
 {
     const Parser* parser = reader->parser;
     CheckGraph* graph = &reader->output->graph;
-    // The requested walk controls filtering and value-list accounting. Host ISA
-    // only selects how the classification above is computed.
-    const bool scalar = parser->options.scalar;
     const uint8_t role = parser->tree.roles[token];
     const uint8_t kind = parser->tokens.kinds[token];
     uint32_t first = BUSTER_CHECK_NONE;
@@ -15449,29 +15154,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 first = begin;
             }
             last = reader->last_value[child];
-            if (scalar)
-            {
-                // A walk of the links, hopping over each chain an earlier walk counted (walk_ends, #1665).
-                uint32_t walked = 0;
-                uint32_t tail = begin;
-                for (uint32_t n = begin; n != BUSTER_CHECK_NONE;)
-                {
-                    const uint32_t hop = reader->walk_ends != NULL ? reader->walk_ends[n] : BUSTER_CHECK_NONE;
-                    walked += hop != BUSTER_CHECK_NONE ? reader->walk_counts[n] : 1;
-                    tail = hop != BUSTER_CHECK_NONE ? hop : n;
-                    n = reader->value_next[tail];
-                }
-                if (reader->walk_ends != NULL)
-                {
-                    reader->walk_ends[begin] = tail;
-                    reader->walk_counts[begin] = walked;
-                }
-                count += walked;
-            }
-            else
-            {
-                count += reader->value_counts[child];
-            }
+            count += reader->value_counts[child];
         }
     }
     uint32_t a = first;
@@ -15500,8 +15183,8 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     bool list = false;
     bool supported = true;
     CheckOp op = CHECK_OP_COUNT;
-    // The sparse columns' tests, of a token whose classes say one has an entry for it on the vector path.
-    const bool sparse = scalar || (classes & BUSTER_CHECK_EXPRESSION_SPARSE) != 0;
+    // The sparse columns' tests, of a token whose classes say one has an entry for it.
+    const bool sparse = (classes & BUSTER_CHECK_EXPRESSION_SPARSE) != 0;
     if (sparse && role == PARSE_ROLE_CLOSE_GROUP && reader->output->expression_regions[token] != 0)
     {
         CheckInputRegion* region = &reader->output->regions[reader->output->expression_regions[token] - 1];
@@ -15752,10 +15435,6 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
                 last = first;
                 count = 1;
                 reader->value_next[first] = BUSTER_CHECK_NONE;
-                if (reader->walk_ends != NULL)
-                {
-                    reader->walk_ends[first] = BUSTER_CHECK_NONE;
-                }
             }
         }
     }
@@ -16228,14 +15907,6 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             }
         }
     }
-    if (scalar)
-    {
-        // What the vector path's classes of the token, made before the walk, would have missed: the walk acts at a
-        // token they say it doesn't, or a sparse column has an entry for one they say has none.
-        const bool acted = node != BUSTER_CHECK_NONE || list || !supported || op != CHECK_OP_COUNT || count != 0;
-        reader->output->visit_misses += ((classes & BUSTER_CHECK_EXPRESSION_ACTS) == 0 && acted) ||
-                                        ((classes & BUSTER_CHECK_EXPRESSION_SPARSE) == 0 && check_input_expression_sparse(reader, token));
-    }
     if (!supported && reader->output->report_count == 0)
     {
         check_input_report(reader, token, CHECK_INPUT_UNSUPPORTED);
@@ -16312,46 +15983,27 @@ static void check_input_expression_visit(CheckInputReader* reader, uint32_t toke
 
 #include "c_check_expression_input.c"
 
-// The walk over the tokens in postorder that builds the expression graph. The scalar path visits every token and tests
-// every column (check_input_expression_visit), the oracle. The vector path, its twin, is the coded walk
-// (check_input_expressions_coded): it visits only the tokens it acts at, whose first values their classes wrote
-// (check_input_expression_classes), and acts at most of them by their classes, testing the sparse columns only of tokens
-// their classes say have an entry.
+// The walk over the tokens in postorder that builds the expression graph, the coded walk (check_input_expressions_coded):
+// it visits only the tokens it acts at, whose first values their classes wrote (check_input_expression_classes), and
+// acts at most of them by their classes, testing the sparse columns only of tokens their classes say have an entry.
 static bool check_deferred_expressions(CheckDeferred* deferred, CheckInputReader* reader);
 static void check_deferred_give_back(CheckDeferred* deferred);
 
 static void check_input_expressions(CheckInputReader* reader)
 {
-    const Parser* parser = reader->parser;
-    // The tokens the walk visits: every token on the scalar path, and those it acts at on the vector path.
+    // The tokens the walk visits: those it acts at.
     const uint64_t start = __rdtsc();
     const uint32_t acts = check_input_expression_classes(reader);
     const uint64_t classed = __rdtsc();
     reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_CLASSES] = classed - start;
-    reader->output->expression_visits = parser->options.scalar ? parser->tokens.count : acts;
-    if (parser->options.scalar)
+    reader->output->expression_visits = acts;
+    if (reader->deferred == NULL || !check_deferred_expressions(reader->deferred, reader))
     {
         if (reader->deferred != NULL)
         {
             check_deferred_give_back(reader->deferred);
         }
-        for (uint32_t order = 0; order < parser->tokens.count && !reader->output->resource; order += 1)
-        {
-            const uint32_t token = reader->postorder[order];
-            check_input_expression_visit(reader, token, reader->visits[token]);
-        }
-        reader->output->expression_part_ticks[BUSTER_CHECK_EXPRESSION_PART_VISITS] = __rdtsc() - classed;
-    }
-    else
-    {
-        if (reader->deferred == NULL || !check_deferred_expressions(reader->deferred, reader))
-        {
-            if (reader->deferred != NULL)
-            {
-                check_deferred_give_back(reader->deferred);
-            }
-            check_input_expressions_coded(reader);
-        }
+        check_input_expressions_coded(reader);
     }
 }
 
@@ -16382,7 +16034,7 @@ static void check_input_complete_uses(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count;
     for (uint32_t first = 0; first < count; first += 64)
     {
-        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, count) : check_input_scan_bit(reader->output->declaration_bits, first, count, BUSTER_CHECK_BITS_TENTATIVE);
+        uint64_t selected = check_input_scan_bit(reader->output->declaration_bits, first, count, BUSTER_CHECK_BITS_TENTATIVE);
         for (; selected != 0; selected &= selected - 1)
         {
             check_input_complete_use(reader, first + (uint32_t)__builtin_ctzll(selected));
@@ -16401,11 +16053,10 @@ static void check_input_complete_uses(CheckInputReader* reader)
 static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limit)
 {
     const uint8_t* bits = reader->output->declaration_bits;
-    const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
     bool candidate = false;
     for (uint32_t first = 0; !candidate && first < limit; first += 64)
     {
-        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE);
+        uint64_t selected = check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE);
         for (; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -16421,7 +16072,7 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
     const uint32_t defined_flag = 0x80000000u;
     for (uint32_t first = 0; latest != NULL && first < limit; first += 64)
     {
-        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE | BUSTER_CHECK_BITS_DEFINED);
+        uint64_t selected = check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE | BUSTER_CHECK_BITS_DEFINED);
         for (; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -16436,7 +16087,7 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
     }
     for (uint32_t first = 0; latest != NULL && first < limit; first += 64)
     {
-        uint64_t selected = scalar ? check_input_scan_all(first, limit) : check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE);
+        uint64_t selected = check_input_scan_bit(bits, first, limit, BUSTER_CHECK_BITS_TENTATIVE);
         for (; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -16487,14 +16138,12 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
 // after it. Keep this small function out of check_input_run: LLVM 23.1.4's MSan switches a large function's wide
 // checks to callbacks whose temporary shadows are allocated at the check, which in this loop can grow the stack
 // with the token count. The separate frame retains every check and the vector path (#1610).
-static __attribute__((noinline)) void check_input_system_token_map(uint8_t* tokens, const uint32_t* sources, uint32_t count, const uint8_t* levels, uint32_t limit, bool scalar)
+static __attribute__((noinline)) void check_input_system_token_map(uint8_t* tokens, const uint32_t* sources, uint32_t count, const uint8_t* levels, uint32_t limit)
 {
-    (void)scalar;
-
     uint32_t token = 0;
-    // The vector path, 16 tokens at a time (#529): their sources, clamped, gather four bytes each at their levels,
-    // of which the low one is the level. The loop after it, the scalar path, is its twin, and takes the last tokens.
-    for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= 16; token += 16)
+    // 16 tokens at a time (#529): their sources, clamped, gather four bytes each at their levels, of which the low one is
+    // the level. The loop after it takes the last tokens.
+    for (; count - token >= 16; token += 16)
     {
         const __m512i source = _mm512_min_epu32(_mm512_loadu_si512(sources + token), _mm512_set1_epi32((int32_t)limit));
         const __m512i level = _mm512_and_si512(_mm512_i32gather_epi32(source, levels, 1), _mm512_set1_epi32(0xff));
@@ -16569,9 +16218,9 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
     }
     if (mapped != NULL)
     {
-        // The vector path 64 tokens at a time; the loop after it, the scalar path, its twin, takes the last ones.
+        // 64 tokens at a time; the loop after it takes the last ones.
         uint32_t token = 0;
-        for (; !BUSTER_SCALAR_PATH(parser->options.scalar) && count - token >= 64; token += 64)
+        for (; count - token >= 64; token += 64)
         {
             const __m512i level = _mm512_loadu_si512(mapped + token);
             const __mmask64 marked = _mm512_cmpeq_epi8_mask(level, _mm512_set1_epi8(BUSTER_PP_SYSTEM_FILE)) |
@@ -16586,7 +16235,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
     }
     if (levels != NULL)
     {
-        if (BUSTER_SCALAR_PATH(parser->options.scalar) || pp->system_runs_inexact)
+        if (pp->system_runs_inexact)
         {
             pp_history_ensure(pp);
             pp_system_levels_history(pp, levels);
@@ -16601,7 +16250,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         const uint32_t limit = pp->output.count;
         levels[limit] = BUSTER_PP_USER_FILE;
         memset(levels + limit + 1, 0, 3);
-        check_input_system_token_map(tokens, sources, count, levels, limit, parser->options.scalar);
+        check_input_system_token_map(tokens, sources, count, levels, limit);
         memset(tokens + count, 0, 4);
     }
     if (tokens != NULL && (levels != NULL || mapped != NULL || relaxed))
@@ -16627,16 +16276,12 @@ static uint32_t check_input_builtin_recorded(uint16_t builtin)
 }
 
 // The graph's builtin call records the reader's `builtins` (a builtin per token of `count`, 0 for none) need. Nearly
-// every token has none, so the vector path tests 32 tokens at once and reads only those with a builtin, and with
-// `reader` (null for none) none of 64 bytes no write claimed (check_input_rare_line); the scalar path, its twin, reads
-// every token's.
-static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, const uint16_t* builtins, uint32_t count, bool scalar)
+// every token has none, so it tests 32 tokens at once and reads only those with a builtin, and with `reader` (null for
+// none) none of 64 bytes no write claimed (check_input_rare_line).
+static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, const uint16_t* builtins, uint32_t count)
 {
-    (void)scalar;
-
     uint32_t result = 0;
-    uint32_t token = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 32)
+    for (uint32_t token = 0; token < count; token += 32)
     {
         const __mmask32 all = (__mmask32)_bzhi_u32(UINT32_MAX, count - token < 32 ? count - token : 32);
         const __m512i ids = _mm512_maskz_loadu_epi16(all, reader == NULL ? builtins + token : check_input_rare_line(reader, builtins + token));
@@ -16646,10 +16291,6 @@ static uint32_t check_input_builtin_capacity(const CheckInputReader* reader, con
             result += check_input_builtin_recorded(builtins[token + (uint32_t)__builtin_ctz(present)]);
             present &= present - 1;
         }
-    }
-    for (; token < count; token += 1)
-    {
-        result += check_input_builtin_recorded(builtins[token]);
     }
     return result;
 }
@@ -16705,15 +16346,14 @@ static void check_input_constant_context(CheckInputReader* reader, uint32_t toke
 }
 
 // The constant contexts of every token, and the static-assert message spans that contribute no expression value.
-// Only static objects, static assertions and case labels open one, so the vector path visits those alone, the scalar
-// path every token. Neither the context writes nor the ignored message spans affect the selection scans.
+// Only static objects, static assertions and case labels open one, so the scan visits those alone. Neither the context
+// writes nor the ignored message spans affect the selection scans.
 static void check_input_constant_contexts_range(CheckInputReader* reader, uint32_t begin, uint32_t end)
 {
     const Parser* parser = reader->parser;
     for (uint32_t first = begin; first < end; first += 64)
     {
-        uint64_t selected = BUSTER_SCALAR_PATH(parser->options.scalar) ? check_input_scan_all(first, end) :
-                            check_input_scan_bit(reader->output->declaration_bits, first, end, BUSTER_CHECK_BITS_STATIC) |
+        uint64_t selected = check_input_scan_bit(reader->output->declaration_bits, first, end, BUSTER_CHECK_BITS_STATIC) |
                             check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_STATIC_ASSERT) |
                             check_input_scan_equal(parser->tokens.kinds, first, end, PARSE_KIND_CASE);
         for (; selected != 0; selected &= selected - 1)
@@ -16772,38 +16412,24 @@ struct CheckInputTokenCounts
     uint32_t groups[CHECK_INPUT_COUNT_GROUPS];
 };
 
-// A token's syntax bits as the walk's own tests give them: the scalar path's, the vector path's twin.
-static uint8_t check_input_syntax_of(const Parser* parser, uint32_t token)
-{
-    const uint32_t name = parser->tokens.names[token];
-    const bool named = name == C_NAME_BUILTIN_VA_ARG || name == C_NAME_BUILTIN_CONVERTVECTOR || name == C_NAME_BUILTIN_BIT_CAST || name == C_NAME_GENERIC ||
-                       name == C_NAME_BUILTIN_CHOOSE_EXPR || name == C_NAME_BUILTIN_TYPES_COMPATIBLE_P || name == C_NAME_BUILTIN_OFFSETOF ||
-                       check_input_source_builtin_span(name);
-    const bool string = parser->tokens.kinds[token] == PARSE_KIND_STRING || check_input_function_name_token(parser, token);
-    return (uint8_t)((named ? BUSTER_CHECK_SYNTAX_NAMED : 0) | (check_input_attribute_starts(parser, token, parser->tokens.count) ? BUSTER_CHECK_SYNTAX_ATTRIBUTE : 0) |
-                     (string ? BUSTER_CHECK_SYNTAX_STRING : 0));
-}
-
 // One pass over the tokens' kinds, roles and names for every count check_input_run needs before it reads (#529), where
 // it made one pass for each, and for the walk's syntax bits of each token, which `syntax` (count + 1 bytes, or null for
-// none) receives, and its marks (check_input_visit_of), which `visits` (count + 1 bytes, or null for none) receives.
+// none) receives, and its marks, which `visits` (count + 1 bytes, or null for none) receives.
 // A name of the overloadable attribute's counts only inside an attribute list (#1038): with more of the lists'
 // openings (PARSE_ROLE_OPEN_ATTRIBUTE_LIST) up to it than closings before it, which, a subtree being a run of tokens,
 // is in a list's closing's subtree, where every GNU and standard attribute's name is (check_input_attribute_read_item
 // reads them from such lists alone). A member or a variable named overloadable, which main.c has, gave its unit
 // overload tables, which made every function declaration a candidate. An attribute's argument is inside the list too,
-// a superset that costs a unit at most the tables. Without roles, every name counts. The vector path keeps the depth
-// of the lists a 64-token block at a time, from the counts of its openings and closings, and the scalar path a token
-// at a time, so that each name's test is one count however deep the tree.
-// The vector path tests 64 tokens' kinds and roles and 16 tokens' names at once, the names against a filter of those it
-// seeks (CheckInputFilter) before it compares the 16 that pass with each, and looks up 64 roles' and kinds' tests in
-// tables (check_input_role_tests); the scalar path, its twin, tests a token at a time. A name of 0 counts no token:
-// tokens without a name have 0. Without roles, every token is marked.
+// a superset that costs a unit at most the tables. Without roles, every name counts. It keeps the depth
+// of the lists a 64-token block at a time, from the counts of its openings and closings, so that each name's test is one
+// count however deep the tree.
+// It tests 64 tokens' kinds and roles and 16 tokens' names at once, the names against a filter of those it seeks
+// (CheckInputFilter) before it compares the 16 that pass with each, and looks up 64 roles' and kinds' tests in tables
+// (check_input_role_tests). A name of 0 counts no token: tokens without a name have 0. Without roles, every token is
+// marked.
 static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(const Parser* parser, const uint32_t* names, const uint8_t* groups,
-                                                                              uint32_t name_count, uint8_t* syntax, uint8_t* visits, bool scalar)
+                                                                              uint32_t name_count, uint8_t* syntax, uint8_t* visits)
 {
-    (void)scalar;
-
     // The names of the syntax bits: BUSTER_CHECK_SYNTAX_NAMED's, then _ATTRIBUTE's, then _STRING's.
     static const uint32_t syntax_names[] =
     {
@@ -16836,10 +16462,9 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
     const CheckInputFilter counted = check_input_filter_values(names, name_count);
     const CheckInputFilter spelled = check_input_filter_values(syntax_names, (uint32_t)BUSTER_ARRAY_LENGTH(syntax_names));
     const CheckInputFilter name_filter = { .low = _mm512_or_si512(counted.low, spelled.low), .high = _mm512_or_si512(counted.high, spelled.high) };
-    uint32_t token = 0;
     // The attribute lists open at the token, signed: a unit whose roles don't pair can't go below zero unseen.
     int64_t attribute_depth = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && token < count; token += 64)
+    for (uint32_t token = 0; token < count; token += 64)
     {
         const uint32_t length = count - token < 64 ? count - token : 64;
         const __mmask64 lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
@@ -16892,7 +16517,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
                     syntax_matched[i < 7 ? 0 : i < 12 ? 1 : 2] |= _mm512_mask_cmpeq_epi32_mask(candidates, name, _mm512_set1_epi32((int32_t)syntax_names[i]));
                 }
             }
-            // The span of the builtins of constants the walk works out (check_input_source_builtin_span), one comparison.
+            // The span of the builtins of constants the walk works out (BUSTER_CHECK_SOURCE_BUILTIN_SPAN), one comparison.
             const __mmask16 source = _mm512_mask_cmplt_epu32_mask(present, _mm512_sub_epi32(name, _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_FIRST)),
                                                                   _mm512_set1_epi32((int32_t)BUSTER_CHECK_SOURCE_BUILTIN_SPAN));
             matched[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS] |= source;
@@ -16922,7 +16547,7 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
         }
         if (visits != 0)
         {
-            // The walk in source order's marks (check_input_visit_of): the tables' tests of each token's role and kind,
+            // The walk in source order's marks: the tables' tests of each token's role and kind,
             // and of its successor's, past the block's last lane too, which a token without one takes as no role and no
             // kind; and the syntax bits.
             uint64_t visit = lanes;
@@ -16947,38 +16572,6 @@ static __attribute__((noinline)) CheckInputTokenCounts check_input_count_tokens(
             _mm512_mask_storeu_epi8(visits + token, lanes, _mm512_maskz_mov_epi8(visit, _mm512_set1_epi8(BUSTER_CHECK_RESOLVE_SYNTAX)));
         }
         attribute_depth += __builtin_popcountll(list_opens) - __builtin_popcountll(list_closes);
-    }
-    for (; token < count; token += 1)
-    {
-        attribute_depth += roles != NULL && roles[token] == PARSE_ROLE_OPEN_ATTRIBUTE_LIST;
-        result.subscripts += kinds[token] == PARSE_KIND_L_SQUARE;
-        result.asms += kinds[token] == PARSE_KIND_ASM;
-        result.asm_groups += roles != NULL && roles[token] == PARSE_ROLE_OPEN_ASM;
-        result.size_queries += kinds[token] == PARSE_KIND_SIZEOF;
-        result.vector_members += roles != 0 && roles[token] == PARSE_ROLE_MEMBER_OPERATOR && kinds[token] == PARSE_KIND_PERIOD;
-        result.operands += roles != 0 && roles[token] == PARSE_ROLE_OPERAND;
-        result.calls += roles != 0 && (roles[token] == PARSE_ROLE_CLOSE_CALL || roles[token] == PARSE_ROLE_CLOSE_FUNCTION);
-        const uint32_t name = token_names[token];
-        bool matched[CHECK_INPUT_COUNT_GROUPS] = { 0 };
-        for (uint32_t i = 0; name != 0 && i < name_count; i += 1)
-        {
-            matched[groups[i]] |= name == names[i];
-        }
-        matched[CHECK_INPUT_COUNT_BUILTIN_CONSTANTS] |= name != 0 && check_input_source_builtin_span(name);
-        for (uint32_t group = 0; group < CHECK_INPUT_COUNT_GROUPS; group += 1)
-        {
-            result.groups[group] += matched[group] && (group != CHECK_INPUT_COUNT_OVERLOADABLE || roles == NULL || attribute_depth > 0);
-        }
-        attribute_depth -= roles != NULL && roles[token] == PARSE_ROLE_CLOSE_ATTRIBUTE_LIST;
-        const uint8_t bits = check_input_syntax_of(parser, token);
-        if (syntax != 0)
-        {
-            syntax[token] = bits;
-        }
-        if (visits != 0)
-        {
-            visits[token] = roles == 0 || check_input_visit_of(parser, bits, token) ? BUSTER_CHECK_RESOLVE_SYNTAX : 0;
-        }
     }
     if (syntax != 0)
     {
@@ -17043,7 +16636,6 @@ static bool check_input_enum_records(CheckInputReader* reader, Arena* arena)
     CheckInput* input = reader->output;
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     bool valid = true;
     CheckInputEnumValue* values = NULL;
     CheckInputEnumDefinition* definitions = NULL;
@@ -17063,7 +16655,7 @@ static bool check_input_enum_records(CheckInputReader* reader, Arena* arena)
         uint32_t definition_at = 0;
         for (uint32_t first = 0; valid && first < count; first += 64)
         {
-            uint64_t enumerators = scalar ? check_input_scan_all(first, count) : check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_ENUMERATOR);
+            uint64_t enumerators = check_input_scan_equal(input->declaration_kinds, first, count, C_BINDING_ENUMERATOR);
             for (; enumerators != 0; enumerators &= enumerators - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(enumerators);
@@ -17076,7 +16668,7 @@ static bool check_input_enum_records(CheckInputReader* reader, Arena* arena)
                     value_at += 1;
                 }
             }
-            uint64_t keywords = scalar ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_ENUM);
+            uint64_t keywords = check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_ENUM);
             for (; keywords != 0; keywords &= keywords - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(keywords);
@@ -17183,28 +16775,17 @@ static void check_attested_events(CheckAttested* census, Preprocessor* pp, const
 
 // The tokens of the declarations that attested declarations skip (#2531, c_check_attested.c's marks: a bit a token, 64
 // a word, none past the unit's last token) given no visit and ignored, as -flazy-system-headers' deferred body is: the
-// walk then passes them, and the expressions' walk acts at none of them. A word at a time, by its bits as a store's mask;
-// the scalar path's bit at a time is its twin.
-static void check_input_skip(CheckInputReader* reader, const uint64_t* skips, uint32_t count, bool scalar)
+// walk then passes them, and the expressions' walk acts at none of them. A word at a time, by its bits as a store's mask.
+static void check_input_skip(CheckInputReader* reader, const uint64_t* skips, uint32_t count)
 {
     const uint32_t words = count / 64 + 1;
     uint8_t* const visits = reader->visits;
     uint8_t* const ignored = reader->ignored;
-    uint32_t w = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && w < words; w += 1)
+    for (uint32_t w = 0; w < words; w += 1)
     {
         const uint64_t bits = skips[w];
         _mm512_mask_storeu_epi8(visits + (uint64_t)w * 64, bits, _mm512_setzero_si512());
         _mm512_mask_storeu_epi8(ignored + (uint64_t)w * 64, bits, _mm512_set1_epi8(1));
-    }
-    for (; w < words; w += 1)
-    {
-        for (uint64_t bits = skips[w]; bits != 0; bits &= bits - 1)
-        {
-            const uint64_t token = (uint64_t)w * 64 + (uint64_t)__builtin_ctzll(bits);
-            visits[token] = 0;
-            ignored[token] = 1;
-        }
     }
 }
 
@@ -17255,7 +16836,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     };
     // The builtins of constants the walk works out (check_input_builtin_constant_prepare) size its table of them: the
     // type queries' names here, and the place's and the type queries' keywords by their span, which the count tests itself
-    // (check_input_source_builtin_span).
+    // (BUSTER_CHECK_SOURCE_BUILTIN_SPAN).
     uint32_t names[BUSTER_CHECK_INPUT_COUNT_NAMES] = { C_NAME_BUILTIN_TYPES_COMPATIBLE_P, C_NAME_BUILTIN_OFFSETOF, C_NAME_GENERIC, C_NAME_BUILTIN_CHOOSE_EXPR };
     uint8_t groups[BUSTER_CHECK_INPUT_COUNT_NAMES] =
     {
@@ -17282,7 +16863,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     uint8_t* syntax = arena_push_array(scratch, (uint64_t)count + 1, sizeof(uint8_t), 64);
     // With BUSTER_CHECK_VISITS_PADDING bytes past its count + 1, which the coded walk's gathers of four bytes may read.
     uint8_t* visits = syntax != 0 ? arena_push_array(scratch, (uint64_t)count + 1 + BUSTER_CHECK_VISITS_PADDING, sizeof(uint8_t), 64) : 0;
-    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits, BUSTER_SCALAR_PATH(parser->options.scalar));
+    const CheckInputTokenCounts counts = check_input_count_tokens(parser, names, groups, name_count, syntax, visits);
     input->vla_capacity = counts.subscripts;
     input->asm_capacity = counts.asms;
     const uint32_t vector_members = counts.vector_members;
@@ -17374,7 +16955,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_OUTPUT_ARRAY(expression_regions, uint32_t);
     // Declaration asm labels need no statement IDs. Keep the scalar path's dense column as an exact oracle, and
     // the old allocation when a handbuilt parser supplies no roles to prove that the column is empty.
-    if (parser->options.scalar || counts.asm_groups != 0 || (parser->tree.roles == NULL && counts.asms != 0))
+    if (counts.asm_groups != 0 || (parser->tree.roles == NULL && counts.asms != 0))
     {
         BUSTER_CHECK_OUTPUT_ARRAY(asm_ids, uint32_t);
     }
@@ -17492,14 +17073,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     valid &= parser->sizes != 0 || sizes != 0;
     reader.subtree_sizes = parser->sizes != 0 ? parser->sizes : sizes;
     reader.value_next = valid ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
-    // The scalar reader's hops (#1665); without room, its walks step through every link.
-    reader.walk_ends = valid && parser->options.scalar ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
-    reader.walk_counts = reader.walk_ends != 0 ? arena_push_array(scratch, graph_capacity, sizeof(uint32_t), 64) : 0;
-    reader.walk_ends = reader.walk_counts != 0 ? reader.walk_ends : 0;
-    if (reader.walk_ends != 0)
-    {
-        memset(reader.walk_ends, 0xff, (uint64_t)graph_capacity * sizeof(uint32_t));
-    }
     valid &= reader.value_next != 0;
     // The columns few tokens have an entry in, and the binding table, which has room for four events a token and fills
     // a few at its start, in an arena of their own that the reader unmaps when it returns (#572). Its pages are new and
@@ -17592,7 +17165,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         {
             memset(reader.rare_marks, 0, (granules + 63) / 64 * sizeof(uint64_t));
         }
-        reader.rare_gate = !BUSTER_SCALAR_PATH(parser->options.scalar) ? reader.rare_marks : NULL;
+        reader.rare_gate = reader.rare_marks;
         reader.rare_gate_base = (uintptr_t)reader.rare_begin & ~(uintptr_t)((UINT64_C(1) << BUSTER_CHECK_RARE_GRANULE_SHIFT) - 1);
     }
 #undef BUSTER_CHECK_SPARSE_COLUMNS
@@ -17703,30 +17276,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         memset(reader.enum_fixed, 0, types->tags.capacity);
         memset(reader.initializers, 0, (uint64_t)count + 1);
         memset(reader.builtin_names, 0xff, (uint64_t)pp->table->count * sizeof(uint16_t));
-        if (parser->options.scalar)
-        {
-            for (uint32_t i = 0; i <= count; i += 1)
-            {
-                input->declarations[i] = BUSTER_CHECK_NONE;
-                input->token_nodes[i] = BUSTER_CHECK_NONE;
-                reader.initializer_declarations[i] = BUSTER_CHECK_NONE;
-                reader.initializer_finish_heads[i] = BUSTER_CHECK_NONE;
-                reader.selected_tokens[i] = BUSTER_CHECK_NONE;
-                reader.activate[i] = BUSTER_CHECK_NONE;
-                reader.first_value[i] = BUSTER_CHECK_NONE;
-                reader.last_value[i] = BUSTER_CHECK_NONE;
-            }
-        }
-        else
-        {
-            check_input_output_none(input, &reader, count);
-        }
+        check_input_output_none(input, &reader, count);
         if (traversal != 0)
         {
-            // The views of c_check_prefix.c and c_check_repair.c bring their postorder, the rest is derived from it, as
-            // with --scalar from the walk's (parse_tree_columns' twins); otherwise, the C driver's tree_only parse, all
-            // of it in parse_tree_columns' three passes.
-            if (parser->postorder != 0 || parser->options.scalar)
+            // The views of c_check_prefix.c and c_check_repair.c bring their postorder, the rest is derived from it;
+            // otherwise, the C driver's tree_only parse, all of it in parse_tree_columns' three passes.
+            if (parser->postorder != 0)
             {
                 if (parser->postorder == 0)
                 {
@@ -17734,7 +17289,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 }
                 parse_tree_links(parser->tree.parents, reader.postorder, count, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots);
             }
-            else if (attested == NULL || BUSTER_SCALAR_PATH(parser->options.scalar) ||
+            else if (attested == NULL ||
                      !check_attested_tree_columns(attested, parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots,
                                                   traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, starts, sizes, scratch))
             {
@@ -17744,10 +17299,10 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                    traversal + 3 * slots, traversal + 4 * slots, starts, sizes);
             }
         }
-        if (sizes != 0 && (traversal == 0 || parser->postorder != 0 || parser->options.scalar))
+        if (sizes != 0 && (traversal == 0 || parser->postorder != 0))
         {
-            // The scalar/prefix/repair traversal already exists. Source order gives an earlier first child's
-            // start before its parent, exactly as parse_tree_columns' size publication does on the vector path.
+            // The prefix/repair traversal already exists. Source order gives an earlier first child's start before its
+            // parent, exactly as parse_tree_columns' size publication does.
             for (uint32_t token = 0; token < count; token += 1)
             {
                 const uint32_t first = reader.first_child[token];
@@ -17866,7 +17421,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                 valid = stack != 0;
                 if (valid)
                 {
-                    check_input_declaration_starts(parser, reader.declaration_starts, stack, BUSTER_SCALAR_PATH(parser->options.scalar));
+                    check_input_declaration_starts(parser, reader.declaration_starts, stack);
                 }
                 arena_pop_to(scratch, stack_mark);
                 input->resource |= !valid;
@@ -17875,7 +17430,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             {
                 if (reader.skips != NULL)
                 {
-                    check_input_skip(&reader, reader.skips, count, BUSTER_SCALAR_PATH(parser->options.scalar));
+                    check_input_skip(&reader, reader.skips, count);
                 }
                 check_input_resolve_range(&reader, 0, count);
             }
@@ -17963,7 +17518,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             {
                 // Without a _Generic or __builtin_choose_expr token there is nothing to select: the scalar reader
                 // walks every token for them, the twin of this count.
-                if (counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0 || BUSTER_SCALAR_PATH(parser->options.scalar))
+                if (counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0)
                 {
                     check_input_selections(&reader);
                 }
@@ -17999,7 +17554,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                         input->graph.transparent_unions = activations;
                     }
                 }
-                input->graph.builtin_capacity += check_input_builtin_capacity(&reader, reader.builtins, count, BUSTER_SCALAR_PATH(parser->options.scalar));
+                input->graph.builtin_capacity += check_input_builtin_capacity(&reader, reader.builtins, count);
                 if (input->graph.builtin_capacity != 0)
                 {
                     input->graph.builtin_calls = arena_push_array(arena, input->graph.builtin_capacity, sizeof(CheckBuiltinCall), _Alignof(CheckBuiltinCall));

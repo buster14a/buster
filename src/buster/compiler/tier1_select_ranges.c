@@ -3,7 +3,7 @@
 //
 // Checked nonnegative induction bounds for #1219. This is an inductive certificate, not optimistic phi iteration:
 // every initial value is independently nonnegative; every other incoming value adds a bounded nonnegative stride to
-// this phi. A strict upper-bound guard either checks that sum on the backedge or guards the phi before the increment.
+// this phi. A strict upper guard can check that sum on the backedge. A strict or inclusive guard can bound the phi before the increment.
 // One common bound covers ALL incoming edges; every executed sum must fit signed I32 before any subsequent guard.
 
 #define BUSTER_TIER1_INDUCTION_EDGES 8
@@ -265,34 +265,44 @@ static void tier1_select_scoped_ranges(const IrFunction* function, const IrDomin
     }
 }
 
-// The selected edge must imply tested < limit. Return a conservative nonnegative upper bound on that limit.
-static bool tier1_select_range_upper_guard(const IrFunction* function, const uint16_t* known, uint32_t branch, uint32_t target, uint32_t tested, uint64_t* upper)
+// Bound the tested value on this edge. Only the caller proving that the edge dominates the add accepts equality.
+// The backedge and the separate phi endpoint certificate both require a strict comparison.
+static bool tier1_select_range_upper_guard(const IrFunction* function, const uint16_t* known, uint32_t branch, uint32_t target, uint32_t tested, bool allow_equal, uint64_t* maximum)
 {
     bool valid = branch < function->instruction_count && function->op[branch] == IR_CBR &&
                  ((function->b[branch] == target) != (function->c[branch] == target));
     bool negated = false;
     const uint32_t condition = valid ? tier1_select_range_condition(function, function->a[branch], &negated) : BUSTER_IR_NONE;
-    valid = valid && condition < function->instruction_count && function->op[condition] == IR_ICMP;
+    valid = valid && condition < function->instruction_count && function->op[condition] == IR_ICMP && function->c[condition] < IR_PREDICATE_COUNT;
     if (valid)
     {
         const uint32_t a = tier1_select_range_source(function, function->a[condition]);
         const uint32_t b = tier1_select_range_source(function, function->b[condition]);
-        const uint32_t predicate = function->c[condition];
-        const bool forward = a == tested && (predicate == IR_LT || predicate == IR_GE || predicate == IR_ULT || predicate == IR_UGE);
-        const bool reversed = b == tested && (predicate == IR_GT || predicate == IR_LE || predicate == IR_UGT || predicate == IR_ULE);
-        const bool less_when_true = predicate == IR_LT || predicate == IR_GT || predicate == IR_ULT || predicate == IR_UGT;
+        const bool true_edge = (function->b[branch] == target) != negated;
+        const uint32_t predicate = true_edge ? function->c[condition] : tier1_select_negations[function->c[condition]];
+        const bool less = predicate == IR_LT || predicate == IR_ULT;
+        const bool greater = predicate == IR_GT || predicate == IR_UGT;
+        const bool forward = a == tested && (less || (allow_equal && (predicate == IR_LE || predicate == IR_ULE)));
+        const bool reversed = b == tested && (greater || (allow_equal && (predicate == IR_GE || predicate == IR_UGE)));
+        const bool strict = less || greater;
         const uint32_t limit = forward ? b : a;
-        valid = (forward || reversed) && limit < function->instruction_count && function->type[limit] == IR_I32 &&
-                (((function->b[branch] == target) != negated) == less_when_true);
+        valid = (forward || reversed) && limit < function->instruction_count && function->type[limit] == IR_I32;
         if (valid)
         {
-            *upper = (UINT64_C(1) << (known[limit] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK)) - 1;
+            uint64_t upper = (UINT64_C(1) << (known[limit] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK)) - 1;
             if (predicate < IR_ULT)
             {
                 const uint64_t signed_upper = (UINT64_C(1) << ((known[limit] >> 8) - 1)) - 1;
-                *upper = *upper < signed_upper ? *upper : signed_upper;
+                upper = upper < signed_upper ? upper : signed_upper;
             }
-            valid = *upper <= INT32_MAX;
+            if (!strict && function->op[limit] == IR_CONST)
+            {
+                // A width rounds INT32_MAX - stride up to INT32_MAX. The constant gives the inclusive endpoint.
+                const uint32_t constant = (uint32_t)function->constants[function->a[limit]].low;
+                upper = upper < constant ? upper : constant;
+            }
+            valid = upper <= INT32_MAX;
+            *maximum = strict && upper != 0 ? upper - 1 : upper;
         }
     }
     return valid;
@@ -313,7 +323,7 @@ static bool tier1_select_range_input_guard(const IrFunction* function, const IrD
             const uint32_t target = edge == 0 ? function->b[branch] : function->c[branch];
             guarded = predecessors[target] == block && dominance->leave[target] != 0 &&
                       dominance->enter[target] <= dominance->enter[step_block] && dominance->leave[target] >= dominance->leave[step_block] &&
-                      tier1_select_range_upper_guard(function, known, branch, target, node, upper);
+                      tier1_select_range_upper_guard(function, known, branch, target, node, true, upper);
         }
     }
     return guarded;
@@ -376,10 +386,10 @@ static bool tier1_select_induction_phi(const IrFunction* function, const IrDomin
             {
                 uint32_t target = block;
                 const uint32_t branch = tier1_select_range_guard(function, predecessors, predecessor, &target);
-                valid = tier1_select_range_upper_guard(function, known, branch, target, value, &upper);
+                valid = tier1_select_range_upper_guard(function, known, branch, target, value, false, &upper);
             }
             const uint64_t delta = (UINT64_C(1) << (known[stride] & BUSTER_TIER1_KNOWN_UNSIGNED_MASK)) - 1;
-            const uint64_t admitted = (upper != 0 ? upper - 1 : 0) + (input_guarded ? delta : 0);
+            const uint64_t admitted = upper + (input_guarded ? delta : 0);
             valid = valid && admitted <= INT32_MAX;
             maximum = maximum > admitted ? maximum : admitted;
             if (!input_guarded)
@@ -422,7 +432,7 @@ static bool tier1_select_range_phi_endpoint(const IrFunction* function, const ui
             uint32_t target = blocks[node];
             const uint32_t branch = tier1_select_range_guard(function, predecessors, predecessor, &target);
             uint64_t upper = 0;
-            bounded = tier1_select_range_upper_guard(function, known, branch, target, value, &upper);
+            bounded = tier1_select_range_upper_guard(function, known, branch, target, value, false, &upper);
         }
     }
     const bool changed = bounded && (known[node] & BUSTER_TIER1_KNOWN_BELOW_MAX) == 0;

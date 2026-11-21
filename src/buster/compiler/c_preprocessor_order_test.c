@@ -153,7 +153,7 @@ static void pp_order_lane(void* argument)
             out->fatal = pp->fatal;
             for (uint32_t k = 0; k < 2; k += 1)
             {
-                out->text[k] = pp_test_print(pp, !test->scalar, k != 0, &out->length[k]);
+                out->text[k] = pp_test_print(pp, k != 0, &out->length[k]);
                 out->ready = out->ready && out->text[k] != 0;
             }
             if (test->reference == 0)

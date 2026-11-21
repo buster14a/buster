@@ -912,10 +912,10 @@ static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const u
 // Compiling and running
 
 // A function compiled by both paths, which must make the same code, its records valid, its branches sized, and encoded by
-// both encoders into `image` (the vector one's) and `scratch` (the scalar one's), which must be the same bytes. Returns
-// the code's length, 0 for a failure, and in *error Tier 0's error. Only random programs may refuse excess depth.
-static uint32_t tier0_test_x87_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, uint8_t* scratch,
-                                      bool depth_allowed, Tier0Error* error)
+// the encoder into `image`. Returns the code's length, 0 for a failure, and in *error Tier 0's error. Only random programs
+// may refuse excess depth.
+static uint32_t tier0_test_x87_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, bool depth_allowed,
+                                      Tier0Error* error)
 {
     const Tier0Check check = tier0_validate(function);
     const Tier0Code scalar = tier0_compile_scalar(function, arena);
@@ -938,9 +938,8 @@ static uint32_t tier0_test_x87_encode(Tier0TestTally* tally, const char* name, c
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "x87", "%s: the branches can't be sized", name);
     const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
     const int64_t vector_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, image, room, 0, 0) : -1;
-    const int64_t scalar_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode_scalar(scalar.records, scalar.count, scratch, room, 0, 0) : -1;
-    ready = ready && tier0_test_expect(tally, vector_length > 0 && vector_length == scalar_length && memcmp(image, scratch, (size_t)vector_length) == 0, "x87",
-                                       "%s: the encoders differ, or fail (%" PRId64 ", %" PRId64 ")", name, vector_length, scalar_length);
+    ready = ready && tier0_test_expect(tally, vector_length > 0, "x87",
+                                       "%s: the encoder fails (%" PRId64 ")", name, vector_length);
     return ready ? (uint32_t)vector_length : 0;
 }
 
@@ -1130,7 +1129,7 @@ static void tier0_test_x87_programs(Tier0TestTally* tally, const Tier0TestX87Abi
         }
         const Tier0Function function = tier0_test_x87_function(program, abi);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_x87_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, true, &error);
+        const uint32_t length = tier0_test_x87_encode(tally, name, &function, &arena, image, true, &error);
         *too_deep += error == TIER0_ERROR_DEPTH ? 1 : 0;
         *entries += program->count;
         if (length == 0)
@@ -1465,7 +1464,7 @@ static void tier0_test_x87_functions(Tier0TestTally* tally, const Tier0TestX87Ab
         arena_pop_to(&arena, 0);
         const Tier0Function function = tier0_test_x87_written_function(&written, abi, signatures[which], result_size);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
+        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, false, &error);
         const bool ran = length != 0 && tier0_test_expect(tally, tier0_test_x87_native(image, length, runs[which], shared), "x87", "%s: the native run failed", names[which]);
         for (uint32_t k = 0; k < 4 && ran; k += 1)
         {
@@ -1577,7 +1576,7 @@ static void tier0_test_x87_boundaries(Tier0TestTally* tally, const Tier0TestX87A
         arena_pop_to(&arena, 0);
         const Tier0Function function = tier0_test_x87_written_function(&written, abi, signature, 0);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
+        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, false, &error);
         const bool ran = length != 0 &&
                          tier0_test_expect(tally, tier0_test_x87_native(image, length, tier0_test_x87_run_boundary, shared), "x87", "%s: the native run failed", names[which]);
         for (uint32_t k = 0; k < shared->boundary_count && ran; k += 1)
@@ -1728,7 +1727,7 @@ static void tier0_test_x87_transfers(Tier0TestTally* tally, const Tier0TestX87Ab
         }
         tier0_test_expect(tally, code.error == TIER0_OK && memory_stores == stores[which], "x87", "%s: %u memory stores, expected %u", names[which], memory_stores, stores[which]);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, false, &error);
+        const uint32_t length = tier0_test_x87_encode(tally, names[which], &function, &arena, image, false, &error);
         const uint32_t controls = which < 2 ? 12 : 1;
         for (uint32_t mode = 0; length != 0 && mode < controls; mode += 1)
         {

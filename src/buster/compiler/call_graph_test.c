@@ -261,6 +261,55 @@ static const CallGraphInput call_graph_test_alias[] = {
     },
 };
 
+// The weak ifunc and function give pick both a diagnostic and one edge. It wins the tie between shortest cycles
+// even with zero-edge, two-target and repeated alias calls interleaved. Each unit's local is a different function.
+static const CallGraphInput call_graph_test_mixed_targets[] = {
+    {
+        .name = BUSTER_S8_INIT("caller.ll"),
+        .text = BUSTER_S8_INIT("@pick = weak ifunc void (), ptr @resolve\n"
+                               "@again = internal alias void (), ptr @local\n"
+                               "declare void @outside()\n"
+                               "\n"
+                               "define void @start() {\n"
+                               "  call void @outside()\n"
+                               "  call void @pick()\n"
+                               "  call void @both()\n"
+                               "  call void @again()\n"
+                               "  call void @both()\n"
+                               "  call void @again()\n"
+                               "  ret void\n"
+                               "}\n"
+                               "define internal void @local() {\n"
+                               "  call void @start()\n"
+                               "  ret void\n"
+                               "}\n"
+                               "define weak void @both() {\n"
+                               "  call void @start()\n"
+                               "  ret void\n"
+                               "}\n"
+                               "define internal ptr @resolve() {\n"
+                               "  ret ptr @local\n"
+                               "}\n"),
+    },
+    {
+        .name = BUSTER_S8_INIT("other.ll"),
+        .text = BUSTER_S8_INIT("declare void @start()\n"
+                               "\n"
+                               "define weak void @pick() {\n"
+                               "  call void @start()\n"
+                               "  ret void\n"
+                               "}\n"
+                               "define weak void @both() {\n"
+                               "  call void @local()\n"
+                               "  ret void\n"
+                               "}\n"
+                               "define internal void @local() {\n"
+                               "  call void @local()\n"
+                               "  ret void\n"
+                               "}\n"),
+    },
+};
+
 // Invalid IR, which the verifier would refuse, but the check must not take for a call of nothing. The string holds the
 // keyword, which only an alias's own words may.
 static const CallGraphInput call_graph_test_lost_alias[] = {
@@ -1232,6 +1281,16 @@ static const CallGraphTestCase call_graph_test_cases[] = {
         .expected = BUSTER_S8_INIT("alias.ll:34: a call of dispatched, an ifunc, whose callee is chosen at run time\n"
                                    "cycle: alias.ll:recurse -> alias.ll:recurse\n"
                                    "call graph: 1 translation unit, 4 functions, 2 calls between them, 1 cycle, 0 allowed, 0 split variables\n"),
+        .success = false,
+    },
+    {
+        .name = "interleaved call targets",
+        .inputs = call_graph_test_mixed_targets,
+        .input_count = BUSTER_ARRAY_LENGTH(call_graph_test_mixed_targets),
+        .expected = BUSTER_S8_INIT("caller.ll:7: a call of pick, an ifunc, whose callee is chosen at run time\n"
+                                   "cycle: caller.ll:start -> other.ll:pick -> caller.ll:start\n"
+                                   "cycle: other.ll:local -> other.ll:local\n"
+                                   "call graph: 2 translation units, 7 functions, 12 calls between them, 2 cycles, 0 allowed, 0 split variables\n"),
         .success = false,
     },
     {

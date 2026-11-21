@@ -25,7 +25,7 @@ static void check_test_sizeof_source(CheckTest* test, const char* source, uint32
     for (uint32_t path = 0; path < 2; path += 1)
     {
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0, .verify = true };
+        const CheckOptions checking = { .verify = true };
         storage[path] = arena_reserve(UINT64_C(1) << 28);
         output[path] = arena_reserve(UINT64_C(1) << 28);
         scratch[path] = arena_reserve(UINT64_C(1) << 28);
@@ -57,6 +57,8 @@ static void check_test_sizeof_source(CheckTest* test, const char* source, uint32
     }
     if (ready)
     {
+        check_test_expect(test, check_test_stream_recorded(&streams[0], &input[0].graph, input[0].graph.argument_count, "sizeof"),
+                          "sizeof: the reference stream is its recorded digest");
         check_test_expect(test, input[0].graph.argument_count == input[1].graph.argument_count &&
                                check_test_stream_equal(&streams[0], &streams[1], input[0].graph.argument_count), "sizeof scalar/vector typed streams agree");
     }

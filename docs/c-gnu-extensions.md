@@ -27,7 +27,7 @@ paths, and run the code natively against clang's builds.
 | `__auto_type` | Deduced as clang deduces it: the initializer's type, lvalue-converted and decayed (`_Atomic` kept), with the specifiers' `const` and `volatile`; through pointer and function declarators, and the same in a declaration's later declarators, as clang deduces them as C++ does (GCC refuses them), by C23 `auto`'s deduction (`check_input_c23_auto_deduce`); a variably modified one, whose sizes the initializer's own declaration evaluated (`&vla`) or its cast evaluates (#2321); a redeclaration of a variable with linkage the earlier declaration's type, as clang merges it before deducing (a `restrict` placeholder's over a restrict pointer too), and clang's "redefinition with a different type" error, with its note, where clang's `mergeTypes` refuses the merge (#1844); numeric and OpenCL address-space attributes retained at each object or pointer level, with the storage, restrict-specifier, attribute and redeclaration diagnostics (the checker guide's "Local labels and `__auto_type` (#147)"); a vector's or a mode's attribute of the placeholder clang's errors (#1844); clang's errors at its places. C23's `auto` is the language's type specifier (the checker guide's "C23 `auto` and `constexpr`") | `_Atomic` and `restrict` are the deduced type's (`_Atomic(int)`, `int *restrict`, #1844). A redeclaration of an atomic entity takes its atomic type, as clang merges it, and a cast to an atomic type deduces the atomic type (#2230). The combined atomic/restrict specifiers diagnose and recover, as do incompatible initializers for `_Atomic __auto_type` pointer declarators, retaining the original initializer type and checking later declarators. Refused by name: other qualified declarators, `_Atomic` of an atomic value, `restrict` of a value that is no pointer to an object (clang's `restrict int`), and other type-changing attributes besides vector, mode and address space. An incompatible address-space pointee initializer is rejected in the assignment checker's words, which name the deduced type. The reader stops at the "different type" error, as at other initialized invalid declarations, so clang's later errors aren't given, and so does it at a vector's or a mode's error, after which clang goes on. Declarators that deduce differently get clang's error at its place in the checker's words |
 | Casts to a union | Checked as clang's `CheckCStyleCast` checks them: an operand of a member's unqualified type, after its lvalue conversion, initializes the first such member that is no unnamed bit-field, with `-Wgnu-union-cast` under `-pedantic` or `-Wgnu`; another type gets clang's "not present in union" error, and a cast to a struct from another type its "used type" error; a record's cast to its own type gets `-Wpedantic`'s "C99 forbids casting nonscalar type" warning, and a cast to a scalar from a record clang's "operand of type" error (#2375). Lowered as clang's code does it: the member stored into a temporary union, whose address is the cast's value, and in a static object's initializer the member's bytes ([the checker guide](c-checker.md)'s "Casts to a union (#2301)") | A function designator's decayed type in the error loses its parameters' typedef names, as buster's other diagnostics of a decayed function do; where an error follows at the same expression (a file-scope initializer's), the cast's warning comes after it, where clang gives it first |
 | `__extension__` | Accepted before expressions and declarations | None: the checker gives no pedantic warning for it to suppress |
-| `cleanup` | Checked as clang checks it, its scopes' jumps too, and called at each exit from its variable's scope, the named return value's after the return's cleanups as clang's NRVO has it, a `_Bool` parameter's argument the address's low bit as clang's code passes it, and a result of any class dropped ([the checker guide](c-checker.md)) | A function of an `_Atomic _Bool` parameter, whose call clang's code generation can't select, is refused by name |
+| `cleanup` | Checked as clang checks it, its scopes' jumps too, and called at each exit from its variable's scope, the named return value's after the return's cleanups as clang's NRVO has it, a `_Bool` parameter's argument the address's low bit as clang's code passes it, an `_Atomic` pointer parameter's the address (#1844), and a result of any class dropped ([the checker guide](c-checker.md)) | A function of an `_Atomic _Bool` parameter, which clang's Sema takes but whose call clang 23's code generation can't select, is refused by name at `-c`; the parameter's error names no types, where clang's names the parameter's and the address's, after `-Walign-mismatch`'s warning where the pointee is more aligned |
 | `transparent_union` | Checked as clang checks it, with its warnings where clang ignores it (a declaration of no union, an incomplete or empty union, a floating or vector first field, a field of another size or a greater alignment, with the note), and a field less aligned than the first is fine, as in clang; a conversion to the union selects its member as clang's does; its arguments, parameters and `va_arg` pass as its first member, as clang's code passes them, with a stack slot of the union's own size and alignment where an `aligned` or `packed` attribute makes them differ ([the checker guide](c-checker.md)'s "Transparent unions (#147)") | A union sized or aligned otherwise than its first member past two eightbytes or of a member passed as an aggregate, or one made transparent after a function definition or an initializer naming a function where its first member passes otherwise, is refused by name |
 | `gnu_inline`, `returns_twice` | `gnu_inline`'s `extern inline` definition is no definition of the unit's, as clang's isn't (a call reaches the library's); `returns_twice` needs nothing of Tier 0's code, which keeps locals across a call in memory or callee-saved registers, as `setjmp` needs | Tier 1's code of a function that calls one (`--tier1`) isn't checked against `setjmp`'s rule |
 | `always_inline`, `noinline`, `used`, `may_alias` | `used` roots its definition, which `-c` and the direct path emit; `always_inline`'s local functions are what the lowering's symbol comparison expects clang to inline; `noinline` and `may_alias` need nothing of Tier 0's code, which inlines nothing and assumes no aliasing rule | None |
@@ -112,8 +112,8 @@ remain in the original tree and are not reported as GNU `__attribute__` lists.
 ### Batching, memory and failure
 
 Candidate discovery compares 64 one-byte token kinds at once with AVX-512;
-only set bits enter the bounded list reader. The scalar twin discovers those
-same candidates. The reader follows the parser's opener-to-matching-closer
+only set bits enter the bounded list reader (its scalar twin is gone, #2924).
+The reader follows the parser's opener-to-matching-closer
 relationship, so it does not rescan nested argument expressions or recurse.
 It preserves names whose meaning is unknown and distinguishes explicitly empty
 argument lists. Semantic evaluation must follow the original syntax/declaration
@@ -177,14 +177,14 @@ The existing executable exposes:
 ./build/compiler test-gnu --clang
 ./build/compiler test-types
 ./build.sh check-call-graph
-./build/compiler benchmark-gnu [--only collect-scalar|collect-vector|build-scalar|build-vector|parser-only|parser-with-gnu] [--after-scalar MS] [-E's options] file.c
+./build/compiler benchmark-gnu [--only collect|build|parser-only|parser-with-gnu] [--after-scalar MS] [-E's options] file.c
 ```
 
 `test-parser` covers the new grammar and keyword regressions with Clang's
-acceptance/rejection, scalar/vector trees and diagnostics, all 64 token-block
+acceptance/rejection, trees and diagnostics, all 64 token-block
 positions, generated inputs and deep nesting. `test-gnu` checks exact metadata
 and source ranges, nested/empty/unknown attributes, asm labels versus assembly
-statements, both producer/collector paths, guarded tails, capacity failures
+statements, the producer/collector path, guarded tails, capacity failures
 and arena rollback. `test-types` includes independent Clang checks for machine
 mode results, canonical type spellings and surrounding record layouts, along
 with invalid modes and names ending at protected pages.
@@ -192,8 +192,8 @@ with invalid modes and names ending at protected pages.
 `benchmark-gnu` preprocesses the requested real input once, then checks the
 metadata and runs 21 rotating measurement passes. It reports:
 
-- scalar/vector collection, including candidate discovery and group decoding;
-- scalar/vector build, including measurement and exact array allocation;
+- collection, including candidate discovery and group decoding;
+- build, including measurement and exact array allocation;
 - the parser pipeline with and without metadata, including token conversion,
   parsing and postorder;
 - time per input token, useful token throughput, retained metadata bytes and

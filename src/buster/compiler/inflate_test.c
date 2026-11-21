@@ -262,6 +262,18 @@ static void inflate_test_by_hand(InflateTestTally* tally)
         stream[length - 1] ^= 1;
         inflate_test_expect(tally, inflate_test_guarded(stream, length, strlen(text), 0, &same) == INFLATE_ERROR_CHECKSUM, "a checksum that differs", matched);
     }
+    // Fixed 'b', fixed 'b', empty stored, fixed 'b', dynamic 'a' (no distance code), stored 's', empty stored,
+    // fixed 'b' with a three-byte match at distance one, fixed 'b'. The match needs both fixed tables back.
+    static const uint8_t mixed[] = {
+        0x4a, 0x02, 0x28, 0x09, 0x00, 0x00, 0x00, 0xff, 0xff, 0x4a, 0x02, 0x10, 0x00, 0x17,
+        0x24, 0x00, 0x00, 0x00, 0x00, 0x80, 0xb6, 0xfa, 0xff, 0x84, 0x08, 0x01, 0x00, 0xfe,
+        0xff, 0x73, 0x00, 0x00, 0x00, 0xff, 0xff, 0x4a, 0x02, 0x02, 0xc0, 0x92, 0x00,
+    };
+    static const uint8_t decoded[] = "bbbasbbbbb";
+    const uint64_t decoded_size = sizeof(decoded) - 1;
+    length = inflate_test_wrap(stream, header, mixed, sizeof(mixed), decoded, decoded_size);
+    inflate_test_expect(tally, inflate_test_guarded(stream, length, decoded_size, decoded, &same) == INFLATE_ERROR_NONE && same, "fixed tables across stored and dynamic blocks", 0);
+    inflate_test_expect(tally, inflate_test_guarded(stream, length, decoded_size - 1, 0, &same) == INFLATE_ERROR_SIZE, "an output a byte short after restoring fixed tables", 0);
     // A match before the output's start: a fixed block's match first.
     bits = (InflateTestBits){ 0 };
     inflate_test_value(&bits, 1, 1);

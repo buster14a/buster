@@ -18,16 +18,16 @@ static bool check_target_feature_intrinsic_noreturn(const CheckProgram* program,
 // needed; no type-based guess can distinguish qualified function pointers yet. Only a token with attributes can have
 // either, so the walk visits the attributes column's tokens in order (check_input_attributed_next: the vector path skips
 // 256 tokens without attributes a load, the scalar path, its twin, visits every group).
-static bool check_program_return_unknowns(const CheckProgram* program, Arena* scratch, uint32_t** first, bool scalar)
+static bool check_program_return_unknowns(const CheckProgram* program, Arena* scratch, uint32_t** first)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     bool ready = true;
     *first = NULL;
-    for (uint32_t group = program->identifiers != NULL && check_sparse_wide_present(input->attributes) ? check_input_attributed_next(input->attributes, 0, count, scalar) : count; ready && group < count;
-         group = check_input_attributed_next(input->attributes, group + 16, count, scalar))
+    for (uint32_t group = program->identifiers != NULL && check_sparse_wide_present(input->attributes) ? check_input_attributed_next(input->attributes, 0, count) : count; ready && group < count;
+         group = check_input_attributed_next(input->attributes, group + 16, count))
     {
-        for (uint32_t lanes = check_input_attributed_group(input->attributes, group, count, scalar); ready && lanes != 0; lanes &= lanes - 1)
+        for (uint32_t lanes = check_input_attributed_group(input->attributes, group, count); ready && lanes != 0; lanes &= lanes - 1)
         {
             const uint32_t token = group + (uint32_t)__builtin_ctz(lanes);
             const CheckInputAttributes* attributes = input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_input_attributes_at(input, token) : NULL;
@@ -61,7 +61,7 @@ static bool check_program_return_unknowns(const CheckProgram* program, Arena* sc
 // Library noreturn depends on builtin options and named typedef visibility. Those policies are not the declaration's
 // FUNCTION_NORETURN bit, so a call to a declaration named as a catalogue entry with the 'r' attribute stays unknown
 // rather than guessed from its name. The answer depends on the interned name alone (#1709).
-// The scalar answer, and the twin of the table below: a search of the catalogue by name.
+// The answer without the table below, and its definition: a search of the catalogue by name.
 static uint8_t check_program_return_library_search(const InternTable* identifiers, uint32_t name)
 {
     const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(identifiers, name), intern_length(identifiers, name));
@@ -229,12 +229,13 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
     return fact;
 }
 
-// check_program_return_facts' vector path: only a source, a node whose own contract may be a stop or unknown (a call, a
+// check_program_return_facts' walk: only a source, a node whose own contract may be a stop or unknown (a call, a
 // miscellaneous or x86 builtin, a query), or a node one of whose operands' or arguments' facts isn't zero can have facts,
 // so that each node's test reads its operands' facts, a byte each (an absent one the sink's, `facts[count]`, zero), and
 // only those nodes take check_program_return_node. A node's operands precede it, so their facts are made; one that doesn't
 // precede it has none yet, which check_program_return_node reads as none too. The sources are 16 operators at a time,
-// whose bits each block's nodes then take. Every other node's facts are zero, as the scalar path makes them.
+// whose bits each block's nodes then take. Every other node's facts are zero, as check_program_return_node would make
+// them.
 static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, const uint32_t* unknowns, const uint8_t* names, uint64_t* work)
 {
     const CheckGraph* graph = &program->input->graph;
@@ -284,17 +285,15 @@ static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, c
 }
 
 // One postorder reduction gives each node a guaranteed stop and a possible unknown control contract
-// (check_program_return_node). The scalar path visits every node in order; the vector path
-// (check_program_return_sparse), only the nodes that can have facts. Their `count` + 1 entries end with a sink, zero.
+// (check_program_return_node), visiting only the nodes that can have facts (check_program_return_sparse). Their
+// `count` + 1 entries end with a sink, zero. `scalar` is only the attributes' scan's (check_program_return_unknowns).
 static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch, uint64_t* work, bool scalar)
 {
-    (void)scalar;
-
     const CheckGraph* graph = &program->input->graph;
     const uint32_t count = graph->count;
     uint8_t* facts = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     uint32_t* unknowns = NULL;
-    const bool ready = (count == 0 || facts != NULL) && check_program_return_unknowns(program, scratch, &unknowns, scalar);
+    const bool ready = (count == 0 || facts != NULL) && check_program_return_unknowns(program, scratch, &unknowns);
     if (!ready)
     {
         check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
@@ -302,17 +301,9 @@ static uint8_t* check_program_return_facts(CheckProgram* program, Arena* scratch
     }
     // The names' answers are an optimisation only: without them every call searches the catalogue, as before.
     const uint8_t* names = ready && count != 0 ? check_program_return_library_names(program->identifiers, scratch) : NULL;
-    if (ready && !BUSTER_SCALAR_PATH(scalar) && count != 0)
+    if (ready && count != 0)
     {
         check_program_return_sparse(program, facts, unknowns, names, work);
-    }
-    for (uint32_t node = 0; ready && BUSTER_SCALAR_PATH(scalar) && node < count; node += 1)
-    {
-        facts[node] = check_program_return_node(program, facts, node, unknowns, names);
-        if (work != NULL)
-        {
-            *work += 1;
-        }
     }
     if (ready && count != 0)
     {

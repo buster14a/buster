@@ -443,10 +443,9 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
     // Each case's code, in pages of its own, and what each run returned, the child's.
     uint64_t* shared = mmap(0, sizeof(uint64_t) * BUSTER_TIER0_TEST_DEEP_CASES * BUSTER_TIER0_TEST_DEEP_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     uint8_t* region = mmap(0, BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_DEEP_CASES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    uint8_t* scratch = malloc(BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE);
     Tier0TestDeep* deep = malloc(sizeof(Tier0TestDeep));
     Arena arena = arena_reserve(1u << 24);
-    bool ready = tier0_test_expect(tally, shared != MAP_FAILED && region != MAP_FAILED && scratch != 0 && deep != 0 && arena.base != 0, "deep", "no memory");
+    bool ready = tier0_test_expect(tally, shared != MAP_FAILED && region != MAP_FAILED && deep != 0 && arena.base != 0, "deep", "no memory");
     for (uint32_t c = 0; c < BUSTER_TIER0_TEST_DEEP_CASES && ready; c += 1)
     {
         const char* name = tier0_test_deep_case(c, deep);
@@ -496,9 +495,8 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
         const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
         uint8_t* page = region + BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * c;
         const int64_t vector_length = ready && room <= BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, page, room, 0, 0) : -1;
-        const int64_t scalar_length = ready && room <= BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE ? x86_encode_scalar(scalar.records, scalar.count, scratch, room, 0, 0) : -1;
-        ready = ready && tier0_test_expect(tally, vector_length > 0 && vector_length == scalar_length && memcmp(page, scratch, (size_t)vector_length) == 0, "deep",
-                                           "%s: the encoders differ, or fail (%" PRId64 ", %" PRId64 ")", name, vector_length, scalar_length);
+        ready = ready && tier0_test_expect(tally, vector_length > 0, "deep",
+                                           "%s: the encoder fails (%" PRId64 ")", name, vector_length);
         arena_pop_to(&arena, mark);
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_DEEP_CASES, PROT_READ | PROT_EXEC) == 0, "deep",
@@ -538,7 +536,6 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
     }
     arena_release(&arena);
     free(deep);
-    free(scratch);
     if (region != MAP_FAILED)
     {
         munmap(region, BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_DEEP_CASES);

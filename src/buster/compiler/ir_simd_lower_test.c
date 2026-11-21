@@ -131,7 +131,7 @@ static void ir_simd_lower_splats(IrLowerTestTally* tally)
             {
                 Tier0TestTally native_tally = {0};
                 Tier0Error error = TIER0_OK;
-                const uint32_t length = tier0_test_vector_encode(&native_tally, "IR scalar splat producer", &source, &native_arena, images, images + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_OK, &error);
+                const uint32_t length = tier0_test_vector_encode(&native_tally, "IR scalar splat producer", &source, &native_arena, images, TIER0_OK, &error);
                 ir_lower_test_expect(tally, length != 0 && native_tally.failures == 0, "both Tier 0 paths encode the same scalar splat producer", width, scalar);
                 if (native && length != 0)
                 {
@@ -295,7 +295,7 @@ static void ir_simd_lower_tests(IrLowerTestTally* tally)
                     {
                         Tier0TestTally native_tally = {0};
                         Tier0Error error = TIER0_OK;
-                        const uint32_t length = tier0_test_vector_encode(&native_tally, "IR SIMD producer integration", &source, &native_arena, images, images + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_OK, &error);
+                        const uint32_t length = tier0_test_vector_encode(&native_tally, "IR SIMD producer integration", &source, &native_arena, images, TIER0_OK, &error);
                         ir_lower_test_expect(tally, length != 0 && native_tally.failures == 0, "both Tier 0 compilers and encoders agree on the admitted producer", width, operation);
                         if (native && length != 0)
                         {

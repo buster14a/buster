@@ -426,15 +426,11 @@ static bool tier1_schedule_ir_permute(IrFunction* f, uint32_t first, uint32_t en
     return ready;
 }
 
-// Schedules every block of `f` in place (see the file's comment), with scratch from `scratch`, popped before it
-// returns, and with `order` not null, stores the permutation there, order[new] = old, of instruction_count elements.
-// Returns IR_ERROR_MEMORY, f unchanged, when there's no room.
-static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f, Arena* scratch, uint32_t* order, Tier1ScheduleIrStats* stats)
+// A load's uses anywhere in the function decide whether a segment may glue it to its consumer.
+static bool tier1_schedule_ir_prepare(const IrFunction* f, Arena* scratch, Tier1ScheduleIrWork* w)
 {
-    const uint64_t mark = scratch->length;
     const uint32_t n = f->instruction_count;
-    *stats = (Tier1ScheduleIrStats){ 0 };
-    Tier1ScheduleIrWork w = {
+    *w = (Tier1ScheduleIrWork){
         .uses = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .glued_to = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .glued_from = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
@@ -446,41 +442,73 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
         .order = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
         .place = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)n + 1),
     };
-    bool ready = w.uses != 0 && w.glued_to != 0 && w.glued_from != 0 && w.pending != 0 && w.height != 0 && w.successor_offsets != 0 && w.successors != 0 &&
-                 w.heap != 0 && w.order != 0 && w.place != 0;
+    const bool ready = w->uses != 0 && w->glued_to != 0 && w->glued_from != 0 && w->pending != 0 && w->height != 0 && w->successor_offsets != 0 &&
+                       w->successors != 0 && w->heap != 0 && w->order != 0 && w->place != 0;
     if (ready)
     {
-        memset(w.uses, 0, (uint64_t)n * sizeof(uint32_t));
+        memset(w->uses, 0, (uint64_t)n * sizeof(uint32_t));
         for (uint32_t i = 0; i < n; i += 1)
         {
             const uint64_t count = ir_operand_count(f, i);
             for (uint32_t p = 0; p < count; p += 1)
             {
-                w.uses[ir_operand(f, i, p, 0).value] += 1;
+                w->uses[ir_operand(f, i, p, 0).value] += 1;
             }
-            w.order[i] = i;
+            w->order[i] = i;
         }
-        for (uint32_t b = 0; b < f->block_count; b += 1)
+    }
+    return ready;
+}
+
+// Schedules every block of `f` in place (see the file's comment), with scratch from `scratch`, popped before it
+// returns, and with `order` not null, stores the permutation there, order[new] = old, of instruction_count elements.
+// Returns IR_ERROR_MEMORY, f unchanged, when there's no room.
+static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f, Arena* scratch, uint32_t* order, Tier1ScheduleIrStats* stats)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t n = f->instruction_count;
+    *stats = (Tier1ScheduleIrStats){ 0 };
+    Tier1ScheduleIrWork w;
+    bool ready = true;
+    for (uint32_t b = 0; ready && b < f->block_count; b += 1)
+    {
+        const uint32_t end = f->block_offsets[b + 1];
+        uint32_t first = f->block_offsets[b];
+        while (first < end)
         {
-            uint32_t first = f->block_offsets[b];
-            const uint32_t end = f->block_offsets[b + 1];
-            for (uint32_t i = first; i <= end; i += 1)
+            uint32_t limit = first;
+            while (limit < end && !tier1_schedule_ir_barrier(f, limit))
             {
-                const bool cut = i == end || tier1_schedule_ir_barrier(f, i);
-                if (cut && i - first >= 2)
-                {
-                    stats->segments += 1;
-                    stats->moved += tier1_schedule_ir_segment(f, &w, first, i, stats);
-                }
-                first = cut ? i + 1 : first;
+                limit += 1;
             }
+            if (limit - first >= 2)
+            {
+                if (stats->segments == 0 && !tier1_schedule_ir_prepare(f, scratch, &w))
+                {
+                    ready = false;
+                    break;
+                }
+                stats->segments += 1;
+                stats->moved += tier1_schedule_ir_segment(f, &w, first, limit, stats);
+            }
+            first = limit < end ? limit + 1 : end;
         }
     }
     // Each segment's operand edges are at most three an instruction, its memory edge one more: 4n bounds the lists.
     ready = ready && (stats->moved == 0 || tier1_schedule_ir_permute(f, 0, n, w.order, w.place, scratch));
-    if (ready && order != 0 && n != 0)
+    if (ready && order != NULL)
     {
-        memcpy(order, w.order, (uint64_t)n * sizeof(uint32_t));
+        if (stats->segments != 0)
+        {
+            memcpy(order, w.order, (uint64_t)n * sizeof(uint32_t));
+        }
+        else
+        {
+            for (uint32_t i = 0; i < n; i += 1)
+            {
+                order[i] = i;
+            }
+        }
     }
     arena_pop_to(scratch, mark);
     if (!ready)
@@ -518,8 +546,7 @@ static __attribute__((unused)) IrError tier1_schedule_ir_function(IrFunction* f,
 // BUSTER_TIER1_SINK_WINDOW before its root, its anchor is in the BUSTER_TIER1_SINK_WINDOW instructions after the root,
 // and each walk up to the phi is bounded too: the pass's work is bounded by the instructions' and the phis' operands.
 //
-// No use count is taken: the window's readers say what the moves need. Two scans are data-parallel, each with an exact
-// scalar twin: the classification, 64 instructions' opcode, type and flag bytes at a time into the set's, the barriers'
+// No use count is taken: the window's readers say what the moves need. Two scans are data-parallel: the classification, 64 instructions' opcode, type and flag bytes at a time into the set's, the barriers'
 // and the phis' bits (tier1_sink_ir_classify); and a value's readers among at most 64 instructions, 16 instructions'
 // value operands at a time (tier1_sink_ir_readers). The expressions' walks are short dependent chains, scalar. A function
 // with nothing to move allocates nothing per instruction but those bits; one with something permutes only the span from
@@ -635,87 +662,51 @@ static uint32_t tier1_sink_ir_previous(const uint64_t* bits, uint32_t i, uint32_
 }
 
 // The bits of the set, of the barriers and of the phis, 64 instructions at a time; a word's bits past the count are clear.
-static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t* barriers, uint64_t* phis, bool scalar)
+static void tier1_sink_ir_classify(const IrFunction* f, uint64_t* pure, uint64_t* barriers, uint64_t* phis)
 {
     const uint32_t count = f->instruction_count;
     for (uint32_t first = 0; first < count; first += 64)
     {
         const uint32_t lanes = count - first < 64 ? count - first : 64;
-        uint64_t set = 0;
-        uint64_t cut = 0;
-        uint64_t joins = 0;
-        if (!scalar)
-        {
-            const __mmask64 valid = UINT64_MAX >> (64 - lanes);
-            const __m512i op = _mm512_maskz_loadu_epi8(valid, f->op + first);
-            const __m512i type = _mm512_maskz_loadu_epi8(valid, f->type + first);
-            const __m512i flags = _mm512_maskz_loadu_epi8(valid, f->flags + first);
-            const __m512i operations = _mm512_permutex2var_epi8(_mm512_loadu_si512(tier1_sink_ir_operations), op, _mm512_loadu_si512(tier1_sink_ir_operations + 64));
-            const __m512i types = _mm512_permutexvar_epi8(type, _mm512_loadu_si512(tier1_sink_ir_types));
-            const __m512i fixed = _mm512_permutex2var_epi8(_mm512_loadu_si512(tier1_schedule_ir_barriers), op, _mm512_loadu_si512(tier1_schedule_ir_barriers + 64));
-            const __m512i terminators = _mm512_permutex2var_epi8(_mm512_loadu_si512(ir_terminator_table), op, _mm512_loadu_si512(ir_terminator_table + 64));
-            const __mmask64 observable = _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_LOAD)) & _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)BUSTER_IR_OBSERVABLE));
-            set = valid & _mm512_test_epi8_mask(operations, types);
-            cut = valid & (_mm512_test_epi8_mask(fixed, fixed) | _mm512_test_epi8_mask(terminators, terminators) | observable);
-            joins = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_PHI));
-        }
-        else
-        {
-            for (uint32_t lane = 0; lane < lanes; lane += 1)
-            {
-                const uint32_t i = first + lane;
-                const uint64_t member = tier1_sink_ir_operations[f->op[i]] != 0 && tier1_sink_ir_types[f->type[i]] != 0;
-                const uint64_t barrier = tier1_schedule_ir_barrier(f, i);
-                const uint64_t join = f->op[i] == IR_PHI;
-                set |= member << lane;
-                cut |= barrier << lane;
-                joins |= join << lane;
-            }
-        }
-        pure[first / 64] = set;
-        barriers[first / 64] = cut;
-        phis[first / 64] = joins;
+        const __mmask64 valid = UINT64_MAX >> (64 - lanes);
+        const __m512i op = _mm512_maskz_loadu_epi8(valid, f->op + first);
+        const __m512i type = _mm512_maskz_loadu_epi8(valid, f->type + first);
+        const __m512i flags = _mm512_maskz_loadu_epi8(valid, f->flags + first);
+        const __m512i operations = _mm512_permutex2var_epi8(_mm512_loadu_si512(tier1_sink_ir_operations), op, _mm512_loadu_si512(tier1_sink_ir_operations + 64));
+        const __m512i types = _mm512_permutexvar_epi8(type, _mm512_loadu_si512(tier1_sink_ir_types));
+        const __m512i fixed = _mm512_permutex2var_epi8(_mm512_loadu_si512(tier1_schedule_ir_barriers), op, _mm512_loadu_si512(tier1_schedule_ir_barriers + 64));
+        const __m512i terminators = _mm512_permutex2var_epi8(_mm512_loadu_si512(ir_terminator_table), op, _mm512_loadu_si512(ir_terminator_table + 64));
+        const __mmask64 observable = _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_LOAD)) & _mm512_test_epi8_mask(flags, _mm512_set1_epi8((char)BUSTER_IR_OBSERVABLE));
+        pure[first / 64] = valid & _mm512_test_epi8_mask(operations, types);
+        barriers[first / 64] = valid & (_mm512_test_epi8_mask(fixed, fixed) | _mm512_test_epi8_mask(terminators, terminators) | observable);
+        phis[first / 64] = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_PHI));
     }
-    (void)scalar;
 }
 
 // The instructions of [from, to), at most 64 of a segment's (whose operands are their a, b and c alone, by their value
-// masks), that read `value`, as bits from `from`; 16 at a time.
-static uint64_t tier1_sink_ir_readers(const IrFunction* f, uint32_t from, uint32_t to, uint32_t value, bool scalar)
+// masks), that read `value`, an instruction's index, as bits from `from`; 16 at a time. An absent optional operand is
+// BUSTER_IR_NONE, which no index equals, so the optional places need no presence test.
+static uint64_t tier1_sink_ir_readers(const IrFunction* f, uint32_t from, uint32_t to, uint32_t value)
 {
     uint64_t read = 0;
-    if (!scalar)
+    const uint32_t* columns[3] = { f->a, f->b, f->c };
+    for (uint32_t first = from; first < to; first += 16)
     {
-        const uint32_t* columns[3] = { f->a, f->b, f->c };
-        for (uint32_t first = from; first < to; first += 16)
+        const uint32_t lanes = to - first < 16 ? to - first : 16;
+        const __mmask16 valid = (__mmask16)(0xffffu >> (16 - lanes));
+        const __m128i op = _mm_maskz_loadu_epi8(valid, f->op + first);
+        const __m512i fixed = ir_lookup_bytes(ir_operand_table, op);
+        const __m512i optional = ir_lookup_bytes(ir_optional_table, op);
+        __mmask16 reads = 0;
+        for (uint32_t k = 0; k < 3; k += 1)
         {
-            const uint32_t lanes = to - first < 16 ? to - first : 16;
-            const __mmask16 valid = (__mmask16)(0xffffu >> (16 - lanes));
-            const __m128i op = _mm_maskz_loadu_epi8(valid, f->op + first);
-            const __m512i fixed = ir_lookup_bytes(ir_operand_table, op);
-            const __m512i optional = ir_lookup_bytes(ir_optional_table, op);
-            __mmask16 reads = 0;
-            for (uint32_t k = 0; k < 3; k += 1)
-            {
-                const __m512i bit = _mm512_set1_epi32((int)(1u << k));
-                const __m512i operand = _mm512_maskz_loadu_epi32(valid, columns[k] + first);
-                const __mmask16 present = _mm512_cmpneq_epi32_mask(operand, _mm512_set1_epi32(-1));
-                const __mmask16 live = valid & (_mm512_test_epi32_mask(fixed, bit) | (_mm512_test_epi32_mask(optional, bit) & present));
-                reads |= live & _mm512_cmpeq_epi32_mask(operand, _mm512_set1_epi32((int)value));
-            }
-            read |= (uint64_t)reads << (first - from);
+            const __m512i bit = _mm512_set1_epi32((int)(1u << k));
+            const __m512i operand = _mm512_maskz_loadu_epi32(valid, columns[k] + first);
+            const __mmask16 live = valid & (_mm512_test_epi32_mask(fixed, bit) | _mm512_test_epi32_mask(optional, bit));
+            reads |= live & _mm512_cmpeq_epi32_mask(operand, _mm512_set1_epi32((int)value));
         }
+        read |= (uint64_t)reads << (first - from);
     }
-    else
-    {
-        for (uint32_t j = from; j < to; j += 1)
-        {
-            const uint32_t mask = ir_value_mask(f, j);
-            const bool reads = ((mask & 1) != 0 && f->a[j] == value) || ((mask & 2) != 0 && f->b[j] == value) || ((mask & 4) != 0 && f->c[j] == value);
-            read |= (uint64_t)reads << (j - from);
-        }
-    }
-    (void)scalar;
     return read;
 }
 
@@ -799,7 +790,7 @@ static bool tier1_sink_ir_family(const IrFunction* f, uint32_t a, uint32_t phi, 
 // Root's expression as `phi`'s next value, recorded where it moves (see the section's comment). Its instructions are in
 // [start, root], start past the last barrier before the root, at most BUSTER_TIER1_SINK_WINDOW before it; its readers
 // are found in [root + 1, to), to the next barrier, at most BUSTER_TIER1_SINK_WINDOW after it.
-static void tier1_sink_ir_candidate(const IrFunction* f, Tier1SinkIrWork* w, uint32_t root, uint32_t phi, uint32_t start, uint32_t to, bool scalar, Tier1SinkIrStats* stats)
+static void tier1_sink_ir_candidate(const IrFunction* f, Tier1SinkIrWork* w, uint32_t root, uint32_t phi, uint32_t start, uint32_t to, Tier1SinkIrStats* stats)
 {
     // The expression: the root and the operands of the set in its segment that no other of its instructions reads; each
     // one's parent is the instruction of it that reads it.
@@ -847,7 +838,7 @@ static void tier1_sink_ir_candidate(const IrFunction* f, Tier1SinkIrWork* w, uin
     uint64_t read = 0;
     for (uint32_t k = 0; valid && k < known; k += 1)
     {
-        const uint64_t readers = tier1_sink_ir_readers(f, root + 1, to, members[k], scalar);
+        const uint64_t readers = tier1_sink_ir_readers(f, root + 1, to, members[k]);
         read |= readers;
         for (uint64_t left = readers; valid && left != 0; left &= left - 1)
         {
@@ -872,7 +863,7 @@ static void tier1_sink_ir_candidate(const IrFunction* f, Tier1SinkIrWork* w, uin
     // instruction's readers up to the anchor, at most 2 * BUSTER_TIER1_SINK_WINDOW + 1 of them.
     for (uint32_t k = 0; valid && k < count; k += 1)
     {
-        const uint64_t readers = tier1_sink_ir_readers(f, nodes[k] + 1, anchor + 1, nodes[k], scalar);
+        const uint64_t readers = tier1_sink_ir_readers(f, nodes[k] + 1, anchor + 1, nodes[k]);
         valid = readers == (parents[k] != BUSTER_IR_NONE ? UINT64_C(1) << (parents[k] - nodes[k] - 1) : 0);
     }
     valid = valid && stats->trees < w->capacity;
@@ -899,10 +890,10 @@ static void tier1_sink_ir_candidate(const IrFunction* f, Tier1SinkIrWork* w, uin
     }
 }
 
-// Moves `f`'s expressions in place (see the section's comment), by the vector scans or their scalar twins, with scratch
-// from `scratch`, popped before it returns; with `order` not null and an expression moved, stores the permutation there,
-// order[new] = old, of instruction_count elements. Returns IR_ERROR_MEMORY, f unchanged, when there's no room.
-static __attribute__((unused)) IrError tier1_schedule_ir_sink(IrFunction* f, Arena* scratch, uint32_t* order, bool scalar, Tier1SinkIrStats* stats)
+// Moves `f`'s expressions in place (see the section's comment), with scratch from `scratch`, popped before it returns;
+// with `order` not null and an expression moved, stores the permutation there, order[new] = old, of instruction_count
+// elements. Returns IR_ERROR_MEMORY, f unchanged, when there's no room.
+static __attribute__((unused)) IrError tier1_schedule_ir_sink(IrFunction* f, Arena* scratch, uint32_t* order, Tier1SinkIrStats* stats)
 {
     const uint64_t mark = scratch->length;
     const uint32_t n = f->instruction_count;
@@ -920,7 +911,7 @@ static __attribute__((unused)) IrError tier1_schedule_ir_sink(IrFunction* f, Are
     if (ready && n != 0)
     {
         memset(w.moved, 0, words * sizeof(uint64_t));
-        tier1_sink_ir_classify(f, w.pure, w.barriers, w.phis, scalar);
+        tier1_sink_ir_classify(f, w.pure, w.barriers, w.phis);
         // Each phi's incoming values of the set, in place order: a value that already moved, as another phi's, stays.
         for (uint32_t phi = tier1_sink_ir_next(w.phis, 0, n); phi < n; phi = tier1_sink_ir_next(w.phis, phi + 1, n))
         {
@@ -934,7 +925,7 @@ static __attribute__((unused)) IrError tier1_schedule_ir_sink(IrFunction* f, Are
                     const uint32_t start = previous != BUSTER_IR_NONE ? previous + 1 : floor;
                     const uint32_t limit = n - root - 1 < BUSTER_TIER1_SINK_WINDOW ? n : root + 1 + BUSTER_TIER1_SINK_WINDOW;
                     const uint32_t to = tier1_sink_ir_next(w.barriers, root + 1, limit);
-                    tier1_sink_ir_candidate(f, &w, root, phi, start, to, scalar, stats);
+                    tier1_sink_ir_candidate(f, &w, root, phi, start, to, stats);
                 }
             }
         }
