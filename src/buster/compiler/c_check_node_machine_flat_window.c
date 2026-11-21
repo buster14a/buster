@@ -141,10 +141,6 @@ static uint8_t node_facts_flat_leaf(NodeFlat* flat, CheckInputReader* reader, ui
     if (given)
     {
         node_facts_window_leaf(source, reader, place, token, kind, payload, &decoded);
-        if (kind == BUSTER_NODE_FRONT_LEAF_IDENTIFIER)
-        {
-            node_facts_window_name(&flat->window->facts, source->window_kinds, source->window_entries, place, token);
-        }
     }
     return given ? 0 : BUSTER_NODE_FLAT_UNMAPPED;
 }
@@ -206,6 +202,7 @@ static void node_facts_flat_chunk(NodeFront* front, CheckInputReader* reader)
             source->ops[place] = record->op;
             source->tokens[place] = record->token;
             source->window_ups[place] = 0;
+            source->window_kinds[place] = BUSTER_NODE_FACTS_GIVEN;
             window->refusals[place] = record->op == CHECK_OP_VALUE ? node_facts_flat_leaf(flat, reader, place, record) :
                                                                      node_facts_flat_operator(flat, reader, ordinal, place, record);
             if ((reader->pp->options.node_reader & BUSTER_NODE_READER_FLAT_WINDOW_FAULT) != 0 && window->refusals[place] == 0)
@@ -216,6 +213,11 @@ static void node_facts_flat_chunk(NodeFront* front, CheckInputReader* reader)
         }
     }
     source->count = place;
+    // The operator rounds depend on their operands' classes, which are already set. A name's declaration can
+    // therefore become its line in a batch after the records are written. Its lookups use this producer's own arena.
+    // The postorder ordinals have served their last reader and now hold the sweep's list of name slots.
+    const uint32_t first = front->made;
+    node_facts_window_names_vector(&window->facts, source, source->window_kinds + first, source->window_entries + first, window->ordinals, first, place - first);
     front->shadow->flat_window_ticks += __rdtsc() - t0;
     memset(window->taken, 0, front->count);
 }

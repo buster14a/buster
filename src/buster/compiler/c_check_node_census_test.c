@@ -5976,21 +5976,42 @@ static bool node_flat_test_window(const char* directory, char** options, uint32_
     snprintf(path, sizeof(path), "%s/flat-window.c", directory);
     const char source[] = "struct S { int value; }; int f(int); int g(int x, struct S* p) {"
                           " int y = f(x) + p->value; if (y) f(x ? y : 3); return (int)(x + y); }";
-    bool valid = parse_test_write(path, source, sizeof(source) - 1);
-    for (uint32_t fault = 0; valid && fault < 2; fault += 1)
+    bool valid = true;
+    // The long right operand places the first operand beyond a byte or across a chunk. The lean window admits the
+    // expression in both cases, and the flat producer names the precise reason it leaves it to the reference.
+    for (uint32_t variant = 0; valid && variant < 4; variant += 1)
     {
+        const bool fault = variant == 1;
+        if (variant < 2)
+        {
+            valid = parse_test_write(path, source, sizeof(source) - 1);
+        }
+        else
+        {
+            char text[2048] = "int f(int x) { return x + (";
+            const uint32_t terms = variant == 2 ? 180 : 510;
+            size_t length = strlen(text);
+            for (uint32_t k = 0; k < terms; k += 1)
+            {
+                text[length++] = '+';
+                text[length++] = '1';
+            }
+            memcpy(text + length, "+x); }", 6);
+            valid = parse_test_write(path, text, length + 6);
+        }
         NodeShadow shadow = {
             .front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_FLAT,
             .reader = BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_WINDOW_TESTS |
                       BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS | BUSTER_NODE_READER_FLAT_WINDOW |
-                      (fault != 0 ? BUSTER_NODE_READER_FLAT_WINDOW_FAULT : 0),
+                      (fault ? BUSTER_NODE_READER_FLAT_WINDOW_FAULT : 0),
             .passes = 1,
             .repeat = 1,
         };
         NodeCensus census = { .shadow = &shadow };
-        valid = node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 && shadow.flat_window_roots >= 4 &&
-                shadow.flat_window_records == shadow.reader_facts[NODE_FACTS_COUNT_WINDOW_RECORDS] && shadow.flat_window_cross == 0 && shadow.flat_window_far == 0 &&
-                shadow.flat_window_other == 0 && shadow.flat_differences == (fault != 0 ? shadow.flat_window_records : 0) && node_shadow_differs(&shadow) == (fault != 0);
+        valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0 &&
+                shadow.flat_window_roots == (variant < 2 ? 4u : 0u) && shadow.flat_window_records == (variant < 2 ? 20u : 0u) &&
+                shadow.flat_window_far == (variant == 2) && shadow.flat_window_cross == (variant == 3) && shadow.flat_window_other == 0 &&
+                shadow.flat_differences == (fault ? 20u : 0u) && node_shadow_differs(&shadow) == fault;
     }
     unlink(path);
     return valid;
