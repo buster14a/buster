@@ -29,3 +29,10 @@ int mixed(int x) { if (x) return x; return 1 + 4; }
 int local_read(int x) { int y = x; return +y; }
 int assigned_literal(int target) { target = 24; return target; }
 int assigned_local(int source, int target) { target = source; return target; }
+
+void for_initializers(int i, int n)
+{
+    for (i = 24; i < n; ++i) { }
+    for (i = n; i > 0; --i) { }
+    for ((void)7; n > 0; --n) { }
+}
