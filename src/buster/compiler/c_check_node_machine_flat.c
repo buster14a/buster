@@ -173,6 +173,14 @@ struct NodeFlat
     uint32_t consumers[BUSTER_NODE_FLAT_RECORDS];
 };
 
+// A class writes its kernel fields as soon as it knows its own record. Operand rounds and distances in the
+// compacted window are finalized after all classes have placed or discarded their provisional records.
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+static void node_facts_flat_start(NodeFlat* flat);
+static void node_facts_flat_place_leaf(NodeFlat* flat, CheckInputReader* reader, uint32_t ordinal, const NodeFlatRecord* record);
+static void node_facts_flat_place_op(NodeFlat* flat, CheckInputReader* reader, uint32_t ordinal, CheckOp op, uint32_t token, uint32_t entry);
+#endif
+
 // The classes whose tokens only pass their children's values on, a bit a class: the compaction leaves them out.
 #define BUSTER_NODE_FLAT_PASSING (1u << CHECK_INPUT_CODE_LIST | 1u << CHECK_INPUT_CODE_SEPARATOR | 1u << CHECK_INPUT_CODE_GROUP)
 // The classes whose tokens are listed (node_flat_classify), a bit a class: the leaves and every class with a loop of its
@@ -635,6 +643,12 @@ static __attribute__((noinline)) void node_flat_places(NodeFlat* flat, CheckInpu
             // The record is written whether or not the token makes one: the next record overwrites one that is none.
             const uint32_t gives = (meta & BUSTER_NODE_FLAT_META_GIVES) >> BUSTER_NODE_FLAT_META_GIVES_SHIFT;
             memcpy(records + (ordinal & (BUSTER_NODE_FLAT_RECORDS - 1)), flat->bases + i, sizeof(NodeFlatRecord));
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+            if (flat->window != NULL && (meta & BUSTER_NODE_FLAT_META_RECORD) != 0 && flat->bases[i].op == CHECK_OP_VALUE)
+            {
+                node_facts_flat_place_leaf(flat, reader, ordinal, &flat->bases[i]);
+            }
+#endif
             words[position & (BUSTER_NODE_FLAT_WINDOW - 1)] = gives == BUSTER_NODE_FLAT_GIVES_RECORD ? ordinal : ~gives;
             ordinal += meta & BUSTER_NODE_FLAT_META_RECORD;
         }
@@ -689,6 +703,12 @@ static __attribute__((noinline)) void node_flat_places(NodeFlat* flat, CheckInpu
                     const uint32_t value = values[count - 1 - k];
                     const uint32_t distance = node_flat_distance(ordinal, value);
                     node_flat_store(records, ordinal, token, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, 1, distance, 0, 0, BUSTER_NODE_FLAT_ROOT, 0);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                    if (flat->window != NULL)
+                    {
+                        node_facts_flat_place_op(flat, reader, ordinal, condition ? CHECK_OP_CONDITION : CHECK_OP_CAST, token, condition ? 0 : BUSTER_TYPE_VOID);
+                    }
+#endif
                     node_flat_take(flat, ordinal, value, distance, 0);
                     ordinal += 1;
                 }
@@ -762,6 +782,15 @@ static inline __attribute__((always_inline)) void node_flat_unaries(NodeFlat* fl
             {
                 const uint32_t distance = node_flat_distance(place, values[0]);
                 node_flat_fill(flat->records, place, token, op, 1, distance, 0);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                if (flat->window != NULL)
+                {
+                    const uint32_t entry = code == CHECK_INPUT_CODE_CAST || code == CHECK_INPUT_CODE_INITIALIZE ? reader->query_types[token] :
+                                           code == CHECK_INPUT_CODE_RETURN ? reader->return_types[token] :
+                                           code == CHECK_INPUT_CODE_MEMBER ? reader->parser->tokens.names[token + 1] : 0;
+                    node_facts_flat_place_op(flat, reader, place, op, token, entry);
+                }
+#endif
                 node_flat_take(flat, place, values[0], distance, 0);
             }
             else
@@ -795,6 +824,12 @@ static inline __attribute__((always_inline)) void node_flat_binaries(NodeFlat* f
             const uint32_t first = node_flat_distance(place, values[1]);
             const uint32_t second = node_flat_distance(place, values[0]);
             node_flat_fill(flat->records, place, token, op, 2, first, second);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+            if (flat->window != NULL)
+            {
+                node_facts_flat_place_op(flat, reader, place, op, token, 0);
+            }
+#endif
             node_flat_take(flat, place, values[0], second, 1);
             node_flat_take(flat, place, values[1], first, 0);
         }
@@ -806,7 +841,7 @@ static inline __attribute__((always_inline)) void node_flat_binaries(NodeFlat* f
 }
 
 // The chunk's conditionals: three values, or two with the middle omitted (x ?: y), which takes its first value twice.
-static __attribute__((noinline)) void node_flat_ternaries(NodeFlat* flat, int64_t reach, uint64_t* beyond, uint64_t* lefts)
+static __attribute__((noinline)) void node_flat_ternaries(NodeFlat* flat, CheckInputReader* reader, int64_t reach, uint64_t* beyond, uint64_t* lefts)
 {
     const uint32_t* list = flat->lists[CHECK_INPUT_CODE_TERNARY];
     const uint32_t count = flat->list_counts[CHECK_INPUT_CODE_TERNARY];
@@ -830,6 +865,12 @@ static __attribute__((noinline)) void node_flat_ternaries(NodeFlat* flat, int64_
             const uint32_t b = taken == 2 ? a : values[1];
             const uint32_t c = values[0];
             node_flat_fill(flat->records, place, token, CHECK_OP_CONDITIONAL, 3, node_flat_distance(place, a), node_flat_distance(place, b));
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+            if (flat->window != NULL)
+            {
+                node_facts_flat_place_op(flat, reader, place, CHECK_OP_CONDITIONAL, token, 0);
+            }
+#endif
             flat->records[place & (BUSTER_NODE_FLAT_RECORDS - 1)].distances[2] = (uint8_t)node_flat_distance(place, c);
             node_flat_take(flat, place, c, node_flat_distance(place, c), 2);
             node_flat_take(flat, place, b, node_flat_distance(place, b), 1);
@@ -868,6 +909,12 @@ static __attribute__((noinline)) void node_flat_calls(NodeFlat* flat, CheckInput
             const uint32_t callee = values[taken - 1];
             const bool listed = arguments + taken - 1 <= BUSTER_NODE_FLAT_ARGUMENTS;
             node_flat_fill(flat->records, place, token, CHECK_OP_CALL, taken < 255 ? taken : 255, node_flat_distance(place, callee), 0);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+            if (flat->window != NULL)
+            {
+                node_facts_flat_place_op(flat, reader, place, CHECK_OP_CALL, token, 0);
+            }
+#endif
             flat->records[place & (BUSTER_NODE_FLAT_RECORDS - 1)].payload = listed ? arguments : BUSTER_NODE_FLAT_NONE;
             node_flat_take(flat, place, callee, node_flat_distance(place, callee), 0);
             for (uint32_t k = 1; k < taken; k += 1)
@@ -1036,6 +1083,12 @@ static __attribute__((noinline)) void node_front_chunk_flat(NodeFlat* flat, Chec
     flat->work = work;
     flat->empty_count = 0;
     flat->argument_count = 0;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (flat->window != NULL)
+    {
+        node_facts_flat_start(flat);
+    }
+#endif
     node_flat_classify(flat, work, false);
     ticks[2] = __rdtsc();
     uint32_t own_literals = 0;
@@ -1059,7 +1112,7 @@ static __attribute__((noinline)) void node_front_chunk_flat(NodeFlat* flat, Chec
     node_flat_returns(flat, reader, reach, &beyond, &lefts);
     node_flat_operators(flat, reader, reach, &beyond, &lefts);
     node_flat_subscripts(flat, reader, reach, &beyond, &lefts);
-    node_flat_ternaries(flat, reach, &beyond, &lefts);
+    node_flat_ternaries(flat, reader, reach, &beyond, &lefts);
     node_flat_calls(flat, reader, reach, &beyond, &lefts);
     ticks[5] = __rdtsc();
     node_flat_empties(flat, &lefts);

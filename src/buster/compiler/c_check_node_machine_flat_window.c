@@ -18,6 +18,8 @@ struct NodeFlatWindow
     NodeFacts facts;
     uint32_t ordinals[BUSTER_NODE_FLAT_RECORDS + 16];
     uint16_t places[BUSTER_NODE_FLAT_RECORDS];
+    uint16_t slots[BUSTER_NODE_FRONT_RECORDS];
+    uint8_t codes[BUSTER_NODE_FRONT_RECORDS];
     uint8_t refusals[BUSTER_NODE_FRONT_RECORDS];
     uint8_t taken[BUSTER_NODE_FRONT_RECORDS];
 };
@@ -114,7 +116,7 @@ static uint8_t node_facts_flat_operand(const NodeFlat* flat, uint32_t ordinal, u
         if (distance != 0 && flat->records[slot].op != BUSTER_NODE_FLAT_EMPTY)
         {
             *operand = flat->window->places[slot];
-            refusal = flat->window->refusals[*operand];
+            refusal = flat->window->refusals[flat->window->slots[*operand]];
         }
     }
     return refusal;
@@ -145,38 +147,94 @@ static uint8_t node_facts_flat_leaf(NodeFlat* flat, CheckInputReader* reader, ui
     return given ? 0 : BUSTER_NODE_FLAT_UNMAPPED;
 }
 
-static uint8_t node_facts_flat_operator(NodeFlat* flat, CheckInputReader* reader, uint32_t ordinal, uint32_t place, const NodeFlatRecord* record)
+// These slots are local to this chunk and include its provisional empty places. The owning class can write
+// positions, kinds and entries here before another class has decided which of its records survive.
+static void node_facts_flat_start(NodeFlat* flat)
 {
-    const CheckOp op = (CheckOp)record->op;
+    memset(flat->window->candidate.window_kinds, BUSTER_NODE_FACTS_GIVEN, sizeof(flat->window->candidate.window_kinds));
+}
+
+static void node_facts_flat_place_leaf(NodeFlat* flat, CheckInputReader* reader, uint32_t ordinal, const NodeFlatRecord* record)
+{
+    const uint32_t slot = (ordinal - flat->chunk_ordinal) & (BUSTER_NODE_FLAT_RECORDS - 1);
+    NodeFlatWindow* window = flat->window;
+    window->candidate.ops[slot] = CHECK_OP_VALUE;
+    window->candidate.tokens[slot] = record->token;
+    window->refusals[slot] = node_facts_flat_leaf(flat, reader, slot, record);
+}
+
+static void node_facts_flat_place_op(NodeFlat* flat, CheckInputReader* reader, uint32_t ordinal, CheckOp op, uint32_t token, uint32_t entry)
+{
+    const uint32_t slot = (ordinal - flat->chunk_ordinal) & (BUSTER_NODE_FLAT_RECORDS - 1);
+    NodeFlatWindow* window = flat->window;
+    NodeFront* front = &window->candidate;
+    const bool discard = op == CHECK_OP_CAST && entry == BUSTER_TYPE_VOID;
+    front->ops[slot] = (uint8_t)op;
+    front->tokens[slot] = token;
+    front->window_kinds[slot] = discard ? BUSTER_NODE_FACTS_LOOKUP : front->window_op_kinds[op];
+    window->codes[slot] = discard ? BUSTER_NODE_FACTS_CODE_DISCARD : front->window_op_codes[op];
+    front->window_entries[slot] = entry;
+    front->window_positions[slot] = check_input_expression_end(reader, token);
+}
+
+static uint8_t node_facts_flat_operator(NodeFlat* flat, uint32_t ordinal, uint32_t place, const NodeFlatRecord* record)
+{
+    NodeFlatWindow* window = flat->window;
+    NodeFront* source = &window->candidate;
+    const uint32_t slot = ordinal - flat->chunk_ordinal;
     const uint32_t count = record->count;
-    const bool call = op == CHECK_OP_CALL;
-    NodeFront* source = &flat->window->candidate;
+    const bool call = record->op == CHECK_OP_CALL;
+    const uint32_t args = source->window_argument_count;
     const bool listed = !call || (count < 255 && record->payload <= flat->argument_count && count - 1 <= flat->argument_count - record->payload &&
-                                  count <= BUSTER_NODE_FRONT_RECORDS - source->window_argument_count);
+                                  count <= BUSTER_NODE_FRONT_RECORDS - args);
     uint8_t refusal = count != 0 && listed && (call || count <= 3) ? 0 : BUSTER_NODE_FLAT_UNMAPPED;
-    uint32_t operands[255];
-    operands[1] = BUSTER_NODE_FRONT_UNKNOWN;
-    operands[2] = BUSTER_NODE_FRONT_UNKNOWN;
+    const uint32_t code = window->codes[slot];
+    uint32_t round = 0;
+    bool cut = false;
+    source->window_right[slot] = 0;
     for (uint32_t k = 0; refusal == 0 && k < count; k += 1)
     {
         const uint32_t distance = call && k != 0 ? flat->argument_distances[record->payload + k - 1] : record->distances[k];
-        refusal = node_facts_flat_operand(flat, ordinal, distance, &operands[k]);
+        uint32_t operand;
+        refusal = node_facts_flat_operand(flat, ordinal, distance, &operand);
+        if (refusal == 0)
+        {
+            const uint32_t original = window->slots[operand];
+            const uint16_t back = (uint16_t)(place - operand);
+            source->window_ups[original] = back;
+            const uint32_t child = source->window_classes[original];
+            const uint32_t asked = node_facts_round_of(code, child);
+            round = asked > round ? asked : round;
+            cut = cut || child == BUSTER_NODE_FACTS_CLASS_CUT;
+            if (k == 0)
+            {
+                source->window_left[slot] = back;
+            }
+            else if (call)
+            {
+                source->window_arguments[args + k - 1] = back;
+            }
+            else if (k == 1)
+            {
+                source->window_right[slot] = back;
+            }
+            else
+            {
+                source->window_entries[slot] = back;
+            }
+        }
     }
-    for (uint32_t k = 0; refusal == 0 && k < count; k += 1)
+    if (refusal == 0)
     {
-        source->window_ups[operands[k]] = (uint16_t)(place - operands[k]);
-    }
-    const uint32_t token = record->token;
-    if (refusal == 0 && call)
-    {
-        node_facts_window_call(source, reader, place, token, operands, count);
-    }
-    else if (refusal == 0)
-    {
-        const uint32_t entry = op == CHECK_OP_CAST ? ((record->flags & BUSTER_NODE_FLAT_ROOT) != 0 ? BUSTER_TYPE_VOID : reader->query_types[token]) :
-                               op == CHECK_OP_INITIALIZE ? reader->query_types[token] : op == CHECK_OP_CONVERT ? reader->return_types[token] :
-                               op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW ? reader->parser->tokens.names[token + 1] : 0;
-        node_facts_window_operator(source, reader, place, op, token, operands[0], operands[1], operands[2], entry);
+        const uint8_t kind = source->window_kinds[slot];
+        const bool made = call || kind == BUSTER_NODE_FACTS_LOOKUP || kind == BUSTER_NODE_FACTS_OPERATOR;
+        source->window_classes[slot] = (uint8_t)(cut ? BUSTER_NODE_FACTS_CLASS_CUT : made ? node_facts_class(round, code) : BUSTER_NODE_FACTS_NO_CLASS);
+        if (call)
+        {
+            source->window_counts[slot] = (uint16_t)(count - 1);
+            source->window_entries[slot] = args;
+            source->window_argument_count = args + count - 1;
+        }
     }
     return refusal;
 }
@@ -196,18 +254,19 @@ static void node_facts_flat_chunk(NodeFront* front, CheckInputReader* reader)
         for (uint32_t i = 0; i < count && place < BUSTER_NODE_FRONT_RECORDS; i += 1)
         {
             const uint32_t ordinal = window->ordinals[i];
-            const uint32_t slot = ordinal & (BUSTER_NODE_FLAT_RECORDS - 1);
-            const NodeFlatRecord* record = &flat->records[slot];
-            window->places[slot] = (uint16_t)place;
-            source->ops[place] = record->op;
-            source->tokens[place] = record->token;
-            source->window_ups[place] = 0;
-            source->window_kinds[place] = BUSTER_NODE_FACTS_GIVEN;
-            window->refusals[place] = record->op == CHECK_OP_VALUE ? node_facts_flat_leaf(flat, reader, place, record) :
-                                                                     node_facts_flat_operator(flat, reader, ordinal, place, record);
-            if ((reader->pp->options.node_reader & BUSTER_NODE_READER_FLAT_WINDOW_FAULT) != 0 && window->refusals[place] == 0)
+            const uint32_t ring = ordinal & (BUSTER_NODE_FLAT_RECORDS - 1);
+            const uint32_t slot = ordinal - flat->chunk_ordinal;
+            const NodeFlatRecord* record = &flat->records[ring];
+            window->places[ring] = (uint16_t)place;
+            window->slots[place] = (uint16_t)slot;
+            source->window_ups[slot] = 0;
+            if (record->op != CHECK_OP_VALUE)
             {
-                source->window_positions[place] ^= 1u;
+                window->refusals[slot] = node_facts_flat_operator(flat, ordinal, place, record);
+            }
+            if ((reader->pp->options.node_reader & BUSTER_NODE_READER_FLAT_WINDOW_FAULT) != 0 && window->refusals[slot] == 0)
+            {
+                source->window_positions[slot] ^= 1u;
             }
             place += 1;
         }
@@ -216,8 +275,11 @@ static void node_facts_flat_chunk(NodeFront* front, CheckInputReader* reader)
     // The operator rounds depend on their operands' classes, which are already set. A name's declaration can
     // therefore become its line in a batch after the records are written. Its lookups use this producer's own arena.
     // The postorder ordinals have served their last reader and now hold the sweep's list of name slots.
-    const uint32_t first = front->made;
-    node_facts_window_names_vector(&window->facts, source, source->window_kinds + first, source->window_entries + first, window->ordinals, first, place - first);
+    const uint32_t length = flat->ordinal - flat->chunk_ordinal;
+    if (length < BUSTER_NODE_FLAT_RECORDS)
+    {
+        node_facts_window_names_vector(&window->facts, source, source->window_kinds, source->window_entries, window->ordinals, 0, length);
+    }
     front->shadow->flat_window_ticks += __rdtsc() - t0;
     memset(window->taken, 0, front->count);
 }
@@ -232,7 +294,15 @@ static void node_facts_flat_expression(NodeFlatWindow* window, uint32_t record, 
     for (uint32_t r = 0; refusal == 0 && r < count; r += 1)
     {
         const uint32_t x = r < size ? start + r : record;
-        refusal = x >= source->count || source->tokens[x] != target->tokens[x] || source->ops[x] != target->ops[x] ? BUSTER_NODE_FLAT_UNMAPPED : window->refusals[x];
+        if (x >= source->count)
+        {
+            refusal = BUSTER_NODE_FLAT_UNMAPPED;
+        }
+        else
+        {
+            const uint32_t slot = window->slots[x];
+            refusal = source->tokens[slot] != target->tokens[x] || source->ops[slot] != target->ops[x] ? BUSTER_NODE_FLAT_UNMAPPED : window->refusals[slot];
+        }
     }
     if (refusal != 0)
     {
@@ -246,27 +316,28 @@ static void node_facts_flat_expression(NodeFlatWindow* window, uint32_t record, 
     for (uint32_t r = 0; r < count; r += 1)
     {
         const uint32_t x = r < size ? start + r : record;
+        const uint32_t slot = window->slots[x];
         window->taken[x] = 1;
-        const uint8_t kind = source->window_kinds[x];
-        const uint32_t entry = source->window_entries[x];
+        const uint8_t kind = source->window_kinds[slot];
+        const uint32_t entry = source->window_entries[slot];
         const uint32_t prior = target->window_entries[x];
-        bool same = target->window_kinds[x] == kind && target->window_classes[x] == source->window_classes[x] &&
-                    target->window_left[x] == source->window_left[x] && target->window_right[x] == source->window_right[x] && target->window_positions[x] == source->window_positions[x];
+        bool same = target->window_kinds[x] == kind && target->window_classes[x] == source->window_classes[slot] &&
+                    target->window_left[x] == source->window_left[slot] && target->window_right[x] == source->window_right[slot] && target->window_positions[x] == source->window_positions[slot];
         if (r + 1 < count)
         {
-            same = same && target->window_ups[x] == source->window_ups[x];
-            target->window_ups[x] = source->window_ups[x];
+            same = same && target->window_ups[x] == source->window_ups[slot];
+            target->window_ups[x] = source->window_ups[slot];
         }
         if (kind == BUSTER_NODE_FACTS_LITERAL_LINE)
         {
             const uint64_t* own = window->facts.lines + 4 * (uint64_t)entry;
-            same = same && prior == entry && memcmp(target->window_facts->lines + 4 * (uint64_t)entry, own, 4 * sizeof(uint64_t)) == 0;
-            memcpy(target->window_facts->lines + 4 * (uint64_t)entry, own, 4 * sizeof(uint64_t));
-            target->window_entries[x] = entry;
+            same = same && prior == x + 1 && entry == slot + 1 && memcmp(target->window_facts->lines + 4 * (uint64_t)(x + 1), own, 4 * sizeof(uint64_t)) == 0;
+            memcpy(target->window_facts->lines + 4 * (uint64_t)(x + 1), own, 4 * sizeof(uint64_t));
+            target->window_entries[x] = x + 1;
         }
-        else if ((CheckOp)source->ops[x] == CHECK_OP_CALL)
+        else if ((CheckOp)source->ops[slot] == CHECK_OP_CALL)
         {
-            const uint32_t args = source->window_counts[x];
+            const uint32_t args = source->window_counts[slot];
             same = same && args == target->window_counts[x] && memcmp(target->window_arguments + prior, source->window_arguments + entry, args * sizeof(uint16_t)) == 0;
             if (args == target->window_counts[x] && prior <= target->window_argument_count && args <= target->window_argument_count - prior)
             {
@@ -300,13 +371,13 @@ static void node_facts_flat_expression(NodeFlatWindow* window, uint32_t record, 
             }
         }
         target->window_kinds[x] = kind;
-        target->window_classes[x] = source->window_classes[x];
-        target->window_left[x] = source->window_left[x];
-        target->window_right[x] = source->window_right[x];
-        target->window_positions[x] = source->window_positions[x];
+        target->window_classes[x] = source->window_classes[slot];
+        target->window_left[x] = source->window_left[slot];
+        target->window_right[x] = source->window_right[slot];
+        target->window_positions[x] = source->window_positions[slot];
         if (!same)
         {
-            node_flat_differs(target->shadow, source->tokens[x], BUSTER_NODE_FLAT_FIELD_WINDOW);
+            node_flat_differs(target->shadow, source->tokens[slot], BUSTER_NODE_FLAT_FIELD_WINDOW);
         }
     }
 }
