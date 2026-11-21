@@ -154,6 +154,35 @@ static bool check_test_tree_roots_case(const uint32_t* expected, const uint32_t*
     return same;
 }
 
+// Independently propagate arbitrary root marks down the verified parents. Only each root's mark
+// determines the evaluation of its tree, even when its children started with other marks.
+static bool check_test_tree_evaluated_roots(const CheckGraph* graph, const uint32_t* parents, const uint64_t* roots)
+{
+    CheckTestSelectionColumn column = { 0 };
+    uint8_t* actual = check_test_selection_column(&column, graph->count);
+    uint8_t* expected = malloc((uint64_t)graph->count + 1);
+    uint32_t* stack = malloc(((uint64_t)graph->count + 1) * sizeof(uint32_t));
+    bool same = actual != NULL && expected != NULL && stack != NULL;
+    uint64_t random = UINT64_C(2850);
+    for (uint32_t pattern = 0; same && pattern < 3; pattern += 1)
+    {
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            actual[node] = pattern < 2 ? (uint8_t)pattern : (uint8_t)(check_test_tree_random(&random) & 1);
+        }
+        for (uint32_t node = graph->count; node-- != 0;)
+        {
+            expected[node] = parents[node] < graph->count ? expected[parents[node]] : actual[node];
+        }
+        check_common_evaluated_roots(graph, roots, actual, stack);
+        same = memcmp(actual, expected, graph->count) == 0;
+    }
+    free(stack);
+    free(expected);
+    check_test_selection_unmap(&column);
+    return same;
+}
+
 // One graph against the definition: the same answer and root membership, and where it's a tree, the same parents. The
 // output roots and parents end at protected pages as the input columns do.
 static bool check_test_tree_parents_case(const CheckGraph* graph, uint32_t* expected, uint32_t* actual, uint64_t* roots, bool* tree)
@@ -166,6 +195,10 @@ static bool check_test_tree_parents_case(const CheckGraph* graph, uint32_t* expe
     for (uint32_t node = 0; same && answer && node < graph->count; node += 1)
     {
         same = actual[node] == expected[node];
+    }
+    if (same && answer)
+    {
+        same = check_test_tree_evaluated_roots(graph, expected, roots);
     }
     const bool uncached = check_common_parents(graph, actual, NULL);
     same &= uncached == *tree;

@@ -10865,12 +10865,33 @@ static void check_common_clear_below(const CheckGraph* graph, uint8_t* evaluated
     }
 }
 
+// Start every node evaluated, then clear each root that control or static selection left out, with its
+// subtree. In the validated postorder tree every child precedes its parent, including call arguments.
+// Thus a cleared root only writes nodes in blocks already initialized or in its own initialized block.
+static void check_common_evaluated_roots(const CheckGraph* graph, const uint64_t* roots, uint8_t* evaluated, uint32_t* stack)
+{
+    for (uint32_t first = 0; first < graph->count;)
+    {
+        const uint32_t live = graph->count - first < 64 ? graph->count - first : 64;
+        const __mmask64 lanes = live == 64 ? (__mmask64)UINT64_MAX : (__mmask64)((UINT64_C(1) << live) - 1);
+        const __m512i marks = _mm512_maskz_loadu_epi8(lanes, evaluated + first);
+        uint64_t cleared = _mm512_mask_cmpeq_epi8_mask(roots[first >> 6], marks, _mm512_setzero_si512());
+        _mm512_mask_storeu_epi8(evaluated + first, lanes, _mm512_set1_epi8(1));
+        for (; cleared != 0; cleared &= cleared - 1)
+        {
+            stack[0] = first + (uint32_t)__builtin_ctzll(cleared);
+            check_common_clear_below(graph, evaluated, stack, 1);
+        }
+        first += live;
+    }
+}
+
 // What check_common_evaluated makes, over the tree check_common_facts_tree found: a node is evaluated where its root is
 // and no node on its way there leaves its operand out (check_common_operand_mask). So every node a parent reads starts
 // evaluated, and then the roots the control and selection walks left out and the operands the masks leave out (their
 // nodes found 16 at a time) are cleared with every node below them, a worklist's walk each, which visits each node once.
 static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
-                                            const CheckProgram* program, const uint32_t* parents, const uint64_t* root_bits,
+                                            const CheckProgram* program, const uint64_t* root_bits,
                                             const CheckCommonCandidates* candidates, Arena* scratch)
 {
     const uint32_t count = graph->count;
@@ -10904,45 +10925,20 @@ static uint8_t* check_common_evaluated_tree(const CheckGraph* graph, const Check
         {
             result = NULL;
         }
-        // A node a parent reads takes its evaluation from it, whatever the walks above marked it.
-        for (uint32_t first = 0; first < count;)
-        {
-            const uint32_t live = count - first < 64 ? count - first : 64;
-            const __mmask64 lanes = live == 64 ? (__mmask64)UINT64_MAX : (__mmask64)((UINT64_C(1) << live) - 1);
-            // All evaluation marks are boolean. Preserve the roots the control and selection walks just changed;
-            // every child starts evaluated until its unevaluated root or operand clears the subtree below it.
-            _mm512_mask_storeu_epi8(evaluated + first, lanes & ~root_bits[first >> 6], _mm512_set1_epi8(1));
-            first += live;
-        }
-        CheckCommonScan roots = { 0 };
+        check_common_evaluated_roots(graph, root_bits, evaluated, stack);
         CheckCommonScan masks = { 0 };
-        uint32_t root = check_common_next_root(parents, root_bits, count, &roots);
-        uint32_t node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_MASK, &masks);
-        while (root < count || node < count)
+        for (uint32_t node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_MASK, &masks); node < count;
+             node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_MASK, &masks))
         {
             uint32_t depth = 0;
-            if (root < count)
+            const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
+            const uint32_t slots[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
             {
-                // A root the walks cleared: marked again so that its own walk clears it with everything below it.
-                if (evaluated[root] == 0)
+                if (slots[i] < count && (mask & (1u << i)) == 0)
                 {
-                    evaluated[root] = 1;
-                    stack[depth++] = root;
+                    stack[depth++] = slots[i];
                 }
-                root = check_common_next_root(parents, root_bits, count, &roots);
-            }
-            else
-            {
-                const uint32_t mask = check_common_operand_mask(graph, stream, types, program, node);
-                const uint32_t slots[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-                for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
-                {
-                    if (slots[i] < count && (mask & (1u << i)) == 0)
-                    {
-                        stack[depth++] = slots[i];
-                    }
-                }
-                node = check_common_next_candidate(candidates, CHECK_COMMON_CANDIDATE_MASK, &masks);
             }
             check_common_clear_below(graph, evaluated, stack, depth);
         }
@@ -11095,7 +11091,7 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         // (Short of scratch for the list, the facts fail as a whole rather than leave comparisons out.)
         const bool short_of = enabled->out_of_range && !enabled->sign_compare && comparisons == NULL;
         check_common_assertion_reach(graph, stream, reach);
-        evaluated = short_of ? NULL : check_common_evaluated_tree(graph, stream, types, parser, program, parents, roots, candidates, scratch);
+        evaluated = short_of ? NULL : check_common_evaluated_tree(graph, stream, types, parser, program, roots, candidates, scratch);
     }
     else if (allocated)
     {
