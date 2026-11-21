@@ -238,6 +238,11 @@ struct CheckProgramOptions
     bool unselected_operands;
     // Optional deterministic tally: unit graph-mark initialization plus return-warning expression visits.
     uint64_t* return_flow_work;
+    // Optional deterministic tallies (#2995): the parents the walks from statement expressions to their GNU break and
+    // continue targets pass (check_control_region_targets), at most one a token, and those the walks from
+    // variable-length arrays' objects and bounds to their statements pass (check_program_statement), at most two.
+    uint64_t* region_target_work;
+    uint64_t* statement_walk_work;
     // The selection census (#2536's step 2.1, --selection-census): each body's candidates' references besides its own, by
     // a walk from every expression root of the body and by scans of the graph's VALUE nodes (check_program_census_walk and
     // _scan), into CheckProgram's census_walk, census_scan and census_arms.
@@ -824,6 +829,8 @@ struct CheckControlWriter
     uint32_t* region_stops;
     uint32_t* region_repeats;
     uint64_t* region_known;
+    // CheckProgramOptions.region_target_work, or null.
+    uint64_t* region_work;
     // Whether each label's address is taken (&&label), by its token: its place gets a CHECK_CONTROL_LABEL.
     const uint8_t* addressed;
     // The body's cleanups' records (CheckInput.cleanups, cleanup_count of them from cleanup_first), and each record's
@@ -2844,7 +2851,8 @@ static bool check_control_region_kept(const CheckControlWriter* writer, uint32_t
 // room, then down again, keeping each one's: nested statement expressions, or many under one deep statement, walk each
 // token once, where each walked up to the body. A kept answer stays right: the regions come in token order, outer ones
 // first (check_input_region_initialize), and a region's statements set the labels of the loops and switches inside it
-// alone, which only a later region is inside.
+// alone, which only a later region is inside. It stays scalar, a chain of dependent loads from a few starts that passes a
+// token at most once a body: docs/c-checker.md has the counts against a data-parallel pass over every token.
 static void check_control_region_targets(CheckControlWriter* writer, uint32_t token, uint32_t* stop, uint32_t* repeat)
 {
     const uint32_t count = writer->program->input->token_count;
@@ -2887,6 +2895,10 @@ static void check_control_region_targets(CheckControlWriter* writer, uint32_t to
         parent = at;
         answered = true;
         at = next;
+    }
+    if (writer->region_work != NULL)
+    {
+        *writer->region_work += steps;
     }
     *stop = stop_label;
     *repeat = repeat_label;
@@ -4047,13 +4059,15 @@ struct CheckProgramStatements
     uint32_t* ends;
     uint32_t* keys;
     uint64_t* known;
+    // CheckProgramOptions.statement_walk_work, or null.
+    uint64_t* work;
 };
 
 // Where the walk from `token` up its parents stops (#2995): at a statement's terminator, at `body`, or at a token past the
 // unit's `count`; BUSTER_CHECK_NONE where it would take `count` steps. Each token it passes keeps that answer under its
 // key, `body` (the unit's count for a walk that no body stops, whose `body` is past the tokens), and a later walk with the
 // key stops at the first kept token: a declarator's bounds ([n][n]...[n]) and a declaration's declarators (a0[n], a1[n],
-// ...) walk the path they share once, where each walked it whole.
+// ...) walk the path they share once, where each walked it whole. Scalar, as check_control_region_targets is.
 static uint32_t check_program_statement(const Parser* parser, uint32_t count, uint32_t token, uint32_t body, const CheckProgramStatements* statements)
 {
     const uint32_t key = body < count ? body : count;
@@ -4075,6 +4089,10 @@ static uint32_t check_program_statement(const Parser* parser, uint32_t count, ui
         statements->keys[at] = key;
         check_program_bit_set(statements->known, at);
         at = next;
+    }
+    if (statements->work != NULL)
+    {
+        *statements->work += steps;
     }
     return found;
 }
@@ -5934,6 +5952,14 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     {
         *options.return_flow_work = 0;
     }
+    if (options.region_target_work != NULL)
+    {
+        *options.region_target_work = 0;
+    }
+    if (options.statement_walk_work != NULL)
+    {
+        *options.statement_walk_work = 0;
+    }
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     const uint32_t count = input->token_count;
@@ -6175,6 +6201,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
             .ends = statement_ends,
             .keys = statement_keys,
             .known = statement_known,
+            .work = options.statement_walk_work,
         };
         const bool walks = statements.ends != 0 && statements.keys != 0 && statements.known != 0;
         if (walks)
@@ -6312,6 +6339,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .region_stops = region_stops,
         .region_repeats = region_repeats,
         .region_known = region_known,
+        .region_work = options.region_target_work,
         .region_final = BUSTER_CHECK_NONE,
         .addressed = addressed,
         .cleanup_parents = cleanup_parents,

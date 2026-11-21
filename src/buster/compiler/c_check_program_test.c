@@ -1987,6 +1987,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                 check_asms_run(&asms, &input, &stream, &types.table, &input_arena, &scratch) &&
                 check_data_prepare(&data, &input, &stream, &initializers, &types.table, parser.options.scalar, &input_arena, &scratch);
         uint64_t return_flow_work = 0;
+        uint64_t region_target_work = 0;
+        uint64_t statement_walk_work = 0;
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -1996,6 +1998,8 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             .initializer_reference_count = data.reference_count,
             .scalar = path == 0,
             .return_flow_work = &return_flow_work,
+            .region_target_work = &region_target_work,
+            .statement_walk_work = &statement_walk_work,
             .target = pp_options.target,
             .predefines = &predefines,
         };
@@ -2005,6 +2009,22 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             check_test_expect(test, program.body_count >= 65 && return_flow_work >= input.graph.count &&
                                    return_flow_work <= (uint64_t)input.graph.count * 8 + 1,
                               "aggregate return graph-mark initialization and visited work are linear in the unit graph");
+        }
+        // #2995: the walks from statement expressions to their break targets and from variable-length arrays to their
+        // statements keep their answers, so in every program they pass a token at most once a body, and twice for the
+        // arrays' two walks; walks that kept none pass a region's or a bound's ancestors again for each, which the checker
+        // sources' deep shapes take far past these bounds.
+        if (ready)
+        {
+            const bool regions = strcmp(name, "quadratic-statement-expressions") == 0;
+            const bool statements = strcmp(name, "quadratic-vla-bounds") == 0;
+            char walks[320];
+            snprintf(walks, sizeof(walks), "%s: %s walks to break targets and statements take %llu and %llu parent steps for %u tokens", name,
+                     path == 0 ? "scalar" : "vector", (unsigned long long)region_target_work, (unsigned long long)statement_walk_work, input.token_count);
+            check_test_expect(test,
+                              region_target_work <= input.token_count && statement_walk_work <= 2 * (uint64_t)input.token_count &&
+                                  (!regions || region_target_work != 0) && (!statements || statement_walk_work != 0),
+                              walks);
         }
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
@@ -2370,6 +2390,24 @@ static void check_test_program_source_char(CheckTest* test, const char* source, 
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang)
 {
     check_test_program_source_char(test, source, name, clang, false);
+}
+
+// A checker source (tests/checker/sources/NAME.c) as a program fixture, against `clang`'s build of it: its `tested` runs.
+static void check_test_program_checker_source(CheckTest* test, const char* name, const char* clang)
+{
+    CheckTestFixtures fixture = { .storage = arena_reserve(UINT64_C(1) << 20) };
+    char path[PATH_MAX + 128];
+    snprintf(path, sizeof(path), "%s/checker/sources/%s.c", check_test_fixture_root, name);
+    uint64_t length = 0;
+    const char* source = fixture.storage.base != NULL ? check_test_fixture_read(&fixture, path, &length) : NULL;
+    char description[PATH_MAX + 160];
+    snprintf(description, sizeof(description), "%s: the checker source %s is read", name, path);
+    check_test_expect(test, source != NULL && length != 0, description);
+    if (source != NULL && length != 0)
+    {
+        check_test_program_source(test, source, name, clang);
+    }
+    arena_release(&fixture.storage);
 }
 
 // A program fixture in another language mode, with clang reading the same source and mode as the oracle.
@@ -5371,6 +5409,10 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "for(int i=0;i<m;i++){r+=({int h[m][i+1];h[m-1][i]=i;if(i==3)break;(int)sizeof h+h[m-1][i];});}"
             "return r+({int g[m][m];g[0][1]=3;(int)sizeof g+g[0][1];});}",
             "vla-several-bounds-nested-blocks", clang);
+        // The checker sources' deep shapes of both (#2995), whose walks the program harness counts: GCC's for the break in
+        // a while condition, as above.
+        check_test_program_checker_source(test, "quadratic-statement-expressions", "gcc");
+        check_test_program_checker_source(test, "quadratic-vla-bounds", clang);
         check_test_program_source(test,
             "int tested(int n){int x=0;double z=0.5+({double y=n+0.25;x++;y;});return (int)(z*4)+x;}", "statement-region-floating-pending-value", clang);
         check_test_program_source(test,

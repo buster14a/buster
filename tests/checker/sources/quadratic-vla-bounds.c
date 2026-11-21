@@ -14,3 +14,4 @@ int h(int n)
     }
     return r;
 }
+int tested(int n) { return f(1) + g(2 + (n & 3)) + h(3 + (n & 1)); }

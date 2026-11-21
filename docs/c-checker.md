@@ -8679,6 +8679,33 @@ to the body (#2995). The regions are written in token order, outer ones first,
 and a region's statements set the labels of the loops inside it alone, which
 only a later region is inside, so a kept answer stays right.
 
+This walk and the variable-length arrays' (`check_program_statement`) stay
+scalar. Each is a chain of dependent loads up a token's parents, started only
+at a statement expression or at an array's object or bound, and with the
+answers kept it passes a token at most once a body (the arrays' walks, of their
+objects and then of their bounds, twice). A data-parallel form, pointer jumping
+over a body's parents, reads every token of the body in each of its passes to
+answer a few walks. The counts, which no host changes (`-c` of the 1,328 units
+in `tests/**/*.c` and c-testsuite that reach the program stage, the two deep
+checker sources below apart, and of three generated shapes):
+
+| Units | Walks' starts | Their tokens | Parents passed | Without kept answers |
+| --- | ---: | ---: | ---: | ---: |
+| 19 with statement expressions | 54 regions | 426,571 | 287 | 310 |
+| 16 with variable-length arrays | 17 bounds | 4,396 | 86 | 86 |
+| 8,000 nested statement expressions | 8,000 regions | 40,039 | 24,002 | 96,028,000 |
+| an array of 8,000 bounds | 8,000 bounds | 24,017 | 16,004 | 64,024,002 |
+| a declaration of 8,000 arrays | 8,000 bounds | 40,013 | 48,000 | 64,055,998 |
+
+Kept answers cost a store or two for each token a walk passes, and clearing a
+bit a token for each body with a statement expression and for each unit with a
+variable-length array. `CheckProgramOptions.region_target_work` and
+`statement_walk_work` tally the parents passed: test-checker bounds them by
+every program fixture's tokens and twice them, and its program fixtures
+compile and run the deep checker sources (`quadratic-statement-expressions.c`,
+`quadratic-vla-bounds.c`), whose walks pass 717 parents in 1,744 tokens and 856
+in 1,005 (22,673 and 21,099 without kept answers, which fail those bounds).
+
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump
 from switch statement to this case label", with the note "jump enters a
