@@ -119,6 +119,12 @@ struct CheckControl
     CheckControlKind kind;
 };
 
+// Lifetime controls use node for their start/end bit. All other controls without an expression already carry NONE.
+static uint32_t check_control_expression_node(const CheckControl* control)
+{
+    return control->kind == CHECK_CONTROL_LIFETIME ? BUSTER_CHECK_NONE : control->node;
+}
+
 typedef struct CheckProgramBody CheckProgramBody;
 struct CheckProgramBody
 {
@@ -3472,7 +3478,7 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
         // Each entry's node pushed without a branch (#892): an entry without one marks the marks' last slot, which names no
         // node, and a node marked already is stored past the stack's top, which has room for one more. Tested an entry at a
         // time, the push was missed at most of the entries it took on the 9700X.
-        const uint32_t node = controls[i].node;
+        const uint32_t node = check_control_expression_node(controls + i);
         const uint32_t mark = node != BUSTER_CHECK_NONE ? node : graph->count;
         const bool fresh = (node != BUSTER_CHECK_NONE) & (nodes[mark] != epoch);
         nodes[mark] = epoch;
