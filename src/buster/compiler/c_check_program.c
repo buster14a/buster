@@ -1190,15 +1190,14 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
 }
 
 // When a cast did not produce a constant, the nonzero address of a symbol cannot
-// decide the converted value. A builtin query also has its own runtime result, which
-// can differ from its source value. Neither operand proves the truth after the cast.
+// decide the converted value. Its low bits may all be zero after truncation.
 static bool check_program_branch_cast(const CheckProgram* program, uint32_t node)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const uint32_t operand = graph->operand0[node];
     const bool unproved = check_stream_constant_kind(stream, node) == CHECK_CONSTANT_NONE && operand < graph->count &&
-                          (check_stream_constant_kind(stream, operand) == CHECK_CONSTANT_ADDRESS || graph->ops[operand] == CHECK_OP_BUILTIN_QUERY);
+                          check_stream_constant_kind(stream, operand) == CHECK_CONSTANT_ADDRESS;
     return !unproved;
 }
 

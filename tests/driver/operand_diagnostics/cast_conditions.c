@@ -30,7 +30,6 @@ int arm(void) { return (char)(long)&g ? 1 : 1 / 0; }
 static __attribute__((unused)) int wide_half(void) { if ((char)(_Float16)(unsigned _BitInt(257))1) return 1; }
 
 #pragma STDC FENV_ACCESS ON
-int query_byte(char* p) { return (char)__builtin_object_size(p, 0) ? 1 : 1 / 0; }
 int fp_exact(void) { if ((float)256) return 1; }
 int fp_zero(void) { if ((double)0) return 1; }
 int fp_widen(void) { if ((double)(float)42) return 1; }
