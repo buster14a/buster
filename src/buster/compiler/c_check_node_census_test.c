@@ -6130,18 +6130,23 @@ static void node_window_test_compile(CheckTest* test)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        check_test_expect(test, reference->window_count == 0 && input->window_count == 9 && input->window_nodes == 28,
-                          "node-window admits nine returns on baked and runtime-initialized transition tables");
+        check_test_expect(test, reference->window_count == 0 && input->window_count == 13 && input->window_nodes == 40,
+                          "node-window admits 13 complete expressions on baked and runtime-initialized transition tables");
         check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
-                          "node-window replaces 28 ordinary nodes by nine return summaries");
+                          "node-window replaces 40 ordinary nodes by 13 checked expression roots");
         bool same = true;
         uint32_t reads = 0;
+        uint32_t writes = 0;
         for (uint32_t i = 0; same && i < input->window_count; i += 1)
         {
-            const CheckInputWindowEntry* row = input->window_entries + i;
-            const uint32_t node = row->node;
-            const uint32_t returned = node < input->graph.count ? input->graph.tokens[node] : BUSTER_CHECK_NONE;
-            const uint32_t other = returned < reference->token_count ? reference->token_nodes[returned] : BUSTER_CHECK_NONE;
+            const CheckInputWindowSummary* summary = input->window_summaries + i;
+            const uint32_t node = summary->node;
+            const uint32_t token = node < input->graph.count ? input->graph.tokens[node] : BUSTER_CHECK_NONE;
+            uint32_t other = 0;
+            while (other < reference->graph.count && reference->graph.tokens[other] != token)
+            {
+                other += 1;
+            }
             if (other >= plain.path.stream.count)
             {
                 same = false;
@@ -6149,20 +6154,36 @@ static void node_window_test_compile(CheckTest* test)
             }
             const CheckValue value = check_stream_value(&window.path.stream, node);
             const CheckValue regular = check_stream_value(&plain.path.stream, other);
-            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 &&
-                   check_test_value_equal(&value, &regular) && row->class == BUSTER_TYPED_CLASS_I32;
-            if (row->read_offset != 0)
+            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && check_test_value_equal(&value, &regular);
+            const CheckInputWindowRow* rows = input->window_rows + summary->first;
+            const bool assignment = reference->graph.ops[other] == CHECK_OP_CAST;
+            same &= summary->count == (assignment ? 3u : 1u);
+            if (assignment && summary->count == 3)
             {
-                const uint32_t token = returned + row->read_offset;
-                same &= row->kind == BUSTER_TYPED_LOCAL && token < input->token_count && input->declarations[token] + 1 == row->value;
+                const uint32_t lhs = rows[1].token + rows[1].event_offset;
+                same &= rows[1].kind == BUSTER_TYPED_STORE_LOCAL && rows[1].flags == (BUSTER_CHECK_WINDOW_LOCAL | BUSTER_CHECK_WINDOW_WRITE) &&
+                        lhs < input->token_count && input->declarations[lhs] + 1 == rows[1].value && rows[2].kind == BUSTER_TYPED_DISCARD;
+                writes += 1;
+            }
+            if ((rows[0].flags & BUSTER_CHECK_WINDOW_READ) != 0)
+            {
+                const uint32_t rhs = rows[0].token + rows[0].event_offset;
+                same &= rows[0].kind == BUSTER_TYPED_LOCAL && rhs < input->token_count && input->declarations[rhs] + 1 == rows[0].value;
                 reads += 1;
             }
             else
             {
-                same &= row->kind == BUSTER_TYPED_CONST && row->value == (uint64_t)(int64_t)(int32_t)value.integer;
+                same &= rows[0].kind == BUSTER_TYPED_CONST && rows[0].value == (assignment ? 24 : (uint64_t)(int64_t)(int32_t)value.integer);
+            }
+            if (!same)
+            {
+                fprintf(stderr, "test-checker: node-window root %u at token %u, object %u/%u, integer %" PRIu64 "/%" PRIu64
+                        ", flags %u/%u, entries %u, first kind %u, first value %" PRIu64 "\n",
+                        i, token, regular.object, value.object, (uint64_t)regular.integer, (uint64_t)value.integer,
+                        regular.flags, value.flags, summary->count, rows[0].kind, rows[0].value);
             }
         }
-        check_test_expect(test, same && reads == 2, "node-window publishes each complete ordinary checked value and its native row, including two local read events");
+        check_test_expect(test, same && reads == 5 && writes == 2, "node-window publishes the complete ordinary checked values, exact native rows, five local reads and two local writes");
         CheckProgramLowered original = { 0 };
         CheckProgramLowered first = { 0 };
         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
@@ -6172,10 +6193,25 @@ static void node_window_test_compile(CheckTest* test)
             lowered = check_test_program_function(original.functions + b, first.functions + b);
         }
         check_test_expect(test, lowered, "node-window mixed returns lower to the ordinary functions' native tapes");
+        if (lowered)
+        {
+            CheckProgramLowered plain_debug = { 0 };
+            CheckProgramLowered window_debug = { 0 };
+            bool tokens = check_program_lower_sources(&plain_debug, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+                          check_program_lower_sources(&window_debug, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) &&
+                          plain_debug.count == window_debug.count;
+            for (uint32_t b = 0; tokens && b < plain_debug.count; b += 1)
+            {
+                const uint32_t entries = plain_debug.functions[b].count;
+                tokens = check_test_program_function(plain_debug.functions + b, window_debug.functions + b) &&
+                         (entries == 0 || memcmp(plain_debug.entry_tokens[b], window_debug.entry_tokens[b], (size_t)entries * sizeof(uint32_t)) == 0);
+            }
+            check_test_expect(test, tokens, "node-window sourced lowering keeps the ordinary source token and native row for each entry");
+        }
         bool replayed = false;
         if (lowered && input->window_count != 0)
         {
-            input->window_entries[0].value = 314159;
+            input->window_rows[input->window_summaries[0].first].value = 314159;
             CheckProgramLowered changed = { 0 };
             if (check_program_lower(&changed, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) && changed.count == first.count)
             {

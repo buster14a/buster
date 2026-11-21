@@ -891,16 +891,29 @@ struct CheckInputMusttail
 
 #include "c_check_noderef_types.c"
 
-// A taken int return's single native entry. A LOCAL's value is its declared object until lowering.
-typedef struct CheckInputWindowEntry CheckInputWindowEntry;
-struct CheckInputWindowEntry
+// The reader publishes complete native rows and one range per summary graph node. Local object numbers
+// remain unit-relative until lowering. A row with a source access also carries its identifier's token offset.
+#define BUSTER_CHECK_WINDOW_LOCAL 0x01u
+#define BUSTER_CHECK_WINDOW_READ 0x02u
+#define BUSTER_CHECK_WINDOW_WRITE 0x04u
+
+typedef struct CheckInputWindowRow CheckInputWindowRow;
+struct CheckInputWindowRow
 {
     uint64_t value;
-    uint32_t node;
+    uint32_t token;
     uint8_t kind;
     uint8_t class;
-    // The read of a local, in tokens from its return (zero for a constant).
-    uint16_t read_offset;
+    uint8_t flags;
+    int8_t event_offset;
+};
+
+typedef struct CheckInputWindowSummary CheckInputWindowSummary;
+struct CheckInputWindowSummary
+{
+    uint32_t node;
+    uint32_t first;
+    uint32_t count;
 };
 
 struct CheckInput
@@ -1290,18 +1303,20 @@ struct CheckInput
     uint32_t sugar_mask;
     uint32_t sugar_entries;
     // A summary is a VALUE at its return token, whose members column is its tape entry's one-based index.
-    CheckInputWindowEntry* window_entries;
+    CheckInputWindowSummary* window_summaries;
+    CheckInputWindowRow* window_rows;
+    uint32_t window_row_count;
+    uint32_t window_row_capacity;
     uint32_t window_capacity;
     uint32_t window_count;
     uint32_t window_nodes;
 };
 
-// The tape row owned by this graph node. VALUE is the only operator whose members index can name a
-// summary, and the row records its owner to distinguish the graph's other uses of that column.
-static inline __attribute__((unused)) const CheckInputWindowEntry* check_input_window_row(const CheckInput* input, uint32_t node)
+// The summary owned by this VALUE. The reciprocal link distinguishes the other uses of the members column.
+static inline __attribute__((unused)) const CheckInputWindowSummary* check_input_window_summary(const CheckInput* input, uint32_t node)
 {
     const uint32_t slot = input->window_count != 0 && input->graph.ops[node] == CHECK_OP_VALUE ? input->graph.members[node] : 0;
-    return slot != 0 && slot <= input->window_count && input->window_entries[slot - 1].node == node ? input->window_entries + slot - 1 : NULL;
+    return slot != 0 && slot <= input->window_count && input->window_summaries[slot - 1].node == node ? input->window_summaries + slot - 1 : NULL;
 }
 
 static __attribute__((unused)) uint32_t check_input_target_candidate(const CheckInput* input, uint32_t token)
