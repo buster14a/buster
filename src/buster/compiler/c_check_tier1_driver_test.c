@@ -1749,13 +1749,25 @@ static bool check_test_tier1_frame_copies(const char* object, const char* name, 
 // own); without it, it has no register copy of rsp.
 static void check_test_driver_tier1_frame(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char* const names[] = { "tier1_frame_rbx", "tier1_frame_rbp", "tier1_frame_r12", "tier1_frame_r13" };
+    static const char* const names[] = {
+        "tier1_frame_rbx",
+        "tier1_frame_rbp",
+        "tier1_frame_r12",
+        "tier1_frame_r13",
+    };
     char source[512];
     char reference[512];
     snprintf(source, sizeof(source), "%s/tier1-frame.c", directory);
     snprintf(reference, sizeof(reference), "%s/tier1-frame-clang", directory);
     const bool written = parse_test_write(source, check_test_tier1_frame_source, sizeof(check_test_tier1_frame_source) - 1);
-    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* clang_arguments[] = {
+        (char*)clang,
+        "-O0",
+        "-o",
+        reference,
+        source,
+        NULL,
+    };
     char* clang_text = NULL;
     const bool referenced = written && check_test_driver_spawn(clang_arguments, &clang_text) == 0;
     free(clang_text);
@@ -1780,7 +1792,13 @@ static void check_test_driver_tier1_frame(CheckTest* test, const char* clang, co
         check_test_expect(test, built && compiled && builds[rematerialize].code_certified != 0 && builds[rematerialize].code_uncertified == 0 && object_build.code_certified != 0 &&
                                     object_build.code_uncertified == 0,
                           "every function of the frame-address fixture has its code certified");
-        char* cc_arguments[] = { "cc", "-o", linked, object, NULL };
+        char* cc_arguments[] = {
+            "cc",
+            "-o",
+            linked,
+            object,
+            NULL,
+        };
         char* cc_text = NULL;
         const bool cc_linked = compiled && check_test_driver_spawn(cc_arguments, &cc_text) == 0;
         free(cc_text);

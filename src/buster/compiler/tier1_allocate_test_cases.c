@@ -965,11 +965,16 @@ static void tier1_allocation_test_rematerialization(Tier1AllocationTestTally* ta
 // displacements 0, 8, -32 and 128: the lea `lea r64, [base + displacement]` but where the displacement is 0 and the
 // base's low three bits are rsp's or rbp's (rsp, rbp, r12, r13), whose lea needs a SIB byte or a zero disp8: there the
 // base's register copy, `mov r64, base`, one byte shorter by the encoder. Elsewhere the copy is the lea's record
-// exactly, so the code is byte for byte what it was. The Zen 5 model's cost of the copy at displacement 0 from rsp is no
-// greater than the lea's at 8, and neither is greater than the reload's: both stay rematerializable.
+// exactly, so the code is byte for byte what it was. The Zen 5 model prices the copy at displacement 0 from rsp as its
+// register copy, `mov rax, rsp`, below the lea's at 8, and neither above the reload's: both stay rematerializable.
 static void tier1_allocation_test_frame_copies(Tier1AllocationTestTally* tally)
 {
-    const int32_t displacements[] = { 0, 8, -32, 128 };
+    const int32_t displacements[] = {
+        0,
+        8,
+        -32,
+        128,
+    };
     const uint8_t operation = BUSTER_TIER1_REMAT_STACK;
     const uint8_t width = 8;
     const uint8_t stable = BUSTER_TIER1_REMAT_STABLE;
@@ -1024,10 +1029,22 @@ static void tier1_allocation_test_frame_copies(Tier1AllocationTestTally* tally)
     tier1_allocation_test_expect(tally, valid && copies == 64 && shorter == 64, "a zero frame displacement from rsp, rbp, r12 or r13 is the base's register copy, 3 bytes for the lea's 4");
     tier1_allocation_test_expect(tally, valid && leas == 960 && exact == 960, "every other frame address's copy is its lea, the same bytes");
     // The model's costs, from rsp as both consumers ask for them: the copy at 0 and the lea at 8 against the reload.
-    const uint8_t operations[2] = { BUSTER_TIER1_REMAT_STACK, BUSTER_TIER1_REMAT_STACK };
-    const uint8_t widths[2] = { 8, 8 };
-    const uint8_t flags[2] = { BUSTER_TIER1_REMAT_STABLE, BUSTER_TIER1_REMAT_STABLE };
-    const uint64_t values[2] = { 0, 8 };
+    const uint8_t operations[2] = {
+        BUSTER_TIER1_REMAT_STACK,
+        BUSTER_TIER1_REMAT_STACK,
+    };
+    const uint8_t widths[2] = {
+        8,
+        8,
+    };
+    const uint8_t flags[2] = {
+        BUSTER_TIER1_REMAT_STABLE,
+        BUSTER_TIER1_REMAT_STABLE,
+    };
+    const uint64_t values[2] = {
+        0,
+        8,
+    };
     uint16_t costs[2] = { 0 };
     uint16_t reloads[2] = { 0 };
     uint8_t marks[2] = { 0 };
@@ -1042,8 +1059,26 @@ static void tier1_allocation_test_frame_copies(Tier1AllocationTestTally* tally)
     costed.costs = costs;
     costed.reload_costs = reloads;
     const bool marked = modeled && tier1_rematerialization_marks(&costed, marks);
-    tier1_allocation_test_expect(tally, marked && costs[0] != 0 && costs[0] <= costs[1] && costs[1] <= reloads[1] && costs[0] <= reloads[0] && marks[0] == 1 && marks[1] == 1,
-                                 "the model prices a zero displacement's copy no higher than a lea or a reload, and both stay rematerializable");
+    // The model's own latencies of the two records, as the consumers' frame base gives them: rsp's register copy, and a
+    // lea from rsp. The copy at 0 is priced as the register copy, strictly below the lea (#3149), the lea at 8 as the lea.
+    const X86Instruction register_copy = {
+        .reg = X86_REGISTER_RAX,
+        .rm = X86_REGISTER_RSP,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .form = X86_FORM_MOV_R64_RM64,
+    };
+    const X86Instruction lea = {
+        .displacement = 8,
+        .reg = X86_REGISTER_RAX,
+        .rm = X86_REGISTER_RSP,
+        .mode = BUSTER_X86_MEMORY_BASE,
+        .form = X86_FORM_LEA_R64_M,
+    };
+    const uint16_t copy_latency = modeled ? x86_zen5_columns[X86_COST_LATENCY][x86_zen5_id(&register_copy)] : BUSTER_X86_COST_UNKNOWN;
+    const uint16_t lea_latency = modeled ? x86_zen5_columns[X86_COST_LATENCY][x86_zen5_id(&lea)] : BUSTER_X86_COST_UNKNOWN;
+    const bool measured = copy_latency != BUSTER_X86_COST_UNKNOWN && lea_latency != BUSTER_X86_COST_UNKNOWN && copy_latency != 0 && copy_latency < lea_latency;
+    tier1_allocation_test_expect(tally, marked && measured && costs[0] == copy_latency && costs[1] == lea_latency && costs[1] <= reloads[1] && costs[0] <= reloads[0] && marks[0] == 1 && marks[1] == 1,
+                                 "the model prices a zero displacement's copy as rsp's register copy, below a lea, neither above a reload, and both stay rematerializable");
     printf("frame copies: %u register copies of a base (%u 3 bytes for the lea's 4), %u leas the same bytes; model latency (cycles * 256) of rsp's copy %u, of a lea from it %u, of a reload %u\n",
            copies, shorter, exact, (uint32_t)costs[0], (uint32_t)costs[1], (uint32_t)reloads[0]);
 }
