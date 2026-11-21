@@ -523,16 +523,53 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             // the difference at the declaration.
             const uint32_t group = reader->declaration_specifiers[declaration];
             const TypeId previous = group < parser->tokens.count ? reader->declaration_deduced[group] : 0;
-            if (previous != 0 && type_same_canonical(types, previous, deduced_base) != TYPE_ANSWER_YES)
+            const uint32_t first = previous != 0 ? reader->declaration_deduced_first[group] : BUSTER_CHECK_NONE;
+            if (previous != 0 && first < parser->tokens.count && type_same_canonical(types, previous, deduced_base) != TYPE_ANSWER_YES)
             {
-                // At the declaration's auto, where clang points its two deductions' error.
-                check_input_report(reader, group < parser->tokens.count ? group : declaration, gnu ? CHECK_INPUT_AUTO_TYPE_MISMATCH : CHECK_INPUT_AUTO_DEDUCED_MISMATCH);
-                deduced = 0;
+                // At the declaration's auto, where clang points its two deductions' error: "'__auto_type' deduced as 'int *'
+                // in declaration of 'c' and deduced as 'int' in declaration of 'd'", each type as its initializer spells it
+                // (#1844); once a group, as clang's loop over its declarators breaks there.
+                // clang's place is the type's own start: the __auto_type or auto keyword among the specifiers.
+                uint32_t keyword = group < parser->tokens.count ? group : declaration;
+                for (uint32_t token = keyword; token < first; token += 1)
+                {
+                    const uint32_t name = parser->tokens.names[token];
+                    const bool found = gnu ? name == C_NAME_AUTO_TYPE : name == C_NAME_AUTO;
+                    keyword = found && keyword == group ? token : keyword;
+                }
+                const uint32_t before = reader->output->report_count;
+                check_input_report(reader, keyword, gnu ? CHECK_INPUT_AUTO_TYPE_MISMATCH : CHECK_INPUT_AUTO_DEDUCED_MISMATCH);
+                if (reader->output->report_count > before)
+                {
+                    const uint32_t first_begin = check_sparse_get(reader->output->initializer_begins, first);
+                    const uint32_t first_end = check_sparse_get(reader->output->initializer_ends, first);
+                    CheckInputReport* report = reader->output->reports + before;
+                    // The deduced types alone, as clang's AutoType has them, without the specifiers' qualifiers.
+                    report->type = type_unqualified(previous);
+                    report->type_spelling = first_begin < first_end && first_end <= parser->tokens.count ?
+                                            check_input_auto_initializer_spelling(reader, first_begin, first_end) : 0;
+                    report->value = (uint64_t)type_unqualified(deduced_base) | (uint64_t)check_input_auto_initializer_spelling(reader, begin, end) << 32;
+                    report->subject = first + 1;
+                    report->detail = declaration;
+                }
+                check_input_rare_claim(reader, &reader->declaration_deduced_first[group]);
+                reader->declaration_deduced_first[group] = BUSTER_CHECK_NONE;
+                // clang marks the declarator invalid and goes on: it keeps its own deduction, its uses quiet
+                // (check_input_invalid_declare), and the error doesn't stop the reader. A lane's unit recovers in source order.
+                check_input_lane_refuse(reader, reader->lane, "an invalid declaration's uses are quiet in source order");
+                const bool recovered = !reader->lane && reader->output->report_count == before + 1 && check_input_recover_reports(reader, before);
+                if (recovered)
+                {
+                    check_input_invalid_declare(reader, declaration);
+                }
+                deduced = recovered ? deduced : 0;
             }
             else if (previous == 0 && group < parser->tokens.count)
             {
                 check_input_rare_claim(reader, &reader->declaration_deduced[group]);
                 reader->declaration_deduced[group] = deduced_base;
+                check_input_rare_claim(reader, &reader->declaration_deduced_first[group]);
+                reader->declaration_deduced_first[group] = declaration;
             }
         }
         CheckInputAttributes* attributes = check_input_attributes_at(reader->output, declaration);

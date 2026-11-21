@@ -526,14 +526,14 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .warnings = 2,
     },
     {
-        .name = "warning groups under -Werror=shadow",
-        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+        .name = "warning groups under -Werror=array-bounds",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"bounded\", \"warning\", \"array-bounds\")));\n"
                   "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
                   "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
                   "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
                   "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
                   "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
-        .options = { "-Werror=shadow" },
+        .options = { "-Werror=array-bounds" },
         .warnings = 4,
         .errors = 2,
         .notes = 1,
@@ -575,14 +575,14 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .errors = 1,
     },
     {
-        .name = "warning groups under -Wfatal-errors=shadow",
-        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+        .name = "warning groups under -Wfatal-errors=array-bounds",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"bounded\", \"warning\", \"array-bounds\")));\n"
                   "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
                   "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
                   "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
                   "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
                   "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
-        .options = { "-Wfatal-errors=shadow" },
+        .options = { "-Wfatal-errors=array-bounds" },
         .errors = 1,
     },
     {
@@ -610,14 +610,14 @@ static const CheckDriverDefaultWarningFixture check_driver_condition_fixtures[] 
         .notes = 1,
     },
     {
-        .name = "warning groups under -Wno-shadow -Wshadow",
-        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"shadowed\", \"warning\", \"shadow\")));\n"
+        .name = "warning groups under -Wno-array-bounds -Warray-bounds",
+        .source = "void f(int x) __attribute__((diagnose_if(x > 0, \"bounded\", \"warning\", \"array-bounds\")));\n"
                   "void h(int x) __attribute__((diagnose_if(x > 0, \"formatted\", \"error\", \"format\")));\n"
                   "void u(int x) __attribute__((diagnose_if(x > 0, \"plain\", \"warning\")));\n"
                   "void a(int x) __attribute__((diagnose_if(x > 0, \"most\", \"warning\", \"all\"), diagnose_if(x > 1, \"unused\", \"warning\", \"unused-variable\")));\n"
                   "void p(int x) __attribute__((diagnose_if(x > 0, \"pedantic\", \"warning\", \"pedantic\")));\n"
                   "int m(void) { f(1); h(2); u(1); a(2); p(1); f(0); return 0; }\n",
-        .options = { "-Wno-shadow", "-Wshadow" },
+        .options = { "-Wno-array-bounds", "-Warray-bounds" },
         .warnings = 5,
         .errors = 1,
         .notes = 1,

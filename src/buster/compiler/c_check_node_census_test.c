@@ -6130,8 +6130,11 @@ static void node_window_test_compile(CheckTest* test)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        bool same = reference->window_count == 0 && input->window_count == 9 && input->window_nodes == 28 &&
-                    reference->graph.count == input->graph.count + input->window_nodes - input->window_count;
+        check_test_expect(test, reference->window_count == 0 && input->window_count == 9 && input->window_nodes == 28,
+                          "node-window admits nine returns on baked and runtime-initialized transition tables");
+        check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
+                          "node-window replaces 28 ordinary nodes by nine return summaries");
+        bool same = true;
         uint32_t reads = 0;
         for (uint32_t i = 0; same && i < input->window_count; i += 1)
         {
@@ -6159,7 +6162,7 @@ static void node_window_test_compile(CheckTest* test)
                 same &= row->kind == BUSTER_TYPED_CONST && row->value == (uint64_t)(int64_t)(int32_t)value.integer;
             }
         }
-        check_test_expect(test, same && reads == 2, "node-window replaces 28 ordinary nodes by nine checked roots with their exact native rows and two local read events");
+        check_test_expect(test, same && reads == 2, "node-window publishes each complete ordinary checked value and its native row, including two local read events");
         CheckProgramLowered original = { 0 };
         CheckProgramLowered first = { 0 };
         bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&

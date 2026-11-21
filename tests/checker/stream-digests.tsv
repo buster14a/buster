@@ -1081,7 +1081,9 @@ sources/generic: Microsoft and z/OS lists@a43bee1f	ac78d99609276a74
 sources/generic: NSString of an int@d0f89ceb	299b8032813336e0
 sources/generic: NSString of no literal in static initializers@b7fb9a5a	887b3d68d1e37d01
 sources/generic: NSStrings compared in a static initializer@27aaeb37	eac6ce551978d420
+sources/generic: a bare const variable in a required integer constant expression@85e972a0	fd49013157114f66
 sources/generic: a builtin's name in parentheses@bca6a0d5	03001608804f7656
+sources/generic: a nested builtin of a runtime argument cannot supply an immediate@31a963ba	0f34b28dab2bc2b6
 sources/generic: addressof of a bit-field@5ff490f3	faeaa828636b0b5e
 sources/generic: addressof of a register@d39fb8e3	87a084e7177a58aa
 sources/generic: addressof of an rvalue@27067e5f	912afe4553b3f00c
@@ -1173,7 +1175,7 @@ sources/generic: eh_return of one@8ae997d4	50c340614800f1ee
 sources/generic: eh_return's value@d9140605	48ff33ecbaa4bd6f
 sources/generic: eh_return_data_regno of a double@13a59e44	cfe2fc9a535936a5
 sources/generic: eh_return_data_regno of a variable@21167881	dcafcd6a24c773e9
-sources/generic: eh_return_data_regno's registers@e49736c6	07dbeee7329da537
+sources/generic: eh_return_data_regno's registers@e49736c6	7bdb7b2632d0bbe4
 sources/generic: extend_pointer of an integer@9b1843b4	4c3d539dc659da27
 sources/generic: fence in constant contexts@77dee43d	2e243c86db16b369
 sources/generic: fence of a complex integer@6bf1339a	b19996bbb21c6c6c
@@ -1223,6 +1225,7 @@ sources/generic: ms_va_end of a const list@df5bcfd9	a749bc621ca7e12a
 sources/generic: ms_va_end of an unsigned char pointer@4fc2c810	c33da0f0a825e086
 sources/generic: ms_va_start out of ms_abi@f3f6829a	ff70434c1c756ad7
 sources/generic: ms_va_start with fixed args@031cb7ec	c49e4e64360d35f9
+sources/generic: nested builtin folds in runtime and immediate arguments@1e7f9f0c	03935c0470527cb9
 sources/generic: omp_required_simd_align of complete types@ab6da21b	79b54020d3dd9271
 sources/generic: operator_delete in C@2f0210e9	78cca739088a9f57
 sources/generic: operator_delete of 33 arguments@0e38bea1	eb4cf5422557133f
@@ -1271,7 +1274,7 @@ sources/generic: set_flt_rounds of nothing@e8ac7658	ee107919b0435d07
 sources/generic: setjmp and longjmp@6a368146	c0eda4ef84bd4bd8
 sources/generic: setjmp of an array of char pointers@8990d346	8f67ad3182991afb
 sources/generic: setjmp of an array of longs@6ff7317c	ecd4699999c22583
-sources/generic: the alloca variants', checks' and addresses' types@9c4c528a	10b9aec2c4b6fe1e
+sources/generic: the alloca variants', checks' and addresses' types@9c4c528a	9ff667f2ae80fe7e
 sources/generic: the leaves' prototypes@0f1cbc34	2e4950d6c895664d
 sources/generic: the unwinder's, the rounding mode's, the pointer's and the trap's leaves@b1d4f164	d09c13d6b266d6fe
 sources/generic: type traits' values and contexts@71df8703	f35a6c9d68f7b587

@@ -35,7 +35,11 @@ requirements. [Command index](README.md).
   register and it is free), which the random inputs and their reference model
   too; avoided registers (#2767: `avoided_registers`, a range live across a fixed
   register's sequence) have their traces on the scan and the common path and their
-  random properties in `tier1_allocate_avoided_test.c`; `test-tier1-emit` checks
+  random properties in `tier1_allocate_avoided_test.c`, and a leaf's callee-saved
+  registers, which every range of a looping leaf that spills avoids in its second
+  allocation (#2819: `Tier1CfgInput.avoided_general`, `tier1_emit_cfg_leaf`), have
+  `test-checker-driver`'s leaf fixture and `test-tier1-pipeline`'s loop past five
+  registers; `test-tier1-emit` checks
   which values the CFG consumer finds read on every iteration of their loops
   (`tier1_hot_recipes_test.c`). Use the shared 9700X lock per build/test/measurement and
   CPU 2 for timing.
