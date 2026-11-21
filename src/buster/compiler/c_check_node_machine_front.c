@@ -192,6 +192,7 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_DECLARATION_LINES,
     NODE_FACTS_COUNT_LINE_TICKS,
     NODE_FACTS_COUNT_LINE_VERSIONS,
+    NODE_FACTS_COUNT_LINE_ASKS,
     NODE_FACTS_COUNT_MEMBER_SLOTS,
     NODE_FACTS_COUNT_PAIR_SLOTS,
     NODE_FACTS_COUNT_TAKEN_RECORDS,
@@ -460,11 +461,13 @@ struct NodeFrontTypes
     // The census's tests at reader time (BUSTER_NODE_READER_TESTS; null otherwise), by root node, for a root T took
     // (BUSTER_NODE_FRONT_TYPED_TESTED in `refusals`): the tests that refuse its expression, as bits of NodeCensusTest;
     // its root's kind as the reader derives it from the front's root (a NodeCensusRoot); and the declared type of the
-    // object it initializes (0 for none). C and X then run on the expressions no test refuses. `policy` is the unit's
-    // enabled warnings as reader time read them (a NodeCensusPolicy), which the shadow compares with the pipeline's.
+    // object it initializes (0 for none) and that object's declaration's token (BUSTER_CHECK_NONE for none). C and X
+    // then run on the expressions no test refuses. `policy` is the unit's enabled warnings as reader time read them (a
+    // NodeCensusPolicy), which the shadow compares with the pipeline's.
     uint64_t* tests;
     uint8_t* kinds;
     TypeId* declared;
+    uint32_t* declarations;
     const void* policy;
     // The expressions the tests ran on and those they refused; by test, the expressions it refuses (`tested_any`) and
     // those it refuses first in the tests' order (`tested_first`); and the nodes a test asked of T's records that the
@@ -518,6 +521,10 @@ struct NodeFrontTypes
     uint64_t own_quiet_casts;
     uint64_t own_quiet_casts_checked;
     uint64_t own_quiet_casts_wrong;
+    // And the ordered comparisons of two operands that are pointers once converted, which the orders' rule left out.
+    uint64_t own_quiet_orders;
+    uint64_t own_quiet_orders_checked;
+    uint64_t own_quiet_orders_wrong;
     // With the reader's verify: the integer constants whose record says its value (node_facts_small), and those of them
     // whose payload is another.
     uint64_t own_values_checked;
