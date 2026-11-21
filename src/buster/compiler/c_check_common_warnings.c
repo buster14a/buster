@@ -5438,6 +5438,17 @@ static uint32_t check_common_enum_question(const Parser* parser, uint32_t colon,
     return question;
 }
 
+// A bare enum the canonical printer will call "(unnamed ...)" or "(unnamed)". A tag with a name or
+// an unqualified naming typedef is never one. The location text of an anonymous member and any non-enum
+// outer type retain the printer's complete classification.
+static bool check_common_unnamed_enum(const TypeTable* types, const CheckWarningSpelling* spell, TypeId type)
+{
+    const uint32_t index = type_index(type);
+    const uint32_t tag = types->types.index[index];
+    return types->types.kind[index] == BUSTER_TYPE_KIND_ENUM && tag < spell->anonymous_count && types->tags.name[tag] == 0 &&
+           spell->anonymous[tag].length == 0 && (!spell->tag_places[tag].available || !spell->tag_places[tag].member);
+}
+
 // One operator's enumeration mix (clang's checkEnumArithmeticConversions), reported at `question` (a conditional's `?`):
 // `kind` its message's (0 arithmetic, 1 bitwise, 2 comparison, 3 conditional, 4 compound assignment), `omitted` a GNU
 // `a ?: b`'s, whose omitted middle operand is its condition promoted (clang's UsualUnaryConversions): an enumeration's is
@@ -5464,6 +5475,25 @@ static void check_common_enum_mix(const Parser* parser, Preprocessor* pp, const 
                        type_unqualified(type_strip_aligned(types, left_type)) != type_unqualified(type_strip_aligned(types, right_type));
     if (floating || mixed)
     {
+        if (pp->fatal || question >= parser->tokens.count)
+        {
+            return;
+        }
+        const uint32_t named_id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL :
+                                  kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE : CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+        const bool named_ignored = check_common_severity(pp, parser, input, question, named_id, named_id != CHECK_WARNING_ID_ENUM_COMPARE) == CHECK_WARNING_IGNORE;
+        const bool unnamed_ignored = !mixed || check_common_severity(pp, parser, input, question, CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION, true) == CHECK_WARNING_IGNORE;
+        if (named_ignored && unnamed_ignored)
+        {
+            return;
+        }
+        // A comparison can be enabled for named enums and ignored for an unnamed operand. Its group can then
+        // be decided from the declarators without building names or replaying preprocessing for source locations.
+        if (mixed && unnamed_ignored && !spell->built && check_driver_spelling_tags(parser, pp, input, types, spell, scratch) &&
+            (check_common_unnamed_enum(types, spell, left_type) || check_common_unnamed_enum(types, spell, right_type)))
+        {
+            return;
+        }
         const TypeId left_alias = left_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[left_spelling] : 0;
         const TypeId right_alias = right_spelling < input->token_count && input->declared_types != NULL ? input->declared_types[right_spelling] : 0;
         left_spelling = rvalue_left && left_alias != 0 && type_qualifiers(left_alias) != 0 ? 0 : left_spelling;
@@ -5474,9 +5504,7 @@ static void check_common_enum_mix(const Parser* parser, Preprocessor* pp, const 
         const String8 right_plain = mixed ? check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type, 0) : (String8){ 0 };
         const bool anonymous = mixed && (memmem(left_plain.pointer, left_plain.length, "(unnamed", 8) != NULL ||
                                          memmem(right_plain.pointer, right_plain.length, "(unnamed", 8) != NULL);
-        const uint32_t id = floating ? CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION : anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION :
-                            kind == 3 ? CHECK_WARNING_ID_ENUM_COMPARE_CONDITIONAL : kind == 2 ? CHECK_WARNING_ID_ENUM_COMPARE :
-                            CHECK_WARNING_ID_ENUM_ENUM_CONVERSION;
+        const uint32_t id = anonymous ? CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION : named_id;
         const char* message = floating ?
             check_warning_text(scratch, "%s %s type %.*s %s %s type %.*s", kinds[kind], left_enum ? "enumeration" : "floating-point",
                                (int)left_name.length, left_name.pointer, kind == 2 ? "with" : kind == 4 ? "from" : "and",
