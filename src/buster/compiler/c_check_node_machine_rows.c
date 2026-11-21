@@ -1396,6 +1396,13 @@ void check_node_window_int_entry(CheckInputWindowRow* entry, uint32_t value, uin
     };
 }
 
+// An explicit (void) cast discards the value at its closing parenthesis.
+void check_node_window_void_rows(CheckInputWindowRow* rows, uint32_t value, uint32_t literal, uint32_t cast)
+{
+    check_node_window_int_entry(rows, value, literal, false);
+    rows[1] = (CheckInputWindowRow){ .token = cast, .kind = BUSTER_TYPED_DISCARD, .class = BUSTER_TYPED_CLASS_I32 };
+}
+
 // A discarded plain int assignment: store the RHS (the preceding row), then discard the stored value.
 void check_node_window_store(CheckInputWindowRow* rows, uint32_t object, uint32_t token)
 {
