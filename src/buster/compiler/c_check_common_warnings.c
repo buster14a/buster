@@ -153,16 +153,7 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
 // Clang skips an analysis whose diagnostics are all ignored.
 static bool check_common_enabled(const Preprocessor* pp, const CheckInput* input, uint32_t id, bool default_ignored)
 {
-    const bool default_error = check_common_default_error(id);
-    const CheckWarningCommandLine command = check_warning_command_line(&pp->options, id, default_ignored, default_error);
-    bool enabled = default_error ? command.mapped != CHECK_WARNING_IGNORE : !command.quiet && command.severity != CHECK_WARNING_IGNORE;
-    const CheckInputDiagnosticPragmas* history = input->diagnostic_pragmas;
-    for (uint32_t i = 0; (!command.quiet || id == CHECK_WARNING_ID_ATOMIC_ACCESS) && !enabled && history != NULL && i < history->count; i += 1)
-    {
-        const CheckInputDiagnosticPragma* record = history->records + i;
-        enabled = record->operation != CHECK_DIAGNOSTIC_IGNORED && check_warning_option(id, record->option);
-    }
-    return enabled;
+    return check_diagnostic_may_report(&pp->options, input->diagnostic_pragmas, id, default_ignored, check_common_default_error(id));
 }
 
 static void check_common_report_published(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication_source,
