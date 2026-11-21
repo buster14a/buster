@@ -2778,6 +2778,7 @@ struct ChunkTokens
     BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t end_counts[BUSTER_LEX_VECTOR_COUNT];
     const __m512i* raw; // The chunk's vectors, and the next chunk's first one.
     int64_t chunk_position; // The source position of bit 0.
+    uint32_t token_lanes; // Lanes owning a token start or end, including tokens spanning chunks.
     uint32_t special_lanes; // Bit j: lane j has a dot-number, or a prefixed or unknown literal.
 };
 
@@ -2801,8 +2802,10 @@ BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, const uint8_t* sou
     // A token's position is its byte index plus its vector's source position (and 1 more for the exclusive end). The
     // vector's position advances by an add: a broadcast from a general register is 2 uops with an 8-cycle latency on
     // Zen 5.
-    __m512i start_offset = _mm512_set1_epi32((int)(uint32_t)t->chunk_position);
-    for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
+    const unsigned first = (unsigned)BUSTER_LEX_CTZ64(t->token_lanes | (1u << BUSTER_LEX_VECTOR_COUNT));
+    const unsigned end = 64u - (unsigned)BUSTER_LEX_CLZ64(t->token_lanes | 1u);
+    __m512i start_offset = _mm512_set1_epi32((int)(uint32_t)(t->chunk_position + first * BUSTER_LEX_VECTOR_BYTES));
+    for (unsigned j = first; j < end; j += 1)
     {
         // From memory straight to mask registers: 1 uop each, where a general register would take 2.
         const __mmask64 starts_mask = _load_mask64((__mmask64*)&t->starts[j]);
@@ -3558,6 +3561,8 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         memcpy(deferred.unknowns, &unknown_starts, sizeof(deferred.unknowns));
         memcpy(deferred.start_counts, &start_counts, sizeof(deferred.start_counts));
         memcpy(deferred.end_counts, &end_counts, sizeof(deferred.end_counts));
+        const U64x8 tokens = BUSTER_LEX_OR(all_starts, all_ends);
+        deferred.token_lanes = _mm512_test_epi64_mask(BUSTER_LEX_NATIVE(tokens), BUSTER_LEX_NATIVE(tokens));
         deferred.raw = raw;
         deferred.chunk_position = chunk_position;
         const U64x8 special = BUSTER_LEX_OR(BUSTER_LEX_OR(dot_numbers, prefix_starts), unknown_starts);
