@@ -9345,6 +9345,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_conditional_mismatch_driver_test.c"
 #include "c_check_generic_attribute_driver_test.c"
 #include "c_check_unused_result_driver_test.c"
+#include "c_check_unused_comparison_driver_test.c"
 #include "c_check_address_space_driver_test.c"
 #include "c_check_auto_qualifier_driver_test.c"
 #include "c_check_sizeof_array_decay_driver_test.c"
@@ -9583,6 +9584,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool operand_diagnostics_only = false;
     // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
     bool assert_bool_only = false;
+    // --unused-comparison-only: discarded comparisons' assignment-note eligibility (#2906).
+    bool unused_comparison_only = false;
     // --record-extensions-only: zero-length arrays and zero-size records, their policies and output preservation.
     bool record_extensions_only = false;
     // --auto-qualifiers-only: qualified __auto_type declarations and recovered atomic pointees (#1844).
@@ -9645,6 +9648,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--assert-bool-only") == 0)
         {
             assert_bool_only = true;
+        }
+        else if (strcmp(argv[i], "--unused-comparison-only") == 0)
+        {
+            unused_comparison_only = true;
         }
         else if (strcmp(argv[i], "--record-extensions-only") == 0)
         {
@@ -9712,7 +9719,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only +
-                             (uint32_t)run_modes_only + (uint32_t)correctness_edges_only;
+                             (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)unused_comparison_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10262,6 +10269,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_assert_bool(&test, clang, executable, directory);
     }
+    if (temporary && unused_comparison_only)
+    {
+        check_test_driver_unused_comparisons(&test, clang, executable, directory);
+    }
     if (temporary && record_extensions_only)
     {
         check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
@@ -10503,6 +10514,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_conditional_mismatches,
             check_test_driver_generic_attributes,
             check_test_driver_unused_results,
+            check_test_driver_unused_comparisons,
             check_test_driver_address_spaces,
             check_test_driver_auto_qualifiers,
             check_test_driver_sizeof_array_decay,

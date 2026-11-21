@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --record-extensions-only | --auto-qualifiers-only |
+  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -138,6 +138,16 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--unused-comparison-only` runs `c_check_unused_comparison_driver_test.c`
+  and the original `tests/driver/unused_comparison*.c` sources (#2906).
+  It compares complete Clang diagnostics for discarded comparisons, eligible
+  lvalue notes, successful assertions, macro operands and warning policy in
+  GNU17/C23 through both readers and one/three requested lanes. Ordinary
+  fixtures also check object output and its preservation after rejection;
+  the vector-swizzle category fixture checks syntax because its unrelated
+  object lowering remains unsupported. A failed-assertion fixture checks
+  rejection, retained assertion errors and absence of invalid notes without
+  pinning missing warnings: full discarded-comma recovery belongs to #2409.
   `--assert-bool-only` runs `c_check_assert_bool_driver_test.c` alone, including
   the original `tests/driver/assert_bool_*.c` sources for root and nested
   boolean-conversion warnings in failed static assertions (#2409). It compares
