@@ -1823,12 +1823,17 @@ static uint32_t check_input_window_first(const CheckInputReader* reader, const u
     uint32_t first = end;
     if (check_input_window_code(classes, end) == CHECK_INPUT_CODE_TERMINATOR)
     {
-        // A stand-alone assignment ending this block statement. Its two names or literal and its operator
-        // must also be the last three actions, in postorder. A statement-expression's final value may escape.
+        // The first semicolon immediately after for (x = y has the same discarded value as a
+        // block-statement assignment. Check its own opener so the condition and increment use their usual consumers.
+        const uint32_t parent = parser->tree.parents[token];
+        const bool for_init = token >= 5 && parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_FOR &&
+                              parser->tree.roles[token - 4] == PARSE_ROLE_OPEN_FOR && parser->tree.parents[token - 4] == parent &&
+                              parser->tokens.kinds[token - 5] == PARSE_KIND_FOR;
+        // A statement-expression's final value may escape.
         if (end - start >= 3 && token >= 3 && parser->tokens.kinds[token] == PARSE_KIND_SEMI &&
             parser->tree.roles[token] == PARSE_ROLE_TERMINATOR &&
             reader->conditions[token] == 0 && parser->tree.parents[token] < parser->tokens.count &&
-            (parser->tree.roles[parser->tree.parents[token]] == PARSE_ROLE_CLOSE_BLOCK || parser->tree.roles[parser->tree.parents[token]] == PARSE_ROLE_CLOSE_BODY) &&
+            (for_init || parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BLOCK || parser->tree.roles[parent] == PARSE_ROLE_CLOSE_BODY) &&
             tokens[end - 3] == token - 3 && tokens[end - 2] == token - 1 && tokens[end - 1] == token - 2 &&
             check_input_window_code(classes, end - 3) == CHECK_INPUT_CODE_IDENTIFIER &&
             (check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_IDENTIFIER || check_input_window_code(classes, end - 2) == CHECK_INPUT_CODE_LITERAL) &&

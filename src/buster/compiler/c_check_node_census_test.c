@@ -6130,8 +6130,8 @@ static void node_window_test_compile(CheckTest* test, bool assignments)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        check_test_expect(test, reference->window_count == 0 && input->window_count == (assignments ? 13u : 11u) && input->window_nodes == (assignments ? 40u : 32u),
-                          "node-window takes two additional complete assignments only with assignment discovery enabled");
+        check_test_expect(test, reference->window_count == 0 && input->window_count == (assignments ? 15u : 11u) && input->window_nodes == (assignments ? 48u : 32u),
+                          "node-window takes discarded block and for-initializer assignments only with assignment discovery enabled");
         check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
                           "node-window replaces complete expressions by single checked roots");
         bool same = true;
@@ -6183,7 +6183,7 @@ static void node_window_test_compile(CheckTest* test, bool assignments)
                         regular.flags, value.flags, summary->count, rows[0].kind, rows[0].value);
             }
         }
-        check_test_expect(test, same && reads == (assignments ? 5u : 4u) && writes == (assignments ? 2u : 0u),
+        check_test_expect(test, same && reads == (assignments ? 6u : 4u) && writes == (assignments ? 4u : 0u),
                           "node-window publishes the complete ordinary checked values, exact native rows and ordered reads and writes");
         CheckProgramLowered original = { 0 };
         CheckProgramLowered first = { 0 };
