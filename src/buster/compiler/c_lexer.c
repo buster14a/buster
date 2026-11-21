@@ -3150,15 +3150,10 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 
         // The block comment the chunk starts inside of (if it does) goes up to its first "*/" at or after bit
         // block_comment_skip, or to the end of the chunk. It's found first, so that the scan below starts after it.
-        U64x8 eligible = block_comment_closers;
-        BUSTER_LEX_LANE(eligible, 0) &= ~_bzhi_u64(~0ull, block_comment_skip);
-        const __mmask8 empty_lanes = _mm512_cmpeq_epi64_mask(BUSTER_LEX_NATIVE(eligible), _mm512_setzero_si512());
-        // In each word x^(x-1) includes through the lowest set bit, or the whole word when x is zero.
-        // The same operation on the nonempty word mask selects through its first nonempty word.
-        const __mmask8 through = (uint8_t)(empty_lanes ^ (uint8_t)(empty_lanes + 1)) & (uint8_t)-(state == STATE_BLOCK_COMMENT);
-        const U64x8 low_bits = BUSTER_LEX_XOR(eligible, BUSTER_LEX_SUB(eligible, BUSTER_LEX_SPLAT64(1)));
-        const U64x8 carried_region = BUSTER_LEX_BITS(_mm512_maskz_mov_epi64(through, BUSTER_LEX_NATIVE(low_bits)));
-        const U64x8 carried_end = BUSTER_LEX_AND(carried_region, eligible);
+        const U64x8 carried_start = bit_0_if(state == STATE_BLOCK_COMMENT);
+        const U64x8 carried_cursor = BUSTER_LEX_SHL(carried_start, block_comment_skip);
+        const U64x8 carried_end = BUSTER_LEX_OR((BUSTER_LEX_AND(block_comment_closers, BUSTER_LEX_NOT(sub(block_comment_closers, BUSTER_LEX_AND(carried_cursor, BUSTER_LEX_NOT(block_comment_closers)))))), (BUSTER_LEX_AND(carried_cursor, block_comment_closers)));
+        const U64x8 carried_region = BUSTER_LEX_OR(BUSTER_LEX_OR(sub(carried_end, carried_start), carried_start), carried_end);
 
         // Find the literals and comments, line by line in parallel (see `scan_lines`), after that comment. The scan
         // starts each line outside of comments; if a block comment spans lines, that can be wrong, so the chunk is
