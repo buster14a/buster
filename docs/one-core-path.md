@@ -18,8 +18,9 @@ middle (`check-input` to `lower`) 18 of them, about 38 a body node, and gets
 there by making what a rule decides on a byte its producer wrote: T's, C's and
 X's rules as arithmetic over byte columns, 64 records to a register, and the
 leaves and lookups, which no lane helps, from words that are one load away.
-Step 0 ran the lanes on the real nodes with the leaves and lookups given: 16.7
-and 20.6 cycles a taken node on `sqlite3.c` and musl, at its gate of 20. Step 1
+Step 0 met its 20-cycle gate on the dumped nodes with leaves and lookups given.
+The packed template key took 14.17 cycles per taken SQLite node and 18.72 on musl
+on repeated passes, or 19.17 and 19.94 after scalar work. Step 1
 measured the leaves and lookups: every record is T's, a leaf takes about 5
 cycles, and a lookup takes 18 to 63 by its operator, 25 to 46 on average,
 where the gate was 10 and the design's own refutation line 20. T is bound by
@@ -99,7 +100,7 @@ token; the issue has each row's source:
 
 | step | what | gate | state |
 | --- | --- | --- | --- |
-| 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | measured: 16.7 and 20.6 cycles, 0.025 and 0.045 mispredicted |
+| 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | met on the frozen SQLite and musl streams: 14.17 and 18.72 cycles on repeated passes, 19.17 and 19.94 after scalar work; at most 0.060 median branch misses per taken node |
 | 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
 | 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35. The tests on the window measured: exact; 54.1 TSC ticks a record on `sqlite3.c` where their pass over T's columns reads 83.0 (gate 40, refuted at 65): the loop 0.7, its inputs 8.9, and 37.2 the tests that read T's records still. Their second half's first piece: an operator a constant sends for nothing is left out of the loop's list (20,898 of 48,645): 48.7. Its second: the tree's tests listed by the operator above (6 operators for 27,794 records), and an expression with nothing listed has its verdict from the window alone (21,157 of 50,993): 42.0. Its third: a call with no test to make is left out of the list (12,064 of 12,918) and a statement that discards nothing is not listed (35,069 expressions with nothing listed): 35.8. Its fourth: a pointer's cast to void or to a pointer, its subscript by a constant and its sum with one are left out of the list (9,744 of 15,688 listed operators; 41,456 expressions with nothing listed): 31.2. C on the window measured: C's templates, contexts and targets for the expressions with no call, logical operator, update or comma (63% of `sqlite3.c`'s placed expressions), exact; 12.6 TSC ticks a record of theirs where C on T's columns reads 40.2, and 13.9 with its bytes, where its gate was 10. A call on the window measured: the kernel makes each argument's conversion (every one for 99.6%, 98.8% and 98.0% of the calls) and C's answers for a call are made on the window from them, exact; 86%, 84% and 86% of the placed expressions are decided there, at 8.2 TSC ticks a record of theirs on `sqlite3.c` and 9.2 with its bytes (gate 10); the kernel in place reads 1.2 ticks a record more, where its gate was 1.0 |
 | 3 | The front's row, into the window | 35 cycles a token or less | first part measured, in the shadow: the node machine's front writes the kernel's window and the kernel reads it in place, exact; the kernel with its inputs 29.9 TSC ticks a record on `sqlite3.c` (gate 35), 38.4 on Lua, 61.5 on musl. The lexer's and the parser's rows are not started |
@@ -123,6 +124,25 @@ is its twin.
   mispredicted branches.
 - By part on `sqlite3.c`: T 2.6, C 2.4, the keys 1.1, the template's lookup 3.7,
   X 6.8.
+
+The follow-up recomputes distant operands on the scalar path, applies parent-independent
+context rules once per block and checks a packed 64-bit template key against one
+table row. Both paths took exactly the same nodes. All 346,998 SQLite entries
+and 154,132 musl entries matched, including those from expressions whose operands
+cross a block boundary. The table lookup also matched the original dictionary
+for every learned key and over 300,000 unknown queries on each stream.
+[Implementation and controls](https://github.com/buster14a/buster-performance/tree/f73e875502710c7f95f24bb4be11adc4c6c63dde/docs/measurements/per-core-step0-2850-2026-11-21/packed-template-keys)
+
+| Locked 9700X, per taken node | SQLite cycles | SQLite branch misses | musl cycles | musl branch misses |
+| --- | ---: | ---: | ---: | ---: |
+| Repeated passes | 14.17 | 0.019 | 18.72 | 0.045 |
+| After 200 ms of the scalar twin | 19.17 | 0.020 | 19.94 | 0.059 |
+
+Each cell is the median of five paired round means, with two fresh processes per
+variant per round and 21 timed passes per process. The five musl after-scalar
+rounds ranged from 19.41 to 20.61 cycles per taken node. Input production and
+ordinary source compilation are measured separately.
+[Raw counters, ranges and exact sources](https://github.com/buster14a/buster-performance/tree/162b41a41bec79bec1b71941c8b1960f4c11a665/docs/measurements/per-core-step0-2850-2026-11-21/qualification/qualpack)
 
 ## Step 1: the fact words
 
