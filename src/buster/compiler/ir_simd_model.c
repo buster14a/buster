@@ -136,6 +136,15 @@ typedef enum IrSimdOperation
     // flags: vpmaddwd's and vpmaddubsw's sums of adjacent products, or a pack's saturating narrowing of each 16-byte lane of
     // a, then b.
     IR_SIMD_PAIRWISE,
+    // A fused multiply-add of each floating lane (#2806): a * b + c, one rounding, the first NaN of a, b and c, as
+    // IR_FMA. The three operands are vectors of the result's shape.
+    IR_SIMD_FMA,
+    // A conversion of each lane between an integer and a float of the same width (#2806): i32 and f32, or i64 and f64.
+    // A float that is not finite, or that does not fit the integer, makes the conversion fail.
+    IR_SIMD_SITOFP,
+    IR_SIMD_UITOFP,
+    IR_SIMD_FPTOSI,
+    IR_SIMD_FPTOUI,
     IR_SIMD_OPERATION_COUNT,
 } IrSimdOperation;
 
@@ -251,7 +260,12 @@ static bool ir_simd_lane_valid(IrSimdOperation operation, IrSimdLane lane)
         case IR_SIMD_FADD:
         case IR_SIMD_FSUB:
         case IR_SIMD_FMUL:
-        case IR_SIMD_FDIV: valid = valid && ir_simd_lane_floating(lane); break;
+        case IR_SIMD_FDIV:
+        case IR_SIMD_FMA:
+        case IR_SIMD_SITOFP:
+        case IR_SIMD_UITOFP:
+        case IR_SIMD_FPTOSI:
+        case IR_SIMD_FPTOUI: valid = valid && ir_simd_lane_floating(lane); break;
         case IR_SIMD_COMPARE:
         case IR_SIMD_SELECT: break;
         default: valid = valid && lane == IR_SIMD_LANE_I32; break;
@@ -306,6 +320,11 @@ static bool ir_simd_action_valid(const IrSimdAction* action)
             case IR_SIMD_FSUB:
             case IR_SIMD_FMUL:
             case IR_SIMD_FDIV: valid = valid && ir_simd_vector(type) && a == type && b == type && c == IR_SIMD_NONE; break;
+            case IR_SIMD_FMA: valid = valid && ir_simd_vector(type) && a == type && b == type && c == type; break;
+            case IR_SIMD_SITOFP:
+            case IR_SIMD_UITOFP:
+            case IR_SIMD_FPTOSI:
+            case IR_SIMD_FPTOUI: valid = valid && ir_simd_vector(type) && a == type && b == IR_SIMD_NONE && c == IR_SIMD_NONE; break;
             case IR_SIMD_AND:
             case IR_SIMD_OR:
             case IR_SIMD_XOR: valid = valid && type != IR_SIMD_NONE && a == type && b == type && c == IR_SIMD_NONE; break;
@@ -651,6 +670,100 @@ static uint8_t ir_simd_aes_sbox(uint8_t value)
         result ^= (uint8_t)((sum & 1) << bit);
     }
     return result;
+}
+
+// IR_FMA's bits of one lane (#1840, #2806): the first NaN of a, b and c quieted, otherwise one rounding of a * b + c,
+// and the default NaN where that rounding is a NaN. `wide` is a double lane.
+static uint64_t ir_simd_fma_bits(bool wide, uint64_t a, uint64_t b, uint64_t c)
+{
+    const uint64_t exponent = wide ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+    const uint64_t mantissa = wide ? UINT64_C(0x000fffffffffffff) : UINT64_C(0x007fffff);
+    const uint64_t quiet = wide ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
+    const uint64_t sign = wide ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    const uint64_t operands[3] = { a, b, c };
+    uint64_t result = 0;
+    bool found = false;
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        const bool nan = (operands[k] & exponent) == exponent && (operands[k] & mantissa) != 0;
+        result = !found && nan ? (operands[k] & (exponent | mantissa | sign)) | quiet : result;
+        found = found || nan;
+    }
+    if (!found && wide)
+    {
+        double x = 0;
+        double y = 0;
+        double z = 0;
+        memcpy(&x, &a, sizeof(x));
+        memcpy(&y, &b, sizeof(y));
+        memcpy(&z, &c, sizeof(z));
+        const double rounded = __builtin_fma(x, y, z);
+        memcpy(&result, &rounded, sizeof(rounded));
+    }
+    else if (!found)
+    {
+        const uint32_t bits[3] = { (uint32_t)a, (uint32_t)b, (uint32_t)c };
+        float x = 0;
+        float y = 0;
+        float z = 0;
+        memcpy(&x, &bits[0], sizeof(x));
+        memcpy(&y, &bits[1], sizeof(y));
+        memcpy(&z, &bits[2], sizeof(z));
+        const float rounded = __builtin_fmaf(x, y, z);
+        uint32_t word = 0;
+        memcpy(&word, &rounded, sizeof(word));
+        result = word;
+    }
+    const bool invalid = !found && (result & exponent) == exponent && (result & mantissa) != 0;
+    result = invalid ? (wide ? UINT64_C(0xfff8000000000000) : UINT64_C(0xffc00000)) : result;
+    return result;
+}
+
+// One lane of a same-width integer/float conversion (#2806). A float that is not finite, or that does not fit the
+// integer, fails; every integer converts.
+static bool ir_simd_convert_lane(IrSimdOperation operation, uint64_t bits, uint32_t lane_bits, uint64_t* result)
+{
+    bool ok = lane_bits == 32 || lane_bits == 64;
+    uint64_t value = 0;
+    if (ok && (operation == IR_SIMD_SITOFP || operation == IR_SIMD_UITOFP))
+    {
+        if (lane_bits == 64)
+        {
+            const double number = operation == IR_SIMD_SITOFP ? (double)(int64_t)bits : (double)bits;
+            memcpy(&value, &number, sizeof(number));
+        }
+        else
+        {
+            const float number = operation == IR_SIMD_SITOFP ? (float)(int32_t)bits : (float)(uint32_t)bits;
+            uint32_t word = 0;
+            memcpy(&word, &number, sizeof(word));
+            value = word;
+        }
+    }
+    else if (ok && lane_bits == 32)
+    {
+        float number = 0;
+        const uint32_t word = (uint32_t)bits;
+        memcpy(&number, &word, sizeof(number));
+        const bool finite = ((word >> 23) & 0xff) != 0xff;
+        const bool signed_result = operation == IR_SIMD_FPTOSI;
+        const bool fits = finite && (signed_result ? number >= -2147483648.0f && number < 2147483648.0f : number >= 0.0f && number < 4294967296.0f);
+        ok = fits;
+        value = fits && signed_result ? (uint32_t)(int32_t)number : fits ? (uint32_t)number : 0;
+    }
+    else if (ok)
+    {
+        double number = 0;
+        memcpy(&number, &bits, sizeof(number));
+        const bool finite = ((bits >> 52) & 0x7ff) != 0x7ff;
+        const bool signed_result = operation == IR_SIMD_FPTOSI;
+        const bool fits = finite && (signed_result ? number >= -9223372036854775808.0 && number < 9223372036854775808.0 :
+                                     number >= 0.0 && number < 18446744073709551616.0);
+        ok = fits;
+        value = fits && signed_result ? (uint64_t)(int64_t)number : fits ? (uint64_t)number : 0;
+    }
+    *result = ok ? value : 0;
+    return ok;
 }
 
 // Success commits one complete result/effect. Failure changes neither output nor memory/counters. Inputs may
@@ -1175,6 +1288,15 @@ static bool ir_simd_evaluate(const IrSimdAction* action, const IrSimdValue* cons
                 case IR_SIMD_FSUB:
                 case IR_SIMD_FMUL:
                 case IR_SIMD_FDIV: value = ir_simd_float_operation(action->operation, a, b, lane_bits); break;
+                case IR_SIMD_FMA:
+                {
+                    const uint64_t addend = ir_simd_lane_read(values[2], lane_bits, lane);
+                    value = ir_simd_fma_bits(lane_bits == 64, a, b, addend);
+                } break;
+                case IR_SIMD_SITOFP:
+                case IR_SIMD_UITOFP:
+                case IR_SIMD_FPTOSI:
+                case IR_SIMD_FPTOUI: valid = ir_simd_convert_lane(action->operation, a, lane_bits, &value); break;
                 case IR_SIMD_AND: value = a & b; break;
                 case IR_SIMD_OR: value = a | b; break;
                 case IR_SIMD_XOR: value = a ^ b; break;
