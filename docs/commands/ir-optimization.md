@@ -286,13 +286,14 @@ values (#2677; their `cmov`s are #2676's fused selects of comparisons), and
 `cmov` with only the loop's branch for the conditional sum and the `?:` sum. They also
 require the branches to remain for loads, division, variable shifts, calls, a
 reload after a call and the running max. #2842's floating selects (the issue's
-kernels, every comparison and its negation at both precisions, a triangle,
-sequential and nested clamps, a negated arm and a reused load) are compiled at
+kernels, the six double comparisons, `!(a < b)` and `!(a == b)`, the float
+comparisons `<`, `!(a > b)` and `!=`, a mixed width, a triangle, sequential and
+nested clamps, a magnitude, a reused load and a nested choice) are compiled at
 x86-64, x86-64-v3 and x86-64-v4 and run against clang -O0 on NaNs, signed
 zeros, infinities and both conditions; their decoded code has its blends
-(`kmovw` and `vpblendm*` under k1 at x86-64-v4 for an integer condition,
-`cmps*` and `pand` otherwise) and no branch but a loop's, the nested clamp's
-outer test and those of an unproven load and a division.
+(`kmovw` and `vpblendmq` under k1 at x86-64-v4 for an integer condition, at
+either width, `cmps*` and `pand` otherwise) and no branch but a loop's, the
+nested clamp's outer test and those of an unproven load and a division.
 
 ## Dominator analysis (#1352, #2924)
 

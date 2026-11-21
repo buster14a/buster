@@ -272,8 +272,8 @@ struct CheckTestFloatSelectShape
 
 // The floating selects' fixture at each target (#2842): clang -O0's run is the oracle of the unit's Tier 1 code (by both
 // paths, rematerializing or not, and by --verify, its code certified), and each function's decoded code has its blends:
-// at x86-64-v4, kmovw and vpblendmq or vpblendmd of an integer condition's select, pxor, pand and pxor of the lane mask
-// elsewhere and of a comparison's cmps.
+// at x86-64-v4, kmovw and vpblendmq of an integer condition's select, at either width, pxor, pand and pxor of the lane
+// mask elsewhere and of a comparison's cmps.
 static void check_test_driver_tier1_float_select(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char* const targets[] = {
