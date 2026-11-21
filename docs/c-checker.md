@@ -11385,18 +11385,31 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   constants, a comma in an operand of `sizeof`, an alignof or a keyword is
   unevaluated and quiet (`check_input_bound_evaluated`), a comparison takes no
   note (its left operand is no lvalue in a constant), and in a function body
-  the warning is published with the body's queued diagnostics at its end
-  (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it;
-  at file scope it precedes the declarator's fold warning
-  (`c_check_vla_fold_driver_test.c`). A variable bound that no graph walk
-  reads either (#2252: a file-scope cast's, `_Alignof`'s or `sizeof`'s type
-  name, `check_input_vla_bound`) takes the same pass. Left: in a function
-  body, a constant's comma (an enumerator's, a typedef's bound) is published
-  before the body's other queued diagnostics, where clang queues it in source
-  order, as the reader's events reach the body's end first; and in a unit
-  with errors, a file-scope declaration's comma whose initializer is an error
-  (`int b = sizeof(int[(6, 2)]);`) comes after that error, where clang gives
-  it first.
+  "has no effect" is published with the body's queued diagnostics at its end
+  (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it,
+  in source order among them (#2252): the reader finds it before the graph's
+  walks find theirs, so its record is ordered by its token
+  (`pp_diagnostic_source_order`), and publication puts it before the first
+  other record at the body's end whose token follows its own, the others
+  keeping their order (`pp_diagnostic_source_merge`). A comparison's and the
+  `void *` cast's question clang gives at once, in a body too, so they are
+  published at the comma. At file scope it precedes the declarator's fold
+  warning (`c_check_vla_fold_driver_test.c`). A variable bound that no graph
+  walk reads either (#2252: a file-scope cast's, `_Alignof`'s or `sizeof`'s
+  type name, `check_input_vla_bound`) takes the same pass. A runtime-sized
+  `sizeof` there is the reader's "initializer element is not a compile-time
+  constant", which is published once the initializer is read, at its last
+  token (`check_driver_initializer_last`), as clang's `AddInitializerToDecl`
+  checks it before the declaration's own checks at its `,` or `;`, so the
+  commas come first. The cost is a
+  token in each collected diagnostic record, and a pass over the records at
+  publication only in a unit that has such a comma in a body. Left: a
+  constant in an expression a graph walk reads (a struct defined in a
+  `sizeof`'s operand) is placed by its token among that expression's queued
+  warnings, where clang gives an array index's once the expression is
+  complete; and the reader stops at the initializer's error, so a later
+  comma of the unit is not given (the second of
+  `sizeof(int[(6, 2)]) + sizeof(int[(7, 3)])`).
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
@@ -11436,9 +11449,7 @@ checker doesn't give anywhere yet
 condition, of a type name's bound that a constant expression reads (`sizeof(int[(1, 2)])`
 within a bound, an `_Alignof`, or a file-scope initializer's `sizeof`: their check reads
 constants again, which would make the constant walk recursive), and a const builtin call's "ignoring return value"
-as a left operand, which clang gives too; in a function body, a constant
-bound's comma warnings come before the body's graph-walked ones rather than
-among them in source order; and, as everywhere in this driver, the uses' errors stop the unit's
+as a left operand, which clang gives too; and, as everywhere in this driver, the uses' errors stop the unit's
 later expression checks, so a call after one such error isn't diagnosed. A
 grouped
 diagnose_if under `-Weverything` meets every other warning that option

@@ -273,6 +273,69 @@ static const char check_driver_vla_variable_commas_source[] =
     "void f(void) { void *p = (int(*)[(7, 2)])0; (void)p; }\n"
     "void k(int n) { unsigned long s = sizeof(int[(8, n)]); (void)s; }\n";
 
+// A function body's constants' commas among its queued diagnostics, in source order as clang queues them (#2252),
+// though the reader finds them first: enumerators' values, a member's bound and width, a static array's bound, in nested
+// blocks, in an if's, a do's and a for's bodies, beside the graph's variable typedef bound, array bounds and a division
+// by zero, in two functions.
+static const char check_driver_vla_body_commas_source[] =
+    "int f(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    a[5] = 0;\n"
+    "    enum { B = (9, 1), C = ((void)0, 2), D = (B, 3) };\n"
+    "    typedef int T[(7, 2)];\n"
+    "    a[6] = 1;\n"
+    "    enum { E = (4, 5) };\n"
+    "    struct S { int m[(1, 2)]; int w : (3, 4); };\n"
+    "    int u = 1 / 0;\n"
+    "    {\n"
+    "        static int s[(5, 2)];\n"
+    "        a[7] = s[0];\n"
+    "        {\n"
+    "            enum { G = (6, 7) };\n"
+    "            a[8] = G;\n"
+    "        }\n"
+    "    }\n"
+    "    a[9] = (int)sizeof(T) + E;\n"
+    "    return u;\n"
+    "}\n"
+    "int g(int n)\n"
+    "{\n"
+    "    int b[2];\n"
+    "    b[2] = n;\n"
+    "    enum { H = (8, 9) };\n"
+    "    if (n) { enum { I = (1, 2) }; b[3] = I; }\n"
+    "    do { enum { J = (3, 4) }; } while (b[4]);\n"
+    "    for (int i = b[5]; i < 1; i++) { enum { K = (5, 6) }; }\n"
+    "    return H;\n"
+    "}\n";
+
+// A body's constants' comparisons and `void *` cast as a comma's left operand, which clang gives at once rather than
+// queued (#2252): before the body's queued diagnostics, a plain comma's among them.
+static const char check_driver_vla_body_comparisons_source[] =
+    "void f(void)\n"
+    "{\n"
+    "    int a[3];\n"
+    "    a[5] = 0;\n"
+    "    enum { B = (1 == 1, 2), C = ((void *)0, 3), D = (4, 5), E = (1 < 2, 6) };\n"
+    "    a[6] = 1;\n"
+    "    typedef int T[(2 != 3, 2)];\n"
+    "    a[7] = 1;\n"
+    "    (void)sizeof(T);\n"
+    "}\n";
+
+// A block's static object's sizeof of a variable bound: its initializer's error at once, its comma with the body's queued
+// diagnostics, among them in source order (#2252).
+static const char check_driver_vla_static_commas_source[] =
+    "void f(void)\n"
+    "{\n"
+    "    int a[2];\n"
+    "    a[3] = 0;\n"
+    "    static int b = sizeof(int[(6, 2)]);\n"
+    "    enum { E = (1, 2) };\n"
+    "    a[4] = 0;\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
     {
@@ -325,6 +388,52 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .name = "variable bounds' comma operators the constant reader alone reads",
         .source = check_driver_vla_variable_commas_source,
         .warnings = 9,
+    },
+    {
+        .name = "a body's constants' commas among its queued diagnostics in source order",
+        .source = check_driver_vla_body_commas_source,
+        .warnings = 24,
+        .notes = 9,
+    },
+    {
+        .name = "a body's constants' comparisons as commas' left operands at once",
+        .source = check_driver_vla_body_comparisons_source,
+        .warnings = 8,
+        .notes = 3,
+    },
+    // A file-scope sizeof's variable bound's commas, which clang gives as it reads them, before its initializer's "not a
+    // compile-time constant" once the initializer is read (#2252): alone, beside a folded bound in a braced list, with an
+    // _Alignof's in a member's, and after a designator.
+    {
+        .name = "a file-scope sizeof's variable bound's comma before its initializer's error",
+        .source = "int x;\nint b = sizeof(int[(6, 2)]);\n",
+        .warnings = 1,
+        .errors = 1,
+    },
+    {
+        .name = "a braced file-scope sizeof's two variable bounds' commas before its error",
+        .source = "int a[(1, 2)] = { sizeof(int[(6, 2)][(8, 3)]) };\n",
+        .warnings = 4,
+        .errors = 1,
+    },
+    {
+        .name = "a member's _Alignof's and sizeof's variable bounds' commas before its error",
+        .source = "struct S { int m; } s = { _Alignof(int[(4, 2)]) + sizeof(int[(5, 2)]) };\n",
+        .warnings = 2,
+        .errors = 1,
+    },
+    {
+        .name = "a designated file-scope sizeof's variable bound's comma before its error",
+        .source = "int b[] = { 1, [2] = sizeof(int[(6, 2)]) };\n",
+        .warnings = 1,
+        .errors = 1,
+    },
+    {
+        .name = "a block's static sizeof's error before its body's queued commas",
+        .source = check_driver_vla_static_commas_source,
+        .warnings = 4,
+        .errors = 1,
+        .notes = 2,
     },
     {
         .name = "constant bounds' comma operators' discarded left operands",

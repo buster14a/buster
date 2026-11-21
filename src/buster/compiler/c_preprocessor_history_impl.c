@@ -911,6 +911,77 @@ static PPDiagnosticRecord* pp_diagnostic_order(PPDiagnosticRecord* first)
     return first;
 }
 
+// The sorted records with each source-ordered one (pp_diagnostic_source_order) moved among the others at its position,
+// which keep their sorted order: before the first whose token follows its own, else after them all (#2252). The sort put
+// the source-ordered ones in token order (their suborders); a record of no token (zero) follows none. One pass over the
+// records, which only a unit with such a record takes.
+static PPDiagnosticRecord* pp_diagnostic_source_merge(PPDiagnosticRecord* first)
+{
+    PPDiagnosticRecord* result = NULL;
+    PPDiagnosticRecord* last = NULL;
+    PPDiagnosticRecord* cursor = first;
+    while (cursor != NULL)
+    {
+        // A run of one position, split into its source-ordered records and the others, each in its sorted order.
+        const uint64_t position = cursor->position;
+        PPDiagnosticRecord* ordered = NULL;
+        PPDiagnosticRecord* ordered_last = NULL;
+        PPDiagnosticRecord* others = NULL;
+        PPDiagnosticRecord* others_last = NULL;
+        while (cursor != NULL && cursor->position == position)
+        {
+            PPDiagnosticRecord* next = cursor->next;
+            cursor->next = NULL;
+            if (cursor->source_ordered)
+            {
+                if (ordered_last != NULL)
+                {
+                    ordered_last->next = cursor;
+                }
+                else
+                {
+                    ordered = cursor;
+                }
+                ordered_last = cursor;
+            }
+            else
+            {
+                if (others_last != NULL)
+                {
+                    others_last->next = cursor;
+                }
+                else
+                {
+                    others = cursor;
+                }
+                others_last = cursor;
+            }
+            cursor = next;
+        }
+        while (ordered != NULL || others != NULL)
+        {
+            const bool take_ordered = ordered != NULL && (others == NULL || ordered->token < others->token);
+            PPDiagnosticRecord* taken = take_ordered ? ordered : others;
+            ordered = take_ordered ? ordered->next : ordered;
+            others = !take_ordered ? others->next : others;
+            if (last != NULL)
+            {
+                last->next = taken;
+            }
+            else
+            {
+                result = taken;
+            }
+            last = taken;
+        }
+    }
+    if (last != NULL)
+    {
+        last->next = NULL;
+    }
+    return result;
+}
+
 static void pp_render_message(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, ...)
 {
     va_list arguments;
@@ -936,6 +1007,10 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
         else
         {
             pp->diagnostic_first = pp_diagnostic_order(pp->diagnostic_first);
+            if (pp->diagnostic_source_ordered)
+            {
+                pp->diagnostic_first = pp_diagnostic_source_merge(pp->diagnostic_first);
+            }
             for (PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL && !pp->fatal; record = record->next)
             {
                 PPSeverity severity = (PPSeverity)record->severity;
@@ -979,6 +1054,7 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
         }
         pp->diagnostic_first = NULL;
         pp->diagnostic_last = NULL;
+        pp->diagnostic_source_ordered = false;
     }
 }
 
@@ -1067,7 +1143,13 @@ static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, u
                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments)
 {
     pp_history_ensure(pp);
+    PPDiagnosticRecord* previous = pp->diagnostic_last;
     pp_diagnose_source_location(pp, severity, location, pp_history_at(pp, token), position, phase, notes, note_count, NULL, 0, format, arguments);
+    // Its collected record's token, which orders a source-ordered record among its position's (pp_diagnostic_source_merge).
+    if (pp->diagnostic_last != previous)
+    {
+        pp->diagnostic_last->token = token + 1;
+    }
 }
 
 static __attribute__((format(printf, 9, 10))) void pp_diagnose_source_notes_phase(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin,

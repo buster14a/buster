@@ -1092,6 +1092,36 @@ static uint32_t check_driver_file_initializer_end(const Parser* parser, const Ch
     return end;
 }
 
+// The last token of the initializer that holds `token`, or BUSTER_CHECK_NONE outside one (#2252): the one before the
+// first `,` or `;` at the depth of the outermost `=` the parse tree's climb from `token` reaches from its right. clang's
+// AddInitializerToDecl checks the initializer once it is parsed, before the declaration's own checks at that `,` or `;`
+// (a type_tag_for_datatype's).
+static uint32_t check_driver_initializer_last(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t equal = BUSTER_CHECK_NONE;
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < count && steps < count; steps += 1)
+    {
+        const uint32_t parent = parser->tree.parents[at];
+        const bool top = parent >= count || parent == at;
+        equal = !top && parent < at && parser->tokens.kinds[parent] == PARSE_KIND_EQUAL ? parent : equal;
+        at = top ? count : parent;
+    }
+    uint32_t end = BUSTER_CHECK_NONE;
+    uint32_t depth = 0;
+    for (uint32_t t = equal < count ? equal + 1 : count; end == BUSTER_CHECK_NONE && t < count; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        end = depth == 0 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || closer) ? t : end;
+        depth = opener ? depth + 1 : closer && depth != 0 ? depth - 1 : depth;
+    }
+    const uint32_t last = end < count && end > equal + 1 ? end - 1 : BUSTER_CHECK_NONE;
+    return last;
+}
+
 static uint32_t check_driver_warning_position(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckRepair* repair,
                                               const uint64_t* completions, uint32_t completion_count, uint32_t token, uint32_t warning, uint32_t publication_end,
                                               const Parser* original, PPDiagnosticPhase* phase)
@@ -5437,6 +5467,15 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         {
                             const uint32_t sorted = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
                             publication = publication < sorted ? sorted : publication;
+                        }
+                        // The reader's "not a compile-time constant" is clang's once the initializer is parsed (#2252): after
+                        // what reading it gave at once, as a comma's -Wunused-value in a bound of its sizeof's type name.
+                        const uint32_t initializer_last = phase == 0 && input->reports[index].message == CHECK_INPUT_CONSTANT_INITIALIZER ?
+                                                          check_driver_initializer_last(parser, located) : BUSTER_CHECK_NONE;
+                        if (initializer_last < count)
+                        {
+                            const uint32_t parsed = check_driver_publication_position(parser, pp, initializer_last, publication_end);
+                            publication = publication < parsed ? parsed : publication;
                         }
                         // The report's identifier supplies its spelling. Its sorted publication key can be a later
                         // expression's end, as for an attribute count diagnosed after an argument's call error.
