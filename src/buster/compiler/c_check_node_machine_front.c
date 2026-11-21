@@ -441,13 +441,14 @@ struct NodeFrontTypes
     // A summary's side facts (BUSTER_NODE_READER_WINDOW_ROWS; null otherwise), by root node, for an expression the
     // rows take whole on the window: its references' first in their store (UINT32_MAX: none is kept for the root) and
     // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
-    // objects one after another, `summary_count` of `summary_capacity`; an expression it had no room for keeps none
+    // objects, followed only for a switch by its selector's TypeId. `summary_count` counts all words stored,
+    // of `summary_capacity`; an expression it had no room for keeps none
     // (`summary_unkept`). And the unit's functions the return flow leaves unknown from a declaration on
     // (check_program_return_unknowns' table, by object; null where the unit has none).
     uint32_t* summary_firsts;
     uint16_t* summary_counts;
     uint8_t* summary_facts;
-    uint32_t* summary_objects;
+    uint32_t* summary_words;
     uint64_t summary_count;
     uint64_t summary_capacity;
     uint64_t summary_unkept;

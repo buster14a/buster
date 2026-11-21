@@ -61,6 +61,7 @@
     ENTRY(LOCATION_LIMIT, "--location-limit") \
     ENTRY(LOWER_ALL, "--lower-all") \
     ENTRY(NO_DEFERRED_BODIES, "--no-deferred-bodies") \
+    ENTRY(NODE_WINDOW, "--node-window") \
     ENTRY(POISON_ARENAS, "--poison-arenas") \
     ENTRY(PREDEFINES, "--predefines") \
     ENTRY(PROVISIONAL_SELECTION, "--provisional-selection") \

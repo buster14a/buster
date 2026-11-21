@@ -6876,7 +6876,7 @@ warnings:
 | the return flow (`check_program_return_facts`; `-Wreturn-type` is on by default) | each call's callee, joined up the tree | **the side record: its root's fact** |
 | `check_program_branch_truth` (the return flow, the warnings' reach) | a branch's condition's truth, through `!`, casts and the operands of `&&` and `\|\|` | its value's: the window lists what an operand or a cast alone decides |
 | the controls' fold (`check_control_fold_truth`) | the root's constant, and below it where it is one | its value's: a taken constant folds |
-| `-Wswitch` | the node at the selector's first token | none: a `switch`'s condition stays the walk's ([#3200](https://github.com/buster14a/buster/issues/3200)) |
+| `-Wswitch` | the selector's type before the switch promotes it | its operand's window type, kept after the references |
 | the initializer planner (`check_initializers_run_events`) | the greatest node of the source's tokens' | the flip's: the summary node is its tokens' |
 | the lowering and its rooms | everything | the flip's: the tape is spliced |
 | the default-on warning passes | subtrees | none: a taken expression has none of their warnings, by its tests |
@@ -6994,14 +6994,18 @@ The controls' fold does not fold a comma whose left operand is no constant,
 and C lists a folded comma: every taken root with an integer constant folds
 as a leaf of its value would.
 
-**Not made: a `switch`'s selector's type.** The specification had it as a
-third fact. `-Wswitch` does not read the selector's own type: it reads the
-node at the selector's first token, which is the selector only where that
-token is its root's
-([#3200](https://github.com/buster14a/buster/issues/3200): `switch
-(s->kind)` warns in clang and not here). A side type by the root would
-answer another question than the pass asks, so a `switch`'s condition stays
-the walk's: 70, 85, 115 and 27 of the taken expressions.
+**A switch's selector type.** The original run left this side fact open on
+70 SQLite, 85 Lua, 115 musl and 27 compiler-source expressions. The warning
+then read the first token's node. After [#3209](https://github.com/buster14a/buster/pull/3209),
+it reads the operand of the switch's promotion and unwraps implicit conversions.
+The window already has the operand's type. It keeps one extra word after the
+references of each switch whose tape it takes. The front only creates an implicit
+conversion at a return, so a taken switch's operand is already the value the
+warning inspects. The shadow compares its full type identity with the warning
+pass's graph walk, including qualifiers and the distinction between two enum
+types. A fixture covers arithmetic promotions and casts alongside enum names,
+members, subscripts and calls. The fault control changes each saved selector
+type and the comparison counts it.
 
 **What the corpora did not have.** The four inputs, the fixtures and the
 piece's own one-statement programs read no difference when the code was
@@ -7108,7 +7112,7 @@ with the facts +0.34, +0.39 and +0.34 more, and the tests' other parts
   operator puts it, conditions an operand or a cast decides, the walks'
   other sources of a reference, a `constexpr` object, and statements at each
   lane of a block) and the 6,414 of the pieces before. The differences: a
-  selector's type is not made (above); and the control changes what reader
+  selector's type was left out of that measurement (its follow-up is above); and the control changes what reader
   time kept, not the program's answers. With it each kept expression's facts
   are kept with one changed (a reference more, a reference's object, its
   fact's stop and its unknown in turn), and the comparison must count every

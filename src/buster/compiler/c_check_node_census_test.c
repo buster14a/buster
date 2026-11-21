@@ -4836,15 +4836,15 @@ static bool node_rows_test_fixture(const char* directory, const char* name, cons
                       counts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0 && shadow.own_values_wrong == 0;
     // And each tape's expression's side facts are the program's own walks' (node_shadow_summaries).
     const bool summarized = shadow.summary_compared == expected->taken && shadow.summary_reference_differences == 0 && shadow.summary_fact_differences == 0 &&
-                            shadow.summary_truth_differences == 0 && shadow.summary_fold_differences == 0 && shadow.summary_unkept == 0 &&
+                            shadow.summary_truth_differences == 0 && shadow.summary_fold_differences == 0 && shadow.summary_selector_differences == 0 && shadow.summary_unkept == 0 &&
                             counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] == 0;
     if (!summarized)
     {
         fprintf(stderr, "test-checker: node-rows %s: the side facts of %" PRIu64 " of the %u expressions whose tape is made were compared with the program's walks: references differ for %"
-                PRIu64 ", return facts for %" PRIu64 ", truths for %" PRIu64 ", folds for %" PRIu64 "; %" PRIu64 " were not kept, and %" PRIu64
+                PRIu64 ", return facts for %" PRIu64 ", truths for %" PRIu64 ", folds for %" PRIu64 ", selector types for %" PRIu64 "; %" PRIu64 " were not kept, and %" PRIu64
                 " chunks' second run made other facts\n",
                 name, shadow.summary_compared, expected->taken, shadow.summary_reference_differences, shadow.summary_fact_differences, shadow.summary_truth_differences,
-                shadow.summary_fold_differences, shadow.summary_unkept, counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES]);
+                shadow.summary_fold_differences, shadow.summary_selector_differences, shadow.summary_unkept, counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES]);
     }
     if (!valid || !same)
     {
@@ -4936,6 +4936,26 @@ struct NodeSummaryExpected
     uint32_t passed;
 };
 
+// Six of the fixture's nine selectors are enums, from two different definitions. An explicit cast to int,
+// unary promotion and an integer by itself account for the other three. Every one must reach the oracle.
+static bool node_summary_test_selectors(char** options, uint32_t option_count, bool fault)
+{
+    const uint8_t front = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_LEAN;
+    const uint16_t reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_VERIFY | BUSTER_NODE_READER_FACTS | BUSTER_NODE_READER_WINDOW | BUSTER_NODE_READER_WINDOW_TESTS |
+                            BUSTER_NODE_READER_WINDOW_CONTEXTS | BUSTER_NODE_READER_WINDOW_ROWS | (fault ? BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT : 0);
+    NodeShadow shadow = { .verify = true, .front = front, .reader = reader, .passes = 1, .repeat = 1 };
+    NodeCensus census = { .shadow = &shadow };
+    const bool read = node_census_file(&census, "tests/node-machine/switch-selectors.c", options, option_count) && census.files == 1 && census.failures == 0;
+    const bool valid = read && shadow.summary_selectors == 9 && shadow.summary_enum_selectors == 6 && shadow.summary_selector_differences == (fault ? 9u : 0u);
+    if (!valid)
+    {
+        fprintf(stderr, "test-checker: switch selectors%s: %" PRIu64 " compared, %" PRIu64 " enums, %" PRIu64 " differences (expected 9, 6, %u)\n",
+                fault ? " with changed types" : "", shadow.summary_selectors, shadow.summary_enum_selectors, shadow.summary_selector_differences, fault ? 9u : 0u);
+    }
+    NodeShadow selector_only = { .summary_selector_differences = shadow.summary_selector_differences };
+    return valid && node_shadow_differs(&selector_only) == fault;
+}
+
 // A summary's side facts on fixture `text` (written to `directory` as `name`, read with `options`): each kept
 // expression's references and return fact are the program's own walks', a kept condition's truth is its value's and a
 // kept constant folds, and the counts are `expected`'s. With the shadow's switch nothing is kept and X's tapes are the
@@ -4957,7 +4977,7 @@ static bool node_summary_test_fixture(const char* directory, const char* name, c
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     const uint64_t* counts = shadow.reader_facts;
     const bool exact = shadow.summary_reference_differences == 0 && shadow.summary_fact_differences == 0 && shadow.summary_truth_differences == 0 &&
-                       shadow.summary_fold_differences == 0 && shadow.summary_unkept == 0 && counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] == 0 &&
+                       shadow.summary_fold_differences == 0 && shadow.summary_selector_differences == 0 && shadow.summary_unkept == 0 && counts[NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES] == 0 &&
                        counts[NODE_FACTS_COUNT_ROWS_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES] == 0 &&
                        counts[NODE_FACTS_COUNT_CONTEXTS_DIFFERENCES] == 0 && counts[NODE_FACTS_COUNT_TESTS_DIFFERENCES] == 0;
     const bool same = counts[NODE_FACTS_COUNT_ROWS_TAKEN] == expected->taken && counts[NODE_FACTS_COUNT_SUMMARY_EXPRESSIONS] == expected->taken &&
@@ -6113,8 +6133,81 @@ static bool node_front_test_builtins(const char* directory, uint8_t front, uint6
     return valid && same;
 }
 
+// Compile the source independently both ways. Change the retained first row after checking and lower it again:
+// only a lowering that actually splices the reader's tape can emit the changed value.
+static void node_window_test_compile(CheckTest* test)
+{
+    char file[PATH_MAX];
+    snprintf(file, sizeof(file), "%s/checker/node-window.c", check_test_fixture_root);
+    char* options[] = { "-nostdinc", "-Wall", "-Wextra" };
+    static LowerSource plain;
+    static LowerSource window;
+    const bool opened_plain = lower_source_open(&plain, file, options, BUSTER_ARRAY_LENGTH(options), false);
+    const bool opened_window = lower_source_open(&window, file, options, BUSTER_ARRAY_LENGTH(options), true);
+    const bool prepared = opened_plain && opened_window && plain.prepared && window.prepared;
+    check_test_expect(test, prepared, "node-window prepares its mixed ordinary and taken returns");
+    if (prepared)
+    {
+        const CheckInput* reference = &plain.path.input;
+        CheckInput* input = &window.path.input;
+        check_test_expect(test, reference->window_count == 0 && input->window_count == 7 && input->window_nodes == 23,
+                          "node-window admits each of the seven returns on baked and runtime-initialized transition tables");
+        check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
+                          "node-window replaces the 23 ordinary nodes by the seven return summaries");
+        bool same = true;
+        for (uint32_t i = 0; same && i < input->window_count; i += 1)
+        {
+            const CheckInputWindowEntry* row = input->window_entries + i;
+            const uint32_t node = row->node;
+            const uint32_t returned = node < input->graph.count ? input->graph.tokens[node] : BUSTER_CHECK_NONE;
+            const uint32_t other = returned < reference->token_count ? reference->token_nodes[returned] : BUSTER_CHECK_NONE;
+            if (other >= plain.path.stream.count)
+            {
+                same = false;
+                break;
+            }
+            const CheckValue value = check_stream_value(&window.path.stream, node);
+            const CheckValue regular = check_stream_value(&plain.path.stream, other);
+            same = input->graph.ops[node] == CHECK_OP_VALUE && input->graph.members[node] == i + 1 && check_test_value_equal(&value, &regular) &&
+                   row->kind == BUSTER_TYPED_CONST && row->class == BUSTER_TYPED_CLASS_I32 &&
+                   row->value == (uint64_t)(int64_t)(int32_t)value.integer;
+        }
+        check_test_expect(test, same, "node-window publishes the full ordinary checked value and native row for each admitted return");
+        CheckProgramLowered original = { 0 };
+        CheckProgramLowered first = { 0 };
+        bool lowered = check_program_lower(&original, &plain.selected.program, true, &plain.path.output_arena, &plain.path.scratch) &&
+                       check_program_lower(&first, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) && original.count == first.count;
+        for (uint32_t b = 0; lowered && b < first.count; b += 1)
+        {
+            lowered = check_test_program_function(original.functions + b, first.functions + b);
+        }
+        check_test_expect(test, lowered, "node-window mixed returns lower to the ordinary functions' native tapes");
+        bool replayed = false;
+        if (lowered && input->window_count != 0)
+        {
+            input->window_entries[0].value = 314159;
+            CheckProgramLowered changed = { 0 };
+            if (check_program_lower(&changed, &window.selected.program, true, &window.path.output_arena, &window.path.scratch) && changed.count == first.count)
+            {
+                for (uint32_t b = 0; b < changed.count; b += 1)
+                {
+                    const Tier0Function* function = changed.functions + b;
+                    for (uint32_t e = 0; e < function->count; e += 1)
+                    {
+                        replayed |= function->kinds[e] == BUSTER_TYPED_CONST && function->values[e] == 314159;
+                    }
+                }
+            }
+        }
+        check_test_expect(test, replayed, "node-window lowering reads the retained native row independently of the checked summary");
+    }
+    lower_source_close(&window);
+    lower_source_close(&plain);
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
+    node_window_test_compile(test);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
     check_test_expect(test, ready, "node-census fixtures' directory is made");
@@ -6716,6 +6809,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-rows: X's rows on the window make each entry's value as X does on T's columns: a line's field, a stride, a fixed number or its number in its expression");
     // A summary's side facts on the window: its own fixture's, and a unit's with a function the return flow leaves
     // unknown from a declaration on.
+    check_test_expect(test, node_summary_test_selectors(quiet, BUSTER_ARRAY_LENGTH(quiet), false) && node_summary_test_selectors(loud, BUSTER_ARRAY_LENGTH(loud), true),
+                      "node-summary: a switch retains its selector type before promotion and the comparison catches every changed type");
     static const NodeSummaryExpected summary_expected = {
         .taken = 371,
         .references = 800,

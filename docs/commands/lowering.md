@@ -2482,9 +2482,9 @@ survey of those passes, what it measured and its gates.
 
   The controls' fold (`check_control_fold_truth`) does not fold a comma
   whose left operand is no constant: C lists a folded comma.
-- **Not made: a `switch`'s selector's type.** `-Wswitch` reads the node at
-  the selector's first token (#3200), which only the walk makes: a
-  `switch`'s condition stays the walk's.
+- **A switch's selector type.** The operand of its promotion in the window
+  supplies the type that `-Wswitch` reads. Each taken switch keeps this one
+  word after its references. Other expressions store their references alone.
 
 `--no-window-summaries` is the cost's switch: the same run with no lines'
 column, no calls' mask and no sweep, and with nothing kept or compared. The
@@ -2516,6 +2516,11 @@ The report adds:
   branch's condition, whether `check_program_branch_truth` knows its truth
   exactly where its value says it. The four differences, `not kept` and the
   second runs that differ must be 0: the command exits 1 otherwise.
+- `node-shadow: window summaries switch selectors=N enums=N type-differences=N`
+  counts the kept switches, how many have an enum selector before promotion,
+  and how many types disagree with `check_common_switch_selector_type`.
+  A difference makes the command exit 1. The summary fault control changes
+  the type of every kept selector.
 - `node-shadow: window summaries ticks=N (T a record swept, T a chunk); a
   second run over the same chunk, not counted: ticks=N (T a record swept,
   T a chunk)`: the sweep's TSC ticks.
@@ -2718,3 +2723,29 @@ search of lists of every length to 20, and
 `node_objects_test_comparisons` the shadow's own comparisons, a row a
 case: an object's facts against the program's, the objects a rename
 pragma labelled, and a name's line by its number or its words.
+
+
+### Compiling with the window (#2850)
+
+`./build/compiler --node-window -c file.c -o file.o` enables the first production
+use of the window. For a complete `return` of an unqualified `int`, the reader
+can accept a plain integer literal, its unary minus, or two such literals with
+`+`, `-` or `*`. The literal values come from the normal chunk decoder. The
+operator uses the window kernel's checked integer fold, which refuses overflow.
+A successful return gets one checked value at its return token and one retained
+native CONST entry. The lowering emits this entry in the ordinary body's tape.
+For example, `return 18 + 24;` replaces two literal nodes, the addition and the
+return conversion with one summary carrying 42.
+
+Admission requires the entire expression in the same coded chunk. Other types,
+operators and spellings, debug information, deferred parts, and units requiring
+musttail validation use the existing graph. The window checks the coded tokens
+before any of their graph actions run. A refusal consumes no tokens. No ordinary
+graph or shadow run supplies a successful fold.
+
+`--time-stages` reports the expressions taken, the ordinary nodes they replace,
+the summaries and the resulting graph size per unit. The
+`test-checker` node-machine tests compare checked root values and native tapes
+with the ordinary compile, then change a retained row to exercise the splice.
+The checker driver also checks warning policy, diagnostic order and object bytes
+for a unit containing both taken and refused expressions.
