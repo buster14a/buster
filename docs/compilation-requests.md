@@ -34,11 +34,16 @@ extends the existing contracts (`PPOptions`, `CheckProgramOptions`,
   protected or internal default visibility, `-ffunction-sections` and
   `-fdata-sections`; `-fcommon` is implemented, #147), then, when the request emits code, instrumentation (#1112: a sanitizer, coverage or
   OpenMP, from the resolved predefines, which a later `-fno-` option may
-  have cancelled) and position-independent code (#811), a layout, then a
+  have cancelled) and position-independent code (#811) but in a link's
+  executable (#2101), a layout, then a
   language or target the checker doesn't take
-  (`check_input_target_supported`). `check_request_describe` writes the
-  driver's message for the refusal. The driver prints it after `error: `, and
-  the other clients print it in their own reports.
+  (`check_input_target_supported`). What the request makes of its code is
+  its `CheckRequestCode`: none (`-E`, `-fsyntax-only`), an object another
+  link may take (`-c`, and the clients that compile as `-c` does) or a
+  link's executable, which takes `-fPIC` and `-fpic`.
+  `check_request_describe` writes the driver's message for the refusal. The
+  driver prints it after `error: `, and the other clients print it in their
+  own reports.
 - `check_request_read` (a client's arguments, file included) and
   `check_request_parse` (options, then one file) are how a client reads its
   request: scanned, parsed and refused or accepted as a whole. A request that

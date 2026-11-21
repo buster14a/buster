@@ -2,7 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #811: PIC predefines must not advertise shared-library code generation that the backend does not implement.
-// Exercise the real driver, including option ordering and rejection before output publication.
+// Exercise the real driver, including option ordering and rejection before output publication. -c's object refuses
+// -fPIC and -fpic; a link's executable takes them (#2101), the same code as without them, with clang's predefined macros.
 
 typedef enum CheckPicAction
 {
@@ -354,6 +355,9 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
             {
                 for (uint32_t mode = BUSTER_CHECK_PIC_OBJECT; mode <= BUSTER_CHECK_PIC_LINK; mode += 1)
                 {
+                    // -c's object, which another link may take, is refused; a link's executable takes the option and
+                    // runs (#2101), replacing what was at its path.
+                    const bool linked = mode == BUSTER_CHECK_PIC_LINK;
                     for (uint32_t existing = 0; existing < 2; existing += 1)
                     {
                         unlink(output);
@@ -364,9 +368,15 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
                                                                         options, BUSTER_ARRAY_LENGTH(options), &text);
                         char expected[128];
                         snprintf(expected, sizeof(expected), "unsupported code generation option '%s'", flags[flag]);
-                        snprintf(label, sizeof(label), "PIC rejection fixture=%u scalar=%u flag=%s mode=%u existing=%u", fixture, scalar, flags[flag], mode, existing);
-                        check_test_expect(test, prepared && status == 1 && text != NULL && strstr(text, expected) != NULL &&
-                                               (existing == 0 ? access(output, F_OK) != 0 : saved_written && check_test_driver_same_files(saved, output)), label);
+                        const bool refused = status == 1 && text != NULL && strstr(text, expected) != NULL &&
+                                             (existing == 0 ? access(output, F_OK) != 0 : saved_written && check_test_driver_same_files(saved, output));
+                        char* run[] = { output, NULL };
+                        char* run_text = NULL;
+                        const int ran = linked && status == 0 ? check_test_driver_spawn(run, &run_text) : -1;
+                        free(run_text);
+                        snprintf(label, sizeof(label), "PIC %s fixture=%u scalar=%u flag=%s mode=%u existing=%u", linked ? "link" : "rejection", fixture, scalar,
+                                 flags[flag], mode, existing);
+                        check_test_expect(test, prepared && (linked ? status == 0 && ran == 0 : refused), label);
                         free(text);
                     }
                 }
@@ -420,6 +430,63 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
         free(text);
         unlink(header);
     }
+    // A link's predefined macros are -E's, which are clang's for the same options (clang 23.1.4's -dM -E, #2101): the last
+    // of the eight PIC and PIE options decides, and -fPIC and -fpic leave __PIE__ undefined. The executable's exit status
+    // is __PIC__ * 10 + __PIE__, either 0 where it is undefined.
+    static const char level_program[] =
+        "#if defined(__pic__) != defined(__PIC__) || defined(__pie__) != defined(__PIE__) || __pic__ != __PIC__ || __pie__ != __PIE__\n"
+        "#error the lower-case PIC macros differ\n#endif\n"
+        "#ifdef __PIC__\n#define PIC_LEVEL __PIC__\n#else\n#define PIC_LEVEL 0\n#endif\n"
+        "#ifdef __PIE__\n#define PIE_LEVEL __PIE__\n#else\n#define PIE_LEVEL 0\n#endif\n"
+        "int main(void) { return PIC_LEVEL * 10 + PIE_LEVEL; }\n";
+    static const struct
+    {
+        const char* options[2];
+        uint32_t count;
+        int status;
+    } levels[] = {
+        { { NULL, NULL }, 0, 22 },
+        { { "-fPIC", NULL }, 1, 20 },
+        { { "-fpic", NULL }, 1, 10 },
+        { { "-fPIC", "-fPIE" }, 2, 22 },
+        { { "-fPIE", "-fPIC" }, 2, 20 },
+        { { "-fpic", "-fPIE" }, 2, 22 },
+        { { "-fPIE", "-fpic" }, 2, 10 },
+        { { "-fPIC", "-fpie" }, 2, 11 },
+        { { "-fpie", "-fPIC" }, 2, 20 },
+        { { "-fPIC", "-fpic" }, 2, 10 },
+        { { "-fpic", "-fPIC" }, 2, 20 },
+        { { "-fPIC", "-fno-PIC" }, 2, 0 },
+        { { "-fno-PIC", "-fPIC" }, 2, 20 },
+        { { "-fpic", "-fno-pic" }, 2, 0 },
+        { { "-fno-pic", "-fpic" }, 2, 10 },
+        { { "-fPIC", "-fno-pie" }, 2, 0 },
+        { { "-fno-pie", "-fPIC" }, 2, 20 },
+    };
+    const bool levels_written = parse_test_write(source, level_program, sizeof(level_program) - 1);
+    check_test_expect(test, levels_written, "PIC link level fixture is written");
+    for (uint32_t i = 0; levels_written && i < BUSTER_ARRAY_LENGTH(levels); i += 1)
+    {
+        char* text = NULL;
+        unlink(output);
+        const int status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_LINK, levels[i].options, levels[i].count, &text);
+        char* run[] = { output, NULL };
+        char* run_text = NULL;
+        const int ran = status == 0 ? check_test_driver_spawn(run, &run_text) : -1;
+        free(run_text);
+        snprintf(label, sizeof(label), "PIC link levels %s %s: status %d", levels[i].count > 0 ? levels[i].options[0] : "(none)",
+                 levels[i].count > 1 ? levels[i].options[1] : "", levels[i].status);
+        check_test_expect(test, status == 0 && ran == levels[i].status, label);
+        free(text);
+    }
+    // -shared is still no option of the driver's (#2101's half-step): -fPIC beside it makes no library.
+    const char* shared[] = { "-shared", "-fPIC" };
+    char* shared_text = NULL;
+    unlink(output);
+    const int shared_status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_LINK, shared, BUSTER_ARRAY_LENGTH(shared), &shared_text);
+    check_test_expect(test, shared_status == 1 && shared_text != NULL && strstr(shared_text, "unknown argument: -shared") != NULL && access(output, F_OK) != 0,
+                      "-shared -fPIC is refused and writes nothing");
+    free(shared_text);
     const bool macros_written = parse_test_write(source, macro_program, sizeof(macro_program) - 1);
     check_test_expect(test, macros_written, "PIC macro fixture is written");
     for (uint32_t scalar = 0; macros_written && scalar < 2; scalar += 1)

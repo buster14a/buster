@@ -630,7 +630,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
     const char* file = 0;
     CheckRequestRefusal refusal = { .error = CHECK_REQUEST_ACCEPTED };
     valid = valid && passes != 0 && passes <= BUSTER_CHECK_SOURCE_MAX_PASSES && iterations <= 1000000 && after <= 1000 &&
-            check_request_read(&pp_options, &refusal, &file, own, used, false, &option_arena) && file != 0;
+            check_request_read(&pp_options, &refusal, &file, own, used, CHECK_REQUEST_CODE_NONE, &option_arena) && file != 0;
     if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");
