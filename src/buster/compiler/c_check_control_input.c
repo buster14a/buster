@@ -644,8 +644,13 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
     // The first clang::likely or clang::unlikely, which excludes the other (#2291).
     uint32_t likelihood = BUSTER_CHECK_NONE;
     bool likely = false;
-    for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+    // clang's Sema drops an attribute it gives an error for and goes on to the next (ProcessStmtAttributes), so each one's
+    // errors are given (#1844), and the statement's attributes are valid where all of them are.
+    bool all = true;
+    for (uint32_t i = 0; attributes != 0 && i < attributes->count; i += 1)
     {
+        all = all && valid;
+        valid = true;
         CheckInputAttribute* attribute = attributes->records + i;
         const CheckInputAttributeKind kind = attribute->kind;
         const String8 generic = kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword ? check_input_attribute_name(reader, attribute->name) : (String8){ 0 };
@@ -703,7 +708,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
                 }
             }
             valid = holder.error == CHECK_ATTRIBUTE_ERROR_NONE && reader->output->report_count == reported;
-            aligned = code_align && aligned == BUSTER_CHECK_NONE ? attribute->first : aligned;
+            aligned = code_align && valid && aligned == BUSTER_CHECK_NONE ? attribute->first : aligned;
             attribute->ignored = true;
         }
         else if (check_input_attribute_equal(generic, "assume"))
@@ -954,7 +959,7 @@ static bool check_input_statement_attribute_kinds(CheckInputReader* reader, Chec
             }
         }
     }
-    return valid;
+    return all && valid;
 }
 
 // The first clang::likely or clang::unlikely among the C23 attribute lists from `token` on, as clang's
@@ -1174,10 +1179,12 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
     }
     else if (body && (empty || keyword || expression))
     {
+        const uint32_t statement_reports = reader->output->report_count;
         uint32_t cursor = first;
         CheckInputAttributes* attributes = 0;
         reader->statement_attributes = true;
-        bool valid = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
+        const bool read = check_input_read_attributes(reader, &cursor, count, &attributes) && cursor == after;
+        bool valid = read;
         reader->statement_attributes = false;
         // GNU suppresses that clang's parser drops, all of them (#1844): it parses the statement as a declaration, whose
         // first token here, no `(` nor `*` that a declarator could start with, is its second error. (A `(` or a `*` makes
@@ -1226,21 +1233,38 @@ static void check_input_statement_attributes(CheckInputReader* reader, uint32_t 
                 check_input_warning_event(reader, &event, &note, 1);
             }
         }
+        // A fallthrough is valid on a null statement and a musttail on a return, whatever the other attributes' errors,
+        // which drop those alone (check_input_statement_attribute_kinds).
         bool fallthrough = false;
-        for (uint32_t i = 0; valid && attributes != 0 && i < attributes->count; i += 1)
+        for (uint32_t i = 0; read && attributes != 0 && i < attributes->count; i += 1)
         {
             fallthrough |= attributes->records[i].kind == CHECK_ATTRIBUTE_FALLTHROUGH;
         }
-        if (valid && empty && fallthrough)
+        if (read && empty && fallthrough)
         {
             check_input_set_attributes_at(reader->output, after, attributes);
         }
-        if (valid && returns && musttail != BUSTER_CHECK_NONE)
+        if (read && returns && musttail != BUSTER_CHECK_NONE)
         {
             const CheckInputMusttail record = { .statement = after, .attributes = first, .name = musttail, .body = reader->function_body };
             check_input_musttail_record(reader, record);
             // Its function's own type and its scopes' cleanups, which the check reads, are source order's.
             check_input_lane_refuse(reader, reader->lane, "a body has a musttail return");
+        }
+        // clang's Sema processes a statement's attributes once it has the statement (ProcessStmtAttributes), so their
+        // errors follow the statement's own, an inner statement's before those of one ending with it, and drops one it
+        // gives an error for, keeping the statement: the unit's later statements are read on, their attributes' errors
+        // too (#1844: a second `nomerge(1)`).
+        if (reader->output->report_count > statement_reports && !reader->output->resource)
+        {
+            const uint32_t end = after < count ? check_input_loop_statement_end(reader, after) : after;
+            for (uint32_t r = statement_reports; r < reader->output->report_count; r += 1)
+            {
+                CheckInputReport* report = reader->output->reports + r;
+                report->completion = report->completion < end ? end : report->completion;
+                report->suborder = report->suborder == 0 ? (uint64_t)(count - first) : report->suborder;
+            }
+            check_input_recover_reports(reader, statement_reports);
         }
         for (uint32_t token = first; token < after; token += 1)
         {
@@ -2920,7 +2944,7 @@ static bool check_input_fallthrough_breaks(CheckInputReader* reader, uint32_t bo
         uint32_t child = token;
         for (uint32_t at = parser->tree.parents[token]; own && live && !above && at < count; at = parser->tree.parents[at])
         {
-            const uint32_t keyword = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FOR ? reader->first_child[at] :
+            const uint32_t keyword = parser->tree.roles[at] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[at] == PARSE_ROLE_CLOSE_FOR ? check_input_statement_keyword(reader, at) :
                                                                                                                                           BUSTER_CHECK_NONE;
             const uint8_t kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
             own = kind != PARSE_KIND_WHILE && kind != PARSE_KIND_FOR && kind != PARSE_KIND_SWITCH && parser->tokens.kinds[at] != PARSE_KIND_DO;
@@ -2961,10 +2985,23 @@ static bool check_input_fallthrough_trap(const CheckInputReader* reader, uint32_
 // parentheses, `&` and `*` (`die`, `(die)`, `(&die)`) and an element's subscript (`table[i]`, whose object's
 // declaration spells its elements' type), or a cast's closing parenthesis (`((N)p)`, whose type name spells the
 // callee's type), or BUSTER_CHECK_NONE.
+static uint32_t check_input_fallthrough_strip(const CheckInputReader* reader, uint32_t callee);
+static uint32_t check_input_fallthrough_operand(const CheckInputReader* reader, uint32_t close);
+
 static uint32_t check_input_fallthrough_callee(const CheckInputReader* reader, uint32_t close)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
+    const uint32_t callee = check_input_fallthrough_strip(reader, check_input_fallthrough_operand(reader, close));
+    const bool named = callee < count && (parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER || parser->tree.roles[callee] == PARSE_ROLE_CLOSE_CAST);
+    return named ? callee : BUSTER_CHECK_NONE;
+}
+
+// A call's callee expression, the call `close` (its closing parenthesis): its child before the opening parenthesis, or
+// BUSTER_CHECK_NONE.
+static uint32_t check_input_fallthrough_operand(const CheckInputReader* reader, uint32_t close)
+{
+    const Parser* parser = reader->parser;
     uint32_t callee = BUSTER_CHECK_NONE;
     uint32_t previous = BUSTER_CHECK_NONE;
     bool found = false;
@@ -2974,6 +3011,14 @@ static uint32_t check_input_fallthrough_callee(const CheckInputReader* reader, u
         callee = found ? previous : callee;
         previous = child;
     }
+    return callee;
+}
+
+// A callee expression past parentheses, `&` and `*` and an element's subscript (check_input_fallthrough_callee).
+static uint32_t check_input_fallthrough_strip(const CheckInputReader* reader, uint32_t callee)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
     bool stripping = callee < count;
     while (stripping)
     {
@@ -3008,8 +3053,7 @@ static uint32_t check_input_fallthrough_callee(const CheckInputReader* reader, u
         stripping = inner < count;
         callee = stripping ? inner : callee;
     }
-    const bool named = callee < count && (parser->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER || parser->tree.roles[callee] == PARSE_ROLE_CLOSE_CAST);
-    return named ? callee : BUSTER_CHECK_NONE;
+    return callee;
 }
 
 // Whether a function's declaration holds GNU's noreturn attribute (`__attribute__((noreturn))`, `[[gnu::noreturn]]`),
@@ -3057,19 +3101,18 @@ static bool check_input_fallthrough_noreturn_object(const CheckInputReader* read
     return noreturn;
 }
 
-// Whether call `close` never returns, as clang's CFG ends its block there (CFGBuilder::VisitCallExpr): its callee names a
-// function declared noreturn (CHECK_INPUT_FUNCTION_NORETURN, which a redeclaration inherits), a builtin clang's table marks
-// noreturn (`r`: __builtin_abort, __builtin_unreachable, __builtin_trap), or a library function it marks so (abort, exit,
-// _Exit) declared with external linkage where the library's builtins are on, as clang's declaration merges the builtin's
-// noreturn type; a call through an object whose function type is noreturn (check_input_fallthrough_noreturn_object); or
-// it is __builtin_assume of a false condition (isBuiltinAssumeFalse).
-static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t close)
+static uint32_t check_input_first_token(const CheckInputReader* reader, uint32_t token);
+
+// Whether a call through named callee `callee` (an identifier or a cast's closing parenthesis, check_input_fallthrough_callee)
+// never returns: a function declared noreturn (CHECK_INPUT_FUNCTION_NORETURN, which a redeclaration inherits), a builtin
+// clang's table marks noreturn (`r`: __builtin_abort, __builtin_unreachable, __builtin_trap), or a library function it
+// marks so (abort, exit, _Exit) declared with external linkage where the library's builtins are on, as clang's
+// declaration merges the builtin's noreturn type; an object whose function type is noreturn
+// (check_input_fallthrough_noreturn_object), or a cast's type that is one.
+static bool check_input_fallthrough_noreturn_name(CheckInputReader* reader, uint32_t callee)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    // A function's declarator (`void die(void);` in a block) declares its name, which calls nothing.
-    const uint32_t named = check_input_fallthrough_callee(reader, close);
-    const uint32_t callee = named < count && reader->output->declarations[named] != named ? named : BUSTER_CHECK_NONE;
     const uint32_t declaration = callee < count ? reader->output->declarations[callee] : BUSTER_CHECK_NONE;
     const bool function = declaration < count && reader->declaration_kinds[declaration] == C_BINDING_FUNCTION;
     const bool declared = function && reader->output->function_flags != NULL && (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0;
@@ -3082,9 +3125,129 @@ static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t 
     // A cast's type name spells the callee's type: its typedef's walk (`((N)p)()`).
     const bool cast = callee < count && parser->tree.roles[callee] == PARSE_ROLE_CLOSE_CAST;
     const uint32_t cast_type = cast ? check_input_token_type_spelling(reader->output, parser, callee, true) : 0;
-    bool noreturn = declared || builtin || check_input_fallthrough_trap(reader, callee) ||
-                    (!cast && declaration < count && !function && check_input_fallthrough_noreturn_object(reader, declaration)) ||
-                    (cast_type != 0 && check_input_fallthrough_noreturn_object(reader, cast_type));
+    return declared || builtin || check_input_fallthrough_trap(reader, callee) ||
+           (!cast && declaration < count && !function && check_input_fallthrough_noreturn_object(reader, declaration)) ||
+           (cast_type != 0 && check_input_fallthrough_noreturn_object(reader, cast_type));
+}
+
+// Whether member access `operator` (its `.` or `->`) names a member that GNU's noreturn marks (CheckInput.noreturn_members,
+// #1844): its base's record, as the cached evaluator types the base (a pointer's pointee for `->`), its member of the
+// name after the operator, found among the marked ones by a binary search (`s.cb()`, `p->cb()`, `(&s)->cb()`).
+static bool check_input_fallthrough_noreturn_member(CheckInputReader* reader, uint32_t operator)
+{
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const CheckInput* input = reader->output;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t name = operator + 1;
+    uint32_t base = BUSTER_CHECK_NONE;
+    for (uint32_t child = reader->first_child[operator]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+    {
+        base = child < operator ? child : base;
+    }
+    bool noreturn = false;
+    if (input->noreturn_member_count != 0 && base < count && name < count && parser->tree.roles[name] == PARSE_ROLE_MEMBER)
+    {
+        CheckValue value = { 0 };
+        const uint32_t first = check_input_first_token(reader, base);
+        if (first < operator && check_input_evaluate_cached(reader, first, operator, &value) && value.type != 0)
+        {
+            TypeId record = type_strip_aligned(types, value.type);
+            if (parser->tokens.kinds[operator] == PARSE_KIND_ARROW)
+            {
+                record = type_kind(types, record) == BUSTER_TYPE_KIND_POINTER ? type_strip_aligned(types, type_element(types, record)) : 0;
+            }
+            const uint8_t kind = record != 0 ? type_kind(types, record) : BUSTER_TYPE_KIND_NONE;
+            uint64_t offset = 0;
+            uint32_t qualifiers = 0;
+            const uint32_t member = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ?
+                                    type_lookup_member(types, record, parser->tokens.names[name], &offset, &qualifiers) : 0;
+            uint32_t low = 0;
+            uint32_t high = input->noreturn_member_count;
+            while (member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN && low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                low = input->noreturn_members[middle] < member ? middle + 1 : low;
+                high = input->noreturn_members[middle] < member ? high : middle;
+            }
+            noreturn = member != 0 && member != BUSTER_TYPE_MEMBER_UNKNOWN && low < input->noreturn_member_count && input->noreturn_members[low] == member;
+        }
+    }
+    return noreturn;
+}
+
+// Whether a call through callee expression `root` never returns, as clang's CFG reads the callee's type
+// (CFGBuilder::VisitCallExpr): past parentheses, `&`, `*` and subscripts (check_input_fallthrough_strip), a named callee's
+// (check_input_fallthrough_noreturn_name), a member's that GNU's noreturn marks (check_input_fallthrough_noreturn_member),
+// a conditional's whose arms both are, whose composite type is then noreturn too, and a comma's right operand's (#1844:
+// `(c ? die : quit)()`, `(c ? s.cb : p->cb)()`, `(0, die)()`). The arms go on a bounded work list, not a recursion: the
+// call is noreturn where every leaf is.
+static bool check_input_fallthrough_noreturn_value(CheckInputReader* reader, uint32_t root)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t pending[16];
+    uint32_t depth = 0;
+    bool noreturn = root < count;
+    pending[depth++] = root;
+    while (noreturn && depth != 0)
+    {
+        const uint32_t callee = check_input_fallthrough_strip(reader, pending[--depth]);
+        const uint8_t role = callee < count ? parser->tree.roles[callee] : PARSE_ROLE_NONE;
+        const uint8_t kind = callee < count ? parser->tokens.kinds[callee] : 0;
+        if (kind == PARSE_KIND_IDENTIFIER || role == PARSE_ROLE_CLOSE_CAST)
+        {
+            // A function's declarator (`void die(void);` in a block) declares its name, which calls nothing.
+            noreturn = reader->output->declarations[callee] != callee && check_input_fallthrough_noreturn_name(reader, callee);
+        }
+        else if (role == PARSE_ROLE_MEMBER_OPERATOR)
+        {
+            noreturn = check_input_fallthrough_noreturn_member(reader, callee);
+        }
+        else if (role == PARSE_ROLE_CLOSE_TERNARY || check_input_attribute_comma(parser, callee))
+        {
+            // A conditional's arms, the children after its `?` (GNU's `?:` of no middle one isn't followed), or a comma's
+            // right operand.
+            uint32_t question = BUSTER_CHECK_NONE;
+            uint32_t middle = BUSTER_CHECK_NONE;
+            uint32_t last = BUSTER_CHECK_NONE;
+            for (uint32_t child = reader->first_child[callee]; child != BUSTER_CHECK_NONE; child = reader->next_child[child])
+            {
+                question = parser->tree.roles[child] == PARSE_ROLE_OPEN_TERNARY ? child : question;
+                middle = question < count && child > question && child < callee ? child : middle;
+                last = child > callee ? child : last;
+            }
+            const bool ternary = role == PARSE_ROLE_CLOSE_TERNARY;
+            noreturn = last < count && (!ternary || middle < count) && depth + 2 <= BUSTER_ARRAY_LENGTH(pending);
+            if (noreturn)
+            {
+                pending[depth++] = last;
+            }
+            if (noreturn && ternary)
+            {
+                pending[depth++] = middle;
+            }
+        }
+        else
+        {
+            noreturn = false;
+        }
+    }
+    return noreturn;
+}
+
+// Whether call `close` never returns, as clang's CFG ends its block there (CFGBuilder::VisitCallExpr): its callee's type
+// is noreturn (check_input_fallthrough_noreturn_value: a function declared noreturn, inheriting it through redeclarations,
+// a builtin or library function clang's table marks so, an object, a member, a cast, or a conditional's arms whose
+// function type is), or it is __builtin_assume of a false condition (isBuiltinAssumeFalse).
+static bool check_input_fallthrough_noreturn(CheckInputReader* reader, uint32_t close)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t named = check_input_fallthrough_callee(reader, close);
+    const uint32_t callee = named < count && reader->output->declarations[named] != named ? named : BUSTER_CHECK_NONE;
+    const uint32_t declaration = callee < count ? reader->output->declarations[callee] : BUSTER_CHECK_NONE;
+    bool noreturn = check_input_fallthrough_noreturn_value(reader, check_input_fallthrough_operand(reader, close));
     if (!noreturn && callee < count && declaration >= count && reader->pp != NULL)
     {
         uint8_t buffer[32];
@@ -3195,7 +3358,7 @@ static bool check_input_fallthrough_leaves(CheckInputReader* reader, uint32_t it
         const uint8_t role = parser->tree.roles[node];
         const uint32_t first = check_input_fallthrough_first(reader, node);
         const uint8_t first_kind = parser->tokens.kinds[first];
-        const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR ? reader->first_child[node] : BUSTER_CHECK_NONE;
+        const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR ? check_input_statement_keyword(reader, node) : BUSTER_CHECK_NONE;
         const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
         const bool statement = parser->tokens.kinds[node] == PARSE_KIND_SEMI;
         if (statement && (first_kind == PARSE_KIND_RETURN || first_kind == PARSE_KIND_GOTO || first_kind == PARSE_KIND_BREAK || first_kind == PARSE_KIND_CONTINUE))
@@ -3445,7 +3608,7 @@ static bool check_input_fallthrough_flows(CheckInputReader* reader, uint32_t tok
             while (result == 2 && child != BUSTER_CHECK_NONE)
             {
                 const uint8_t role = parser->tree.roles[child];
-                const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION ? reader->first_child[child] : BUSTER_CHECK_NONE;
+                const uint32_t keyword = role == PARSE_ROLE_CLOSE_CONDITION ? check_input_statement_keyword(reader, child) : BUSTER_CHECK_NONE;
                 const bool straight = check_input_fallthrough_straight(reader, child);
                 bool if_alone = keyword < count && parser->tokens.kinds[keyword] == PARSE_KIND_IF;
                 for (uint32_t branch = if_alone ? reader->first_child[child] : BUSTER_CHECK_NONE; branch != BUSTER_CHECK_NONE; branch = reader->next_child[branch])
@@ -3540,7 +3703,7 @@ static bool check_input_fallthrough_placed(const CheckInputReader* reader, uint3
         else if (role == PARSE_ROLE_CLOSE_CONDITION)
         {
             // An if's branch goes on after the if, and a switch's body after the switch; a loop's body goes back.
-            const uint32_t keyword = reader->first_child[parent];
+            const uint32_t keyword = check_input_statement_keyword(reader, parent);
             const uint8_t keyword_kind = keyword < count ? parser->tokens.kinds[keyword] : 0;
             done = keyword_kind != PARSE_KIND_IF && keyword_kind != PARSE_KIND_SWITCH;
             statement = parent;
@@ -3607,10 +3770,16 @@ static void check_input_fallthrough_placements(CheckInputReader* reader)
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     const CheckInput* input = reader->output;
+    // clang's analysis runs for no function that ends after an error (hasUncompilableErrorOccurred), one the reader went
+    // on past (CheckInput.recovered_reports) too: a statement attribute's (#1844).
     uint32_t first_error = count;
     for (uint32_t report = 0; report < input->report_count; report += 1)
     {
         first_error = input->reports[report].token < first_error ? input->reports[report].token : first_error;
+    }
+    for (uint32_t report = 0; report < input->recovered_count; report += 1)
+    {
+        first_error = input->recovered_reports[report].token < first_error ? input->recovered_reports[report].token : first_error;
     }
     const uint32_t recorded = reader->fallthrough_count;
     uint32_t function = BUSTER_CHECK_NONE;
@@ -3685,6 +3854,8 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
         memset(labels, 0, capacity * sizeof(uint32_t));
         uint32_t body = BUSTER_CHECK_NONE;
         uint32_t close = 0;
+        uint32_t case_from = BUSTER_CHECK_NONE;
+        uint32_t case_owner = count;
         CheckInputControlScan scan = { .after = begin };
         for (uint32_t token = begin; token < end; token += 1)
         {
@@ -3841,16 +4012,26 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
             else if (role == PARSE_ROLE_OPEN_CASE && (!prefix || token < limit))
             {
                 const uint32_t end = parser->tree.parents[token];
-                uint32_t owner = end < count ? parser->tree.parents[end] : count;
+                const uint32_t from = end < count ? parser->tree.parents[end] : count;
+                uint32_t owner = from;
                 while (owner < count)
                 {
-                    const uint32_t keyword = reader->first_child[owner];
+                    // The walk is a function of where it is: one that reaches the previous label's start ends where
+                    // that label's did, so a run of labels on one statement walks its parents once (#2995).
+                    if (owner == case_from)
+                    {
+                        owner = case_owner;
+                        break;
+                    }
+                    const uint32_t keyword = check_input_statement_keyword(reader, owner);
                     if (parser->tree.roles[owner] == PARSE_ROLE_CLOSE_CONDITION && keyword < count && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH)
                     {
                         break;
                     }
                     owner = parser->tree.parents[owner];
                 }
+                case_from = from;
+                case_owner = owner;
                 const bool complete = !prefix || (owner < limit && end < limit);
                 if (owner >= count || end >= count)
                 {
@@ -3961,7 +4142,7 @@ static __attribute__((always_inline)) void check_input_controls_range(CheckInput
                 bool enclosed = false;
                 for (uint32_t ancestor = parser->tree.parents[token]; ancestor < count && !enclosed; ancestor = parser->tree.parents[ancestor])
                 {
-                    const uint32_t keyword = reader->first_child[ancestor];
+                    const uint32_t keyword = check_input_statement_keyword(reader, ancestor);
                     enclosed = parser->tree.roles[ancestor] == PARSE_ROLE_CLOSE_CONDITION && keyword < count &&
                                parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH;
                 }

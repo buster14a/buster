@@ -6131,8 +6131,11 @@ static void node_window_test_compile(CheckTest* test, bool debug)
     {
         const CheckInput* reference = &plain.path.input;
         CheckInput* input = &window.path.input;
-        bool same = reference->window_count == 0 && input->window_count == (debug ? 7u : 9u) && input->window_nodes == (debug ? 23u : 28u) &&
-                    reference->graph.count == input->graph.count + input->window_nodes - input->window_count;
+        check_test_expect(test, reference->window_count == 0 && input->window_count == (debug ? 7u : 9u) && input->window_nodes == (debug ? 23u : 28u),
+                          "node-window admits the expected returns on baked and runtime-initialized tables, including the debug case");
+        check_test_expect(test, reference->graph.count == input->graph.count + input->window_nodes - input->window_count,
+                          "node-window replaces each admitted expression by one return summary");
+        bool same = true;
         uint32_t reads = 0;
         for (uint32_t i = 0; same && i < input->window_count; i += 1)
         {

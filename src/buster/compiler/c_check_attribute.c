@@ -4937,6 +4937,11 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
     const Parser* parser = reader->parser;
     uint32_t i = *cursor;
     bool valid = end <= parser->tokens.count && i <= end && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE;
+    // A GNU group's scan of the groups after it (whether a body follows) is the same for each group it passes, so a
+    // group that the previous group's scan reached first takes that scan's end, and hands it on to the next group of
+    // the scan, whatever its own kind: a run of n groups is scanned once, not n times (#2995).
+    uint32_t chain_next = UINT32_MAX;
+    uint32_t chain_after = 0;
     while (valid && check_input_attribute_starts(parser, i, end))
     {
         const uint32_t first = i;
@@ -4954,13 +4959,16 @@ static bool check_input_attributes(CheckInputReader* reader, uint32_t* cursor, u
             valid &= close > open + 1 && close < end && parser->tokens.kinds[open + 1] == (standard ? PARSE_KIND_L_SQUARE : PARSE_KIND_L_PAREN);
             const uint32_t list_end = valid ? parser->tree.parents[open + 1] : end;
             valid &= list_end + 1 == close;
-            uint32_t after = close + 1;
             const bool suffix = valid && !standard && parser->tree.roles[open] == PARSE_ROLE_OPEN_ATTRIBUTE;
-            while (suffix && after < end && check_input_attribute_starts(parser, after, end))
+            uint32_t after = first == chain_next ? chain_after : close + 1;
+            while (suffix && first != chain_next && after < end && check_input_attribute_starts(parser, after, end))
             {
                 const uint32_t next_open = parser->tokens.kinds[after] == PARSE_KIND_L_SQUARE ? after : after + 1;
                 after = next_open < end ? check_input_attribute_after_group(parser, next_open, end) : end + 1;
             }
+            // The scan's first step from this group is the group at close + 1, where it goes on as from there.
+            chain_next = close + 1 < after ? close + 1 : UINT32_MAX;
+            chain_after = after;
             const bool definition = suffix && after <= end && after < parser->tokens.count && parser->tree.roles[after] == PARSE_ROLE_OPEN_BODY;
             i = open + 2;
             if (valid && standard && parser->language.standard < 2023)

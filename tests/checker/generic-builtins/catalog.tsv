@@ -324,3 +324,6 @@ buster-fixtures v1 checker-sources
 0266	0266.c	rejected	generic: cpu_init of an argument
 0267	0267.c	rejected	generic: cpu_init's value
 0268	0268.c	-	generic: complex of qualified and aligned operands
+0269	0269.c	-	generic: nested builtin folds in runtime and immediate arguments
+0270	0270.c	rejected	generic: a bare const variable in a required integer constant expression
+0271	0271.c	rejected	generic: a nested builtin of a runtime argument cannot supply an immediate
