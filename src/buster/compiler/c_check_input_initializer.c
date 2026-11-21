@@ -158,7 +158,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             reader->incomplete_array_types[declaration] = incomplete_type;
         }
         check_input_rare_claim(reader, &reader->initializer_finish_next[declaration]);
-        reader->initializer_finish_next[declaration] = reader->initializer_finish_heads[end];
+        reader->initializer_finish_next[declaration] = check_input_list_head(reader, reader->initializer_finish_heads, end, BUSTER_CHECK_RESOLVE_FINISH);
         reader->initializer_finish_heads[end] = declaration;
         check_input_visit(reader, end, BUSTER_CHECK_RESOLVE_FINISH);
         reader->inference_end = end > reader->inference_end ? end : reader->inference_end;
