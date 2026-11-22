@@ -393,7 +393,9 @@ below), and long double (#141), in frame objects of their own, computed on the
 x87 stack (the selection guide's "Long double"), with aggregates returned in
 the x87's registers, and the convention's rarer aggregate shapes (#141): a
 part in a stack slot, a high or low eightbyte alone, an aggregate in a vector
-register whole, and an aggregate it ignores. So do the IR's vectors (#141, the
+register whole, and an aggregate it ignores; and the records SSE, SSEUP of a
+size no vector register has (#2798), whose payload a wider ymm or zmm register
+or stack slot carries. So do the IR's vectors (#141, the
 selection guide's "Vectors"), within a function and passed or returned by value,
 which the lowering makes aggregates in a vector register whole. Calls whose
 register parts exceed the red zone's 14 eightbyte staging slots reserve one
@@ -761,8 +763,7 @@ IR as libgcc's calls (the checker's lowering), whose 128-bit arguments and
 results are by-value aggregates; an `I128` in a signature, or an operation the
 split doesn't take, refuses the body as unsupported, and Tier 0 compiles it.
 Every function `--tier1` compiles is scanned for an `I128` instruction, 64 type
-bytes a compare on the vector path and one at a time on its scalar twin, and a
-function without one is the promoted function itself. The rewrite is scalar:
+bytes a compare, and a function without one is the promoted function itself. The rewrite is scalar:
 two passes of one body, counting then writing, on the functions with 128-bit
 values alone (two of `sqlite3.c`'s 2,668, none of Lua's), whose cost is below
 measurement on the compile (the record below). Each phi's and call's remapped
@@ -791,11 +792,11 @@ loads and stores, which the split makes 8-byte accesses: `sqlite3Multiply128`'s
 `sqlite3Multiply128`'s product, a shift by an extended constant, phis around a
 loop, unaligned, volatile and indexed accesses), 120 random straight-line
 programs and 300 of Tier 0's random 128-bit typed programs (frame objects,
-`?:`'s blocks, conversions both ways) through the split by both paths, which
-must make the same function, both verifiers, the optimizer and both of Tier 1's
+`?:`'s blocks, conversions both ways) through the split, which must count their
+`I128` instructions, the verifier, the optimizer and both of Tier 1's
 paths with their certificates, natively, against the IR's interpreter on the
 unsplit function and the programs' stack machine; the split's refusals and its
-scan's twins; overlapping `extra` slices, and `I128` phis that share one
+scan against its definition; overlapping `extra` slices, and `I128` phis that share one
 predecessor list past the `u32` limit; and 300 of Tier 0's random long double programs (calls of C
 functions of long doubles, every conversion, NaNs, frame objects, `?:`'s blocks)
 through the optimizer and both of Tier 1's paths natively against their stack
@@ -916,12 +917,16 @@ greater than the matching Clang `-O0` sum. Its Tier 1 objects are built with
 `--tier1-no-inline` (#2541 step 2): the bound is per function against clang
 -O0's same function, which a body with other functions' bodies expanded into
 it has no counterpart of; inlining's growth is the [unit inlining
-design](tier1-unit-inlining.md)'s own measurement. The command also reports SQLite's
-`sqlite3.c`; `test-c-testsuite --tier1 --code-size` reports the same quantities
-for c-testsuite. Their above-bound results stay visible as `gate=fail` with
-`enforced=0`. Strict optional gates remain available with the bare
-`--check-code-size` flag on either command, or `=sqlite` on the program
-command. `--sizes-only` needs no runtime scripts or hardware counters.
+design](tier1-unit-inlining.md)'s own measurement. CI enforces the same bound on SQLite's
+`sqlite3.c` (the bare `--check-code-size`, Lua's and SQLite's together) and,
+with `test-c-testsuite --tier1 --check-code-size`, on c-testsuite's 220
+programs, whose size objects are compiled with `--tier1-no-inline` as well
+(#2646). Those two exceeded the bound when #2643 measured them, by 6.40% and
+2.65%; Tier 1's allocation now takes a call's arguments in the registers the
+call reads them in ([the allocation guide](tier1-allocation.md)'s "Call
+arguments in their registers"), and both are below it. `--check-code-size=lua`
+or `=sqlite` enforces one corpus alone. `--sizes-only` needs no runtime
+scripts or hardware counters.
 
 An opt-in, versioned `--tier1-function-sizes` manifest identifies source bodies
 by exact emitted symbol names and their actual tier after publication. The

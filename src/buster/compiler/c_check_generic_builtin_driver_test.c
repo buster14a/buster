@@ -259,7 +259,10 @@ static void check_test_driver_availability(CheckTest* test, const char* clang, c
 
 // #1842's argument diagnostics and recovery, from an original runtime fixture: independent error/warning counts,
 // then Clang's complete output and status through both readers, in syntax-only and object mode. Rejected units
-// retain an existing output; malformed attributes leave later valid members and independent errors reachable.
+// retain an existing output; malformed attributes leave later valid members and independent errors reachable. A second
+// argument's first stays the count, after the `,`'s "expected ')'" and before the first's errors, but for an undeclared
+// name's; an operand after the argument is the parser's "expected ')'" at it, noted at the `(`, before a type name's
+// integer error.
 static void check_test_driver_counted_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     const char* const source = "tests/driver/counted_by_diagnostics.c";
@@ -283,6 +286,9 @@ static void check_test_driver_counted_diagnostics(CheckTest* test, const char* c
         { "empty arguments", 4, "-std=gnu23", NULL, 5, 0, 0 },
         { "type and GNU alignof operands", 5, "-std=gnu23", NULL, 4, 0, 0 },
         { "lexical warning policy", 6, "-std=gnu23", NULL, 2, 1, 0 },
+        { "a second argument's first", 7, "-std=gnu23", NULL, 7, 0, 3 },
+        { "a type name then an operand", 8, "-std=gnu23", NULL, 3, 0, 1 },
+        { "an operand then an operand", 9, "-std=gnu23", NULL, 1, 0, 1 },
     };
     static const char sentinel[] = "previous counted object\n";
     char object[PATH_MAX];

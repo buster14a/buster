@@ -6,7 +6,8 @@
 // symbol/stack addresses qualify: a symbol's address computed from rip, or read from its GOT slot where the consumer
 // certifies that access (BUSTER_TIER1_REMAT_GOT: the loader writes the slot before the program runs, and nothing
 // changes it after). Other loads, TLS recipes, dynamic stack addresses, floating operations, and mutable operands do
-// not. tier1_rematerialization_marks[_scalar] produce the allocator's byte column; tier1_rematerialize emits one copy;
+// not. tier1_rematerialization_marks produces the allocator's byte column; tier1_rematerialize emits one copy (a frame
+// address a lea from the frame base, or at the base itself from rsp, rbp, r12 or r13 the base's 3-byte register copy);
 // tier1_rematerialization_model_costs fills the optional cost columns from the Zen 5 model where it has measured them.
 // The caller supplies actual flags liveness at each copy and the final stable frame-base displacement. Every symbol
 // copy carries a distinct encoder FIXUP flag and its own returned symbol/addend for link_add_code_fixups, a PC32
@@ -92,24 +93,8 @@ static bool tier1_rematerialization_eligible(const Tier1RematerializationInput* 
     return eligible;
 }
 
-static __attribute__((unused)) bool tier1_rematerialization_marks_scalar(const Tier1RematerializationInput* input, uint8_t* marks)
-{
-    const bool valid = tier1_rematerialization_input_valid(input, marks);
-    if (valid)
-    {
-        for (uint32_t i = 0; i < input->count; i += 1)
-        {
-            marks[i] = tier1_rematerialization_eligible(input, i) ? 1 : 0;
-        }
-    }
-    return valid;
-}
-
 static __attribute__((unused)) bool tier1_rematerialization_marks(const Tier1RematerializationInput* input, uint8_t* marks)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier1_rematerialization_marks_scalar(input, marks);
-#else
     const bool valid = tier1_rematerialization_input_valid(input, marks);
     if (valid)
     {
@@ -140,7 +125,6 @@ static __attribute__((unused)) bool tier1_rematerialization_marks(const Tier1Rem
         }
     }
     return valid;
-#endif
 }
 
 static bool tier1_rematerialize(const Tier1RematerializationInput* input, uint32_t index, uint8_t destination, uint8_t frame_base, uint8_t flags_live, Tier1Rematerialized* result);
@@ -162,9 +146,9 @@ static void tier1_rematerialization_model_cost(const Tier1RematerializationInput
 // `frame_base` a stack address's base, and the reload as the model's aligned L1-hit load (`mov r64, [base]`), the
 // cheapest a load of a slot can be, so that a copy no costlier than it is no costlier than any reload it saves. A cost
 // the model hasn't measured is 0, unknown, which keeps the candidate (tier1_rematerialization_eligible): with every
-// copy's latency unmeasured, as now, every candidate is recomputed. The vector path classifies 64 operations at a time
-// by table, as the marks do, and visits the candidates alone; the scalar path is its twin. Requires x86_zen5_initialize.
-static __attribute__((unused)) bool tier1_rematerialization_model_costs(const Tier1RematerializationInput* input, uint8_t frame_base, uint16_t* costs, uint16_t* reload_costs, bool vector)
+// copy's latency unmeasured, as now, every candidate is recomputed. It classifies 64 operations at a time by table, as
+// the marks do, and visits the candidates alone. Requires x86_zen5_initialize.
+static __attribute__((unused)) bool tier1_rematerialization_model_costs(const Tier1RematerializationInput* input, uint8_t frame_base, uint16_t* costs, uint16_t* reload_costs)
 {
     uint8_t dummy = 0;
     const bool valid = tier1_rematerialization_input_valid(input, &dummy) && input->costs == 0 && (input->count == 0 || (costs != 0 && reload_costs != 0));
@@ -176,8 +160,7 @@ static __attribute__((unused)) bool tier1_rematerialization_model_costs(const Ti
         memset(costs, 0, (uint64_t)input->count * sizeof(uint16_t));
         memset(reload_costs, 0, (uint64_t)input->count * sizeof(uint16_t));
     }
-#if BUSTER_HOST_VECTOR
-    if (valid && BUSTER_VECTOR_PATH(vector))
+    if (valid)
     {
         static const uint8_t table[64] __attribute__((aligned(64))) = {
             [BUSTER_TIER1_REMAT_INTEGER] = 1,
@@ -197,18 +180,6 @@ static __attribute__((unused)) bool tier1_rematerialization_model_costs(const Ti
                 const uint32_t lane = (uint32_t)__builtin_ctzll(selected);
                 selected &= selected - 1;
                 tier1_rematerialization_model_cost(input, first + lane, frame_base, reload, costs, reload_costs);
-            }
-        }
-    }
-    else
-#endif
-    {
-        for (uint32_t i = 0; valid && i < input->count; i += 1)
-        {
-            const uint32_t op = input->operations[i];
-            if (op == BUSTER_TIER1_REMAT_INTEGER || op == BUSTER_TIER1_REMAT_SYMBOL || op == BUSTER_TIER1_REMAT_STACK)
-            {
-                tier1_rematerialization_model_cost(input, i, frame_base, reload, costs, reload_costs);
             }
         }
     }
@@ -268,9 +239,12 @@ static __attribute__((unused)) bool tier1_rematerialize(const Tier1Rematerializa
         }
         else
         {
+            // A lea from the frame base, or, at a zero displacement from rsp, rbp, r12 or r13, whose lea needs a SIB byte
+            // or a zero disp8, the base's register copy: `mov r64, base`, 3 bytes for 4 (#3149). Neither writes the flags.
+            const bool copied = value == 0 && ((frame_base & 7) == X86_REGISTER_RSP || (frame_base & 7) == X86_REGISTER_RBP);
             valid = frame_base < 16;
-            candidate.instruction.form = X86_FORM_LEA_R64_M;
-            candidate.instruction.mode = BUSTER_X86_MEMORY_BASE;
+            candidate.instruction.form = copied ? X86_FORM_MOV_R64_RM64 : X86_FORM_LEA_R64_M;
+            candidate.instruction.mode = copied ? BUSTER_X86_REGISTER_DIRECT : BUSTER_X86_MEMORY_BASE;
             candidate.instruction.rm = frame_base;
             candidate.instruction.reg = destination;
             candidate.instruction.displacement = (int32_t)value;

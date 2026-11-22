@@ -92,11 +92,19 @@ static bool dependency_prepare(DependencyOutput* output, const DependencyOptions
         };
         uint64_t length = 0;
         result = path != NULL && target != NULL && dependency_rule(&rule, NULL, 0, &length) == DEPENDENCY_OK;
-        char* bytes = result ? arena_push(arena, length, 1) : NULL;
-        result = result && bytes != NULL && dependency_rule(&rule, bytes, length, &length) == DEPENDENCY_OK;
+        DependencySink writing = {
+            .pointer = result ? arena_push(arena, length, 1) : NULL,
+            .status = DEPENDENCY_OK,
+        };
+        if (writing.pointer != NULL)
+        {
+            // The query validated this immutable rule. The private buffer has exactly the space it measured.
+            dependency_emit(&writing, &rule);
+        }
+        result = writing.pointer != NULL && writing.status == DEPENDENCY_OK && writing.count == length;
         if (result)
         {
-            *output = (DependencyOutput){ .path = path, .bytes = { .pointer = bytes, .length = length } };
+            *output = (DependencyOutput){ .path = path, .bytes = { .pointer = writing.pointer, .length = length } };
         }
         else
         {
@@ -614,11 +622,16 @@ static bool driver_read_stdin(Arena* arena, String8* source)
 
 // 1 when `path` is neither a regular file nor a directory and its bytes are in `*source` (a character device, FIFO,
 // socket, or /dev/fd pipe). 0 when it is absent, a directory, or a regular file, which the file cache reads.
-// -1 when it is a stream and the read fails. Include search does not use this: those probes stay non-blocking.
-static int driver_read_nonregular(Arena* arena, const char* path, String8* source)
+// -1 when it is a stream and the read fails. When requested, size gets its positive stat size, or zero. Include
+// search does not use this: those probes stay non-blocking.
+static int driver_read_nonregular(Arena* arena, const char* path, String8* source, uint64_t* size)
 {
     struct stat status;
     const bool exists = stat(path, &status) == 0;
+    if (size != NULL)
+    {
+        *size = exists && status.st_size > 0 ? (uint64_t)status.st_size : 0;
+    }
     const bool stream = exists && !S_ISREG(status.st_mode) && !S_ISDIR(status.st_mode) && !S_ISBLK(status.st_mode);
     int result = 0;
     *source = (String8){ 0 };

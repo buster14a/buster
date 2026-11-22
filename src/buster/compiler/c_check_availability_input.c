@@ -261,7 +261,7 @@ static bool check_availability_canonical(uint32_t platform, CheckVersionTuple ve
 // reads as one, `true` or `__func__`, or an #embed's data) is no version, as it is no numeric_constant of clang's.
 static CheckAvailabilityVersion check_input_availability_number(CheckInputReader* reader, uint32_t token)
 {
-    const uint8_t kind = reader->pp->output.kinds[reader->parser->tokens.sources[token]];
+    const uint8_t kind = reader->pp->output.kinds[parse_source_index(&reader->parser->tokens, token)];
     CheckAvailabilityVersion result = { .status = BUSTER_CHECK_VERSION_EXPECTED };
     const uint8_t* bytes = NULL;
     uint32_t length = 0;

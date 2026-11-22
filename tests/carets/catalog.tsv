@@ -1,0 +1,49 @@
+buster-fixtures v1 carets
+# test-carets' cases (c_caret_test.c; #2376): ID, FILE, FLAGS, OPTIONS, NAME, tab-separated. Each command line runs as
+# ours and as clang's, carets on by default; their exit statuses and standard errors must be the same bytes, or with
+# FLAGS `prefix` clang's error must start ours (ours adds its usage text). No diagnostic here has a fix-it or a line of
+# scratch space, which a later piece of #2376 adds; those with highlighted ranges are below.
+directives	directives.c	-	-fsyntax-only	preprocessor and checker diagnostics at a line's start, middle and end, with a note
+directives-preprocessed	directives.c	-	-E -o /dev/null	the same diagnostics under -E
+directives-compiled	directives.c	-	-c -o /dev/null	the same diagnostics under -c
+tabs	tabs.c	-	-fsyntax-only	tabs expanded to stops 8 columns apart, counted in bytes since the previous tab
+tabs-preprocessed	tabs.c	-	-E -o /dev/null -fno-diagnostics-show-line-numbers	tabs under -E, without the gutter
+utf8	utf8.c	-	-fsyntax-only	wide and combining characters, and escaped controls, zero-width spaces and malformed bytes
+repeat	repeat.c	-	-fsyntax-only	a second diagnostic at the last one's place shows no line
+gutter	gutter.c	-	-fsyntax-only	the gutter's presumed line numbers and widths, from 4 digits to 10
+gutter-no-numbers	gutter.c	-	-fsyntax-only -fno-diagnostics-show-line-numbers	no gutter
+gutter-numbers-again	gutter.c	-	-fsyntax-only -fno-diagnostics-show-line-numbers -fdiagnostics-show-line-numbers	the last line-number option wins
+gutter-lines-0	gutter.c	-	-fsyntax-only -fcaret-diagnostics-max-lines=0	no lines after the first: a narrower gutter
+gutter-lines-1	gutter.c	-	-fsyntax-only -fcaret-diagnostics-max-lines=1	one line after the first
+gutter-lines-wrap	gutter.c	-	-fsyntax-only -fcaret-diagnostics-max-lines=4294967295	the largest value, whose sum with the line wraps
+gutter-lines-hex	gutter.c	-	-fsyntax-only -fcaret-diagnostics-max-lines=0x10	a hexadecimal value
+gutter-lines-octal	gutter.c	-	-fsyntax-only -fcaret-diagnostics-max-lines=010	an octal value
+gutter-lines-last	gutter.c	-	-fsyntax-only -fcaret-diagnostics-max-lines=x -fcaret-diagnostics-max-lines=2	only the last value is read
+gutter-lines-negative	gutter.c	prefix	-fsyntax-only -fcaret-diagnostics-max-lines=-1	a negative value is refused
+gutter-lines-large	gutter.c	prefix	-fsyntax-only -fcaret-diagnostics-max-lines=4294967296	a value past 32 bits is refused
+gutter-lines-empty	gutter.c	prefix	-fsyntax-only -fcaret-diagnostics-max-lines=	an empty value is refused
+gutter-lines-preprocessed	gutter.c	prefix	-E -o /dev/null -fcaret-diagnostics-max-lines=x	-E refuses a malformed value too
+no-carets	gutter.c	-	-fsyntax-only -fno-caret-diagnostics	no source lines and no summary
+carets-again	gutter.c	-	-fsyntax-only -fno-caret-diagnostics -fcaret-diagnostics	the last caret option wins
+no-carets-last	gutter.c	-	-fsyntax-only -fcaret-diagnostics -fno-caret-diagnostics	the last caret option wins, off
+include	include.c	-	-fsyntax-only	a header's diagnostics show the header's lines, under its include stack
+end	end.c	-	-fsyntax-only	a file's last line without a newline
+line-ends	line-ends.c	-	-fsyntax-only	lines ended by CR LF and by CR alone
+nul	nul.c	-	-fsyntax-only	NUL bytes escaped, and trailing ones past the caret dropped
+long	long.c	-	-fsyntax-only	no line longer than 4096 bytes, and no caret past 4096
+# Code generation's target-feature diagnostics at -c (#2094), each in a file of its own: the first error ends the run.
+target-inline	target-inline.c	-	-c -o /dev/null	an always_inline function's target feature
+target-flatten	target-flatten.c	-	-c -o /dev/null	a flatten function's callee's target feature
+target-builtin	target-builtin.c	-	-c -o /dev/null	a builtin's target feature
+target-abi	target-abi.c	-	-c -o /dev/null	AVX vectors' ABI warnings
+# Highlighted ranges (#2376's second piece): each diagnostic's, through macros (the invocation a range maps to, and in
+# each "expanded from" note the range in the macro's body), over several lines and within the line limit.
+ranges-names	ranges-names.c	-	-fsyntax-only	a name that names nothing, directly and through macros' bodies and arguments
+ranges-expressions	ranges-expressions.c	-	-fsyntax-only	operands, counts and divisors, with parentheses, through a macro and over lines
+ranges-expressions-lines	ranges-expressions.c	-	-fsyntax-only -fcaret-diagnostics-max-lines=2	a range's lines cut to the line limit
+ranges-literals	ranges-literals.c	-	-fsyntax-only	an escape sequence's characters in a literal
+ranges-include	ranges-include.c	-	-fsyntax-only	a quoted header name not found
+ranges-include-angled	ranges-include-angled.c	-	-E -o /dev/null	an angled header name not found, under -E
+ranges-assignments	ranges-assignments.c	-	-fsyntax-only	the expression assigned to, a register variable's operand, a conversion's source
+ranges-members	ranges-members.c	-	-fsyntax-only	an unknown attribute's name with its scope, a member access's base and name
+ranges-members-c23	ranges-members.c	-	-fsyntax-only -std=gnu23	the same in C23, whose '::' is one token

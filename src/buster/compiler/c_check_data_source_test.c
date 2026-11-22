@@ -198,9 +198,7 @@ static void check_test_data_source(CheckTest* test, const CheckDataSourceFixture
         ready = ready && parse_translation_unit(&parser, &pp) && parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE;
         CheckInput input = { 0 };
         ready = ready && check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch);
-        const CheckOptions options = {
-            .scalar = path == 0,
-        };
+        const CheckOptions options = { 0 };
         CheckStream stream = { 0 };
         ready = ready && check_graph_run(&types.table, &input.graph, &stream_arena, &scratch, &options, &stream) && stream.report_count == 0;
         char description[256];

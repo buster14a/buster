@@ -32,24 +32,30 @@ cc -std=c17 -O1 -g -Wall -Wextra -Werror -fno-strict-aliasing -fsanitize=address
 "$work/rerun" --self-test --root .
 ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$work/rerun-sanitize" --self-test --root .
 
-# Mutants of the workflows that the allowlist's policy must refuse.
+# Mutants of the workflows that the allowlist's policy must refuse, each FILE of the space-separated list changed.
+# A step that the row workflow and drawn.yml (the AVX-512 jobs' draws, #2924) both name is renamed in both.
 mutant()
 {
-    local what=$1 file=$2 expression=$3
+    local what=$1 files=$2 expression=$3 file
     rm -rf "$work/mutant"
     mkdir -p "$work/mutant/.github"
     cp -R .github/workflows "$work/mutant/.github/"
-    sed -i -e "$expression" "$work/mutant/.github/workflows/$file"
-    if cmp -s ".github/workflows/$file" "$work/mutant/.github/workflows/$file"; then
-        fail "the mutant doesn't change $file: $what"
-    elif "$work/rerun" --self-test --root "$work/mutant" > /dev/null 2>&1; then
+    for file in $files; do
+        sed -i -e "$expression" "$work/mutant/.github/workflows/$file"
+        if cmp -s ".github/workflows/$file" "$work/mutant/.github/workflows/$file"; then
+            fail "the mutant doesn't change $file: $what"
+        fi
+    done
+    if "$work/rerun" --self-test --root "$work/mutant" > /dev/null 2>&1; then
         fail "the policy accepts a mutant: $what"
     fi
 }
-mutant 'a renamed setup step' hosted-correctness.yml 's/name: Install official Clang 23.1.4 and test tools$/name: Install official Clang 23.1.4 and the test tools/'
-mutant 'a renamed fetch' hosted-correctness.yml 's/name: Fetch generic baseline startup objects and runtime for emulation$/name: Fetch the baseline runtime/'
+mutant 'a renamed setup step' 'hosted-correctness.yml drawn.yml' 's/name: Install official Clang 23.1.4 and test tools$/name: Install official Clang 23.1.4 and the test tools/'
+mutant 'a renamed fetch' 'hosted-correctness.yml drawn.yml' 's/name: Fetch and verify frozen corpus inputs$/name: Fetch the corpus/'
+mutant "a renamed draw's checkout" 'hosted-correctness.yml drawn.yml' "s/name: Fetch the vector draw's script from this commit\$/name: Fetch the script/"
 mutant 'a renamed preparation' prepare-hosted-tools.yml 's/name: Acquire missing inputs once and verify the complete set$/name: Acquire the inputs/'
-mutant 'a renamed row build' hosted-correctness.yml "s/name: Build the compiler once for the row's shards$/name: Build the row's compiler/"
+# The x86-64 rows' shared build job is historical (#2924): a row workflow that has it again is refused.
+mutant 'a shared row build again' hosted-correctness.yml "s/^  draw-1:$/  compiler:\n    name: Build the compiler once for the row's shards\n    runs-on: ubuntu-26.04\n    steps:\n      - run: 'true'\n  draw-1:/"
 mutant 'a renamed test step' hosted-correctness.yml 's/name: Run correctness tests within the hosted CPU budget$/name: Run the correctness tests/'
 mutant 'a renamed caller' 9700x.yml '1s/^name: .*/name: Tests and benchmarks/'
 mutant 'another caller' build.yml '0,/^jobs:$/s//jobs:\n  rows:\n    uses: .\/.github\/workflows\/hosted-correctness.yml/'

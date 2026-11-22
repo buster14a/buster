@@ -248,6 +248,62 @@ static void foreign_strings_output_structure(ForeignTestTally* tally, const Fore
     foreign_test_expect(tally, valid, "stable 1/2/4-byte duplicates, distinct groups, byte-interior aliases and stronger alignment", 0);
 }
 
+// Keep the second object's section map as after GC: either no string section survives, or just its single wide4 entry.
+static void foreign_strings_output_no_saving(ForeignTestTally* tally, const Foreign* foreign, const ForeignLink* converted, Arena* arena)
+{
+    const uint64_t saved = arena->length;
+    ImportObject maps[2] = { [1] = converted->objects[2] };
+    const SymbolId symbol = foreign_link_test_symbol(foreign, converted, "second_wide4");
+    const AtomId atom = symbol != 0 ? converted->link.symbols.atom[symbol] : 0;
+    uint32_t section = 1;
+    while (section < maps[1].section_count && maps[1].section_atoms[section] != atom)
+    {
+        section += 1;
+    }
+    maps[1].section_atoms = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, maps[1].section_count);
+    const bool ready = atom != 0 && converted->link.atoms.size[atom] == 8 && section < maps[1].section_count && maps[1].section_atoms != 0;
+    foreign_test_expect(tally, ready, "find the single four-byte-unit entry", 0);
+    if (ready)
+    {
+        memset(maps[1].section_atoms, 0, (uint64_t)maps[1].section_count * sizeof(AtomId));
+        ForeignLink view = *converted;
+        view.objects = maps;
+        Foreign input = {
+            .path = foreign->path,
+            .objects = foreign->objects + 1,
+            .object_count = 2,
+        };
+        const uint64_t mark = arena->length;
+        for (uint32_t test = 0; test < 4; test += 1)
+        {
+            const bool selected = test == 1 || test == 2;
+            maps[1].section_atoms[section] = selected ? atom : 0;
+            view.link.atoms.size[atom] = test == 2 ? 7 : 8;
+            input.path = test == 3 ? (ForeignPath)255 : foreign->path;
+            ForeignStringsMerge result;
+            uint8_t poison[sizeof(result)];
+            memset(poison, 0xa5, sizeof(poison));
+            memcpy(&result, poison, sizeof(result));
+            const ForeignStringsError error = foreign_strings_merge(&view, &input, arena, &result);
+            if (test < 2)
+            {
+                const bool empty = error == FOREIGN_STRINGS_ERROR_NONE && !result.applied && result.atom_inputs == 0 && result.strings.bytes == 0 &&
+                                   result.strings.size == 0 && result.strings.count == 0 && result.strings.input_count == 0 && result.strings.section_begin == 0 &&
+                                   result.strings.input_offset == 0 && result.strings.output_offset == 0 && result.strings.lengths == 0;
+                foreign_test_expect(tally, empty && result.input_bytes == (selected ? 8u : 0u) && arena->length == mark,
+                                    "no saving publishes only the original byte count and releases the arena", 0);
+            }
+            else
+            {
+                foreign_test_expect(tally, error == FOREIGN_STRINGS_ERROR_INPUT && memcmp(&result, poison, sizeof(result)) == 0 && arena->length == mark,
+                                    "a partial code unit or invalid empty-input path preserves the result and arena", 0);
+            }
+        }
+        view.link.atoms.size[atom] = 8;
+    }
+    arena_pop_to(arena, saved);
+}
+
 static void foreign_strings_output_oracles(ForeignTestTally* tally, const char* directory, char** inputs, uint32_t fixture)
 {
     static const char* const linkers[] = {
@@ -320,6 +376,10 @@ static void foreign_strings_output_program(ForeignTestTally* tally, const char* 
             foreign_test_expect(tally, ready, "resolve and convert original objects", detail);
             if (ready)
             {
+                if (fixture == 0 && lane == 0)
+                {
+                    foreign_strings_output_no_saving(tally, &foreign, &converted, arena);
+                }
                 foreign_strings_output_relocations(tally, &foreign, &converted, fixture);
                 ForeignLink before;
                 memcpy(&before, &converted, sizeof(before));

@@ -309,17 +309,28 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
                 else if (check_action_integer_type(types, element, &component_width, &component_signed) && component_width <= 64)
                 {
                     const unsigned __int128 mask = check_action_mask(component_width);
-                    const unsigned __int128 real = value->integer & UINT64_MAX;
-                    const unsigned __int128 imaginary = value->integer >> 64;
-                    if ((real & ~mask) != 0 || (imaginary & ~mask) != 0)
+                    const unsigned __int128 parts[2] = { value->integer & UINT64_MAX, value->integer >> 64 };
+                    if ((parts[0] & ~mask) != 0 || (parts[1] & ~mask) != 0)
                     {
                         status = CHECK_DATA_INVALID;
                     }
                     else
                     {
-                        check_data_integer_bytes(plan->bytes, real, component_size);
-                        check_data_integer_bytes(plan->bytes + component_size, imaginary, component_size);
+                        for (uint32_t part = 0; part < 2; part += 1)
+                        {
+                            // A complex _BitInt's part extends a signed value through its storage unit, as a _BitInt does
+                            // (#2219); a GNU complex integer's fills its own.
+                            const bool extend = component_signed && component_width < component_size * 8u && (parts[part] >> (component_width - 1)) != 0;
+                            check_data_integer_bytes(plan->bytes + part * component_size, parts[part] | (extend ? ~mask : 0), component_size);
+                        }
                     }
+                }
+                else if (check_complex_wide_element(types, element, &component_width, &component_signed))
+                {
+                    // An integer element past 64 bits: each part's limbs (#2219).
+                    const bool written = check_complex_wide_bytes(value, false, component_width, component_signed, plan->bytes, component_size) &&
+                                         check_complex_wide_bytes(value, true, component_width, component_signed, plan->bytes + component_size, component_size);
+                    status = written ? status : CHECK_DATA_UNSUPPORTED;
                 }
                 else
                 {
@@ -355,31 +366,50 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
     return status;
 }
 
+// A complex _BitInt's element past 128 bits (#2219), with its width and signedness, or 0.
+static TypeId check_data_wide_element(const TypeTable* types, TypeId type, uint32_t* width, bool* is_signed)
+{
+    const TypeId base = type_unqualified(type_strip_aligned(types, type));
+    const TypeId element = type_kind(types, base) == BUSTER_TYPE_KIND_COMPLEX ? type_element(types, base) : 0;
+    return element != 0 && check_wide_type(types, element, width, is_signed) ? element : 0;
+}
+
 // A _BitInt past 128 bits' constant `value` as `type`'s `size` bytes at `destination` (#1447): its limbs, the bits past
-// its width extended as the x86-64 ABI keeps them (check_wide_bytes). A value of another type, an lvalue, a faulted or
+// its width extended as the x86-64 ABI keeps them (check_wide_bytes); or a complex one's of an element past 128 bits
+// (#2219), each part's limbs so (check_complex_wide_bytes). A value of another type, an lvalue, a faulted or
 // side-effecting one, or one no constant is refused as check_data_plan_scalar refuses them.
 static CheckDataStatus check_data_wide_value(const TypeTable* types, const CheckValue* value, TypeId type, uint8_t* destination, uint64_t size)
 {
     CheckDataStatus status = CHECK_DATA_OK;
     const bool valid_type = type_is_valid(types, value->type);
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool complex = valid_type && check_data_wide_element(types, type, &width, &is_signed) != 0;
     if (!valid_type || type_unqualified(type_strip_aligned(types, value->type)) != type_unqualified(type_strip_aligned(types, type)) || value->category != CHECK_RVALUE)
     {
         status = CHECK_DATA_INVALID;
     }
-    else if (value->fault != CHECK_FAULT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0 || value->constant_kind != CHECK_CONSTANT_INTEGER ||
-             !check_wide_bytes(types, value, destination, size))
+    else if (value->fault != CHECK_FAULT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
+    {
+        status = CHECK_DATA_NON_CONSTANT;
+    }
+    else if (complex ? value->constant_kind != CHECK_CONSTANT_COMPLEX || size % 2 != 0 ||
+                           !check_complex_wide_bytes(value, false, width, is_signed, destination, size / 2) ||
+                           !check_complex_wide_bytes(value, true, width, is_signed, destination + size / 2, size / 2) :
+                       value->constant_kind != CHECK_CONSTANT_INTEGER || !check_wide_bytes(types, value, destination, size))
     {
         status = CHECK_DATA_NON_CONSTANT;
     }
     return status;
 }
 
-// Whether `type` is a _BitInt past 128 bits, whose constants check_data_wide_value writes.
+// Whether `type` is a _BitInt past 128 bits, or a complex one of an element past 128 bits (#2219), whose constants
+// check_data_wide_value writes.
 static bool check_data_wide_type(const TypeTable* types, TypeId type)
 {
     uint32_t width = 0;
     bool is_signed = false;
-    return type_is_valid(types, type) && check_wide_type(types, type, &width, &is_signed);
+    return type_is_valid(types, type) && (check_wide_type(types, type, &width, &is_signed) || check_data_wide_element(types, type, &width, &is_signed) != 0);
 }
 
 static bool check_data_nonzero(const uint8_t* bytes, uint64_t size)
@@ -765,9 +795,9 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
     CheckDataStatus status = check_data_plan_header(types, object, object_symbols, object_count, link, plan);
     const TypeId base = status == CHECK_DATA_OK ? type_strip_aligned(types, object->type) : 0;
     const uint8_t kind = status == CHECK_DATA_OK ? type_kind(types, type_conversion_operand(types, base)) : 0;
-    // A _BitInt past 128 bits (#137) without an initializer is zeros, as an aggregate's are, and so is a complex one,
-    // whose constants the checker doesn't fold, so that one with an initializer is refused as not constant. A _BitInt's
-    // constant (#1447) is its limbs (check_data_wide_value).
+    // A _BitInt past 128 bits (#137) without an initializer is zeros, as an aggregate's are, and so is a complex one past
+    // 32 bytes. A _BitInt's constant (#1447) is its limbs (check_data_wide_value), and so are a complex _BitInt's parts
+    // past 128 bits (#2219).
     const bool aggregate = kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION ||
                            kind == BUSTER_TYPE_KIND_VECTOR || kind == BUSTER_TYPE_KIND_EXT_VECTOR ||
                            (kind == BUSTER_TYPE_KIND_BIT_INT && type_size(types, base) > 16) || (kind == BUSTER_TYPE_KIND_COMPLEX && type_size(types, base) > 32);

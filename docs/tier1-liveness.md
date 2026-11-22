@@ -96,23 +96,21 @@ The adapter builds the CFG from the actual IR and marks values whose selected
 uses cross a block boundary, plus the incoming-parameter re-entry case above.
 Only those values receive dense IDs. Local values use their definition and
 last selected use directly and never occupy a bitset column. Dense IDs retain
-ascending original value order. The vector path constructs them in batches of
-16 by masks, population counts and compress stores; the scalar twin has the
-same IDs and ordering.
+ascending original value order. They are constructed in batches of 16 by masks,
+population counts and compress stores.
 
 Use/def construction resolves dense IDs from the selected-use stream, then
 batches up to 16 IDs within each block. AVX-512 conflict detection groups lanes
 that address the same 32-bit word; a masked OR reduction combines their bits
 before one scalar word store. No hardware scatter occurs, and duplicate uses
-cannot lose updates. The scalar twin sets one 64-bit word bit at a time. Tail
-loads are masked; inactive IDs are `BUSTER_IR_NONE`. Batches flush at every
+cannot lose updates. Tail loads are masked; inactive IDs are `BUSTER_IR_NONE`. Batches flush at every
 block boundary, because grouping across blocks would change meaning.
 
-The existing `dataflow_postorder` and scalar/vector liveness routines solve
-the dense rows. The implementation does not alter those established solvers
-or their alignment policy. Each row starts on a 64-byte boundary, is rounded
-to a full 512-bit width and has zero padding. The vector and scalar paths
-produce identical iteration counts and interval results in the tests.
+The existing `dataflow_postorder` and liveness routines solve the dense rows.
+The implementation does not alter those established solvers or their alignment
+policy. Each row starts on a 64-byte boundary, is rounded to a full 512-bit
+width and has zero padding. The tests check the dense IDs and rows against
+their definitions, and the intervals against an independent path search.
 
 The final handoff expands each value's interval to include block entry when it
 is live-in and block end when it is live-out. Original machine-node order is

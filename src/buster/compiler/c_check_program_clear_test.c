@@ -44,7 +44,7 @@ static bool check_test_program_clear_lower(const char* source, bool scalar, Chec
     Arena bytes = arena_reserve(UINT64_C(1) << 22);
     Arena scratch = arena_reserve(UINT64_C(1) << 26);
     const ParseOptions parsing = { .scalar = scalar };
-    const CheckOptions checking = { .scalar = scalar };
+    const CheckOptions checking = { 0 };
     CheckInput input = { 0 };
     CheckStream stream = { 0 };
     CheckInitializers plans = { 0 };

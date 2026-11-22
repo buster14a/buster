@@ -40,6 +40,26 @@ requirements. [Command index](README.md).
   (`ExecutableDynamic.tls_get_addr`, #515): to local-exec, or to initial-exec
   through a `TPOFF64` slot for an imported thread-local; all from vector
   passes with exact twins.
+  It also writes position-dependent dynamic executables (`-no-pie`, #1503:
+  `ExecutableDynamic.position_dependent`, which `dynamic_inputs` sets for a
+  runtime of `RUNTIME_KIND_NO_PIE`): the layout's `dynamic` (it has `.dynamic`)
+  and `pie` (it is at base 0 as `ET_DYN`, its own symbols relocated) are
+  separate, and such an image is an `ET_EXEC` at `BUSTER_EXECUTABLE_BASE` with
+  a dynamic PIE's interpreter, libraries, dynamic symbols, stubs, GOT, copies
+  and TLS relaxation, and no `RELATIVE` relocation, RELR (nor its version need)
+  or `DF_1_PIE`: `executable_slots_of_class` and `executable_abs64_class` give
+  the image's symbols no relocation. The fields a PIE refuses because the
+  loader moves them (an `ABS32` or a text `ABS64` to the image, a `PC32` to
+  address 0 or to an absolute symbol) hold their values; a fixup to an import
+  other than through the GOT, a call or a written `ABS64` is still refused. A
+  weak reference to nothing stays dynamic, as lld keeps it, and a field the
+  loader doesn't relocate takes it at address 0 (`ExecutablePatch.zero_abs64`
+  for an `ABS64`), as GNU ld and lld resolve it; one that a `PC32`, `PC64`,
+  `ABS32` or `ABS32S` takes (`crtbegin.o`'s `_ITM_` names, GCC's `-fno-pie`
+  `mov $f`) has no stub or slot of its own (`ExecutableShared.zero_marks`), its
+  calls reaching address 0 as GNU ld's do. The refusal walk runs for an `ABS64`
+  to a dynamic symbol outside the atoms the loader writes, which the count
+  finds 16 targets at a time against the filter.
   It also writes shared libraries (`ExecutableDynamic.shared`, with optional
   `soname`): default-visibility global and weak definitions are preemptible,
   calls use non-lazy GOT stubs, and initial-exec TLS uses TPOFF64 slots.
@@ -274,6 +294,19 @@ alone and run alike. The checks:
   `.gnu.hash`;
 - imports: 256 of `libc.so.6`'s functions, each called through a stub and
   pointed to, which the loader must bind at their versions;
+- position-dependent executables (`dynamic_no_pie_test.c`, #1503), against
+  the `-no-pie` runtime (`RUNTIME_KIND_NO_PIE`): the small programs below,
+  none refused, each by every lane count and the exact twins with 1 and 8
+  lanes into the same bytes, an `ET_EXEC` whose `PT_LOAD`s are at
+  `BUSTER_EXECUTABLE_BASE` from their file offsets, with the interpreter and
+  `.dynamic` and no `DF_1_PIE`, RELR or `RELATIVE` relocation, the fields a PIE
+  refuses holding `main`'s address (an `ABS32`, a `.rodata` pointer), address
+  0's distance (a `PC32` to a weak reference to nothing, a `PC64` to a hidden
+  one) or 42's (a `PC64` to the absolute symbol), and each run; `environ`'s
+  `.rodata` pointer refused as a text relocation by every lane count and the
+  twins, and its `.data` pointer an `R_X86_64_64`, which runs; and a weak
+  reference to nothing that an `ABS32` takes and a function calls, both at
+  address 0, without a stub or a slot;
 - refusals: a pointer to `main` in `.rodata` (a text relocation), an `ABS32` to
   `main` and a `PC32` to a dynamic symbol in `.data`, a `lea` of and a `PC64`
   in `.data` to a hidden weak reference to nothing, which stays at address 0

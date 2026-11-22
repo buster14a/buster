@@ -33,6 +33,7 @@ static const ForeignLinkTestSource foreign_gc_link_test_sources[] = {
             "fgc_dynamic_init:\nret\n.size fgc_dynamic_init,.-fgc_dynamic_init\n"
             ".section .text.dynamic_fini,\"ax\",@progbits\n.globl fgc_dynamic_fini\n.type fgc_dynamic_fini,@function\n"
             "fgc_dynamic_fini:\nret\n.size fgc_dynamic_fini,.-fgc_dynamic_fini\n"
+            ".section .eh_frame,\"a\",@progbits\n.globl fgc_empty_frame\nfgc_empty_frame:\n"
             ".section .note.GNU-stack,\"\",@progbits\n",
     },
     {
@@ -568,7 +569,26 @@ static void foreign_gc_link_test_program(ForeignTestTally* tally, const char* di
                                         "exact/vector GC emits identical executable bytes", 0);
                 }
                 foreign_gc_link_test_refused(tally, &foreign, &input, &roots);
-                if (fixture == 1)
+                if (fixture == 0)
+                {
+                    const AtomId empty = foreign_gc_link_test_atom(&foreign, &input, "fgc_empty_frame");
+                    const bool recordless = empty != 0 && input.link.atoms.size[empty] == 0 && input.link.atoms.fixup_count[empty] == 0;
+                    foreign_test_expect(tally, recordless, "import a recordless unwind atom", 0);
+                    if (recordless)
+                    {
+                        const FixupId begin = input.link.atoms.fixup_begin[empty];
+                        input.link.atoms.fixup_begin[empty] = 1;
+                        input.link.atoms.fixup_count[empty] = 1;
+                        ForeignLink output = { 0 };
+                        const ForeignLinkResult result = foreign_gc_link(&output, &foreign, &input, &roots, FOREIGN_PATH_VECTOR, &arenas[0], &names[0]);
+                        const uint32_t section = result.import.section;
+                        foreign_test_expect(tally, result.error == FOREIGN_LINK_ERROR_INPUT && result.object == 1 && section < input.objects[1].section_count &&
+                                                  input.objects[1].section_atoms[section] == empty, "a fixup outside every unwind record identifies its input section", 0);
+                        input.link.atoms.fixup_begin[empty] = begin;
+                        input.link.atoms.fixup_count[empty] = 0;
+                    }
+                }
+                else if (fixture == 1)
                 {
                     foreign_gc_link_test_whole_unwind(tally, &foreign, &input, &roots);
                 }

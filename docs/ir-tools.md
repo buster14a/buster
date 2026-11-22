@@ -258,6 +258,37 @@ first in `InterpreterRuntime.recent`: the memory that an earlier access at its
 address's hashed entry found, checked before it is trusted. Only then does the
 search run from the newest memory down, which reached a global or the heap last
 when a step alternated between them and a frame's locals.
+
+The step loops keep in registers what they read at every step (#2758, second
+part). Neither takes the address of its status, its step count or its stack
+top, so none of them lives in memory, where MemorySanitizer instruments each
+access: the IR front's helpers that write them through a pointer are inlined
+(the operation, a block's entry, a static chain), and the typed front's write a
+local of the run's own (its arithmetic's status, its mask helper's top). The
+current frame's position, its function's columns and its values are loaded when
+the frame changes, at a call or a return, not at every step; a call stores the
+position back. The IR front works out a step's undefined operands only when the
+run asks (`check_undefined`), takes `ir_value_mask` from the operands it has
+loaded without its branch, masks a value by a two-word table
+(`interpreter_value_masks`) rather than a 128-bit shift, and sign-extends only
+for the signed predicates. The typed front reads a kind's operand counts, its
+refusal and whether it may be VOID from one table (`interpreter_typed_kinds`)
+and checks an entry's shape by one switch: each compare of a chain on the kind
+was checked again by the sanitizer. Each front keeps the symbols its run named
+(`IrInterpreterSymbol`, `InterpreterTypedSymbol`: 256 entries by a hash of the
+symbol, each checked before it is trusted), so that a global's address, a
+GLOBAL's binding and a direct call's target are a search of the program once a
+run, not at every step that names them. A function's SIMD scan is kept with its
+verification. Frames, registered memories and typed DUP and STORE values are
+written field by field or word by word, as a compound literal with padding was a
+`memset` and a 16-byte copy a `memcpy`, calls into the runtime; and a frame's
+return no longer copies the memories it keeps onto themselves. Under the vector
+MSan build in a 4-CPU container (medians of three runs), `00040.c` alone went
+from 113.2 s to 66.8 s, and CI's command on the subset's 220 programs from
+140.0 s to 91.2 s; under the vector ASan build, from 114.6 s to 46.9 s and from
+127.8 s to 57.3 s, as its fake stacks for each step's address-taken locals went
+too.
+
 Callable program mappings share one symbol namespace: IDs zero and UINT32_MAX
 are reserved, and function, data and native IDs must be distinct. Different IDs
 may intentionally refer to the same address.
@@ -493,7 +524,7 @@ renaming, independent constant reordering, unused pure-value insertion, CFG edge
 splitting with phi predecessor repair, commutative operand exchange, and an
 unreachable block. Rebuilding validates the original and replacement. Its
 bounded SIMD ID-remap kernel has a scalar twin; canonical texts must match
-exactly. Both complete verifiers check reachable dominance. Both text-parser
+exactly. The complete verifier checks reachable dominance. Both text-parser
 paths must stabilize print/parse/print. For each variant, SCCP, DCE, CFG cleanup,
 their combination with CFG cleanup's merges (Tier 1's, #139), GVN, LICM and
 scalar replacement run through their scalar and vector paths. Optimized arrays may differ; checked execution must preserve the

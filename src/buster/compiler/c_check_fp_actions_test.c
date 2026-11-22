@@ -212,42 +212,43 @@ static void check_test_fp_graph(CheckTest* test, TypeTable* table)
                                     .flags = BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT };
         const uint32_t call = check_test_leaf(&graph, 21, called);
         const uint32_t call_query = check_test_special_node(&graph, CHECK_OP_BUILTIN_QUERY, CBUILTIN_CONSTANT_P, &call, 1);
-        CheckStream scalar;
-        const CheckOptions options = { .scalar = true };
-        const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &scalar);
-        check_test_expect(test, checked && scalar.report_count == 0 && scalar.query_count == 3 && scalar.floating_count == 4,
+        CheckStream reference;
+        const CheckOptions options = { 0 };
+        const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &reference);
+        check_test_expect(test, checked && reference.report_count == 0 && reference.query_count == 3 && reference.floating_count == 4,
                           "FENV and math graph actions retain valid source constraints");
         if (checked)
         {
-            check_test_expect(test, check_stream_value(&scalar, constant).integer == 1 && scalar.queries[0].runtime_value.integer == 0 &&
-                                   scalar.queries[0].evaluated_operands == 1 && check_stream_value(&scalar, ancestor).integer == 2 &&
-                                   (check_stream_flags(&scalar, ancestor) & BUSTER_CHECK_FP_ENVIRONMENT) != 0,
+            check_test_expect(test, check_stream_value(&reference, constant).integer == 1 && reference.queries[0].runtime_value.integer == 0 &&
+                                   reference.queries[0].evaluated_operands == 1 && check_stream_value(&reference, ancestor).integer == 2 &&
+                                   (check_stream_flags(&reference, ancestor) & BUSTER_CHECK_FP_ENVIRONMENT) != 0,
                               "source constant_p proof and executable false result retain distinct values and a transitive runtime witness");
-            check_test_expect(test, check_stream_value(&scalar, comma_query).integer == 0 && check_stream_value(&scalar, call_query).integer == 0 &&
-                                   scalar.queries[1].evaluated_operands == 0 && scalar.queries[2].evaluated_operands == 0 &&
-                                   scalar.queries[1].runtime_value.integer == 0 && scalar.queries[2].runtime_value.integer == 0 &&
-                                   (check_stream_flags(&scalar, comma_query) & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
-                                   (check_stream_flags(&scalar, call_query) & BUSTER_CHECK_FP_ENVIRONMENT) == 0,
+            check_test_expect(test, check_stream_value(&reference, comma_query).integer == 0 && check_stream_value(&reference, call_query).integer == 0 &&
+                                   reference.queries[1].evaluated_operands == 0 && reference.queries[2].evaluated_operands == 0 &&
+                                   reference.queries[1].runtime_value.integer == 0 && reference.queries[2].runtime_value.integer == 0 &&
+                                   (check_stream_flags(&reference, comma_query) & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
+                                   (check_stream_flags(&reference, call_query) & BUSTER_CHECK_FP_ENVIRONMENT) == 0,
                               "constant_p leaves marked comma and call operands unevaluated when their source proof is false");
-            check_test_expect(test, check_stream_value(&scalar, classify).integer == 12 && scalar.floating[0].selected_selector == BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR &&
-                                   scalar.floating[0].evaluated_operands == 63 && scalar.floating[0].definite_operands == 48 &&
-                                   scalar.floating[0].evaluation == CHECK_BUILTIN_FLOAT_EVALUATION_FPCLASSIFY_RUNTIME && !scalar.floating[0].folded &&
-                                   scalar.floating[1].node == sign && scalar.floating[1].may_raise_fp_exceptions,
+            check_test_expect(test, check_stream_value(&reference, classify).integer == 12 && reference.floating[0].selected_selector == BUSTER_CHECK_BUILTIN_FLOAT_NO_SELECTOR &&
+                                   reference.floating[0].evaluated_operands == 63 && reference.floating[0].definite_operands == 48 &&
+                                   reference.floating[0].evaluation == CHECK_BUILTIN_FLOAT_EVALUATION_FPCLASSIFY_RUNTIME && !reference.floating[0].folded &&
+                                   reference.floating[1].node == sign && reference.floating[1].may_raise_fp_exceptions,
                               "environment-dependent classification retains all runtime selector paths and strict comparison exceptions");
-            check_test_expect(test, check_stream_type(&scalar, copy) == BUSTER_TYPE_FLOAT && check_stream_constant_kind(&scalar, copy) == CHECK_CONSTANT_FLOATING &&
-                                   scalar.floating[2].runtime_builtin == CBUILTIN_COPYSIGNF && !scalar.floating[2].folded &&
-                                   scalar.floating[2].converted_arguments[0].type == BUSTER_TYPE_FLOAT &&
-                                   scalar.floating[2].compiler_barrier && scalar.floating[2].may_raise_inexact &&
-                                   check_stream_type(&scalar, square) == BUSTER_TYPE_DOUBLE && check_stream_constant_kind(&scalar, square) == CHECK_CONSTANT_NONE &&
-                                   scalar.floating[3].may_set_errno && scalar.floating[3].errno_pointer_type == type_pointer(table, BUSTER_TYPE_INT),
+            check_test_expect(test, check_stream_type(&reference, copy) == BUSTER_TYPE_FLOAT && check_stream_constant_kind(&reference, copy) == CHECK_CONSTANT_FLOATING &&
+                                   reference.floating[2].runtime_builtin == CBUILTIN_COPYSIGNF && !reference.floating[2].folded &&
+                                   reference.floating[2].converted_arguments[0].type == BUSTER_TYPE_FLOAT &&
+                                   reference.floating[2].compiler_barrier && reference.floating[2].may_raise_inexact &&
+                                   check_stream_type(&reference, square) == BUSTER_TYPE_DOUBLE && check_stream_constant_kind(&reference, square) == CHECK_CONSTANT_NONE &&
+                                   reference.floating[3].may_set_errno && reference.floating[3].errno_pointer_type == type_pointer(table, BUSTER_TYPE_INT),
                               "math descriptors retain source conversions, runtime environment requirements and a real errno pointer type");
             const uint64_t mark = output.length;
+            check_test_expect(test, check_test_stream_recorded(&reference, &graph, graph.argument_count, "fp-graphs"), "fp-graphs: the reference stream is its recorded digest");
             for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 CheckStream vector;
                 const CheckOptions partition = { .batch_size = batch, .regions = batch != 0 };
                 check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &partition, &vector) &&
-                                       check_test_stream_equal(&scalar, &vector, graph.argument_count),
+                                       check_test_stream_equal(&reference, &vector, graph.argument_count),
                                   "all graph partitions preserve FENV proofs, runtime masks and complete math descriptors");
                 arena_pop_to(&output, mark);
             }
@@ -427,28 +428,29 @@ static void check_test_half_constant_graph(CheckTest* test, TypeTable* table)
             const uint32_t runtime_sum = check_graph_add(&graph, CHECK_OP_ADD, 5, large, one, BUSTER_CHECK_NONE);
             runtime[format] = check_graph_add(&graph, CHECK_OP_SUBTRACT, 6, runtime_sum, large, BUSTER_CHECK_NONE);
         }
-        CheckStream scalar;
-        const CheckOptions options = { .scalar = true };
-        const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &scalar);
-        check_test_expect(test, graph.const_values == NULL && checked && scalar.report_count == 0,
+        CheckStream reference;
+        const CheckOptions options = { 0 };
+        const bool checked = check_graph_run(table, &graph, &output, &scratch, &options, &reference);
+        check_test_expect(test, graph.const_values == NULL && checked && reference.report_count == 0,
                           "required half arithmetic needs no optional const-object receipt table");
         if (checked)
         {
             for (uint32_t format = 0; format < BUSTER_ARRAY_LENGTH(formats); format += 1)
             {
-                const CheckValue constant = check_stream_value(&scalar, required[format]);
-                const CheckValue ordinary = check_stream_value(&scalar, runtime[format]);
+                const CheckValue constant = check_stream_value(&reference, required[format]);
+                const CheckValue ordinary = check_stream_value(&reference, runtime[format]);
                 check_test_expect(test, constant.fault == CHECK_FAULT_NONE && constant.constant_kind == CHECK_CONSTANT_FLOATING &&
                                        constant.floating == 0 && ordinary.fault == CHECK_FAULT_UNSUPPORTED_CONSTANT,
                                   "required half graph chains round each operation without folding neighboring runtime chains");
             }
             const uint64_t mark = output.length;
+            check_test_expect(test, check_test_stream_recorded(&reference, &graph, graph.argument_count, "fp-graphs"), "fp-graphs: the reference stream is its recorded digest");
             for (uint32_t batch = 0; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 CheckStream vector;
                 const CheckOptions partition = { .batch_size = batch, .regions = batch != 0, .transitions = batch == 0 };
                 check_test_expect(test, check_graph_run(table, &graph, &output, &scratch, &partition, &vector) &&
-                                       check_test_stream_equal(&scalar, &vector, graph.argument_count),
+                                       check_test_stream_equal(&reference, &vector, graph.argument_count),
                                   "half required contexts and runtime chains agree across graph schedules and transition requests");
                 arena_pop_to(&output, mark);
             }

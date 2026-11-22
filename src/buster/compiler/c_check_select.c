@@ -137,7 +137,7 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
     const uint64_t mark = reader->scratch->length;
     const TypeId control_type = check_constant_control_type(reader, control);
     CheckGenericSet seen;
-    bool valid = control_type != 0 && check_generic_initialize(reader, &seen, close - separator, control_type, close + 1);
+    bool valid = control_type != 0 && check_generic_initialize(reader, &seen, check_generic_associations(parser, separator + 1, close), control_type, close + 1);
     uint32_t chosen = BUSTER_CHECK_NONE;
     uint32_t fallback = BUSTER_CHECK_NONE;
     uint32_t association = separator + 1;
@@ -178,7 +178,7 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
     valid &= chosen != BUSTER_CHECK_NONE;
     if (valid)
     {
-        reader->selected_tokens[close] = chosen;
+        check_input_selection_set(reader, close, chosen);
         check_input_sparse_mark(reader, close, chosen < reader->parser->tokens.count);
         association = separator + 1;
         while (association < close)
@@ -226,7 +226,7 @@ static bool check_input_selection(CheckInputReader* reader, uint32_t close)
             selected &= root != BUSTER_CHECK_NONE;
             if (selected)
             {
-                reader->selected_tokens[close] = root;
+                check_input_selection_set(reader, close, root);
                 check_input_sparse_mark(reader, close, root < reader->parser->tokens.count);
                 check_input_constant_fold_warning(reader, first, separator, &control, true, first, false);
                 check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? close : next, CHECK_WARNING_INTEGER_OVERFLOW);
@@ -244,46 +244,27 @@ static bool check_input_selection(CheckInputReader* reader, uint32_t close)
 // The postorder positions of the closes whose first child is a _Generic or __builtin_choose_expr token, as bits of
 // `positions` ((count + 63) / 64 words, zeroed), and how many there are (#877). AVX-512 compares 16 tokens' names at a
 // time with the two names and maps each such token to its parent, of which it must be the first child: a unit has few
-// of them, where the walk visited every token. The scalar path tests every close of the postorder as the walk does: the
-// kernel's twin in test-checker, since check_input_selections' own scalar path walks instead.
-static uint32_t check_input_selection_positions(const uint32_t* names, const uint32_t* parents, const uint32_t* first_child, const uint32_t* postorder,
-                                                const uint32_t* postorder_positions, uint32_t count, uint64_t* positions, bool scalar)
+// of them, where the walk visited every token.
+static uint32_t check_input_selection_positions(const uint32_t* names, const uint32_t* parents, const uint32_t* first_child,
+                                                const uint32_t* postorder_positions, uint32_t count, uint64_t* positions)
 {
-    (void)scalar;
-
     uint32_t found = 0;
-    if (BUSTER_SCALAR_PATH(scalar))
+    const __m512i generic = _mm512_set1_epi32((int32_t)C_NAME_GENERIC);
+    const __m512i choose = _mm512_set1_epi32((int32_t)C_NAME_BUILTIN_CHOOSE_EXPR);
+    for (uint32_t first = 0; first < count; first += 16)
     {
-        for (uint32_t position = 0; position < count; position += 1)
+        const __mmask16 lanes = (__mmask16)check_input_scan_all(first, count);
+        const __m512i spelled = _mm512_maskz_loadu_epi32(lanes, names + first);
+        for (uint32_t keywords = (uint32_t)(_mm512_mask_cmpeq_epi32_mask(lanes, spelled, generic) | _mm512_mask_cmpeq_epi32_mask(lanes, spelled, choose));
+             keywords != 0; keywords &= keywords - 1)
         {
-            const uint32_t keyword = first_child[postorder[position]];
-            const uint32_t name = keyword < count ? names[keyword] : 0;
-            if (name == C_NAME_GENERIC || name == C_NAME_BUILTIN_CHOOSE_EXPR)
+            const uint32_t keyword = first + (uint32_t)__builtin_ctz(keywords);
+            const uint32_t close = parents[keyword];
+            if (close < count && first_child[close] == keyword)
             {
+                const uint32_t position = postorder_positions[close];
                 positions[position / 64] |= UINT64_C(1) << (position % 64);
                 found += 1;
-            }
-        }
-    }
-    else
-    {
-        const __m512i generic = _mm512_set1_epi32((int32_t)C_NAME_GENERIC);
-        const __m512i choose = _mm512_set1_epi32((int32_t)C_NAME_BUILTIN_CHOOSE_EXPR);
-        for (uint32_t first = 0; first < count; first += 16)
-        {
-            const __mmask16 lanes = (__mmask16)check_input_scan_all(first, count);
-            const __m512i spelled = _mm512_maskz_loadu_epi32(lanes, names + first);
-            for (uint32_t keywords = (uint32_t)(_mm512_mask_cmpeq_epi32_mask(lanes, spelled, generic) | _mm512_mask_cmpeq_epi32_mask(lanes, spelled, choose));
-                 keywords != 0; keywords &= keywords - 1)
-            {
-                const uint32_t keyword = first + (uint32_t)__builtin_ctz(keywords);
-                const uint32_t close = parents[keyword];
-                if (close < count && first_child[close] == keyword)
-                {
-                    const uint32_t position = postorder_positions[close];
-                    positions[position / 64] |= UINT64_C(1) << (position % 64);
-                    found += 1;
-                }
             }
         }
     }
@@ -291,23 +272,20 @@ static uint32_t check_input_selection_positions(const uint32_t* names, const uin
 }
 
 // Each _Generic's and __builtin_choose_expr's selection, in postorder, so that a selection's operands are selected
-// before it. The vector path visits only the closes check_input_selection_positions finds, in the order of their bits,
-// the order the walk would visit them in; the scalar path, its twin, walks every token. Where the vector path has no
-// room for its bits, it walks too: the same visits.
+// before it. It visits only the closes check_input_selection_positions finds, in the order of their bits, the order a
+// walk of every token would visit them in; where it has no room for its bits, it walks: the same visits.
 static bool check_input_selections(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     const uint64_t mark = reader->scratch->length;
     const uint64_t words = ((uint64_t)count + 63) / 64;
-    uint64_t* positions = scalar || words == 0 ? NULL : BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words);
+    uint64_t* positions = words == 0 ? NULL : BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, words);
     bool valid = true;
     if (positions != NULL)
     {
         memset(positions, 0, words * sizeof(uint64_t));
-        check_input_selection_positions(parser->tokens.names, parser->tree.parents, reader->first_child, reader->postorder, reader->postorder_positions, count,
-                                        positions, false);
+        check_input_selection_positions(parser->tokens.names, parser->tree.parents, reader->first_child, reader->postorder_positions, count, positions);
         for (uint64_t word = 0; word < words; word += 1)
         {
             for (uint64_t bits = positions[word]; bits != 0; bits &= bits - 1)

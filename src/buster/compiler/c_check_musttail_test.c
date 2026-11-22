@@ -164,7 +164,7 @@ static __attribute__((noinline)) void check_test_musttail_limit(CheckTest* test)
         Arena output = arena_reserve(UINT64_C(1) << 24);
         Arena scratch = arena_reserve(UINT64_C(1) << 24);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         const bool ready = input_arena.base != 0 && output.base != 0 && scratch.base != 0 && check_test_types_open(&types) &&

@@ -1,188 +1,150 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-# Network-free fixture glue for the C statistics and the API extraction boundary.
+# Offline API-boundary fixtures; the C tests own the numeric accounting oracle.
 set -euo pipefail
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/timings.c -o "$work/timings"
 "$work/timings" --self-test
+"$work/timings" --accounting-self-test
 cc -std=c17 -O1 -g -Wall -Wextra -Werror -fno-strict-aliasing -fsanitize=address,undefined -fno-sanitize-recover=all tools/ci/timings.c -o "$work/timings-sanitize"
-ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 "$work/timings-sanitize" --self-test
+ASAN_OPTIONS=${ASAN_OPTIONS:-detect_leaks=1:abort_on_error=1} UBSAN_OPTIONS=halt_on_error=1 "$work/timings-sanitize" --accounting-self-test
+jq -n -f tests/ci/timings-fixtures.jq > "$work/api.json"
 mkdir "$work/bin"
-cat > "$work/bin/gh" <<'SH'
+cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
 set -euo pipefail
-[[ "$1" == api ]]
-case "${*: -1}" in
-    *workflows/9700x.yml/runs\?per_page=100)
-        printf '%s\n' '{"workflow_runs":[{"id":1,"event":"pull_request"},{"id":2,"event":"push"},{"id":3,"event":"schedule"},{"id":4,"event":"unsupported"},{"id":5,"event":"workflow_dispatch","display_title":"Nightly backlog (admit) of 0123456789abcdef0123456789abcdef01234567 [20261104.9.1.admit]"},{"id":6,"event":"workflow_dispatch","display_title":"Tests and Zen 5 benchmarks"},{"id":17,"event":"pull_request","status":"completed","created_at":"2026-11-17T09:00:00Z"},{"id":18,"event":"pull_request","status":"completed","created_at":"2026-11-17T09:00:00Z"},{"id":19,"event":"pull_request","status":"completed","created_at":"2026-11-17T09:00:00Z"}]}' ;;
-    *runs/1/jobs\?per_page=100\&filter=latest)
-        cat <<'JSON'
-{"jobs":[{"id":11,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-03T01:00:00Z","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:02:00Z","steps":[{"name":"Set up runner","conclusion":"success","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:00:20Z"},{"name":"Verify benchmark host","conclusion":"success","started_at":"2026-11-03T01:00:20Z","completed_at":"2026-11-03T01:00:21Z"},{"name":"Run complete native vector correctness before benchmarks","conclusion":"success","started_at":"2026-11-03T01:00:30Z","completed_at":"2026-11-03T01:01:00Z"},{"name":"Benchmark first","conclusion":"success","started_at":"2026-11-03T01:01:00Z","completed_at":"2026-11-03T01:01:10Z"},{"name":"Measure second","conclusion":"success","started_at":"2026-11-03T01:01:10Z","completed_at":"2026-11-03T01:01:15Z"},{"name":"Benchmark skipped","conclusion":"skipped","started_at":"2026-11-03T01:01:15Z","completed_at":"2026-11-03T01:01:59Z"}]}]}
-JSON
-        ;;
-    *runs/2/jobs\?per_page=100\&filter=latest)
-        cat <<'JSON'
-{"jobs":[{"id":22,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"failure","created_at":"2026-11-03T01:00:00Z","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:02:00Z"},{"id":23,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","started_at":"2026-11-03T01:00:00Z","completed_at":"2026-11-03T01:01:40Z"}]}
-JSON
-        ;;
-    *runs/3/jobs\?per_page=100\&filter=latest)
-        [[ "$2" == --paginate ]]
-        cat <<'JSON'
-{"jobs":[{"id":31,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-03T01:00:00Z","started_at":"2026-11-03T01:00:05Z","completed_at":"2026-11-03T01:00:10Z"}]}
-{"jobs":[{"id":32,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-03T01:00:00Z","started_at":"2026-11-03T01:00:10Z","completed_at":"2026-11-03T01:00:30Z","steps":[{"name":"Run complete native vector correctness before benchmarks","conclusion":"success","started_at":null,"completed_at":"2026-11-03T01:00:20Z"}]}]}
-JSON
-        ;;
-    *runs/5/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":51,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-04T03:00:00Z","started_at":"2026-11-04T03:00:30Z","completed_at":"2026-11-04T03:04:30Z"}]}' ;;
-    *runs/6/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":61,"name":"Native tests and benchmarks on Benchpress (Ryzen 7 9700X)","status":"completed","conclusion":"success","created_at":"2026-11-04T09:00:00Z","started_at":"2026-11-04T09:00:20Z","completed_at":"2026-11-04T09:20:20Z"}]}' ;;
-    # The runner hooks' lines in the jobs' logs: a whole cycle (11), a wait behind another holder (51), none of them
-    # (23, 32), a log that can't be read (31), and one without its release, its first line behind the byte-order mark (61).
-    *jobs/11/logs)
-        printf '%s\n' "2026-11-03T01:00:10.1000000Z Current runner version: '2.338.0'" \
-            '2026-11-03T01:00:10.2000000Z A job started hook has been configured by the self-hosted runner administrator' \
-            "2026-11-03T01:00:10.2500000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'" \
-            '2026-11-03T01:00:10.2600000Z ##[endgroup]' \
-            '2026-11-03T01:00:19.8000000Z buster-9700x: this job has the machine' \
-            '2026-11-03T01:00:20.0000000Z ##[group]Run test "$(uname -s)" = Linux' \
-            "2026-11-03T01:01:59.8000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-completed.sh'" \
-            '2026-11-03T01:01:59.9000000Z buster-9700x: gave the machine back' ;;
-    *jobs/51/logs)
-        printf '%s\n' "2026-11-04T03:00:30.4000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'" \
-            '2026-11-04T03:00:30.4100000Z buster-9700x: waiting for the machine, held by: 2026-11-04T02:59:00+00:00 someone: taskset -c 2 ./build/compiler benchmark-lexer src' \
-            '2026-11-04T03:00:38.4000000Z buster-9700x: this job has the machine' \
-            '2026-11-04T03:04:29.6000000Z buster-9700x: gave the machine back' ;;
-    *jobs/23/logs|*jobs/32/logs)
-        printf '%s\n' '2026-11-03T01:00:00.0000000Z Current runner version: '"'2.338.0'" ;;
-    *jobs/31/logs)
-        printf '{"message":"Not Found","status":"404"}\n'
-        exit 1 ;;
-    *jobs/61/logs)
-        printf '\xef\xbb\xbf%s\n' "2026-11-04T09:00:20.0000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'"
-        printf '%s\n' '2026-11-04T09:00:21.0000000Z buster-9700x: this job has the machine' ;;
-    # The merge queue: a merged candidate (7), one that passed but was invalidated (8), a failure (9), a cancelled one
-    # (10), a failure its stop job cancelled (16, #2703) and one whose fate can't be read (12); another event's run (13),
-    # one without its times (14) and another branch's queue's candidate (15, the drill's) are left out.
-    *workflows/9700x.yml/runs\?event=merge_group\&status=completed\&per_page=100)
-        printf '%s\n' '{"workflow_runs":[{"id":7,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-107-0000000000000000000000000000000000000001","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000007","created_at":"2026-11-13T09:00:00Z","run_started_at":"2026-11-13T09:00:10Z","updated_at":"2026-11-13T09:37:26Z"},{"id":8,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-108-0000000000000000000000000000000000000001","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000008","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:30:00Z"},{"id":9,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-109-0000000000000000000000000000000000000001","status":"completed","conclusion":"failure","head_sha":"0000000000000000000000000000000000000009","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:04:00Z"},{"id":10,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-110-0000000000000000000000000000000000000001","status":"completed","conclusion":"cancelled","head_sha":"0000000000000000000000000000000000000010","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":12,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-112-0000000000000000000000000000000000000001","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000012","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":13,"event":"push","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000013","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":14,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-114-0000000000000000000000000000000000000001","status":"completed","conclusion":"success","head_sha":"0000000000000000000000000000000000000014","created_at":null,"updated_at":"2026-11-13T09:10:00Z"},{"id":15,"event":"merge_group","head_branch":"gh-readonly-queue/merge-queue-drill/pr-115-0000000000000000000000000000000000000001","status":"completed","conclusion":"failure","head_sha":"0000000000000000000000000000000000000015","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:10:00Z"},{"id":16,"event":"merge_group","head_branch":"gh-readonly-queue/main/pr-116-0000000000000000000000000000000000000001","status":"completed","conclusion":"cancelled","head_sha":"0000000000000000000000000000000000000016","created_at":"2026-11-13T09:00:00Z","updated_at":"2026-11-13T09:06:00Z"}]}' ;;
-    *compare/0000000000000000000000000000000000000007...main) echo ahead ;;
-    *compare/0000000000000000000000000000000000000008...main) echo diverged ;;
-    *compare/0000000000000000000000000000000000000009...main) echo behind ;;
-    *compare/0000000000000000000000000000000000000010...main) echo diverged ;;
-    *compare/0000000000000000000000000000000000000016...main) echo diverged ;;
-    # The drill's candidate has a fate and jobs, so that counting it would change the candidates' table.
-    *compare/0000000000000000000000000000000000000015...main) echo diverged ;;
-    *runs/15/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":151,"runner_id":5,"created_at":"2026-11-13T09:00:00Z","started_at":"2026-11-13T09:00:01Z","completed_at":"2026-11-13T09:05:01Z"}]}' ;;
-    *compare/0000000000000000000000000000000000000012...main)
-        printf '{"message":"Server Error","status":"502"}\n'
-        exit 1 ;;
-    # The candidates' jobs. Runner waits count the hosted jobs a runner took (71, 73, 81: 10, 285 and 2 s), not a
-    # skipped one (72, runner 0), one that never started (74), the 9700X's (75, self-hosted) or one without a runner (91).
-    *runs/7/jobs\?per_page=100\&filter=latest)
-        [[ "$2" == --paginate ]]
-        printf '%s\n' '{"jobs":[{"id":71,"runner_id":1,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:30:20Z"},{"id":72,"runner_id":0,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:01:00Z","completed_at":"2026-11-13T09:01:00Z"}]}' \
-            '{"jobs":[{"id":73,"runner_id":2,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:15Z","started_at":"2026-11-13T09:05:00Z","completed_at":"2026-11-13T09:15:00Z"},{"id":74,"runner_id":3,"created_at":"2026-11-13T09:00:10Z","started_at":null,"completed_at":"2026-11-13T09:15:00Z"},{"id":75,"runner_id":9,"labels":["self-hosted","buster-9700x"],"created_at":"2026-11-13T09:00:10Z","started_at":"2026-11-13T09:20:00Z","completed_at":"2026-11-13T09:20:00Z"}]}' ;;
-    *runs/8/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":81,"runner_id":4,"created_at":"2026-11-13T09:00:18Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:20:20Z"}]}' ;;
-    *runs/9/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":91,"created_at":"2026-11-13T09:00:00Z","started_at":"2026-11-13T09:00:20Z","completed_at":"2026-11-13T09:00:50Z"}]}' ;;
-    # A cancelled run's aggregates fail (10), which leaves it cancelled; a shard that failed of its own before its stop
-    # job cancelled the run (16) makes it a failure.
-    *runs/10/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":101,"name":"Integration qualification","conclusion":"failure","runner_id":0,"created_at":"2026-11-13T09:10:00Z","started_at":"2026-11-13T09:10:00Z","completed_at":"2026-11-13T09:10:00Z"},{"id":102,"name":"Coverage record","conclusion":"failure","runner_id":0,"created_at":"2026-11-13T09:10:00Z","started_at":"2026-11-13T09:10:00Z","completed_at":"2026-11-13T09:10:00Z"}]}' ;;
-    *runs/16/jobs\?per_page=100\&filter=latest)
-        printf '%s\n' '{"jobs":[{"id":161,"name":"Tests on Ubuntu 26.04 (x86-64, none, O3) / Tests on Ubuntu 26.04 (Clang 23, x86-64, none, O3, shard 2 of 4)","conclusion":"failure","runner_id":6,"labels":["ubuntu-26.04"],"created_at":"2026-11-13T09:00:00Z","started_at":"2026-11-13T09:00:05Z","completed_at":"2026-11-13T09:05:05Z"},{"id":162,"name":"Integration qualification","conclusion":"failure","runner_id":0,"created_at":"2026-11-13T09:06:00Z","started_at":"2026-11-13T09:06:00Z","completed_at":"2026-11-13T09:06:00Z"}]}' ;;
-    # First feedback includes queue/setup and prior-attempt failures. Costs include setup, redraws and retries.
-    *runs/17/jobs\?per_page=100\&filter=latest|*runs/18/jobs\?per_page=100\&filter=latest|*runs/19/jobs\?per_page=100\&filter=latest)
-        echo '{"jobs":[]}' ;;
-    *runs/17/jobs\?per_page=100\&filter=all)
-        [[ "$2" == --paginate ]]
-        echo '{"jobs":[{"id":171,"runner_id":1,"started_at":"2026-11-17T09:00:20Z","completed_at":"2026-11-17T09:01:20Z","steps":[{"name":"Build compiler","conclusion":"failure","completed_at":"2026-11-17T09:01:10Z"}]}]}'
-        echo '{"jobs":[{"id":172,"runner_id":2,"started_at":"2026-11-17T09:03:00Z","completed_at":"2026-11-17T09:05:00Z","steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"success","completed_at":"2026-11-17T09:04:00Z"}]},{"id":173,"runner_id":3,"started_at":"2026-11-17T09:00:00Z","completed_at":"2026-11-17T09:00:30Z"},{"id":174,"runner_id":0,"conclusion":"cancelled"}]}' ;;
-    *runs/18/jobs\?per_page=100\&filter=all)
-        echo '{"jobs":[{"id":181,"runner_id":4,"started_at":"2026-11-17T09:03:00Z","completed_at":null,"steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"cancelled","completed_at":"2026-11-17T09:04:00Z"}]},{"id":182,"name":"Integration qualification","runner_id":0,"steps":[{"name":"Require hosted and native correctness before successful qualification","conclusion":"failure","completed_at":"2026-11-17T09:04:10Z"}]}]}' ;;
-    *runs/19/jobs\?per_page=100\&filter=all)
-        echo '{"jobs":[{"id":191,"runner_id":5,"started_at":"2026-11-17T09:02:00Z","completed_at":"2026-11-17T09:03:00Z","steps":[{"name":"Early hosted feedback (not qualification)","conclusion":"success","completed_at":"2026-11-17T09:03:00Z"}]}]}' ;;
-    *) echo "unexpected gh invocation: $*" >&2; exit 1 ;;
-esac
-SH
+[[ "$1" == api && "$#" == 2 ]]
+endpoint=$2
+printf '%s\n' "$endpoint" >> "$TIMINGS_FIXTURE_CALLS"
+if [[ "$endpoint" =~ workflows/([^/]+)/runs\?per_page=([0-9]+) ]]; then
+    workflow=${BASH_REMATCH[1]} limit=${BASH_REMATCH[2]} event=all lower=- upper=-
+    if [[ "$endpoint" =~ \&event=([^\&]+) ]]; then event=${BASH_REMATCH[1]}; fi
+    if [[ "$endpoint" =~ \&created=([^\&]+) ]]; then
+        bounds=${BASH_REMATCH[1]}
+        case "$bounds" in
+            '>='*) lower=${bounds:2} ;;
+            '<='*) upper=${bounds:2} ;;
+            *..*) lower=${bounds%%..*}; upper=${bounds#*..} ;;
+            *) echo 'unexpected created filter' >&2; exit 1 ;;
+        esac
+    fi
+    jq --arg workflow "$workflow" --arg event "$event" --arg lower "$lower" --arg upper "$upper" --argjson limit "$limit" '
+        [.runs[] | select(.workflow == $workflow and ($event == "all" or .event == $event))
+            | select(($lower == "-" or .created_at >= $lower) and ($upper == "-" or .created_at <= $upper))]
+        | sort_by(.created_at) | reverse | {total_count:length,workflow_runs:.[:$limit]}' "$TIMINGS_FIXTURE_API"
+elif [[ "$endpoint" =~ runs/([0-9]+)/attempts/([0-9]+)/jobs\?per_page=100\&page=([0-9]+)$ ]]; then
+    run=${BASH_REMATCH[1]} attempt=${BASH_REMATCH[2]} page=${BASH_REMATCH[3]}
+    # A transient gateway error succeeds on the bounded retry. The other
+    # failure persists, but cannot discard the report's available data.
+    if [[ "$run" == 9 && ! -e "$TIMINGS_FIXTURE_STATE/retried" ]]; then
+        touch "$TIMINGS_FIXTURE_STATE/retried"
+        printf '{"message":"Bad Gateway","status":"502"}\n'
+        exit 1
+    fi
+    if [[ "$run" == 11 ]]; then
+        printf '{"message":"Bad Gateway","status":"502"}\n'
+        exit 1
+    fi
+    jq --arg key "$run-$attempt" --argjson page "$page" '.jobs[$key] // [] | {total_count:length,jobs:.[(($page-1)*100):($page*100)]}' "$TIMINGS_FIXTURE_API"
+elif [[ "$endpoint" =~ runs/([0-9]+)/attempts/([0-9]+)$ ]]; then
+    jq --arg key "${BASH_REMATCH[1]}-${BASH_REMATCH[2]}" '.attempts[$key]' "$TIMINGS_FIXTURE_API"
+elif [[ "$endpoint" =~ compare/([0-9a-f]{40})\.\.\.main$ ]]; then
+    sha=${BASH_REMATCH[1]}
+    run=$(jq -r --arg sha "$sha" '.runs[] | select(.head_sha == $sha) | .id' "$TIMINGS_FIXTURE_API")
+    if [[ "$run" == 6 ]]; then printf '{"message":"Bad Gateway","status":"502"}\n'; exit 1; fi
+    if [[ "$run" == 12 && "$(grep -Fc "$endpoint" "$TIMINGS_FIXTURE_CALLS")" -gt 1 ]]; then printf '{"status":"ahead"}\n'; exit 0; fi
+    jq --arg run "$run" '{status:.compares[$run]}' "$TIMINGS_FIXTURE_API"
+elif [[ "$endpoint" =~ branches/gh-readonly-queue%2Fmain%2Fpr-([0-9]+)-base$ ]]; then
+    run=${BASH_REMATCH[1]}
+    if [[ "$run" == 5 ]]; then printf '{"message":"Not Found","status":"404"}\n'; exit 1; fi
+    jq --argjson run "$run" 'if $run == 12 then {commit:{sha:"ffffffffffffffffffffffffffffffffffffffff"}} else .runs[] | select(.id == $run) | {commit:{sha:.head_sha}} end' "$TIMINGS_FIXTURE_API"
+elif [[ "$endpoint" =~ jobs/([0-9]+)/logs$ ]]; then
+    case "${BASH_REMATCH[1]}" in
+        12)
+            printf '%s\n' '2026-11-03T01:00:30.0000000Z model name : Fixture Hosted CPU' \
+                '2026-11-03T01:00:30.0000000Z $(false) this untrusted line is never executed' ;;
+        31)
+            printf '%s\n' "2026-11-03T01:02:10.1000000Z ##[group]Run '/usr/local/libexec/buster-9700x/job-started.sh'" \
+                '2026-11-03T01:02:15.9000000Z buster-9700x: this job has the machine' \
+                '2026-11-03T01:03:09.9000000Z buster-9700x: gave the machine back' \
+                '2026-11-03T01:02:16.0000000Z cpu model: Fixture Hardware CPU' ;;
+        *) echo 'unexpected log request' >&2; exit 1 ;;
+    esac
+elif [[ "$endpoint" == 'repos/buster14a/buster-performance/contents/nightly/reports?ref=nightly-ledger' ]]; then
+    printf '[{"type":"file","name":"2026-11-03.md"}]\n'
+elif [[ "$endpoint" == 'repos/buster14a/buster-performance/contents/nightly/reports/2026-11-03.md?ref=nightly-ledger' ]]; then
+    jq '{encoding:"base64",content:(.nightly|@base64)}' "$TIMINGS_FIXTURE_API"
+else
+    echo "unexpected gh invocation: $endpoint" >&2
+    exit 1
+fi
+GH
 chmod +x "$work/bin/gh"
-PATH="$work/bin:$PATH" GITHUB_REPOSITORY=buster14a/buster bash tools/ci/timings.sh "$work/report"
-cat > "$work/expected.tsv" <<'TSV'
-11	pr	queue	10
-11	pr	execution	110
-11	pr	runner-hook	10
-11	pr	setup-build	10
-11	pr	native-tests	30
-11	pr	host-occupation	100
-11	pr	benchmark-steps	15
-23	main	execution	100
-31	full	queue	5
-31	full	execution	5
-32	full	queue	10
-32	full	execution	20
-51	targeted	queue	30
-51	targeted	execution	240
-61	full	queue	20
-61	full	execution	1200
-17	pr	first-result	70
-17	pr	runner-minutes	210
-19	pr	first-result	180
-19	pr	runner-minutes	60
-11	pr	lock-wait	10
-11	pr	lock-hold	100
-51	targeted	lock-wait	8
-51	targeted	lock-hold	231
-61	full	lock-wait	1
-TSV
-cmp "$work/expected.tsv" "$work/report/observations.tsv"
-grep -Fq '| PR | first-result | 2 | 125.0 | 180 |' "$work/report/summary.md"
-grep -Fq '| PR | runner-minutes | 2 | 2.25 | 3.50 |' "$work/report/summary.md"
-grep -Fq '| PR | total runner-minutes | 2 | 4.50 |' "$work/report/summary.md"
-grep -Fq '| nightly targeted | lock-wait | 1 | 8.0 | 8 |' "$work/report/summary.md"
-grep -Fq '| PR | lock-hold | 1 | 100.0 | 100 |' "$work/report/summary.md"
-grep -Fq '| full (daily, dispatched, snapshot) | lock-wait | 1 | 1.0 | 1 |' "$work/report/summary.md"
-if grep -Fq '| full (daily, dispatched, snapshot) | lock-hold |' "$work/report/summary.md"; then
-    echo 'a log without its release gave a lock hold' >&2
-    exit 1
+export PATH="$work/bin:$PATH" GITHUB_REPOSITORY=buster14a/buster
+export TIMINGS_FIXTURE_API="$work/api.json" TIMINGS_FIXTURE_CALLS="$work/calls" TIMINGS_FIXTURE_STATE="$work"
+export CI_TIMINGS_NOW=1793668600 CI_TIMINGS_RUN_LIMIT=10 CI_TIMINGS_SPLIT_AT=2026-11-03T01:03:00Z
+export CI_TIMINGS_WORKFLOWS='9700x.yml build.yml publish-hosted-inputs.yml ci-timings.yml'
+export CI_TIMINGS_MAX_SECONDS=600 CI_TIMINGS_LOG_LIMIT=24
+bash tools/ci/timings.sh "$work/report" > "$work/stdout"
+facts="$work/report/facts.tsv"
+# Every outcome and both cohorts survive, including old attempts and a missing
+# API page. There are no native tests in the PR's setup/build observation.
+awk -F '\t' '$1=="run"&&$2==1&&$3==1&&$6=="before"&&$10=="failure" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==1&&$3==2&&$10=="success" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==7&&$6=="after" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==2&&$10=="cancelled"&&$14=="superseded-possible" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==3&&$10=="timed_out"&&$15==1 {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==4&&$14=="live" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==5&&$14=="invalidated" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==6&&$14=="unknown" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==8&&$14=="merged" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==12&&$14=="merged" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==13&&$5=="other"&&$14=="unknown" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="job"&&$2==131&&$4=="hosted" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="run"&&$2==11&&$15==0 {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="job"&&$2==101&&$7=="in_progress"&&$11=="-" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="job"&&$2==3000&&$4=="none"&&$8=="skipped" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="job"&&$2==121&&$4=="none"&&$8=="cancelled" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="job"&&$2==22&&$4=="hosted"&&$10=="-" {found=1} END {exit !found}' "$facts"
+awk -F '\t' '$1=="job"&&$2==12&&$6=="Fixture Hosted CPU" {found=1} END {exit !found}' "$facts"
+test "$(awk -F '\t' '$1=="job" {n++} END {print n}' "$facts")" -eq 114
+test "$(awk -F '\t' '$1=="step"&&($3~/^Compare /||$3~/^Time /||$3~/^Attribute /) {n++} END {print n}' "$facts")" -eq 4
+grep -Fq 'https://github.com/buster14a/buster/actions/runs/1/attempts/1' "$work/report/run-links.tsv"
+grep -Fq 'Carried over: 3 states;' "$work/report/notes.tsv"
+grep -Fq 'unknown' "$work/report/summary.md"
+grep -Fq 'jobs-9-1-1' "$work/report/requests.tsv"
+test "$(grep -Fc 'runs/9/attempts/1/jobs' "$work/calls")" -eq 2
+test "$(grep -Fc 'runs/11/attempts/1/jobs' "$work/calls")" -eq 2
+test "$(grep -Fc 'runs/3/attempts/1/jobs' "$work/calls")" -eq 2
+# Logs contain data only and are not retained, including failed log downloads.
+test ! -e "$work/report/job.log"
+test ! -e "$work/report/job-12-log.json"
+# Replay is network-free and reproduces every fact, independent of note counters.
+cp "$work/calls" "$work/calls-before-replay"
+CI_TIMINGS_REPLAY="$work/report" bash tools/ci/timings.sh "$work/replayed" > /dev/null
+cmp "$work/calls" "$work/calls-before-replay"
+awk -F '\t' '$1!="note"' "$facts" > "$work/facts-expected"
+awk -F '\t' '$1!="note"' "$work/replayed/facts.tsv" > "$work/facts-actual"
+cmp "$work/facts-expected" "$work/facts-actual"
+# Reusing the output directory must discard previous CPU markers/raw responses.
+CI_TIMINGS_LOG_LIMIT=0 CI_TIMINGS_WORKFLOWS=build.yml bash tools/ci/timings.sh "$work/report" > /dev/null
+test ! -e "$work/report/job-12-evidence.json"
+test ! -e "$work/report/jobs-1-2-1.json"
+# Exhaustion is a successful partial report with an explicit missing observation.
+CI_TIMINGS_MAX_REQUESTS=1 CI_TIMINGS_WORKFLOWS=9700x.yml bash tools/ci/timings.sh "$work/bounded" > /dev/null
+grep -Fq 'budget exhausted' "$work/bounded/notes.tsv"
+test -s "$work/bounded/summary.md"
+# Truncated retry histories cannot claim complete resource accounting.
+CI_TIMINGS_ATTEMPT_LIMIT=1 CI_TIMINGS_REPLAY="$work/replayed" bash tools/ci/timings.sh "$work/attempt-bound" > /dev/null
+awk -F '\t' '$1=="run"&&$2==1&&$3==2&&$15==0 {found=1} END {exit !found}' "$work/attempt-bound/facts.tsv"
+if CI_TIMINGS_HOSTED_CAPACITY=500 CI_TIMINGS_CAPACITY_SOURCE=- bash tools/ci/timings.sh "$work/no-source" > /dev/null 2>&1; then
+    echo 'an unverified capacity limit was accepted' >&2; exit 1
 fi
-test ! -e "$work/report/job.log" || { echo 'a job log was kept' >&2; exit 1; }
-# The collector run again into the same directory reports the same observations, none of the first run's lock lines
-# replayed.
-PATH="$work/bin:$PATH" GITHUB_REPOSITORY=buster14a/buster bash tools/ci/timings.sh "$work/report" > /dev/null
-cmp "$work/expected.tsv" "$work/report/observations.tsv" || { echo 'a second run into the same directory replayed rows' >&2; exit 1; }
-test "$(wc -l < "$work/report/locks.tsv")" -eq 5 || { echo 'the lock lines were not started afresh' >&2; exit 1; }
-grep -Fq '| full (daily, dispatched, snapshot) | queue | 3 | 10.0 | 20 |' "$work/report/summary.md"
-grep -Fq '| full (daily, dispatched, snapshot) | execution | 3 | 20.0 | 1200 |' "$work/report/summary.md"
-grep -Fq '| nightly targeted | execution | 1 | 240.0 | 240 |' "$work/report/summary.md"
-grep -Fq '| PR | host-occupation | 1 | 100.0 | 100 |' "$work/report/summary.md"
-# The merge queue's candidates, each by its fate, the time spent on those that didn't merge, and their hosted jobs'
-# waits for a runner: the longest, their sum and their count.
-printf '7\tmerged\t2236\t2400\t285\t295\t2\n8\tpassed\t1800\t1200\t2\t2\t1\n9\tfailed\t240\t30\t0\t0\t0\n10\tcancelled\t600\t0\t0\t0\t0\n16\tfailed\t360\t300\t5\t5\t1\n' > "$work/expected-candidates.tsv"
-cmp "$work/expected-candidates.tsv" "$work/report/candidates.tsv" || { cat "$work/report/candidates.tsv" >&2; echo 'the candidates differ' >&2; exit 1; }
-grep -Fq '| merged | 1 | 40 |' "$work/report/summary.md"
-grep -Fq '| passed, not merged (invalidated) | 1 | 20 |' "$work/report/summary.md"
-grep -Fq '| failed | 2 | 6 |' "$work/report/summary.md"
-grep -Fq '| cancelled (dropped or invalidated) | 1 | 0 |' "$work/report/summary.md"
-grep -Fq '| all | 5 | 66 |' "$work/report/summary.md"
-grep -Fq "Candidates that didn't merge took 26 runner-minutes, 38.9% of the queue's" "$work/report/summary.md"
-grep -Fq 'median 37.3 min, p95 37.3 min (1 candidates)' "$work/report/summary.md"
-grep -Fq "each candidate's longest, median 5.0 s and p95 285 s (3 candidates); every job's, mean 75.5 s over 4 jobs." "$work/report/summary.md"
-"$work/timings" --queue < /dev/null > "$work/empty-queue.md"
-grep -Fq 'No completed candidate runs' "$work/empty-queue.md"
-if printf '7\tmerged\t1\t1\t0\t0\t0\n7\tfailed\t1\t1\t0\t0\t0\n' | "$work/timings" --queue > /dev/null 2>&1; then
-    echo 'a candidate counted twice was accepted' >&2
-    exit 1
-fi
-"$work/timings" < /dev/null > "$work/empty.md"
-grep -Fq 'No eligible observations' "$work/empty.md"
-printf '%s\n' 'invalid' > "$work/invalid.tsv"
-if "$work/timings" < "$work/invalid.tsv" > "$work/invalid.md" 2> /dev/null; then
-    echo 'invalid input unexpectedly accepted' >&2
-    exit 1
+"$work/timings" < /dev/null > "$work/empty-legacy.md"
+if printf 'invalid\n' | "$work/timings" --accounting > "$work/invalid.md" 2> /dev/null; then
+    echo 'invalid facts accepted' >&2; exit 1
 fi
 test ! -s "$work/invalid.md"
-printf 'timings extraction: successful, failed, missing timestamps, paginated jobs, the lock lines of job logs and the merge queue'"'"'s candidates checked\n'
+printf 'timings collection: outcomes, cohorts, attempts, pagination, CPU/lock evidence, queue fate, partial reads, bounds and replay checked\n'

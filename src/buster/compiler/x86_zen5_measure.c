@@ -1369,13 +1369,12 @@ static int64_t x86_zen5_fill_bits(const X86CostShape* shape)
 // Builds case `shape`'s program for `experiment` (or a reference's, with a default shape): `void program(uint64_t
 // iterations, void* data)` preserves the SysV callee-saved registers, sets every register it reads from the data's
 // constants, aligns its loop to 64 bytes and returns with the x87 stack empty and the upper vector state clean. The
-// mapping is writable only while it is built and executable only after both encoders agree on every byte.
+// mapping is writable only while it is built and executable only once its records validate and encode.
 static bool x86_zen5_program(const X86CostShape* shape, X86CostExperiment experiment, uint32_t reference, const X86CostHost* host, X86CostProgram* program)
 {
     static const uint8_t saved[] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
     static X86CostBuilder builder;
     static uint32_t offsets[BUSTER_X86_COST_RECORDS + 1];
-    static uint8_t vector_bytes[BUSTER_X86_COST_CODE_SIZE];
     memset(program, 0, sizeof(*program));
     builder.count = 0;
     builder.fixups = 0;
@@ -1432,7 +1431,7 @@ static bool x86_zen5_program(const X86CostShape* shape, X86CostExperiment experi
         }
     }
     uint8_t prefix[4096];
-    const int64_t prefix_length = builder.valid ? x86_encode_scalar(builder.records, builder.count, prefix, sizeof(prefix), 0, 0) : -1;
+    const int64_t prefix_length = builder.valid && x86_validate(builder.records, builder.count) == builder.count ? x86_encode(builder.records, builder.count, prefix, sizeof(prefix), 0, 0) : -1;
     builder.valid &= prefix_length > 0;
     for (int64_t i = 0; builder.valid && i < (64 - prefix_length % 64) % 64; i += 1)
     {
@@ -1476,7 +1475,7 @@ static bool x86_zen5_program(const X86CostShape* shape, X86CostExperiment experi
     }
     if (builder.valid)
     {
-        int64_t length = x86_encode_scalar(builder.records, builder.count, program->code, BUSTER_X86_COST_CODE_SIZE, offsets, 0);
+        int64_t length = x86_encode(builder.records, builder.count, program->code, BUSTER_X86_COST_CODE_SIZE, offsets, 0);
         builder.valid = length > 0 && offsets[loop] % 64 == 0;
         offsets[builder.count] = (uint32_t)length;
         // The relative displacements: the loop's branch, then the units' (each to its target record's offset, from the
@@ -1490,9 +1489,8 @@ static bool x86_zen5_program(const X86CostShape* shape, X86CostExperiment experi
                 const uint32_t target = builder.fixup_targets[f] == BUSTER_X86_COST_STUB ? stub : builder.fixup_targets[f];
                 builder.records[record].displacement = (int32_t)offsets[target] - (int32_t)offsets[record + 1];
             }
-            const int64_t final = x86_encode_scalar(builder.records, builder.count, program->code, BUSTER_X86_COST_CODE_SIZE, offsets, 0);
-            const int64_t vector = x86_encode(builder.records, builder.count, vector_bytes, sizeof(vector_bytes), 0, 0);
-            builder.valid = final == length && vector == length && memcmp(vector_bytes, program->code, (size_t)length) == 0;
+            const int64_t final = x86_encode(builder.records, builder.count, program->code, BUSTER_X86_COST_CODE_SIZE, offsets, 0);
+            builder.valid = final == length;
         }
         if (builder.valid)
         {

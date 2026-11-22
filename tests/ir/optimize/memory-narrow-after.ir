@@ -1,0 +1,80 @@
+function (i64, i64) -> i16 {
+  slot $0 size=16 align=8 type=void flags=0x00
+  slot $1 size=16 align=8 type=void flags=0x00
+b0:
+  %0 = param.i64 0
+  %1 = param.i64 1
+  %2 = stack_addr.ptr $0
+  %3 = stack_addr.ptr $1
+  %4 = address.ptr %2 offset=1
+  %5 = trunc.i1 %0
+  %6 = select.ptr %5, %2, %3
+  %7 = trunc.i8 %0
+  %8 = trunc.i16 %1
+  %9 = store.void %3, %1 align=8
+  %10 = store.void %3, %7 align=1
+  %11 = zext.i32 %7
+  %12 = zext.i64 %8
+  %13 = store.void %2, %11 align=4
+  %14 = address.ptr %2 offset=0
+  %15 = store.void %2, %12 align=8
+  %16 = call.void @1(%7, %7, %8) fixed=(i8, i8, i16) variadic=0
+  %17 = store.void %14, %12 align=8
+  %18 = load.i16 %4 align=1
+  %19 = store.void %14, %12 align=8
+  %20 = load.i16 %3 align=2
+  %21 = store.void %14, %12 align=8
+  %22 = load.i8 %2 align=1
+  %23 = store.void %2, %12 align=8
+  %24 = store.void %4, %7 align=1
+  %25 = load.i16 %2 align=2
+  %26 = store.void %2, %12 align=8
+  %27 = store.void %6, %7 align=1
+  %28 = load.i16 %2 align=2
+  %29 = call.void @2(%18, %20, %22, %25, %28) fixed=(i16, i16, i8, i16, i16) variadic=0
+  %30 = store.void %2, %12 align=8
+  %31 = load.i32 %3 align=4 volatile
+  %32 = load.i16 %2 align=2
+  %33 = store.void %2, %12 align=8
+  %34 = load.i32 %3 align=4 atomic acquire
+  %35 = load.i16 %2 align=2
+  %36 = store.void %2, %12 align=8
+  %37 = load.i32 %3 align=4 gs
+  %38 = load.i16 %2 align=2
+  %39 = store.void %2, %12 align=8
+  %40 = fence.void seq_cst
+  %41 = load.i16 %2 align=2
+  %42 = store.void %2, %12 align=8
+  %43 = call.void @3(%2) fixed=(ptr) variadic=0
+  %44 = load.i16 %2 align=2
+  %45 = store.void %2, %12 align=8
+  %46 = lifetime.void $0 start
+  %47 = load.i16 %2 align=2
+  %48 = call.void @4(%32, %35, %38, %41, %44, %47) fixed=(i16, i16, i16, i16, i16, i16) variadic=0
+  %49 = store.void %2, %12 align=8 volatile
+  %50 = load.i16 %2 align=2
+  %51 = store.void %2, %12 align=8 atomic release
+  %52 = load.i16 %2 align=2
+  %53 = store.void %2, %12 align=8 fs
+  %54 = load.i16 %2 align=2
+  %55 = store.void %2, %12 align=8
+  %56 = load.i16 %2 align=2 volatile
+  %57 = store.void %2, %12 align=8
+  %58 = load.i16 %2 align=2 atomic acquire
+  %59 = store.void %2, %12 align=8
+  %60 = load.i16 %2 align=2 gs
+  %61 = call.void @5(%50, %52, %54, %56, %58, %60) fixed=(i16, i16, i16, i16, i16, i16) variadic=0
+  %62 = undef.i16
+  %63 = zext.i32 %62
+  %64 = store.void %2, %63 align=4
+  %65 = load.i16 %2 align=2
+  %66 = sext.i32 %8
+  %67 = store.void %2, %66 align=4
+  %68 = load.i16 %2 align=2
+  %69 = call.void @6(%65, %68) fixed=(i16, i16) variadic=0
+  %70 = store.void %2, %12 align=8
+  %71 = br.void b1
+b1:
+  %72 = load.i16 %2 align=2
+  %73 = ret.void %72
+}

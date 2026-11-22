@@ -26,9 +26,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(BUSTER_HOST_VECTOR) && BUSTER_HOST_VECTOR
 #include <immintrin.h>
-#endif
 
 #define BUSTER_EMISSION_NO_ORIGIN UINT32_MAX
 #define BUSTER_EMISSION_MAX_REGISTERS 65536u
@@ -246,7 +244,6 @@ static EmissionCheck emission_layout_check_scalar(const EmissionLayout* layout)
 static EmissionCheck emission_layout_check(const EmissionLayout* layout, bool scalar)
 {
     EmissionCheck check;
-#if defined(BUSTER_HOST_VECTOR) && BUSTER_HOST_VECTOR
     if (scalar || layout == NULL || (layout->count != 0 && (layout->starts == NULL || layout->ends == NULL)))
     {
         check = emission_layout_check_scalar(layout);
@@ -285,10 +282,6 @@ static EmissionCheck emission_layout_check(const EmissionLayout* layout, bool sc
             }
         }
     }
-#else
-    (void)scalar;
-    check = emission_layout_check_scalar(layout);
-#endif
     return check;
 }
 

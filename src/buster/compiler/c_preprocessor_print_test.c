@@ -65,8 +65,18 @@ static bool pp_test_print_offsets(void)
     return result;
 }
 
-// Every possible alignment of a printed pragma end, followed by ordinary fast batches and exceptional spellings.
-// Compare complete outputs from the independent scalar printer in both marker modes, not merely their tokenization.
+// A run's -E text as pp_test_printed checks it (it lexes back into the stream, and prints with line markers too), whose
+// digest must be the one recorded for `key`.
+static bool pp_print_test_printed(Preprocessor* pp, const char* key)
+{
+    PPSpellings ours = { 0 };
+    const bool result = pp_stream_spellings(pp, &ours) && pp_test_printed(pp, &ours, key, key);
+    arena_release(&ours.arena);
+    return result;
+}
+
+// Every possible alignment of a printed pragma end, followed by ordinary fast batches and exceptional spellings, in both
+// marker modes: each output complete, as recorded, not merely its tokenization.
 static bool pp_test_print_batches(const char* directory)
 {
     char path[PATH_MAX];
@@ -118,16 +128,9 @@ static bool pp_test_print_batches(const char* directory)
             .defer_history = true,
         };
         result = result && pp_test_run(&pp, &table, &options, path);
-        for (uint32_t markers = 0; result && markers < 2; markers += 1)
-        {
-            size_t vector_length = 0;
-            size_t scalar_length = 0;
-            char* vector = pp_test_print(&pp, true, markers != 0, &vector_length);
-            char* scalar = pp_test_print(&pp, false, markers != 0, &scalar_length);
-            result = vector != 0 && scalar != 0 && vector_length == scalar_length && memcmp(vector, scalar, vector_length) == 0;
-            free(vector);
-            free(scalar);
-        }
+        char key[64];
+        snprintf(key, sizeof(key), "printer batches, alignment %u", alignment);
+        result = result && pp_print_test_printed(&pp, key);
         pp_release(&pp);
         intern_release(&table);
     }
@@ -237,21 +240,10 @@ static bool pp_test_print_lines(const char* directory)
             .defer_history = true,
         };
         result = result && pp_test_run(&pp, &table, &options, path);
-        for (uint32_t markers = 0; result && markers < 2; markers += 1)
-        {
-            size_t vector_length = 0;
-            size_t scalar_length = 0;
-            char* vector = pp_test_print(&pp, true, markers != 0, &vector_length);
-            char* scalar = pp_test_print(&pp, false, markers != 0, &scalar_length);
-            result = vector != 0 && scalar != 0 && vector_length == scalar_length && memcmp(vector, scalar, vector_length) == 0;
-            if (!result)
-            {
-                printf("printer lines: alignment %u, markers %u differ\n", alignment, markers);
-            }
-            free(vector);
-            free(scalar);
-            runs += 1;
-        }
+        char key[64];
+        snprintf(key, sizeof(key), "printer lines, alignment %u", alignment);
+        result = result && pp_print_test_printed(&pp, key);
+        runs += 2;
         pp_release(&pp);
         intern_release(&table);
     }
@@ -262,7 +254,7 @@ static bool pp_test_print_lines(const char* directory)
     return result;
 }
 
-// The class pp_print_vector's spaces give a character as a token's first (pp_after_classes) or last
+// The class pp_print's spaces give a character as a token's first (pp_after_classes) or last
 // (pp_before_classes): every byte past 0x7F is a word character.
 static uint8_t pp_print_test_class(const uint8_t* classes, uint8_t c)
 {
@@ -765,12 +757,25 @@ static bool pp_test_print_unspliced(void)
     return result;
 }
 
-// pp_splice_possible_vector against its scalar twin, and the rule against the splices themselves. Random spellings of
-// 0 to 300 bytes of letters, backslashes, every blank, '?', '/', 'x', digits and quotes, each ending at a PROT_NONE
-// page (the masked loads must read no byte past it), with and without trigraphs: both checks must agree, and so must
-// pp_remove_splices_by's spellings with and without `scalar`, for each kind it treats apart; and wherever the rule
-// finds no possible splice, the full cleaning (pp_clean_splices) must give back the same bytes. Then a backslash at
-// every position of spellings of 1 to 200 bytes, before a blank, a letter or nothing, at the 64-byte block edges too.
+// The rule pp_splice_possible_vector keeps, a byte at a time: a backslash before a byte up to ' ' or at the end may start
+// a splice, and with trigraphs any '?' may start one (??/).
+static bool pp_print_test_splice_possible(const uint8_t* bytes, uint32_t length, bool trigraphs)
+{
+    bool result = false;
+    for (uint32_t i = 0; !result && i < length; i += 1)
+    {
+        result = (bytes[i] == '\\' && (i + 1 == length || bytes[i + 1] <= ' ')) || (trigraphs && bytes[i] == '?');
+    }
+    return result;
+}
+
+// pp_splice_possible_vector against the rule, and the rule against the splices themselves. Random spellings of 0 to 300
+// bytes of letters, backslashes, every blank, '?', '/', 'x', digits and quotes, each ending at a PROT_NONE page (the
+// masked loads must read no byte past it), with and without trigraphs: the check must be the rule's; pp_remove_splices_by
+// must give the full cleaning's spelling (pp_clean_splices) where the rule finds a possible splice (but in a raw string's
+// characters), and the bytes themselves elsewhere, for each kind it treats apart; and wherever the rule finds no possible
+// splice, the full cleaning must give back the same bytes. Then a backslash at every position of spellings of 1 to 200
+// bytes, before a blank, a letter or nothing, at the 64-byte block edges too.
 static bool pp_test_splice_possible(void)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -784,7 +789,6 @@ static bool pp_test_splice_possible(void)
         C_TOKEN_CHAR_CONSTANT,
         C_TOKEN_UNKNOWN,
     };
-    uint8_t scalar_buffer[512];
     uint8_t vector_buffer[512];
     uint8_t cleaned[512];
     uint64_t state = 1388;
@@ -804,29 +808,27 @@ static bool pp_test_splice_possible(void)
             const uint64_t pick = pp_print_test_random(&state);
             spelling[b] = sparse != 0 && pick % 8 != 0 ? 'a' : alphabet[(pick >> 8) % (sizeof(alphabet) - 1)];
         }
-        const bool scalar = pp_splice_possible_scalar(spelling, length, trigraphs);
-        result = pp_splice_possible_vector(spelling, length, trigraphs) == scalar;
+        const bool splice = pp_print_test_splice_possible(spelling, length, trigraphs);
+        result = pp_splice_possible_vector(spelling, length, trigraphs) == splice;
         for (uint32_t kind = 0; result && kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
         {
-            const uint8_t* scalar_spelling = 0;
+            // Cleaned where a splice may be (but in a raw string's characters), the bytes themselves elsewhere, where
+            // cleaning would give them back.
             const uint8_t* vector_spelling = 0;
             const uint32_t flags = trigraphs ? C_TOKENIZER_TRIGRAPHS : 0;
-            const uint32_t scalar_length = pp_remove_splices_by(spelling, length, flags, kinds[kind], true, scalar_buffer, &scalar_spelling);
-            const uint32_t vector_length = pp_remove_splices_by(spelling, length, flags, kinds[kind], false, vector_buffer, &vector_spelling);
-            result = scalar_length == vector_length && (scalar_spelling == spelling) == (vector_spelling == spelling) &&
-                     memcmp(scalar_spelling, vector_spelling, scalar_length) == 0;
-            if (result && !scalar)
-            {
-                const uint32_t clean_length = pp_clean_splices(spelling, length, trigraphs, pp_is_string_literal(kinds[kind]), cleaned);
-                result = clean_length == length && memcmp(cleaned, spelling, length) == 0 && scalar_spelling == spelling;
-            }
+            const uint32_t vector_length = pp_remove_splices_by(spelling, length, flags, kinds[kind], vector_buffer, &vector_spelling);
+            const uint32_t clean_length = pp_clean_splices(spelling, length, trigraphs, pp_is_string_literal(kinds[kind]), cleaned);
+            const bool raw = kinds[kind] == C_TOKEN_UNKNOWN && pp_raw_string_start(spelling, length);
+            result = splice && !raw ? vector_spelling == vector_buffer && vector_length == clean_length && memcmp(vector_spelling, cleaned, clean_length) == 0
+                                    : vector_spelling == spelling && vector_length == length;
+            result = result && (splice || (clean_length == length && memcmp(cleaned, spelling, length) == 0));
         }
         if (!result)
         {
             printf("splice scan: trial %u (length %u, trigraphs %u) failed\n", trial, length, trigraphs);
         }
-        possible += scalar;
-        kept += !scalar;
+        possible += splice;
+        kept += !splice;
         trials += 1;
     }
     // A backslash at every position, before a blank, a letter, a digit or nothing (the end), with each block edge.
@@ -845,7 +847,7 @@ static bool pp_test_splice_possible(void)
                     spelling[at + 1] = after[form];
                 }
                 const bool expected = at + 1 == length || after[form] <= ' ';
-                result = pp_splice_possible_scalar(spelling, length, false) == expected && pp_splice_possible_vector(spelling, length, false) == expected &&
+                result = pp_print_test_splice_possible(spelling, length, false) == expected && pp_splice_possible_vector(spelling, length, false) == expected &&
                          pp_splice_possible_vector(spelling, length, true) == expected;
                 if (!result)
                 {
@@ -946,21 +948,10 @@ static bool pp_test_print_spelling_paths(const char* directory)
                 .defer_history = true,
             };
             result = pp_test_run(&pp, &table, &options, path);
-            for (uint32_t markers = 0; result && markers < 2; markers += 1)
-            {
-                size_t vector_length = 0;
-                size_t scalar_length = 0;
-                char* vector = pp_test_print(&pp, true, markers != 0, &vector_length);
-                char* scalar = pp_test_print(&pp, false, markers != 0, &scalar_length);
-                result = vector != 0 && scalar != 0 && vector_length == scalar_length && memcmp(vector, scalar, vector_length) == 0;
-                if (!result)
-                {
-                    printf("printer spelling paths: alignment %u, trigraphs %u, markers %u differ\n", alignment, trigraphs, markers);
-                }
-                free(vector);
-                free(scalar);
-                runs += 1;
-            }
+            char key[96];
+            snprintf(key, sizeof(key), "printer spelling paths, alignment %u, trigraphs %u", alignment, trigraphs);
+            result = result && pp_print_test_printed(&pp, key);
+            runs += 2;
             pp_release(&pp);
             intern_release(&table);
         }

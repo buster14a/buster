@@ -243,7 +243,6 @@ static bool check_program_alias_names(CheckProgram* program, CheckProgramAlias* 
         .identifiers = identifiers,
         .types = program->types,
         .output = scratch,
-        .scalar = BUSTER_SCALAR_PATH(scalar),
     };
     Scratch mangle = { 0 };
     for (uint32_t i = 0; valid && overloaded != 0 && identifiers != NULL && i < graph->overload_candidate_count; i += 1)

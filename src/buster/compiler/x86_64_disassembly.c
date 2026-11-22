@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Formatting plans for validated decoder records. The independent scalar formatter above this include retains
-// the original decisions and bounded fragment writer. Plans resolve catalogue-only choices once, while register
-// tokens carry their byte length. A proved per-form bound admits direct stores; smaller buffers use the scalar
-// writer. No allocation or variable-length string scan occurs while formatting a record.
+// Formatting plans for validated decoder records. The bounded formatter above this include
+// (x86_disassembly_format_scalar) writes the same text into any capacity, one checked fragment at a time. Plans
+// resolve catalogue-only choices once, while register tokens carry their byte length. A proved per-form bound admits
+// direct stores; smaller buffers, and forms without a plan, take the bounded writer (#2924's phase D). No allocation
+// or variable-length string scan occurs while formatting a record.
 
 #define BUSTER_X86_TEXT_EVEX 1u
 #define BUSTER_X86_TEXT_VEX 2u
@@ -202,15 +203,6 @@ static char* x86_disassembly_write_signed(char* output, int64_t value, bool plus
 
 static char* x86_disassembly_write_hex(char* output, uint64_t value)
 {
-#if !BUSTER_HOST_VECTOR
-    static const char hex[] = "0123456789abcdef";
-    const uint32_t first = (uint32_t)__builtin_clzll(value | 1) / 4;
-    for (uint32_t i = first; i < 16; i += 1)
-    {
-        output[i - first] = hex[(value >> ((15 - i) * 4)) & 15];
-    }
-    return output + 16 - first;
-#else
     // Convert all sixteen nibbles together. VPSHUFB XMM's measured Zen 5 register latency is two cycles; using
     // a 128-bit register avoids wide temporaries for this single immediate and needs no gather or compress.
     const __m128i reverse = _mm_setr_epi8(7, 6, 5, 4, 3, 2, 1, 0, 7, 6, 5, 4, 3, 2, 1, 0);
@@ -223,7 +215,6 @@ static char* x86_disassembly_write_hex(char* output, uint64_t value)
     const uint32_t length = 16 - first;
     _mm_mask_storeu_epi8(output, (uint16_t)((1u << length) - 1), _mm_shuffle_epi8(digits, positions));
     return output + length;
-#endif
 }
 
 static char* x86_disassembly_write_memory(char* output, const X86Decoded* decoded, const X86DisassemblyPlan* plan)
@@ -426,50 +417,31 @@ static int64_t x86_disassembly_format(const X86Decoded* decoded, char* output, u
 // Listing prefixes occupy exactly 56 bytes: eight address digits, two spaces, fifteen three-byte hex slots and
 // one final space. Only decoded.length input bytes are read. The caller's source starts at decoded.offset zero;
 // base adjusts the displayed address when a command decodes a later chunk of the same bounded source.
-static int64_t x86_disassembly_listing(const X86Decoded* decoded, const uint8_t* source, uint32_t base, char* output, uint64_t capacity, bool scalar)
+static int64_t x86_disassembly_listing(const X86Decoded* decoded, const uint8_t* source, uint32_t base, char* output, uint64_t capacity)
 {
-    (void)scalar;
-
     int64_t length = -1;
     if (output != 0 && capacity >= 56)
     {
         const uint32_t address = base + decoded->offset;
         static const char hex[] = "0123456789abcdef";
-        if (BUSTER_SCALAR_PATH(scalar))
-        {
-            for (uint32_t i = 0; i < 8; i += 1)
-            {
-                output[i] = hex[(address >> (28 - i * 4)) & 15];
-            }
-            memset(output + 8, ' ', 48);
-            for (uint32_t i = 0; i < decoded->length; i += 1)
-            {
-                const uint8_t byte = source[decoded->offset + i];
-                output[10 + i * 3] = hex[byte >> 4];
-                output[11 + i * 3] = hex[byte & 15];
-            }
-        }
-        else
-        {
-            const __m128i alphabet = _mm_loadu_si128((const __m128i*)hex);
-            const __m128i reverse = _mm_setr_epi8(3, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0);
-            const __m128i address_bytes = _mm_shuffle_epi8(_mm_cvtsi32_si128((int)address), reverse);
-            const __m128i address_nibbles = _mm_and_si128(_mm_unpacklo_epi8(_mm_srli_epi16(address_bytes, 4), address_bytes), _mm_set1_epi8(15));
-            _mm_storel_epi64((__m128i*)output, _mm_shuffle_epi8(alphabet, address_nibbles));
-            memcpy(output + 8, "  ", 2);
-            const __m128i bytes = _mm_maskz_loadu_epi8((uint16_t)((1u << decoded->length) - 1), source + decoded->offset);
-            const __m256i wide = _mm256_cvtepu8_epi16(bytes);
-            const __m256i nibbles = _mm256_or_si256(_mm256_srli_epi16(wide, 4), _mm256_slli_epi16(_mm256_and_si256(wide, _mm256_set1_epi16(15)), 8));
-            const __m256i digits = _mm256_shuffle_epi8(_mm256_broadcastsi128_si256(alphabet), nibbles);
-            const __m512i table = _mm512_inserti64x4(_mm512_set1_epi8(' '), digits, 0);
-            const __m512i positions = _mm512_setr_epi64(0x0504200302200100ull, 0x0a20090820070620ull, 0x200f0e200d0c200bull, 0x1514201312201110ull,
-                                                       0x1a20191820171620ull, 0x202020201d1c201bull, 0x2020202020202020ull, 0x2020202020202020ull);
-            const __m512i spaced = _mm512_permutexvar_epi8(positions, table);
-            const uint64_t active = (1ull << (decoded->length * 3)) - 1;
-            const __m512i prefix = _mm512_mask_mov_epi8(_mm512_set1_epi8(' '), active, spaced);
-            _mm512_mask_storeu_epi8(output + 10, (1ull << 46) - 1, prefix);
-        }
-        const int64_t body = BUSTER_SCALAR_PATH(scalar) ? x86_disassembly_format_scalar(decoded, output + 56, capacity - 56) : x86_disassembly_format(decoded, output + 56, capacity - 56);
+        const __m128i alphabet = _mm_loadu_si128((const __m128i*)hex);
+        const __m128i reverse = _mm_setr_epi8(3, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0, 3, 2, 1, 0);
+        const __m128i address_bytes = _mm_shuffle_epi8(_mm_cvtsi32_si128((int)address), reverse);
+        const __m128i address_nibbles = _mm_and_si128(_mm_unpacklo_epi8(_mm_srli_epi16(address_bytes, 4), address_bytes), _mm_set1_epi8(15));
+        _mm_storel_epi64((__m128i*)output, _mm_shuffle_epi8(alphabet, address_nibbles));
+        memcpy(output + 8, "  ", 2);
+        const __m128i bytes = _mm_maskz_loadu_epi8((uint16_t)((1u << decoded->length) - 1), source + decoded->offset);
+        const __m256i wide = _mm256_cvtepu8_epi16(bytes);
+        const __m256i nibbles = _mm256_or_si256(_mm256_srli_epi16(wide, 4), _mm256_slli_epi16(_mm256_and_si256(wide, _mm256_set1_epi16(15)), 8));
+        const __m256i digits = _mm256_shuffle_epi8(_mm256_broadcastsi128_si256(alphabet), nibbles);
+        const __m512i table = _mm512_inserti64x4(_mm512_set1_epi8(' '), digits, 0);
+        const __m512i positions = _mm512_setr_epi64(0x0504200302200100ull, 0x0a20090820070620ull, 0x200f0e200d0c200bull, 0x1514201312201110ull,
+                                                   0x1a20191820171620ull, 0x202020201d1c201bull, 0x2020202020202020ull, 0x2020202020202020ull);
+        const __m512i spaced = _mm512_permutexvar_epi8(positions, table);
+        const uint64_t active = (1ull << (decoded->length * 3)) - 1;
+        const __m512i prefix = _mm512_mask_mov_epi8(_mm512_set1_epi8(' '), active, spaced);
+        _mm512_mask_storeu_epi8(output + 10, (1ull << 46) - 1, prefix);
+        const int64_t body = x86_disassembly_format(decoded, output + 56, capacity - 56);
         length = body < 0 ? -1 : 56 + body;
     }
     return length;

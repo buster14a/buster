@@ -69,7 +69,7 @@ static void check_test_warning_graph(CheckTest* test)
             Arena scratch = arena_reserve(UINT64_C(1) << 26);
             const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .quiet = true };
             const ParseOptions parsing = { .extension_metadata = true, .scalar = scalar != 0, .tree_only = variant >= 2 };
-            const CheckOptions checking = { .verify = true, .scalar = scalar != 0 };
+            const CheckOptions checking = { .verify = true };
             CheckInput input = { 0 };
             CheckStream stream = { 0 };
             const bool ready = retained.base != NULL && output.base != NULL && scratch.base != NULL && check_test_types_open(&types) &&
@@ -92,7 +92,7 @@ static void check_test_warning_graph(CheckTest* test)
                     ordered += event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER;
                     if (event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL && cases[c].column != 0)
                     {
-                        const uint32_t location = pp.output.locations[parser.tokens.sources[event->token]];
+                        const uint32_t location = pp.output.locations[parse_source_index(&parser.tokens, event->token)];
                         const uint32_t range = pp_find_range(&pp, location);
                         uint32_t column = 0;
                         if (range < pp.range_count)

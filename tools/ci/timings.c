@@ -9,9 +9,9 @@
 // line per completed candidate run, its id, outcome (merged, passed, failed,
 // cancelled), wall seconds and runner seconds, then its hosted jobs' waits for
 // a runner (#2031): the longest job's seconds from its creation to its start,
-// all of theirs summed, and how many jobs they are. A candidate that didn't
-// merge spent its runner time on nothing that landed, the cost of rebuilds and
-// of failures the review of #1430 asks to be reported.
+// all of theirs summed, and how many jobs they are. This legacy format has no
+// branch-liveness evidence and cannot determine invalidation or wasted work.
+// `--accounting` reads all-outcome, all-attempt phase/capacity facts instead.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -226,7 +226,7 @@ static int timing_report(FILE* input, FILE* output)
 #define BUSTER_TIMINGS_RUNNER (UINT64_C(1000) * BUSTER_TIMINGS_SECONDS)
 
 static const char* const queue_outcomes[] = { "merged", "passed", "failed", "cancelled" };
-static const char* const queue_outcome_labels[] = { "merged", "passed, not merged (invalidated)", "failed", "cancelled (dropped or invalidated)" };
+static const char* const queue_outcome_labels[] = { "merged", "passed, not observed merged", "failed", "cancelled (cause unknown)" };
 #define BUSTER_TIMINGS_OUTCOMES (sizeof(queue_outcomes) / sizeof(queue_outcomes[0]))
 
 typedef struct QueueCandidates QueueCandidates;
@@ -341,7 +341,7 @@ static int queue_report(FILE* input, FILE* output)
             all += queue->candidates[i];
             runner += queue->runner[i];
         }
-        const uint64_t wasted = runner - queue->runner[0];
+        const uint64_t unmerged = runner - queue->runner[0];
         fputs("\n## Merge-queue candidates\n\n", output);
         fputs("Completed `merge_group` runs of `9700x.yml`, by what became of the candidate: runner time is the sum of its jobs' own times.\n\n", output);
         fputs("| Outcome | Candidates | Runner-minutes |\n| --- | ---: | ---: |\n", output);
@@ -356,7 +356,7 @@ static int queue_report(FILE* input, FILE* output)
         }
         else
         {
-            fprintf(output, "Candidates that didn't merge took %.0f runner-minutes, %.1f%% of the queue's: the failures themselves, and the entries behind them that GitHub rebuilt, whose first runs passed, failed or were cancelled for nothing.\n", (double)wasted / 60, runner != 0 ? 100.0 * (double)wasted / (double)runner : 0.0);
+            fprintf(output, "Candidates not observed merged took %.0f runner-minutes, %.1f%% of the queue's. This legacy input does not distinguish live candidates from invalidated ones, or establish cancellation/rebuild causes; these are not verified wasted-work totals.\n", (double)unmerged / 60, runner != 0 ? 100.0 * (double)unmerged / (double)runner : 0.0);
         }
         double median = 0;
         uint32_t p95 = 0;
@@ -416,6 +416,9 @@ static unsigned int queue_test(unsigned int* checks)
     return failures;
 }
 
+#include "timings_accounting.c"
+#include "timings_accounting_test.c"
+
 static int timing_test(void)
 {
     Timings timings = { 0 };
@@ -466,6 +469,7 @@ static int timing_test(void)
     checks += 1;
     failures += !timing_quantiles(&timings.series[1][0], &median, &p95) || median != 0 || p95 != 0;
     failures += queue_test(&checks);
+    failures += accounting_test(&checks);
     printf("timings --self-test: %u checks, %u failures\n", checks, failures);
     return failures != 0;
 }
@@ -485,9 +489,20 @@ int main(int argc, char** argv)
     {
         status = queue_report(stdin, stdout);
     }
+    else if (argc == 2 && strcmp(argv[1], "--accounting") == 0)
+    {
+        status = accounting_report(stdin, stdout);
+    }
+    else if (argc == 2 && strcmp(argv[1], "--accounting-self-test") == 0)
+    {
+        unsigned int checks = 0;
+        const unsigned int failures = accounting_test(&checks);
+        printf("timings --accounting-self-test: %u checks, %u failures\n", checks, failures);
+        status = failures != 0;
+    }
     else
     {
-        fputs("usage: timings [--self-test] < observations.tsv\n       timings --queue < candidates.tsv\n", stderr);
+        fputs("usage: timings [--self-test] < observations.tsv\n       timings --queue < candidates.tsv\n       timings --accounting < facts.tsv\n       timings --accounting-self-test\n", stderr);
     }
     return status;
 }
