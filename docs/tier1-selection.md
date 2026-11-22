@@ -725,8 +725,10 @@ patterns are:
   put in rdi; `test-tier1-emit`'s code certificate fixtures run such a call
   natively and refuse its move into rdi left out. A
   return loads the parts staged below rsp (the frame stays out of the red zone),
-  or copies the bytes through the hidden pointer that the entry stored, which
-  rax returns.
+  but a whole register's part (a split vector's, and since #3299 a whole
+  eightbyte's) straight from the result's address, the address's own register
+  last (`tier1_select_result_order`), or copies the bytes through the hidden
+  pointer that the entry stored, which rax returns.
   `test-checker-driver`'s overflow-staging fixture cross-links four, five,
   eight and nine vector arguments, mixed integer aggregate parts, repeated
   values, and dynamic and indirect callers with clang. Both v3 and v4 policies,
