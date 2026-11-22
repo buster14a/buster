@@ -234,25 +234,25 @@ definition. Its flags and edges:
   keep normal dispatch. Complete retained blocks keep their scope exits;
   terminal breaks use the ordinary cleanup, VLA-restore and lifetime machinery.
   Dropped regions and block-scope statics introduce no selection roots.
-- **Statements no control reaches (#2987):** a block's statements are walked in
-  source order (`c_check_program_reach.c`). One that follows a `return`,
+- **Statements no control reaches (#2987):** a block's statements are walked
+  in source order (`c_check_program_reach.c`). One that follows a `return`,
   `break`, `continue`, `goto` or `__builtin_unreachable()`, and that holds no
-  label and no `case` of a switch outside it, is left out with the same dropped
-  ranges. An `if` whose arms both end that way ends the same way, including a
-  constant `if (1)` folded onto a `return`. A `while` whose condition is
-  constantly true, and a `for (;;)` that no `break` of its own leaves, does
-  too, so `for (;;) {}` drops the statement after it. A `for` that has a
-  condition does not: clang still branches to its exit, including `for (; 1;)`.
-  `__builtin_trap()` does not, and neither does the statement after a `do`:
-  clang -O0 still names a function only that statement calls. A `switch` jumps to a case, so a statement before
-  its first case is left out, and a body no case or label can enter is left out
-  whole. An automatic local that dropped statement declares still has a place
-  when a statement that is emitted names it: a later case, or a label after a
-  `goto`. Clang allocates that local and does not emit its initializer. A
-  local nothing emitted names stays dropped, so its cleanup is not run. A
-  block-scope static the dropped statement declares is still emitted: clang
-  emits that declaration with no insertion point, and its initializer with it.
-  What only the dropped
+  label and no `case` of a switch outside it, is left out with the same
+  dropped ranges. An `if` whose arms both end that way ends the same way,
+  including a constant `if (1)` folded onto a `return`. A `while` whose
+  condition is constantly true, and a `for (;;)` that no `break` of its own
+  leaves, does too, so `for (;;) {}` drops the statement after it. A `for`
+  that has a condition does not: clang still branches to its exit, including
+  `for (; 1;)`. `__builtin_trap()` does not, and neither does the statement
+  after a `do`: clang -O0 still names a function only that statement calls. A
+  `switch` jumps to a case, so a statement before its first case is left out,
+  and a body no case or label can enter is left out whole. An automatic local
+  that dropped statement declares still has a place when a statement that is
+  emitted names it: a later case, or a label after a `goto`. Clang allocates
+  that local and does not emit its initializer. A local nothing emitted names
+  stays dropped, so its cleanup is not run. A block-scope static the dropped
+  statement declares is still emitted: clang emits that declaration with no
+  insertion point, and its initializer with it. What only the dropped
   statement reaches is not selected and is not checked for target features. A
   cleanup whose declaration was dropped does not run.
 - **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
