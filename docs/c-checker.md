@@ -6807,7 +6807,18 @@ too. `c_check_binding.c` adds
 `-Wunused-variable`, `-Wunused-const-variable`, `-Wunused-function` and
 `-Wunused-parameter` as sparse events, with the declaration's body deciding
 the completion, so they follow Clang's after-function order; a redeclaration
-inherits an earlier `unused` or `used` attribute. A file-scope variable's
+inherits an earlier `unused` or `used` attribute. Attributes use what they
+name, as clang's do (#3300): a function definition with a `constructor` or
+`destructor` attribute, its own or an earlier declaration's, is never unused
+(clang's `DeclMustBeEmitted`; one only declared, or whose attribute follows its
+definition, still is, `check_input_unused_structor`), and an `alias`'s or
+`ifunc`'s string names the function or variable visible by that name where the
+attribute is read (clang's `markUsedForAliasOrIfunc`), whose declarations are
+then used as a use's are (`CheckInputAttribute.alias_target`,
+`check_input_alias_used`). A target declared after the attribute, one whose
+symbol is spelled otherwise (an asm label, `overloadable`), an ignored
+attribute's (an `ifunc` on a variable), a `weakref`'s and a `#pragma weak`
+alias's target stay unused. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
 them. `-Wunused-but-set-variable` (#2409, in `-Wunused` and `-Wall`) is an
