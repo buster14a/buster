@@ -579,7 +579,15 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     // record's VALUE context even when the outer node lies beyond the shadow's capacity.
                     const uint32_t initializer = front->tokens[record];
                     const bool required = initialization && initializer < reader->parser->tokens.count && BUSTER_CHECK_RARE(reader, static_initializers, initializer);
+                    // (The first run by sweep where the unit asks: a clock's read before each and after the last.)
+                    const bool split = pass == 0 && types->split;
+                    const uint64_t typing = split ? __rdtsc() : 0;
                     const NodeMachineRefusal refusal = node_machine_type_in_context(machine, first, root, records, required);
+                    if (split)
+                    {
+                        types->sweep_ticks[0] += __rdtsc() - typing;
+                        types->sweep_reads += 2;
+                    }
                     if (pass != 0)
                     {
                         types->digests[root] = node_machine_digest(machine, refusal);
@@ -608,7 +616,13 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         const uint32_t declaration = initialization && token < reader->parser->tokens.count ? reader->initializer_declarations[token] : BUSTER_CHECK_NONE;
                         const TypeId declared = declaration < reader->output->token_count ? reader->declared_types[declaration] : 0;
                         uint8_t kind = 0;
+                        const uint64_t testing = split ? __rdtsc() : 0;
                         verdict = node_census_reader_expression(typer->tests, root, (CheckOp)front->ops[record], token, declaration, declared, &kind, NULL);
+                        if (split)
+                        {
+                            types->sweep_ticks[1] += __rdtsc() - testing;
+                            types->sweep_reads += 2;
+                        }
                         if (pass != 0)
                         {
                             types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_TESTED;
@@ -642,6 +656,12 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         }
                         const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
+                        if (split)
+                        {
+                            types->sweep_ticks[2] += expand_start - contexts_start;
+                            types->sweep_ticks[3] += __rdtsc() - expand_start;
+                            types->sweep_reads += 1;
+                        }
                         if (pass != 0 && typer->facts != NULL)
                         {
                             // The reference of X's rows on the window: this run's ticks; its tape is kept below.

@@ -4987,6 +4987,12 @@ struct NodeShadow
     uint64_t alone_front_ticks;
     uint64_t alone_write_ticks;
     uint64_t alone_sweep_ticks;
+    // The scan of each body's tokens for a root the front would lose: its ticks and the tokens it read.
+    uint64_t alone_scan_ticks;
+    uint64_t alone_scan_tokens;
+    // With --front-alone-split, the machine's first run by sweep (T, the tests, C, X) and the clock's reads that made it.
+    uint64_t alone_step_ticks[4];
+    uint64_t alone_step_reads;
     uint64_t alone_roots;
     uint64_t alone_taken;
     uint64_t alone_compared;
@@ -5000,6 +5006,8 @@ struct NodeShadow
     // those with one among their expression's tokens.
     uint64_t alone_taken_checked;
     uint64_t alone_taken_declined;
+    // The tokens of the bodies it read that the walk marked as left by its class actions.
+    uint64_t alone_declined_tokens;
     uint64_t alone_listed;
     // Its verdicts of the bodies the lowering lowered, by what stops it (BUSTER_NODE_ALONE_BODY_*), in bodies and in their
     // tokens; and against the machine on the walk's nodes, for which a body is whole where every root the lowering popped
@@ -5009,6 +5017,15 @@ struct NodeShadow
     // machine's roots allow, and the statements are another piece's.
     uint64_t alone_verdicts[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_verdict_tokens[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    // By verdict too: its bodies' reading's ticks, their machine's first run's, those spent by the end of the chunk in
+    // which each is first stopped, and the bodies (and their tokens) a scan of the tokens' kinds and classes alone
+    // would refuse.
+    uint64_t alone_verdict_reading[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_machine[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_before[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_scanned_tokens[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_scans_listed;
     uint64_t alone_body_tokens;
     uint64_t alone_whole_both;
     uint64_t alone_whole_both_tokens;
@@ -7328,6 +7345,14 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                shadow->alone_bodies, shadow->alone_bodies_left, shadow->alone_positions, shadow->alone_records, shadow->alone_roots, shadow->alone_taken, reading,
                shadow->alone_prepare_ticks, shadow->alone_front_ticks, shadow->alone_write_ticks, shadow->alone_sweep_ticks,
                shadow->alone_positions != 0 ? (double)(reading + shadow->alone_sweep_ticks) / (double)shadow->alone_positions : 0.0);
+        if (shadow->alone_step_reads != 0)
+        {
+            // The first run by sweep: each sweep's ticks, with the clock's reads that bound it.
+            printf("node-shadow: alone the machine's first run by sweep: T=%" PRIu64 " the-tests=%" PRIu64 " C=%" PRIu64 " X=%" PRIu64 " (%" PRIu64
+                   " of the clock's reads among them) the-rest-of-the-run=%" PRIu64 "\n",
+                   shadow->alone_step_ticks[0], shadow->alone_step_ticks[1], shadow->alone_step_ticks[2], shadow->alone_step_ticks[3], shadow->alone_step_reads,
+                   shadow->alone_sweep_ticks - (shadow->alone_step_ticks[0] + shadow->alone_step_ticks[1] + shadow->alone_step_ticks[2] + shadow->alone_step_ticks[3]));
+        }
         printf("node-shadow: alone compared=%" PRIu64 " differences=%" PRIu64, shadow->alone_compared, shadow->alone_differences);
         for (uint32_t field = 0; field < BUSTER_NODE_ALONE_FIELDS; field += 1)
         {
@@ -7337,9 +7362,9 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
             }
         }
         printf(" roots-of-the-walk's-nodes-alone=%" PRIu64 " (outside a body %" PRIu64 ") roots-of-its-own-alone=%" PRIu64 " taken-before-an-event-of-the-walk's=%" PRIu64
-               " taken-with-a-token-the-walk's-actions-left=%" PRIu64 " (of %" PRIu64 " checked)\n",
+               " taken-with-a-token-the-walk's-actions-left=%" PRIu64 " (of %" PRIu64 " checked; the bodies hold %" PRIu64 " such tokens)\n",
                shadow->alone_walk_only, shadow->alone_walk_only_outside, shadow->alone_own_only, shadow->alone_events_after, shadow->alone_taken_declined,
-               shadow->alone_taken_checked);
+               shadow->alone_taken_checked, shadow->alone_declined_tokens);
         static const char* const verdict_names[BUSTER_NODE_ALONE_BODY_VERDICTS] = { "whole", "a-token-left", "a-root-not-run", "T", "the-tests", "C-or-X", "no-room" };
         printf("node-shadow: alone lowered-bodies' verdicts before the walk (their tokens %" PRIu64 "):", shadow->alone_body_tokens);
         for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
@@ -7351,6 +7376,20 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
             }
         }
         printf(" not-read=%" PRIu64 " waiting-values-lost=%" PRIu64 "\n", shadow->alone_bodies_unread, shadow->alone_resets);
+        for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
+        {
+            if (shadow->alone_verdicts[verdict] != 0)
+            {
+                // A verdict's bodies' ticks, and what a scan of the tokens alone would have refused.
+                printf("node-shadow: alone verdict=%s bodies=%" PRIu64 " tokens=%" PRIu64 " ticks: reading=%" PRIu64 " the-machine's-first-run=%" PRIu64
+                       " by-the-chunk-that-stops-them=%" PRIu64 " a-scan-of-the-tokens-refuses: bodies=%" PRIu64 " tokens=%" PRIu64 "\n",
+                       verdict_names[verdict], shadow->alone_verdicts[verdict], shadow->alone_verdict_tokens[verdict], shadow->alone_verdict_reading[verdict],
+                       shadow->alone_verdict_machine[verdict], shadow->alone_verdict_before[verdict], shadow->alone_verdict_scanned[verdict],
+                       shadow->alone_verdict_scanned_tokens[verdict]);
+            }
+        }
+        printf("node-shadow: alone a scan of every body's tokens for a root the front would lose: tokens-read=%" PRIu64 " ticks=%" PRIu64 " a-token-read=%.2f\n",
+               shadow->alone_scan_tokens, shadow->alone_scan_ticks, shadow->alone_scan_tokens != 0 ? (double)shadow->alone_scan_ticks / (double)shadow->alone_scan_tokens : 0.0);
         printf("node-shadow: alone bodies whole for it and for the walk's nodes' machine=%" PRIu64 " (tokens %" PRIu64 ") for-it-alone=%" PRIu64 " for-the-walk's-nodes'-alone=%" PRIu64
                " (and with a block's static or extern declaration %" PRIu64 ")\n",
                shadow->alone_whole_both, shadow->alone_whole_both_tokens, shadow->alone_whole_own, shadow->alone_whole_walk, shadow->alone_whole_walk_static);
@@ -7489,6 +7528,11 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             const bool own = verdict == BUSTER_NODE_ALONE_BODY_WHOLE;
             shadow->alone_verdicts[verdict] += 1;
             shadow->alone_verdict_tokens[verdict] += tokens;
+            shadow->alone_verdict_reading[verdict] += fronted->alone_body_reading[low];
+            shadow->alone_verdict_machine[verdict] += fronted->alone_body_machine[low];
+            shadow->alone_verdict_before[verdict] += fronted->alone_body_before[low];
+            shadow->alone_verdict_scanned[verdict] += fronted->alone_body_scanned[low] != 0;
+            shadow->alone_verdict_scanned_tokens[verdict] += fronted->alone_body_scanned[low] != 0 ? tokens : 0;
             shadow->alone_whole_both += own && reader_whole;
             shadow->alone_whole_both_tokens += own && reader_whole ? tokens : 0;
             shadow->alone_whole_own += own && !reader_whole;
@@ -7500,6 +7544,16 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             }
             shadow->alone_whole_walk += !own && reader_whole && !statics;
             shadow->alone_whole_walk_static += !own && reader_whole && statics;
+            const bool unscanned = verdict == BUSTER_NODE_ALONE_BODY_LEFT && fronted->alone_body_scanned[low] == 0;
+            const bool misscanned = verdict != BUSTER_NODE_ALONE_BODY_LEFT && fronted->alone_body_scanned[low] != 0;
+            if ((unscanned || misscanned) && shadow->alone_scans_listed < node_census_list)
+            {
+                // The scan and the front disagree on the body: listed, since the scan is to refuse a body before its reading.
+                shadow->alone_scans_listed += 1;
+                printf("node-shadow: alone %s file=%s line=%u verdict=%u tokens=%" PRIu64 "\n",
+                       unscanned ? "the scan finds no lost root in a body the front lost one of" : "the scan finds a lost root in a body the front lost none of", s->file,
+                       node_census_line(s->pp, program->parser, body->opening), verdict, tokens);
+            }
             if (!own && reader_whole && !statics && shadow->alone_bodies_listed < node_census_list)
             {
                 shadow->alone_bodies_listed += 1;
@@ -7589,10 +7643,18 @@ static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, 
     shadow->alone_resets += front->alone_resets;
     shadow->alone_taken_checked += front->alone_taken_checked;
     shadow->alone_taken_declined += front->alone_taken_declined;
+    shadow->alone_declined_tokens += front->alone_declined_tokens;
     shadow->alone_prepare_ticks += front->alone_prepare_ticks;
     shadow->alone_front_ticks += front->alone_front_ticks;
     shadow->alone_write_ticks += front->alone_write_ticks;
+    shadow->alone_scan_ticks += front->alone_scan_ticks;
+    shadow->alone_scan_tokens += front->alone_scan_tokens;
     shadow->alone_sweep_ticks += alone->ticks;
+    for (uint32_t step = 0; step < 4; step += 1)
+    {
+        shadow->alone_step_ticks[step] += alone->sweep_ticks[step];
+    }
+    shadow->alone_step_reads += alone->sweep_reads;
     shadow->alone_roots += alone->expressions;
     // The walk's nodes' roots in their order, each against the other's next one at its token: a token's roots are in the
     // order they were made in both (`next`: by token, the other's next root + 1 there once its first is taken, or
@@ -8359,12 +8421,13 @@ static int run_node_census(int count, char** arguments)
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
             shadow.reader |= BUSTER_NODE_READER_TESTS;
         }
-        else if (strcmp(arguments[i], "--front-alone") == 0)
+        else if (strcmp(arguments[i], "--front-alone") == 0 || strcmp(arguments[i], "--front-alone-split") == 0 || strcmp(arguments[i], "--front-alone-first") == 0)
         {
             // The machine with no node of the walk's, a body at a time before the walk acts at it; and the machine on the
             // walk's nodes after it, which it is compared with: T, the census's tests, C and X at reader time.
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
-            shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE;
+            shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | (strcmp(arguments[i], "--front-alone-split") == 0 ? BUSTER_NODE_READER_SPLIT : 0) |
+                             (strcmp(arguments[i], "--front-alone-first") == 0 ? BUSTER_NODE_READER_ALONE_FIRST : 0);
         }
         else if (strcmp(arguments[i], "--front-facts") == 0 || strcmp(arguments[i], "--front-window") == 0)
         {

@@ -1617,9 +1617,16 @@ struct NodeAloneExpected
     uint32_t walk;
     uint32_t statics;
     uint32_t lost;
+    // The tokens the walk's class actions left to its visit, in the bodies: the fixture's `sizeof`, `_Alignof` and the
+    // rest of the walk's own visits, which the count of taken roots with one is read against.
+    uint32_t declined;
+    // The bodies with a root the front lost that a scan of their tokens finds one in, before any of them is compacted:
+    // the `sizeof`'s, the `_Alignof`'s and the several characters'. The floating constant out of range and the table
+    // that overflows the front's stack are none of the scan's; the escape under a label is one it must leave.
+    uint32_t scanned;
 };
 
-static bool node_alone_test_fixture(const char* directory, char** options, uint32_t option_count, const NodeAloneExpected* expected)
+static bool node_alone_test_fixture(const char* directory, char** options, uint32_t option_count, bool split, const NodeAloneExpected* expected)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/alone.c", directory);
@@ -1671,28 +1678,37 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
     valid = valid && length + 1 < capacity && parse_test_write(path, text, length);
     NodeShadow shadow = {
         .front = (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER),
-        .reader = (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE),
+        .reader = (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | (split ? BUSTER_NODE_READER_SPLIT : 0)),
         .passes = 0,
         .repeat = 1,
     };
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool same = valid && !node_shadow_differs(&shadow) && shadow.alone_differences == 0 && shadow.alone_walk_only == 0 && shadow.alone_own_only == 0 &&
+    // By sweep (`split`): the clock was read five times a root the machine swept, and the sweeps' ticks are within the run's.
+    const uint64_t swept = shadow.alone_step_ticks[0] + shadow.alone_step_ticks[1] + shadow.alone_step_ticks[2] + shadow.alone_step_ticks[3];
+    const bool timed = split ? shadow.alone_step_reads != 0 && shadow.alone_step_ticks[0] != 0 && shadow.alone_step_ticks[1] != 0 && shadow.alone_step_ticks[2] != 0 &&
+                               shadow.alone_step_ticks[3] != 0 && swept <= shadow.alone_sweep_ticks :
+                               shadow.alone_step_reads == 0 && swept == 0;
+    const bool same = valid && timed && !node_shadow_differs(&shadow) && shadow.alone_differences == 0 && shadow.alone_walk_only == 0 && shadow.alone_own_only == 0 &&
                       shadow.alone_events_after == 0 && shadow.alone_bodies_left == 0 && shadow.alone_bodies_unread == 0 && shadow.alone_taken_checked != 0 &&
                       shadow.alone_taken_declined == 0;
     bool counts = shadow.alone_bodies == expected->bodies && shadow.alone_compared == expected->roots && shadow.alone_whole_own == expected->own &&
-                  shadow.alone_whole_walk == expected->walk && shadow.alone_whole_walk_static == expected->statics && shadow.alone_resets == expected->lost;
+                  shadow.alone_whole_walk == expected->walk && shadow.alone_whole_walk_static == expected->statics && shadow.alone_resets == expected->lost &&
+                  shadow.alone_declined_tokens == expected->declined && shadow.alone_scan_tokens != 0;
     for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
     {
-        counts = counts && shadow.alone_verdicts[verdict] == expected->verdicts[verdict];
+        // The scan finds a lost root in the bodies it should, and in no body of another verdict.
+        counts = counts && shadow.alone_verdicts[verdict] == expected->verdicts[verdict] &&
+                 shadow.alone_verdict_scanned[verdict] == (verdict == BUSTER_NODE_ALONE_BODY_LEFT ? expected->scanned : 0);
     }
     if (!same || !counts)
     {
         fprintf(stderr, "test-checker: node-alone: %s, %s: %" PRIu64 " bodies read (%u expected), %" PRIu64 " left, %" PRIu64 " not read; %" PRIu64 " roots compared (%u), %" PRIu64
                 " differ, %" PRIu64 " the walk's nodes' alone, %" PRIu64 " its own alone, %" PRIu64 " taken before an event of the walk's; verdicts: whole %" PRIu64 " (%u), a root lost %"
                 PRIu64 " (%u), not run %" PRIu64 " (%u), T %" PRIu64 " (%u), the tests %" PRIu64 " (%u), C or X %" PRIu64 " (%u), no room %" PRIu64 " (%u); whole for it alone %" PRIu64
-                " (%u), for the walk's nodes' alone %" PRIu64 " (%u), with a block's static %" PRIu64 " (%u); waiting values lost %" PRIu64 " times (%u)\n",
+                " (%u), for the walk's nodes' alone %" PRIu64 " (%u), with a block's static %" PRIu64 " (%u); waiting values lost %" PRIu64 " times (%u); %" PRIu64
+                " tokens the walk's actions left (%u); the scan finds a lost root in %" PRIu64 " of the bodies with one (%u) and in %" PRIu64 " others (0)\n",
                 valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.alone_bodies, expected->bodies, shadow.alone_bodies_left, shadow.alone_bodies_unread,
                 shadow.alone_compared, expected->roots, shadow.alone_differences, shadow.alone_walk_only, shadow.alone_own_only, shadow.alone_events_after,
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_WHOLE], expected->verdicts[BUSTER_NODE_ALONE_BODY_WHOLE], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_LEFT],
@@ -1700,7 +1716,11 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_TYPE], expected->verdicts[BUSTER_NODE_ALONE_BODY_TYPE], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_TESTS],
                 expected->verdicts[BUSTER_NODE_ALONE_BODY_TESTS], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_SWEEP], expected->verdicts[BUSTER_NODE_ALONE_BODY_SWEEP],
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_ROOM], expected->verdicts[BUSTER_NODE_ALONE_BODY_ROOM], shadow.alone_whole_own, expected->own, shadow.alone_whole_walk,
-                expected->walk, shadow.alone_whole_walk_static, expected->statics, shadow.alone_resets, expected->lost);
+                expected->walk, shadow.alone_whole_walk_static, expected->statics, shadow.alone_resets, expected->lost, shadow.alone_declined_tokens, expected->declined,
+                shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_LEFT], expected->scanned,
+                shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_WHOLE] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_UNRUN] +
+                    shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_TYPE] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_TESTS] +
+                    shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_SWEEP] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_ROOM]);
     }
     free(text);
     unlink(path);
@@ -7370,11 +7390,15 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .own = 1,
         .statics = 1,
         .lost = 2,
+        .declined = 7,
+        .scanned = 3,
     };
-    check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), &alone_expected),
+    check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), false, &alone_expected),
                       "node-alone: the machine on the front's records alone, before the walk, makes every root's results the machine makes of the walk's nodes");
-    check_test_expect(test, ready && node_alone_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), &alone_expected),
+    check_test_expect(test, ready && node_alone_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), false, &alone_expected),
                       "node-alone: the same with the default warnings");
+    check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &alone_expected),
+                      "node-alone by sweep: the same results, and each sweep's ticks within the run's");
     // The flat front beside the lean one, its twin: on the shadow's fixture, at the chunks' ends, where the lean front's
     // stack is full, and past its own rings' reach.
     const uint8_t flat = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_FLAT;
