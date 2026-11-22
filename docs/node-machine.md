@@ -7805,6 +7805,104 @@ proof of silence (the return flow's, with the default warnings); and any of it
 at reader time, where a tape's labels' places and calls' records are only
 digested today.
 
+### The same comparison before the walk
+
+The piece above read three things a producer does not have: the program's
+controls, the machine after the pipeline with each tape's labels and calls
+at hand, and the lowered function's locals for a declared object. This one
+replaces the first two, one at a time, and reports the two comparisons apart
+so that a difference names its cause
+([its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7083525675)).
+`measure-node-machine --shadow --front-alone --bodies`
+([the guide](commands/lowering.md#a-bodys-entries-from-its-controls-and-its-tapes-2850)).
+
+**First, a count.** A producer pairs a control with its tape by the
+control's token: it has no node. Of the controls with an expression in the
+lowered bodies, none has several roots of the machine's before the walk, and
+every one with a root has it under the control's own token as the reader has
+it there (the root's record's own; an initialization's declaration): 51,255
+of 51,255 on `sqlite3.c`, 10,896, 22,571 and 22,916 on Lua, the compiler's
+own source and musl. A control with none is in a body whose root the front
+lost, or has a braced initializer, whose parts are roots of the lowering's
+and none of the front's.
+
+**The tapes kept before the walk.** The machine with no node of the walk's
+keeps, for each root it takes, what a splice reads beside its tape: each
+label's place on it, each call's row (what stands for its callee's symbol,
+its arguments' count and classes, whether it is variadic), its temporaries,
+and whether its root is branches or a constant; and, by each control's
+token, the root that is its expression's. After the pipeline the comparison
+above runs again for each body that machine took whole before the walk: the
+controls are still the program's, each finds its root by its own token, and
+the kept tape stands where the machine's stood, a global's object made its
+symbol by the program's numbering.
+
+- **A constant `if`.** The program drops a constant `if`'s condition and the
+  arm it skips, by its node's value, and the locals declared there get no
+  place. Before the walk the condition's root is there, and a constant: a
+  body with an `if` whose condition's root's value is any constant is
+  refused, by the tokens alone (the program's controls have no condition
+  where it folded one). It is wider than what the program folds, on purpose.
+  None of the bodies the program dropped a range of may be attempted.
+- **A root's constant is its own record's.** An lvalue's record's constant
+  kind is its address's, and says nothing of its value: the first run took a
+  condition's operand's for the condition's and refused 415 of `sqlite3.c`'s
+  bodies.
+
+**The controls from the tokens.** A twin of the program's builder
+(`check_control_build`) makes a body's controls from the parser's tree and
+tokens, the reader's columns the resolution fills (a goto's label, a
+declaration's initializer's place and its storage) and, for whether a control
+has an expression, the root kept under its token. It reads no node. It makes
+a block, an `if` with or without an `else`, a `while`, a do statement, a
+`for`, a break, a continue, a return, a goto and its label, an expression
+statement and a declaration with initializers, each a plan's INITIALIZE at
+its initializer's nearest terminator. Its controls are compared with the
+program's: their count, and each one's kind, token, target and whether it
+has an expression. An INITIALIZE's plan and a control's node are not the
+twin's to name.
+
+**What it measured** (Develop builds on this session's machine; counts):
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| whole before the walk, of the body tokens | 35.62% | 29.71% | 3.62% | 31.76% |
+| the kept tapes: attempted; of the body tokens | 1,814; 32.79% | 580; 23.12% | 205; 2.84% | 1,287; 20.94% |
+| … the lowered function's; that differ | 1,814; 0 | 580; 0 | 205; 0 | 1,287; 0 |
+| … bodies the program dropped a range of; attempted there | 9; 0 | 1; 0 | 2; 0 | 71; 0 |
+| the controls' twin: attempted; its controls | 1,791; 21,661 | 572; 4,218 | 205; 1,209 | 1,308; 7,314 |
+| … bodies the program's; that differ | 1,791; 0 | 572; 0 | 205; 0 | 1,308; 0 |
+
+With `-g` the same; with `-Wall -Wextra` 1,505, 525, 176 and 1,167 bodies
+from the kept tapes and 1,485, 519, 176 and 1,188 from the twin, none
+differing.
+
+- **What the kept tapes leave out** of the bodies whole before the walk: a
+  control of another kind (33 of `sqlite3.c`'s, a `switch`'s each; 532 of
+  musl's, most an `asm` statement's, which the front makes no root of), an
+  initialization of another form (the braced ones: 4, 0, 5 and 51), and a
+  constant `if` (5, 0, 0 and 1).
+- **What the twin leaves out:** a `switch` (32, 48, 6 and 27), an `asm`
+  statement (6 of the compiler's own, 509 of musl's), a block's static or
+  extern declaration (28, 10, 5 and 26), a range the program dropped.
+- **So what a producer could make today** is the bodies both attempt: about
+  a third of `sqlite3.c`'s body tokens, a fifth of Lua's and musl's.
+
+**Its fixture's faults.** Twenty single changes, each built and run against
+the fixture: to what the machine keeps beside a tape (a label's place, the
+temporaries, the root's two facts, a call's callee, whether it is variadic,
+an argument's class, an initialization's root's token), to the kept tapes'
+splice (a global's object left an object, the constant `if` not looked for)
+and to the twin (an else's jump, a while's branch, a do statement's sense, a
+for's condition, a break's target, a goto's, a return's value, an
+initialization's token, a block's static not left out, a label's statement
+without its label). Each fails it.
+
+**What it does not do:** the locals' table from the declarations, the calls'
+rows' locations, the references, the rows of body-level silence, and the
+compile. Both comparisons still read the lowered function's locals for a
+declared object; in a compile the lowering's own setup makes them.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
