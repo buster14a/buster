@@ -142,6 +142,11 @@ struct CheckProgramCode
     // symbol in the high half and the one its fixups take in the low; null in a unit without them, the usual one.
     uint64_t* label_forwards;
     uint32_t label_forward_count;
+    // With CheckProgramLanes.assembly (-S, #1362): each TEXT atom's records as the emission encoded them, indexed by
+    // AtomId (assembly_code_count entries), in the emission's output arena; a TEXT atom no body made (an inline assembly
+    // unit's, a multiversioned function's resolver) has none. Null without -S.
+    AssemblyCode* assembly_code;
+    uint32_t assembly_code_count;
 };
 
 #include "c_check_program_cpu_dispatch.c"
@@ -543,6 +548,9 @@ struct CheckTier1Lane
     uint8_t* allowed;
     // The vector operations the target selects, for the loop vectorizer (ir_vectorize_target.c), in `forms` with `allowed`.
     struct IrVectorizeTarget* vectorize;
+    // The opt-in C vectorizer's source qualifier guard (#2805), indexed by body, including inline callees.
+    const uint8_t* vectorize_volatile;
+    uint32_t emitting_body;
     X86Target target;
     bool reserved;
     // Which optional steps are among the reserved ones: bit k for step BUSTER_CHECK_TIER1_STEPS_ALWAYS + k.
@@ -599,11 +607,10 @@ struct CheckTier1Inline
     uint32_t* sites;
     // Per body (#2541 step 2), whether the unit stage holds its code back for the last pass (check_tier1_inline_stage), and
     // whether the last pass let it go on (check_program_emit_last); whether the run holds any back (`holding`, which the
-    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm). And the scalar twins' choice.
+    // emission sets: not under -g, -fpatchable-function-entry or in a unit with asm).
     uint8_t* held;
     uint8_t* released;
     bool holding;
-    bool scalar;
     // Whether the run writes -g's source rows: summaries then carry their source identities, which their expansions
     // keep as instances (IrDebugInline, #2541 step 3).
     bool sources;
@@ -1010,6 +1017,9 @@ struct CheckProgramLanes
     // writer's calls and arguments, which each part's fit grows (CheckLowerShared.deferred_call_room): 0 for the bound.
     bool deferred_lowering;
     uint32_t deferred_call_room;
+    // -S (#1362): the emission keeps each TEXT atom's records, sized and encoded, with its branch columns, for the
+    // assembly sink (CheckProgramCode.assembly_code), and runs its bodies in one window, whose records it keeps whole.
+    bool assembly;
     // A caller's bodies' loop (#2536's step 2.2c.4, part 2): run by each part's lowering on one lane, before it lowers, and
     // whole before the lanes or a lowering that reads the controls' totals. None (no `run`) without --windowed-loop.
     CheckEmitLoop loop;
@@ -1034,6 +1044,10 @@ static void check_tier1_lane_release(CheckTier1Lane* lane);
 static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, bool scalar, Arena* arena,
                                      CheckTier1Inline* table);
 static void check_tier1_inline_release(CheckTier1Inline* table);
+// Defined in c_check_tier1_inline.c (#2541 step 2): one body's entries that take a candidate's address, marked in `addressed`
+// (test-tier0-inline checks it against its definition).
+static void check_tier1_inline_addressed_entries(const uint8_t* kinds, const uint64_t* values, uint32_t count, const uint32_t* candidates, uint32_t symbol_count, uint32_t body_count,
+                                                 uint8_t* addressed);
 // Gives `table` a new generation, which no lane's cache is valid for: its bodies are lowered again.
 static void check_tier1_inline_renew(CheckTier1Inline* table);
 // Defined in c_check_tier1_inline.c (#2541 step 2): the candidates the emission gives no code, once every body's is made.
@@ -1197,6 +1211,9 @@ struct CheckEmitLane
     CheckTier1Lane* tier1;
     // With Tier 0's inlining (CheckEmitRun.tier0_inline), its cache of expanded callees; null without.
     CheckTier0InlineLane* tier0_inline;
+    // The Tier 0 code of the body it is emitting, whose frame check_program_emit_code describes at its final offsets
+    // where EmittedCode.frame_direct says so.
+    Tier0Code frame_code;
     bool prepared;
     bool ready;
 };
@@ -1234,6 +1251,7 @@ struct CheckEmitRun
     // With --tier1, each body's complete outcome and its published code's counts (zero on refusal).
     CheckTier1Outcome* tier1_outcomes;
     CheckTier1Counts* tier1_counts;
+    const uint8_t* vectorize_volatile;
     uint64_t* costs;
     uint64_t* boundaries;
     uint32_t* orders[BUSTER_CHECK_EMIT_MAX_LANES];
@@ -1328,16 +1346,18 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
 #endif
 // A function's unwind descriptor, `frame`, from its emitted code's frame events after branch sizing (`offsets`, which
 // gets the length at the record count): resolved through the final layout (emitted_unwind) into `rows` (frame_count
-// room, which the tables read once the lanes are done). With `verify`, the events are proved against the records and
-// their control flow too (emitted_verify_frames: but an assembly template's code, the user's, a function an asm
-// statement's template returns from, and a rule a form
-// x86_semantics.c doesn't cover leaves unproven), and where Tier 0's fixed-frame analyzer takes the records
-// (unwind_tier0, which reads them alone), its frame must be the same CFI. Code past 2 GB is unsupported, not an
-// internal error; no room is a resource failure,
-// which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its reason. Where
-// provided, failed receives a rejected verifier verdict for the calling thread's diagnostic, never printed on a lane.
-static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar, EmissionFrameRow* rows,
-                                                           Arena* scratch, UnwindFunction* frame, const char** reason, EmittedVerdict* failed)
+// room, which the tables read once the lanes are done); or, for a Tier 0 frame of the fixed shape alone
+// (EmittedCode.frame_direct, which has no events), from the frame Tier 0 published, `direct`, at the final offsets
+// (unwind_tier0_frame_tails, which checks each of its prologue's and epilogue's records). With `verify`, the events are
+// proved against the records and their control flow too (emitted_verify_frames: but an assembly template's code, the
+// user's, a function an asm statement's template returns from, and a rule a form x86_semantics.c doesn't cover leaves
+// unproven), and where Tier 0's fixed-frame analyzer takes the records (unwind_tier0, which reads them alone), its frame
+// must be the same CFI, a direct frame's too. Code past 2 GB is unsupported, not an internal error; no room is a
+// resource failure, which the lanes retry on one. Returns the status of a failure (CHECK_PROGRAM_OK for none) and its
+// reason. Where provided, failed receives a rejected verifier verdict for the calling thread's diagnostic, never
+// printed on a lane.
+static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* code, const Tier0Code* direct, uint32_t* offsets, int64_t length, bool verify, bool scalar,
+                                                           EmissionFrameRow* rows, Arena* scratch, UnwindFunction* frame, const char** reason, EmittedVerdict* failed)
 {
     if (failed != NULL)
     {
@@ -1354,11 +1374,11 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
     if (status == CHECK_PROGRAM_OK)
     {
         offsets[code->count] = (uint32_t)length;
-        const UnwindError error = emitted_unwind(code, offsets, (uint32_t)length, scalar, rows, frame);
+        const UnwindError error = direct != NULL ? unwind_tier0_frame_tails(direct, offsets, (uint32_t)length, frame, 0) : emitted_unwind(code, offsets, (uint32_t)length, scalar, rows, frame);
         status = error == UNWIND_OK ? status : CHECK_PROGRAM_BACKEND;
-        *reason = error == UNWIND_OK ? 0 : "internal compiler error: a function's frame events don't resolve to an unwind table";
+        *reason = error == UNWIND_OK ? 0 : direct != NULL ? mismatch : "internal compiler error: a function's frame events don't resolve to an unwind table";
     }
-    if (status == CHECK_PROGRAM_OK && verify && !code->assembly)
+    if (status == CHECK_PROGRAM_OK && verify && !code->assembly && direct == NULL)
     {
         // A frame the verifier can't prove past a form x86_semantics.c doesn't cover (an x86 builtin's leaf of one)
         // stands, as Tier 0's analyzer below leaves it.
@@ -1384,7 +1404,7 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
             .error = TIER0_OK,
         };
         UnwindFunction proven;
-        const UnwindError analyzed = scalar ? unwind_tier0_scalar(&records, offsets, (uint32_t)length, &proven) : unwind_tier0(&records, offsets, (uint32_t)length, &proven);
+        const UnwindError analyzed = unwind_tier0(&records, offsets, (uint32_t)length, &proven);
         const EmittedSame same = analyzed != UNWIND_OK ? EMITTED_SAME : emitted_unwind_same(&proven, frame, scratch);
         status = same == EMITTED_SAME ? status : same == EMITTED_SAME_MEMORY ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_BACKEND;
         *reason = same == EMITTED_SAME ? 0 : same == EMITTED_SAME_MEMORY ? "no room to compare a function's unwind table with Tier 0's analyzer's" : mismatch;
@@ -1396,7 +1416,7 @@ static CheckProgramStatus check_program_emit_frame_checked(const EmittedCode* co
 static __attribute__((unused)) CheckProgramStatus check_program_emit_frame(const EmittedCode* code, uint32_t* offsets, int64_t length, bool verify, bool scalar,
                                                                            EmissionFrameRow* rows, Arena* scratch, UnwindFunction* frame, const char** reason)
 {
-    return check_program_emit_frame_checked(code, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
+    return check_program_emit_frame_checked(code, NULL, offsets, length, verify, scalar, rows, scratch, frame, reason, NULL);
 }
 #if !defined(BUSTER_UNIT) || BUSTER_SOURCE_CONSUMER
 // A bounded diagnostic for the selected failure only, after the lanes have joined. Numeric form and raw operand
@@ -1757,13 +1777,10 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     {
         // The branch columns alone, which sizing reads and writes by: the code generators' records are valid by
         // construction, which x86_validate checks above only with `verify` (#532).
-        const BranchSizingCheck shape = run->scalar ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
-                                                      branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+        const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
         const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
         check_clock_lap(run->stage_clock, CHECK_STAGE_BRANCH_SIZING);
-        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
-                               run->scalar ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
-                                             x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+        const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
         check_clock_lap(run->stage_clock, CHECK_STAGE_ENCODE);
         valid = length >= 0;
         if (valid && run->sources)
@@ -1816,11 +1833,13 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
         if (valid && run->unwind)
         {
             // Its frame events resolved after sizing (a naked function's code is its templates', which say nothing of
-            // its frame: no events, so its unwind entry, as clang's, has the call's rule alone, whatever they push). A
+            // its frame: no events, so its unwind entry, as clang's, has the call's rule alone, whatever they push), or
+            // a frame of the fixed shape alone (EmittedCode.frame_direct) described from the frame Tier 0 published. A
             // frame its producer couldn't describe is the compiler's own failure; and with --verify, so are events its
             // records don't establish.
             const char* reason = 0;
-            failure = check_program_emit_frame_checked(code, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
+            const Tier0Code* direct = code->frame_direct ? &lane->frame_code : NULL;
+            failure = check_program_emit_frame_checked(code, direct, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
             valid = failure == CHECK_PROGRAM_OK;
             failure = valid ? CHECK_PROGRAM_BACKEND : failure;
             body->reason = valid ? body->reason : reason;
@@ -1876,6 +1895,53 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     return valid;
 }
 
+// Indirect C accesses lose their volatile qualifier in the typed stream (docs/ir.md). Until the stream carries
+// per-access flags, the opt-in vectorizer can only widen reads in a body whose checked expressions are all clear.
+// Inspect the unit once. Only set bits need their source token mapped to a body. Qualifiers on a cast's result
+// matter at the dereference, just as they do on a parameter's pointee.
+static uint8_t* check_program_vectorize_volatile(const CheckProgram* program, Arena* arena)
+{
+    uint8_t* bodies = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->body_count);
+    const CheckStream* stream = program->stream;
+    if (bodies != NULL)
+    {
+        const bool known = stream != NULL && check_stream_has_values(stream) && check_program_bodies_ordered(program);
+        memset(bodies, known ? 0 : 1, program->body_count);
+        for (uint32_t first = 0; known && first < stream->count;)
+        {
+            const uint32_t count = stream->count - first < 16 ? stream->count - first : 16;
+            const __mmask16 active = (__mmask16)((1u << count) - 1);
+            __m512i types;
+            __m512i flags;
+            if (stream->dense_values == NULL)
+            {
+                types = _mm512_maskz_loadu_epi32(active, stream->value_types + first);
+                flags = _mm512_maskz_loadu_epi32(active, stream->value_flags + first);
+            }
+            else
+            {
+                const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+                const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckValue)));
+                types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, &stream->dense_values[first].type, 1);
+                flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, &stream->dense_values[first].flags, 1);
+            }
+            uint32_t volatile_nodes = _mm512_test_epi32_mask(types, _mm512_set1_epi32(BUSTER_TYPE_VOLATILE)) |
+                                      _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_CHECK_VOLATILE_PART));
+            for (; volatile_nodes != 0; volatile_nodes &= volatile_nodes - 1)
+            {
+                const uint32_t node = first + (uint32_t)__builtin_ctz(volatile_nodes);
+                const uint32_t body = check_program_token_body(program, program->input->graph.tokens[node]);
+                if (body != 0)
+                {
+                    bodies[body - 1] = 1;
+                }
+            }
+            first += count;
+        }
+    }
+    return bodies;
+}
+
 // Body `b`'s code by Tier 1's pipeline (--tier1, check_tier1_compile) into run->codes[b], on its lane's arenas for it,
 // the code in its lane's scratch as Tier 0's is, with an explicit outcome and disposition. A naked
 // function's code is its templates'. Out of line, so that the plain emission carries none of it.
@@ -1892,6 +1958,8 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     lane->tier1->summaries = run->tier1_inline != NULL && run->tier1_inline->arenas != NULL ? &run->tier1_inline->arenas[2 * (lane - run->lane_states)] : NULL;
     lane->tier1->schedule = run->lanes->tier1_schedule;
     lane->tier1->passes = run->lanes->tier1_passes;
+    lane->tier1->vectorize_volatile = run->vectorize_volatile;
+    lane->tier1->emitting_body = b;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
                                                             !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, run->sources, lane->scratch,
@@ -2097,9 +2165,13 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                 }
                 // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
                 // read, as it doesn't a naked function's; and so does one that moves a value into rsp (#1846, tier0_asm_stack).
-                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0, run->sources,
-                                                   naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source),
-                                                   lane->code);
+                // A frame of the fixed shape alone has no events: its descriptor is made from the frame at its final offsets
+                // (check_program_emit_frame_checked).
+                const bool direct = naked == 0 && emitted_tier0_frame_direct(&compiled);
+                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0 && !direct, run->sources,
+                                                   naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source), lane->code);
+                run->codes[b].frame_direct = direct;
+                lane->frame_code = compiled;
             }
             check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
             if (forbidden || run->codes[b].error != TIER0_OK)
@@ -3452,13 +3524,13 @@ static UnwindError check_asm_unit_frame(uint32_t saved, uint32_t frame, uint32_t
     uint32_t sizes_count = 0;
     for (uint32_t r = 0; valid && r < prologue_count; r += 1)
     {
-        const int64_t encoded = x86_encode_scalar(prologue + r, 1, bytes, sizeof(bytes), 0, 0);
+        const int64_t encoded = x86_validate(prologue + r, 1) == 1 ? x86_encode(prologue + r, 1, bytes, sizeof(bytes), 0, 0) : -1;
         valid = encoded > 0;
         sizes[sizes_count++] = encoded > 0 ? (uint32_t)encoded : 0;
     }
     for (uint32_t r = 0; valid && r < epilogue_length; r += 1)
     {
-        const int64_t encoded = x86_encode_scalar(epilogue + r, 1, bytes, sizeof(bytes), 0, 0);
+        const int64_t encoded = x86_validate(epilogue + r, 1) == 1 ? x86_encode(epilogue + r, 1, bytes, sizeof(bytes), 0, 0) : -1;
         valid = encoded > 0;
         sizes[sizes_count++] = encoded > 0 ? (uint32_t)encoded : 0;
     }
@@ -3729,6 +3801,39 @@ static bool check_program_emit_literals(CheckEmitLiterals* literals, const Emitt
     return valid;
 }
 
+// -S's copy of a body's records and branch columns (#1362), in `output`, which outlives the lanes' arenas the code is
+// in: what the assembly sink prints the body's atom from. Returns false if `output` can't hold them.
+static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, Arena* output)
+{
+    const uint32_t count = code->count;
+    const uint32_t branch_count = code->branch_count;
+    X86Instruction* records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, count);
+    uint32_t* branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, branch_count);
+    uint32_t* targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, branch_count);
+    const bool valid = (count == 0 || records != NULL) && (branch_count == 0 || (branches != NULL && targets != NULL));
+    if (valid)
+    {
+        // (A code without records or branches may have null columns, which memcpy mustn't be given.)
+        if (count != 0)
+        {
+            memcpy(records, code->records, (uint64_t)count * sizeof(X86Instruction));
+        }
+        if (branch_count != 0)
+        {
+            memcpy(branches, code->branches, (uint64_t)branch_count * sizeof(uint32_t));
+            memcpy(targets, code->targets, (uint64_t)branch_count * sizeof(uint32_t));
+        }
+        *kept = (AssemblyCode){
+            .records = records,
+            .branches = branches,
+            .targets = targets,
+            .count = count,
+            .branch_count = branch_count,
+        };
+    }
+    return valid;
+}
+
 // With `verify`, every function's records must pass x86_validate before they are sized and encoded (the tests', and
 // #145's c-testsuite harness's, check of Tier 0's output), or the emission fails with CHECK_PROGRAM_BACKEND; without
 // it, only their branch columns are checked (branch_sizing_validate_branches), which sizing needs inside each
@@ -3876,9 +3981,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
     run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
+    const bool vectorize = tier1 && (lanes->tier1_passes & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0;
+    run.vectorize_volatile = vectorize ? check_program_vectorize_volatile(program, scratch) : NULL;
     // The windows (#2536), where the bodies are compiled alone: the plain emission's, since --tier1's inlining and
     // --helper-report read the bodies' streams after every body's code.
-    run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting ? lanes->window_tokens : 0;
+    run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting && !lanes->assembly ? lanes->window_tokens : 0;
     run.poison_windows = lanes != NULL && lanes->poison_windows;
     run.squeeze_window = lanes != NULL ? lanes->squeeze_window : 0;
     if (run.tier1_outcomes != 0)
@@ -3922,7 +4029,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->status = check_tier1_ready ? result->status : CHECK_PROGRAM_BACKEND;
     }
     valid = valid && (count == 0 || (run.codes != 0 && run.bodies != 0)) && (frames == 0 || run.frames != 0) && run.costs != 0 &&
-            (!tier1 || (run.tier1_outcomes != 0 && run.tier1_counts != 0 && check_tier1_ready));
+            (!tier1 || (run.tier1_outcomes != 0 && run.tier1_counts != 0 && check_tier1_ready)) && (!vectorize || run.vectorize_volatile != NULL);
     uint64_t total = 0;
     uint64_t largest = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)
@@ -4219,9 +4326,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const uint32_t tokens = input->token_count;
         const uint32_t* declarations = input->declarations;
         const CheckSparseWide attributes = input->attributes;
-        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
+        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
         {
-            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
                 if (declarations[token] == token)
@@ -4486,7 +4593,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         .identifiers = identifiers,
         .types = program->types,
         .output = scratch,
-        .scalar = scalar,
     };
     Scratch mangle_scratch = { 0 };
     for (uint32_t i = 0; valid && i < program->input->graph.overload_candidate_count; i += 1)
@@ -5381,6 +5487,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     uint32_t labels = 0;
     CheckEmitBody helper_body;
+    // -S's records (#1362), by atom: room for every atom the link can hold, each copied as its atom is added below.
+    const bool keep_records = valid && lanes != NULL && lanes->assembly;
+    result->assembly_code_count = keep_records ? result->link.atoms.capacity : 0;
+    result->assembly_code = keep_records ? BUSTER_ARENA_PUSH_ARRAY(output, AssemblyCode, result->assembly_code_count) : NULL;
+    if (keep_records && result->assembly_code == NULL)
+    {
+        result->status = CHECK_PROGRAM_RESOURCE;
+        valid = false;
+    }
+    else if (keep_records)
+    {
+        memset(result->assembly_code, 0, (uint64_t)result->assembly_code_count * sizeof(AssemblyCode));
+    }
     for (uint32_t b = 0; valid && b < count + helpers->count; b += 1)
     {
         const bool source_body = b < count;
@@ -5506,17 +5625,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             if (encodes)
             {
-                const BranchSizingCheck shape = BUSTER_SCALAR_PATH(scalar) ? branch_sizing_validate_branches_scalar(code->records, code->count, code->branches, code->targets, code->branch_count) :
-                                                         branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
+                const BranchSizingCheck shape = branch_sizing_validate_branches(code->records, code->count, code->branches, code->targets, code->branch_count);
                 const BranchSizing sizing = shape.error == BRANCH_SIZING_OK ? size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets) : (BranchSizing){ .error = shape.error };
-                const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 :
-                                       BUSTER_SCALAR_PATH(scalar) ? x86_encode_scalar(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends) :
-                                                x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
+                const int64_t length = sizing.error != BRANCH_SIZING_OK ? -1 : x86_encode(code->records, code->count, encoded, byte_capacity, 0, body->fixup_ends);
                 encodes = length >= 0;
                 if (encodes && unwind)
                 {
                     const char* reason = 0;
-                    failure = check_program_emit_frame_checked(code, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason, &helper_verdict);
+                    failure = check_program_emit_frame_checked(code, NULL, offsets, length, verify, BUSTER_SCALAR_PATH(scalar), helper_rows, scratch, &run.frames[b], &reason, &helper_verdict);
                     body->frame_verdict = helper_verdict.error != EMITTED_VERIFY_OK ? &helper_verdict : NULL;
                     encodes = failure == CHECK_PROGRAM_OK;
                     failure = encodes ? CHECK_PROGRAM_BACKEND : failure;
@@ -5559,6 +5675,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             if (valid && source_body && body->sled != 0)
             {
                 valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
+            }
+            // -S's copy of the records the atom's bytes are (#1362): a template's code and a NOP sled's aren't records the
+            // sink prints, which it refuses by name.
+            if (valid && keep_records && !assembly && body->sled == 0 && !body->windowed && atom < result->assembly_code_count)
+            {
+                valid = check_program_emit_keep_records(&result->assembly_code[atom], code, output);
+                result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
             }
             // The labels its templates define, each at its record's offset (its lane's, for a naked function): the
             // program's definitions.

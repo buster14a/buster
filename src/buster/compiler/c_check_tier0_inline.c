@@ -129,7 +129,7 @@ static bool check_tier0_inline_splice(const CheckEmitRun* run, CheckTier0InlineL
             .vector_bytes = check_tier0_inline_transport(check_tier1_inline_target(table->program, b)),
             .shapes = run->tier0_inline_shapes,
         };
-        valid = run->scalar ? tier0_inline_scalar(&input, arena, result) : tier0_inline(&input, arena, result);
+        valid = tier0_inline(&input, arena, result);
     }
     else
     {

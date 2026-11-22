@@ -75,6 +75,8 @@ struct CheckLowerPadding
     uint32_t pool;
     const uint64_t* entries;
     uint32_t count;
+    // The entries' words in the table (CBuiltinMiscLowerCall.padding_words).
+    uint64_t words;
     uint64_t elements;
     uint64_t stride;
     const char* refusal;

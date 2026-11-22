@@ -7,7 +7,7 @@
 // against clang -O0's build of the same source on both paths: blocks' ends, breaks and continues of every loop and a for
 // statement's own variables, gotos, returns of each class of value (kept before their cleanups) and the named return value
 // (after them, as clang's NRVO has it), statement expressions, switches, and the functions' kinds the lowering takes: their
-// parameters (a _Bool's among them) and their results (in memory, in registers, in a result object).
+// parameters (a _Bool's and _Atomic pointers' among them) and their results (in memory, in registers, in a result object).
 // Include after c_check_program_test.c and c_check_vla_test.c.
 #ifndef BUSTER_C_CHECK_CLEANUP_TEST_INCLUDED
 #define BUSTER_C_CHECK_CLEANUP_TEST_INCLUDED
@@ -186,6 +186,19 @@ static __attribute__((noinline)) void check_test_cleanup_programs(CheckTest* tes
         "int f __attribute__((cleanup(noted_u)))=n+5;int g __attribute__((cleanup(noted_v)))=n+6;"
         "int i __attribute__((cleanup(noted_c)))=n+8;int j __attribute__((cleanup(noted_mv)))=n+9;r+=c+d+e+f+g+i+j;"
         "if(n&1)return (int)trace^r;}return (int)trace^r;}", "cleanup-parameters-results", clang);
+    // An _Atomic pointer parameter takes the address, as clang's code passes it (#1844): of the variable's type, of void
+    // and through a typedef, qualified, an __auto_type variable's too, past a return and a block's end.
+    check_test_program_source(test, BUSTER_CHECK_TEST_CLEANUP_TRACE
+        "static void noted_atomic(_Atomic(int*)p){int*q=p;trace=trace*31u+(unsigned)*q+8000u;*q=-1;}"
+        "static void noted_atomic_void(const _Atomic(void*)p){trace=trace*31u+(unsigned)*(const long*)p+8100u;}"
+        "typedef _Atomic(const short*) AS;static void noted_atomic_typedef(AS volatile p){trace=trace*31u+(unsigned)*p+8200u;}"
+        "int tested(int n){trace=0;int r=0;{int a __attribute__((cleanup(noted_atomic)))=n;long b __attribute__((cleanup(noted_atomic_void)))=n+1;"
+        "const short c __attribute__((cleanup(noted_atomic_typedef)))=(short)(n+2);__auto_type d __attribute__((cleanup(noted_atomic)))=n+3;r+=a+(int)b+c+d;"
+        "if(n&1)return (int)trace^r;}return (int)trace^r;}", "cleanup-atomic-parameters", clang);
+    // An _Atomic _Bool's, which clang 23's instruction selection can't select ("Cannot select: bitcast FrameIndex"), is
+    // refused by name.
+    check_test_program_boundary_reason(test, "static void noted(_Atomic _Bool b){(void)b;}int tested(int n){int a __attribute__((cleanup(noted)))=n;return a;}",
+                                       "cleanup-atomic-bool-parameter", true, false, 1, 1, "cleanup functions of an _Atomic _Bool parameter");
     check_test_program_build_release();
 }
 

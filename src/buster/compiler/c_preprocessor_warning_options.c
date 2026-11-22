@@ -256,6 +256,106 @@ static bool pp_warning_option_known(PPWarningOption option)
            (option.kind != PP_WARNING_OPTION_INVALID && pp_warning_group_known(option.name));
 }
 
+// Recognition is not implementation. These opt-in families (#1365) have no complete consumer; -Wconversion
+// already controls some default warnings, but not its requested narrowing/sign/float analyses. Keep this inventory
+// separate from __has_warning's frozen vocabulary and the ordinary diagnostic severity policy. A family's removal
+// requires its own consumer and triggering/nontriggering driver tests, not merely another recognized spelling.
+static const char* const pp_warning_unimplemented[] =
+{
+    "cast-qual",
+    "comma",
+    "conversion",
+    "float-equal",
+    "implicit-fallthrough",
+    "missing-prototypes",
+    "missing-variable-declarations",
+    "nested-externs",
+    "pointer-arith",
+    "redundant-decls",
+    "shadow",
+    "sign-conversion",
+    "strict-prototypes",
+    "switch-enum",
+    "undef",
+    "unused-macros",
+    "vla",
+};
+
+static uint32_t pp_warning_unimplemented_index(const char* name)
+{
+    uint32_t result = UINT32_MAX;
+    uint32_t low = 0;
+    uint32_t high = BUSTER_ARRAY_LENGTH(pp_warning_unimplemented);
+    while (result == UINT32_MAX && low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const int compared = strcmp(name, pp_warning_unimplemented[middle]);
+        result = compared == 0 ? middle : result;
+        high = compared < 0 ? middle : high;
+        low = compared > 0 ? middle + 1 : low;
+    }
+    return result;
+}
+
+// Once per command, before opening sources or outputs. Fold only actual enabling/disabling requests: global
+// promotion and group demotion do not enable a consumer, while -Werror= does. Disabling an ancestor clears an
+// active child request, but disabling a child does not satisfy its parent's missing analyses. Broad positive
+// groups retain their documented subset; -w suppresses diagnostics, never a missing-capability error.
+static bool pp_warning_options_supported(const PPOptions* options)
+{
+    _Static_assert(BUSTER_ARRAY_LENGTH(pp_warning_unimplemented) <= 32, "warning capability requests fit the active mask");
+    // Only active lanes read their request index. Ordinary commands do not initialize or scan optional state.
+    uint32_t requested[BUSTER_ARRAY_LENGTH(pp_warning_unimplemented)];
+    uint32_t active = 0;
+    const uint32_t count = options->semantic_warning_option_count;
+    const char* const* arguments = options->semantic_warning_options;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const PPWarningOption option = pp_warning_option(arguments[i]);
+        const bool enables = !option.negative && (option.kind == PP_WARNING_OPTION_GROUP || option.kind == PP_WARNING_OPTION_ERROR ||
+                                                 option.kind == PP_WARNING_OPTION_FATAL);
+        if (enables)
+        {
+            const uint32_t family = pp_warning_unimplemented_index(option.name);
+            if (family != UINT32_MAX)
+            {
+                requested[family] = i + 1;
+                active |= (uint32_t)1 << family;
+            }
+        }
+        else if (active != 0 && option.negative && option.kind == PP_WARNING_OPTION_GROUP)
+        {
+            const bool everything = strcmp(option.name, "everything") == 0;
+            const uint32_t holder = pp_warning_group_index(option.name);
+            for (uint32_t remaining = active; remaining != 0; remaining &= remaining - 1)
+            {
+                const uint32_t f = (uint32_t)__builtin_ctz(remaining);
+                if (everything || (holder != UINT32_MAX && pp_warning_group_holds(holder, pp_warning_group_index(pp_warning_unimplemented[f]))))
+                {
+                    active &= ~((uint32_t)1 << f);
+                }
+            }
+        }
+    }
+    uint32_t first = UINT32_MAX;
+    uint32_t family = 0;
+    for (uint32_t remaining = active; remaining != 0; remaining &= remaining - 1)
+    {
+        const uint32_t f = (uint32_t)__builtin_ctz(remaining);
+        if (requested[f] < first)
+        {
+            first = requested[f];
+            family = f;
+        }
+    }
+    const bool supported = first == UINT32_MAX;
+    if (!supported)
+    {
+        fprintf(stderr, "error: unsupported warning option '%s' (warning family '%s' is not fully implemented)\n", arguments[first - 1], pp_warning_unimplemented[family]);
+    }
+    return supported;
+}
+
 typedef enum PPWarningOptionSeverity
 {
     PP_WARNING_OPTION_IGNORED,

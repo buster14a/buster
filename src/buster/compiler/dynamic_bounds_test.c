@@ -147,7 +147,7 @@ static void dynamic_bounds_kinds(DynamicTestTally* tally)
     for (uint32_t k = 0; k < RUNTIME_KINDS; k += 1)
     {
         const RuntimeKind kind = (RuntimeKind)k;
-        const bool executable = kind == RUNTIME_KIND_DYNAMIC || kind == RUNTIME_KIND_STATIC || kind == RUNTIME_KIND_STATIC_PIE;
+        const bool executable = kind == RUNTIME_KIND_DYNAMIC || kind == RUNTIME_KIND_STATIC || kind == RUNTIME_KIND_STATIC_PIE || kind == RUNTIME_KIND_NO_PIE;
         for (uint32_t n = 0; n < BUSTER_ARRAY_LENGTH(dynamic_bounds_names); n += 1)
         {
             const char* name = dynamic_bounds_names[n];

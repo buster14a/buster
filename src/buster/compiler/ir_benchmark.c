@@ -2,12 +2,12 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Synthetic IR benchmark, included after ir.c. run_ir_benchmark measures the complete verifier/derived-array entry
-// points on a small function and a larger integer/control-flow function. The producer, independent accounting checks,
-// scalar/vector comparison and calibration are outside the recorded samples. Every recorded sample covers at least
+// points on a small function and a larger integer/control-flow function. The producer, independent accounting checks
+// and calibration are outside the recorded samples. Every recorded sample covers at least
 // 2 ms; repeated rebuilds reuse arena checkpoints, including the allocation, initialization and fill the API performs.
 // No source corpus or bytes/source-token claim is made. TSC ticks are reported as TSC ticks, not core clock cycles.
 //
-// Usage: benchmark-ir [--instructions N] [--passes N] [--only scalar|vector|uses|cfg] [--after-scalar MS]
+// Usage: benchmark-ir [--instructions N] [--passes N] [--only verify|uses|cfg]
 // Pin the optimized executable to one CPU on the approved host under its shared benchmark lock for target results.
 
 #include <stdint.h>
@@ -25,20 +25,17 @@
 #define BUSTER_IR_BENCHMARK_MAX_PASSES 101u
 #define BUSTER_IR_BENCHMARK_MIN_NS 2000000ull
 #define BUSTER_IR_BENCHMARK_MAX_REPETITIONS (1u << 20)
-#define BUSTER_IR_BENCHMARK_MAX_AFTER_SCALAR_MS 10000u
 
 typedef enum IrBenchmarkVariant
 {
-    IR_BENCHMARK_SCALAR,
-    IR_BENCHMARK_VECTOR,
+    IR_BENCHMARK_VERIFY,
     IR_BENCHMARK_USES,
     IR_BENCHMARK_CFG,
     IR_BENCHMARK_VARIANT_COUNT,
 } IrBenchmarkVariant;
 
 static const char* const ir_benchmark_names[IR_BENCHMARK_VARIANT_COUNT] = {
-    "scalar",
-    "vector",
+    "verify",
     "uses",
     "cfg",
 };
@@ -193,9 +190,7 @@ static bool ir_benchmark_validate(const IrFunction* function, Arena* derived, Ar
 {
     const uint64_t derived_mark = derived->length;
     const uint64_t scratch_mark = scratch->length;
-    const IrCheck scalar = ir_verify_scalar(function, scratch, 0);
-    const IrCheck vector = ir_verify(function, scratch, 0);
-    bool valid = scalar.error == IR_OK && vector.error == scalar.error && vector.instruction == scalar.instruction && vector.detail == scalar.detail && vector.dominance_checked == scalar.dominance_checked;
+    bool valid = ir_verify(function, scratch, 0).error == IR_OK;
     IrCfg cfg = { 0 };
     IrUses uses = { 0 };
     if (valid)
@@ -282,13 +277,7 @@ static __attribute__((noinline)) IrError ir_benchmark_run(const IrFunction* func
     for (uint32_t i = 0; error == IR_OK && i < repetitions; i += 1)
     {
         __asm__ volatile("" : : "r"(function) : "memory");
-        if (variant == IR_BENCHMARK_SCALAR)
-        {
-            const IrCheck check = ir_verify_scalar(function, scratch, 0);
-            error = check.error;
-            observable += check.instruction;
-        }
-        else if (variant == IR_BENCHMARK_VECTOR)
+        if (variant == IR_BENCHMARK_VERIFY)
         {
             const IrCheck check = ir_verify(function, scratch, 0);
             error = check.error;
@@ -314,56 +303,37 @@ static __attribute__((noinline)) IrError ir_benchmark_run(const IrFunction* func
     return error;
 }
 
-static IrError ir_benchmark_after_scalar(const IrFunction* function, Arena* derived, Arena* scratch, uint32_t milliseconds)
-{
-    const uint64_t duration = (uint64_t)milliseconds * 1000000ull;
-    const uint64_t start = ir_benchmark_now();
-    IrError error = IR_OK;
-    while (error == IR_OK && ir_benchmark_now() - start < duration)
-    {
-        error = ir_benchmark_run(function, IR_BENCHMARK_SCALAR, 1, derived, scratch);
-    }
-    return error;
-}
-
 // Each attempt is bounded by the repetition cap. A recorded sample that becomes faster than calibration predicted
-// is repeated with twice the work; that short attempt is discarded, including its after-scalar preparation.
-static IrBenchmarkSample ir_benchmark_sample(const IrFunction* function, IrBenchmarkVariant variant, Arena* derived, Arena* scratch, uint32_t* repetitions, uint32_t after_scalar_ms)
+// is repeated with twice the work; that short attempt is discarded.
+static IrBenchmarkSample ir_benchmark_sample(const IrFunction* function, IrBenchmarkVariant variant, Arena* derived, Arena* scratch, uint32_t* repetitions)
 {
     IrBenchmarkSample sample = { 0 };
     bool complete = false;
     while (!complete && sample.error == IR_OK)
     {
-        if (variant == IR_BENCHMARK_VECTOR && after_scalar_ms != 0)
+        const uint64_t start_ns = ir_benchmark_now();
+        const uint64_t start_tsc = ir_benchmark_tsc();
+        sample.error = ir_benchmark_run(function, variant, *repetitions, derived, scratch);
+        sample.tsc_ticks = ir_benchmark_tsc() - start_tsc;
+        sample.nanoseconds = ir_benchmark_now() - start_ns;
+        sample.repetitions = *repetitions;
+        complete = sample.nanoseconds >= BUSTER_IR_BENCHMARK_MIN_NS;
+        if (!complete)
         {
-            sample.error = ir_benchmark_after_scalar(function, derived, scratch, after_scalar_ms);
-        }
-        if (sample.error == IR_OK)
-        {
-            const uint64_t start_ns = ir_benchmark_now();
-            const uint64_t start_tsc = ir_benchmark_tsc();
-            sample.error = ir_benchmark_run(function, variant, *repetitions, derived, scratch);
-            sample.tsc_ticks = ir_benchmark_tsc() - start_tsc;
-            sample.nanoseconds = ir_benchmark_now() - start_ns;
-            sample.repetitions = *repetitions;
-            complete = sample.nanoseconds >= BUSTER_IR_BENCHMARK_MIN_NS;
-            if (!complete)
+            if (*repetitions == BUSTER_IR_BENCHMARK_MAX_REPETITIONS)
             {
-                if (*repetitions == BUSTER_IR_BENCHMARK_MAX_REPETITIONS)
-                {
-                    sample.error = IR_ERROR_LIMIT;
-                }
-                else
-                {
-                    *repetitions *= 2;
-                }
+                sample.error = IR_ERROR_LIMIT;
+            }
+            else
+            {
+                *repetitions *= 2;
             }
         }
     }
     return sample;
 }
 
-static bool ir_benchmark_case(uint32_t instructions, uint32_t passes, uint32_t selected, uint32_t after_scalar_ms)
+static bool ir_benchmark_case(uint32_t instructions, uint32_t passes, uint32_t selected)
 {
     // Virtual reservations are bounds, not readable padding. Each operation still allocates its own exact columns.
     const uint64_t capacity = (uint64_t)instructions * 256 + (1u << 20);
@@ -386,7 +356,6 @@ static bool ir_benchmark_case(uint32_t instructions, uint32_t passes, uint32_t s
         1,
         1,
         1,
-        1,
     };
     double nanoseconds[IR_BENCHMARK_VARIANT_COUNT][BUSTER_IR_BENCHMARK_MAX_PASSES];
     double ticks[IR_BENCHMARK_VARIANT_COUNT][BUSTER_IR_BENCHMARK_MAX_PASSES];
@@ -398,7 +367,7 @@ static bool ir_benchmark_case(uint32_t instructions, uint32_t passes, uint32_t s
             valid = ir_benchmark_run(&function, (IrBenchmarkVariant)variant, 1, &derived, &scratch) == IR_OK;
             if (valid)
             {
-                const IrBenchmarkSample calibration = ir_benchmark_sample(&function, (IrBenchmarkVariant)variant, &derived, &scratch, &repetitions[variant], after_scalar_ms);
+                const IrBenchmarkSample calibration = ir_benchmark_sample(&function, (IrBenchmarkVariant)variant, &derived, &scratch, &repetitions[variant]);
                 valid = calibration.error == IR_OK;
             }
         }
@@ -410,7 +379,7 @@ static bool ir_benchmark_case(uint32_t instructions, uint32_t passes, uint32_t s
             const uint32_t variant = (step + pass) % IR_BENCHMARK_VARIANT_COUNT;
             if ((selected & (1u << variant)) != 0)
             {
-                const IrBenchmarkSample sample = ir_benchmark_sample(&function, (IrBenchmarkVariant)variant, &derived, &scratch, &repetitions[variant], after_scalar_ms);
+                const IrBenchmarkSample sample = ir_benchmark_sample(&function, (IrBenchmarkVariant)variant, &derived, &scratch, &repetitions[variant]);
                 valid = sample.error == IR_OK;
                 if (valid)
                 {
@@ -450,7 +419,6 @@ static int run_ir_benchmark(int argc, char** argv)
     uint32_t instructions = BUSTER_IR_BENCHMARK_INSTRUCTIONS;
     uint32_t passes = BUSTER_IR_BENCHMARK_PASSES;
     uint32_t selected = (1u << IR_BENCHMARK_VARIANT_COUNT) - 1;
-    uint32_t after_scalar_ms = 0;
     bool valid = true;
     for (int i = 0; valid && i < argc; i += 1)
     {
@@ -463,11 +431,6 @@ static int run_ir_benchmark(int argc, char** argv)
         {
             i += 1;
             valid = ir_benchmark_number(argv[i], 1, BUSTER_IR_BENCHMARK_MAX_PASSES, &passes);
-        }
-        else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            valid = ir_benchmark_number(argv[i], 0, BUSTER_IR_BENCHMARK_MAX_AFTER_SCALAR_MS, &after_scalar_ms);
         }
         else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
@@ -489,8 +452,8 @@ static int run_ir_benchmark(int argc, char** argv)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-ir [--instructions N] [--passes N] [--only scalar|vector|uses|cfg] [--after-scalar MS]\n");
-        fprintf(stderr, "  instructions: 2..%u; passes: 1..%u; after-scalar: 0..%u ms\n", BUSTER_IR_BENCHMARK_MAX_INSTRUCTIONS, BUSTER_IR_BENCHMARK_MAX_PASSES, BUSTER_IR_BENCHMARK_MAX_AFTER_SCALAR_MS);
+        fprintf(stderr, "usage: benchmark-ir [--instructions N] [--passes N] [--only verify|uses|cfg]\n");
+        fprintf(stderr, "  instructions: 2..%u; passes: 1..%u\n", BUSTER_IR_BENCHMARK_MAX_INSTRUCTIONS, BUSTER_IR_BENCHMARK_MAX_PASSES);
     }
 #ifndef __OPTIMIZE__
     fprintf(stderr, "benchmark-ir: an optimized build is required; unoptimized timings are not reported\n");
@@ -500,15 +463,11 @@ static int run_ir_benchmark(int argc, char** argv)
     {
         printf("benchmark-ir: synthetic integer/control-flow functions, %u passes; each sample >= 2 ms\n", passes);
         printf("No corpus bytes/source-token measurement; TSC ticks are not core cycles. Pin to one CPU for measurements.\n");
-        if (after_scalar_ms != 0 && (selected & (1u << IR_BENCHMARK_VECTOR)) != 0)
-        {
-            printf("Each vector sample follows %u ms of untimed scalar verification.\n", after_scalar_ms);
-        }
         const uint32_t small = instructions < BUSTER_IR_BENCHMARK_BLOCK_INSTRUCTIONS ? instructions : BUSTER_IR_BENCHMARK_BLOCK_INSTRUCTIONS;
-        valid = ir_benchmark_case(small, passes, selected, after_scalar_ms);
+        valid = ir_benchmark_case(small, passes, selected);
         if (valid && instructions != small)
         {
-            valid = ir_benchmark_case(instructions, passes, selected, after_scalar_ms);
+            valid = ir_benchmark_case(instructions, passes, selected);
         }
     }
     return valid ? 0 : 1;

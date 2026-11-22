@@ -172,13 +172,10 @@ version_at_least "$cmake_version" 3.25 || die "cmake $cmake_version is older tha
 # BUSTER_LINKER, for which an empty value is an error (cmake/BusterSettings.cmake checks them all).
 fuzz_entry="${BUSTER_FUZZ_ENTRY:-}"
 [ -z "$fuzz_entry" ] || fuzz_entry="$(absolute "$fuzz_entry")"
-host_runtime="${BUSTER_HOST_RUNTIME:-}"
-[ -z "$host_runtime" ] || host_runtime="$(absolute "$host_runtime")"
 pgo_train="${BUSTER_PGO_TRAIN:-}"
 [ -z "$pgo_train" ] || pgo_train="$(absolute "$pgo_train")"
 settings=(
     "-DBUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native}"
-    "-DBUSTER_HOST_RUNTIME=$host_runtime"
     "-DBUSTER_DEBUG_INFO=${BUSTER_DEBUG_INFO-1}"
     "-DBUSTER_LINKER=${BUSTER_LINKER-auto}"
     "-DBUSTER_BUILD_DEFINES=${BUSTER_BUILD_DEFINES:-}"

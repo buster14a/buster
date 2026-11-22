@@ -257,7 +257,7 @@ static bool tier1_narrow_fixture(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
         function->constant_count = fixture->constants;
         function->block_offsets[1] = fixture->nodes;
         ready = fixture->nodes <= BUSTER_TIER1_NARROW_NODES && fixture->constants <= BUSTER_TIER1_NARROW_CONSTANTS;
-        ready = ready && ir_verify_scalar(function, &test->scratch, 0).error == IR_OK;
+        ready = ready && ir_verify(function, &test->scratch, 0).error == IR_OK;
     }
     return ready;
 }
@@ -429,24 +429,17 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
         tier1_emit_test_expect(test, encoded, "canonical-register probes preserve straight-line records and use reserved R11 only");
         const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(count);
         const uint64_t mapping_bytes = (capacity + page - 1) / page * page;
-        uint8_t* native[2] = {
-            mmap(0, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0),
-            mmap(0, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0),
-        };
-        encoded = encoded && native[0] != MAP_FAILED && native[1] != MAP_FAILED;
+        uint8_t* native = mmap(0, mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        encoded = encoded && native != MAP_FAILED;
         encoded = encoded && x86_validate(records, count) == count && x86_target_validate(test->allowed, records, count) == count;
-        int64_t lengths[2] = {0};
         if (encoded)
         {
-            lengths[0] = x86_encode_scalar(records, count, native[0], capacity, 0, 0);
-            lengths[1] = x86_encode(records, count, native[1], capacity, 0, 0);
-            encoded = lengths[0] > 0 && lengths[1] > 0 && (uint64_t)lengths[0] <= capacity && (uint64_t)lengths[1] <= capacity;
-            encoded = encoded && lengths[0] == lengths[1] && memcmp(native[0], native[1], (size_t)lengths[0]) == 0;
-            encoded = encoded && mprotect(native[0], mapping_bytes, PROT_READ | PROT_EXEC) == 0 && mprotect(native[1], mapping_bytes, PROT_READ | PROT_EXEC) == 0;
+            const int64_t length = x86_encode(records, count, native, capacity, 0, 0);
+            encoded = length > 0 && (uint64_t)length <= capacity && mprotect(native, mapping_bytes, PROT_READ | PROT_EXEC) == 0;
         }
-        tier1_emit_test_expect(test, encoded, "both encoders agree on baseline narrow records and create executable mappings");
+        tier1_emit_test_expect(test, encoded, "baseline narrow records encode into an executable mapping");
         const bool executable = encoded && tier1_emit_test_native(test, records, count);
-        for (uint32_t encoder = 0; executable && encoder < 2; encoder += 1)
+        if (executable)
         {
             for (uint32_t placement = 0; placement < 2; placement += 1)
             {
@@ -464,7 +457,7 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
                         data[offset + byte] = (uint8_t)(expected->initial[sample] >> (byte * 8));
                         page_expected[offset + byte] = (uint8_t)(expected->memory[sample] >> (byte * 8));
                     }
-                    const uint64_t actual = tier1_emit_test_call(native[encoder], (uintptr_t)(data + offset), expected->input[sample]);
+                    const uint64_t actual = tier1_emit_test_call(native, (uintptr_t)(data + offset), expected->input[sample]);
                     tier1_emit_test_expect(test, actual == expected->result[sample], "native narrow result has the independent exact canonical 32/64-bit value");
                     tier1_emit_test_expect(test, memcmp(data, page_expected, page) == 0, "narrow memory value and every adjacent byte match the frozen oracle");
                     for (uint32_t node = 0; probes && node < fixture->nodes; node += 1)
@@ -477,12 +470,9 @@ static void tier1_narrow_execute(Tier1EmitTest* test, const Tier1NarrowFixture* 
                 }
             }
         }
-        for (uint32_t encoder = 0; encoder < 2; encoder += 1)
+        if (native != MAP_FAILED)
         {
-            if (native[encoder] != MAP_FAILED)
-            {
-                munmap(native[encoder], mapping_bytes);
-            }
+            munmap(native, mapping_bytes);
         }
     }
     if (guard != MAP_FAILED)
@@ -510,7 +500,7 @@ static void tier1_narrow_compile(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
         {
             Tier1SelectPlan plan;
             uint32_t node = BUSTER_IR_NONE;
-            const Tier1SelectError selected = tier1_select_plan(&fixture->function, 0, &test->output, &test->scratch, vector != 0, &plan, &node);
+            const Tier1SelectError selected = tier1_select_plan(&fixture->function, 0, &test->output, &test->scratch, &plan, &node);
             tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "narrow memory and conversion IR selects");
             if (selected == TIER1_SELECT_OK)
             {
@@ -592,7 +582,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
         Tier1SelectPlan plan;
         uint32_t node;
         bool ready = tier1_narrow_fixture(test, &fixture);
-        ready = ready && tier1_select_plan(&fixture.function, 0, &test->output, &test->scratch, true, &plan, &node) == TIER1_SELECT_OK;
+        ready = ready && tier1_select_plan(&fixture.function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
         tier1_emit_test_expect(test, ready, "narrow refusal fixture selects before target/arena failures");
         if (ready)
         {
@@ -720,7 +710,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             tier1_emit_test_node(&function, count++, IR_RET, IR_VOID, value, BUSTER_IR_NONE);
             function.instruction_count = count;
             function.block_offsets[1] = count;
-            ready = count <= sizes.instruction_count && ir_verify_scalar(&function, &test->scratch, 0).error == IR_OK;
+            ready = count <= sizes.instruction_count && ir_verify(&function, &test->scratch, 0).error == IR_OK;
             tier1_emit_test_expect(test, ready, "unsupported narrow ABI/arithmetic/conversion fixture is valid IR");
         }
         for (uint32_t vector = 0; ready && vector < 2; vector += 1)
@@ -732,7 +722,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             const uint64_t output_mark = test->output.length;
             const uint64_t scratch_mark = test->scratch.length;
             uint32_t node;
-            const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, vector != 0, &result, &node);
+            const Tier1SelectError error = tier1_select_plan(&function, 0, &test->output, &test->scratch, &result, &node);
             tier1_emit_test_expect(test, error == TIER1_SELECT_ERROR_UNSUPPORTED, "narrow call argument/arithmetic/compare/shift and I1 SEXT/TRUNC remain unsupported");
             tier1_emit_test_expect(test, test->output.length == output_mark && test->scratch.length == scratch_mark && memcmp(&before, &result, sizeof(result)) == 0, "unsupported narrow selection publishes no partial plan");
         }

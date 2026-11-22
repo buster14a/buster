@@ -213,11 +213,10 @@ reason, and checks the selection with a stand-in release in a cache of its own.
 ## Trees, settings and publication
 
 `build.sh` keeps a tree per toolchain and variant, `build/cmake/VARIANT`: the
-host ISA, then `-runtime` (`BUSTER_HOST_RUNTIME`), `-SANITIZER-ON` (the
-sanitizer and its optimization), `-fuzz` and `-g0` (`BUSTER_DEBUG_INFO=0`, but
-in a sanitizer build, whose units have line tables either way) where they
-apply, and `-lexer` for lexer variants: `native`, `x86-64-g0`,
-`native-address-O3`, `x86-64-address-O1-fuzz`. These change every unit's flags,
+host ISA, then `-SANITIZER-ON` (the sanitizer and its optimization), `-fuzz`
+and `-g0` (`BUSTER_DEBUG_INFO=0`, but in a sanitizer build, whose units have
+line tables either way) where they apply, and `-lexer` for lexer variants:
+`native`, `vector-g0`, `native-address-O3`, `native-address-O1-fuzz`. These change every unit's flags,
 so each has its objects apart and switching between them rebuilds nothing.
 
 It passes every setting to CMake explicitly, so unsetting an environment
@@ -240,8 +239,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `BUSTER_HOST_ARCH` | `native` | `-march`: `x86-64` for the scalar baseline, `znver5` for benchmark builds; `vector` is the explicit vector target, `-march=x86-64-v4` and host_isa.h's other features (`-maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni`), which must select `BUSTER_HOST_VECTOR=1` (#2033; the hosted vector row's) |
-| `BUSTER_HOST_RUNTIME` | none | links CI's emulated old CPU's runtime from that root (`x86-64` alone) |
+| `BUSTER_HOST_ARCH` | `native` | `-march`: `znver5` for benchmark builds; `vector` is the explicit vector target, `-march=x86-64-v4` and host_isa.h's other features (`-maes -mgfni -mvaes -mavx512vbmi -mavx512vbmi2 -mavx512vpopcntdq -mavx512bitalg -mavx512vnni`; #2033, the hosted vector row's). Configuring fails for a target `host_isa.h` refuses, one without every AVX-512 feature it names (#2924): `x86-64`, the scalar baseline, is gone |
 | `BUSTER_DEBUG_INFO` | `1` | `0` leaves `-g` out of Release, a fifth of its build time; Develop keeps its line tables |
 | `BUSTER_LINKER` | `auto` | `auto` (wild, then mold, then clang's; for a static link lld, then mold, then clang's), `system`, `wild`, `mold`, `lld`, `bfd` or a path; lld links at `-O0` |
 | `BUSTER_BUILD_DEFINES` | none | whitespace-separated arguments every unit's compile adds |
@@ -258,8 +256,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
-(fuzzing with ThreadSanitizer, a sanitizer with `BUSTER_HOST_RUNTIME`, a runtime
-without `x86-64`). With CMake directly, they are cache variables of the same
+(fuzzing with ThreadSanitizer). With CMake directly, they are cache variables of the same
 names.
 
 `build/compiler` is a hard link to the configuration's executable (a copy where
@@ -322,8 +319,8 @@ to 13 ms of page faults, which `link-foreign` and the tests pay per process
 
 It is also linked statically (`-static`, #652): the dynamic loader took 8% to
 12% of a small compile's task-clock on the 9700X. The sanitizers' PIEs, a
-fuzzing build (libFuzzer's runtime needs C++'s shared libraries) and
-`BUSTER_HOST_RUNTIME`'s explicit runtime stay dynamic, and so does a link by
+fuzzing build (libFuzzer's runtime needs C++'s shared libraries) stay dynamic,
+and so does a link by
 wild: wild 0.10.0's static executables fault in glibc's `__ctype_init`, at
 their first TLS access, against Ubuntu's glibc, so a static build's `auto`
 linker is lld, then mold (or clang's default without either), and an explicit
@@ -694,10 +691,10 @@ necessary sharing, remaining production boundaries and validation limits.
 
 ## Presets and CTest
 
-`CMakePresets.json` has the configure presets `native`, `x86-64` and `znver5`,
-whose trees are `build.sh`'s `build/cmake/native`, `x86-64` and `znver5`; the
-build and test presets `debug`, `release` and `develop` (native),
-`x86-64-debug`, `x86-64-release`, `x86-64-develop`, `znver5-debug`,
+`CMakePresets.json` has the configure presets `native` and `znver5`, whose
+trees are `build.sh`'s `build/cmake/native` and `znver5` (the `x86-64` preset
+went with the scalar host, #2924); the build and test presets `debug`,
+`release` and `develop` (native), `znver5-debug`,
 `znver5-release` and `znver5-develop`; the test presets `debug-build`,
 `release-build` and `develop-build`, the `build` label alone; and the workflow
 presets `debug`, `release` and `develop`, which configure, build and run those:
@@ -1250,7 +1247,10 @@ sources compiled with `-fprofile-instr-generate`, without debug information,
 into an executable left unbaked, since its counters are writable memory outside
 `buster_baked`, which `bake-tables` refuses; that executable compiles each
 source as `-E -P`, `-fsyntax-only` and `-c` (a Ninja step per source, one per
-core at a time), a profile per process; and the `llvm-profdata` beside `clang`
+core at a time), a profile per process, with the units' flags but
+`-ffunction-sections`, which is the host compiler's alone
+([the start's code order](#the-starts-code-order)) and which the compiler
+refuses; and the `llvm-profdata` beside `clang`
 (or on `PATH`) merges them into `pgo/compiler.profdata`, with which every unit
 then compiles (`-fprofile-instr-use`). Each step reruns when its inputs
 change: an edited source retrains the profile, and a new profile recompiles
@@ -1261,8 +1261,8 @@ executable. On the 9700X, the compiler's own sources gave a better profile
 than the frozen `sqlite3.c`, musl and c-testsuite of buster-performance#182
 ("The compiler's own code and a profile", `docs/compile-time.md`).
 
-The mode isn't the default, and no CI job builds with it. Sanitizer builds,
-`BUSTER_HOST_RUNTIME` and `lexer-variant` refuse it (the lexer variants change
+The mode isn't the default, and no CI job builds with it. Sanitizer builds and
+`lexer-variant` refuse it (the lexer variants change
 `main.c`'s code, so a profile of the build without them no longer matches it),
 as do invalid values of `BUSTER_PGO` and `BUSTER_PGO_TRAIN`; the settings'
 checks make each refusal before any tree is configured, and
@@ -1281,7 +1281,7 @@ go first, together, in a section of their own before `.text`
 (`.text.buster_start`), and the C library's ones right after it, first in
 `.text`. They are what every compile measured runs, exactly (#2873): the
 four small commands' functions, then those of musl's units and of
-`sqlite3.c`'s `-c`, 1,432 functions of the executable's 13,573, 4.2 MB of
+`sqlite3.c`'s `-c`, 1,441 functions of the executable's 13,689, 4.2 MB of
 code. The checker's own code stays in its section, `.text.buster_checker`
 (one section of each unit, which starts on a page, `main.c`'s pragmas, #502),
 which held 18 of the empty file's windows and 60 of `hello.c`'s; the script
@@ -1360,8 +1360,8 @@ build's parallel split, put the list's functions of that section first in it.
   `-ffunction-sections`, and its split units' parts take the list, whatever
   its linker, so that switching `BUSTER_LINKER` relinks alone; a static link
   by mold or GNU ld lays the sections out without the script, and keeps the
-  checker's section in the list's order. The sanitizers', fuzzing and
-  `BUSTER_HOST_RUNTIME`'s dynamic links compile without it.
+  checker's section in the list's order. The sanitizers' and fuzzing's
+  dynamic links compile without it.
   `-ffunction-sections` alone made `.text` 6 KB longer (0.02%): a jump to
   another function's section can't take the assembler's short form.
 - **A stale list:** a function that is gone, renamed or no longer an object's

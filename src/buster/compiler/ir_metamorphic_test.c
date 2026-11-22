@@ -16,10 +16,8 @@ static bool ir_meta_expect(IrMetaTally* tally, bool valid, const char* message)
 static bool ir_meta_bad_pair(const IrFunction* function, IrError expected, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
-    const IrCheck vector = ir_verify_complete(function, scratch, true);
-    const IrCheck scalar = ir_verify_complete(function, scratch, false);
-    const bool valid = vector.error == expected && scalar.error == expected && vector.instruction == scalar.instruction &&
-                       vector.detail == scalar.detail && vector.dominance_checked == scalar.dominance_checked && scratch->length == mark;
+    const IrCheck check = ir_verify_complete(function, scratch);
+    const bool valid = check.error == expected && scratch->length == mark;
     return valid;
 }
 
@@ -99,15 +97,11 @@ static bool ir_meta_resource_contracts(IrMetaTally* tally, const IrFunction* fun
     const IrError limits[] = { IR_ERROR_MEMORY, IR_ERROR_LIMIT };
     for (uint32_t error = 0; error < BUSTER_ARRAY_LENGTH(limits); error += 1)
     {
-        for (uint32_t path = 0; path < 2; path += 1)
-        {
-            IrCheck checks[2] = { { .error = IR_OK, .dominance_checked = true }, { .error = IR_OK, .dominance_checked = true } };
-            checks[path] = (IrCheck){ .error = limits[error], .instruction = BUSTER_IR_NONE };
-            valid = ir_meta_expect(tally, ir_meta_verification_result(checks[0], checks[1], true) == IR_META_RESOURCE,
-                                  "one verifier's resource limit is inconclusive even when the other algorithm completes") && valid;
-            valid = ir_meta_expect(tally, ir_meta_verification_result(checks[0], checks[1], false) == IR_META_VERIFY,
-                                  "a resource result cannot hide scratch-prefix lifetime corruption") && valid;
-        }
+        const IrCheck check = { .error = limits[error], .instruction = BUSTER_IR_NONE };
+        valid = ir_meta_expect(tally, ir_meta_verification_result(check, true) == IR_META_RESOURCE,
+                              "the verifier's resource limit is inconclusive") && valid;
+        valid = ir_meta_expect(tally, ir_meta_verification_result(check, false) == IR_META_VERIFY,
+                              "a resource result cannot hide scratch-prefix lifetime corruption") && valid;
     }
     for (uint32_t a = 0; a < 4; a += 1)
     {

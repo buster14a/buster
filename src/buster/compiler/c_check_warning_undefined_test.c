@@ -157,7 +157,7 @@ static void check_test_warning_undefined(CheckTest* test)
             const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .semantic_pragmas = true,
                                               .no_standard_includes = true, .quiet = true };
             const ParseOptions parsing = { .extension_metadata = true, .scalar = scalar != 0, .tree_only = mode >= 2 };
-            const CheckOptions checking = { .verify = true, .scalar = scalar != 0 };
+            const CheckOptions checking = { .verify = true };
             CheckInput input = { 0 };
             CheckStream stream = { 0 };
             CheckInitializers initializers = { 0 };

@@ -36,8 +36,22 @@ The stable LSD radix sort runs eight byte passes on each key. It takes 16
 digits at a time: AVX-512 conflict masks and population counts give each
 duplicate digit its rank, and the last copy advances the bucket count once.
 Placement uses those ranks and scalar stores, avoiding gathers and scatters.
-Inactive tail lanes cannot enter the histogram. Counts up to 256 use insertion
-sort, which is also the exact scalar oracle.
+Inactive tail lanes cannot enter the histogram. The block's digits and ranks
+are 64-byte stack lines: the ranks' one 64-byte store, read back four bytes
+at a time, split across two lines in some processes and not others, and the
+sort ran at 62 ns/key rather than 43 by where the stack fell (#2959).
+
+Counts up to 512 (`BUSTER_DIAGNOSTIC_SMALL_COUNT`) count each record's place
+instead (`diagnostic_sort_small`): the records before it in the order, those
+of a smaller (source, sequence) and those of equal keys and a smaller index,
+which keeps the sort stable. Two permutes take 8 records' sources and
+sequences from three registers into columns, with the largest key past the
+end, and each record's count runs 8 keys at a time: `<=` on the sequence in
+the blocks before its own, `<` after, and its own block's lanes below it
+count ties. O(n²/8) compares, branch-free; each record then goes to its place
+in the scratch, which `diagnostic_merge` always provides. It replaced an
+insertion sort (#2924) whose speed moved with where the compiler put its
+loop.
 
 A fatal stops its own job. Further appends from that job return false without
 marking the buffer as failed. It does not cancel another job on whichever lane
@@ -103,11 +117,13 @@ that occurs after the initial global symbols have been created.
 
 ## Property tests
 
-- `test-diagnostics`: radix against stable insertion sort on counts 0–319
-  and 4,095–4,097, every tail ending against a guard page, repeated keys,
-  forward/reverse/random orders and high key bits. Lane tests compare rendered
-  groups at 1, 2, 3 and 8 lanes with reversed jobs and delayed completions,
-  through both sorting paths. Limits include empty input and record, text and
+- `test-diagnostics`: the sort against its definition (every record once,
+  with its keys, ordered by source then sequence, and equal keys in input
+  order) on counts 0–319, 504–519 (around the count sort's cutoff) and
+  4,095–4,097, every tail ending against a guard
+  page, repeated keys, forward/reverse/random orders and high key bits. Lane
+  tests compare rendered groups at 1, 2, 3 and 8 lanes with reversed jobs and
+  delayed completions. Limits include empty input and record, text and
   merge exhaustion.
 - `test-preprocessor`: every built-in fixture is also an independent lane
   job. Both kernel paths, both job orders and 1/2/3/8 lanes must reproduce a
@@ -204,17 +220,40 @@ The four output test commands, `test-preprocessor`, `test-files`,
 fixture seeds. The default 9700X workflow runs these property checks in their
 stage commands and runs `test-diagnostics` explicitly.
 
-`benchmark-diagnostics [--only scalar|selected] [--after-scalar MS]` compares insertion sort with the
-selected path on the same frozen random keys, including the input copy. It
-prints medians of 21 interleaved samples after one warm-up, in nanoseconds and
-invariant-TSC ticks per key. TSC ticks are not hardware core-cycle counts.
-Run it on CPU 2 under the shared lock. The default interleaves the two paths;
-`--only selected` runs the selected path back to back, with longer batches for
-the large radix sort. `--only selected --after-scalar 100` conditions each
-short timed batch with 100 ms of lighter insertion sorts. Repeat each in
-several processes: an interleaved run alone does not establish either state.
+`benchmark-diagnostics [--after-scalar MS]` times `diagnostic_sort` on the
+frozen random keys, including the input copy, and checks every sample's
+result against the sort's definition (`diagnostic_test_sorted`). It prints
+medians of 21 samples after one warm-up, in nanoseconds and invariant-TSC
+ticks per key; TSC ticks are not hardware core-cycle counts. Run it on CPU 2
+under the shared lock. Back to back, the large radix sort runs in longer
+batches; `--after-scalar 100` conditions each short timed batch with 100 ms of
+scalar integer work over the keys. Repeat each in several processes. Until
+#2924 the benchmark also timed the insertion sort at every count
+(`--only scalar|selected`), which the measurements below compare.
 
 ## 9700X measurements
+
+On 2026-11-18 (#2959, buster-performance's
+[`c-diagnostics-fix-2959`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-diagnostics-fix-2959)),
+against the insertion sort at every count (the twin #2924 removed), three
+processes interleaved, Release with an experiment patch's extra counts:
+
+| Records | Insertion | Selected | Insertion / selected (medians) |
+| ---: | ---: | ---: | ---: |
+| 32 | 4.47–4.50 | 4.45–4.52 | 1.00 |
+| 64 | 7.51–7.52 | 7.21–7.22 | 1.04 |
+| 128 | 16.96–17.45 | 13.41–13.42 | 1.27 |
+| 256 | 29.28–30.70 | 21.21–21.22 | 1.38 |
+| 512 | 60.18–60.28 | 36.51–36.87 | 1.65 |
+| 513 | 62.44–62.53 | 43.74–43.86 | 1.43 |
+| 1,024 | 124.06–124.20 | 43.06–43.16 | 2.88 |
+| 4,096 | 473.01–473.77 | 43.10–43.19 | 10.96 |
+
+The count sort through 512, the radix sort above; with the cutoff at 1,024,
+the count sort took 51.7 ns/key at 768 records and 67.2 at 1,024 against the
+radix sort's 43.6. Before #2959 the selected path lost to the insertion twin
+from 32 records to about 512, in insertion's own code (the same loop, placed
+otherwise) and by the radix sort's slower state.
 
 Measured on 2026-10-22 with Clang 23.1.1, `build.sh`'s `-O3 -march=native`,
 CPU 2 and the shared exclusive lock. Inputs are the benchmark's frozen seed
@@ -233,7 +272,7 @@ enabled, precedes each timed sample.
 | 4,096 | 614.48–614.67 | 43.26–43.44 | 614.84–616.10 | 43.34–43.37 |
 
 Insertion clearly wins at 64, the paths overlap at 256, and radix wins at
-4,096. The selected path therefore uses insertion through 256. These are
+4,096. The selected path then used insertion through 256. These are
 sorting measurements on random keys, not whole-compiler throughput claims
 or a claim that radix wins on every already ordered input.
 
@@ -310,8 +349,9 @@ The diagnostic module's actual edges are rendered groups → `diagnostic_append`
 primary and notes together into a lane-owned text arena. Records retain two
 u64 keys packing four u32 fields (unit, source location, job, sequence), a text
 slice and severity; counts/capacities are explicit. The caller joins all jobs
-before merge sorts bounded order records using separate scratch: insertion sort through 256
-records, otherwise 16-key radix work with initialized local tails. It retains
+before merge sorts bounded order records using separate scratch: counting
+each record's place 8 keys at a time through 512 records, otherwise 16-key
+radix work with initialized local tails. It retains
 the prefix through the first fatal group. Any append/merge failure rejects the
 whole result before printing. A source job has exactly one writer.
 

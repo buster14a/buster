@@ -509,10 +509,16 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             suffix -= 3;
             continue;
         }
+        if (suffix >= 2 && ((bytes[suffix - 2] == 'w' && bytes[suffix - 1] == 'b') || (bytes[suffix - 2] == 'W' && bytes[suffix - 1] == 'B')))
+        {
+            // A bit-precise constant's wb or WB after the imaginary suffix (5iwb, 5iuwb), which clang takes in any order
+            // with it, as 5wbi (#2219).
+            suffix -= 2;
+            continue;
+        }
         if (c == 'i' || c == 'j')
         {
             imaginary = suffix - 1;
-            suffix -= 1;
             break;
         }
         if (c != 'f' && c != 'l' && c != 'u' && c != 'q')
@@ -535,15 +541,44 @@ static void check_literal_number(const uint8_t* bytes, uint32_t length, Arena* s
             memcpy(spelling, bytes, imaginary);
             memcpy(spelling + imaginary, bytes + imaginary + 1, length - imaginary - 1);
             check_literal_number_plain(spelling, length - 1, scratch, result);
-            // A bit-precise constant has no imaginary form: clang refuses 5wbi's suffix.
-            result->valid &= result->bit_width == 0;
             if (result->valid)
             {
-                result->type = BUSTER_TYPE_COMPLEX(type_index(result->type));
+                // A bit-precise constant's imaginary form (#2219: 5wbi, clang's _Complex _BitInt(N)) keeps its width and
+                // value, and its type 0: the reader makes the complex _BitInt in its table (check_input_literal).
+                result->type = result->bit_width != 0 ? 0 : BUSTER_TYPE_COMPLEX(type_index(result->type));
                 result->imaginary = true;
             }
         }
         arena_pop_to(scratch, mark);
+    }
+}
+
+// An imaginary bit-precise constant of more than 64 bits (#2219, check_literal_number) as a complex constant of its
+// _BitInt (c_check_complex.c's representation past 64 bits): its real part's limbs zeros, as the region gives them, and
+// its imaginary part's its value's, the literal's own past 128 bits (check_literal_bit_precise_wide). No constant when the
+// region is full, or for a width past BITINT_MAXWIDTH, which the reader refuses by name.
+static __attribute__((noinline, cold)) void check_literal_imaginary_wide(const CheckLiteral* literal, CheckValue* value)
+{
+    const uint32_t width = literal->bit_width;
+    const uint32_t count = width <= BUSTER_CHECK_WIDE_MAX_WIDTH ? check_wide_count(width) : 0;
+    uint64_t* parts[2] = { NULL, NULL };
+    if (count != 0)
+    {
+        parts[0] = check_wide_allocate(count);
+        parts[1] = width > 128 ? (uint64_t*)(uintptr_t)literal->floating_storage[0] : check_wide_allocate(count);
+    }
+    if (parts[0] != NULL && parts[1] != NULL && width <= 128)
+    {
+        parts[1][0] = literal->integer;
+        parts[1][1] = literal->high;
+    }
+    if (parts[0] != NULL && parts[1] != NULL)
+    {
+        check_complex_wide_publish(value, parts);
+    }
+    else
+    {
+        *value = (CheckValue){ .type = value->type, .category = CHECK_RVALUE, .constant_kind = CHECK_CONSTANT_NONE };
     }
 }
 
@@ -576,6 +611,11 @@ static CheckValue check_literal_value(CheckLiteral literal)
     {
         // An imaginary q/Q literal's bits, its imaginary part's (#1250, check_quad_complex_set), its real part +0.
         check_quad_complex_set(&value, 0, (unsigned __int128)literal.high << 64 | literal.integer);
+    }
+    else if (__builtin_expect(literal.imaginary && literal.bit_width > 64, 0))
+    {
+        // An imaginary bit-precise constant past 64 bits (#2219): its parts' limbs (check_complex_wide_set), its real part 0.
+        check_literal_imaginary_wide(&literal, &value);
     }
     return value;
 }
@@ -952,7 +992,6 @@ static bool check_literal_string_part_scalar(const CheckStringPart* part, CheckS
     return valid;
 }
 
-#if BUSTER_HOST_VECTOR
 // #1388: a part's characters 64 bytes at a time, for the 1-byte encodings (ordinary and u8) outside raw string literals,
 // where every unit is a byte of its own or a few bytes that decode to one, and every valid UTF-8 character is the bytes
 // it is written with. A block starts at a unit and holds `avail` bytes of the part (masked loads: never past its end).
@@ -1146,7 +1185,6 @@ static uint32_t check_literal_string_blocks(const uint8_t* bytes, uint32_t posit
     *length = written;
     return position;
 }
-#endif
 
 // A part's characters in units (check_literal_string_step), appended to `output` (when not NULL) at `*length`. With a
 // vector host and a 1-byte encoding outside a raw string literal, check_literal_string_blocks reads as many units as
@@ -1155,7 +1193,6 @@ static uint32_t check_literal_string_blocks(const uint8_t* bytes, uint32_t posit
 static bool check_literal_string_part(const CheckStringPart* part, CheckStringEncoding encoding, bool c23, bool scalar, uint8_t* output, uint64_t* length)
 {
     bool valid;
-#if BUSTER_HOST_VECTOR
     const CheckStringSpan span = check_literal_string_span(part);
     const bool blocks = !scalar && !span.raw && (encoding == CHECK_STRING_ORDINARY || encoding == CHECK_STRING_UTF8);
     if (blocks)
@@ -1176,10 +1213,6 @@ static bool check_literal_string_part(const CheckStringPart* part, CheckStringEn
     {
         valid = check_literal_string_part_scalar(part, encoding, c23, output, length, false);
     }
-#else
-    (void)scalar;
-    valid = check_literal_string_part_scalar(part, encoding, c23, output, length, false);
-#endif
     return valid;
 }
 

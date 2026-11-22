@@ -3709,6 +3709,22 @@ static __attribute__((unused)) X86Target predefines_function_target(const Predef
     return result;
 }
 
+// The instruction set clang gives a target_clones version (#2247) whose string is `text` (arch= CPU `cpu`,
+// predefines_target_attribute's, or -1; "default" is no text at all): that CPU's features (or the unit's CPU's) and the
+// version's alone. ASTContext::getFunctionFeatureMap's target_clones branch gives initFeatureMap the CPU and "+" the
+// version, without the command line's -m features or -march=native's list, so a clone of a unit built with -mavx2 or
+// -mno-avx has its CPU's features all the same. The rest is predefines_function_target's.
+static __attribute__((unused)) X86Target predefines_clone_target(const PredefinesOptions* options, const PredefinesHost* host, X86Target unit, const char* text,
+                                                                 uint32_t length, int32_t cpu)
+{
+    PredefinesOptions alone = *options;
+    alone.feature_count = 0;
+    alone.inline_asm_use_gpr32 = false;
+    PredefinesHost listless = *host;
+    listless.native = false;
+    return predefines_function_target(&alone, &listless, unit, text, length, cpu);
+}
+
 #define BUSTER_PREDEFINES_FP_APPROX_FUNC 0x01u
 #define BUSTER_PREDEFINES_FP_REASSOCIATE 0x02u
 #define BUSTER_PREDEFINES_FP_RECIPROCAL 0x04u

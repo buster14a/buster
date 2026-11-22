@@ -3,6 +3,15 @@
 # BUSTER_COMPILER, its own executable's path, so that the commands test the configuration that runs them; run one by
 # hand with BUSTER_COMPILER set to a build's executable, such as build/compiler.
 
+== Test the early driver feedback corpus
+# #1427: small fixed driver cases (tests/ci/feedback/): preprocessing, parsing, checking, object generation, linking and
+# execution with clang, and an expected diagnostic. Every plain drawn item also runs it first, as its early result.
+bash tools/ci/feedback.sh smoke
+== Test deterministic work and growth contracts [1 CPU]
+# #2041: bounded dependency admission and sparse SSA storage at N, 2N and 4N, with semantic checks, deterministic
+# work/byte records, real excessive-work mutations and a check that production builds cannot enable the counters.
+# The standalone harnesses inherit this row's host and sanitizer flags; no elapsed time or RSS decides their verdict.
+bash tests/work-contracts/run.sh
 == Check unity fixture ownership without rebuilding
 # The existing compiler's dependency graph keeps private fixtures, arbitrary nested includes and test headers in
 # one main unit. Exact shared exceptions and shared-root structure may not grow silently; stale/incomplete records
@@ -162,9 +171,15 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 # #140 and #138: each program compiled by the driver's --tier1 (each function Tier 1's pipeline takes by Tier 1, the
 # others by Tier 0, with both tiers' unwind tables, #177), by both paths, whose allocators assign registers differently,
 # both programs run; the scalar path's executable the same bytes with the ids in source order and in another (#153).
-# The declared subset must pass. #1116 also reports all Tier 1 function bytes against clang -O0's matching bytes;
-# --code-size implies the object/Clang cross-check and validates the evidence. Lua below is the required size corpus.
-"$BUSTER_COMPILER" test-c-testsuite --tier1 --code-size --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+# The declared subset must pass. #1116 and #2646 also require all Tier 1 function bytes, of objects compiled with
+# --tier1-no-inline, to be at most clang -O0's matching bytes; --check-code-size implies the object/Clang cross-check
+# and validates the evidence.
+"$BUSTER_COMPILER" test-c-testsuite --tier1 --check-code-size --clang clang --jobs "$BUSTER_PARALLEL_CPUS" --subset tests/c-testsuite/subset.txt build/c-testsuite
+== Test -S of c-testsuite's programs against -c and GNU as
+# #1362: each program's -S at Tier 0 and with --tier1, assembled by GNU as into -c's object but for the form contract's
+# normalizations (docs/commands/driver.md's "-S"), then linked from GNU as's object and run. The declared subset must
+# pass.
+"$BUSTER_COMPILER" test-assembly-output --c-testsuite build/c-testsuite --subset tests/c-testsuite/subset.txt
 == Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 # #925: real C preparation/promotions and all three child processes, no expected-output sidecar. Normal return and
 # native exits (including255) pass; alarms, interpreter limits and real record-write failure fail, with every process
@@ -203,6 +218,10 @@ test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c > build/interpreter-units.out && printf 'typed units: 1\n' | cmp - build/interpreter-units.out
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 "$BUSTER_COMPILER" test-unwind --cross-check
+== Test the caret display against clang
+# #2376: tests/carets' command lines, each run by this compiler and by clang with carets on, as both have them by
+# default; their exit statuses and diagnostics, source lines, gutters and carets among them, must be the same bytes.
+"$BUSTER_COMPILER" test-carets
 == Test the preprocessor's cases against clang (part 1 of 4)
 # --clang also preprocesses each case with clang -E and compares the tokens. --part deals the checks (the cases,
 # the header sets, the predefines' option sets in four slices, the fuzz batch's own checks and each of its modes)
@@ -664,6 +683,10 @@ corpus=$BUSTER_CORPUS
 "$BUSTER_COMPILER" test-checker-corpus --clang clang --deferred 8 --symbols --report build/checker-sqlite.tsv --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c"
 == Test the scalar and AVX-512 assembly frontends
 "$BUSTER_COMPILER" test-assembler --cross-check
+== Test the assembly sink against GNU as
+# #1362: hand-built units printed as AT&T assembly (the sink -S is to write), and every form the matcher admits,
+# assembled by GNU as into the object writer's sections, symbols and relocations and the encoder's bytes.
+"$BUSTER_COMPILER" test-assembly-output --cross-check
 == Assemble a .s and a .S file that -c comes before
 # #652: a first argument that starts with '-' goes to the source commands at once, past the units' chains of command
 # names, but for the assembler's -c of a .s or .S file (main_assembly_source). Each assembles, the .S preprocessed, and
@@ -746,12 +769,9 @@ if "$BUSTER_COMPILER" test-preprocessor --compare-clang tests/preprocessor-oracl
 # libc_nonshared.a's members, with readelf's.
 "$BUSTER_COMPILER" test-import --cross-check
 == Test Make dependency-rule serialization
-# #805's serializer, standalone until the driver calls it: the x86-64 build's scalar classifier and the
-# native build's AVX-512BW path where the host supplies it, each over generated names against an
-# independent quoting implementation, guarded tails, malformed records and capacities, and --oracle's
-# -MT/-MQ target rules against the installed gcc and clang's -MM output.
-clang -std=c17 -O2 -march=x86-64 -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-scalar
-./build/test-dependency-rule-scalar --oracle
+# #805's serializer, standalone until the driver calls it: the native build's AVX-512BW path (the host's alone since
+# #2924) over generated names against an independent quoting implementation, guarded tails, malformed records and
+# capacities, and --oracle's -MT/-MQ target rules against the installed gcc and clang's -MM output.
 clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-native
 ./build/test-dependency-rule-native --oracle
 == Test selective lowering against its independent oracle and Clang symbols
@@ -818,10 +838,10 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 ./build/test-driver-tier1-code-size "$BUSTER_COMPILER" clang
 # #1116 is a deterministic object-size bound, independent of the machine's timing. Reuse this row's compiler and
 # frozen SQLite, and Lua 5.4.8 from the run's verified offline input bundle; include luac.c, not only the interpreter.
-# Enforce the issue's Lua corpus bound. SQLite's size status remains visible with enforced=0.
+# Enforce #1116's Lua corpus bound and #2646's SQLite one.
 directory=$(mktemp -d)
 bash tools/ci/hosted-offline.sh lua "$directory/lua"
-"$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size=lua --clang clang --sqlite "$BUSTER_CORPUS/sqlite" \
+"$BUSTER_COMPILER" measure-tier1-programs --sizes-only --check-code-size --clang clang --sqlite "$BUSTER_CORPUS/sqlite" \
     --lua "$directory/lua/src" --directory "$directory"
 rm -rf "$directory"
 == Measure the frames and keep the frame pointer on request
@@ -958,6 +978,44 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-ir-sroa
 # #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
 "$BUSTER_COMPILER" test-ir-vectorize
+# #2805: compare the C reductions built by the opt-in Tier 1 vectorizer and Clang.
+objects=$(mktemp -d)
+kernels=tests/ir/vectorize/minmax.c
+"$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict --tier1-report --verify -march=x86-64-v4 -c "$kernels" -o "$objects/buster.o"
+objdump -d -M intel --no-show-raw-insn --disassemble=max_if_i32 "$objects/buster.o"
+clang -O2 -march=x86-64-v4 -c "$kernels" -o "$objects/clang.o"
+for impl in buster clang; do
+    clang -O2 tests/ir/vectorize/minmax-main.c "$objects/$impl.o" -o "$objects/$impl"
+    "$objects/$impl" > "$objects/$impl.out"
+done
+diff -u "$objects/clang.out" "$objects/buster.out"
+wc -l "$objects/buster.out"
+for kind in min max; do
+    for spelling in if cond; do
+        for sign in i32 u32; do
+            symbol=${kind}_${spelling}_${sign}
+            op=vp${kind}sd
+            if [ "$sign" = u32 ]; then op=vp${kind}ud; fi
+            objdump -d -M intel --no-show-raw-insn --disassemble="$symbol" "$objects/buster.o" > "$objects/$symbol.s"
+            grep -E "[[:space:]]$op[[:space:]]+zmm" "$objects/$symbol.s"
+            grep -E "[[:space:]]$op[[:space:]]+xmm" "$objects/$symbol.s"
+        done
+    done
+done
+for symbol in max_volatile max_inline_volatile; do
+    objdump -d -M intel --no-show-raw-insn --disassemble="$symbol" "$objects/buster.o" > "$objects/$symbol.s"
+    cat "$objects/$symbol.s"
+    if grep -E '[xyz]mm[0-9]+' "$objects/$symbol.s"; then exit 1; fi
+    # The condition and its winning arm each read the array. The inline control must exercise the inlined path.
+    test "$(grep -c 'DWORD PTR' "$objects/$symbol.s")" -ge 2
+    if grep -E '[[:space:]]call[[:space:]]' "$objects/$symbol.s"; then exit 1; fi
+done
+# The pass is opt-in, and the available horizontal reductions require EVEX.
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64-v4 -c "$kernels" -o "$objects/default.o"
+"$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict -march=x86-64-v3 -c "$kernels" -o "$objects/v3.o"
+objdump -d "$objects/default.o" "$objects/v3.o" > "$objects/scalar.s"
+if grep -E 'v?p(min|max)[su]d' "$objects/scalar.s"; then exit 1; fi
+rm -r "$objects"
 "$BUSTER_COMPILER" test-ir-inline
 == Test dataflow bitsets
 "$BUSTER_COMPILER" test-dataflow
@@ -983,7 +1041,9 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 == Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 # #2554: the subject compiles at Tier 1 with no fallback, by both host paths, and runs against Clang's oracle; objdump
 # checks that the truth values became branches, constants are stores' immediates, no shift by zero is left, each
-# computed goto has its own indirect jump, (#2676) each select of a comparison is a cmov of its flags, with no setcc, and
+# computed goto has its own indirect jump, (#2676) each select of a comparison is a cmov of its flags, with no setcc,
+# (#2791) a select of a floating comparison by <, <=, > or >= a cmov of its ucomis's flags, on NaN and signed-zero
+# operands, (#2922) one of == or != two cmovs, the parity flag's too, unless its values recur through it, and
 # (#2745) no object a vector's value writes whole is zeroed first.
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_patterns.c -o build/test-driver-tier1-patterns

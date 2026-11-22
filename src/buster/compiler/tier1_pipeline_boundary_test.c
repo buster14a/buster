@@ -262,8 +262,7 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
     IrFunction lowered;
     IrFunction promoted;
     IrOptimizeResult optimized;
-    IrCheck check = test->vector ? ir_lower_typed(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered) :
-                                  ir_lower_typed_scalar(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
+    IrCheck check = ir_lower_typed(source, IR_I64, source->symbol_count, &test->arenas[TIER1_PIPELINE_LOWERED], scratch, &lowered);
     bool ok = tier1_pipeline_expect(test, check.error == IR_OK, "boundary typed stream lowers");
     if (ok)
     {
@@ -296,7 +295,6 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
             .predecessors = cfg.predecessors,
         };
         DominatorOptions options = dominators_options();
-        options.path = test->vector ? DOMINATOR_VECTOR : DOMINATOR_SCALAR;
         options.outputs = 0;
         Dominators result;
         ok = tier1_pipeline_expect(test, dominators_analyze(&test->arenas[TIER1_PIPELINE_DERIVED], scratch, &graph, options, &result) == DOMINATOR_OK, "boundary dominance rebuilds");
@@ -307,16 +305,15 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
                 .leave = result.subtree_end,
                 .block_count = result.block_count,
             };
-            const IrCheck vector = ir_verify(&optimized.function, scratch, &dominance);
-            const IrCheck scalar = ir_verify_scalar(&optimized.function, scratch, &dominance);
-            ok = tier1_pipeline_expect(test, vector.error == IR_OK && scalar.error == IR_OK && vector.dominance_checked && scalar.dominance_checked, "both verifiers accept boundary optimized SSA");
+            const IrCheck verified = ir_verify(&optimized.function, scratch, &dominance);
+            ok = tier1_pipeline_expect(test, verified.error == IR_OK && verified.dominance_checked, "the verifier accepts boundary optimized SSA");
         }
     }
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
     if (ok)
     {
-        const Tier1SelectError error = tier1_select_plan_verified(&optimized.function, &dominance, 0, 0, &test->arenas[TIER1_PIPELINE_SELECTED], scratch, test->vector, &plan, &node);
+        const Tier1SelectError error = tier1_select_plan_verified(&optimized.function, &dominance, 0, 0, &test->arenas[TIER1_PIPELINE_SELECTED], scratch, &plan, &node);
         ok = tier1_pipeline_expect(test, error == TIER1_SELECT_OK, "boundary selection succeeds without fallback");
     }
     if (ok)
@@ -397,13 +394,11 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
     }
     *mapped = (capacity + 4095) & ~UINT64_C(4095);
     uint8_t* machine = capacity != 0 && capacity < INT32_MAX ? mmap(0, *mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
-    uint8_t* scalar = malloc(capacity);
-    bool ok = tier1_pipeline_expect(test, machine != MAP_FAILED && scalar != 0, "boundary native buffers allocate");
+    bool ok = tier1_pipeline_expect(test, machine != MAP_FAILED, "boundary native buffers allocate");
     for (uint32_t f = 0; ok && f < count; f += 1)
     {
         Tier0Code* body = &bodies[f];
-        uint32_t* scalar_ends = malloc(BUSTER_X86_ENCODER_FIXUP_CAPACITY(body->reference_count) * sizeof(uint32_t));
-        ok = offsets[f] != 0 && ends[f] != 0 && scalar_ends != 0;
+        ok = offsets[f] != 0 && ends[f] != 0;
         ok = ok && branch_sizing_validate(body->records, body->count, body->branches, body->targets, body->branch_count).error == BRANCH_SIZING_OK;
         ok = ok && size_branches(body->records, body->count, body->branches, body->targets, body->branch_count, offsets[f]).error == BRANCH_SIZING_OK;
         ok = ok && x86_target_validate(test->allowed, body->records, body->count) == body->count;
@@ -419,10 +414,8 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
         ok = ok && marked == body->reference_count;
         const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(body->count);
         const int64_t vector_size = ok ? x86_encode(body->records, body->count, machine + starts[f], room, 0, ends[f]) : -1;
-        const int64_t scalar_size = ok ? x86_encode_scalar(body->records, body->count, scalar + starts[f], room, 0, scalar_ends) : -1;
-        ok = ok && vector_size > 0 && (uint64_t)vector_size <= room && vector_size == scalar_size && memcmp(machine + starts[f], scalar + starts[f], (size_t)vector_size) == 0;
-        ok = ok && memcmp(ends[f], scalar_ends, (uint64_t)body->reference_count * sizeof(uint32_t)) == 0;
-        ok = tier1_pipeline_expect(test, ok, "boundary branches size and baseline encoders agree on bytes and fixup ends");
+        ok = ok && vector_size > 0 && (uint64_t)vector_size <= room;
+        ok = tier1_pipeline_expect(test, ok, "boundary branches size and the baseline records encode");
         if (ok)
         {
             sizes[f] = (uint64_t)vector_size;
@@ -443,7 +436,6 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
             }
             ok = tier1_pipeline_expect(test, ok, "boundary label symbols name their emitted records");
         }
-        free(scalar_ends);
     }
     for (uint32_t f = 0; ok && f < count; f += 1)
     {
@@ -477,7 +469,6 @@ static uint8_t* tier1_pipeline_boundary_load(Tier1PipelineTest* test, Tier0Code*
         free(offsets[f]);
         free(ends[f]);
     }
-    free(scalar);
     *entry = starts[count - 1];
     return machine;
 }

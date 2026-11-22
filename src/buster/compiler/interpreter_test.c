@@ -406,9 +406,14 @@ static void interpreter_test_memory(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, address + 7, 2, false) == INTERPRETER_MEMORY, "allocation crossing");
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, UINT64_MAX, 2, false) == INTERPRETER_MEMORY, "address overflow");
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, false) == INTERPRETER_UNDEFINED, "defined-byte read checking");
+    runtime.recent[interpreter_memory_recent(address)] = runtime.memory_count;
+    runtime.evicted[interpreter_memory_recent(address)] = 0;
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, false) == INTERPRETER_UNDEFINED, "defined-byte read through a displaced hint");
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, true) == INTERPRETER_MEMORY, "read-only write through a displaced hint");
     interpreter_memory_remove_owner(&runtime, 1);
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 1, false) == INTERPRETER_MEMORY, "returned frame allocation lifetime");
     added = interpreter_memory_add(&runtime, (uint8_t*)&bytes, 8, 0, true, 0);
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, true) == INTERPRETER_OK, "a reused address has its new registration's permissions");
     interpreter_memory_remove(&runtime, (uint8_t*)&bytes);
     interpreter_test_expect(tally, added && runtime.memory_count == 0, "heap allocation removal");
 }
@@ -701,6 +706,11 @@ static void interpreter_test_lookup(InterpreterTestTally* tally)
     interpreter_test_expect(tally, runtime.memory_count == 4 && runtime.disjoint_count == 1, "lookup: a removal keeps the prefix's memories it kept");
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_MEMORY,
                             "lookup: a hint past the prefix isn't taken over an earlier memory that holds the range");
+    const uint32_t entry = interpreter_memory_recent(at_first + 8);
+    runtime.recent[entry] = runtime.memory_count;
+    runtime.evicted[entry] = 3;
+    interpreter_test_expect(tally, interpreter_memory_access(&runtime, at_first + 8, 4, true) == INTERPRETER_MEMORY,
+                            "lookup: a displaced hint past the prefix cannot bypass the first read-only registration");
     // With first removed, its views decide for its bytes 4 to 12, and nothing for its others.
     interpreter_memory_remove(&runtime, first);
     interpreter_test_expect(tally, runtime.memory_count == 3 && runtime.disjoint_count == 0, "lookup: no prefix once its memories are gone");
@@ -1454,6 +1464,88 @@ static void interpreter_test_function_addresses(InterpreterTestTally* tally, Are
     }
 }
 
+// A typed run's symbols (InterpreterTypedSymbol, #2758) where two data symbols share an entry: their globals read in turn,
+// each filling the entry the other held, give each one's bytes, and a symbol of that entry that names nothing stays
+// INTERPRETER_SYMBOL after the entry held a symbol that names something.
+static void interpreter_test_symbols(InterpreterTestTally* tally, Arena* scratch)
+{
+    const SymbolId first = 30;
+    const uint32_t entry = interpreter_typed_symbol_entry(first);
+    SymbolId second = first + 1;
+    while (interpreter_typed_symbol_entry(second) != entry)
+    {
+        second += 1;
+    }
+    SymbolId third = second + 1;
+    while (interpreter_typed_symbol_entry(third) != entry)
+    {
+        third += 1;
+    }
+    uint8_t kinds[] = {
+        BUSTER_TYPED_GLOBAL,
+        BUSTER_TYPED_GLOBAL,
+        BUSTER_TYPED_ADD,
+        BUSTER_TYPED_GLOBAL,
+        BUSTER_TYPED_MUL,
+        BUSTER_TYPED_RETURN,
+    };
+    uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U8,
+        BUSTER_TYPED_CLASS_U8,
+        BUSTER_TYPED_CLASS_U8,
+        BUSTER_TYPED_CLASS_U8,
+        BUSTER_TYPED_CLASS_U8,
+        BUSTER_TYPED_CLASS_U8,
+    };
+    uint64_t values[] = {
+        first,
+        second,
+        0,
+        first,
+        0,
+        0,
+    };
+    const Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+    };
+    const SymbolId symbols[] = {
+        1,
+    };
+    uint8_t bytes[] = {
+        3,
+        5,
+    };
+    const InterpreterBinding bindings[] = {
+        {
+            .symbol = first,
+            .bytes = &bytes[0],
+            .size = 1,
+        },
+        {
+            .symbol = second,
+            .bytes = &bytes[1],
+            .size = 1,
+        },
+    };
+    const InterpreterProgram program = {
+        .functions = &function,
+        .function_symbols = symbols,
+        .function_count = 1,
+        .bindings = bindings,
+        .binding_count = BUSTER_ARRAY_LENGTH(bindings),
+    };
+    InterpreterResult result;
+    bool ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, ok && result.value.low == (3 + 5) * 3, "globals sharing a run's symbol entry each give their own bytes");
+    // The third symbol, which names nothing, at the second's place: the entry the first holds then answers for none.
+    values[1] = third;
+    ok = interpreter_typed_run(&program, 1, 0, 0, scratch, 0, &result);
+    interpreter_test_expect(tally, !ok && result.status == INTERPRETER_SYMBOL, "a global naming nothing stays unresolved in a shared entry");
+}
+
 static void interpreter_test_guarded(InterpreterTestTally* tally, Arena* scratch)
 {
     const uint32_t counts[] = {
@@ -1854,6 +1946,7 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_heap(&tally, &scratch);
         interpreter_test_mappings(&tally, &scratch);
         interpreter_test_function_addresses(&tally, &scratch);
+        interpreter_test_symbols(&tally, &scratch);
         interpreter_test_guarded(&tally, &scratch);
         interpreter_test_text_native(&tally, &scratch);
         interpreter_test_programs(&tally, &scratch, seed, count);

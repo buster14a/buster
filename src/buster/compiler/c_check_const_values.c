@@ -61,9 +61,20 @@ struct CheckConstHash
     uint32_t child[2];
 };
 
+// Source object IDs are one-based token indices. These borrowed columns identify declared storage and give its
+// complete extent even when the object has no initializer receipt. A literal or label is not a declaration.
+typedef struct CheckObjectDeclarations CheckObjectDeclarations;
+struct CheckObjectDeclarations
+{
+    const uint32_t* objects;
+    const TypeId* types;
+    uint32_t count;
+};
+
 typedef struct CheckConstValues CheckConstValues;
 struct CheckConstValues
 {
+    CheckObjectDeclarations declarations;
     const CheckConstObject* objects;
     uint32_t count;
     const CheckConstPart* parts;
@@ -81,6 +92,7 @@ typedef struct CheckConstBuffer CheckConstBuffer;
 struct CheckConstBuffer
 {
     Arena* arena;
+    CheckObjectDeclarations declarations;
     CheckConstObject* objects;
     uint32_t count;
     uint32_t capacity;
@@ -102,6 +114,7 @@ struct CheckConstBuffer
 static CheckConstValues check_const_view(const CheckConstBuffer* buffer)
 {
     const CheckConstValues result = buffer != NULL ? (CheckConstValues){
+        .declarations = buffer->prefix != NULL ? buffer->prefix->declarations : buffer->declarations,
         .objects = buffer->objects,
         .count = buffer->count,
         .parts = buffer->parts,
@@ -562,11 +575,19 @@ static bool check_const_zero(const TypeTable* types, TypeId type, CheckValue* va
         constant = CHECK_CONSTANT_ADDRESS;
     }
     uint64_t* limbs = NULL;
+    uint64_t* parts[2] = { NULL, NULL };
     if (constant == CHECK_CONSTANT_NONE && kind == BUSTER_TYPE_KIND_BIT_INT && check_wide_type(types, type, &width, &sign))
     {
         // A _BitInt past 128 bits' zero (#1447): its limbs, zeros as the region gives them (c_check_wide.c).
         limbs = check_wide_allocate(check_wide_count(width));
         constant = limbs != NULL ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE;
+    }
+    else if (constant == CHECK_CONSTANT_COMPLEX && check_complex_wide_element(types, type_element(types, type_strip_aligned(types, type)), &width, &sign))
+    {
+        // A complex integer element past 64 bits' (#2219): each part's limbs, zeros (c_check_complex.c).
+        parts[0] = check_wide_allocate(check_wide_count(width));
+        parts[1] = check_wide_allocate(check_wide_count(width));
+        constant = parts[0] != NULL && parts[1] != NULL ? CHECK_CONSTANT_COMPLEX : CHECK_CONSTANT_NONE;
     }
     if (constant != CHECK_CONSTANT_NONE)
     {
@@ -574,6 +595,10 @@ static bool check_const_zero(const TypeTable* types, TypeId type, CheckValue* va
         if (limbs != NULL)
         {
             check_wide_publish(value, limbs);
+        }
+        if (parts[0] != NULL)
+        {
+            check_complex_wide_publish(value, parts);
         }
     }
     return constant != CHECK_CONSTANT_NONE;

@@ -1,0 +1,7 @@
+# The vector parser's outputs, a digest per generated batch of test-parser (c_parser_test.c, parse_test_batch_digest):
+# the sum of its units' digests (parse_test_unit_digest) and the vector path's (parse_test_vector_digest), recorded with
+# BUSTER_PARSE_RECORD_DIGESTS where the vector path and its kernels agreed with the scalar parser and their twins (#2924).
+# Each line is a key (the batch, '/', its language), a tab and the digest; lines without a tab are comments.
+alignments/c2017 gnu, keywords 0, digraphs 0	2c221b135d592547
+nesting/c2017 gnu, keywords 0, digraphs 0	bf5a18950284ecfe
+streams/c2017 gnu, keywords 0, digraphs 0	85e8d486e4752100

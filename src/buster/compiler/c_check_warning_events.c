@@ -619,6 +619,7 @@ typedef enum CheckWarningEventKind
     // An enum's fixed underlying type in a declaration with a declarator (#2213), at its `:`: its description's words.
     CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
     CHECK_WARNING_EVENT_UNDERLYING_ATOMIC_QUALIFIER,
+    CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -668,6 +669,14 @@ typedef enum CheckWarningEventKind
 #define BUSTER_CHECK_TRANSPARENT_SIZE 5u
 #define BUSTER_CHECK_TRANSPARENT_ALIGNMENT 6u
 
+typedef enum CheckNonPrototypeMessage
+{
+    CHECK_NON_PROTOTYPE_PREVIOUS,
+    CHECK_NON_PROTOTYPE_SUBSEQUENT,
+    CHECK_NON_PROTOTYPE_SUBSEQUENT_DEFINITION,
+    CHECK_NON_PROTOTYPE_HAS_PARAMETERS,
+} CheckNonPrototypeMessage;
+
 typedef enum CheckWarningNoteKind
 {
     CHECK_WARNING_NOTE_PRIOR_INITIALIZATION,
@@ -697,6 +706,7 @@ typedef enum CheckWarningNoteKind
     // "use '=' to turn this equality comparison into an assignment" (payload.data BUSTER_CHECK_UNUSED_EQUALITY), or "use '|='
     // to turn this inequality comparison into an or-assignment" (BUSTER_CHECK_UNUSED_INEQUALITY).
     CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,
+    CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

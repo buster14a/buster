@@ -26,16 +26,12 @@
 // pieces, the second writes the columns. Tables are copied whole, the new addresses and vector constants appended; each
 // phi's predecessor list (each piece's) and each call's arguments are appended to the extra table, their values
 // remapped. The counts are 64-bit, and an output past a u32's count is refused (IR_ERROR_LIMIT). SIMD: what pays. Every
-// function --tier1 compiles at such a target is scanned for a wide vector instruction, 64 type bytes two compares on the
-// vector path, one at a time on its scalar twin, which must agree; a function without one is returned as it is. The
-// rewrite is scalar: it runs on the functions with wide vectors alone (the scalar host's emulations of AVX2's and
-// AVX-512's intrinsics, host_scalar_vectors.h, among the compiler's own).
+// function --tier1 compiles at such a target is scanned for a wide vector instruction, 64 type bytes two compares; a
+// function without one is returned as it is. The
+// rewrite is scalar: it runs on the functions with wide vectors alone.
 
 #ifndef BUSTER_IR_VECTOR_SPLIT_C
 #define BUSTER_IR_VECTOR_SPLIT_C
-
-// The most pieces a vector splits into: a 64-byte one into 16-byte ones.
-#define BUSTER_IR_VECTOR_PIECES 4u
 
 typedef struct IrVectorSplitResult IrVectorSplitResult;
 struct IrVectorSplitResult
@@ -56,9 +52,8 @@ struct IrVectorSplitWork
     // The pieces' type (IR_V4I32 or IR_V8I32) and bytes.
     uint32_t piece_type;
     uint32_t piece_bytes;
-    // Each source value's pieces' output instructions, BUSTER_IR_VECTOR_PIECES apiece: a value no wider than a piece is
-    // its first alone. The counting pass places them; the writing pass, which makes the same instructions, keeps them.
-    uint32_t* pieces;
+    // The first output instruction of each source row, filled by the counting pass before any operand is remapped.
+    uint32_t* first;
     // The output's counts so far, 64-bit as ir_wide.c's.
     uint64_t instruction;
     uint64_t address;
@@ -74,30 +69,17 @@ static bool ir_vector_split_wide(uint32_t type, uint32_t piece_type)
     return type > piece_type && type <= IR_V16I32;
 }
 
-// Whether a function has an instruction of a vector wider than `piece_type`: its type column 64 bytes two compares on
-// the vector path, one at a time on its scalar twin, which must agree.
-static bool ir_vector_split_present_path(const IrFunction* function, uint32_t piece_type, bool vector)
+// Whether a function has an instruction of a vector wider than `piece_type`: its type column 64 bytes two compares.
+static bool ir_vector_split_present(const IrFunction* function, uint32_t piece_type)
 {
-    (void)vector;
-
     bool found = false;
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
     {
-        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
-        {
-            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
-            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
-            const __mmask64 above = _mm512_mask_cmpgt_epu8_mask(active, types, _mm512_set1_epi8((char)piece_type));
-            found = _mm512_mask_cmplt_epu8_mask(above, types, _mm512_set1_epi8(IR_V16I32 + 1)) != 0;
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
-        {
-            found = ir_vector_split_wide(function->type[i], piece_type);
-        }
+        const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+        const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+        const __mmask64 above = _mm512_mask_cmpgt_epu8_mask(active, types, _mm512_set1_epi8((char)piece_type));
+        found = _mm512_mask_cmplt_epu8_mask(above, types, _mm512_set1_epi8(IR_V16I32 + 1)) != 0;
     }
     return found;
 }
@@ -147,19 +129,19 @@ static uint32_t ir_vector_split_count(const IrVectorSplitWork* work, uint32_t va
     return ir_vector_split_wide(type, work->piece_type) ? ir_type_bits[type] / ir_type_bits[work->piece_type] : 1;
 }
 
-// A value's piece j, as placed: the output instruction it is. Only the writing pass reads it.
+// Pieces are consecutive except for a load, whose later pieces each follow one address instruction.
 static uint32_t ir_vector_split_piece(const IrVectorSplitWork* work, uint32_t value, uint32_t j)
 {
-    return work->pieces[(uint64_t)value * BUSTER_IR_VECTOR_PIECES + j];
-}
-
-// The counting pass's place of `value`'s piece j; the writing pass, which makes the same instructions, keeps it.
-static void ir_vector_split_place(IrVectorSplitWork* work, uint32_t value, uint32_t j, uint32_t id)
-{
-    if (work->output == 0)
+    uint32_t id = 0;
+    if (work->output != NULL)
     {
-        work->pieces[(uint64_t)value * BUSTER_IR_VECTOR_PIECES + j] = id;
+        id = work->first[value] + j;
+        if (j != 0 && work->source->op[value] == IR_LOAD)
+        {
+            id += j;
+        }
     }
+    return id;
 }
 
 // A piece's memory access's flags and alignment: the access's, at most a piece's alignment.
@@ -236,19 +218,18 @@ static bool ir_vector_split_value(IrVectorSplitWork* work, uint32_t i)
                 {
                     work->output->flags[id] = f->flags[i];
                 }
-                ir_vector_split_place(work, i, j, id);
             }
         } break;
         case IR_UNDEF:
             for (uint32_t j = 0; j < pieces; j += 1)
             {
-                ir_vector_split_place(work, i, j, ir_vector_split_emit(work, IR_UNDEF, type, none, none, none));
+                ir_vector_split_emit(work, IR_UNDEF, type, none, none, none);
             }
             break;
         case IR_COPY:
             for (uint32_t j = 0; j < pieces; j += 1)
             {
-                ir_vector_split_place(work, i, j, ir_vector_split_emit(work, IR_COPY, type, ir_vector_split_piece(work, a, j), none, none));
+                ir_vector_split_emit(work, IR_COPY, type, ir_vector_split_piece(work, a, j), none, none);
             }
             break;
         case IR_LOAD:
@@ -257,7 +238,6 @@ static bool ir_vector_split_value(IrVectorSplitWork* work, uint32_t i)
             {
                 const uint32_t id = ir_vector_split_emit(work, IR_LOAD, type, ir_vector_split_address(work, a, j), none, none);
                 ir_vector_split_memory(work, id, i);
-                ir_vector_split_place(work, i, j, id);
             }
             break;
         case IR_PHI:
@@ -268,7 +248,7 @@ static bool ir_vector_split_value(IrVectorSplitWork* work, uint32_t i)
             for (uint32_t j = 0; j < pieces; j += 1)
             {
                 const uint32_t list = (uint32_t)(first + (uint64_t)j * b * 2);
-                ir_vector_split_place(work, i, j, ir_vector_split_emit(work, IR_PHI, type, list, b, none));
+                ir_vector_split_emit(work, IR_PHI, type, list, b, none);
                 for (uint32_t p = 0; work->output != 0 && p < b; p += 1)
                 {
                     work->output->extra[list + p * 2] = f->extra[a + p * 2];
@@ -314,11 +294,6 @@ static bool ir_vector_split_use(IrVectorSplitWork* work, uint32_t i)
         const uint32_t address = ir_vector_split_address(work, a, j);
         const uint32_t id = ir_vector_split_emit(work, IR_STORE, IR_VOID, address, ir_vector_split_piece(work, b, j), BUSTER_IR_NONE);
         ir_vector_split_memory(work, id, i);
-        // The store's own value, its first piece's.
-        if (j == 0)
-        {
-            ir_vector_split_place(work, i, 0, id);
-        }
     }
     return supported;
 }
@@ -372,7 +347,6 @@ static void ir_vector_split_copy(IrVectorSplitWork* work, uint32_t i)
             }
         }
     }
-    ir_vector_split_place(work, i, 0, id);
 }
 
 // One pass over the source's instructions, block by block: the counting one (work->output 0) or the writing one. A phi
@@ -394,6 +368,10 @@ static void ir_vector_split_pass(IrVectorSplitWork* work)
         for (uint32_t i = f->block_offsets[block]; work->error == IR_OK && i < f->block_offsets[block + 1]; i += 1)
         {
             const uint64_t first = work->instruction;
+            if (work->output == NULL)
+            {
+                work->first[i] = (uint32_t)first;
+            }
             bool supported = true;
             if (ir_vector_split_wide(f->type[i], work->piece_type))
             {
@@ -433,14 +411,14 @@ static void ir_vector_split_pass(IrVectorSplitWork* work)
 }
 
 // The split of `function` into pieces of `piece_bytes` (16 or 32; 64, a target with every width, splits nothing).
-static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, bool vector, IrVectorSplitResult* result)
+static __attribute__((unused)) IrCheck ir_vector_split(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, IrVectorSplitResult* result)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     *result = (IrVectorSplitResult){ .function = *function };
     const uint32_t piece_type = piece_bytes == 16 ? IR_V4I32 : piece_bytes == 32 ? IR_V8I32 : IR_V16I32;
-    const bool present = output != scratch && piece_type != IR_V16I32 && ir_vector_split_present_path(function, piece_type, vector);
+    const bool present = output != scratch && piece_type != IR_V16I32 && ir_vector_split_present(function, piece_type);
     if (output == scratch || (piece_bytes != 16 && piece_bytes != 32 && piece_bytes != 64))
     {
         check.error = IR_ERROR_STRUCTURE;
@@ -452,14 +430,13 @@ static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_b
     if (check.error == IR_OK && present)
     {
         const uint32_t count = function->instruction_count;
-        bool ok = true;
         IrVectorSplitWork work = {
             .source = function,
             .piece_type = piece_type,
             .piece_bytes = piece_bytes,
-            .pieces = ir_allocate(scratch, (uint64_t)count * BUSTER_IR_VECTOR_PIECES, sizeof(uint32_t), &ok),
+            .first = arena_push_array(scratch, count, sizeof(uint32_t), 64),
         };
-        check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+        check.error = work.first != NULL ? IR_OK : IR_ERROR_MEMORY;
         if (check.error == IR_OK)
         {
             ir_vector_split_pass(&work);
@@ -597,20 +574,6 @@ static IrCheck ir_vector_split_path(const IrFunction* function, uint32_t piece_b
     }
     arena_pop_to(scratch, scratch_mark);
     return check;
-}
-
-static __attribute__((unused)) IrCheck ir_vector_split(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, IrVectorSplitResult* result)
-{
-#if !BUSTER_HOST_VECTOR
-    return ir_vector_split_path(function, piece_bytes, output, scratch, false, result);
-#else
-    return ir_vector_split_path(function, piece_bytes, output, scratch, true, result);
-#endif
-}
-
-static __attribute__((unused)) IrCheck ir_vector_split_scalar(const IrFunction* function, uint32_t piece_bytes, Arena* output, Arena* scratch, IrVectorSplitResult* result)
-{
-    return ir_vector_split_path(function, piece_bytes, output, scratch, false, result);
 }
 
 #endif

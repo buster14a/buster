@@ -347,7 +347,10 @@ static bool check_control_switch_prune(CheckControlWriter* writer, uint32_t keyw
 // Keep the unfolder's dispatch unchanged: the same case controls, fallback edge and jump-table admission.
 static void check_control_switch(CheckControlWriter* writer, uint32_t keyword, uint32_t token, uint32_t body, uint32_t condition, uint32_t end, uint32_t repeat)
 {
-    writer->stops[token] = end;
+    if (writer->loop_targets)
+    {
+        writer->stops[token] = end;
+    }
     if (!check_program_switch_type(writer->program->types, check_stream_type(writer->program->stream, condition)))
     {
         check_program_fail(writer->program, CHECK_PROGRAM_INVALID, token);
@@ -364,7 +367,22 @@ static void check_control_switch(CheckControlWriter* writer, uint32_t keyword, u
             }
         }
         check_control_mark(writer, end);
-        check_control_statement(writer, body, end, repeat);
+        // The switch jumps to a case, not to the start of the body. A statement before the first case is left out
+        // (#2987), and so is a body that no case or label can enter.
+        if (check_control_enterable(writer, body))
+        {
+            check_control_statement_at(writer, body, end, repeat, false);
+        }
+        else
+        {
+            uint32_t low = 0;
+            uint32_t high = 0;
+            check_control_extent(writer, body, &low, &high);
+            if (low <= high)
+            {
+                check_control_drop(writer, low, high);
+            }
+        }
         check_control_entry(writer, CHECK_CONTROL_JUMP, token, BUSTER_CHECK_NONE, fallback);
         uint32_t cases = 0;
         for (uint32_t c = writer->case_first[token]; c != BUSTER_CHECK_NONE; c = writer->case_next[c])

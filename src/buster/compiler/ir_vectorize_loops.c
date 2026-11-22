@@ -9,7 +9,7 @@
 // A loop is taken where it has this shape after promotion, truth simplification and if-conversion: a header whose
 // only phis are an induction (i32 or i64, from an invariant start, `+ 1` on the back edge) and integer reductions, whose
 // only other needed row is the exit test `iv < n` (unsigned, or signed) on which it branches into the loop or out; then
-// a chain of blocks, each its predecessor's only successor, back to the header; and one preheader, whose only successor
+// a chain of blocks optionally containing min/max reduction diamonds, back to the header; and one preheader, whose only successor
 // is the header. Every needed row of the chain is classified in order (IrVectorizeClass): uniform (no lane depends on
 // the induction), an index or a pointer that is affine in the induction, or a vector value of one lane per iteration.
 // A row nothing needs is ignored. Loads and stores must be consecutive: their pointer advances by its access's bytes.
@@ -27,14 +27,18 @@
 // - VX, the exit: each accumulator reduced (`reduce`, `lane_extract`) and combined with its initial value; then the
 //   scalar loop, whose header phis take the start and the initial values from G or the vector loop's results from VX:
 //   the original loop is both the remainder and the fallback.
+// Where the target has masked moves and the loop computes no floating value (#2807, ir_vectorize_masked_legal), the
+// remainder is one masked vector iteration instead: G's overlap tests cover the whole trip count, and G enters P where it
+// is nonzero; P enters VB where a whole vector is, else T; and T, after VB, runs the remaining lanes' iteration under a
+// mask of them (masked loads and stores, each reduction's update selected by it), reduces as VX does and enters the
+// original header at the trip's end, whose exit test fails at once. A loop shorter than a vector runs in T alone.
 // Vector widths come from IrVectorizeTarget, the operations the target selects at each width (Tier 1's tables give
 // it: ir_vectorize_target.c): the widest width at which every row is legal and no value is narrower than 16 bytes.
 //
 // Data-parallel parts: every row's admission kind is an opcode table's lookup 64 rows at a time (vpermi2b), with the
-// volatile and atomic flags folded in, and each loop's rows are scanned for a refusing kind 64 at a time; both have
-// exact scalar twins (ir_vectorize_kinds_scalar, ir_vectorize_forbidden_scalar). The classification of one loop's
-// needed rows, their order and the emission are the small ordered part, shared by both paths, so both give the same
-// function byte for byte. Rows are counted first and then written by the same replay (IrVectorizeBuild.counting).
+// volatile and atomic flags folded in, and each loop's rows are scanned for a refusing kind 64 at a time. The
+// classification of one loop's needed rows, their order and the emission are the small ordered part. Rows are counted
+// first and then written by the same replay (IrVectorizeBuild.counting).
 
 #ifndef BUSTER_IR_VECTORIZE_LOOPS_C
 #define BUSTER_IR_VECTORIZE_LOOPS_C
@@ -103,10 +107,15 @@ struct IrVectorizeTarget
     uint8_t extend[4][4][2];
     // A wrapping truncation from 1 << from bytes to 1 << to, at the source's width.
     uint8_t truncate[4][4];
-    // A reduction of lanes of 1 << size bytes by BUSTER_IR_REDUCE_* at the source's width, then lane_extract of lane 0.
+    // A horizontal reduction and lane_extract of lane 0. For min/max this also covers lane_op at the full width.
     uint8_t reduce[4][BUSTER_IR_REDUCE_OPERATIONS];
     // A population count of lanes of 1 << size bytes.
     uint8_t popcount[4];
+    // A masked load and a masked store of lanes of 1 << size bytes at the width: the masked tail's (#2807), EVEX's alone.
+    uint8_t masked[4];
+    // The masked tail's mask of 1 << k lanes from a general register, a bit k for 2 to 64 lanes (#2807): a kmov of the mask
+    // type's bytes, which a loop with no vector load or store needs too (kmovb, of 8 lanes or fewer, is AVX512DQ's).
+    uint8_t mask;
 };
 
 // test-ir-vectorize's mutants (IrVectorizeOptions.mutation): each breaks one rule of the rewrite, and the tests' oracle
@@ -120,13 +129,14 @@ struct IrVectorizeTarget
 #define BUSTER_IR_VECTORIZE_MUTATE_IDENTITY 3u
 // An integer vector operation reads lanes of twice its elements' width (half their width for quadwords).
 #define BUSTER_IR_VECTORIZE_MUTATE_LANES 4u
-#define BUSTER_IR_VECTORIZE_MUTATIONS 5u
+// The masked tail's mask has one lane more than the trip count's remainder (#2807).
+#define BUSTER_IR_VECTORIZE_MUTATE_MASK 5u
+#define BUSTER_IR_VECTORIZE_MUTATIONS 6u
 
 typedef struct IrVectorizeOptions IrVectorizeOptions;
 struct IrVectorizeOptions
 {
     const IrVectorizeTarget* target;
-    bool scalar;
     uint32_t mutation;
 };
 
@@ -143,6 +153,8 @@ struct IrVectorizeResult
     uint32_t widths[BUSTER_IR_VECTORIZE_WIDTHS];
     uint32_t reductions;
     uint32_t guards;
+    // Those whose tail is one masked vector iteration (#2807).
+    uint32_t masked;
     uint32_t refused[IR_VECTORIZE_REFUSALS];
 };
 
@@ -169,6 +181,14 @@ typedef enum IrVectorizeClass
     IR_VECTORIZE_CLASS_CONTROL,
 } IrVectorizeClass;
 
+typedef struct IrVectorizeReduction IrVectorizeReduction;
+struct IrVectorizeReduction
+{
+    uint32_t phi;
+    uint32_t lane;
+    uint32_t operation;
+};
+
 // One loop's plan, from ir_vectorize_plan, for ir_vectorize_emit.
 typedef struct IrVectorizeLoop IrVectorizeLoop;
 struct IrVectorizeLoop
@@ -193,6 +213,8 @@ struct IrVectorizeLoop
     uint32_t lanes;
     // Lanes per vector iteration, and the widest vector's width index.
     uint32_t width;
+    // Whether the tail is one masked vector iteration (#2807, ir_vectorize_masked_legal), not the scalar loop's.
+    bool masked;
     bool stores;
     uint32_t reductions;
     uint32_t guards;
@@ -236,6 +258,9 @@ struct IrVectorizeWork
     // guards' pointer clone with the induction at its start, and its splat), and the extension's two constants.
     uint8_t* kinds;
     uint8_t* classes;
+    // Valid for UPDATE rows only: the reduction whose partial result they produce.
+    uint8_t* reduction_index;
+    IrVectorizeReduction reduction[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT];
     uint8_t* needed;
     uint8_t* sizes;
     uint8_t* floating;
@@ -260,7 +285,8 @@ struct IrVectorizeWork
 // The admission kinds by opcode. Integer and pointer arithmetic, comparisons, selects and conversions are PURE, SAFE
 // where LICM would speculate them; floating arithmetic is FLOAT (vectorized, never speculated); a phi, a branch, a
 // load and a store have their own kinds; everything else (calls, divisions, fences, atomics, undef, stack operations,
-// masked and gathered memory, floating conversions, existing vector rows) refuses.
+// masked and gathered memory, and existing vector rows) refuses. fma and the same-width integer/float
+// conversions are FLOAT (#2806): vectorized, and never speculated or given a masked tail.
 static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
     [IR_CONST] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
     [IR_PARAM] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
@@ -288,6 +314,11 @@ static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
     [IR_FSUB] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
     [IR_FMUL] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
     [IR_FDIV] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_FMA] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_SITOFP] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_UITOFP] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_FPTOSI] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
+    [IR_FPTOUI] = BUSTER_IR_VECTORIZE_KIND_FLOAT,
     [IR_LOAD] = BUSTER_IR_VECTORIZE_KIND_LOAD,
     [IR_STORE] = BUSTER_IR_VECTORIZE_KIND_STORE,
     [IR_PHI] = BUSTER_IR_VECTORIZE_KIND_PHI,
@@ -299,9 +330,8 @@ static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
 // Every row's admission kind: its opcode's in the table, and FORBID for a load or a store with any access flag
 // (volatile, atomic, a segment). 64 rows at a time: one two-register byte lookup of the opcodes and one compare of the
 // flags.
-static void ir_vectorize_kinds_vector(const IrFunction* f, uint8_t* kinds)
+static void ir_vectorize_kinds(const IrFunction* f, uint8_t* kinds)
 {
-#if BUSTER_HOST_VECTOR
     const __m512i low = _mm512_loadu_si512(ir_vectorize_kind_table);
     const __m512i high = _mm512_loadu_si512(ir_vectorize_kind_table + 64);
     for (uint64_t first = 0; first < f->instruction_count; first += BUSTER_IR_VECTORIZE_BATCH)
@@ -317,48 +347,20 @@ static void ir_vectorize_kinds_vector(const IrFunction* f, uint8_t* kinds)
         const __m512i result = _mm512_mask_mov_epi8(kind, flagged, _mm512_setzero_si512());
         _mm512_mask_storeu_epi8(kinds + first, valid, result);
     }
-#else
-    (void)f;
-    (void)kinds;
-#endif
 }
 
-static void ir_vectorize_kinds_scalar(const IrFunction* f, uint8_t* kinds)
-{
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
-    {
-        const uint32_t kind = f->op[i] < BUSTER_IR_OP_TABLE ? ir_vectorize_kind_table[f->op[i]] : BUSTER_IR_VECTORIZE_KIND_FORBID;
-        const uint32_t base = kind & 7;
-        const bool flagged = (base == BUSTER_IR_VECTORIZE_KIND_LOAD || base == BUSTER_IR_VECTORIZE_KIND_STORE) && (f->flags[i] & BUSTER_IR_ACCESS_FLAGS) != 0;
-        kinds[i] = (uint8_t)(flagged ? BUSTER_IR_VECTORIZE_KIND_FORBID : kind);
-    }
-}
-
-// Whether rows [first, end) hold a refusing kind: 64 at a time, or by the scalar twin.
-static bool ir_vectorize_forbidden(const uint8_t* kinds, uint32_t first, uint32_t end, bool scalar)
+// Whether rows [first, end) hold a refusing kind, 64 at a time.
+static bool ir_vectorize_forbidden(const uint8_t* kinds, uint32_t first, uint32_t end)
 {
     bool forbidden = false;
-#if BUSTER_HOST_VECTOR
-    if (!scalar)
+    for (uint64_t at = first; at < end; at += BUSTER_IR_VECTORIZE_BATCH)
     {
-        for (uint64_t at = first; at < end; at += BUSTER_IR_VECTORIZE_BATCH)
-        {
-            const uint64_t left = end - at;
-            const __mmask64 valid = left >= BUSTER_IR_VECTORIZE_BATCH ? UINT64_MAX : (UINT64_C(1) << left) - 1;
-            const __m512i kind = _mm512_maskz_loadu_epi8(valid, kinds + at);
-            const __mmask64 bad = valid & _mm512_cmpeq_epi8_mask(_mm512_and_si512(kind, _mm512_set1_epi8(7)), _mm512_setzero_si512());
-            forbidden = forbidden || bad != 0;
-        }
+        const uint64_t left = end - at;
+        const __mmask64 valid = left >= BUSTER_IR_VECTORIZE_BATCH ? UINT64_MAX : (UINT64_C(1) << left) - 1;
+        const __m512i kind = _mm512_maskz_loadu_epi8(valid, kinds + at);
+        const __mmask64 bad = valid & _mm512_cmpeq_epi8_mask(_mm512_and_si512(kind, _mm512_set1_epi8(7)), _mm512_setzero_si512());
+        forbidden = forbidden || bad != 0;
     }
-    else
-#endif
-    {
-        for (uint32_t at = first; at < end; at += 1)
-        {
-            forbidden = forbidden || (kinds[at] & 7) == BUSTER_IR_VECTORIZE_KIND_FORBID;
-        }
-    }
-    (void)scalar;
     return forbidden;
 }
 
@@ -600,9 +602,115 @@ static bool ir_vectorize_in_g(const IrVectorizeWork* work, uint32_t loop, uint32
     return result;
 }
 
-// The loop's blocks: the header, then the chain from one of its branch's targets back to it, each block of it reached
-// from the previous one alone and ending in a `br` to the next. Such a loop is a natural loop whose header dominates it,
-// reducible and innermost by its shape: no chain block can head another loop, having one predecessor. The header's
+static void ir_vectorize_set(IrVectorizeWork* work, uint32_t i, uint32_t class, int64_t coefficient, uint32_t size, bool floating)
+{
+    work->classes[i] = (uint8_t)class;
+    work->coefficients[i] = coefficient;
+    work->sizes[i] = (uint8_t)size;
+    work->floating[i] = floating ? 1 : 0;
+    ir_vectorize_touch(work, i);
+}
+
+// A branch's condition past the lowering's truth chains, `icmp ne (zext c), 0`, which truth simplification removes in
+// Tier 1's pipeline but other clients may leave: c.
+static uint32_t ir_vectorize_truth(const IrFunction* f, uint32_t value)
+{
+    uint32_t at = value;
+    uint64_t zero = 1;
+    uint32_t depth = 0;
+    while (depth < BUSTER_IR_VECTORIZE_DEPTH && at < f->instruction_count && f->op[at] == IR_ICMP && f->c[at] == IR_NE && f->a[at] < f->instruction_count && f->op[f->a[at]] == IR_ZEXT &&
+           f->type[f->a[f->a[at]]] == IR_I1 && ir_vectorize_constant(f, f->b[at], &zero) && zero == 0)
+    {
+        at = f->a[f->a[at]];
+        depth += 1;
+    }
+    return at;
+}
+
+// Meet the branch's two edges at one join, directly or through a private block ending in br. Both
+// predecessors of the join are accounted for. In particular an early exit or a second loop cannot be an arm.
+static uint32_t ir_vectorize_join(const IrVectorizeWork* work, uint32_t header, uint32_t head, uint32_t from[2])
+{
+    const IrFunction* f = work->function;
+    const uint32_t branch = f->block_offsets[(uint64_t)head + 1] - 1;
+    uint32_t ends[2] = { f->b[branch], f->c[branch] };
+    bool valid = ends[0] != ends[1];
+    for (uint32_t side = 0; valid && side < 2; side += 1)
+    {
+        const uint32_t arm = ends[side];
+        from[side] = head;
+        valid = arm != 0 && arm != head && arm != header;
+        if (valid && work->predecessor_count[arm] == 1)
+        {
+            const uint32_t end = f->block_offsets[(uint64_t)arm + 1] - 1;
+            valid = work->predecessor_first[arm] == head && f->op[end] == IR_BR;
+            ends[side] = f->a[end];
+            from[side] = arm;
+        }
+    }
+    const uint32_t join = ends[0];
+    valid = valid && join == ends[1] && join != 0 && join != head && join != header && work->predecessor_count[join] == 2;
+    return valid ? join : BUSTER_IR_NONE;
+}
+
+static bool ir_vectorize_record_reduction(IrVectorizeWork* work, IrVectorizeLoop* plan, uint32_t update, IrVectorizeReduction reduction)
+{
+    const uint32_t index = plan->reductions;
+    const bool valid = index < BUSTER_IR_VECTORIZE_REDUCTION_LIMIT && work->classes[update] != IR_VECTORIZE_CLASS_UPDATE;
+    if (valid)
+    {
+        work->reduction[index] = reduction;
+        plan->reductions = index + 1;
+        work->reduction_index[update] = (uint8_t)index;
+        ir_vectorize_set(work, update, IR_VECTORIZE_CLASS_UPDATE, 0, ir_vectorize_size(work->function->type[update]), false);
+    }
+    return valid;
+}
+
+// Match both values selected by the comparison. Ties have the same bits in either arm. A distinct reload
+// must be the head's own plain load with no intervening writer. The arm check below excludes any write there.
+static bool ir_vectorize_minmax(IrVectorizeWork* work, IrVectorizeLoop* plan, uint32_t update, uint32_t condition, uint32_t yes, uint32_t no, uint32_t head, const uint32_t from[2])
+{
+    const IrFunction* f = work->function;
+    const uint32_t cmp = ir_vectorize_truth(f, condition);
+    const bool keep_true = ir_vectorize_in_block(f, plan->header, yes) && f->op[yes] == IR_PHI && ir_vectorize_incoming(f, yes, plan->latch) == update;
+    const uint32_t phi = keep_true ? yes : no;
+    const uint32_t chosen = keep_true ? no : yes;
+    bool valid = ir_vectorize_in_block(f, plan->header, phi) && f->op[phi] == IR_PHI && f->type[phi] == IR_I32 && f->type[update] == IR_I32 &&
+                 chosen < f->instruction_count && cmp < f->instruction_count && f->op[cmp] == IR_ICMP && ir_vectorize_incoming(f, phi, plan->latch) == update;
+    if (valid)
+    {
+        const uint32_t pred = f->c[cmp];
+        const bool left = f->a[cmp] == phi;
+        const uint32_t lane = left ? f->b[cmp] : f->a[cmp];
+        valid = (left != (f->b[cmp] == phi)) && pred >= IR_LT && pred <= IR_UGE;
+        if (valid && chosen != lane)
+        {
+            const uint32_t arm = from != NULL ? from[keep_true ? 1 : 0] : head;
+            valid = arm != head && ir_vectorize_in_block(f, arm, chosen) && ir_vectorize_in_block(f, head, lane) && f->op[lane] == IR_LOAD && f->op[chosen] == IR_LOAD &&
+                    f->flags[lane] == 0 && f->flags[chosen] == 0 && f->type[chosen] == IR_I32 && ir_vectorize_same(f, f->a[lane], f->a[chosen], BUSTER_IR_VECTORIZE_DEPTH);
+            const uint32_t end = valid ? f->block_offsets[(uint64_t)head + 1] - 1 : 0;
+            for (uint32_t i = lane + 1; valid && i < end; i += 1)
+            {
+                const uint32_t kind = work->kinds[i] & 7;
+                valid = kind == BUSTER_IR_VECTORIZE_KIND_PURE || kind == BUSTER_IR_VECTORIZE_KIND_LOAD || kind == BUSTER_IR_VECTORIZE_KIND_FLOAT;
+            }
+        }
+        if (valid)
+        {
+            const bool greater = pred == IR_GT || pred == IR_GE || pred == IR_UGT || pred == IR_UGE;
+            const bool true_selects_left = left == keep_true;
+            const bool maximum = greater == true_selects_left;
+            // lane_op and reduce share 0/1 for unsigned/signed min and 2/3 for unsigned/signed max.
+            const IrVectorizeReduction reduction = { .phi = phi, .lane = lane, .operation = (maximum ? 2u : 0u) + (pred < IR_ULT) };
+            valid = ir_vectorize_record_reduction(work, plan, update, reduction);
+        }
+    }
+    return valid;
+}
+
+// Follow each header edge through single-entry blocks and two-edge joins back to the header. Each internal
+// conditional must close at a private join (ir_vectorize_join), so the header dominates the entire body. The header's
 // reachable predecessors must be the chain's last block (the latch) and one other, the preheader, which ends in a
 // `br` to it. Fills the plan's blocks and returns the chain's first block, or BUSTER_IR_NONE where the blocks aren't
 // the admitted shape. Reads the blocks alone: a function none of whose loops has it needs no row of the pass's.
@@ -626,12 +734,24 @@ static uint32_t ir_vectorize_chain(const IrVectorizeWork* work, uint32_t loop, I
         uint32_t block = target;
         uint32_t steps = 0;
         bool chain = true;
+        bool join = false;
         while (chain && block != header && steps < f->block_count)
         {
             const uint32_t end = f->block_offsets[(uint64_t)block + 1] - 1;
-            chain = block != 0 && work->reached[block] != 0 && work->predecessor_count[block] == 1 && work->predecessor_first[block] == previous && f->op[end] == IR_BR;
+            chain = block != 0 && work->reached[block] != 0 && (join || (work->predecessor_count[block] == 1 && work->predecessor_first[block] == previous));
             previous = block;
-            block = chain ? f->a[end] : block;
+            join = chain && f->op[end] == IR_CBR;
+            if (join)
+            {
+                uint32_t from[2];
+                block = ir_vectorize_join(work, header, block, from);
+                chain = block != BUSTER_IR_NONE;
+            }
+            else
+            {
+                chain = chain && f->op[end] == IR_BR;
+                block = chain ? f->a[end] : block;
+            }
             steps += 1;
         }
         const bool closes = chain && block == header;
@@ -652,7 +772,7 @@ static uint32_t ir_vectorize_chain(const IrVectorizeWork* work, uint32_t loop, I
 }
 
 // The loop's shape (ir_vectorize_chain), then its blocks' and rows' marks and the plan's rows: the header's non-phi
-// rows, then each chain block's, whose phis must be copies. Returns whether the shape is the admitted one.
+// rows, then each unconditional block's. A private arm contributes only its winning value to a matched update.
 static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
@@ -676,6 +796,7 @@ static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorize
         }
     }
     plan->header_rows = count;
+    uint32_t join_phi = BUSTER_IR_NONE;
     for (uint32_t block = first; valid && block != header;)
     {
         const uint32_t end = f->block_offsets[(uint64_t)block + 1] - 1;
@@ -683,15 +804,46 @@ static bool ir_vectorize_shape(IrVectorizeWork* work, uint32_t loop, IrVectorize
         for (uint32_t i = f->block_offsets[block]; i <= end; i += 1)
         {
             work->row_marks[i] = mark;
-            // A chain block's phi has its predecessor's value alone: a copy.
-            valid = valid && (f->op[i] != IR_PHI || f->b[i] == 1);
+            // The matched join's first phi is the update. Every other phi on the chain must be a copy.
+            valid = valid && (f->op[i] != IR_PHI || f->b[i] == 1 || i == join_phi);
             if (i < end)
             {
                 work->rows[count] = i;
                 count += 1;
             }
         }
-        block = f->a[end];
+        if (f->op[end] == IR_CBR)
+        {
+            uint32_t from[2];
+            const uint32_t join = ir_vectorize_join(work, header, block, from);
+            // ir_vectorize_chain already proved both edges meet here.
+            join_phi = f->block_offsets[join];
+            valid = valid && f->op[join_phi] == IR_PHI && f->b[join_phi] == 2;
+            const uint32_t yes = valid ? ir_vectorize_incoming(f, join_phi, from[0]) : BUSTER_IR_NONE;
+            const uint32_t no = valid ? ir_vectorize_incoming(f, join_phi, from[1]) : BUSTER_IR_NONE;
+            valid = valid && ir_vectorize_minmax(work, plan, join_phi, f->a[end], yes, no, block, from);
+            for (uint32_t side = 0; valid && side < 2; side += 1)
+            {
+                const uint32_t arm = from[side];
+                if (arm != block)
+                {
+                    work->block_marks[arm] = mark;
+                    const uint32_t stop = f->block_offsets[(uint64_t)arm + 1] - 1;
+                    for (uint32_t i = f->block_offsets[arm]; valid && i < stop; i += 1)
+                    {
+                        work->row_marks[i] = mark;
+                        // These rows disappear only from the vector path. Its only arm load may be the matched reload.
+                        valid = (work->kinds[i] & BUSTER_IR_VECTORIZE_KIND_SAFE) != 0 ||
+                                (work->kinds[i] == BUSTER_IR_VECTORIZE_KIND_LOAD && i == (side == 0 ? yes : no));
+                    }
+                }
+            }
+            block = join;
+        }
+        else
+        {
+            block = f->a[end];
+        }
     }
     plan->row_count = valid ? count : 0;
     return valid;
@@ -798,22 +950,6 @@ static bool ir_vectorize_graph(IrVectorizeWork* work, Arena* scratch)
     return ok;
 }
 
-// A branch's condition past the lowering's truth chains, `icmp ne (zext c), 0`, which truth simplification removes in
-// Tier 1's pipeline but other clients may leave: c.
-static uint32_t ir_vectorize_truth(const IrFunction* f, uint32_t value)
-{
-    uint32_t at = value;
-    uint64_t zero = 1;
-    uint32_t depth = 0;
-    while (depth < BUSTER_IR_VECTORIZE_DEPTH && at < f->instruction_count && f->op[at] == IR_ICMP && f->c[at] == IR_NE && f->a[at] < f->instruction_count && f->op[f->a[at]] == IR_ZEXT &&
-           f->type[f->a[f->a[at]]] == IR_I1 && ir_vectorize_constant(f, f->b[at], &zero) && zero == 0)
-    {
-        at = f->a[f->a[at]];
-        depth += 1;
-    }
-    return at;
-}
-
 // Whether `value` is a header phi, or a header row adding a constant to one (the exit test's `i + 1 < n`): its phi.
 static uint32_t ir_vectorize_tested(const IrFunction* f, const IrVectorizeLoop* plan, uint32_t value, uint64_t* offset)
 {
@@ -910,8 +1046,10 @@ static void ir_vectorize_needed(IrVectorizeWork* work, uint32_t loop, const IrVe
         }
         if (work->needed[i] != 0)
         {
-            const uint32_t mask = f->op[i] == IR_PHI ? 1u : ir_value_mask3(f, i);
-            const uint32_t operands[3] = { f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], f->b[i], ir_value_third(f, i) };
+            const bool update = work->classes[i] == IR_VECTORIZE_CLASS_UPDATE;
+            const uint32_t mask = update || f->op[i] == IR_PHI ? 1u : ir_value_mask3(f, i);
+            const uint32_t first = update ? work->reduction[work->reduction_index[i]].lane : f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i];
+            const uint32_t operands[3] = { first, f->b[i], ir_value_third(f, i) };
             for (uint32_t k2 = 0; k2 < 3; k2 += 1)
             {
                 const uint32_t v = operands[k2];
@@ -923,15 +1061,6 @@ static void ir_vectorize_needed(IrVectorizeWork* work, uint32_t loop, const IrVe
             }
         }
     }
-}
-
-static void ir_vectorize_set(IrVectorizeWork* work, uint32_t i, uint32_t class, int64_t coefficient, uint32_t size, bool floating)
-{
-    work->classes[i] = (uint8_t)class;
-    work->coefficients[i] = coefficient;
-    work->sizes[i] = (uint8_t)size;
-    work->floating[i] = floating ? 1 : 0;
-    ir_vectorize_touch(work, i);
 }
 
 // Whether a vector row's operand is admitted: a vector of the row's lanes' size, or a uniform scalar (which G or VB
@@ -1136,6 +1265,31 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
             ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_VECTOR, 0, size, false);
         }
     }
+    else if (op == IR_FMA)
+    {
+        const bool admitted = (type == IR_F32 || type == IR_F64) && ir_vectorize_lane_operand(work, loop, a, type) &&
+                              ir_vectorize_lane_operand(work, loop, b, type) && ir_vectorize_lane_operand(work, loop, f->c[i], type);
+        refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
+        if (admitted)
+        {
+            ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_VECTOR, 0, size, true);
+        }
+    }
+    else if (op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI)
+    {
+        // Same width only: i32 with f32, i64 with f64. The float lane is the row's, and the integer operand or result
+        // is that many bits.
+        const bool to_float = op == IR_SITOFP || op == IR_UITOFP;
+        const uint32_t source = f->type[a];
+        const bool pair = to_float ? (type == IR_F32 && source == IR_I32) || (type == IR_F64 && source == IR_I64) :
+                                     (type == IR_I32 && source == IR_F32) || (type == IR_I64 && source == IR_F64);
+        const bool admitted = pair && ir_vectorize_lane_operand(work, loop, a, source);
+        refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
+        if (admitted)
+        {
+            ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_VECTOR, 0, size, to_float);
+        }
+    }
     else if ((op >= IR_ADD && op <= IR_ASHR && op != IR_SDIV && op != IR_UDIV && op != IR_SREM && op != IR_UREM && integer) || ((kind & 7) == BUSTER_IR_VECTORIZE_KIND_FLOAT && (type == IR_F32 || type == IR_F64)))
     {
         const bool admitted = ir_vectorize_lane_operand(work, loop, a, type) && ir_vectorize_lane_operand(work, loop, b, type);
@@ -1152,13 +1306,12 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
     return refusal;
 }
 
-// The header's phis: the induction, and reductions (an i32 or i64 phi whose back edge value is one wrapping addition,
-// multiplication or bitwise operation of it and another value, and which nothing else in the loop reads).
+// The header phis are the induction and independent integer reductions. A min/max diamond's update was
+// recorded at its join; a select or an arithmetic update is recognized here, before tracing the needed operands.
 static uint32_t ir_vectorize_phis(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
     uint32_t refusal = IR_VECTORIZE_REFUSALS;
-    plan->reductions = 0;
     for (uint32_t i = f->block_offsets[plan->header]; refusal == IR_VECTORIZE_REFUSALS && f->op[i] == IR_PHI; i += 1)
     {
         if (i == plan->induction)
@@ -1169,13 +1322,28 @@ static uint32_t ir_vectorize_phis(IrVectorizeWork* work, uint32_t loop, IrVector
         {
             const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
             const uint32_t op = update < f->instruction_count ? f->op[update] : IR_INVALID;
-            const bool admitted = f->b[i] == 2 && (f->type[i] == IR_I32 || f->type[i] == IR_I64) && ir_vectorize_inside(work, loop, update) && f->type[update] == f->type[i] &&
-                                  (op == IR_ADD || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR) && (f->a[update] == i) != (f->b[update] == i);
-            refusal = admitted && plan->reductions < BUSTER_IR_VECTORIZE_REDUCTION_LIMIT ? refusal : IR_VECTORIZE_REFUSE_PHI;
-            if (refusal == IR_VECTORIZE_REFUSALS)
+            bool admitted = f->b[i] == 2 && (f->type[i] == IR_I32 || f->type[i] == IR_I64) && ir_vectorize_inside(work, loop, update) && f->type[update] == f->type[i];
+            if (admitted && work->classes[update] == IR_VECTORIZE_CLASS_UPDATE)
+            {
+                admitted = work->reduction[work->reduction_index[update]].phi == i;
+            }
+            else if (admitted && op == IR_SELECT)
+            {
+                admitted = ir_vectorize_minmax(work, plan, update, f->a[update], f->b[update], f->c[update], BUSTER_IR_NONE, NULL) &&
+                           work->reduction[work->reduction_index[update]].phi == i;
+            }
+            else if (admitted)
+            {
+                static const uint8_t operations[IR_OP_COUNT] = { [IR_ADD] = BUSTER_IR_REDUCE_ADD, [IR_MUL] = BUSTER_IR_REDUCE_MUL, [IR_AND] = BUSTER_IR_REDUCE_AND, [IR_OR] = BUSTER_IR_REDUCE_OR, [IR_XOR] = BUSTER_IR_REDUCE_XOR };
+                const uint32_t operation = operations[op];
+                const uint32_t other = f->a[update] == i ? f->b[update] : f->a[update];
+                const IrVectorizeReduction reduction = { .phi = i, .lane = other, .operation = operation };
+                admitted = operation != 0 && (f->a[update] == i) != (f->b[update] == i) && ir_vectorize_record_reduction(work, plan, update, reduction);
+            }
+            refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_PHI;
+            if (admitted)
             {
                 ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_REDUCTION, 0, ir_vectorize_size(f->type[i]), false);
-                plan->reductions += 1;
             }
         }
     }
@@ -1196,38 +1364,25 @@ static uint32_t ir_vectorize_rows(IrVectorizeWork* work, uint32_t loop, IrVector
             work->classes[i] = IR_VECTORIZE_CLASS_DEAD;
             ir_vectorize_touch(work, i);
         }
+        else if (work->classes[i] == IR_VECTORIZE_CLASS_UPDATE)
+        {
+            const uint32_t lane = work->reduction[work->reduction_index[i]].lane;
+            refusal = ir_vectorize_lane_operand(work, loop, lane, f->type[i]) ? refusal : IR_VECTORIZE_REFUSE_USE;
+        }
         else
         {
-            // A reduction's update: the phi's lanes combined with the other operand's.
             const uint32_t mask = f->op[i] == IR_PHI ? 1u : ir_value_mask3(f, i);
             const uint32_t operands[3] = { f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], f->b[i], ir_value_third(f, i) };
-            uint32_t reductions = 0;
-            uint32_t phi = BUSTER_IR_NONE;
             for (uint32_t k2 = 0; k2 < 3; k2 += 1)
             {
                 const uint32_t v = operands[k2];
-                const bool present = ((mask >> k2) & 1) != 0 && ir_vectorize_inside(work, loop, v);
-                const uint32_t class = present ? work->classes[v] : IR_VECTORIZE_CLASS_NONE;
-                reductions += class == IR_VECTORIZE_CLASS_REDUCTION ? 1 : 0;
-                phi = class == IR_VECTORIZE_CLASS_REDUCTION ? v : phi;
-                refusal = class == IR_VECTORIZE_CLASS_UPDATE ? IR_VECTORIZE_REFUSE_USE : refusal;
-            }
-            const bool update = reductions == 1 && ir_vectorize_incoming(f, phi, plan->latch) == i;
-            if (refusal == IR_VECTORIZE_REFUSALS && update)
-            {
-                const uint32_t other = f->a[i] == phi ? f->b[i] : f->a[i];
-                const bool admitted = ir_vectorize_lane_operand(work, loop, other, f->type[i]);
-                refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
-                if (admitted)
+                if (((mask >> k2) & 1) != 0 && ir_vectorize_inside(work, loop, v) &&
+                    (work->classes[v] == IR_VECTORIZE_CLASS_REDUCTION || work->classes[v] == IR_VECTORIZE_CLASS_UPDATE))
                 {
-                    ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_UPDATE, 0, ir_vectorize_size(f->type[i]), false);
+                    refusal = IR_VECTORIZE_REFUSE_USE;
                 }
             }
-            else if (refusal == IR_VECTORIZE_REFUSALS && reductions != 0)
-            {
-                refusal = IR_VECTORIZE_REFUSE_USE;
-            }
-            else if (refusal == IR_VECTORIZE_REFUSALS)
+            if (refusal == IR_VECTORIZE_REFUSALS)
             {
                 refusal = ir_vectorize_classify(work, loop, plan, i);
             }
@@ -1265,7 +1420,13 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
         const uint32_t size = work->sizes[i];
         const uint32_t bytes = lanes << size;
         const uint32_t lane = ir_vectorize_lane(size, work->floating[i] != 0);
-        if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_UPDATE)
+        if (class == IR_VECTORIZE_CLASS_UPDATE)
+        {
+            const uint32_t operation = work->reduction[work->reduction_index[i]].operation;
+            legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->moves, bytes) && ir_vectorize_has(t->splat[lane], bytes) && ir_vectorize_has(t->reduce[size][operation], bytes);
+            legal = legal && (operation < BUSTER_IR_REDUCE_ADD || ir_vectorize_has(t->binary[op][lane], bytes));
+        }
+        else if (class == IR_VECTORIZE_CLASS_VECTOR)
         {
             legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->moves, bytes);
             if (op == IR_LOAD || op == IR_STORE || op == IR_COPY || op == IR_PHI)
@@ -1292,6 +1453,11 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
             else if (op == IR_INTRINSIC)
             {
                 legal = legal && ir_vectorize_has(t->popcount[size], bytes);
+            }
+            else if (op == IR_FMA || op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI)
+            {
+                const uint32_t float_lane = ir_vectorize_lane(size, true);
+                legal = legal && ir_vectorize_has(t->binary[op][float_lane], bytes);
             }
             else
             {
@@ -1322,18 +1488,6 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
                 const uint32_t v = k2 == 0 ? f->a[i] : f->b[i];
                 legal = work->classes[v] == IR_VECTORIZE_CLASS_VECTOR || ir_vectorize_has(t->splat[lane], bytes);
             }
-        }
-    }
-    for (uint32_t i = f->block_offsets[plan->header]; legal && f->op[i] == IR_PHI; i += 1)
-    {
-        if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
-        {
-            static const uint8_t operations[IR_OP_COUNT] = { [IR_ADD] = BUSTER_IR_REDUCE_ADD, [IR_MUL] = BUSTER_IR_REDUCE_MUL, [IR_AND] = BUSTER_IR_REDUCE_AND, [IR_OR] = BUSTER_IR_REDUCE_OR, [IR_XOR] = BUSTER_IR_REDUCE_XOR };
-            const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
-            const uint32_t size = work->sizes[i];
-            const uint32_t bytes = lanes << size;
-            const uint32_t lane = ir_vectorize_lane(size, false);
-            legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->moves, bytes) && ir_vectorize_has(t->reduce[size][operations[f->op[update]]], bytes) && ir_vectorize_has(t->splat[lane], bytes);
         }
     }
     return legal;
@@ -1369,6 +1523,32 @@ static uint32_t ir_vectorize_width(const IrVectorizeWork* work, const IrVectoriz
         lanes = fits && ir_vectorize_legal(work, plan, candidate) ? candidate : 0;
     }
     return lanes;
+}
+
+// Whether the loop's tail can be one masked vector iteration at `lanes` (#2807): the mask of the lanes from a general
+// register (IrVectorizeTarget.mask), the vector rows' integer arithmetic alone (a floating row would compute the inactive
+// lanes too, raising flags the scalar loop never raises), each vector load and store with its lanes' masked move at its
+// width (IrVectorizeTarget.masked), and each reduction's accumulator kept in the inactive lanes by a select.
+static bool ir_vectorize_masked_legal(const IrVectorizeWork* work, const IrVectorizeLoop* plan, uint32_t lanes)
+{
+    const IrFunction* f = work->function;
+    const IrVectorizeTarget* t = work->target;
+    bool legal = ((t->mask >> __builtin_ctz(lanes)) & 1) != 0;
+    for (uint32_t k = 0; legal && k < plan->row_count; k += 1)
+    {
+        const uint32_t i = work->rows[k];
+        const uint32_t class = work->classes[i];
+        const uint32_t op = f->op[i];
+        const bool vector = class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_UPDATE;
+        legal = !vector || (work->kinds[i] & 7) != BUSTER_IR_VECTORIZE_KIND_FLOAT;
+        legal = legal && (!vector || (op != IR_LOAD && op != IR_STORE) || ir_vectorize_has(t->masked[work->sizes[i]], lanes << work->sizes[i]));
+    }
+    for (uint32_t i = f->block_offsets[plan->header]; legal && f->op[i] == IR_PHI; i += 1)
+    {
+        const uint32_t size = work->sizes[i];
+        legal = work->classes[i] != IR_VECTORIZE_CLASS_REDUCTION || ir_vectorize_has(t->select[ir_vectorize_lane(size, false)], lanes << size);
+    }
+    return legal;
 }
 
 // A pointer's base: past its conversions, the pointer an address row of the loop's chain offsets (by the induction's
@@ -1489,7 +1669,7 @@ static uint32_t ir_vectorize_dependences(IrVectorizeWork* work, uint32_t loop, I
 }
 
 // The plan for one innermost loop: its refusal, or IR_VECTORIZE_REFUSALS and a complete plan.
-static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan, bool scalar)
+static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
     uint32_t refusal = ir_vectorize_shape(work, loop, plan) ? IR_VECTORIZE_REFUSALS : IR_VECTORIZE_REFUSE_SHAPE;
@@ -1498,15 +1678,18 @@ static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVector
     {
         const uint32_t first = f->block_offsets[block];
         const uint32_t end = f->block_offsets[(uint64_t)block + 1];
-        refusal = ir_vectorize_forbidden(work->kinds, first, end, scalar) ? IR_VECTORIZE_REFUSE_OPERATION : refusal;
+        refusal = ir_vectorize_forbidden(work->kinds, first, end) ? IR_VECTORIZE_REFUSE_OPERATION : refusal;
         const uint32_t next = f->op[end - 1] == IR_BR ? f->a[end - 1] : ir_vectorize_block_inside(work, loop, f->b[end - 1]) ? f->b[end - 1] : f->c[end - 1];
         block = next == plan->header ? BUSTER_IR_NONE : next;
     }
     refusal = refusal == IR_VECTORIZE_REFUSALS && !ir_vectorize_induction(work, loop, plan) ? IR_VECTORIZE_REFUSE_INDUCTION : refusal;
     if (refusal == IR_VECTORIZE_REFUSALS)
     {
-        ir_vectorize_needed(work, loop, plan);
         refusal = ir_vectorize_phis(work, loop, plan);
+    }
+    if (refusal == IR_VECTORIZE_REFUSALS)
+    {
+        ir_vectorize_needed(work, loop, plan);
     }
     refusal = refusal == IR_VECTORIZE_REFUSALS ? ir_vectorize_rows(work, loop, plan) : refusal;
     refusal = refusal == IR_VECTORIZE_REFUSALS ? ir_vectorize_dependences(work, loop, plan) : refusal;
@@ -1526,6 +1709,7 @@ static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVector
         }
         const uint32_t bytes = plan->lanes << largest;
         plan->width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
+        plan->masked = ir_vectorize_masked_legal(work, plan, plan->lanes);
     }
     return refusal;
 }
@@ -1704,7 +1888,15 @@ static void ir_vectorize_g_splats(IrVectorizeWork* work, IrVectorizeBuild* build
         const uint32_t i = work->rows[k];
         const uint32_t class = work->classes[i];
         const uint32_t op = f->op[i];
-        if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_MASK || class == IR_VECTORIZE_CLASS_UPDATE)
+        if (class == IR_VECTORIZE_CLASS_UPDATE)
+        {
+            const uint32_t lane = work->reduction[work->reduction_index[i]].lane;
+            if (ir_vectorize_class(work, loop, lane) == IR_VECTORIZE_CLASS_UNIFORM && ir_vectorize_in_g(work, loop, lane))
+            {
+                ir_vectorize_splat(work, build, loop, lane, lanes);
+            }
+        }
+        else if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_MASK)
         {
             const uint32_t mask = ir_value_mask(f, i);
             const uint32_t operands[3] = { f->a[i], f->b[i], f->c[i] };
@@ -1742,7 +1934,13 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
     const uint32_t lane = ir_vectorize_lane(size, work->floating[i] != 0);
     const uint32_t origin = ir_vectorize_origin(f, i);
     uint32_t value = BUSTER_IR_NONE;
-    if (op == IR_PHI || op == IR_COPY)
+    if (work->classes[i] == IR_VECTORIZE_CLASS_UPDATE && work->reduction[work->reduction_index[i]].operation < BUSTER_IR_REDUCE_ADD)
+    {
+        const IrVectorizeReduction reduction = work->reduction[work->reduction_index[i]];
+        const uint32_t other = ir_vectorize_lanes_of(work, build, loop, reduction.lane, lanes);
+        value = ir_vectorize_row(build, IR_INTRINSIC, vtype, size | reduction.operation << 2, 0, work->values[reduction.phi], other, BUSTER_IR_INTRINSIC_LANE_OP, origin);
+    }
+    else if (op == IR_PHI || op == IR_COPY)
     {
         value = work->values[op == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i]];
     }
@@ -1784,6 +1982,19 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
         const uint32_t flags = size | BUSTER_IR_LANE_UNARY_POPCOUNT << 2;
         value = ir_vectorize_row(build, IR_INTRINSIC, vtype, flags, 0, work->values[f->a[i]], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_UNARY, origin);
     }
+    else if (op == IR_FMA)
+    {
+        const uint32_t x = ir_vectorize_lanes_of(work, build, loop, f->a[i], lanes);
+        const uint32_t y = ir_vectorize_lanes_of(work, build, loop, f->b[i], lanes);
+        const uint32_t z = ir_vectorize_lanes_of(work, build, loop, f->c[i], lanes);
+        value = ir_vectorize_row(build, IR_FMA, vtype, lane, 0, x, y, z, origin);
+    }
+    else if (op == IR_SITOFP || op == IR_UITOFP || op == IR_FPTOSI || op == IR_FPTOUI)
+    {
+        const uint32_t float_lane = ir_vectorize_lane(size, true);
+        const uint32_t x = ir_vectorize_lanes_of(work, build, loop, f->a[i], lanes);
+        value = ir_vectorize_row(build, op, vtype, float_lane, 0, x, BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
+    }
     else
     {
         // An element-wise operation, or a reduction's update of its accumulator. The bitwise operations read no lanes.
@@ -1797,16 +2008,83 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
     work->values[i] = value;
 }
 
-// One accepted loop's G, VB and VX, and its preheader's branch and header's phis rewritten.
+// The masked tail's rows of the loop (#2807): each needed row as VB has it, at the tail's induction and accumulators
+// (IrVectorizeWork.values), but a vector load and store masked by `mask` (a load's inactive lanes zero), and a
+// reduction's update selected by it, so that its inactive lanes keep the accumulator.
+static void ir_vectorize_tail_rows(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, const IrVectorizeLoop* plan, uint32_t mask)
+{
+    const IrFunction* f = work->function;
+    const uint32_t lanes = plan->lanes;
+    // The uniforms VB clones, and their splats, are VB's: the tail makes its own.
+    for (uint32_t k = 0; k < plan->row_count; k += 1)
+    {
+        const uint32_t i = work->rows[k];
+        work->splats[i] = work->classes[i] == IR_VECTORIZE_CLASS_UNIFORM && work->placed_g[i] == 0 ? BUSTER_IR_NONE : work->splats[i];
+    }
+    uint32_t zeros[4] = { BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE };
+    for (uint32_t k = 0; k < plan->row_count; k += 1)
+    {
+        const uint32_t i = work->rows[k];
+        const uint32_t class = work->classes[i];
+        const uint32_t op = f->op[i];
+        const bool copy = op == IR_COPY || op == IR_PHI;
+        const bool vector = class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_MASK || class == IR_VECTORIZE_CLASS_UPDATE;
+        const uint32_t size = work->sizes[i];
+        const uint32_t vtype = ir_vectorize_vector_type(lanes << size);
+        const uint32_t lane = ir_vectorize_lane(size, false);
+        if ((class == IR_VECTORIZE_CLASS_UNIFORM && work->placed_g[i] == 0) || class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER)
+        {
+            work->values[i] = copy ? ir_vectorize_operand(work, loop, op == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], false) : ir_vectorize_clone(work, build, loop, i, false);
+        }
+        else if (vector && op == IR_LOAD)
+        {
+            if (zeros[size & 3] == BUSTER_IR_NONE)
+            {
+                static const uint8_t integers[4] = { IR_I8, IR_I16, IR_I32, IR_I64 };
+                const uint32_t zero = ir_vectorize_const(build, integers[size & 3], 0);
+                zeros[size & 3] = ir_vectorize_row(build, IR_INTRINSIC, vtype, 0, 0, zero, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
+            }
+            const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[i], false);
+            work->values[i] = ir_vectorize_row(build, IR_MASKED_LOAD, vtype, lane, f->alignment_log2[i], pointer, mask, zeros[size & 3], ir_vectorize_origin(f, i));
+        }
+        else if (vector && op == IR_STORE)
+        {
+            const uint32_t stored = ir_vectorize_lanes_of(work, build, loop, f->b[i], lanes);
+            const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[i], false);
+            work->values[i] = ir_vectorize_row(build, IR_MASKED_STORE, IR_VOID, lane, f->alignment_log2[i], pointer, stored, mask, ir_vectorize_origin(f, i));
+        }
+        else if (vector)
+        {
+            ir_vectorize_vector_row(work, build, loop, plan, i);
+            if (class == IR_VECTORIZE_CLASS_UPDATE)
+            {
+                // The update's own phi: a min/max's update is a select or a join, whose operands aren't it.
+                const uint32_t accumulator = work->reduction[work->reduction_index[i]].phi;
+                work->values[i] = ir_vectorize_row(build, IR_VSELECT, vtype, lane, 0, mask, work->values[i], work->values[accumulator], BUSTER_IR_NONE);
+            }
+        }
+    }
+}
+
+// One accepted loop's G, VB and VX, and its preheader's branch and header's phis rewritten. A masked tail's (#2807)
+// are G, P, VB, T, TM and TX: G enters P where the trip count is nonzero (its overlap tests cover every element); P
+// enters VB where a whole vector is, else T; VB exits to T, which enters TM where the trip count has a remainder of the
+// lanes, else TX; TM runs the remaining lanes' iteration under a mask of them; and TX reduces as VX does and enters the
+// original header at the trip's end, whose exit test fails at once.
 static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, const IrVectorizeLoop* plan)
 {
     const IrFunction* f = work->function;
     IrFunction* v = build->view;
     const uint32_t lanes = plan->lanes;
     const uint32_t itype = f->type[plan->induction];
+    const bool masked = plan->masked;
     const uint32_t g = ir_vectorize_block(build);
-    const uint32_t body = g + 1;
-    const uint32_t exit = g + 2;
+    const uint32_t pick = g + 1;
+    const uint32_t body = masked ? g + 2 : g + 1;
+    const uint32_t exit = masked ? g + 3 : g + 2;
+    // TM and TX, the masked iteration and the join the header is entered from (VX itself without a masked tail).
+    const uint32_t tail = g + 4;
+    const uint32_t join = masked ? g + 5 : exit;
     // G: the speculatable uniforms, in order.
     for (uint32_t k = 0; k < plan->row_count; k += 1)
     {
@@ -1849,17 +2127,26 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
     const uint32_t narrow = itype == IR_I64 ? vector_n : ir_vectorize_row(build, IR_TRUNC, itype, 0, 0, vector_n, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
     const uint32_t end = ir_vectorize_row(build, IR_ADD, itype, 0, 0, start, narrow, BUSTER_IR_NONE, BUSTER_IR_NONE);
     const uint32_t step = ir_vectorize_const(build, itype, lanes);
-    uint32_t enter = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, vector_n, zero64, IR_NE, BUSTER_IR_NONE);
+    // A masked tail covers every element: its loop runs where the trip count is nonzero, and ends at the trip's end.
+    const uint32_t covered = masked ? trip : vector_n;
+    uint32_t stop = end;
+    if (masked)
+    {
+        const uint32_t narrow_trip = itype == IR_I64 ? trip : ir_vectorize_row(build, IR_TRUNC, itype, 0, 0, trip, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        stop = ir_vectorize_row(build, IR_ADD, itype, 0, 0, start, narrow_trip, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    uint32_t enter = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, covered, zero64, IR_NE, BUSTER_IR_NONE);
     if (unwrapped != BUSTER_IR_NONE)
     {
         enter = ir_vectorize_row(build, IR_SELECT, IR_I1, 0, 0, enter, unwrapped, enter, BUSTER_IR_NONE);
     }
-    // The overlap tests: lane 0's pointers at the start, and each pair's ranges of vector_n elements apart modulo 2^64.
+    // The overlap tests: lane 0's pointers at the start, and each pair's ranges of vector_n elements (a masked tail's
+    // trip count's) apart modulo 2^64.
     const uint32_t guards = work->mutation == BUSTER_IR_VECTORIZE_MUTATE_GUARDS ? 0 : plan->guards;
     if (guards != 0)
     {
         const uint32_t limit = ir_vectorize_const(build, IR_I64, BUSTER_IR_VECTORIZE_RANGE_LIMIT);
-        const uint32_t small = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, vector_n, limit, IR_ULT, BUSTER_IR_NONE);
+        const uint32_t small = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, covered, limit, IR_ULT, BUSTER_IR_NONE);
         enter = ir_vectorize_row(build, IR_SELECT, IR_I1, 0, 0, enter, small, enter, BUSTER_IR_NONE);
     }
     for (uint32_t pair = 0; pair < guards; pair += 1)
@@ -1873,7 +2160,7 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
             const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[access], true);
             base[side] = f->type[f->a[access]] == IR_I64 ? pointer : ir_vectorize_row(build, IR_PTRTOINT, IR_I64, 0, 0, pointer, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
             const uint32_t shift = ir_vectorize_const(build, IR_I64, work->sizes[access]);
-            length[side] = ir_vectorize_row(build, IR_SHL, IR_I64, 0, 0, vector_n, shift, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            length[side] = ir_vectorize_row(build, IR_SHL, IR_I64, 0, 0, covered, shift, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
         const uint32_t forward = ir_vectorize_row(build, IR_SUB, IR_I64, 0, 0, base[1], base[0], BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t backward = ir_vectorize_row(build, IR_SUB, IR_I64, 0, 0, base[0], base[1], BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -1883,21 +2170,35 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         enter = ir_vectorize_row(build, IR_SELECT, IR_I1, 0, 0, enter, apart, enter, BUSTER_IR_NONE);
     }
     ir_vectorize_g_splats(work, build, loop, plan);
-    // The accumulators' identities: 0, 1 for a product, all ones for an and.
-    uint32_t identities[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
+    // Arithmetic identities and the min/max accumulators' incoming values.
+    uint32_t seeds[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
     uint32_t count = 0;
     for (uint32_t i = f->block_offsets[plan->header]; f->op[i] == IR_PHI; i += 1)
     {
         if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
         {
-            const uint32_t op = f->op[ir_vectorize_incoming(f, i, plan->latch)];
-            const uint64_t bits = (op == IR_MUL ? 1 : op == IR_AND ? UINT64_MAX : 0) + (work->mutation == BUSTER_IR_VECTORIZE_MUTATE_IDENTITY ? 1 : 0);
-            const uint32_t identity = ir_vectorize_const(build, f->type[i], bits);
-            identities[count] = ir_vectorize_row(build, IR_INTRINSIC, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, identity, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
+            const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
+            const uint32_t operation = work->reduction[work->reduction_index[update]].operation;
+            // Min/max is idempotent: seeding every lane includes the incoming accumulator in the horizontal result.
+            uint32_t seed = ir_vectorize_incoming(f, i, plan->preheader);
+            if (operation >= BUSTER_IR_REDUCE_ADD)
+            {
+                const uint64_t bits = (operation == BUSTER_IR_REDUCE_MUL ? 1 : operation == BUSTER_IR_REDUCE_AND ? UINT64_MAX : 0) + (work->mutation == BUSTER_IR_VECTORIZE_MUTATE_IDENTITY ? 1 : 0);
+                seed = ir_vectorize_const(build, f->type[i], bits);
+            }
+            seeds[count] = ir_vectorize_row(build, IR_INTRINSIC, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, seed, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
             count += 1;
         }
     }
-    ir_vectorize_row(build, IR_CBR, IR_VOID, 0, 0, enter, body, plan->header, BUSTER_IR_NONE);
+    ir_vectorize_row(build, IR_CBR, IR_VOID, 0, 0, enter, masked ? pick : body, plan->header, BUSTER_IR_NONE);
+    // P: the vector loop where a whole vector is, else the masked tail alone.
+    if (masked)
+    {
+        ir_vectorize_block(build);
+        const uint32_t whole = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, vector_n, zero64, IR_NE, BUSTER_IR_NONE);
+        ir_vectorize_row(build, IR_CBR, IR_VOID, 0, 0, whole, body, exit, BUSTER_IR_NONE);
+    }
+    const uint32_t before = masked ? pick : g;
     // VB: lane 0's induction and the accumulators, then the loop's rows in order.
     ir_vectorize_block(build);
     const uint32_t induction = ir_vectorize_row(build, IR_PHI, itype, 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -1935,27 +2236,87 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
     const uint32_t next = ir_vectorize_row(build, IR_ADD, itype, 0, 0, induction, step, BUSTER_IR_NONE, BUSTER_IR_NONE);
     const uint32_t more = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, next, end, plan->predicate, BUSTER_IR_NONE);
     ir_vectorize_row(build, IR_CBR, IR_VOID, 0, 0, more, body, exit, BUSTER_IR_NONE);
-    // VX: each accumulator reduced, combined with its initial value.
+    // The accumulators' values at VB's back edge, before a masked tail clones the rows again.
+    uint32_t updates[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
+    count = 0;
+    for (uint32_t i = f->block_offsets[plan->header]; f->op[i] == IR_PHI; i += 1)
+    {
+        if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
+        {
+            updates[count] = work->values[ir_vectorize_incoming(f, i, plan->latch)];
+            count += 1;
+        }
+    }
+    // VX: each accumulator reduced; an arithmetic one combined with its initial value (a min/max's lanes started from it).
+    // With a masked tail, T first: the accumulators P or VB leave, and whether the trip count has a remainder; then TM,
+    // the masked iteration at VB's end (G's `end`); then TX, which joins the accumulators and reduces as VX does.
     ir_vectorize_block(build);
+    uint32_t tails[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
+    uint32_t masked_updates[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
+    uint32_t joins[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
+    if (masked)
+    {
+        count = 0;
+        for (uint32_t i = f->block_offsets[plan->header]; f->op[i] == IR_PHI; i += 1)
+        {
+            if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
+            {
+                tails[count] = ir_vectorize_row(build, IR_PHI, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                work->values[i] = tails[count];
+                count += 1;
+            }
+        }
+        const uint32_t below = ir_vectorize_const(build, IR_I64, lanes - 1);
+        const uint32_t remaining = ir_vectorize_row(build, IR_AND, IR_I64, 0, 0, trip, below, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t partial = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, remaining, zero64, IR_NE, BUSTER_IR_NONE);
+        ir_vectorize_row(build, IR_CBR, IR_VOID, 0, 0, partial, tail, join, BUSTER_IR_NONE);
+        // TM: the mask of the remainder, (1 << remainder) - 1 at the mask's type, and the loop's rows under it.
+        ir_vectorize_block(build);
+        work->values[plan->induction] = end;
+        const uint32_t mtype = ir_vectorize_mask_type(lanes);
+        const uint32_t bits_type = mtype == IR_M8 ? IR_I8 : mtype == IR_M16 ? IR_I16 : mtype == IR_M32 ? IR_I32 : IR_I64;
+        const uint32_t one = ir_vectorize_const(build, IR_I64, 1);
+        const uint32_t bit = work->mutation == BUSTER_IR_VECTORIZE_MUTATE_MASK ? ir_vectorize_const(build, IR_I64, 2) : one;
+        const uint32_t shifted = ir_vectorize_row(build, IR_SHL, IR_I64, 0, 0, bit, remaining, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t low = ir_vectorize_row(build, IR_SUB, IR_I64, 0, 0, shifted, one, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t narrow_low = bits_type == IR_I64 ? low : ir_vectorize_row(build, IR_TRUNC, bits_type, 0, 0, low, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t mask = ir_vectorize_row(build, IR_BITCAST, mtype, 0, 0, narrow_low, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_vectorize_tail_rows(work, build, loop, plan, mask);
+        ir_vectorize_row(build, IR_BR, IR_VOID, 0, 0, join, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        // TX: each accumulator T's or TM's, which the reduction below reads.
+        ir_vectorize_block(build);
+        count = 0;
+        for (uint32_t i = f->block_offsets[plan->header]; f->op[i] == IR_PHI; i += 1)
+        {
+            if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
+            {
+                const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
+                masked_updates[count] = work->values[update];
+                joins[count] = ir_vectorize_row(build, IR_PHI, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                work->values[update] = joins[count];
+                count += 1;
+            }
+        }
+    }
     uint32_t finals[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
     count = 0;
     for (uint32_t i = f->block_offsets[plan->header]; f->op[i] == IR_PHI; i += 1)
     {
         if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
         {
-            static const uint8_t operations[IR_OP_COUNT] = { [IR_ADD] = BUSTER_IR_REDUCE_ADD, [IR_MUL] = BUSTER_IR_REDUCE_MUL, [IR_AND] = BUSTER_IR_REDUCE_AND, [IR_OR] = BUSTER_IR_REDUCE_OR, [IR_XOR] = BUSTER_IR_REDUCE_XOR };
             const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
+            const uint32_t operation = work->reduction[work->reduction_index[update]].operation;
             const uint32_t size = work->sizes[i];
-            const uint32_t reduced = ir_vectorize_row(build, IR_INTRINSIC, IR_V4I32, size | (uint32_t)operations[f->op[update]] << 2, 0, work->values[update], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_REDUCE, BUSTER_IR_NONE);
+            const uint32_t reduced = ir_vectorize_row(build, IR_INTRINSIC, IR_V4I32, size | operation << 2, 0, work->values[update], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_REDUCE, BUSTER_IR_NONE);
             const uint32_t lane = ir_vectorize_row(build, IR_INTRINSIC, f->type[i], size, 0, reduced, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, BUSTER_IR_NONE);
             const uint32_t initial = ir_vectorize_incoming(f, i, plan->preheader);
-            finals[count] = ir_vectorize_row(build, f->op[update], f->type[i], 0, 0, initial, lane, BUSTER_IR_NONE, ir_vectorize_origin(f, update));
+            finals[count] = operation < BUSTER_IR_REDUCE_ADD ? lane : ir_vectorize_row(build, f->op[update], f->type[i], 0, 0, initial, lane, BUSTER_IR_NONE, ir_vectorize_origin(f, update));
             count += 1;
         }
     }
     ir_vectorize_row(build, IR_BR, IR_VOID, 0, 0, plan->header, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
     // The phis' incoming pairs, the preheader's branch to G and the header's phis.
-    const uint32_t induction_pairs[4] = { g, start, body, next };
+    const uint32_t induction_pairs[4] = { before, start, body, next };
     const uint32_t induction_extra = ir_vectorize_pairs(build, induction_pairs, 2);
     if (!build->counting)
     {
@@ -1970,15 +2331,23 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         const uint32_t back = ir_vectorize_incoming(f, i, plan->latch);
         if (reduction)
         {
-            const uint32_t pairs[4] = { g, identities[count], body, work->values[back] };
+            const uint32_t pairs[4] = { before, seeds[count], body, updates[count] };
             const uint32_t offset = ir_vectorize_pairs(build, pairs, 2);
+            const uint32_t tail_offset = masked ? ir_vectorize_pairs(build, pairs, 2) : 0;
+            const uint32_t join_pairs[4] = { exit, tails[count], tail, masked_updates[count] };
+            const uint32_t join_offset = masked ? ir_vectorize_pairs(build, join_pairs, 2) : 0;
             if (!build->counting)
             {
                 v->a[phis[count]] = offset;
             }
+            if (!build->counting && masked)
+            {
+                v->a[tails[count]] = tail_offset;
+                v->a[joins[count]] = join_offset;
+            }
         }
-        const uint32_t final = reduction ? finals[count] : end;
-        const uint32_t pairs[6] = { g, initial, plan->latch, back, exit, final };
+        const uint32_t final = reduction ? finals[count] : stop;
+        const uint32_t pairs[6] = { g, initial, plan->latch, back, join, final };
         const uint32_t offset = ir_vectorize_pairs(build, pairs, 3);
         if (!build->counting)
         {
@@ -1991,13 +2360,13 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
 
 // Plans every loop header the walk found and emits the accepted loops: once counting, once writing. Both replays
 // decide alike.
-static void ir_vectorize_replay(IrVectorizeWork* work, IrVectorizeBuild* build, bool scalar)
+static void ir_vectorize_replay(IrVectorizeWork* work, IrVectorizeBuild* build)
 {
     for (uint32_t loop = 0; loop < work->header_count; loop += 1)
     {
         {
             IrVectorizeLoop plan = { 0 };
-            const uint32_t refusal = ir_vectorize_plan(work, loop, &plan, scalar);
+            const uint32_t refusal = ir_vectorize_plan(work, loop, &plan);
             if (build->counting)
             {
                 work->statistics.loops += 1;
@@ -2007,6 +2376,7 @@ static void ir_vectorize_replay(IrVectorizeWork* work, IrVectorizeBuild* build, 
                     work->statistics.widths[plan.width] += 1;
                     work->statistics.reductions += plan.reductions;
                     work->statistics.guards += plan.guards;
+                    work->statistics.masked += plan.masked ? 1u : 0u;
                 }
                 else
                 {
@@ -2046,7 +2416,7 @@ static bool ir_vectorize_candidate(const IrFunction* f)
 static __attribute__((unused)) void ir_vectorize_target_ir(IrVectorizeTarget* target)
 {
     *target = (IrVectorizeTarget){ .moves = 7 };
-    static const uint8_t binaries[] = { IR_ADD, IR_SUB, IR_MUL, IR_AND, IR_OR, IR_XOR, IR_SHL, IR_LSHR, IR_ASHR, IR_FADD, IR_FSUB, IR_FMUL, IR_FDIV };
+    static const uint8_t binaries[] = { IR_ADD, IR_SUB, IR_MUL, IR_AND, IR_OR, IR_XOR, IR_SHL, IR_LSHR, IR_ASHR, IR_FADD, IR_FSUB, IR_FMUL, IR_FDIV, IR_FMA };
     for (uint32_t lane = 0; lane < IR_SIMD_LANE_COUNT; lane += 1)
     {
         for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(binaries); k += 1)
@@ -2069,11 +2439,23 @@ static __attribute__((unused)) void ir_vectorize_target_ir(IrVectorizeTarget* ta
             target->truncate[from][to] = from > to ? 7 : 0;
         }
         target->popcount[from] = 7;
+        target->masked[from] = 7;
     }
-    for (uint32_t operation = BUSTER_IR_REDUCE_ADD; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
+    // Same-width integer/float conversions (#2806), keyed by the float lane.
+    target->binary[IR_SITOFP][IR_SIMD_LANE_F32] = 7;
+    target->binary[IR_SITOFP][IR_SIMD_LANE_F64] = 7;
+    target->binary[IR_UITOFP][IR_SIMD_LANE_F32] = 7;
+    target->binary[IR_UITOFP][IR_SIMD_LANE_F64] = 7;
+    target->binary[IR_FPTOSI][IR_SIMD_LANE_F32] = 7;
+    target->binary[IR_FPTOSI][IR_SIMD_LANE_F64] = 7;
+    target->binary[IR_FPTOUI][IR_SIMD_LANE_F32] = 7;
+    target->binary[IR_FPTOUI][IR_SIMD_LANE_F64] = 7;
+    // A mask of 2 to 64 lanes.
+    target->mask = 0x7e;
+    for (uint32_t operation = 0; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
     {
         target->reduce[2][operation] = 7;
-        target->reduce[3][operation] = 7;
+        target->reduce[3][operation] = operation >= BUSTER_IR_REDUCE_ADD ? 7 : 0;
     }
 }
 
@@ -2081,7 +2463,6 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
 {
     const uint64_t om = output->length;
     const uint64_t sm = scratch->length;
-    const bool path = BUSTER_SCALAR_PATH(options->scalar);
     IrVectorizeWork work = { .function = function, .target = options->target, .mutation = options->mutation };
     IrCheck check = ir_check(output != scratch ? IR_OK : IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     const bool candidate = check.error == IR_OK && function->label_count == 0 && function->block_count != 0 && ir_vectorize_candidate(function);
@@ -2105,6 +2486,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         bool ok = true;
         work.kinds = ir_allocate(scratch, n, 1, &ok);
         work.classes = ir_allocate(scratch, n, 1, &ok);
+        work.reduction_index = ir_allocate(scratch, n, 1, &ok);
         work.needed = ir_allocate(scratch, n, 1, &ok);
         work.sizes = ir_allocate(scratch, n, 1, &ok);
         work.floating = ir_allocate(scratch, n, 1, &ok);
@@ -2132,16 +2514,9 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         memset(work.splats, 0xff, n * 4);
         memset(work.ones, 0xff, n * 4);
         memset(work.zeros, 0xff, n * 4);
-        if (path)
-        {
-            ir_vectorize_kinds_scalar(function, work.kinds);
-        }
-        else
-        {
-            ir_vectorize_kinds_vector(function, work.kinds);
-        }
+        ir_vectorize_kinds(function, work.kinds);
         IrVectorizeBuild counting = { .counting = true, .rows = function->instruction_count, .blocks = function->block_count, .extras = function->extra_count, .constants = function->constant_count };
-        ir_vectorize_replay(&work, &counting, path);
+        ir_vectorize_replay(&work, &counting);
         if (work.statistics.vectorized != 0)
         {
             const uint64_t rows = counting.rows;
@@ -2185,7 +2560,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
                 ir_debug_remap(function, &view, NULL, NULL, NULL);
                 IrVectorizeBuild build = { .counting = false, .view = &view, .rows = function->instruction_count, .blocks = function->block_count, .extras = function->extra_count, .constants = function->constant_count };
                 const IrVectorizeResult counted = work.statistics;
-                ir_vectorize_replay(&work, &build, path);
+                ir_vectorize_replay(&work, &build);
                 work.statistics = counted;
                 view.block_offsets[view.block_count] = view.instruction_count;
                 check.error = build.rows == counting.rows && build.blocks == counting.blocks && build.extras == counting.extras && build.constants == counting.constants ? IR_OK : IR_ERROR_STRUCTURE;
@@ -2202,7 +2577,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
     // dominator tree covers until the optimizer that follows removes them (it verifies dominance then).
     if (check.error == IR_OK && work.statistics.changed)
     {
-        check = path ? ir_verify_scalar(&work.statistics.function, scratch, NULL) : ir_verify(&work.statistics.function, scratch, NULL);
+        check = ir_verify(&work.statistics.function, scratch, NULL);
     }
     if (check.error == IR_OK)
     {

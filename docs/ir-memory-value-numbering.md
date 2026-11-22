@@ -78,6 +78,13 @@ overlapped). The source's value is the load's, or the value the store stored. A
 store of an `undef` is no source: a load reads one value of it, and each use of
 an `undef` may be another.
 
+A plain `i8` or `i16` load can also take the operand of a `zext` when the
+preceding memory event in its block stored that extension. On x86-64 the low
+bytes start at the store's address. The family and offset must match, and the
+extension's operand must have the load's exact type and must not resolve to `undef`.
+The wider store still writes all its bytes. The walk records the narrow value
+under the load's ordinary key so later reads can reuse it by the usual rules.
+
 ## The walk
 
 `ir_memory_walk` visits the dominator tree in preorder, each block's
@@ -103,20 +110,22 @@ header takes nothing across a latch that writes, and a loop's exit takes the
 header's value. SCCP's unreachable blocks are walked (their writes count) but
 forward nothing.
 
-## Twins
+## The vector phases
 
-The data-parallel phases before the walk have a vector version and an exact
-scalar twin. The caller's explicit request chooses between them, not the
-optimizer's AUTO size bound (`IrOptimizeWork.scalar`): this pass's vector
-phases have no set-up that a small function doesn't repay, as the verifier's
-don't (#786).
+The data-parallel phases before the walk are vector code, whatever the
+optimizer's AUTO size bound (`IrOptimizeWork.scalar`): they have no set-up that
+a small function doesn't repay, as the verifier's don't (#786). Their exact
+scalar twins went in #2924 (C9f): under `--tier1-passes=+all`, the optimizer's
+ticks with the vector phases were 0.95 to 0.96 of those with the twins, in every
+size bin. The scalar versions stay only for a function whose value spaces the
+gathers can't index (below).
 
 - **Classification:** each instruction's kind by a 128-byte table's
   `vpermi2b` lookup, refined by its flags and type, and the operand its address
   is read through, by gathers of its operands' info words (`info`, a dword per
   instruction: kind, type, SCCP's constant and reachability).
 - **Derivation:** the slot each value's chain starts at, by pointer jumping
-  along those operands until no jump moves (the scalar twin: reverse
+  along those operands until no jump moves (the scalar fallback: reverse
   postorder).
 - **Escapes:** the values derived from a slot, found 16 at a time by a mask,
   and their uses (the use lists the optimizer built).
@@ -128,18 +137,18 @@ don't (#786).
   (an open-addressed table numbering them in access order, comparing whole
   keys) is shared.
 
-Shared by both: the addresses' chains, the grouping, the overlaps (a counting
-sort of the keys by family, then each family's few keys by offset), the blocks'
-writes and clear entries, and the walk. The walk is the ordered part: each
-block's state is its dominator's, and a key's chain of entries follows the
-tree. Both versions give the same forwarded loads (`test-ir-optimize`,
-`test-ir-source --passes`). Value spaces past 2^30 take the scalar twin, since
-the gathers' indices are signed dwords.
+One code for both: the addresses' chains, the grouping, the overlaps (a
+counting sort of the keys by family, then each family's few keys by offset),
+the blocks' writes and clear entries, and the walk. The walk is the ordered
+part: each block's state is its dominator's, and a key's chain of entries
+follows the tree. Value spaces past 2^30 (instructions or address rows) take
+the scalar phases, since the gathers' indices are signed dwords: a fallback no
+test can reach, which #2924's phase D removes.
 
 ### SIMD: what pays
 
-The 9700X's phases of the pass, read by the TSC (a patch over `5a4e56b`, in
-the record below), over `sqlite3.c`'s 2,602 functions in `test-ir-source
+The 9700X's phases of the pass while it had its twins, read by the TSC (a
+patch over `5a4e56b`, in the record below), over `sqlite3.c`'s 2,602 functions in `test-ir-source
 --passes`'s `memory` and `tier1-memory` rows, 5,204 calls of each version, in
 millions of ticks:
 
@@ -179,21 +188,27 @@ The whole pass by each version, each over the corpus in runs of its own
   block's forwarding (a load's value, a store's, a family's other offset, a
   call and another family's store between); the clobbers (an overlapping store,
   another type at one offset, volatile and atomic loads, a fence, an `undef`'s
-  store, a slot's marker); private slots (a call between, an escape to a call
+  store, a slot's marker); byte and word loads after a zero-extended store,
+  including wrong offsets, widths, observable accesses and a block boundary;
+  private slots (a call between, an escape to a call
   and through a stored address, markers, an indexed store of the same slot);
   blocks (a diamond's clean and written arms, a loop's header, latch and exit);
   addresses (an index's family, a constant index, a constant out of
   `int32_t`'s range, a second index, an `inttoptr` of an `i32`); and a volatile
   slot's loads, kept beside a private slot's forwarded one. Both parsers, both
-  twins, the canonical bytes and the shared executor on eighteen inputs.
+  of the optimizer's paths, the canonical bytes and the shared executor on
+  eighteen inputs.
 - **Generated programs** (`ir_optimize_memory_test.c`): 400 programs of
   straight blocks, diamonds and bounded loops whose loads and stores of `i32`s
   and `i64`s reach a private slot and two escaped ones at constant and indexed
   places, some through addresses that wrap around `int64_t`'s range, with calls
-  and fences. Both twins must give the same function, with dead-code removal
-  alone and in the optimizer's whole set, and an independent interpreter whose
-  calls rewrite every escaped byte must return the same values before and after.
-  An overflow fixture checks where the arithmetic stops. Breaking the calls'
+  and fences. With dead-code removal alone and in the optimizer's whole set,
+  every result folds into a digest frozen where the pass's vector phases and
+  their scalar twins agreed (`test-ir-optimize`, default seed), the optimizer's
+  two paths (whose other passes keep their twins) must give the same function,
+  and an independent interpreter whose calls rewrite every escaped byte must
+  return the same values before and after. An overflow fixture checks where the
+  arithmetic stops. Breaking the calls'
   writes, the clear entries, the overlap rule or the escapes each fails it
   (150, 3,324, 27 and 211 failures).
 - **Real C:** `test-ir-source --passes`'s `memory` and `tier1-memory` rows

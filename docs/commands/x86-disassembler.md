@@ -28,11 +28,14 @@ the reassembled bytes (any version), are probed once (2.47 is the qualified
 2.42` (or `objdump`, `objcopy`, `not found on PATH` or `--version exited with
 status N`), runs the rest of the command, and exits 77 for the unavailable
 oracle. The raw `--file` oracle needs only `objdump`. A present pair's wrong listing
-still fails. Keep hand-written semantic fixtures and guarded tails:
-scalar/vector equality
-and re-encoding through the shared catalogue do not constitute an independent
-oracle. Benchmarks separate decode from decode plus formatting and include
-`--file raw.text` and `--only scalar|compact|avx512|batched`. `batched` is the
-default API path; `compact` isolates validation specialization with scalar
-matching. `--iterations N` and `--after-scalar MS` distinguish short bursts
-after scalar work from sustained runs.
+still fails. The decoder has one implementation (#2924), so the plain run's oracles
+aren't a second decoder: the encoder's bytes for generated streams, a prefix table
+for the classifier, hand-written semantic fixtures, and the decoder's contract on
+every decode (records tile the input, each decodes alone to itself, slices keep
+their records, a stop decodes alone the same, text is the same at every capacity
+that holds it, listing columns written by the test). [The design
+notes](../x86-64-disassembler.md#validation-and-measurement) list them. Keep the
+fixtures and guarded tails. Benchmarks separate decode from decode plus formatting
+or listing and include `--file raw.text` and `--phase decode|classify|format|listing`.
+`--iterations N` and `--after-scalar MS` distinguish short bursts after scalar work
+from sustained runs.

@@ -260,7 +260,6 @@ static bool ir_optimize_simd_float_compare(uint64_t a, uint64_t b, uint32_t widt
     return result;
 }
 
-#if BUSTER_HOST_VECTOR
 // Every lane at once (`bits` / `width` of them; the rest of the 512 bits stay zero). The arithmetic rounds down and up
 // by embedded rounding, which ignores MXCSR's rounding control and, with exceptions suppressed, sets no flag and
 // traps on none; a lane is exact where the two agree. Comparisons are integer operations on the bits. The host's own FTZ and DAZ still apply: a subnormal operand's
@@ -306,7 +305,7 @@ static bool ir_optimize_simd_float_vector(uint32_t op, uint32_t width, uint32_t 
     }
     const __mmask16 nan = a_nan | b_nan;
     __mmask16 refused = subnormal & (__mmask16)~nan;
-    __m512i staged = _mm512_setzero_si512();
+    __m512i staged;
     if (op == IR_VCMP)
     {
         // C's predicates from the bits, as ir_optimize_simd_float_compare orders them: Clang drops a comparison's
@@ -431,21 +430,16 @@ static bool ir_optimize_simd_float_vector(uint32_t op, uint32_t width, uint32_t 
     }
     return result;
 }
-#endif
 
 // A floating operation's or comparison's lanes, or false where one of them depends on the floating environment.
 static bool ir_optimize_simd_float(uint32_t op, uint32_t width, uint32_t bits, uint32_t predicate, const IrSimdValue* left, const IrSimdValue* right, bool scalar, IrSimdValue* output)
 {
     bool result = true;
-#if BUSTER_HOST_VECTOR
     if (!scalar)
     {
         result = ir_optimize_simd_float_vector(op, width, bits, predicate, left, right, output);
     }
     else
-#else
-    (void)scalar;
-#endif
     {
         const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
         const uint64_t fraction = width == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);

@@ -1384,6 +1384,7 @@ typedef enum X86Pattern
     X(VBROADCASTSS_Z_XM32, VBROADCASTSD_Z_XM64, VECTOR_SHUFFLE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(WHOLE, 64), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(VBROADCASTSS_X_XM32_EVEX, VBROADCASTSS_X_XM32_EVEX, VECTOR_SHUFFLE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 16), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(VBROADCASTSS_Y_XM32_EVEX, VBROADCASTSD_Y_XM64_EVEX, VECTOR_SHUFFLE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 32), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
+    X(VBROADCASTF32X4_Z_M128, VBROADCASTF32X4_Z_M128, VECTOR_SHUFFLE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(WHOLE, 64), 0, 0, 0, 0, 0, 0, NONE, NONE, 0) \
     X(VINSERTI32X4_Z_Z_XM128_IMM8, VINSERTI32X4_Z_Z_XM128_IMM8, VECTOR_SHUFFLE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(WHOLE, 64), 0, 0, 0, 0, 0, 0, CONTROL, NONE, 0) \
     X(VEXTRACTI32X4_XM128_Z_IMM8, VEXTRACTI32X4_XM128_Z_IMM8, VECTOR_SHUFFLE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 16), 0, 0, 0, 0, 0, 0, CONTROL, NONE, 0) \
     X(VINSERTI32X4_Y_Y_XM128_IMM8, VINSERTI32X4_Y_Y_XM128_IMM8, VECTOR_SHUFFLE, MOVE, 0, BUSTER_X86_VECTOR_WRITE(ZERO, 32), 0, 0, 0, 0, 0, 0, CONTROL, NONE, 0) \
@@ -3329,7 +3330,6 @@ static __attribute__((unused)) void x86_instructions_effects_opmasks_scalar(cons
 // the loop (whose vector constants a call inside it would make it reload) one test of it says whether the function
 // resolves any again, so that the common lane pays the OR alone. Inlined into its two callers, it is compiled with
 // `opmasks` null and not, and the first has none of the opmasks' instructions.
-#if BUSTER_HOST_VECTOR
 static __attribute__((always_inline)) inline void x86_instructions_effects_lanes(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes,
                                                                                uint16_t* opmasks)
 {
@@ -3517,26 +3517,17 @@ static __attribute__((always_inline)) inline void x86_instructions_effects_lanes
         }
     }
 }
-#endif
 
 static __attribute__((unused)) void x86_instructions_effects(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes)
 {
-#if !BUSTER_HOST_VECTOR
-    x86_instructions_effects_scalar(instructions, count, reads, writes);
-#else
     x86_instructions_effects_lanes(instructions, count, reads, writes, 0);
-#endif
 }
 
 // x86_instructions_effects with each record's opmask registers in `opmasks` (x86_instruction_resolve's).
 static __attribute__((unused)) void x86_instructions_effects_opmasks(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes,
                                                                      uint16_t* opmasks)
 {
-#if !BUSTER_HOST_VECTOR
-    x86_instructions_effects_opmasks_scalar(instructions, count, reads, writes, opmasks);
-#else
     x86_instructions_effects_lanes(instructions, count, reads, writes, opmasks);
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3862,9 +3853,6 @@ static __m512i x86_choice_classes(__m512i value, __m512i info)
 // with masked loads and stores, so nothing past them is touched. Requires x86_semantics_initialize.
 static __attribute__((unused)) void x86_choose_forms(const uint16_t* rows, const int64_t* values, const uint16_t* contexts, uint64_t count, uint16_t* forms)
 {
-#if !BUSTER_HOST_VECTOR
-    x86_choose_forms_scalar(rows, values, contexts, count, forms);
-#else
     const __m512i info_low = _mm512_load_si512(x86_choice_row_info);
     const __m512i info_high = _mm512_load_si512(x86_choice_row_info + 32);
     const __m512i flags = _mm512_set1_epi16(BUSTER_X86_CONTEXT_LIVE_FLAGS);
@@ -3908,7 +3896,6 @@ static __attribute__((unused)) void x86_choose_forms(const uint16_t* rows, const
         }
         _mm512_mask_storeu_epi16(forms + first, lanes, result);
     }
-#endif
 }
 
 // The record for a chosen form: `destination` holds the destination operand as the row's operation takes it (a register

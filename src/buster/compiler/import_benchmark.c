@@ -28,7 +28,6 @@
 // The exit status is 1 if the arguments are invalid, a case or a file can't be made or read, or the paths disagree.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -665,6 +664,7 @@ static bool import_benchmark_runtime_import(RuntimeKind kind, int cycles_counter
         [RUNTIME_KIND_STATIC] = "runtime_import_static",
         [RUNTIME_KIND_STATIC_PIE] = "runtime_import_static_pie",
         [RUNTIME_KIND_SHARED] = "runtime_import_shared",
+        [RUNTIME_KIND_NO_PIE] = "runtime_import_kind (no PIE)",
     };
     uint64_t nanoseconds[BUSTER_IMPORT_BENCHMARK_RUNS];
     uint64_t cycles[BUSTER_IMPORT_BENCHMARK_RUNS];
@@ -755,7 +755,6 @@ int run_import_benchmark(int argc, char** argv)
             valid = false;
         }
     }
-    bool result = valid;
     if (!valid)
     {
         printf("usage: benchmark-import [--units N] [--functions N] [--seed N] [--library PATH]... [--archive PATH]...\n");
@@ -766,7 +765,8 @@ int run_import_benchmark(int argc, char** argv)
     Runtime static_runtime;
     bool runtime_started = false;
     bool static_started = false;
-    if (cases != 0)
+    bool result = cases != NULL;
+    if (result)
     {
         memset(cases, 0, BUSTER_IMPORT_BENCHMARK_CASES * sizeof(ImportBenchmarkCase));
         LinkProgramOptions options = link_program_default_options();
@@ -860,11 +860,3 @@ int run_import_benchmark(int argc, char** argv)
     return result ? 0 : 1;
 }
 
-#else
-int run_import_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR
