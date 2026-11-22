@@ -106,7 +106,7 @@ static uint32_t check_control_reach_condition(const CheckControlWriter* writer, 
     const CheckInput* input = writer->program->input;
     const CheckGraph* graph = &input->graph;
     const uint32_t node = token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-    const uint32_t first = writer->token_first[token];
+    const uint32_t first = check_control_statement_head(writer, token);
     const uint32_t chosen = node != BUSTER_CHECK_NONE ? node : first;
     const uint32_t expression = chosen < graph->count && graph->ops[chosen] == CHECK_OP_CONDITION ? graph->operand0[chosen] : chosen;
     return expression;
@@ -151,7 +151,7 @@ static bool check_control_reach_statement_unreachable(const CheckControlWriter* 
 {
     const CheckInput* input = writer->program->input;
     const uint32_t node = token < input->token_count && input->token_nodes[token] != BUSTER_CHECK_NONE ? input->token_nodes[token] :
-                          writer->token_first[token];
+                          check_control_statement_head(writer, token);
     const bool result = check_control_reach_unreachable(writer, node);
     return result;
 }
@@ -263,7 +263,7 @@ static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t 
         }
         // Clang's EmitForStmt branches to the exit whenever the for has a condition, even `for (; 1;)`. Only
         // `for (;;)` leaves that block unused, so only then is there no insertion point after the loop.
-        const bool absent = condition != BUSTER_CHECK_NONE && writer->token_first[condition] == BUSTER_CHECK_NONE &&
+        const bool absent = condition != BUSTER_CHECK_NONE && check_control_statement_head(writer, condition) == BUSTER_CHECK_NONE &&
                             (condition >= writer->program->input->token_count || writer->program->input->token_nodes[condition] == BUSTER_CHECK_NONE);
         const bool breaks = check_control_reach_breaks(writer, token, body);
         result = !absent || breaks;
