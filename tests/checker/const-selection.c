@@ -45,6 +45,7 @@ int tested(int n)
     }
     int result = off ? missing() : (off && missing());
     result += (five || hardware(n)) - 1;
+    result += off ? __builtin_ia32_crc32qi(n, 1) : 0;
     result += (five == 0) ? ({ expression_label: in_expression(n); }) : 0;
     int calls = 0;
     if (++calls && (five == 0))

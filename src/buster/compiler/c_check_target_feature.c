@@ -1899,26 +1899,25 @@ static void check_target_feature_expression(CheckX86DiagnosticWalk* walk, CheckT
         // A label inside the condition keeps clang's ConstantFoldsToSimpleInteger from folding it: every operand's
         // code emits, whichever the constant would have left out.
         const bool labeled_condition = check_target_feature_labeled(emission, program, operands[0]);
-        if (labeled_condition)
-        {
-            for (uint32_t k = 1; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
-            {
-                if (operands[k] < graph->count)
-                {
-                    check_x86_diagnostic_push(walk, operands[k], false);
-                }
-            }
-        }
         bool truth = false;
-        if (!labeled_condition && check_program_emission_truth(program, node, operands[0], &truth))
+        const CheckEmissionTruth known = labeled_condition ? CHECK_EMISSION_UNKNOWN : check_program_emission_truth(program, node, operands[0], &truth);
+        if (known != CHECK_EMISSION_UNKNOWN && (op == CHECK_OP_CONDITIONAL || truth == (op == CHECK_OP_LOGICAL_OR)))
         {
-            const uint32_t skipped = op == CHECK_OP_CONDITIONAL ? operands[truth ? 2 : 1] :
-                                    truth == (op == CHECK_OP_LOGICAL_OR) ? operands[1] : BUSTER_CHECK_NONE;
-            if (skipped < graph->count && check_target_feature_labeled(emission, program, skipped))
+            const uint32_t skipped = op == CHECK_OP_CONDITIONAL && truth ? 2 : 1;
+            if (!check_target_feature_labeled(emission, program, operands[skipped]))
             {
-                check_x86_diagnostic_push(walk, skipped, false);
+                operands[skipped] = BUSTER_CHECK_NONE;
             }
         }
+        if (known == CHECK_EMISSION_INITIALIZER)
+        {
+            operands[0] = BUSTER_CHECK_NONE;
+        }
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
+        {
+            check_x86_diagnostic_push(walk, operands[k], false);
+        }
+        return;
     }
     else if (op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < program->input->token_count)
     {
