@@ -7696,11 +7696,17 @@ null while the machine runs.
 **What it does not do.** It makes no function: a body's statements, its
 locals' table and its calls' rows are other pieces', with the recorded
 functions of the boundary's scaffold as their oracle. It refuses nothing
-before its sweeps, so a body with a token left is swept to its end. And its
+before its sweeps, so a body with a token left is swept to its end: what
+would refuse one before its reading is counted beside it (a scan of the
+body's tokens for a token the front leaves whose value reaches a root's,
+which finds 513 of the 514 such bodies of `sqlite3.c` and none of its 1,856
+whole ones, for 0.4 ms). And its
 cost is the reference's, which is most of what a taken body is worth: the
 one-core path's page has it against its gate, by sweep
-(`--front-alone-split`: the census's tests are half the machine's run), and
-what that changes in the order of the pieces after it.
+(`--front-alone-split`: the census's tests are half the machine's run) and
+by a body's verdict, and what that changes in the order of the pieces after
+it. `--front-alone-first` reads every body before the walk's first chunk, as
+a compile that walks none of them would: nothing differs there either.
 
 ### What it says of step 2
 

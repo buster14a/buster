@@ -366,7 +366,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone|--front-alone-split] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone|--front-alone-split|--front-alone-first] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -2753,19 +2753,41 @@ It reports three lines a run:
   the times its front lost its waiting values; and its whole bodies against
   those whose every popped root the machine on the walk's nodes takes.
 
+Two more kinds of line follow in every such run:
+
+- `alone verdict=... bodies=... tokens=... ticks: reading=...
+  the-machine's-first-run=... by-the-chunk-that-stops-them=...
+  a-scan-of-the-tokens-refuses: bodies=... tokens=...`, one a verdict: its
+  bodies' ticks (their reading, the machine's first run on them, and what
+  was spent by the end of the chunk in which each is first stopped), and how
+  many of them a scan of their tokens alone finds a lost root in.
+- `alone a scan of every body's tokens for a root the front would lose:
+  tokens-read=... ticks=... a-token-read=...`: the scan's own cost. It reads
+  a body's tokens' kinds and parents and the walk's visit bytes before any of
+  the body is compacted, and finds a lost root where a token the front
+  leaves (a `sizeof` or `_Alignof`, a token of the walk's own visit, a
+  character constant with an escape or of several characters) has its value
+  reach a root's token through the parents that take values. It refuses
+  nothing here: the lines say what it would.
+
 `--front-alone-split` is the same run with the clock read before each of the
 machine's sweeps and after the last, in its first run, and one line more:
 `alone the machine's first run by sweep: T=... the-tests=... C=... X=...`, the
 reads it took, and what is left of the run (its loop, the roots' ranges, the
 settling of the types made since the last chunk).
 
+`--front-alone-first` reads every body of the unit before the walk's first
+chunk, where `--front-alone` reads each before the walk acts at it: what a
+compile that walks none of them would read.
+
 A difference, a root only one of the two ran on in a body, a root taken
 before an event of the walk's or with a token its actions left, or a lowered
 body it did not read makes the command exit 1. While the machine runs, the
 reader's own graph has no column of nodes, so a read of the walk's node
 faults. `--list N` prints the first N
-differences (`alone difference file=... line=... field=...`) and the first N
-bodies it refuses whose popped roots the other takes.
+differences (`alone difference file=... line=... field=...`), the first N
+bodies it refuses whose popped roots the other takes, and the first N bodies
+the scan and the front disagree on (`alone the scan finds ...`).
 
 ### Compiling with the window (#2850)
 

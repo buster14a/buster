@@ -3097,6 +3097,66 @@ postorder position):
   sweeps cost (the bodies T, the tests or C and X stop hold 15.4% of `sqlite3.c`'s body tokens), which the forecast
   this piece retired left out.
 
+### Its ticks by a body's verdict
+
+The same option keeps each lowered body's ticks beside its verdict: its reading's, its machine's first run's, and
+those spent by the end of the chunk in which it is first stopped.
+[The record](https://github.com/buster14a/buster-performance/tree/5a44ff50d/docs/measurements/takeover-2850-2026-11-22#the-pieces-ticks-by-a-bodys-verdict-and-what-a-scan-of-the-tokens-would-refuse-machine-alone9700x-verdicts-branch-at-b3bb0de89)
+(`5a44ff50d`; the 9700X, CPU 2, Release, under the lock; medians of 7 runs; ms), on `sqlite3.c`'s 568,438 body tokens:
+
+| a body's verdict before the walk | bodies | its tokens | its reading | the machine's first run |
+| --- | ---: | ---: | ---: | ---: |
+| every root taken | 1,856 | 35.6% | 4.65 | 9.89 |
+| a root the front lost | 514 | 49.0% | 5.39 | 11.98 |
+| T refuses a root | 52 | 2.7% | 0.33 | 0.83 |
+| the tests refuse one | 130 | 6.9% | 0.87 | 1.93 |
+| C or X refuses one | 116 | 5.9% | 0.69 | 1.60 |
+
+- **Half the body tokens are in bodies the front loses a root of, and 17.4 of the piece's 38.2 ms go to them.**
+- **The bodies refused after their sweeps are 15.4% of the tokens and 6.25 ms.** A machine that takes bodies pays that
+  for nothing, a term the retired forecast did not have. Stopping a body at its first refused root saves little of
+  it (5.77 of the 6.25 are spent by the end of the chunk that stops it): a refused root is late in its body as often
+  as early.
+
+### A scan of a body's tokens before its reading
+
+What refuses the first of those classes before any work on it is in the tokens. `node_alone_scan` reads a body's
+tokens' kinds and parents (the parser's) and the walk's visit bytes (the reader's), before any of the body is
+compacted: a token the front leaves (a `sizeof` or `_Alignof` by its kind, a token of the walk's own visit by its
+class, a character constant with an escape or of several characters by its spelling) loses a root where its value
+reaches a root's token (a statement's terminator, a condition, a return, an initialization) through the parents that
+take values. Under a declarator or a label it reaches none, and the body may still be whole. In the shadow the scan
+refuses nothing: every body is read and compared as before, and the report counts, by a body's verdict, the bodies the
+scan finds a lost root in, with its own ticks.
+[The record](https://github.com/buster14a/buster-performance/tree/5a44ff50d/docs/measurements/takeover-2850-2026-11-22#a-scan-of-a-bodys-tokens-for-a-root-the-front-would-lose-machine-alone9700x-scan-branch-at-90c42e997)
+(the 9700X, CPU 2, Release, under the lock; 7 runs, musl's 3):
+
+| | `sqlite3.c` | Lua | musl |
+| --- | ---: | ---: | ---: |
+| bodies whose root the front lost that the scan finds one in | 513 of 514 | 279 of 279 | 584 of 584 |
+| whole bodies it finds one in | 0 of 1,856 | 0 of 630 | 0 of 1,871 |
+| tokens it read (it stops at the first it finds) | 374,620 | 121,860 | 619,925 |
+| its ms | 0.383 | 0.146 | 2.294 |
+| its ticks a body's postorder position | 2.56 | 2.73 | 6.11 |
+
+- **So a refusal before the reading costs 0.4 ms on `sqlite3.c` where reading and sweeping those bodies costs 17.4,**
+  and loses no body the machine takes. The specification's gate for it was 20 ticks a body token.
+- The one body of `sqlite3.c` it leaves (`sqlite3OpcodeName`, 404 tokens) is a block's static table of strings, whose
+  lost root is no token's of the three kinds. The compiler's own source: 748 of 748, none of its 222 whole bodies.
+- It is not a rule of the language: a body it passes may still lose a root (the front's own stack, a constant out of
+  range), and is then read and refused as today. What it must not do is find one in a body the machine takes, which
+  the fixture and the four corpora count.
+
+### Every body read before the walk's first chunk
+
+The comparison reads a body before the walk acts at it, with the bodies before it walked already. A compile that
+takes bodies in a row walks none of them, so `measure-node-machine --shadow --front-alone-first` reads every body of
+the unit before the walk's first chunk. The same roots on `sqlite3.c`, Lua, the compiler's own source and musl
+(51,306, 10,900, 53,916 and 43,196), no difference, none run by one of the two alone, none taken before an event of
+the walk's or with a token its actions left
+([the record](https://github.com/buster14a/buster-performance/tree/5a44ff50d/docs/measurements/takeover-2850-2026-11-22#every-body-read-before-the-walks-first-chunk-machine-alonedevelopfirst-18fd6b349-branch-at-18fd6b349)).
+Nothing the machine reads of a body is left there by the walk of another.
+
 ## Step 4's first piece: a census of Tier 0's row
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-census-2874-2026-11-16)
