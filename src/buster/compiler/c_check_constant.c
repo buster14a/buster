@@ -424,7 +424,7 @@ static uint32_t check_constant_bool_expression(const CheckConstantInput* input, 
     {
         const uint8_t role = parser->tree.roles[root];
         const uint8_t kind = parser->tokens.kinds[root];
-        const uint32_t chosen = reader->selected_tokens != NULL ? reader->selected_tokens[root] : BUSTER_CHECK_NONE;
+        const uint32_t chosen = check_input_selection_at(reader, root);
         const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
         if (chosen != BUSTER_CHECK_NONE && selected >= begin && selected < end && selected != root)
         {

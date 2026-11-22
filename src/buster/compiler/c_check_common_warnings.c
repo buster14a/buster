@@ -6492,12 +6492,11 @@ static void check_common_conditional_conversions(const Parser* parser, Preproces
     const bool enabled = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE, false) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_LITERAL_CONVERSION, false) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT, true);
-    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     static const CheckOp ops[] = { CHECK_OP_CONDITIONAL };
     const CheckCommonOps set = check_common_ops(ops, BUSTER_ARRAY_LENGTH(ops));
     CheckCommonScan scan = { 0 };
-    for (uint32_t node = enabled && stream != NULL ? check_common_next_op(graph, &set, &scan, vector) : graph->count;
-         node < graph->count && !pp->fatal; node = check_common_next_op(graph, &set, &scan, vector))
+    for (uint32_t node = enabled && stream != NULL ? check_common_next_op(graph, &set, &scan) : graph->count;
+         node < graph->count && !pp->fatal; node = check_common_next_op(graph, &set, &scan))
     {
         const uint32_t token = graph->tokens[node];
         if (graph->ops[node] == CHECK_OP_CONDITIONAL && node < stream->count && stream->diagnostics[node] == CHECK_DIAG_NONE &&

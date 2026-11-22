@@ -8256,13 +8256,12 @@ static void check_driver_rejected_conditionals(const Parser* unit, const Parser*
     const bool enabled = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE, false) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_LITERAL_CONVERSION, false) ||
                          check_common_enabled(pp, input, CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT, true);
-    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     static const CheckOp ops[] = { CHECK_OP_CONDITIONAL };
     const CheckCommonOps set = check_common_ops(ops, BUSTER_ARRAY_LENGTH(ops));
     CheckCommonScan scan = { 0 };
     CheckWarningSpelling spell = { 0 };
-    for (uint32_t node = enabled ? check_common_next_op(graph, &set, &scan, vector) : graph->count;
-         node < graph->count && !pp->fatal; node = check_common_next_op(graph, &set, &scan, vector))
+    for (uint32_t node = enabled ? check_common_next_op(graph, &set, &scan) : graph->count;
+         node < graph->count && !pp->fatal; node = check_common_next_op(graph, &set, &scan))
     {
         const uint32_t token = graph->tokens[node];
         const uint32_t at = token < parser->tokens.count && to_original != NULL ? to_original[token] : token;
