@@ -1158,6 +1158,7 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "late_attributes", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "deprecated_attributes", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "condition_attributes", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "alias_targets", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "tcb_attributes", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "merged_attributes", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "objc_attributes", CHECK_ATTESTED_FIELD_CONSEQUENCE },

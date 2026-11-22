@@ -11560,6 +11560,12 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/asm-label-after-definition");
             }
+            // Functions and variables an attribute uses (#3300): a constructor's or destructor's definition, and an alias's
+            // or ifunc's target declared before it, which clang's -Wunused-function and -Wunused-variable never name.
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/attribute-uses");
+            }
             if (check_test_driver_takes())
             {
                 check_test_driver_kr_policy(&test, clang, executable, directory, lazy);

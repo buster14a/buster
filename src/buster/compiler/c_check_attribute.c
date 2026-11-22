@@ -363,6 +363,10 @@ struct CheckInputAttribute
     // A type argument's type (#147: vec_type_hint's and preferred_type's, check_input_type_argument), read where its
     // attributes are read (check_input_read_attributes), or 0.
     TypeId argument_type;
+    // alias's or ifunc's target plus one, 0 for none (#3300): the function or variable its string names where the
+    // attribute is read, which clang's markUsedForAliasOrIfunc marks used (check_input_attribute_alias_target). In
+    // argument_type's padding: a record stays 168 bytes.
+    uint32_t alias_target;
     // Thread-safety arguments' checked expression types, retained once for the subject's handler.
     TypeId* expression_types;
     // An availability attribute's arguments as clang's parser reads them (#1447, check_input_availability_parse), or NULL.
@@ -2095,6 +2099,44 @@ static bool check_input_attribute_argument_value(CheckInputReader* reader, Check
     return valid;
 }
 
+// The declaration an alias's or ifunc's string names where the attribute is read, plus one, or 0 (#3300): clang's
+// markUsedForAliasOrIfunc looks the string up as an ordinary name there and marks a function or variable it finds used,
+// so that -Wunused-function and -Wunused-variable give it nothing. A declaration after the attribute isn't found, nor
+// is a typedef's or an enumerator's name, nor an entity whose symbol is another spelling: an asm label's or
+// overloadable's (a mangled name), on the found declaration or an earlier one of its scope. The mark is made with the
+// unused facts (check_input_alias_used), which skip an attribute its subject check ignored, as clang's handler never runs.
+static uint32_t check_input_attribute_alias_target(CheckInputReader* reader, const CheckInputAttribute* attribute)
+{
+    const CBindings* bindings = &reader->bindings;
+    const String8 text = attribute->text;
+    const bool spelled = reader->pp != NULL && text.length != 0 && text.length <= UINT32_MAX;
+    const uint32_t name = spelled ? intern_find(reader->pp->table, (const uint8_t*)text.pointer, (uint32_t)text.length) : 0;
+    uint32_t handle = name != 0 && name < bindings->name_capacity ? c_bindings_lookup(bindings, C_BINDING_ORDINARY, name) : 0;
+    // Where the log has gone past the attribute (check_input_use_point), a declaration after it may hide the one it sees.
+    for (uint32_t steps = 0; handle != 0 && handle <= bindings->count && bindings->declaration[handle - 1] > attribute->first && steps < bindings->count;
+         steps += 1)
+    {
+        handle = bindings->previous[handle - 1];
+    }
+    const uint32_t found = handle != 0 && handle <= bindings->count ? handle - 1 : BUSTER_CHECK_NONE;
+    const uint8_t kind = found != BUSTER_CHECK_NONE ? bindings->kind[found] : C_BINDING_KINDS;
+    bool named = (kind == C_BINDING_FUNCTION || kind == C_BINDING_OBJECT) && bindings->declaration[found] < reader->parser->tokens.count;
+    for (uint32_t at = handle, steps = 0; named && at != 0 && at <= bindings->count && steps < bindings->count; steps += 1)
+    {
+        const uint32_t event = at - 1;
+        const bool chained = bindings->operation[event] == C_BINDING_DECLARE && bindings->key[event] == bindings->key[found] &&
+                             bindings->depth[event] == bindings->depth[found] && bindings->declaration[event] < reader->parser->tokens.count;
+        const CheckInputAttributes* attributes = chained ? check_input_attributes_at(reader->output, bindings->declaration[event]) : NULL;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* record = attributes->records + i;
+            named &= record->ignored || (record->kind != CHECK_ATTRIBUTE_ASM_LABEL && record->kind != CHECK_ATTRIBUTE_OVERLOADABLE);
+        }
+        at = chained ? bindings->previous[event] : 0;
+    }
+    return named ? bindings->declaration[found] + 1 : 0;
+}
+
 static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, uint32_t minimum, uint32_t maximum)
 {
     const Parser* parser = reader->parser;
@@ -2301,6 +2343,11 @@ static bool check_input_attribute_validate(CheckInputReader* reader, CheckInputA
             check_input_report(reader, token, CHECK_INPUT_CLEANUP_FUNCTION);
             valid = false;
         }
+    }
+    if (valid && (attribute->kind == CHECK_ATTRIBUTE_ALIAS || attribute->kind == CHECK_ATTRIBUTE_IFUNC))
+    {
+        attribute->alias_target = check_input_attribute_alias_target(reader, attribute);
+        reader->alias_targets |= attribute->alias_target != 0;
     }
     if (valid && attribute->kind == CHECK_ATTRIBUTE_VISIBILITY)
     {
@@ -4853,6 +4900,10 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
             const bool conditional = rule->kind == CHECK_ATTRIBUTE_DIAGNOSE_IF || rule->kind == CHECK_ATTRIBUTE_ENABLE_IF;
             reader->condition_attributes |= conditional;
             check_input_lane_refuse(reader, reader->lane && conditional, "a body declares a diagnose_if or enable_if attribute");
+            // An alias's or ifunc's target is marked used by the unit's unused facts, which read the reader's flag
+            // (#3300, CheckInputReader.alias_targets): a lane's reading doesn't publish it.
+            check_input_lane_refuse(reader, reader->lane && (rule->kind == CHECK_ATTRIBUTE_ALIAS || rule->kind == CHECK_ATTRIBUTE_IFUNC),
+                                    "a body declares an alias or ifunc attribute");
             // A lane cannot publish attribute state to later declarations; source-order replay handles this case.
             check_input_lane_refuse(reader, reader->lane && late_kind, "a body declares an attribute with linked state");
             // x86's interrupt and no_caller_saved_registers (#147): only a unit with either has its calls looked through

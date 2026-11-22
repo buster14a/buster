@@ -2366,6 +2366,9 @@ struct CheckInputReader
     bool deprecated_attributes;
     // Whether a diagnose_if or enable_if attribute was read, for its conditions (#1447, c_check_condition.c).
     bool condition_attributes;
+    // Whether an alias or ifunc attribute named a function or variable declared before it (#3300,
+    // CheckInputAttribute.alias_target): only then are the unused facts' targets looked for (check_input_alias_used).
+    bool alias_targets;
     // Whether an enforce_tcb or enforce_tcb_leaf attribute was read, for its calls' warnings (#1447, check_input_tcb_calls),
     // and whether one of them or a modular_format was, for its redeclarations' checks (check_input_attribute_merge_checks).
     bool tcb_attributes;
