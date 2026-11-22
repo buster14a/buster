@@ -1622,7 +1622,7 @@ follows rather than a `(`, and `_Pragma(/* c */ "x")` is an error. So under
   all, as clang's lexer skips its body without marking it for cleaning, but where
   a splice splits its opener or, in a `//` comment, escapes a newline, which
   makes clang clean it (`pp_without_splices`).
-- The printers count a comment's line breaks into the line, as clang's
+- The printer counts a comment's line breaks into the line, as clang's
   `HandleNewlinesInToken` does, and after a `//` comment the next token starts a
   line, as after clang's `setEmittedDirectiveOnThisLine`. Under `-CC` a `//`
   comment of a replacement list prints as clang's lexer made it there,
@@ -1645,14 +1645,15 @@ predefines' and the command line's definitions print under `<built-in>` and
 (`pp_print_includer`), as clang includes its `<built-in>` buffer there. A
 history replay records none: the run's records are the printer's.
 
-**Which printer.** `-C` prints by either printer, as a comment is an unknown
-token, which both take, and so do `-dD`'s and `-dI`'s directives: the vector
-printer's batches stop at a chunk that holds one, as at an include exit, and
-`pp_print_events` prints it through stdio before the token it precedes.
-`test-preprocessor` compares the two printers' bytes. `-CC`'s output is the
-scalar printer's alone (`pp_print_vector` hands such a unit to
-`pp_print_scalar`), which turns a replacement list's `//` comment into a block
-comment and starts a line after any other: the rarest of these modes.
+**The printer.** `-E`'s one printer (`pp_print_vector_mode`, #2924) prints
+these modes too. A comment is an unknown token, which it takes as any other;
+under `-C` and `-CC` step 2 makes the token after a `//` comment start a line
+(`line_comments`, carried to the next chunk by `force_line`). `-CC`'s chunks
+that hold an unknown token go through the general loop, which spells a
+replacement list's `//` comment as a block comment: the rarest of these modes.
+`-dD`'s and `-dI`'s directives stop the batches at a chunk that holds one, as
+an include exit does, and `pp_print_events` prints it through stdio before the
+token it precedes.
 
 **Cost** (the 9700X, CPU 2, the frozen `sqlite3.c` with its pinned headers; [the
 record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/e-output-modes-1380-2026-11-17),
@@ -1663,12 +1664,14 @@ buster-performance `59c2b612`). Without these options a run is main's: `-E -P`,
 11.5, and `-E -C` 34.7 against 13.9: the scalar lexer takes 15.7 ms where the
 vectorized one takes 2.4 without comments, refinement 4.6 against 1.5 (the
 comments' bytes are tokens'), and the main loop 6.9 against 5.4 (`-C`'s arguments
-a token at a time). `-E -P -CC` takes 39.4 ms, its printing by the scalar printer
-13.5 against 2.1. `-E -dD -dI` takes 15.4 ms against `-E`'s 13.9 (26.5 before
-the vector printer printed them). These modes are `-E`'s opt-in output for tools
-and small inputs (a linker script's `$(CPP) -P -C`), which no compile reads: the
-comments' lexer and `-CC`'s printing stay scalar, and a vectorized lexer's comment
-tokens would be the next step if a corpus needed them fast.
+a token at a time). `-E -P -CC` took 39.4 ms, its printing by the scalar printer
+13.5 against 2.1, before #2924 removed that printer and `-CC` moved to the
+vector printer's general loop (not measured on the 9700X since). `-E -dD -dI`
+takes 15.4 ms against `-E`'s 13.9 (26.5 before the vector printer printed them).
+These modes are `-E`'s opt-in output for tools and small inputs (a linker
+script's `$(CPP) -P -C`), which no compile reads: the comments' lexer stays the
+scalar one, and a vectorized lexer's comment tokens would be the next step if a
+corpus needed them fast.
 
 **Where clang's output differs.** Line markers differ in form, as `-E`'s do.
 The predefines under `<built-in>` are buster's, in its order. After each `-dI`
@@ -1678,8 +1681,9 @@ breaks of a comment it prints in a definition, so what follows a definition
 whose comment spans lines is a line late on clang's side until its next marker;
 ours is on its line. `-P`'s blank lines and indentation differ as `-E -P`'s do.
 
-**Tests.** `test-preprocessor`'s cases run each mode by both kernels with the
-exact text with markers: comments where clang keeps them, a comment before a
+**Tests.** `test-preprocessor`'s cases run each mode as the other cases run,
+with their digests (`tests/preprocessor-kernels/digests.tsv`) and the exact
+text with markers: comments where clang keeps them, a comment before a
 skipped group's `#endif`, `-CC`'s replacement lists, arguments, stringizing and
 pasting, `-dD`'s definitions (a redefinition, an undefined name's `#undef`),
 `-dI`'s guarded, computed and `#include_next` includes, the modes together, and
