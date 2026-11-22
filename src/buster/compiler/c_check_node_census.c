@@ -6059,46 +6059,16 @@ typedef enum NodeBodiesReason
     // is beside it; and a condition whose root's value is a constant, which the program may fold.
     NODE_BODIES_UNKEPT,
     NODE_BODIES_CONSTANT,
+    // A statement the program may leave out because no control reaches it (node_twin_unreached).
+    NODE_BODIES_REACH,
     NODE_BODIES_REASONS,
 } NodeBodiesReason;
 
 static const char* const node_bodies_reason_names[NODE_BODIES_REASONS] = {
     "attempted",          "a-root-the-machine-does-not-take",  "a-root-of-no-control-of-its-own", "a-tracked-stack", "copies-of-parameters-without-a-prototype",
     "a-result-of-another-class", "a-control-of-another-kind", "a-return-of-another-kind",        "an-initialization-of-another-form", "no-room",
-    "a-control's-root-not-kept-before-the-walk", "a-condition-that-is-a-constant",
+    "a-control's-root-not-kept-before-the-walk", "a-condition-that-is-a-constant", "a-statement-no-control-reaches",
 };
-
-// Why the controls' twin from the tokens leaves a body out (node_twin_build, below the report that names them).
-typedef enum NodeTwinReason
-{
-    NODE_TWIN_ATTEMPTED,
-    // The machine did not take the body whole before the walk: a control's expression may have no root there.
-    NODE_TWIN_UNWHOLE,
-    // The program dropped a range of it (a constant `if`'s), by a node's value.
-    NODE_TWIN_DROPPED,
-    NODE_TWIN_SWITCH,
-    NODE_TWIN_ASM,
-    // A variable-length array, a variably modified typeof's operand, or a cleanup.
-    NODE_TWIN_VARIABLE,
-    NODE_TWIN_CLEANUP,
-    // An indirect goto, a musttail return, a break or a continue outside its loop.
-    NODE_TWIN_JUMP,
-    // A block's static or extern declaration, whose initializer's discard the program reads a node of.
-    NODE_TWIN_STATIC,
-    // A statement expression.
-    NODE_TWIN_REGION,
-    // A statement whose shape the twin does not know (a condition without its keyword or its body), or a token with
-    // several roots.
-    NODE_TWIN_SHAPE,
-    NODE_TWIN_ROOM,
-    NODE_TWIN_REASONS,
-} NodeTwinReason;
-
-static const char* const node_twin_reason_names[NODE_TWIN_REASONS] = {
-    "attempted", "not-whole-before-the-walk", "a-range-the-program-dropped", "a-switch", "an-asm-statement", "a-variable-length-array-or-typeof", "a-cleanup",
-    "a-jump-of-another-kind", "a-block's-static-or-extern-declaration", "a-statement-expression", "a-shape-it-does-not-know", "no-room",
-};
-
 
 // What an entry's value is until the body's end: the stream's already; a control's index, whose label's entry it
 // becomes; a temporary's number among the body's; a declared object, whose local the lowered function gives.
@@ -8092,586 +8062,6 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
 }
 
 // Body `b`'s pops (`pops`, `count` of them), counted into `census`.
-// The controls' twin from the tokens (measure-node-machine --shadow --bodies with --front-alone; docs/node-machine.md, "The
-// same comparison before the walk"): a body's controls made as check_control_build makes them, from the parser's tree
-// and tokens, the reader's columns the resolution fills (a goto's label, a declaration's initializer's place and its
-// storage) and, for whether a token has an expression, the roots the machine with no node of the walk's ran on before
-// the walk, by each control's token. It reads no node of the graph. What it makes: a block, an `if` with or without an
-// `else`, a `while`, a do statement, a `for`, a break, a continue, a return, a goto and its label, an expression
-// statement, a declaration with initializers. Every other body is left out by its first reason (NodeTwinReason).
-//
-// A twin's control has the program's kind, token and target, and whether it has an expression where the program's has a
-// node; an INITIALIZE's target, the program's plan, is not the twin's to name.
-typedef struct NodeTwinControl NodeTwinControl;
-struct NodeTwinControl
-{
-    uint32_t token;
-    uint32_t target;
-    uint8_t kind;
-    bool valued;
-};
-
-#define BUSTER_NODE_TWIN_TASK_STATEMENT 0u
-#define BUSTER_NODE_TWIN_TASK_LABEL 1u
-#define BUSTER_NODE_TWIN_TASK_ENTRY 2u
-#define BUSTER_NODE_TWIN_TASK_TOKEN 3u
-
-typedef struct NodeTwinTask NodeTwinTask;
-struct NodeTwinTask
-{
-    uint32_t token;
-    uint32_t stop;
-    uint32_t repeat;
-    NodeTwinControl entry;
-    uint8_t kind;
-};
-
-typedef struct NodeTwin NodeTwin;
-struct NodeTwin
-{
-    // By token, for the body at hand: each token's first and last child and its siblings (check_control_children's), a
-    // label's number, and a terminator's first declaration with an initializer and each such declaration's next.
-    uint32_t* first;
-    uint32_t* last;
-    uint32_t* next;
-    uint32_t* previous;
-    uint32_t* source_labels;
-    uint32_t* plan_first;
-    uint32_t* plan_last;
-    uint32_t* plan_next;
-    NodeTwinTask* tasks;
-    uint32_t* labels;
-    NodeTwinControl* entries;
-    // The return flow's walk of the twin's controls (node_twin_silent): each one reached, and those to visit.
-    uint8_t* seen;
-    uint32_t* queue;
-    uint32_t capacity;
-    uint32_t depth;
-    uint32_t label_count;
-    uint32_t count;
-    uint32_t opening;
-    uint32_t closing;
-    uint8_t reason;
-    const CheckProgram* program;
-    // By a control's token: its expression's root there plus one, 0 for none, UINT32_MAX for several.
-    const uint32_t* roots;
-};
-
-static void node_twin_fail(NodeTwin* twin, NodeTwinReason reason)
-{
-    twin->reason = twin->reason == NODE_TWIN_ATTEMPTED ? (uint8_t)reason : twin->reason;
-}
-
-static void node_twin_push(NodeTwin* twin, NodeTwinTask task)
-{
-    if (twin->depth < twin->capacity)
-    {
-        twin->tasks[twin->depth++] = task;
-    }
-    else
-    {
-        node_twin_fail(twin, NODE_TWIN_ROOM);
-    }
-}
-
-static uint32_t node_twin_label(NodeTwin* twin)
-{
-    const uint32_t label = twin->label_count;
-    if (label < twin->capacity)
-    {
-        twin->labels[label] = BUSTER_CHECK_NONE;
-        twin->label_count += 1;
-    }
-    else
-    {
-        node_twin_fail(twin, NODE_TWIN_ROOM);
-    }
-    return label < twin->capacity ? label : 0;
-}
-
-static void node_twin_mark(NodeTwin* twin, uint32_t label)
-{
-    node_twin_push(twin, (NodeTwinTask){ .kind = BUSTER_NODE_TWIN_TASK_LABEL, .token = label });
-}
-
-static void node_twin_entry(NodeTwin* twin, CheckControlKind kind, uint32_t token, bool valued, uint32_t target)
-{
-    node_twin_push(twin, (NodeTwinTask){ .kind = BUSTER_NODE_TWIN_TASK_ENTRY, .token = token, .entry = { .token = token, .target = target, .kind = (uint8_t)kind, .valued = valued } });
-}
-
-static void node_twin_statement(NodeTwin* twin, uint32_t token, uint32_t stop, uint32_t repeat)
-{
-    if (token != BUSTER_CHECK_NONE)
-    {
-        node_twin_push(twin, (NodeTwinTask){ .kind = BUSTER_NODE_TWIN_TASK_STATEMENT, .token = token, .stop = stop, .repeat = repeat });
-    }
-}
-
-static void node_twin_token(NodeTwin* twin, uint32_t token)
-{
-    node_twin_push(twin, (NodeTwinTask){ .kind = BUSTER_NODE_TWIN_TASK_TOKEN, .token = token });
-}
-
-// Whether the control at `token` has an expression: one root before the walk; several fail the body.
-static bool node_twin_valued(NodeTwin* twin, uint32_t token)
-{
-    const uint32_t slot = token < twin->program->parser->tokens.count ? twin->roots[token] : 0;
-    if (slot == UINT32_MAX)
-    {
-        node_twin_fail(twin, NODE_TWIN_SHAPE);
-    }
-    return slot != 0 && slot != UINT32_MAX;
-}
-
-// One statement's controls (check_control_expand's).
-static void node_twin_expand(NodeTwin* twin, NodeTwinTask task)
-{
-    const Parser* parser = twin->program->parser;
-    const CheckInput* input = twin->program->input;
-    const uint32_t token = task.token;
-    const uint8_t role = parser->tree.roles[token];
-    if (role == PARSE_ROLE_CLOSE_BODY || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_ELSE || role == PARSE_ROLE_DO)
-    {
-        for (uint32_t child = twin->last[token]; child != BUSTER_CHECK_NONE; child = twin->previous[child])
-        {
-            if (parser->tree.roles[child] != PARSE_ROLE_OPEN_BODY && parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK)
-            {
-                node_twin_statement(twin, child, task.stop, task.repeat);
-            }
-        }
-    }
-    else if (role == PARSE_ROLE_CLOSE_CONDITION)
-    {
-        uint32_t body = BUSTER_CHECK_NONE;
-        uint32_t alternate = BUSTER_CHECK_NONE;
-        uint32_t keyword = BUSTER_CHECK_NONE;
-        for (uint32_t child = twin->first[token]; child != BUSTER_CHECK_NONE; child = twin->next[child])
-        {
-            if (child < token && parser->tree.roles[child] == PARSE_ROLE_LEAF_RIGHT)
-            {
-                keyword = child;
-            }
-            else if (child > token)
-            {
-                if (parser->tree.roles[child] == PARSE_ROLE_ELSE)
-                {
-                    alternate = child;
-                }
-                else
-                {
-                    body = child;
-                }
-            }
-        }
-        const uint32_t end = node_twin_label(twin);
-        const bool valued = node_twin_valued(twin, token);
-        if (keyword == BUSTER_CHECK_NONE || !valued || body == BUSTER_CHECK_NONE)
-        {
-            node_twin_fail(twin, NODE_TWIN_SHAPE);
-        }
-        else if (parser->tokens.kinds[keyword] == PARSE_KIND_IF)
-        {
-            const uint32_t otherwise = alternate != BUSTER_CHECK_NONE ? node_twin_label(twin) : end;
-            node_twin_mark(twin, end);
-            if (alternate != BUSTER_CHECK_NONE)
-            {
-                node_twin_statement(twin, alternate, task.stop, task.repeat);
-                node_twin_mark(twin, otherwise);
-                node_twin_entry(twin, CHECK_CONTROL_JUMP, token, false, end);
-            }
-            node_twin_statement(twin, body, task.stop, task.repeat);
-            node_twin_entry(twin, CHECK_CONTROL_BRANCH_FALSE, token, true, otherwise);
-        }
-        else if (parser->tokens.kinds[keyword] == PARSE_KIND_WHILE)
-        {
-            const uint32_t start = node_twin_label(twin);
-            node_twin_mark(twin, end);
-            node_twin_entry(twin, CHECK_CONTROL_JUMP, token, false, start);
-            node_twin_statement(twin, body, end, start);
-            node_twin_entry(twin, CHECK_CONTROL_BRANCH_FALSE, token, true, end);
-            node_twin_mark(twin, start);
-        }
-        else
-        {
-            node_twin_fail(twin, parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH ? NODE_TWIN_SWITCH : NODE_TWIN_SHAPE);
-        }
-    }
-    else if (role == PARSE_ROLE_CLOSE_FOR)
-    {
-        uint32_t first = BUSTER_CHECK_NONE;
-        uint32_t condition = BUSTER_CHECK_NONE;
-        uint32_t body = BUSTER_CHECK_NONE;
-        for (uint32_t child = twin->first[token]; child != BUSTER_CHECK_NONE; child = twin->next[child])
-        {
-            if (child < token && parser->tokens.kinds[child] == PARSE_KIND_SEMI)
-            {
-                if (first == BUSTER_CHECK_NONE)
-                {
-                    first = child;
-                }
-                else
-                {
-                    condition = child;
-                }
-            }
-            else if (child > token)
-            {
-                body = child;
-            }
-        }
-        const uint32_t start = node_twin_label(twin);
-        const uint32_t update = node_twin_label(twin);
-        const uint32_t end = node_twin_label(twin);
-        if (first == BUSTER_CHECK_NONE || condition == BUSTER_CHECK_NONE || body == BUSTER_CHECK_NONE)
-        {
-            node_twin_fail(twin, NODE_TWIN_SHAPE);
-        }
-        else
-        {
-            node_twin_mark(twin, end);
-            node_twin_entry(twin, CHECK_CONTROL_JUMP, token, false, start);
-            node_twin_token(twin, token);
-            node_twin_mark(twin, update);
-            node_twin_statement(twin, body, end, update);
-            if (node_twin_valued(twin, condition))
-            {
-                node_twin_entry(twin, CHECK_CONTROL_BRANCH_FALSE, condition, true, end);
-            }
-            node_twin_mark(twin, start);
-            node_twin_token(twin, first);
-        }
-    }
-    else if (role == PARSE_ROLE_TERMINATOR)
-    {
-        uint32_t jump = BUSTER_CHECK_NONE;
-        uint32_t body = BUSTER_CHECK_NONE;
-        uint32_t condition = BUSTER_CHECK_NONE;
-        for (uint32_t child = twin->first[token]; child != BUSTER_CHECK_NONE; child = twin->next[child])
-        {
-            const uint8_t child_role = parser->tree.roles[child];
-            if (child_role == PARSE_ROLE_CLOSE_ATTRIBUTE_SPECIFIER)
-            {
-                // A statement's attributes: a musttail return's among them.
-                node_twin_fail(twin, NODE_TWIN_JUMP);
-            }
-            jump = child_role == PARSE_ROLE_RETURN ? child : jump;
-            body = child_role == PARSE_ROLE_DO ? child : body;
-            condition = child_role == PARSE_ROLE_CLOSE_CONDITION ? child : condition;
-        }
-        if (jump != BUSTER_CHECK_NONE)
-        {
-            const uint8_t kind = parser->tokens.kinds[jump];
-            if (kind == PARSE_KIND_RETURN && input->musttail_count != 0 && check_control_musttail(input, jump))
-            {
-                node_twin_fail(twin, NODE_TWIN_JUMP);
-            }
-            else if (kind == PARSE_KIND_RETURN)
-            {
-                node_twin_entry(twin, CHECK_CONTROL_RETURN, jump, node_twin_valued(twin, jump), BUSTER_CHECK_NONE);
-            }
-            else if ((kind == PARSE_KIND_BREAK && task.stop != BUSTER_CHECK_NONE) || (kind == PARSE_KIND_CONTINUE && task.repeat != BUSTER_CHECK_NONE))
-            {
-                node_twin_entry(twin, CHECK_CONTROL_JUMP, jump, false, kind == PARSE_KIND_BREAK ? task.stop : task.repeat);
-            }
-            else if (kind == PARSE_KIND_GOTO && !check_input_indirect_goto(parser, jump))
-            {
-                const uint32_t target = check_sparse_get(input->label_targets, jump);
-                const bool named = target > twin->opening && target < twin->closing && parser->tree.roles[target] == PARSE_ROLE_LABEL;
-                if (named)
-                {
-                    node_twin_entry(twin, CHECK_CONTROL_JUMP, jump, false, twin->source_labels[target]);
-                }
-                else
-                {
-                    node_twin_fail(twin, NODE_TWIN_JUMP);
-                }
-            }
-            else
-            {
-                node_twin_fail(twin, NODE_TWIN_JUMP);
-            }
-        }
-        else if (body != BUSTER_CHECK_NONE && condition != BUSTER_CHECK_NONE)
-        {
-            const uint32_t start = node_twin_label(twin);
-            const uint32_t test = node_twin_label(twin);
-            const uint32_t end = node_twin_label(twin);
-            const bool valued = node_twin_valued(twin, condition);
-            if (!valued)
-            {
-                node_twin_fail(twin, NODE_TWIN_SHAPE);
-            }
-            node_twin_mark(twin, end);
-            node_twin_entry(twin, CHECK_CONTROL_BRANCH_TRUE, condition, true, start);
-            node_twin_mark(twin, test);
-            node_twin_statement(twin, body, end, test);
-            node_twin_mark(twin, start);
-        }
-        else
-        {
-            node_twin_token(twin, token);
-        }
-    }
-    else if (role == PARSE_ROLE_LABEL)
-    {
-        for (uint32_t child = twin->last[token]; child != BUSTER_CHECK_NONE; child = twin->previous[child])
-        {
-            if (child > token)
-            {
-                node_twin_statement(twin, child, task.stop, task.repeat);
-            }
-        }
-        node_twin_mark(twin, twin->source_labels[token]);
-    }
-    else if (role == PARSE_ROLE_CLOSE_CASE)
-    {
-        node_twin_fail(twin, NODE_TWIN_SWITCH);
-    }
-}
-
-// What the twin leaves out of `body` by its tokens and the reader's columns alone, before any of it is read: its reason
-// (NodeTwin.reason, where it had none).
-static void node_twin_gates(NodeTwin* twin, const CheckProgramBody* body)
-{
-    const CheckProgram* program = twin->program;
-    const Parser* parser = program->parser;
-    const CheckInput* input = program->input;
-    const uint32_t opening = body->opening;
-    const uint32_t closing = parser->tree.parents[opening];
-    // What the twin leaves out, by the tokens and the reader's columns.
-    for (uint32_t token = opening + 1; token < closing && twin->reason == NODE_TWIN_ATTEMPTED; token += 1)
-    {
-        const uint8_t kind = parser->tokens.kinds[token];
-        const bool declares = input->declarations[token] == token;
-        if (kind == PARSE_KIND_SWITCH)
-        {
-            node_twin_fail(twin, NODE_TWIN_SWITCH);
-        }
-        else if (kind == PARSE_KIND_ASM)
-        {
-            node_twin_fail(twin, NODE_TWIN_ASM);
-        }
-        else if (declares && (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) || check_input_linkage(input->declaration_bits, token) != 0))
-        {
-            node_twin_fail(twin, NODE_TWIN_STATIC);
-        }
-        else if (check_sparse_present(input->evaluation_nodes) && check_sparse_get(input->evaluation_nodes, token) != BUSTER_CHECK_NONE)
-        {
-            node_twin_fail(twin, NODE_TWIN_VARIABLE);
-        }
-    }
-    for (uint32_t v = 0; v < input->vla_count && twin->reason == NODE_TWIN_ATTEMPTED; v += 1)
-    {
-        if (input->vlas[v].declaration > opening && input->vlas[v].declaration < closing)
-        {
-            node_twin_fail(twin, NODE_TWIN_VARIABLE);
-        }
-    }
-    for (uint32_t c = 0; c < input->cleanup_count && twin->reason == NODE_TWIN_ATTEMPTED; c += 1)
-    {
-        if (input->cleanups[c].declaration > opening && input->cleanups[c].declaration < closing)
-        {
-            node_twin_fail(twin, NODE_TWIN_CLEANUP);
-        }
-    }
-    for (uint32_t r = 0; r < input->region_count && twin->reason == NODE_TWIN_ATTEMPTED; r += 1)
-    {
-        if (input->regions[r].opening > opening && input->regions[r].opening < closing)
-        {
-            node_twin_fail(twin, NODE_TWIN_REGION);
-        }
-    }
-}
-
-// The body's controls from its tokens (check_control_build's): whether the twin made them (its reason says why not).
-static bool node_twin_build(NodeTwin* twin, const CheckProgramBody* body)
-{
-    const CheckProgram* program = twin->program;
-    const Parser* parser = program->parser;
-    const CheckInput* input = program->input;
-    const uint32_t* parents = parser->tree.parents;
-    const uint8_t* roles = parser->tree.roles;
-    const uint32_t opening = body->opening;
-    const uint32_t closing = parents[opening];
-    const uint32_t sink = parser->tokens.count;
-    twin->opening = opening;
-    twin->closing = closing;
-    twin->depth = 0;
-    twin->label_count = 0;
-    twin->count = 0;
-    node_twin_gates(twin, body);
-    if (twin->reason == NODE_TWIN_ATTEMPTED)
-    {
-        // Each token's children, its label's number, and each terminator's declarations with an initializer, in their
-        // order: a declaration's plan is its initializer's first token's nearest terminator's.
-        const uint64_t extent = (uint64_t)closing - opening + 1;
-        memset(twin->first + opening, 0xff, extent * sizeof(uint32_t));
-        memset(twin->last + opening, 0xff, extent * sizeof(uint32_t));
-        memset(twin->plan_first + opening, 0xff, extent * sizeof(uint32_t));
-        memset(twin->plan_last + opening, 0xff, extent * sizeof(uint32_t));
-        for (uint32_t token = opening; token <= closing; token += 1)
-        {
-            const uint32_t parent = parents[token];
-            const bool inside = parent - opening <= closing - opening;
-            const uint32_t sibling = inside ? twin->last[parent] : BUSTER_CHECK_NONE;
-            twin->previous[token] = sibling;
-            twin->next[token] = BUSTER_CHECK_NONE;
-            twin->next[inside && sibling != BUSTER_CHECK_NONE ? sibling : sink] = token;
-            twin->first[inside && sibling == BUSTER_CHECK_NONE ? parent : sink] = token;
-            twin->last[inside ? parent : sink] = token;
-        }
-        for (uint32_t token = opening + 1; token < closing; token += 1)
-        {
-            if (roles[token] == PARSE_ROLE_LABEL || roles[token] == PARSE_ROLE_CLOSE_CASE)
-            {
-                twin->source_labels[token] = node_twin_label(twin);
-            }
-            const uint32_t begin = input->declarations[token] == token && check_sparse_present(input->initializer_begins) ? check_sparse_get(input->initializer_begins, token) :
-                                                                                                                             BUSTER_CHECK_NONE;
-            if (begin > opening && begin < closing)
-            {
-                uint32_t terminator = begin;
-                while (terminator > opening && terminator < closing && roles[terminator] != PARSE_ROLE_TERMINATOR)
-                {
-                    terminator = parents[terminator];
-                }
-                if (terminator > opening && terminator < closing)
-                {
-                    twin->plan_next[token] = BUSTER_CHECK_NONE;
-                    if (twin->plan_last[terminator] != BUSTER_CHECK_NONE)
-                    {
-                        twin->plan_next[twin->plan_last[terminator]] = token;
-                    }
-                    else
-                    {
-                        twin->plan_first[terminator] = token;
-                    }
-                    twin->plan_last[terminator] = token;
-                }
-                else
-                {
-                    node_twin_fail(twin, NODE_TWIN_SHAPE);
-                }
-            }
-        }
-        for (uint32_t child = twin->last[closing]; child != BUSTER_CHECK_NONE; child = twin->previous[child])
-        {
-            if (child > opening)
-            {
-                node_twin_statement(twin, child, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-            }
-        }
-        // Its tasks, then its END at its closing brace (check_control_drain's and check_control_end's).
-        for (uint32_t round = 0; round < 2 && twin->reason == NODE_TWIN_ATTEMPTED; round += 1)
-        {
-            while (twin->depth != 0 && twin->reason == NODE_TWIN_ATTEMPTED)
-            {
-                const NodeTwinTask task = twin->tasks[--twin->depth];
-                if (task.kind == BUSTER_NODE_TWIN_TASK_LABEL)
-                {
-                    twin->labels[task.token] = twin->count;
-                }
-                else if (task.kind == BUSTER_NODE_TWIN_TASK_ENTRY || task.kind == BUSTER_NODE_TWIN_TASK_TOKEN)
-                {
-                    // A token's declarations with an initializer, each an INITIALIZE unless it has static storage; or,
-                    // with none, its one expression's EVALUATE.
-                    const bool entry = task.kind == BUSTER_NODE_TWIN_TASK_ENTRY;
-                    const uint32_t plan = entry ? BUSTER_CHECK_NONE : twin->plan_first[task.token];
-                    uint32_t wrote = entry ? 1 : 0;
-                    for (uint32_t declaration = plan; declaration != BUSTER_CHECK_NONE; declaration = twin->plan_next[declaration])
-                    {
-                        wrote += 1;
-                    }
-                    wrote += !entry && plan == BUSTER_CHECK_NONE && node_twin_valued(twin, task.token);
-                    if (wrote > twin->capacity - twin->count)
-                    {
-                        node_twin_fail(twin, NODE_TWIN_ROOM);
-                    }
-                    else if (entry)
-                    {
-                        twin->entries[twin->count++] = task.entry;
-                    }
-                    else if (plan != BUSTER_CHECK_NONE)
-                    {
-                        for (uint32_t declaration = plan; declaration != BUSTER_CHECK_NONE; declaration = twin->plan_next[declaration])
-                        {
-                            twin->entries[twin->count++] = (NodeTwinControl){ .kind = CHECK_CONTROL_INITIALIZE, .token = declaration, .target = BUSTER_CHECK_NONE, .valued = false };
-                        }
-                    }
-                    else if (wrote != 0)
-                    {
-                        twin->entries[twin->count++] = (NodeTwinControl){ .kind = CHECK_CONTROL_EVALUATE, .token = task.token, .target = BUSTER_CHECK_NONE, .valued = true };
-                    }
-                }
-                else
-                {
-                    node_twin_expand(twin, task);
-                }
-            }
-            if (round == 0)
-            {
-                node_twin_entry(twin, CHECK_CONTROL_END, closing, false, BUSTER_CHECK_NONE);
-            }
-        }
-        // Each branch's and each jump's target, from its label to its control.
-        for (uint32_t i = 0; i < twin->count && twin->reason == NODE_TWIN_ATTEMPTED; i += 1)
-        {
-            NodeTwinControl* entry = twin->entries + i;
-            if (entry->kind >= CHECK_CONTROL_BRANCH_FALSE)
-            {
-                if (entry->target >= twin->label_count || twin->labels[entry->target] == BUSTER_CHECK_NONE)
-                {
-                    node_twin_fail(twin, NODE_TWIN_SHAPE);
-                }
-                else
-                {
-                    entry->target = twin->labels[entry->target];
-                }
-            }
-        }
-    }
-    return twin->reason == NODE_TWIN_ATTEMPTED;
-}
-
-// Whether the program's return flow says nothing of `body` (check_program_return_flow: a function with a result that
-// may not return one, a noreturn function that may return), by the twin's controls alone: the function is main; or it
-// has no result and is not noreturn; or its END is not reached from its first control with every branch taken both
-// ways. The program's walk folds the branches it knows and stops at an expression that never returns, so what it
-// reaches is among what this one reaches: where END is out of reach here it is there, and the program reports nothing.
-static bool node_twin_silent(NodeTwin* twin, const CheckProgramBody* body)
-{
-    const CheckProgram* program = twin->program;
-    const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
-    const bool noreturn = program->input->function_flags != NULL && (program->input->function_flags[body->declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0;
-    bool silent = body->is_main || (!noreturn && (result == 0 || type_kind(program->types, result) == BUSTER_TYPE_KIND_VOID));
-    if (!silent && twin->count != 0)
-    {
-        memset(twin->seen, 0, twin->count);
-        uint32_t head = 0;
-        uint32_t tail = 1;
-        twin->queue[0] = 0;
-        twin->seen[0] = 1;
-        while (head < tail)
-        {
-            const uint32_t index = twin->queue[head++];
-            const NodeTwinControl* entry = twin->entries + index;
-            const bool jump = entry->kind == CHECK_CONTROL_JUMP;
-            const uint32_t targets[2] = { entry->kind >= CHECK_CONTROL_BRANCH_FALSE ? entry->target : BUSTER_CHECK_NONE,
-                                          !jump && entry->kind != CHECK_CONTROL_RETURN && entry->kind != CHECK_CONTROL_END ? index + 1 : BUSTER_CHECK_NONE };
-            for (uint32_t t = 0; t < 2; t += 1)
-            {
-                if (targets[t] < twin->count && twin->seen[targets[t]] == 0)
-                {
-                    twin->seen[targets[t]] = 1;
-                    twin->queue[tail++] = targets[t];
-                }
-            }
-        }
-        silent = twin->seen[twin->count - 1] == 0;
-    }
-    return silent;
-}
-
 // The twin's controls of `body` against the program's, where the machine took the body whole before the walk
 // (`verdict`): their count and each one's kind, token, target and whether it has an expression. `tokens` are the body's.
 static void node_twin_compare(NodeTwin* twin, NodeShadow* shadow, const NodeCensusScratch* s, const CheckProgramBody* body, uint8_t verdict, uint64_t tokens)
@@ -8685,7 +8075,7 @@ static void node_twin_compare(NodeTwin* twin, NodeShadow* shadow, const NodeCens
         dropped = low > body->opening && low < closing;
     }
     twin->reason = verdict != BUSTER_NODE_ALONE_BODY_WHOLE ? NODE_TWIN_UNWHOLE : dropped ? NODE_TWIN_DROPPED : NODE_TWIN_ATTEMPTED;
-    const bool made = twin->reason == NODE_TWIN_ATTEMPTED && node_twin_build(twin, body);
+    const bool made = twin->reason == NODE_TWIN_ATTEMPTED && node_twin_build(twin, body->opening);
     shadow->twin_reasons[twin->reason] += 1;
     shadow->twin_reason_tokens[twin->reason] += tokens;
     if (made)
@@ -8706,7 +8096,7 @@ static void node_twin_compare(NodeTwin* twin, NodeShadow* shadow, const NodeCens
         shadow->twin_same += field == NULL;
         shadow->twin_different += field != NULL;
         // The return flow's silence by the twin's controls, against the program's own verdict of the body.
-        const bool silent = node_twin_silent(twin, body);
+        const bool silent = node_twin_silent(twin, body->declaration, body->is_main);
         shadow->twin_silent += silent;
         shadow->twin_silent_tokens += silent ? tokens : 0;
         shadow->twin_loud += body->return_warning != 0;
@@ -8834,6 +8224,17 @@ static void node_bodies_kept(NodeBodies* built, NodeShadow* shadow, NodeCensusSc
     {
         built->placed = false;
         built->unplaced = NODE_BODIES_CONSTANT;
+    }
+    else if (built->whole && s->twin != NULL)
+    {
+        // A statement the program may leave out for no control reaching it (#2987), by the tokens and the kept roots'
+        // facts: the program's controls have none of it where it did.
+        node_twin_children(s->twin, body->opening);
+        if (node_twin_unreached(s->twin))
+        {
+            built->placed = false;
+            built->unplaced = NODE_BODIES_REACH;
+        }
     }
     const uint64_t before = shadow->bodies_attempted[1];
     node_bodies_end(built, shadow, s, tokens, 1);
@@ -9040,7 +8441,10 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             shadow->alone_whole_walk_static += !own && reader_whole && statics;
             if (s->twin != NULL && fronted->alone_control_roots != NULL)
             {
-                s->twin->program = program;
+                s->twin->parser = program->parser;
+                s->twin->input = program->input;
+                s->twin->types = program->types;
+                s->twin->kept = fronted->alone_types;
                 s->twin->roots = fronted->alone_control_roots;
                 const uint64_t kept_before = shadow->bodies_same[1];
                 const uint64_t twin_before = shadow->twin_same;
@@ -9055,7 +8459,7 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
                 // What it takes of them: a body both comparisons attempted and found the same, its return flow proved
                 // silent.
                 s->twin->reason = NODE_TWIN_ATTEMPTED;
-                node_twin_gates(s->twin, body);
+                node_twin_gates(s->twin, body->opening);
                 const bool swept = fronted->alone_body_scanned[low] == 0 && s->twin->reason == NODE_TWIN_ATTEMPTED &&
                                    (s->bodies_kept == NULL || s->bodies_kept->reason == NODE_BODIES_ATTEMPTED);
                 const bool taken = swept && shadow->bodies_same[1] != kept_before && shadow->twin_same != twin_before && shadow->twin_silent != silent_before;
@@ -9509,10 +8913,11 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                         room = *columns[c] != NULL;
                     }
                     twin->tasks = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeTwinTask, token_room) : NULL;
+                    twin->reach = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeTwinReach, token_room) : NULL;
                     twin->entries = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeTwinControl, token_room) : NULL;
                     twin->seen = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, token_room) : NULL;
                     twin->queue = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, token_room) : NULL;
-                    room = room && twin->tasks != NULL && twin->entries != NULL && twin->seen != NULL && twin->queue != NULL;
+                    room = room && twin->tasks != NULL && twin->reach != NULL && twin->entries != NULL && twin->seen != NULL && twin->queue != NULL;
                     s.twin = room ? twin : NULL;
                 }
             }

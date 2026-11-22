@@ -7843,14 +7843,32 @@ symbol by the program's numbering.
   refused, by the tokens alone (the program's controls have no condition
   where it folded one). It is wider than what the program folds, on purpose.
   None of the bodies the program dropped a range of may be attempted.
+- **A statement no control reaches (#2987).** Since `c_check_program_reach.c`
+  the program also leaves out a statement that follows, in its block, a
+  `return`, a `break`, a `continue` or a `goto`, an `if` whose arms both end
+  so, a `while` that is constantly true or a `for` without a condition, and
+  that holds no label: it walks each block in order and reads a condition's
+  truth and a loop's own breaks from its nodes. A producer has no node, so the
+  twin asks more, by the tokens and the kept roots' facts
+  (`node_twin_unreached`): after a statement control may not leave for the
+  next (a jump; an `if` with an else whose arms both are such; a `while` whose
+  condition's root is a constant, whatever breaks it; a `for` without a
+  condition; a block or a labelled statement that ends so), the next statement
+  of the block is a labelled one, which control reaches by its label. Where
+  that holds in every block the program has nothing to leave out; where it
+  does not, the body is refused, a few the program would have kept whole among
+  them (a `while (1)` a `break` leaves, with a statement after it). The kept
+  tapes' comparison refuses by it as it refuses a constant `if`, and none of
+  the bodies the program dropped a range of may be attempted.
 - **A root's constant is its own record's.** An lvalue's record's constant
   kind is its address's, and says nothing of its value: the first run took a
   condition's operand's for the condition's and refused 415 of `sqlite3.c`'s
   bodies.
 
 **The controls from the tokens.** A twin of the program's builder
-(`check_control_build`) makes a body's controls from the parser's tree and
-tokens, the reader's columns the resolution fills (a goto's label, a
+(`check_control_build`; `c_check_node_bodies.c`, its columns by a token's
+place in the body, so a unit's bodies share them) makes a body's controls
+from the parser's tree and tokens, the reader's columns the resolution fills (a goto's label, a
 declaration's initializer's place and its storage) and, for whether a control
 has an expression, the root kept under its token. It reads no node. It makes
 a block, an `if` with or without an `else`, a `while`, a do statement, a
