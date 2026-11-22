@@ -567,8 +567,10 @@ struct NodeCensusScratch
     // The current expression's temporaries' locals, by their number on the tape, and how many it has met.
     uint32_t* temporary_locals;
     uint32_t temporary_count;
-    // --bodies: the body's entries as its controls and its roots' tapes make them (node_bodies_begin), or none.
+    // --bodies: the body's entries as its controls and its roots' tapes make them (node_bodies_begin), or none; and the
+    // same from the tapes kept before the walk (node_bodies_kept).
     struct NodeBodies* bodies;
+    struct NodeBodies* bodies_kept;
     // The current expression's records' consumers, for the fused sweep's census (node_shadow_fusion).
     uint32_t* consumers;
     // --fused: the three sweeps' tape, labels' entries and calls' records, kept for the comparison with the one sweep's
@@ -5047,21 +5049,28 @@ struct NodeShadow
     // the lowered function's. The lowered bodies; those the machine takes every popped root of; those the piece attempts,
     // their tokens and the entries it made; those whose entries are the function's and those that differ; and the bodies
     // it leaves out, in bodies and in tokens, by the first reason that does (NodeBodiesReason).
+    // Each count is two: of the comparison with the machine's tapes after the pipeline (0), and of the one with the tapes
+    // the machine with no node of the walk's kept before the walk, found by each control's token (1, with --front-alone;
+    // node_bodies_kept), whose "every root the machine's" is that machine's verdict of the body before the walk.
     bool bodies;
-    uint64_t bodies_lowered;
-    uint64_t bodies_tokens;
-    uint64_t bodies_whole;
-    uint64_t bodies_whole_tokens;
-    uint64_t bodies_attempted;
-    uint64_t bodies_attempted_tokens;
-    uint64_t bodies_entries;
-    uint64_t bodies_same;
-    uint64_t bodies_different;
-    uint64_t bodies_reasons[16];
-    uint64_t bodies_reason_tokens[16];
+    uint64_t bodies_lowered[2];
+    uint64_t bodies_tokens[2];
+    uint64_t bodies_whole[2];
+    uint64_t bodies_whole_tokens[2];
+    uint64_t bodies_attempted[2];
+    uint64_t bodies_attempted_tokens[2];
+    uint64_t bodies_entries[2];
+    uint64_t bodies_same[2];
+    uint64_t bodies_different[2];
+    uint64_t bodies_reasons[2][16];
+    uint64_t bodies_reason_tokens[2][16];
     // Those left out for a control of another kind, by the first such control's kind (CheckControlKind).
-    uint64_t bodies_other_kinds[32];
-    uint64_t bodies_listed;
+    uint64_t bodies_other_kinds[2][32];
+    uint64_t bodies_listed[2];
+    // Before the walk: the bodies the program dropped a range of (a constant `if`'s condition and the arm it skips), and
+    // those of them attempted, which must be none: a body with a condition that is any constant is refused there.
+    uint64_t bodies_dropped;
+    uint64_t bodies_dropped_attempted;
     uint64_t alone_body_tokens;
     uint64_t alone_whole_both;
     uint64_t alone_whole_both_tokens;
@@ -6007,12 +6016,17 @@ typedef enum NodeBodiesReason
     // An initialization that is not one whole value of a scalar object without a brace.
     NODE_BODIES_INITIALIZER,
     NODE_BODIES_ROOM,
+    // Before the walk alone: a control with an expression whose token has no one root kept there with its tape and what
+    // is beside it; and a condition whose root's value is a constant, which the program may fold.
+    NODE_BODIES_UNKEPT,
+    NODE_BODIES_CONSTANT,
     NODE_BODIES_REASONS,
 } NodeBodiesReason;
 
 static const char* const node_bodies_reason_names[NODE_BODIES_REASONS] = {
     "attempted",          "a-root-the-machine-does-not-take",  "a-root-of-no-control-of-its-own", "a-tracked-stack", "copies-of-parameters-without-a-prototype",
     "a-result-of-another-class", "a-control-of-another-kind", "a-return-of-another-kind",        "an-initialization-of-another-form", "no-room",
+    "a-control's-root-not-kept-before-the-walk", "a-condition-that-is-a-constant",
 };
 
 // What an entry's value is until the body's end: the stream's already; a control's index, whose label's entry it
@@ -6050,9 +6064,11 @@ struct NodeBodies
     bool placed;
     bool room;
     bool calls_same;
-    // The body's own reason (NodeBodiesReason), the kind of its first control of another kind where that is the reason, its
-    // result's class and whether it has none.
+    // The body's own reason (NodeBodiesReason), the reason of a root out of place (NODE_BODIES_STRAY, or before the walk
+    // _UNKEPT or _CONSTANT), the kind of its first control of another kind where that is the reason, its result's class
+    // and whether it has none.
     uint8_t reason;
+    uint8_t unplaced;
     uint8_t other_kind;
     uint8_t result_class;
     bool result_void;
@@ -6120,6 +6136,7 @@ static void node_bodies_begin(NodeBodies* built, const NodeCensusScratch* s, con
     built->branched = false;
     built->whole = true;
     built->placed = true;
+    built->unplaced = NODE_BODIES_STRAY;
     built->room = true;
     built->calls_same = true;
     built->result_class = class;
@@ -6212,6 +6229,70 @@ static void node_bodies_advance(NodeBodies* built, const NodeCensusScratch* s, u
     }
 }
 
+// A root's tape and what a splice reads beside it: the machine's own after the pipeline, or the one kept before the walk.
+typedef struct NodeBodiesTape NodeBodiesTape;
+struct NodeBodiesTape
+{
+    const uint8_t* kinds;
+    const uint8_t* classes;
+    const uint64_t* values;
+    // Each label's place on the tape.
+    const uint32_t* labels;
+    uint32_t entries;
+    uint32_t label_count;
+    uint32_t temporaries;
+    uint32_t calls;
+    bool branched;
+    // A global's entry holds its object, which the program's numbering makes its symbol: a tape kept before the walk.
+    bool objects;
+};
+
+// `tape` after the label of the body's control `index`: each entry's value the stream's.
+static void node_bodies_splice(NodeBodies* built, const NodeCensusScratch* s, uint32_t index, const NodeBodiesTape* tape)
+{
+    const CheckProgram* program = s->program;
+    node_bodies_advance(built, s, index);
+    const uint32_t start = built->count;
+    for (uint32_t t = 0; t < tape->entries; t += 1)
+    {
+        const uint8_t entry = tape->kinds[t];
+        const uint64_t value = tape->values[t];
+        const bool branch = entry >= BUSTER_TYPED_BRANCH_FALSE && entry <= BUSTER_TYPED_JUMP_VALUE;
+        if (node_shadow_local_kind(entry) && (value & BUSTER_NODE_MACHINE_TEMPORARY) != 0)
+        {
+            node_bodies_put(built, entry, tape->classes[t], built->temporaries + (value & ~BUSTER_NODE_MACHINE_TEMPORARY), BUSTER_NODE_BODIES_TEMPORARY);
+        }
+        else if (node_shadow_local_kind(entry))
+        {
+            node_bodies_put(built, entry, tape->classes[t], value, BUSTER_NODE_BODIES_OBJECT);
+        }
+        else if (branch && value == BUSTER_NODE_MACHINE_CONTROL_LABEL)
+        {
+            node_bodies_put(built, entry, tape->classes[t], program->controls[built->body->first + index].target, BUSTER_NODE_BODIES_LABEL);
+        }
+        else if (branch)
+        {
+            node_bodies_put(built, entry, tape->classes[t], value < tape->label_count ? (uint64_t)start + tape->labels[value] : UINT64_MAX, BUSTER_NODE_BODIES_VALUE);
+        }
+        else if (entry == BUSTER_TYPED_CALL)
+        {
+            node_bodies_put(built, entry, tape->classes[t], built->calls + value, BUSTER_NODE_BODIES_VALUE);
+        }
+        else if (tape->objects && node_shadow_global_kind(entry))
+        {
+            node_bodies_put(built, entry, tape->classes[t], value < program->object_count ? program->object_symbols[value] : UINT64_MAX, BUSTER_NODE_BODIES_VALUE);
+        }
+        else
+        {
+            node_bodies_put(built, entry, tape->classes[t], value, BUSTER_NODE_BODIES_VALUE);
+        }
+    }
+    built->temporaries += tape->temporaries;
+    built->calls += tape->calls;
+    built->rooted = true;
+    built->branched = tape->branched;
+}
+
 // The machine's tape of the root whose pop is `pop`, taken, after its control's label: each entry's value the stream's.
 static void node_bodies_root(NodeBodies* built, NodeCensusScratch* s, const NodeMachine* machine, const CheckLowerOwnerPop* pop, NodeCensusRoot context)
 {
@@ -6228,60 +6309,35 @@ static void node_bodies_root(NodeBodies* built, NodeCensusScratch* s, const Node
     built->placed = built->placed && fits;
     if (fits && built->reason == NODE_BODIES_ATTEMPTED)
     {
-        node_bodies_advance(built, s, index - body->first);
-        const uint32_t start = built->count;
-        for (uint32_t t = 0; t < machine->entry_count; t += 1)
-        {
-            const uint8_t entry = machine->kinds[t];
-            const uint64_t value = machine->tape[t];
-            const bool branch = entry >= BUSTER_TYPED_BRANCH_FALSE && entry <= BUSTER_TYPED_JUMP_VALUE;
-            if (node_shadow_local_kind(entry) && (value & BUSTER_NODE_MACHINE_TEMPORARY) != 0)
-            {
-                node_bodies_put(built, entry, machine->classes[t], built->temporaries + (value & ~BUSTER_NODE_MACHINE_TEMPORARY), BUSTER_NODE_BODIES_TEMPORARY);
-            }
-            else if (node_shadow_local_kind(entry))
-            {
-                node_bodies_put(built, entry, machine->classes[t], value, BUSTER_NODE_BODIES_OBJECT);
-            }
-            else if (branch && value == BUSTER_NODE_MACHINE_CONTROL_LABEL)
-            {
-                node_bodies_put(built, entry, machine->classes[t], program->controls[index].target, BUSTER_NODE_BODIES_LABEL);
-            }
-            else if (branch)
-            {
-                node_bodies_put(built, entry, machine->classes[t], value < machine->label_count ? (uint64_t)start + machine->label_entries[value] : UINT64_MAX,
-                                BUSTER_NODE_BODIES_VALUE);
-            }
-            else if (entry == BUSTER_TYPED_CALL)
-            {
-                node_bodies_put(built, entry, machine->classes[t], built->calls + value, BUSTER_NODE_BODIES_VALUE);
-            }
-            else
-            {
-                node_bodies_put(built, entry, machine->classes[t], value, BUSTER_NODE_BODIES_VALUE);
-            }
-        }
         // Its calls' rows' contents, at the body's rows they are.
         built->calls_same = built->calls_same && (machine->call_count == 0 || node_shadow_same_calls(machine, s->function, built->calls));
-        built->temporaries += machine->temporary_count;
-        built->calls += machine->call_count;
-        built->rooted = true;
-        built->branched = machine->count != 0 && (node_machine_record_state(machine, machine->count - 1) & BUSTER_NODE_MACHINE_BRANCHED) != 0;
+        const NodeBodiesTape tape = {
+            .kinds = machine->kinds,
+            .classes = machine->classes,
+            .values = machine->tape,
+            .labels = machine->label_entries,
+            .entries = machine->entry_count,
+            .label_count = machine->label_count,
+            .temporaries = machine->temporary_count,
+            .calls = machine->call_count,
+            .branched = machine->count != 0 && (node_machine_record_state(machine, machine->count - 1) & BUSTER_NODE_MACHINE_BRANCHED) != 0,
+        };
+        node_bodies_splice(built, s, index - body->first, &tape);
     }
 }
 
 // The body's end: its last controls, its implicit return, each value made the stream's, and the comparison with the
 // lowered function. `tokens` are the body's.
-static void node_bodies_end(NodeBodies* built, NodeShadow* shadow, NodeCensusScratch* s, uint64_t tokens)
+static void node_bodies_end(NodeBodies* built, NodeShadow* shadow, NodeCensusScratch* s, uint64_t tokens, uint32_t source)
 {
     const CheckProgram* program = s->program;
     const CheckProgramBody* body = built->body;
     const Tier0Function* function = s->function;
-    const uint8_t reason = !built->whole ? NODE_BODIES_ROOT : built->reason != NODE_BODIES_ATTEMPTED ? built->reason : !built->placed ? NODE_BODIES_STRAY : NODE_BODIES_ATTEMPTED;
-    shadow->bodies_lowered += 1;
-    shadow->bodies_tokens += tokens;
-    shadow->bodies_whole += built->whole;
-    shadow->bodies_whole_tokens += built->whole ? tokens : 0;
+    const uint8_t reason = !built->whole ? NODE_BODIES_ROOT : built->reason != NODE_BODIES_ATTEMPTED ? built->reason : !built->placed ? built->unplaced : NODE_BODIES_ATTEMPTED;
+    shadow->bodies_lowered[source] += 1;
+    shadow->bodies_tokens[source] += tokens;
+    shadow->bodies_whole[source] += built->whole;
+    shadow->bodies_whole_tokens[source] += built->whole ? tokens : 0;
     bool attempted = reason == NODE_BODIES_ATTEMPTED;
     if (attempted)
     {
@@ -6304,10 +6360,10 @@ static void node_bodies_end(NodeBodies* built, NodeShadow* shadow, NodeCensusScr
         }
         attempted = built->room;
     }
-    const uint8_t final = attempted ? NODE_BODIES_ATTEMPTED : reason != NODE_BODIES_ATTEMPTED ? reason : !built->placed ? NODE_BODIES_STRAY : NODE_BODIES_ROOM;
-    shadow->bodies_reasons[final] += 1;
-    shadow->bodies_reason_tokens[final] += tokens;
-    shadow->bodies_other_kinds[final == NODE_BODIES_CONTROL && built->other_kind < BUSTER_ARRAY_LENGTH(shadow->bodies_other_kinds) ? built->other_kind : 0] += final == NODE_BODIES_CONTROL;
+    const uint8_t final = attempted ? NODE_BODIES_ATTEMPTED : reason != NODE_BODIES_ATTEMPTED ? reason : !built->placed ? built->unplaced : NODE_BODIES_ROOM;
+    shadow->bodies_reasons[source][final] += 1;
+    shadow->bodies_reason_tokens[source][final] += tokens;
+    shadow->bodies_other_kinds[source][final == NODE_BODIES_CONTROL && built->other_kind < BUSTER_ARRAY_LENGTH(shadow->bodies_other_kinds[source]) ? built->other_kind : 0] += final == NODE_BODIES_CONTROL;
     if (attempted)
     {
         // The comparison: the counts, then each entry. A temporary's local is the function's locals less the body's
@@ -6328,15 +6384,15 @@ static void node_bodies_end(NodeBodies* built, NodeShadow* shadow, NodeCensusScr
                     mark == BUSTER_NODE_BODIES_OBJECT ? (theirs < declared && node_shadow_same_local(s, ours, theirs) ? NULL : "local") :
                     value != theirs ? (mark == BUSTER_NODE_BODIES_LABEL ? "label" : mark == BUSTER_NODE_BODIES_TEMPORARY ? "temporary" : "value") : NULL;
         }
-        shadow->bodies_attempted += 1;
-        shadow->bodies_attempted_tokens += tokens;
-        shadow->bodies_entries += built->count;
-        shadow->bodies_same += field == NULL;
-        shadow->bodies_different += field != NULL;
-        if (field != NULL && shadow->bodies_listed < node_census_list)
+        shadow->bodies_attempted[source] += 1;
+        shadow->bodies_attempted_tokens[source] += tokens;
+        shadow->bodies_entries[source] += built->count;
+        shadow->bodies_same[source] += field == NULL;
+        shadow->bodies_different[source] += field != NULL;
+        if (field != NULL && shadow->bodies_listed[source] < node_census_list)
         {
-            shadow->bodies_listed += 1;
-            printf("node-shadow: bodies difference file=%s line=%u field=%s entry=%u (the piece's entries %u, the function's %u; its locals %u, the tapes' temporaries %u)\n", s->file,
+            shadow->bodies_listed[source] += 1;
+            printf("node-shadow: bodies%s difference file=%s line=%u field=%s entry=%u (the piece's entries %u, the function's %u; its locals %u, the tapes' temporaries %u)\n", source != 0 ? " before the walk" : "", s->file,
                    node_census_line(s->pp, program->parser, body->opening), field, at, built->count, function->count, function->local_count, built->temporaries);
         }
     }
@@ -7540,38 +7596,50 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
            shadow->value_differences, shadow->entry_differences, shadow->twin_differences, shadow->row_nodes, shadow->action_nodes,
            shadow->verify ? ", verified" : "");
     printf("node-shadow: labels=%" PRIu64 " in taken expressions=%" PRIu64 "\n", shadow->labels, shadow->labeled_expressions);
-    if (shadow->bodies)
+    for (uint32_t source = 0; shadow->bodies && source < 2; source += 1)
     {
-        // The bodies' entries made from their controls and their roots' tapes (node_bodies_begin).
-        printf("node-shadow: bodies lowered=%" PRIu64 " (tokens %" PRIu64 ") the-machine-takes-every-root-of=%" PRIu64 " (tokens %" PRIu64 ", %.2f%%) attempted=%" PRIu64
+        // The bodies' entries made from their controls and their roots' tapes (node_bodies_begin): the machine's after the
+        // pipeline, then those kept before the walk where the unit has them.
+        if (source != 0 && shadow->bodies_lowered[source] == 0)
+        {
+            continue;
+        }
+        const char* where = source != 0 ? " before the walk" : "";
+        printf("node-shadow: bodies%s lowered=%" PRIu64 " (tokens %" PRIu64 ") the-machine-takes-every-root-of=%" PRIu64 " (tokens %" PRIu64 ", %.2f%%) attempted=%" PRIu64
                " (tokens %" PRIu64 ", %.2f%%; entries %" PRIu64 ") same=%" PRIu64 " different=%" PRIu64 "\n",
-               shadow->bodies_lowered, shadow->bodies_tokens, shadow->bodies_whole, shadow->bodies_whole_tokens, node_census_share(shadow->bodies_whole_tokens, shadow->bodies_tokens),
-               shadow->bodies_attempted, shadow->bodies_attempted_tokens, node_census_share(shadow->bodies_attempted_tokens, shadow->bodies_tokens), shadow->bodies_entries,
-               shadow->bodies_same, shadow->bodies_different);
-        printf("node-shadow: bodies left out, by the first reason:");
+               where, shadow->bodies_lowered[source], shadow->bodies_tokens[source], shadow->bodies_whole[source], shadow->bodies_whole_tokens[source],
+               node_census_share(shadow->bodies_whole_tokens[source], shadow->bodies_tokens[source]), shadow->bodies_attempted[source], shadow->bodies_attempted_tokens[source],
+               node_census_share(shadow->bodies_attempted_tokens[source], shadow->bodies_tokens[source]), shadow->bodies_entries[source], shadow->bodies_same[source],
+               shadow->bodies_different[source]);
+        printf("node-shadow: bodies%s left out, by the first reason:", where);
         for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
         {
-            if (shadow->bodies_reasons[reason] != 0)
+            if (shadow->bodies_reasons[source][reason] != 0)
             {
-                printf(" %s=%" PRIu64 " (tokens %" PRIu64 ", %.2f%%)", node_bodies_reason_names[reason], shadow->bodies_reasons[reason], shadow->bodies_reason_tokens[reason],
-                       node_census_share(shadow->bodies_reason_tokens[reason], shadow->bodies_tokens));
+                printf(" %s=%" PRIu64 " (tokens %" PRIu64 ", %.2f%%)", node_bodies_reason_names[reason], shadow->bodies_reasons[source][reason],
+                       shadow->bodies_reason_tokens[source][reason], node_census_share(shadow->bodies_reason_tokens[source][reason], shadow->bodies_tokens[source]));
             }
         }
         printf("\n");
-        if (shadow->bodies_reasons[NODE_BODIES_CONTROL] != 0)
+        if (shadow->bodies_reasons[source][NODE_BODIES_CONTROL] != 0)
         {
             // CheckControlKind's names, in its order.
             static const char* const kinds[] = { "evaluate", "initialize", "vla", "asm", "return", "switch", "case", "end", "stack-save", "allocate", "stack-restore", "label",
                                                  "jump-indirect", "cleanup", "result", "lifetime", "exit", "branch-false", "branch-true", "jump" };
-            printf("node-shadow: bodies left out for a control of another kind, by the first such control:");
+            printf("node-shadow: bodies%s left out for a control of another kind, by the first such control:", where);
             for (uint32_t kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
             {
-                if (shadow->bodies_other_kinds[kind] != 0)
+                if (shadow->bodies_other_kinds[source][kind] != 0)
                 {
-                    printf(" %s=%" PRIu64, kinds[kind], shadow->bodies_other_kinds[kind]);
+                    printf(" %s=%" PRIu64, kinds[kind], shadow->bodies_other_kinds[source][kind]);
                 }
             }
             printf("\n");
+        }
+        if (source != 0)
+        {
+            printf("node-shadow: bodies before the walk the program dropped a range of=%" PRIu64 " attempted-there=%" PRIu64 "\n", shadow->bodies_dropped,
+                   shadow->bodies_dropped_attempted);
         }
     }
     printf("node-shadow: fusion evaluated=%" PRIu64 " unevaluated=%" PRIu64 " (under an unevaluated consumer %" PRIu64 ") inherited-context=%" PRIu64 " (not a value %" PRIu64
@@ -7883,6 +7951,107 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
 }
 
 // Body `b`'s pops (`pops`, `count` of them), counted into `census`.
+// The same body's entries from the tapes the machine with no node of the walk's kept before the walk (`fronted`'s, its
+// verdict of the body `verdict`): each control with an expression finds its root by its own token, and the root's kept
+// tape, labels, calls, temporaries and facts stand where the machine's after the pipeline stood. The controls are the
+// program's. A body with a condition whose root's value is any constant is refused: the program may fold it, dropping
+// an arm and the locals declared there. `tokens` are the body's.
+static void node_bodies_kept(NodeBodies* built, NodeShadow* shadow, NodeCensusScratch* s, const CheckProgramBody* body, const NodeFrontShadow* fronted, uint8_t verdict,
+                             uint64_t tokens)
+{
+    const CheckProgram* program = s->program;
+    const Tier0Function* function = s->function;
+    const NodeFrontTypes* kept = fronted->alone_types;
+    const uint32_t token_count = program->parser->tokens.count;
+    node_bodies_begin(built, s, body);
+    built->whole = verdict == BUSTER_NODE_ALONE_BODY_WHOLE;
+    // Whether the program dropped a range of the body: a constant `if`'s.
+    const uint32_t closing = program->parser->tree.parents[body->opening];
+    bool dropped = false;
+    for (uint32_t r = 0; r < program->dropped_range_count && !dropped; r += 1)
+    {
+        const uint32_t low = (uint32_t)(program->dropped_ranges[r] >> 32);
+        dropped = low > body->opening && low < closing;
+    }
+    // An `if` whose condition's root, kept before the walk at its closing token, is a constant: by the tokens alone, since
+    // the program's controls have no such condition where it folded it.
+    bool constant = false;
+    for (uint32_t token = body->opening + 1; built->whole && !constant && token < closing && token < token_count; token += 1)
+    {
+        const uint32_t close = program->parser->tree.parents[token];
+        if (program->parser->tokens.kinds[token] == PARSE_KIND_IF && close < token_count && program->parser->tree.roles[close] == PARSE_ROLE_CLOSE_CONDITION)
+        {
+            const uint32_t slot = fronted->alone_control_roots[close];
+            constant = slot != 0 && slot != UINT32_MAX && slot - 1 < kept->node_capacity && kept->side_label_firsts[slot - 1] != UINT32_MAX &&
+                       (kept->side_facts[slot - 1] & BUSTER_NODE_FRONT_SIDE_CONSTANT) != 0;
+        }
+    }
+    for (uint32_t i = 0; built->whole && built->reason == NODE_BODIES_ATTEMPTED && built->placed && i < body->count; i += 1)
+    {
+        const CheckControl* control = program->controls + body->first + i;
+        const CheckControlKind kind = control->kind;
+        const bool expected = kind == CHECK_CONTROL_EVALUATE || kind == CHECK_CONTROL_BRANCH_FALSE || kind == CHECK_CONTROL_BRANCH_TRUE || kind == CHECK_CONTROL_INITIALIZE ||
+                              (kind == CHECK_CONTROL_RETURN && control->node != BUSTER_CHECK_NONE);
+        if (expected)
+        {
+            const uint32_t slot = control->token < token_count ? fronted->alone_control_roots[control->token] : 0;
+            const uint32_t root = slot - 1;
+            const bool found = slot != 0 && slot != UINT32_MAX && root < kept->node_capacity && (kept->refusals[root] & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0 &&
+                               kept->sweep_refusals[root] == NODE_MACHINE_TAKEN && kept->tape_counts[root] != UINT32_MAX && kept->side_label_firsts[root] != UINT32_MAX;
+            built->placed = found;
+            built->unplaced = NODE_BODIES_UNKEPT;
+            if (found)
+            {
+                // Its calls' rows at the body's: each one's callee, by the program's numbering, its arguments' count and
+                // classes, whether it is variadic, and no result object.
+                const uint32_t calls = kept->side_call_counts[root];
+                bool same = built->calls <= function->call_count && calls <= function->call_count - built->calls;
+                for (uint32_t k = 0; same && k < calls; k += 1)
+                {
+                    const uint64_t row = (uint64_t)kept->side_call_firsts[root] + k;
+                    const uint32_t at = built->calls + k;
+                    const uint32_t callee = kept->side_call_targets[row];
+                    const uint32_t count = kept->side_call_argument_counts[row];
+                    const uint32_t first = function->call_first[at];
+                    same = function->call_targets[at] == (callee != 0 && callee < program->object_count ? program->object_symbols[callee] : 0) &&
+                           function->call_argument_counts[at] == count && (function->call_variadic[at] != 0) == (kept->side_call_variadic[row] != 0) &&
+                           (function->call_result_objects == NULL || function->call_result_objects[at] == 0) && first <= function->argument_count &&
+                           count <= function->argument_count - first;
+                    for (uint32_t a = 0; same && a < count; a += 1)
+                    {
+                        same = function->argument_classes[first + a] == kept->side_argument_classes[kept->side_call_argument_firsts[row] + a] &&
+                               (function->argument_sizes == NULL || function->argument_sizes[first + a] == 0);
+                    }
+                }
+                built->calls_same = built->calls_same && same;
+                const uint64_t tape_first = kept->tape_firsts[root];
+                const NodeBodiesTape tape = {
+                    .kinds = kept->tape_kinds + tape_first,
+                    .classes = kept->tape_classes + tape_first,
+                    .values = kept->tape_values + tape_first,
+                    .labels = kept->side_labels + kept->side_label_firsts[root],
+                    .entries = kept->tape_counts[root],
+                    .label_count = kept->side_label_counts[root],
+                    .temporaries = kept->side_temporaries[root],
+                    .calls = calls,
+                    .branched = (kept->side_facts[root] & BUSTER_NODE_FRONT_SIDE_BRANCHED) != 0,
+                    .objects = true,
+                };
+                node_bodies_splice(built, s, i, &tape);
+            }
+        }
+    }
+    if (constant)
+    {
+        built->placed = false;
+        built->unplaced = NODE_BODIES_CONSTANT;
+    }
+    const uint64_t before = shadow->bodies_attempted[1];
+    node_bodies_end(built, shadow, s, tokens, 1);
+    shadow->bodies_dropped += dropped;
+    shadow->bodies_dropped_attempted += dropped && shadow->bodies_attempted[1] != before;
+}
+
 static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t b, const CheckLowerOwnerPop* pops, uint32_t count)
 {
     const CheckProgram* program = s->program;
@@ -7967,7 +8136,7 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
     if (s->bodies != NULL)
     {
         const uint32_t end = program->parser->tree.parents[body->opening];
-        node_bodies_end(s->bodies, census->shadow, s, end > body->opening ? (uint64_t)end - body->opening + 1 : 0);
+        node_bodies_end(s->bodies, census->shadow, s, end > body->opening ? (uint64_t)end - body->opening + 1 : 0, 0);
     }
     for (uint32_t p = 0; p < count; p += 1)
     {
@@ -8018,6 +8187,10 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             }
             shadow->alone_whole_walk += !own && reader_whole && !statics;
             shadow->alone_whole_walk_static += !own && reader_whole && statics;
+            if (s->bodies_kept != NULL && fronted->alone_control_roots != NULL && fronted->alone_types->side_label_firsts != NULL)
+            {
+                node_bodies_kept(s->bodies_kept, shadow, s, body, fronted, verdict, tokens);
+            }
             if (fronted->alone_root_tokens != NULL && fronted->alone_roots != NULL)
             {
                 // Its roots against the body's controls: each control's expression's root's token, and the roots there.
@@ -8417,10 +8590,12 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     entries = lowered.entry_tokens[b] != 0 && lowered.functions[b].count > entries ? lowered.functions[b].count : entries;
                     controls = selected.program.bodies[b].count > controls ? selected.program.bodies[b].count : controls;
                 }
-                NodeBodies* built = BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeBodies, 1);
-                room = built != NULL;
-                if (room)
+                // One for the tapes after the pipeline, one for those kept before the walk.
+                NodeBodies* builders = BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeBodies, 2);
+                room = builders != NULL;
+                for (uint32_t which = 0; room && which < 2; which += 1)
                 {
+                    NodeBodies* built = builders + which;
                     *built = (NodeBodies){ .capacity = entries + 64, .label_capacity = controls + 2 };
                     built->kinds = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, (uint64_t)built->capacity);
                     built->classes = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, (uint64_t)built->capacity);
@@ -8428,8 +8603,9 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     built->marks = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, (uint64_t)built->capacity);
                     built->labels = BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, (uint64_t)built->label_capacity);
                     room = built->kinds != NULL && built->classes != NULL && built->values != NULL && built->marks != NULL && built->labels != NULL;
-                    s.bodies = room ? built : NULL;
                 }
+                s.bodies = room ? builders : NULL;
+                s.bodies_kept = room ? builders + 1 : NULL;
             }
             if (room && shadow->facts)
             {
@@ -8863,7 +9039,7 @@ static void node_census_report(const NodeCensus* census)
 static bool node_shadow_differs(const NodeShadow* shadow)
 {
     return shadow->value_differences != 0 || shadow->entry_differences != 0 || shadow->twin_differences != 0 || shadow->fused_differences != 0 ||
-           shadow->bodies_different != 0 ||
+           shadow->bodies_different[0] != 0 || shadow->bodies_different[1] != 0 || shadow->bodies_dropped_attempted != 0 ||
            shadow->facts_differences != 0 || shadow->facts_list_differences != 0 || shadow->facts_failures != 0 ||
            shadow->facts_conversions != shadow->facts_conversions_derived || shadow->reads.same_differences != 0 || shadow->reads.misplaced != 0 ||
            shadow->front_differences != 0 || shadow->typed_differences != 0 || shadow->typed_object_differences != 0 || shadow->typed_library_differences != 0 ||

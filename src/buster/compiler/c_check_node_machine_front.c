@@ -145,6 +145,11 @@
 // tests left it silent, C and X took it) and the front left no token of it; or the first thing in the body's order that
 // stops it: a token the front left or a value it lost (an expression it makes no root of), a root the machine didn't run
 // on, T's refusal, the tests', C's or X's.
+// A kept tape's root's facts (NodeFrontTypes.side_facts): the root is branches (BUSTER_NODE_MACHINE_BRANCHED: its
+// control writes no branch of its own); and its value is a constant: a condition's truth that the program may fold
+// where it is an `if`'s (check_control_fold_truth).
+#define BUSTER_NODE_FRONT_SIDE_BRANCHED 0x01u
+#define BUSTER_NODE_FRONT_SIDE_CONSTANT 0x02u
 #define BUSTER_NODE_ALONE_BODY_WHOLE 0u
 #define BUSTER_NODE_ALONE_BODY_LEFT 1u
 #define BUSTER_NODE_ALONE_BODY_UNRUN 2u
@@ -464,6 +469,29 @@ struct NodeFrontTypes
     uint64_t* tape_values;
     uint64_t tape_count;
     uint64_t tape_capacity;
+    // What a splice reads of a kept tape beside its entries (the machine with no node of the walk's alone; null
+    // elsewhere), by root node, for a root C and X took: its labels' first place in `side_labels` (UINT32_MAX: the
+    // stores had no room for the root's) and their count, its calls' first row in the calls' columns and their count,
+    // its temporaries, and its root's facts (BUSTER_NODE_FRONT_SIDE_*). The stores: each label's place on its tape; and,
+    // a call's row, what stands for its callee's symbol (0: none), its arguments' count, their first class in
+    // `side_argument_classes`, and whether it is variadic.
+    uint32_t* side_label_firsts;
+    uint32_t* side_label_counts;
+    uint32_t* side_call_firsts;
+    uint32_t* side_call_counts;
+    uint32_t* side_temporaries;
+    uint8_t* side_facts;
+    uint32_t* side_labels;
+    uint32_t* side_call_targets;
+    uint32_t* side_call_argument_counts;
+    uint32_t* side_call_argument_firsts;
+    uint8_t* side_call_variadic;
+    uint8_t* side_argument_classes;
+    uint64_t side_label_count;
+    uint64_t side_call_count;
+    uint64_t side_argument_count;
+    uint64_t side_capacity;
+    uint64_t side_unkept;
     // A summary's side facts (BUSTER_NODE_READER_WINDOW_ROWS; null otherwise), by root node, for an expression the
     // rows take whole on the window: its references' first in their store (UINT32_MAX: none is kept for the root) and
     // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
@@ -690,6 +718,8 @@ struct NodeFrontShadow
     // By its root's node there: the token of the control a root is the expression of, as the reader has it before the walk
     // (its root's record's own: a statement's terminator, a condition's, a return's; an initialization's declaration).
     uint32_t* alone_root_tokens;
+    // By a control's token: the root it is the expression of, plus one (0: none; UINT32_MAX: several).
+    uint32_t* alone_control_roots;
     // What it read: the bodies it read whole and those it left (a body whose tokens are no run of the postorder, or past
     // its graph's room), their postorder positions, the records it made of them, and its ticks, all of it (the
     // compaction, the entries, the front, the records' copy and the machine's runs).

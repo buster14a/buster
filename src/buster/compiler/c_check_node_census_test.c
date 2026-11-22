@@ -1780,21 +1780,21 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool same = valid && !node_shadow_differs(&shadow) && shadow.bodies_different == 0 && shadow.bodies_same == shadow.bodies_attempted && shadow.bodies_entries != 0;
-    bool counts = shadow.bodies_lowered == expected->lowered && shadow.bodies_whole == expected->whole && shadow.bodies_attempted == expected->attempted;
+    const bool same = valid && !node_shadow_differs(&shadow) && shadow.bodies_different[0] == 0 && shadow.bodies_same[0] == shadow.bodies_attempted[0] && shadow.bodies_entries[0] != 0;
+    bool counts = shadow.bodies_lowered[0] == expected->lowered && shadow.bodies_whole[0] == expected->whole && shadow.bodies_attempted[0] == expected->attempted;
     for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
     {
-        counts = counts && shadow.bodies_reasons[reason] == expected->reasons[reason];
+        counts = counts && shadow.bodies_reasons[0][reason] == expected->reasons[reason];
     }
     if (!same || !counts)
     {
         fprintf(stderr, "test-checker: node-bodies: %s, %s: %" PRIu64 " bodies lowered (%u expected), every root the machine's in %" PRIu64 " (%u), %" PRIu64 " attempted (%u), %" PRIu64
                 " the lowered function's, %" PRIu64 " differ, %" PRIu64 " entries; left out:",
-                valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.bodies_lowered, expected->lowered, shadow.bodies_whole, expected->whole,
-                shadow.bodies_attempted, expected->attempted, shadow.bodies_same, shadow.bodies_different, shadow.bodies_entries);
+                valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.bodies_lowered[0], expected->lowered, shadow.bodies_whole[0], expected->whole,
+                shadow.bodies_attempted[0], expected->attempted, shadow.bodies_same[0], shadow.bodies_different[0], shadow.bodies_entries[0]);
         for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
         {
-            fprintf(stderr, " %s %" PRIu64 " (%u)", node_bodies_reason_names[reason], shadow.bodies_reasons[reason], expected->reasons[reason]);
+            fprintf(stderr, " %s %" PRIu64 " (%u)", node_bodies_reason_names[reason], shadow.bodies_reasons[0][reason], expected->reasons[reason]);
         }
         fprintf(stderr, "\n");
     }

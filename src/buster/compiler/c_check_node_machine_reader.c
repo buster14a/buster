@@ -317,6 +317,54 @@ static uint64_t node_machine_side_digest(const NodeMachine* machine)
     return digest;
 }
 
+// What a splice reads of the machine's current expression beside its tape (NodeFrontTypes.side_*), kept by its root's
+// node `root`: its labels' places, its calls' rows, its temporaries and its root's facts. A root C and X refused, or one
+// the stores have no room for, keeps none (its labels' first is UINT32_MAX).
+static void node_machine_reader_side(NodeFrontTypes* types, const NodeMachine* machine, uint32_t root, bool taken)
+{
+    uint64_t arguments = 0;
+    for (uint32_t call = 0; taken && call < machine->call_count; call += 1)
+    {
+        arguments += node_machine_record_argument_count(machine, machine->call_records[call]);
+    }
+    const bool room = taken && machine->label_count <= types->side_capacity - types->side_label_count && machine->call_count <= types->side_capacity - types->side_call_count &&
+                      arguments <= types->side_capacity - types->side_argument_count;
+    types->side_label_firsts[root] = room ? (uint32_t)types->side_label_count : UINT32_MAX;
+    types->side_label_counts[root] = room ? machine->label_count : 0;
+    types->side_call_firsts[root] = room ? (uint32_t)types->side_call_count : 0;
+    types->side_call_counts[root] = room ? machine->call_count : 0;
+    types->side_temporaries[root] = room ? machine->temporary_count : 0;
+    types->side_facts[root] = 0;
+    types->side_unkept += taken && !room;
+    if (room)
+    {
+        // The root's record is the expression's last: a statement's condition's is its truth, a constant where its
+        // operand's value is one (an lvalue's own kind is its address's, and says nothing of its value).
+        const uint32_t last = machine->count - 1;
+        const bool constant = node_machine_record_constant_kind(machine, last) != CHECK_CONSTANT_NONE;
+        types->side_facts[root] = (uint8_t)(((node_machine_record_state(machine, last) & BUSTER_NODE_MACHINE_BRANCHED) != 0 ? BUSTER_NODE_FRONT_SIDE_BRANCHED : 0u) |
+                                            (constant ? BUSTER_NODE_FRONT_SIDE_CONSTANT : 0u));
+        memcpy(types->side_labels + types->side_label_count, machine->label_entries, (uint64_t)machine->label_count * sizeof(uint32_t));
+        types->side_label_count += machine->label_count;
+        for (uint32_t call = 0; call < machine->call_count; call += 1)
+        {
+            const uint32_t r = machine->call_records[call];
+            const uint32_t count = node_machine_record_argument_count(machine, r);
+            const uint64_t row = types->side_call_count;
+            types->side_call_targets[row] = node_machine_call_target(machine, r);
+            types->side_call_argument_counts[row] = count;
+            types->side_call_argument_firsts[row] = (uint32_t)types->side_argument_count;
+            types->side_call_variadic[row] = node_machine_call_variadic(machine, r);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                types->side_argument_classes[types->side_argument_count + i] = node_machine_class(machine, node_machine_record_argument_converted(machine, r, i));
+            }
+            types->side_argument_count += count;
+            types->side_call_count += 1;
+        }
+    }
+}
+
 // The conversion's target the lowering's task gives the machine's current expression's root where its consumer converts
 // it to `to` (check_lower_expression's, which a pop logs): `to` where the root's type isn't it and the conversion writes
 // entries (check_lower_conversion_empty's test, of the types' words), 0 otherwise.
@@ -688,6 +736,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                                 memcpy(types->tape_classes + types->tape_count, machine->classes, entries);
                                 memcpy(types->tape_values + types->tape_count, machine->tape, (uint64_t)entries * sizeof(uint64_t));
                                 types->tape_count += entries;
+                            }
+                            if (types->side_label_firsts != NULL)
+                            {
+                                node_machine_reader_side(types, machine, root, taken);
                             }
                             types->swept += 1;
                             types->swept_refused[swept] += 1;
