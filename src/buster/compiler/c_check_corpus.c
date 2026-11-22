@@ -1950,7 +1950,7 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
     }
     if (equal && contents && symbols_a != NULL)
     {
-        equal = symbols_a->count == symbols_b->count;
+        equal = symbols_a->count == symbols_b->count && symbols_a->has_asm_label == symbols_b->has_asm_label;
         for (uint32_t i = 0; equal && i < symbols_a->count; i += 1)
         {
             const CheckInputSymbolPragma* p = symbols_a->records + i;

@@ -44,31 +44,6 @@ static uint32_t check_control_reach_jump(const CheckControlWriter* writer, uint3
     return jump;
 }
 
-// Whether `token` sits in a loop or switch a break leaves, or (when `loops_only`) in a loop a continue repeats.
-static bool check_control_reach_scope(const CheckControlWriter* writer, uint32_t token, bool loops_only)
-{
-    const Parser* parser = writer->parser;
-    const uint32_t count = parser->tokens.count;
-    uint32_t ancestor = token < count ? parser->tree.parents[token] : count;
-    bool found = false;
-    for (uint32_t steps = 0; !found && ancestor < count && steps < count; steps += 1)
-    {
-        const bool scope = check_control_switch_break_scope(writer, ancestor);
-        const uint8_t role = parser->tree.roles[ancestor];
-        bool loop = role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_DO;
-        if (role == PARSE_ROLE_CLOSE_CONDITION)
-        {
-            for (uint32_t child = writer->first[ancestor]; child != BUSTER_CHECK_NONE && child < ancestor; child = writer->next[child])
-            {
-                loop |= parser->tree.roles[child] == PARSE_ROLE_LEAF_RIGHT && parser->tokens.kinds[child] == PARSE_KIND_WHILE;
-            }
-        }
-        found = loops_only ? loop : scope;
-        ancestor = parser->tree.parents[ancestor];
-    }
-    return found;
-}
-
 // A break in `body` whose nearest break scope is `loop`. An inner loop's or switch's break is not one.
 static bool check_control_reach_breaks(const CheckControlWriter* writer, uint32_t loop, uint32_t body)
 {
@@ -180,8 +155,9 @@ static void check_control_reach_condition_children(const CheckControlWriter* wri
     }
 }
 
-// A statement whose completion does not depend on another statement. Sequences and ifs are not leaves.
-static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t token, bool* completes)
+// A loop or switch is a leaf here: its body is emitted as a separate task with its own jump targets.
+// The blocks, labels and if arms visited together by check_control_completes therefore share stop and repeat.
+static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat, bool* completes)
 {
     const Parser* parser = writer->parser;
     const uint8_t role = parser->tree.roles[token];
@@ -207,11 +183,11 @@ static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t 
         }
         else if (kind == PARSE_KIND_BREAK)
         {
-            result = !check_control_reach_scope(writer, jump, false);
+            result = stop == BUSTER_CHECK_NONE;
         }
         else if (kind == PARSE_KIND_CONTINUE)
         {
-            result = !check_control_reach_scope(writer, jump, true);
+            result = repeat == BUSTER_CHECK_NONE;
         }
         else if (do_body != BUSTER_CHECK_NONE)
         {
@@ -318,7 +294,7 @@ struct CheckReachFrame
 
 // Whether control leaves `token` for the next statement. `entered` is false when the statement was reached only
 // through a label inside it. An explicit stack: the call graph has no cycle here.
-static bool check_control_completes(CheckControlWriter* writer, uint32_t token, bool entered)
+static bool check_control_completes(CheckControlWriter* writer, uint32_t token, bool entered, uint32_t stop, uint32_t repeat)
 {
     CheckReachFrame stack[BUSTER_CHECK_REACH_DEPTH];
     uint32_t depth = 0;
@@ -362,7 +338,7 @@ static bool check_control_completes(CheckControlWriter* writer, uint32_t token, 
         {
             const uint8_t role = writer->parser->tree.roles[frame->token];
             bool leaf_result = true;
-            if (check_control_reach_leaf(writer, frame->token, &leaf_result))
+            if (check_control_reach_leaf(writer, frame->token, stop, repeat, &leaf_result))
             {
                 result = leaf_result;
                 have = true;
@@ -581,7 +557,7 @@ static void check_control_emit_sequence(CheckControlWriter* writer, uint32_t par
                 list[count] = child;
                 at[count] = ip ? 1 : 0;
                 count += 1;
-                ip = check_control_completes(writer, child, ip);
+                ip = check_control_completes(writer, child, ip, stop, repeat);
             }
         }
     }

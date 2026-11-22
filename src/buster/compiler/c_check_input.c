@@ -14567,6 +14567,61 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
     }
 }
 
+typedef struct CheckInputJumpContext CheckInputJumpContext;
+struct CheckInputJumpContext
+{
+    uint32_t next;
+    uint32_t loop_limit;
+    uint32_t switch_limit;
+};
+
+// Jumps arrive in source order. A for, while or switch body starts after its head's closing parenthesis,
+// so a jump in a GNU statement expression in the head can use only an enclosing body. A do body starts
+// at the do and its subtree ends before the trailing while. Only membership is needed: the furthest end
+// seen for each kind covers nested bodies without a stack.
+static bool check_input_jump_enclosed(const CheckInputReader* reader, CheckInputJumpContext* context, uint32_t jump, bool is_break)
+{
+    if (jump >= context->loop_limit && (!is_break || jump >= context->switch_limit))
+    {
+        const Parser* parser = reader->parser;
+        uint32_t first = context->next;
+        if (reader->function_body < jump && first < reader->function_body)
+        {
+            first = reader->function_body;
+        }
+        while (first < jump)
+        {
+            uint64_t heads = check_input_scan_equal(parser->tree.roles, first, jump, PARSE_ROLE_DO) |
+                             check_input_scan_equal(parser->tree.roles, first, jump, PARSE_ROLE_CLOSE_FOR) |
+                             check_input_scan_equal(parser->tree.roles, first, jump, PARSE_ROLE_CLOSE_CONDITION);
+            while (heads != 0)
+            {
+                const uint32_t head = first + (uint32_t)__builtin_ctzll(heads);
+                heads &= heads - 1;
+                const uint32_t limit = reader->ends[head] + 1;
+                if (jump < limit)
+                {
+                    const bool condition = parser->tree.roles[head] == PARSE_ROLE_CLOSE_CONDITION;
+                    const uint32_t keyword = condition ? check_input_statement_keyword(reader, head) : head;
+                    const uint8_t kind = keyword < parser->tokens.count ? parser->tokens.kinds[keyword] : PARSE_KIND_UNKNOWN;
+                    if (!condition || kind == PARSE_KIND_WHILE)
+                    {
+                        context->loop_limit = limit > context->loop_limit ? limit : context->loop_limit;
+                    }
+                    else if (kind == PARSE_KIND_SWITCH)
+                    {
+                        context->switch_limit = limit > context->switch_limit ? limit : context->switch_limit;
+                    }
+                }
+            }
+            first += jump - first < 64 ? jump - first : 64;
+        }
+        // Both jumps are valid throughout a loop. Any body starting inside it ends there or earlier.
+        context->next = context->loop_limit > jump ? context->loop_limit : jump + 1;
+    }
+    return jump < context->loop_limit || (is_break && jump < context->switch_limit);
+}
+
 // The walk from token `begin` to `end`, where it stops (the unit's count, for the whole unit). A lane's walk of a body
 // (CheckInputReader.lane) starts at its opening brace, whose activations the top level made, and ends at the token
 // after its closing brace, where its scopes end and nothing else of the token is its. It visits only the
@@ -14583,6 +14638,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     // C89's implicit declarations start at a name (check_input_starts_implicit_declaration), which a plain name's visit
     // leaves to the general one.
     const bool modern = parser->language.standard >= 1999;
+    CheckInputJumpContext jumps = { .next = begin };
     uint32_t visits = 0;
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
@@ -14921,16 +14977,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             }
             else if (kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE)
             {
-                bool loop = false;
-                for (uint32_t ancestor = parser->tree.parents[i]; ancestor < parser->tokens.count && !loop; ancestor = parser->tree.parents[ancestor])
-                {
-                    const uint8_t ancestor_role = parser->tree.roles[ancestor];
-                    const uint32_t keyword = check_input_statement_keyword(reader, ancestor);
-                    loop = (i > ancestor || ancestor_role == PARSE_ROLE_DO) && (ancestor_role == PARSE_ROLE_CLOSE_FOR || ancestor_role == PARSE_ROLE_DO ||
-                           (ancestor_role == PARSE_ROLE_CLOSE_CONDITION && keyword < parser->tokens.count &&
-                            (parser->tokens.kinds[keyword] == PARSE_KIND_WHILE || (kind == PARSE_KIND_BREAK && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH))));
-                }
-                if (!loop)
+                if (!check_input_jump_enclosed(reader, &jumps, i, kind == PARSE_KIND_BREAK))
                 {
                     const uint32_t first = reader->output->report_count;
                     check_input_report(reader, i, kind == PARSE_KIND_BREAK ? CHECK_INPUT_BREAK : CHECK_INPUT_CONTINUE);
