@@ -17484,7 +17484,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     const uint64_t graph_capacity = (uint64_t)count + (uint64_t)input->vla_capacity * 8 + (uint64_t)counts.size_queries * 4 + 1;
     CheckInputReader reader =
     {
-        .plain_declarations = fresh_output && complete_translation_unit && deferred == NULL && deferred_tokens == NULL && attested == NULL && parser->errors == 0 &&
+        // A lazy mask's bodies are never read, so the packed prefixes of the declarations that are read stand under one.
+        .plain_declarations = fresh_output && complete_translation_unit && deferred == NULL && attested == NULL && parser->errors == 0 &&
                               parser->recovered_types == NULL && !parser->options.scalar && pp->options.published_unused_only && !pp->options.predefines.debug &&
                               !pp->options.predefines.debug_modules && !pp->options.node_window && !pp->options.node_window_constants,
         .output = input,
@@ -17636,7 +17637,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
     input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
-    if (pp->options.statement_controls && valid && fresh_output && complete_translation_unit && deferred == NULL && deferred_tokens == NULL && attested == NULL && count >= 8192)
+    if (pp->options.statement_controls && valid && fresh_output && complete_translation_unit && deferred == NULL && attested == NULL && count >= 8192)
     {
         const uint64_t words = (graph_capacity + 63) / 64;
         input->discard_roots = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);

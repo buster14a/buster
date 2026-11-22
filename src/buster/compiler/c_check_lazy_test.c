@@ -177,6 +177,8 @@ static void check_test_lazy_fixture(CheckTest* test, const CheckLazyFixture* fix
                           description);
         if (planned)
         {
+            uint32_t classed[2] = { 0, 0 };
+            bool both = true;
             for (uint32_t mode = 0; mode < 2; mode += 1)
             {
                 CheckTestTypes types = { 0 };
@@ -200,6 +202,8 @@ static void check_test_lazy_fixture(CheckTest* test, const CheckLazyFixture* fix
                 const bool expected = mode == 0 ? fixture->ordinary_valid : fixture->lazy_valid;
                 snprintf(description, sizeof(description), "%s: %s checking has the required acceptance", fixture->name, mode == 0 ? "default all-body" : "selected-body");
                 check_test_expect(test, initialized && accepted == expected && !input.resource && (!adapted || graphed), description);
+                classed[mode] = adapted ? check_input_expression_classed(&input) : 0;
+                both &= accepted;
                 if (adapted && mode != 0)
                 {
                     check_test_expect(test, input.deferred_tokens != plans[path].deferred_tokens &&
@@ -230,6 +234,13 @@ static void check_test_lazy_fixture(CheckTest* test, const CheckLazyFixture* fix
                 arena_release(&checked);
                 arena_release(&retained);
                 check_test_types_close(&types);
+            }
+            if (both)
+            {
+                // The coded walk acts by class under a lazy mask as without one (#2524), at the kept tokens alone.
+                snprintf(description, sizeof(description), "%s: under the mask the coded walk acts by class at %u tokens, at %u without it", fixture->name,
+                         classed[1], classed[0]);
+                check_test_expect(test, classed[1] <= classed[0] && (classed[1] != 0 || classed[0] == 0 || plans[path].selected_count == 0), description);
             }
         }
     }

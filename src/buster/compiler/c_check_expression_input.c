@@ -2239,8 +2239,9 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
 
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
-// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
-// is acted at by the walk's visit throughout, though still compacted. A unit with overload tables (CheckInput.
+// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit, or with a
+// lazy mask beside #113's deferred bodies, is acted at by the walk's visit throughout, though still compacted; under a
+// lazy mask alone the classes act, at the tokens it keeps. A unit with overload tables (CheckInput.
 // overload_heads: one that names the overloadable attribute in an attribute list, whose every function declaration is a
 // candidate) is coded too: the class actions carry the heads through their nodes to their calls as the walk's does.
 static void check_input_expressions_coded_range(CheckInputReader* reader, uint32_t begin, uint32_t stop)
@@ -2248,7 +2249,10 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     const CheckInput* input = reader->output;
     const uint32_t count = reader->parser->tokens.count;
     // Every token's expression ends by the count, so that within these limits none is past them.
-    const bool coded = input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit >= count && input->token_count >= count;
+    // A lazily deferred body's tokens are ignored (check_input_run copies the mask), so their classes don't act and the
+    // compaction leaves them out; #113's are read later by their own walk, which the mask alone holds off.
+    const bool masked = input->deferred_tokens != NULL && reader->deferred != NULL;
+    const bool coded = input->diagnostic_limits == NULL && !masked && reader->expression_limit >= count && input->token_count >= count;
     const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
