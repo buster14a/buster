@@ -36,6 +36,9 @@ and a defined failure result. Unsupported input must be reported before code is
 published. An experimental pass may be disabled explicitly; a semantic error
 must not silently select another compiler or another tier.
 
+The opt-in [private local values experiment](tier1-private-values.md) changes
+the lowering-to-promotion handoff and measures its source-to-object cost.
+
 ## Vector and opmask handoff
 
 [#732](https://github.com/buster14a/buster/issues/732) supplies verified

@@ -566,6 +566,8 @@ struct CheckTier1Lane
     // --tier1-passes='s turned passes (BUSTER_CHECK_TIER1_PASS_*, #139), which the emission sets for each body: its own
     // pipeline and the summaries it builds for the unit's callers (c_check_tier1_inline.c) run the same passes.
     uint16_t passes;
+    // Whether an optional pass needs the source locals' storage identity before promotion.
+    bool preserve_local_storage;
 };
 
 // A body's CheckTier1Inline.held byte (#2541 step 2): one the unit stage may hold back, and one whose code waits for the

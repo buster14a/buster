@@ -196,6 +196,10 @@ clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing
 # promotion makes a block's locals undefined; each block's own locals are assigned and read under one condition, and
 # all three forms must give clang -O0's output.
 "$BUSTER_COMPILER" test-ssa-source --tier1 --generate 24 --seed 141 --lifetimes --clang clang
+# Check same-block values, loop-carried values, an escaped local and a scalar wrapper around an inlined vector body.
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --lifetimes --clang clang tests/ir-source/private-values.c
+"$BUSTER_COMPILER" --tier1 --tier1-strict --verify -DBUSTER_TEST_INLINE_VECTOR=1 tests/ir-source/private-values.c -o build/test-tier1-private-vector
+./build/test-tier1-private-vector
 == Test the preprocessor on the repository's translation units against clang [2 CPUs]
 # --clang also preprocesses each unit with clang -E, with clang's predefines for its options, and compares the
 # tokens. -target and its triple (clang's default) go to both. clang's runs go to the job's clang server where it built
