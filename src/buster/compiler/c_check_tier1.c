@@ -664,6 +664,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     // --tier1-passes='s SROA on every body, LICM and the loop vectorizer, each with an arena of its own.
     const uint32_t on = check_tier1_passes_on(lane);
     const bool sroa = (on & BUSTER_CHECK_TIER1_PASS_SROA) != 0;
+    lane->preserve_local_storage = BUSTER_TIER1_PRIVATE_VALUES && (gvn || sroa);
     const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0) |
                                        ((on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 ? 8u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 ? 16u : 0));
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
@@ -701,8 +702,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && !own)
     {
         // A vector wider than the target moves whole is taken, and split below (#1624).
-        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered) :
-                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered);
+        const IrCheck check = check_tier1_lower_body(lane, function, result_type, function->symbol_count, target->features,
+                                                          &lane->steps[0], scratch, &lowered, sources);
         outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         stage = outcome.stage;

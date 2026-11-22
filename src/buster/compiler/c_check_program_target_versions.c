@@ -1218,7 +1218,7 @@ static bool check_program_target_atoms(CheckProgramCode* code, const CheckProgra
                                               branches, &branch_count);
                 }
             }
-            const bool local = link->symbols.source[option->symbol] == BUSTER_LINK_SOURCE_PROGRAM;
+            const bool local = check_program_resolver_local(link, program, option->symbol);
             const uint8_t address[] = { 0x48, local ? 0x8d : 0x8b, 0x05, 0, 0, 0, 0, 0x59, 0xc3 };
             check_program_cpu_bytes(text, &length, address, sizeof(address));
             fixup_offsets[fixups] = length - 6;

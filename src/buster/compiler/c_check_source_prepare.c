@@ -142,6 +142,8 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
         .scalar = scalar,
         .lifetimes = request.lifetimes,
         .asm_helpers = request.asm_helpers,
+        // -c's code, -fPIC's with it (#2101).
+        .pic = request.emits,
     }) : (CheckProgramOptions){ 0 };
     prepared = prepared && check_program(&source->program, parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
     if (prepared && request.fault == CHECK_SOURCE_PROGRAM)

@@ -388,12 +388,16 @@ static void foreign_gc_test_errors(ForeignTestTally* tally)
         }
         foreign_gc_test_failure(&test, &roots, FOREIGN_GC_ERROR_INPUT, (ForeignPath)99, tally);
         const uint64_t capacity = test.results.capacity;
-        // Three maps end at byte 44; the live row, two atom queues, symbol row and fixup row end at byte 320.
-        for (uint64_t bytes = 0; bytes < 320; bytes += 1)
+        // Three maps end at byte 44. The three 64-byte bitsets start at byte 64.
+        for (uint64_t bytes = 0; bytes < 256; bytes += 1)
         {
             test.results.capacity = bytes;
             foreign_gc_test_failure(&test, &roots, FOREIGN_GC_ERROR_MEMORY, FOREIGN_PATH_VECTOR, tally);
         }
+        test.results.capacity = 256;
+        ForeignGc gc = { 0 };
+        const ForeignGcError error = foreign_gc_mark(&test.link, &roots, FOREIGN_PATH_VECTOR, &test.results, &gc);
+        foreign_test_expect(tally, error == FOREIGN_GC_ERROR_NONE && test.results.length == 44 && gc.rounds == 2, "exact capacity keeps the maps after both rounds", 0);
         test.results.capacity = capacity;
     }
     foreign_gc_test_release(&test);

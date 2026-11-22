@@ -142,7 +142,11 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
         {
             directories[system_begin + i] = foreign_string(runtime_library_directories[i]);
         }
-        undefined[0] = libraries->linker.entry.pointer != NULL ? libraries->linker.entry : foreign_string("_start");
+        // A shared library (-shared, #2101) has no entry point unless -e names one, as link-foreign's has it, and its
+        // -soname's DT_SONAME.
+        const bool shared = command->runtime_kind == RUNTIME_KIND_SHARED;
+        const bool entry = libraries->linker.entry.pointer != NULL || !shared;
+        undefined[0] = libraries->linker.entry.pointer != NULL ? libraries->linker.entry : shared ? (String8){ 0 } : foreign_string("_start");
         run.driver = (ForeignDriver){
             .command = {
                 .arguments = arguments,
@@ -150,13 +154,14 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
                 .directories = directories,
                 .directory_count = system_begin + defaults,
                 .undefined = undefined,
-                .undefined_count = 1,
+                .undefined_count = entry ? 1 : 0,
                 // The libraries' versions checked as the direct path checks them (#1590).
                 .library_versions = true,
             },
             .output = foreign_string(command->output != NULL ? command->output : "a.out"),
             .entry = undefined[0],
             .entry_given = libraries->linker.entry.pointer != NULL,
+            .soname = shared ? libraries->soname : (String8){ 0 },
             .linker = libraries->linker,
             .kind = command->runtime_kind,
             .path = command->scalar ? FOREIGN_PATH_EXACT : FOREIGN_PATH_VECTOR,

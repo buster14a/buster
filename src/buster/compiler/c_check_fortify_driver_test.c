@@ -87,6 +87,27 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
             0
         },
         {
+            // A pass_object_size(1) wrapper's bound is the closest subobject's, which the caller computes (#2983): an
+            // 8-byte copy into a 4-byte member aborts though it stays in its structure, at -O0 too.
+            "object-size wrapper's subobject bound",
+            "#define O __attribute__((overloadable))\nchar*cpy(char*d,const char*s);\n"
+            "extern inline __attribute__((gnu_inline,always_inline)) O char*cpy(char*const d __attribute__((pass_object_size(1))),const char*s)"
+            "{return __builtin___strcpy_chk(d,s,__builtin_object_size(d,1));}\n"
+            "char*cpy(char*d,const char*s){return __builtin_strcpy(d,s);}\nstruct S{char a[4];int b;};static const char*volatile s7=\"abcdefg\";\n"
+            "int main(void){struct S t;cpy(t.a,s7);return t.a[7];}",
+            128 + SIGABRT
+        },
+        {
+            // A pass_object_size(0) wrapper's is the whole object's: the same copy stays in it.
+            "object-size wrapper's object bound",
+            "#define O __attribute__((overloadable))\nchar*cpy(char*d,const char*s);\n"
+            "extern inline __attribute__((gnu_inline,always_inline)) O char*cpy(char*const d __attribute__((pass_object_size(0))),const char*s)"
+            "{return __builtin___strcpy_chk(d,s,__builtin_object_size(d,0));}\n"
+            "char*cpy(char*d,const char*s){return __builtin_strcpy(d,s);}\nstruct S{char a[4];int b;};static const char*volatile s7=\"abcdefg\";\n"
+            "int main(void){struct S t;cpy(t.a,s7);return t.a[7];}",
+            0
+        },
+        {
             "query-selected fortified native calls",
             "#if !(__has_builtin(__builtin___memcpy_chk) && __has_builtin(__builtin___memmove_chk) && __has_builtin(__builtin___mempcpy_chk) && "
             "__has_builtin(__builtin___memset_chk) && __has_builtin(__builtin___strcpy_chk) && __has_builtin(__builtin___stpcpy_chk) && "
@@ -332,9 +353,42 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         const char* source;
         int result;
         bool system_link;
+        // Clang's result differs by glibc's version, and buster's doesn't: glibc 2.39's `__glibc_fortify` wrappers (read,
+        // pread, getcwd) reach the plain call in clang's build, and 2.40's Clang overloads check them, as GCC's builds and
+        // buster's do (#2983). Clang isn't run.
+        bool clang_by_version;
+        // Clang's result differs by glibc's version, and buster's must be the same (#2983): a member's bound is its
+        // structure's through glibc 2.39's wrappers (LLVM's objectsize) and the member's through 2.40's Clang overloads
+        // (pass_object_size, which the caller computes). Clang's run, 0 or an abort, is the expected result.
+        bool as_clang;
     } header_cases[] =
     {
         { "fortified system headers", headers, 0 },
+        // The wrappers' bounds are their callers' objects (#2983): an overflow aborts, as clang's build does.
+        { "fortified memset past a local array", "#include <string.h>\nstatic volatile unsigned long n=32;int main(void){char b[8];memset(b,'x',n);return b[0];}\n",
+          128 + SIGABRT },
+        { "fortified memcpy past an element's offset",
+          "#include <string.h>\nstatic volatile unsigned long n=5;int main(void){char b[8]={0};memcpy(&b[4],\"abcdefgh\",n);return b[0];}\n", 128 + SIGABRT },
+        { "fortified strcpy past a static array", "#include <string.h>\nstatic char g[5];static const char*volatile s=\"hello world\";"
+          "int main(void){strcpy(g,s);return g[0];}\n", 128 + SIGABRT },
+        { "fortified strcpy past a structure", "#include <string.h>\nstruct S{char a[4];int b;};static const char*volatile s=\"abcdefghi\";"
+          "int main(void){struct S t;strcpy(t.a,s);return t.a[0];}\n", 128 + SIGABRT },
+        { "fortified bzero past a local array", "#define _GNU_SOURCE 1\n#include <strings.h>\nstatic volatile unsigned long n=9;"
+          "int main(void){char b[8];bzero(b,n);return b[0];}\n", 128 + SIGABRT },
+        // Within their objects: the arguments' effects once each and in order, a wrapper's call in another's argument, in
+        // an arm not taken, a void one.
+        { "fortified calls within their objects",
+          "#define _GNU_SOURCE 1\n#include <string.h>\n#include <strings.h>\n#include <unistd.h>\n#include <fcntl.h>\n"
+          "static volatile unsigned long n=8;\n"
+          "int main(int argc,char**argv){char b[2][8],d[8];int i=0;memset(b[i++],1,n);memset(b[i++],2,n);"
+          "if(i!=2||b[0][7]!=1||b[1][0]!=2)return 1;if(memcpy(d,memcpy(b[0],b[1],n),n)!=d||d[7]!=2)return 2;"
+          "char*r=argc>5?memset(d,0,64):d;if(r!=d)return 4;"
+          "bzero(d,n);if(d[7])return 5;int fd=open(\"/dev/zero\",O_RDONLY);if(fd<0||read(fd,d,n)!=8||close(fd))return 6;return 0;}\n", 0 },
+        // A member's copy that stays in its structure: as clang's build, by glibc's version.
+        { "fortified strcpy past a member within its structure", "#include <string.h>\nstruct S{char a[4];int b;};static const char*volatile s=\"abcdefg\";"
+          "int main(void){struct S t;strcpy(t.a,s);return t.a[7];}\n", 0, false, false, true },
+        { "fortified read past a local array", "#include <unistd.h>\n#include <fcntl.h>\nstatic volatile unsigned long n=16;"
+          "int main(void){char b[8];int fd=open(\"/dev/zero\",O_RDONLY);return read(fd,b,n)!=16;}\n", 128 + SIGABRT, false, true },
         { "fortified header keeps printf security flag", "#include <stdio.h>\nint main(void){char b[32],f[]=\"x%n\";int n=0;snprintf(b,sizeof b,f,&n);return 0;}\n", 128 + SIGABRT },
         // mbstowcs has two distinct extern declarations redirected to the same libc symbol. Validate its object
         // and ABI with Clang's linker independently of the direct binder's existing duplicate-name restriction.
@@ -346,12 +400,14 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         check_test_expect(test, written, "fortified system-header reproducer written");
         for (uint32_t level = 2; written && level <= 3; level += 1)
         {
-            for (uint32_t path = 0; path < 5; path += 1)
+            int expected = header_cases[c].result;
+            // Clang; buster with lazy and with eager system headers, each with and without --scalar; and buster --tier1.
+            for (uint32_t path = header_cases[c].clang_by_version ? 1 : 0; path < 6; path += 1)
             {
                 char* text = NULL;
                 char* arguments[] = { (char*)(path == 0 ? clang : executable), "-O2", level == 2 ? "-D_FORTIFY_SOURCE=2" : "-D_FORTIFY_SOURCE=3",
                                       source, "-o", header_cases[c].system_link ? object : binary, path == 0 ? "-Wno-unused-parameter" : path >= 3 ? "-fno-lazy-system-headers" : "-flazy-system-headers",
-                                      path == 1 || path == 3 ? "--scalar" : "-Wno-unused-parameter", header_cases[c].system_link ? "-c" : NULL, NULL };
+                                      path == 1 || path == 3 ? "--scalar" : path == 5 ? "--tier1" : "-Wno-unused-parameter", header_cases[c].system_link ? "-c" : NULL, NULL };
                 unlink(binary);
                 unlink(object);
                 const int compiled = check_test_driver_spawn(arguments, &text);
@@ -368,10 +424,13 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
                     free(link_text);
                 }
                 const int ran = compiled == 0 && linked == 0 ? check_test_fortify_execute(binary) : -1;
+                // Clang's result is the expected one of an as_clang case's, where it is 0 or an abort.
+                const bool clang_sets = path == 0 && header_cases[c].as_clang && (ran == 0 || ran == 128 + SIGABRT);
+                expected = clang_sets ? ran : expected;
                 char description[256];
                 snprintf(description, sizeof(description), "%s: FORTIFY_SOURCE=%u path %u compiles and exits %d (got compile %d, run %d)",
-                         header_cases[c].name, level, path, header_cases[c].result, compiled, ran);
-                check_test_expect(test, compiled == 0 && linked == 0 && ran == header_cases[c].result, description);
+                         header_cases[c].name, level, path, expected, compiled, ran);
+                check_test_expect(test, compiled == 0 && linked == 0 && ran == expected, description);
                 if (compiled != 0 && text != NULL)
                 {
                     fprintf(stderr, "%s", text);

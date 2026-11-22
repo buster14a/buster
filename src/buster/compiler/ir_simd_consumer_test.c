@@ -274,6 +274,63 @@ static void ir_simd_vector_consumer_test(IrTestTally* tally, Arena* input, Arena
     }
 }
 
+// Keep zero, two or many pointer definitions while doubling a chain of vector arithmetic.
+static void ir_simd_oracle_scratch_test(IrTestTally* tally, Arena* input, uint32_t count, uint32_t pointers)
+{
+    const uint64_t mark = input->length;
+    const uint32_t has_pointer = pointers != 0;
+    const IrSizes sizes = {
+        .instruction_count = count,
+        .block_count = 1,
+        .parameter_count = has_pointer,
+        .constant_count = has_pointer,
+        .vector_constant_count = 1,
+    };
+    IrFunction function = { 0 };
+    const uint64_t budget = (sizeof(uint32_t) + sizeof(IrSimdValue)) * count + sizeof(uint64_t) * pointers;
+    Arena limited = { .base = arena_push(input, budget, 64), .capacity = budget };
+    const bool ready = limited.base != NULL && ir_create(input, &sizes, &function) == IR_OK;
+    ir_test_expect(tally, ready, "bounded SIMD execution fixture allocates");
+    if (ready)
+    {
+        function.result_type = IR_V4I32;
+        function.block_offsets[1] = count;
+        function.vector_constants[0].words[0] = 1;
+        ir_test_instruction(&function, 0, IR_VCONST, IR_V4I32, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        if (has_pointer)
+        {
+            function.parameter_types[0] = IR_PTR;
+            function.constants[0].low = 16;
+        }
+        uint32_t node = 1;
+        uint32_t value = 0;
+        for (uint32_t p = 0; p < pointers; p += 1)
+        {
+            const uint32_t pointer = node++;
+            ir_test_instruction(&function, pointer, (p & 1) != 0 ? IR_CONST : IR_PARAM, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_test_instruction(&function, node++, IR_STORE, IR_VOID, pointer, value, BUSTER_IR_NONE);
+            value = node++;
+            ir_test_instruction(&function, value, IR_LOAD, IR_V4I32, pointer, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        const uint32_t additions = count - 1 - node;
+        for (; node < count - 1; node += 1)
+        {
+            ir_test_instruction(&function, node, IR_ADD, IR_V4I32, value, 0, BUSTER_IR_NONE);
+            value = node;
+        }
+        ir_test_instruction(&function, node, IR_RET, IR_VOID, value, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint8_t bytes[48] = { 0 };
+        const IrSimdArgument argument = { .offset = 32 };
+        IrSimdMemory memory = { .bytes = bytes, .size = sizeof(bytes) };
+        const IrSimdExecution ran = ir_simd_execute(&function, &argument, has_pointer, &memory, &limited);
+        ir_test_expect(tally, ran.status == IR_SIMD_EXECUTION_OK && ran.value.words[0] == 1 + additions && limited.length == 0,
+                       "vector chain fits its scratch bound and returns its arithmetic result");
+        ir_test_expect(tally, memory.reads == 16 * pointers && memory.writes == 16 * pointers &&
+                       (!has_pointer || (bytes[16] == 1 && bytes[32] == 1)), "constant and argument pointer producers select their own addresses");
+    }
+    arena_pop_to(input, mark);
+}
+
 static int run_ir_simd_tests(int argc, char** argv)
 {
     (void)argv;
@@ -285,6 +342,12 @@ static int run_ir_simd_tests(int argc, char** argv)
     ir_simd_scan_test(&tally);
     if (input.base != NULL && output.base != NULL && scratch.base != NULL)
     {
+        for (uint32_t count = 1024; count <= 2048; count *= 2)
+        {
+            ir_simd_oracle_scratch_test(&tally, &input, count, 0);
+            ir_simd_oracle_scratch_test(&tally, &input, count, 2);
+            ir_simd_oracle_scratch_test(&tally, &input, count, 64);
+        }
         ir_simd_mask_consumer_test(&tally, &input, &output, &scratch);
         ir_simd_vector_consumer_test(&tally, &input, &output, &scratch);
     }

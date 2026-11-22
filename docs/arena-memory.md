@@ -329,10 +329,32 @@ A pooled arena (`arena_pool`, which only the C driver's units lanes set) is
 discarded with `MADV_DONTNEED`, and its committed prefix stays writable for the
 next reservation that takes it (#1128): every `mprotect` takes the address
 space's lock for writing, which the other lanes' reservations, commits and
-page faults then wait for, while the discard takes it only for reading. Where
-commit charge is bounded, under strict overcommit (`vm.overcommit_memory` 2)
-or a finite `RLIMIT_DATA`, release reprotects the prefix inaccessible first,
-returning its charge. The pool reads both once, with the `RLIMIT_AS` share its
+page faults then wait for, while the discard takes it only for reading. The
+discard covers the writable prefix of the mapping alone (#3070,
+`arena_pool_writable`): there, and nowhere else, the arena or a copy of it
+committed, and the prefix only grows while commit isn't charged. The arena's
+own commit bounds it unless a copy committed further, which one
+`PROCMAP_QUERY` of `/proc/self/maps` (Linux 6.11) from the commit on answers,
+from the kernel's tree of mappings rather than its page tables; a kernel
+without it discards the whole mapping. A discard of a whole mapping, up to
+64 GB, made the kernel walk the page tables of each gigabyte of it that had
+been touched a 2 MB entry at a time: `unmap_page_range` was a fifth of the
+cycles of 1,336 empty units in one command on the 9700X, about 5,500 TSC
+ticks a release, where 16 MB take 2,400 and the query 340. Where commit charge
+is bounded, under strict overcommit (`vm.overcommit_memory` 2) or a finite
+`RLIMIT_DATA`, release reprotects the prefix inaccessible first, returning its
+charge, and discards the whole mapping.
+
+Clearing a released arena's pages in place and keeping them, rather than
+discarding them, was measured and rejected (#3070). Found by `PAGEMAP_SCAN`,
+the pages that hold anything are exact for a private anonymous mapping, but
+once kept they are present whether or not the next unit writes them, so each
+release cleared every page any earlier unit had touched, not those the last
+one wrote: musl's command took 9% more cycles on one lane and 15% more on four,
+most of it `memset`. An arena of tables, touched a few pages in each of its
+gigabytes, costs a scan more than its discard (124 against 89 thousand ticks
+for ten gigabytes). The record is
+[pool-discard-3070-2026-11-22](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/pool-discard-3070-2026-11-22). The pool reads both once, with the `RLIMIT_AS` share its
 thread's reservations admit (`arena_pool_limits`), and again after
 `arena_pool_release`. A reservation takes the pooled arena with the smallest
 mapping that holds its capacity with the same base pages and page layout (huge

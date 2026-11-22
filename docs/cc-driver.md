@@ -153,11 +153,22 @@ without them (a PIE by default, or `-no-pie`'s, `-static`'s or
 `-static-pie`'s), and only interposition, which an executable's definitions
 don't have, tells their code from `-fPIE`'s. Its predefined macros are Clang's for
 the same options (`__PIC__` and `__pic__` 2 or 1, no `__PIE__`, the last of the
-eight PIC and PIE options deciding). `-c -fPIC` and `-shared` still require real
-preemption and shared-library TLS support (#811): `-c` refuses `-fPIC` and
-`-fpic` by name, since its object may go into another link, and `-shared` stays
-an unknown argument, so it can't take precedence over `-no-pie` as Clang's
-does. Stack-protector and control-flow-protection requests
+eight PIC and PIE options deciding). Where the code may go into a shared library,
+`-c`'s, `-S`'s and `-shared`'s, `-fPIC` and `-fpic` make Clang's -fPIC code on
+both tiers (`CheckProgramOptions.pic`, [the checker's guide](c-checker.md)'s
+"Position-independent code"): a symbol another module may preempt, one of
+external linkage and default visibility wherever it is defined, is reached
+through its GOT slot and called through its PLT entry, a thread-local by a
+general-dynamic access (local-dynamic for the unit's own), and the unwind tables
+refer to their functions through their section's symbol, so that GNU ld, lld and
+the foreign writer link the objects into a shared library. `-shared` links one
+through the mixed path's foreign resolver and writer, with `crti.o`,
+`crtbeginS.o`, `crtendS.o` and `crtn.o`, no entry point unless `-e` names one,
+and `-Wl,-soname` (or `-h`, `-soname=`, `--soname=`) for its `DT_SONAME`; as in
+Clang's driver it takes precedence over `-static`, `-pie` and `-no-pie`, and
+`-static-pie` over it. Without `-fPIC` its code is `-fPIE`'s, which the writer
+refuses where it reaches a preemptible symbol directly or a thread-local by
+local-exec, as GNU ld refuses Clang's. Stack-protector and control-flow-protection requests
 remain explicit refusals, not ignored security flags. `-S`, `-save-temps`, general object-input
 linking and macro-only forced includes (`-imacros`) are not added here. These
 limits mean **#1113 remains open**; dependency support alone does not make Buster

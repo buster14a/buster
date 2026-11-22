@@ -521,6 +521,11 @@ typedef enum CheckWarningEventKind
     // payload.data and token its left operand's low and high 32 bits, payload.name that operand's typedef spelling (0 for
     // none). check_common_shift_sign_overflow reports it as the graph's shifts.
     CHECK_WARNING_EVENT_SHIFT_SIGN,
+    // No message: a full conditional's boolean conversion from the constant/type reader (#2899). token is the
+    // conditional's `:`, for ownership and graph deduplication; completion is its construction's end. payload.token
+    // is the warning's location and payload.data its BUSTER_CHECK_BOOL_* fact. A floating fact also keeps its source
+    // type in first_type and its positive literal's token in name; no evaluator scratch or private type escapes.
+    CHECK_WARNING_EVENT_BOOL_CONVERSION,
     // target_clones' versions (#1838, c_check_target_versions.c), each at its string literal's quote plus its offset in
     // the trimmed string (BUSTER_CHECK_TARGET_CLONES_CPU's payload): -Wignored-attributes' unsupported one,
     // -Wfunction-multiversion's duplicate one, and -Wtarget-clones-mixed-specifiers' at the first string.
@@ -660,6 +665,15 @@ typedef enum CheckWarningEventKind
 #define BUSTER_CHECK_UNUSED_EQUALITY 2u
 #define BUSTER_CHECK_UNUSED_INEQUALITY 3u
 #define BUSTER_CHECK_UNUSED_RELATIONAL 4u
+
+// CHECK_WARNING_EVENT_BOOL_CONVERSION's retained fact (payload.data). Floating facts preserve the written literal
+// and its one unary sign; only the cold diagnostic consumer reads that literal again for its displayed value.
+#define BUSTER_CHECK_BOOL_SHIFT_FALSE 1u
+#define BUSTER_CHECK_BOOL_SHIFT_TRUE 2u
+#define BUSTER_CHECK_BOOL_SHIFT_SIGNED 3u
+#define BUSTER_CHECK_BOOL_CONDITIONAL_TRUE 4u
+#define BUSTER_CHECK_BOOL_FLOAT_POSITIVE 5u
+#define BUSTER_CHECK_BOOL_FLOAT_NEGATIVE 6u
 
 // CHECK_WARNING_EVENT_TRANSPARENT_UNION's case, in its data's low byte (its bits above it), and its note's.
 #define BUSTER_CHECK_TRANSPARENT_INCOMPLETE 1u
