@@ -123,7 +123,7 @@ static void check_test_malformed_call_views(CheckTest* test)
                     for (uint32_t t = 0; metadata && t + 1 < view->tokens.count; t += 1)
                     {
                         closer |= view->tokens.kinds[t] == PARSE_KIND_R_PAREN && view->tokens.kinds[t + 1] == PARSE_KIND_SEMI &&
-                                  view->tokens.sources[t] == view->tokens.sources[t + 1];
+                                  parse_source_index(&view->tokens, t) == parse_source_index(&view->tokens, t + 1);
                     }
                     check_test_expect(test, metadata && original_errors == 1 && closer,
                                       "malformed calls: early semicolon keeps one original argument error and the synthetic closer's source");

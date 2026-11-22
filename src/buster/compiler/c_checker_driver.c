@@ -11913,7 +11913,7 @@ static void check_driver_orphan_diagnostics(const Parser* original, const Parser
                                checking->tree.roles[terminator] == PARSE_ROLE_TERMINATOR && checking->tokens.kinds[terminator] == PARSE_KIND_SEMI &&
                                semi < original->tokens.count && original->tokens.kinds[token] == PARSE_KIND_R_PAREN &&
                                (!extraneous || original->tokens.kinds[semi] == PARSE_KIND_SEMI) &&
-                               checking->tokens.sources[terminator] == original->tokens.sources[semi];
+                               parse_source_index(&checking->tokens, terminator) == parse_source_index(&original->tokens, semi);
         const bool cut = statement && input->diagnostic_limits[root] < terminator;
         bool unusable = false;
         for (uint32_t r = 0; cut && !unusable && r < input->report_count; r += 1)
