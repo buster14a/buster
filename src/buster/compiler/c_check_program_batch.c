@@ -170,7 +170,8 @@ static inline __attribute__((always_inline)) bool check_lower_value_payload(cons
     {
         const uint32_t local = check_lower_local_of(writer, object);
         const SymbolId symbol = program->object_symbols[object];
-        valid = local != BUSTER_CHECK_NONE || symbol != 0;
+        // A thread-local of position-independent code is its accessor's call (#2101, check_lower_tls), not a GLOBAL.
+        valid = local != BUSTER_CHECK_NONE || (symbol != 0 && (writer->tls_models == NULL || writer->tls_models[symbol] == 0));
         *kind = local != BUSTER_CHECK_NONE ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_GLOBAL;
         *bits = local != BUSTER_CHECK_NONE ? local : symbol;
     }

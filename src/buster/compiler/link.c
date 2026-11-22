@@ -210,9 +210,10 @@ typedef uint32_t FixupId;
 //     R_X86_64_DTPOFF32; that offset + A, which in an executable is TPOFF32's, from the end of the block.
 //   - TPOFF64, DTPOFF64: TPOFF32's and DTPOFF32's values in 8 bytes, a 64-bit immediate (movabs rax, x@tpoff) or data
 //     (DWARF's location of a TLS variable, `.quad x@dtpoff`): R_X86_64_TPOFF64, R_X86_64_DTPOFF64 (#1115).
-// Only imported objects and the assembler have the last five (libgcc.a's decimal floating point and split-stack members,
-// GCC 16's libgcc_eh.a's heap trampolines, and compilers' -S output): the code generator makes local-exec and
-// initial-exec accesses.
+// Imported objects and the assembler have the last five (libgcc.a's decimal floating point and split-stack members,
+// GCC 16's libgcc_eh.a's heap trampolines, and compilers' -S output); the code generator makes local-exec and
+// initial-exec accesses, and in position-independent code (-fPIC's, #2101) TLSGD, TLSLD and DTPOFF32 in its
+// thread-locals' accessors (check_program_emit_tls_atoms).
 #define BUSTER_LINK_FIXUP_NONE 0
 #define BUSTER_LINK_FIXUP_CALL 1
 #define BUSTER_LINK_FIXUP_CALL_GOT 2

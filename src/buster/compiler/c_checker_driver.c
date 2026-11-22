@@ -9749,6 +9749,7 @@ static Object check_driver_object_build(CheckProgramCode* code, ObjectAtomSectio
             .atom_section_count = sections != 0 ? code->link.atoms.count : 0,
             .temporary_symbols = temporary,
             .temporary_symbol_count = temporary != 0 ? code->link.symbols.count : 0,
+            .local_unwind = code->pic,
             .debug = debug,
             .debug_count = debug != NULL ? 1 : 0,
         };
@@ -9795,6 +9796,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
             .temporary_count = temporary != 0 ? code->link.symbols.count : 0,
             .source_name = { .pointer = (char*)source_path, .length = strlen(source_path) },
             .unit = 0,
+            .local_unwind = code->pic,
         };
         printed = assembly_print(&view, text, scratch);
     }
@@ -11043,6 +11045,8 @@ typedef struct CheckDriverLibraries CheckDriverLibraries;
 struct CheckDriverLibraries
 {
     LinkerOptions linker;
+    // -shared's -soname (#2101), empty for none.
+    String8 soname;
     bool* required;
     String8* names;
     uint32_t count;
@@ -13476,6 +13480,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                         .selection_census = command->selection_census,
                         .candidates = command->provisional_selection,
+                        // -fPIC's code where it may go into a shared library (#2101): -c's and -S's objects, and a
+                        // -shared link's; a link's executable takes -fPIE's.
+                        .pic = emit_object || (link && command->runtime_kind == RUNTIME_KIND_SHARED),
                         // A units lane with a unit left to take gives its scratch's pages back in whole huge pages
                         // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
@@ -14365,6 +14372,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool static_pie_requested = false;
     bool static_requested = false;
     bool no_pie_requested = false;
+    bool shared_requested = false;
     bool no_pie_last = false;
     bool syntax_only = false;
     bool quiet = false;
@@ -14617,15 +14625,20 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 }
             }
         }
-        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE || match.exact == C_OPTION_NO_PIE)
+        else if (match.exact == C_OPTION_STATIC || match.exact == C_OPTION_STATIC_PIE || match.exact == C_OPTION_PIE || match.exact == C_OPTION_NO_PIE ||
+                 match.exact == C_OPTION_SHARED)
         {
             // Clang gives -static-pie priority over -static, and either static request priority over -pie and -no-pie,
-            // irrespective of their argv order. Never downgrade a static request to shared-library resolution.
+            // irrespective of their argv order. Never downgrade a static request to shared-library resolution. -shared
+            // (#2101) is a shared library's link whatever -static, -pie and -no-pie say, as clang's driver has it, but
+            // -static-pie's executable.
             static_pie_requested |= match.exact == C_OPTION_STATIC_PIE;
             static_requested |= match.exact == C_OPTION_STATIC;
             no_pie_requested |= match.exact == C_OPTION_NO_PIE;
+            shared_requested |= match.exact == C_OPTION_SHARED;
             no_pie_last = match.exact == C_OPTION_NO_PIE || (no_pie_last && match.exact != C_OPTION_PIE);
             runtime_kind = static_pie_requested ? RUNTIME_KIND_STATIC_PIE
+                           : shared_requested   ? RUNTIME_KIND_SHARED
                            : static_requested   ? RUNTIME_KIND_STATIC
                            : no_pie_last        ? RUNTIME_KIND_NO_PIE
                                                 : RUNTIME_KIND_DYNAMIC;
@@ -14934,6 +14947,22 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             // Shared output options.
         }
+        else if (runtime_kind == RUNTIME_KIND_SHARED && (strcmp(argument, "-soname") == 0 || strcmp(argument, "-h") == 0 ||
+                                                        strncmp(argument, "-soname=", 8) == 0 || strncmp(argument, "--soname=", 9) == 0))
+        {
+            // A shared library's DT_SONAME (#2101), as link-foreign takes it; an executable's link refuses it, as before.
+            const char* equals = strchr(argument, '=');
+            const char* value = equals != NULL ? equals + 1 : i + 1 < linker_count ? linker_arguments[++i] : NULL;
+            if (value == NULL || value[0] == 0)
+            {
+                libraries.linker.error = argument;
+                libraries.linker.missing = true;
+            }
+            else
+            {
+                libraries.soname = (String8){ .pointer = (char*)value, .length = strlen(value) };
+            }
+        }
         else if (strcmp(argument, "--as-needed") == 0 || strcmp(argument, "--no-as-needed") == 0)
         {
             as_needed = strcmp(argument, "--as-needed") == 0;
@@ -14980,7 +15009,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
     }
     const bool linker_valid = linker_ready && linker_options_finish(&libraries.linker, &arena);
-    const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && !runtime_kind_is_dynamic_executable(runtime_kind);
+    // A shared library's link (#2101) is the mixed path's, whose foreign resolver and writer make one; it takes a runtime
+    // search path as a dynamic executable's does.
+    mixed_inputs = mixed_inputs || (link && runtime_kind == RUNTIME_KIND_SHARED);
+    const bool runtime_path_refused = link && linker_valid && libraries.linker.runpath.pointer != NULL && !runtime_kind_is_dynamic_executable(runtime_kind) &&
+                                      runtime_kind != RUNTIME_KIND_SHARED;
     // Clang refuses -no-pie beside -static-pie in either order when it links ("cannot specify 'nopie' along with
     // 'static-pie'"); -c and -fsyntax-only leave both unused.
     const bool pie_conflict = link && static_pie_requested && no_pie_requested;

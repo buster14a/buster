@@ -3863,10 +3863,15 @@ up, so it chooses forms that let the linker decide:
 | other TLS | initial-exec | `GOTTPOFF` |
 | a pointer in data | | `R_X86_64_64` |
 
-`-fPIC` sends data references through the GOT, and TLS through the
-general-dynamic and local-dynamic sequences. The addends are the fixups' (A
-relative to the field, "Fixups from the encoder"), and the fields themselves
-are zero, as GNU as writes them.
+`-fPIC` (#2101, [the checker's guide](c-checker.md)'s "Position-independent
+code") sends the references to a symbol another module may preempt, the
+unit's own definitions of default visibility among them, through the GOT
+(`REX_GOTPCRELX`) and their calls through `PLT32` against the symbol, and
+thread-locals through clang's general-dynamic and local-dynamic sequences
+(`TLSGD`, or `TLSLD` and `DTPOFF32`, each with its `PLT32` to
+`__tls_get_addr`), in a small function of the unit's per thread-local that the
+bodies call. The addends are the fixups' (A relative to the field, "Fixups from
+the encoder"), and the fields themselves are zero, as GNU as writes them.
 
 **Which symbol a relocation names.** Where GNU as and LLVM name a local
 target's section symbol instead of the target, so does the object writer,
@@ -3883,7 +3888,14 @@ with the target's offset in its section added to the addend:
     pool into its strings and send a reference through the section's symbol
     to the string its offset and addend land in, which is the target's only
     for an absolute reference without an addend: `lea rax, [rip + .LC0]`'s
-    addend is −4, which would land in the string before.
+    addend is −4, which would land in the string before;
+- and with `ObjectOptions.local_unwind` (`-fPIC`'s objects, #2101), an unwind
+  table's `PC32` to a global or weak symbol the object defines, an FDE's
+  initial location, is named through its section's symbol too, as GNU as
+  writes it from the function's local label: GNU ld refuses a shared object's
+  `PC32` to a symbol another module may preempt, in `.eh_frame` as in code.
+  `-S` prints a local label of its own at such a function for the FDE's
+  `.long` (`AssemblyView.local_unwind`).
 
 An object that defines an IFUNC, or has a section whose descriptor's flags
 have `SHF_GNU_RETAIN` (a retain attribute's, #147), is `ELFOSABI_GNU`, as

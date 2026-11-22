@@ -465,6 +465,16 @@ static bool check_program_cpu_symbols(CheckProgramCode* code, const CheckProgram
     return valid;
 }
 
+// Whether a resolver reaches `symbol`, a version it returns, by its address (lea, a PC32) rather than its GOT slot: one
+// the unit defines that no other module may preempt, a local or non-default-visibility one under -fPIC (#2101), as
+// check_program_object_access's column has it for the bodies.
+static bool check_program_resolver_local(const Link* link, const CheckProgram* program, SymbolId symbol)
+{
+    const uint8_t flags = link->symbols.flags[symbol];
+    const bool preemptible = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL && (flags & BUSTER_LINK_SYMBOL_VISIBILITY) == BUSTER_LINK_SYMBOL_DEFAULT;
+    return link->symbols.source[symbol] == BUSTER_LINK_SOURCE_PROGRAM && !(program->pic && preemptible);
+}
+
 // The groups' code once the functions' atoms exist (after check_program_cpu_symbols): each version's other CPUs' names
 // at its body; and for each group with a dispatcher, its resolver's atom, in `bytes`, with f.resolver, f.ifunc and f at
 // it. The resolver is clang's EmitX86MultiVersionResolver in other instructions:
@@ -599,7 +609,7 @@ static bool check_program_cpu_atoms(CheckProgramCode* code, const CheckProgram* 
                     branches[branch_count++] = length - 4;
                 }
             }
-            const bool local = link->symbols.source[option->symbol] == BUSTER_LINK_SOURCE_PROGRAM;
+            const bool local = check_program_resolver_local(link, program, option->symbol);
             const uint8_t address[] = { 0x48, local ? 0x8d : 0x8b, 0x05, 0, 0, 0, 0, 0x59, 0xc3 };
             check_program_cpu_bytes(text, &length, address, sizeof(address));
             fixup_offsets[fixups] = length - 6;
