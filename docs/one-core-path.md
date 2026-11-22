@@ -3564,6 +3564,40 @@ and the start and exit (1.4) are 5.3 before any table.
 - **For measuring:** a compile's kernel cycles counted by its own task's
   counters leave out its teardown on this kernel; the CPU's count holds it.
 
+## The redesign's fifth piece: beside a body's entries, and `-c`'s own path
+
+The fourth piece's comparisons ran in a pipeline that was not `-c`'s own, compared a lowered function's entries and not
+what its locals hold beside them, and said nothing of a body's references. This piece closes each against its oracle in
+the shadow, and counts the two sets a producer would have ([`node-machine.md`](node-machine.md), "Beside a body's
+entries").
+
+### What it measured
+
+Develop builds on this session's machine (counts);
+[the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22):
+
+| | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| units the reader takes the statement controls' path in, as in `-c` | 1 of 1 | 29 of 34 | 1 of 1 | 196 of 1,336 |
+| bodies compared there, after the pipeline and before the walk; that differ | 2,086 and 1,814; 0 | 671 and 580; 0 | 271 and 205; 0 | 1,447 and 1,287; 0 |
+| bodies whose kept tapes name the program's references; that do not | 1,814; 0 | 580; 0 | 205; 0 | 1,287; 0 |
+| a producer reads and sweeps: bodies; of the body tokens | 2,070; 45.90% | 741; 38.59% | 564; 12.11% | 1,470; 27.81% |
+| a producer takes: bodies; of the body tokens | 1,786; 32.04% | 557; 22.01% | 200; 2.66% | 1,256; 20.31% |
+
+A plain local's taken address and a temporary's class are the entries' in every attempted body (16,596 plain locals
+after the pipeline, 472 with their address taken), a volatile local's left to the lowering's setup. With `-Wall
+-Wextra` the same comparisons on fewer bodies, none differing, and 1,480, 504, 173 and 1,142 bodies taken.
+
+### What it means
+
+- **The comparisons hold in `-c`'s own pipeline,** so a compile's bodies are the ones compared.
+- **A producer's price can be said from counts.** On `sqlite3.c` it sweeps 260,940 body tokens to take 182,105. With the
+  reference machine a swept token costs about what a taken one saves (the whole bodies' reading and first run were
+  14.66 ms for 202,451 tokens, 72 ns a token, against 77.7 ns saved), so the first compile that takes bodies is slower
+  than main by about what the 78,835 tokens it sweeps and leaves cost, some 6 ms, before its own bookkeeping.
+- **What is still not a producer's:** the body's own reasons are read from the program's controls and plans, and the
+  twin's gates from the reader's columns as they stand after the walk. A producer decides before the walk.
+
 ## Step 5's allocation, and its kept rows in the compile
 
 [#2873](https://github.com/buster14a/buster/issues/2873). After the census,

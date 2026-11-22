@@ -7920,6 +7920,77 @@ rows' locations, the references, the rows of body-level silence, and the
 compile. Both comparisons still read the lowered function's locals for a
 declared object; in a compile the lowering's own setup makes them.
 
+### Beside a body's entries: its locals, its references, and `-c`'s own path
+
+The two comparisons above read three things a producer does not have, or
+that they did not look at: the pipeline they ran in was not `-c`'s own, a
+lowered function's locals hold more than its entries say, and nothing was
+said of a body's references. Each has an exact oracle in the shadow, and this
+piece compares against each. No compile changes.
+
+**Read as `-c` reads a unit.** The shadow's pipeline was `-c`'s without the
+statement controls' path (`PPOptions.statement_controls`), which the driver
+asks for and the reader takes in a complete unit of 8,192 tokens and more
+whose output is fresh: there an expression statement's value has no node of
+the walk's for its discard. `measure-node-machine --shadow
+--statement-controls` asks the reader for the path wherever a compile would
+take it (`PPOptions.statement_controls_anywhere`) and counts the units it
+took it in: `sqlite3.c`, the compiler's own source, 29 of Lua's 34 units and
+196 of musl's 1,336. With it the front's records and the machine's roots
+before the walk are not the walk's (the walk has no node for a discard), so
+the shadow's comparisons of those are left out and its pipeline asks for no
+numbering of the expressions; the bodies' comparisons, which read the lowered
+function, run as before. Both are exact there too: the same bodies, none
+differing.
+
+**A local, beside the entries.** The lowering's tasks write two things of a
+local that no entry holds: a temporary's class (`check_lower_temporary`), and
+the taken address of a plain local, which keeps it in its frame
+(`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`). In every attempted body, from the
+machine's tapes after the pipeline and from the tapes kept before the walk:
+a temporary's class is the class of the entries that read and set it, and a
+plain local's address is taken where an entry of the body is its
+`LOCAL_ADDRESS`, and nowhere else. The first run found the one exception: a
+volatile local (`BUSTER_TYPED_LOCAL_VOLATILE`), which the lowering's own
+setup marks from its declaration (Lua's `aux_close`, and musl's
+`fp_force_eval` in 52 units). The setup is the lowering's in a compile too,
+so the rule leaves a volatile local to it. In the four corpora's attempted
+bodies after the pipeline: 16,596 plain locals, 472 with their address
+taken.
+
+**Its references.** What the selection and the symbols' numbering read of a
+body is its references (`CheckProgram.references`). The objects the kept
+tapes name (a global's entry's object, a call's callee) are the program's
+references of the body, in every body attempted from the kept tapes: 1,814
+of `sqlite3.c`'s, 580, 205 and 1,287, none naming an object the program does
+not list and none with a reference no tape names. A call the program folds
+away (`0 && f()`) is in neither.
+
+**A producer's two sets,** counted under the conditions it would have and
+not by a share. What it must read and sweep: the bodies that the scan, the
+twin's gates and the body's own reasons do not refuse, each a fact of the
+tokens or the declarations (the last are read here from the program's
+controls and plans; a producer has to make each of them from the tokens).
+What it takes of them: a body both comparisons attempt and find the same,
+with its return flow proved silent.
+
+| | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| it reads and sweeps: bodies; of the body tokens | 2,070; 45.90% | 741; 38.59% | 564; 12.11% | 1,470; 27.81% |
+| it takes, the default warnings | 1,786; 32.04% | 557; 22.01% | 200; 2.66% | 1,256; 20.31% |
+| it takes, `-Wall -Wextra` | 1,480; 21.07% | 504; 18.51% | 173; 1.92% | 1,142; 14.75% |
+
+On `sqlite3.c` that is 260,940 body tokens swept and 182,105 taken: 78,835
+tokens, three in ten of what it sweeps, are in bodies it then leaves to the
+walk.
+
+**Its fixtures.** The bodies' fixture has a call the program folds away, an
+address taken and discarded, a volatile local and a `sizeof` (which the scan
+refuses); and a second one is a unit of 8,192 tokens and more, read with the
+path and without. Eleven single changes (to the taken address's rule, the
+volatile local's, a temporary's class, the named objects, each of the
+producer's conditions, and the path's two switches) each fail them.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
