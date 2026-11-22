@@ -7510,67 +7510,79 @@ static uint32_t check_lower_wrapper_of(const CheckLowerWriter* writer, uint32_t 
 // constant byte offset from its start (#2983): its object in *object and the offset in *offset. The checker's value says
 // so for an array (`buf`, `s.name`) and for a static object's address constant; for an automatic object's address it
 // keeps no constant, so `&x`, `&a[i]` and `p + i` (or `p - i`) of a constant i and a cast of a pointer are taken apart
-// here, at most `depth` operators down.
-static bool check_lower_wrapper_address(const CheckLowerWriter* writer, uint32_t node, uint32_t depth, uint32_t* object, int64_t* offset)
+// here, down their one pointer operand at most `steps` operators, each one's move added to the offset.
+static bool check_lower_wrapper_address(const CheckLowerWriter* writer, uint32_t node, uint32_t steps, uint32_t* object, int64_t* offset)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const TypeTable* types = program->types;
-    const CheckValue value = node < stream->count ? check_stream_value(stream, node) : (CheckValue){ 0 };
-    const uint8_t kind = value.type != 0 ? check_action_kind(types, value.type) : 0;
-    const bool designated = value.object != 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.fault == CHECK_FAULT_NONE &&
-                            ((value.category == CHECK_LVALUE && type_kind_is_array(kind)) || value.category == CHECK_RVALUE);
-    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
-    bool found = designated;
-    if (designated)
+    int64_t moved = 0;
+    bool found = false;
+    bool walking = true;
+    for (uint32_t step = 0; walking && step <= steps; step += 1)
     {
-        *object = value.object;
-        *offset = value.offset;
-    }
-    else if (depth != 0 && (op == CHECK_OP_ADDRESS || op == CHECK_OP_CAST || op == CHECK_OP_CONVERT) && graph->operand0[node] < stream->count)
-    {
-        // `&x`, an lvalue's address that its value designates, or a pointer's or an array's conversion to a pointer.
-        const uint32_t operand = graph->operand0[node];
-        const CheckValue lvalue = check_stream_value(stream, operand);
-        const uint8_t from = lvalue.type != 0 ? check_action_kind(types, lvalue.type) : 0;
-        const bool designator = op == CHECK_OP_ADDRESS && lvalue.category == CHECK_LVALUE && lvalue.object != 0 && lvalue.constant_kind == CHECK_CONSTANT_ADDRESS &&
-                                lvalue.fault == CHECK_FAULT_NONE;
-        if (designator)
+        const CheckValue value = node < stream->count ? check_stream_value(stream, node) : (CheckValue){ 0 };
+        const uint8_t kind = value.type != 0 ? check_action_kind(types, value.type) : 0;
+        const bool designated = value.object != 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.fault == CHECK_FAULT_NONE &&
+                                ((value.category == CHECK_LVALUE && type_kind_is_array(kind)) || value.category == CHECK_RVALUE);
+        const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+        const bool last = step == steps;
+        uint32_t next = BUSTER_CHECK_NONE;
+        if (designated)
         {
-            *object = lvalue.object;
-            *offset = lvalue.offset;
+            *object = value.object;
+            *offset = value.offset + moved;
             found = true;
         }
-        else if (op == CHECK_OP_ADDRESS ? graph->ops[operand] == CHECK_OP_SUBSCRIPT : kind == BUSTER_TYPE_KIND_POINTER && (from == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(from)))
+        else if (!last && (op == CHECK_OP_ADDRESS || op == CHECK_OP_CAST || op == CHECK_OP_CONVERT) && graph->operand0[node] < stream->count)
         {
-            found = check_lower_wrapper_address(writer, operand, depth - 1, object, offset);
+            // `&x`, an lvalue's address that its value designates; `&a[i]`; or a pointer's or an array's conversion to a
+            // pointer.
+            const uint32_t operand = graph->operand0[node];
+            const CheckValue lvalue = check_stream_value(stream, operand);
+            const uint8_t from = lvalue.type != 0 ? check_action_kind(types, lvalue.type) : 0;
+            const bool designator = op == CHECK_OP_ADDRESS && lvalue.category == CHECK_LVALUE && lvalue.object != 0 &&
+                                    lvalue.constant_kind == CHECK_CONSTANT_ADDRESS && lvalue.fault == CHECK_FAULT_NONE;
+            if (designator)
+            {
+                *object = lvalue.object;
+                *offset = lvalue.offset + moved;
+                found = true;
+            }
+            else if (op == CHECK_OP_ADDRESS ? graph->ops[operand] == CHECK_OP_SUBSCRIPT :
+                                              kind == BUSTER_TYPE_KIND_POINTER && (from == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(from)))
+            {
+                next = operand;
+            }
         }
-    }
-    else if (depth != 0 && (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_SUBSCRIPT) && graph->operand0[node] < stream->count &&
-             graph->operand1[node] < stream->count)
-    {
-        // A pointer and an integer constant, in either order for `+` and `[]`: the pointer's place moved by the constant's
-        // elements (the pointer's, or an array's that decays).
-        const uint32_t a = graph->operand0[node];
-        const uint32_t b = graph->operand1[node];
-        const TypeId a_type = check_stream_type(stream, a);
-        const bool a_pointer = a_type != 0 && (check_action_kind(types, a_type) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(check_action_kind(types, a_type)));
-        const uint32_t pointer = a_pointer || op == CHECK_OP_SUBTRACT ? a : b;
-        const uint32_t index = a_pointer || op == CHECK_OP_SUBTRACT ? b : a;
-        const CheckValue count = check_stream_value(stream, index);
-        const TypeId pointer_type = type_strip_aligned(types, check_stream_type(stream, pointer));
-        const TypeId element = pointer_type != 0 ? type_element(types, pointer_type) : 0;
-        const bool constant = count.constant_kind == CHECK_CONSTANT_INTEGER && count.fault == CHECK_FAULT_NONE && element != 0 && type_is_complete(types, element) &&
-                              (type_inherited_flags(types, element) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0 && type_size(types, element) <= UINT32_MAX;
-        const int64_t elements = (int64_t)count.integer;
-        int64_t base = 0;
-        if (constant && elements > -(INT64_C(1) << 31) && elements < (INT64_C(1) << 31) && check_lower_wrapper_address(writer, pointer, depth - 1, object, &base))
+        else if (!last && (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_SUBSCRIPT) && graph->operand0[node] < stream->count &&
+                 graph->operand1[node] < stream->count)
         {
-            const int64_t moved = elements * (int64_t)type_size(types, element);
-            *offset = op == CHECK_OP_SUBTRACT ? base - moved : base + moved;
-            found = true;
+            // A pointer and an integer constant, in either order for `+` and `[]`: the pointer's place moved by the
+            // constant's elements (the pointer's, or an array's that decays). Each move is under 2^56 bytes (fewer than
+            // 2^24 elements of at most 2^32 bytes), so `steps` of them don't overflow.
+            const uint32_t a = graph->operand0[node];
+            const uint32_t b = graph->operand1[node];
+            const TypeId a_type = check_stream_type(stream, a);
+            const bool a_pointer = a_type != 0 && (check_action_kind(types, a_type) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(check_action_kind(types, a_type)));
+            const uint32_t pointer = a_pointer || op == CHECK_OP_SUBTRACT ? a : b;
+            const uint32_t index = a_pointer || op == CHECK_OP_SUBTRACT ? b : a;
+            const CheckValue count = check_stream_value(stream, index);
+            const TypeId pointer_type = type_strip_aligned(types, check_stream_type(stream, pointer));
+            const TypeId element = pointer_type != 0 ? type_element(types, pointer_type) : 0;
+            const bool constant = count.constant_kind == CHECK_CONSTANT_INTEGER && count.fault == CHECK_FAULT_NONE && element != 0 && type_is_complete(types, element) &&
+                                  (type_inherited_flags(types, element) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0 && type_size(types, element) <= UINT32_MAX;
+            const int64_t elements = (int64_t)count.integer;
+            if (constant && elements > -(INT64_C(1) << 24) && elements < (INT64_C(1) << 24))
+            {
+                const int64_t bytes = elements * (int64_t)type_size(types, element);
+                moved += op == CHECK_OP_SUBTRACT ? -bytes : bytes;
+                next = pointer;
+            }
         }
+        walking = !found && next != BUSTER_CHECK_NONE;
+        node = next;
     }
     return found;
 }
