@@ -780,10 +780,12 @@ every token of the unit, skipped or not. Seven changes, each exact:
   kinds, roles and names alone, which its own hash covers at their places, so
   the vector path takes the declarations' bounds (64 tokens at a time), then
   their own hashes, then each one's list from the cache by its own hash and
-  length, or makes it a token at a time and keeps it. musl's command takes
+  length, or makes it 64 tokens at a time (`check_attested_list_run`, #2769)
+  and keeps it. musl's command takes
   92.7% of its declarations' lists from the cache (all but 3,036 misses and the
-  18,584 definitions), the glibc units 98.3%. The walk over the whole unit is
-  the scalar path, the twin: `measure-attested --twins` finds no difference.
+  18,584 definitions), the glibc units 98.3%. One run over the whole unit, the
+  cache unread, is the scalar path, the twin: `measure-attested --twins` finds
+  no difference.
 - **A cached declaration's tree columns are kept beside its list**
   (`check_attested_tree_columns`). In a valid parse each file-scope
   declaration is one tree whose root is its last token and has no sibling, so
@@ -870,7 +872,7 @@ What the gate still needs:
   the passes that read the tree whole (the commas', the packs', the limits').
 - **The passes** (19 and 33 ticks a skipped token): the chain and the reach
   read each name's lane state out of the first two caches, the lists' hits copy
-  from a pool there, and a definition's body still takes the lists' walk.
+  from a pool there, and a definition's lists are made, never cached.
 - **The names' arrays' clears**, 2.3 ticks a token of musl's units (0.6 of the
   glibc units'): a lane's intern table holds every unit's names.
 - **The glibc units' preprocessing**, beyond the reader, which the first part

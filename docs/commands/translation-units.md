@@ -297,9 +297,13 @@ sets, at two places: its reader's call and its unit's end.
   vector path the declarations' bounds go 64 tokens at a time, then the own
   hashes eight a register (a function definition's is zero, its body unread),
   then each declaration's list from the lane's cache by its own hash, or made
-  a token at a time and kept; `--scalar` runs the lists' walk over the unit,
-  their twin, and the own hashes' scalar loop after it. A body's list holds
-  each key and class once. `--twins` makes each unit's lists, own hashes and
+  and kept; `--scalar` makes every declaration's list in one run, the cache
+  unread, and the own hashes' scalar loop after it. A list is made 64 tokens
+  at a time (`check_attested_list_run`, #2769): each token's level is its tree
+  depth, each level's flags and bits are latches over masks, and the
+  identifiers' entries are compress-stored; a command of one source file, which
+  keeps no cache, makes its unit's in one run. A body's list holds each key and
+  class once. `--twins` makes each unit's lists, own hashes and
   literals again by the other path and counts the units whose results differ,
   and makes the reader's tree columns whole too and counts each unit whose
   cached columns differ as a contradiction. Each pass is timed by the thread's user-mode cycles, branch
