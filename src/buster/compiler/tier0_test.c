@@ -6057,6 +6057,138 @@ static Tier0Function tier0_test_stack_function(const Tier0TestEntry* entries, ui
     return function;
 }
 
+// Homes weighted by loops (#2841). tier0_loop_weights against a naive count of the back edges around each entry, on
+// random streams of up to 300 entries (none without a back edge, where every weight is 1). Then a hand-written function
+// whose 18 straight-line locals are named 5 times each and whose loop's sum and counter only 4 times each: weighted, the
+// loop's locals come first and take registers, which unweighted they lose; both paths compile it to the same code.
+static void tier0_test_loop_weights(Tier0TestTally* tally, uint64_t seed)
+{
+    Arena arena = arena_reserve(1ull << 26);
+    uint64_t random = seed ^ UINT64_C(0x6c6f6f70686f6d65);
+    uint8_t kinds[300];
+    uint8_t classes[300];
+    uint64_t values[300];
+    for (uint32_t test = 0; test < 2000; test += 1)
+    {
+        const uint32_t count = 1 + tier0_generate_below(&random, 300);
+        const uint32_t branchy = 1 + tier0_generate_below(&random, 8);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const bool branch = tier0_generate_below(&random, 16) < branchy;
+            kinds[i] = branch ? (uint8_t)(BUSTER_TYPED_BRANCH_FALSE + tier0_generate_below(&random, 4)) : (uint8_t)(1 + tier0_generate_below(&random, BUSTER_TYPED_BRANCH_FALSE - 1));
+            classes[i] = BUSTER_TYPED_CLASS_I32;
+            values[i] = branch ? tier0_generate_below(&random, count + 1) : tier0_generate_random(&random);
+        }
+        const Tier0Function function = { .kinds = kinds, .classes = classes, .values = values, .count = count };
+        const uint64_t mark = arena.length;
+        uint32_t* weights = (uint32_t*)UINTPTR_MAX;
+        const bool valid = tier0_loop_weights(&function, &arena, &weights);
+        bool any = false;
+        bool same = valid;
+        for (uint32_t e = 0; e < count; e += 1)
+        {
+            uint32_t depth = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const bool back = kinds[i] - BUSTER_TYPED_BRANCH_FALSE < 4u && values[i] <= i;
+                any |= back;
+                depth += back && values[i] <= e && e <= i ? 1 : 0;
+            }
+            const uint32_t expected = 1u << BUSTER_TIER0_LOOP_WEIGHT_SHIFT * (depth < BUSTER_TIER0_LOOP_WEIGHT_DEPTHS ? depth : BUSTER_TIER0_LOOP_WEIGHT_DEPTHS);
+            same &= weights != (uint32_t*)UINTPTR_MAX && (weights != 0 ? weights[e] : 1) == expected;
+        }
+        same &= any == (weights != 0);
+        tier0_test_expect(tally, same, "loop weights", "test %u, %u entries: the weights differ from the back edges' count", test, count);
+        arena_pop_to(&arena, mark);
+    }
+    // The function: a_k = k; a_k += a_k (18 locals); sum = 0; i = 0; do { sum += i; } while ((i = i + 1) < 100);
+    // return sum + a_0 + ... + a_17.
+    enum
+    {
+        straight = 18,
+        sum = straight,
+        counter = straight + 1,
+        locals = straight + 2,
+    };
+    Tier0TestEntry entries[200];
+    uint32_t count = 0;
+    for (uint32_t k = 0; k < straight; k += 1)
+    {
+        entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, k };
+        entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, k };
+    }
+    for (uint32_t k = 0; k < straight; k += 1)
+    {
+        entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k };
+        entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k };
+        entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 };
+        entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, k };
+    }
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, sum };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 0 };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, counter };
+    const uint32_t top = count;
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, sum };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, counter };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, sum };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, counter };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 1 };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_STORE_LOCAL, BUSTER_TYPED_CLASS_U64, counter };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, 100 };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LT, BUSTER_TYPED_CLASS_I32, 0 };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, top };
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, sum };
+    for (uint32_t k = 0; k < straight; k += 1)
+    {
+        entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, k };
+        entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 };
+    }
+    entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 };
+    uint8_t local_classes[locals];
+    uint8_t local_flags[locals];
+    memset(local_classes, BUSTER_TYPED_CLASS_U64, sizeof(local_classes));
+    memset(local_flags, 0, sizeof(local_flags));
+    uint8_t stream_kinds[200];
+    uint8_t stream_classes[200];
+    uint64_t stream_values[200];
+    const Tier0Function function = tier0_test_stack_function(entries, count, stream_kinds, stream_classes, stream_values, local_classes, local_flags, locals);
+    uint32_t* weights = 0;
+    const bool weighed = tier0_loop_weights(&function, &arena, &weights) && weights != 0;
+    for (uint32_t weighted = 0; weighted < 2 && weighed; weighted += 1)
+    {
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            uint32_t references[locals];
+            Tier0Home homes[locals];
+            uint32_t order[2 * BUSTER_TIER0_HOME_CANDIDATES];
+            if (path != 0)
+            {
+                tier0_count_references_vector(&function, weighted != 0 ? weights : 0, references);
+            }
+            else
+            {
+                tier0_count_references(&function, weighted != 0 ? weights : 0, references);
+            }
+            Tier0Frame frame = { 0 };
+            tier0_assign_homes(&function, &frame, homes, references, order, path != 0);
+            const bool loop = homes[sum].is_register != 0 && homes[counter].is_register != 0;
+            tier0_test_expect(tally, references[sum] == (weighted != 0 ? 18u : 4u) && references[counter] == (weighted != 0 ? 25u : 4u) && references[0] == 5 &&
+                                         loop == (weighted != 0),
+                              "loop weights", "%s path, %s: the sum's and counter's references %u and %u, %s registers", path != 0 ? "vector" : "scalar",
+                              weighted != 0 ? "weighted" : "unweighted", references[sum], references[counter], loop ? "in" : "not in");
+        }
+    }
+    tier0_test_expect(tally, weighed, "loop weights", "the function's loop has no weights");
+    const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+    const Tier0Code vector = tier0_compile(&function, &arena);
+    tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
+                      "loop weights", "the loop's function: errors %d and %d, or the paths differ", scalar.error, vector.error);
+    arena_release(&arena);
+}
+
 // The stack's allocations: the validator's rules for ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS; a frame pointer's depths
 // (rbp's taken from the table); then the program above, compiled by both paths, its frame pointer in its prologue, run
 // natively on 8 inputs, and against the interpreter and this file's own count.
@@ -6710,6 +6842,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_home_candidates(&tally, seed);
                 tier0_test_report("home candidates", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_loop_weights(&tally, seed);
+                tier0_test_report("loop weights", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

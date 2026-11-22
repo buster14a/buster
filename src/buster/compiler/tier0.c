@@ -4640,13 +4640,96 @@ static __attribute__((noinline)) void tier0_hidden_references(const Tier0Functio
     {
         const bool tail = function->call_tails != 0 && function->call_tails[c] != 0 && function->calls[c].result.kind == BUSTER_ABI_RESULT_MEMORY;
         const bool forwarded = function->call_result_objects != 0 && function->call_result_objects[c] == BUSTER_TIER0_RESULT_HIDDEN;
-        references[0] += tail || forwarded ? 1 : 0;
+        references[0] += (tail || forwarded) && references[0] != UINT32_MAX ? 1 : 0;
     }
 }
 
-// Each local's references: its LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL entries (`references` has local_count), and
-// the hidden pointer's that calls pass on (tier0_hidden_references).
-static void tier0_count_references(const Tier0Function* function, uint32_t* references)
+static __mmask64 tier0_lanes(int64_t first, uint32_t count);
+
+// A reference's weight grows 8 times a loop it is in (#2841), up to 4 loops deep: a home goes to the locals a loop reads,
+// not to those that straight-line code names more often but runs once (an always_inline callee's loop spliced into a
+// large caller, #1398 step 5).
+#define BUSTER_TIER0_LOOP_WEIGHT_SHIFT 3u
+#define BUSTER_TIER0_LOOP_WEIGHT_DEPTHS 4u
+
+// Each entry's reference weight (Tier0Function.count words), or none for a function without loops, where every weight is
+// 1 (`*weights` 0). A back edge is a branch or jump to its own entry or one before it; the entries from its target to it
+// are its loop's. Its target gets +1 and the entry after it -1, the branching entries 64 at a time as a mask
+// (vpshufbitqmb of their kinds in the four branches' bitset), and a prefix sum 16 entries at a time gives each entry's
+// depth, then its weight, 1 << 3 * min(depth, 4). Allocation fails only past the arena (false).
+static bool tier0_loop_weights(const Tier0Function* function, Arena* scratch, uint32_t** weights)
+{
+    _Static_assert(BUSTER_TYPED_BRANCH_TRUE == BUSTER_TYPED_BRANCH_FALSE + 1 && BUSTER_TYPED_JUMP == BUSTER_TYPED_BRANCH_FALSE + 2 && BUSTER_TYPED_JUMP_VALUE == BUSTER_TYPED_BRANCH_FALSE + 3,
+                   "the branches' kinds are one range");
+    const uint8_t* kinds = function->kinds;
+    const uint64_t* values = function->values;
+    const uint32_t count = function->count;
+    const __m512i branching = _mm512_set1_epi64((int64_t)(0xfull << BUSTER_TYPED_BRANCH_FALSE));
+    int32_t* marks = 0;
+    bool valid = true;
+    for (uint32_t first = 0; valid && first < count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, count);
+        uint64_t bits = _mm512_mask_bitshuffle_epi64_mask(lanes, branching, _mm512_maskz_loadu_epi8(lanes, kinds + first));
+        while (valid && bits != 0)
+        {
+            const uint32_t i = first + (uint32_t)__builtin_ctzll(bits);
+            bits &= bits - 1;
+            const uint64_t target = values[i];
+            if (target <= i)
+            {
+                if (marks == 0)
+                {
+                    marks = BUSTER_ARENA_PUSH_ARRAY(scratch, int32_t, count + 1);
+                    valid = marks != 0;
+                    if (valid)
+                    {
+                        memset(marks, 0, (count + 1) * sizeof(int32_t));
+                    }
+                }
+                if (valid)
+                {
+                    marks[target] += 1;
+                    marks[i + 1] -= 1;
+                }
+            }
+        }
+    }
+    if (marks != 0)
+    {
+        const __m512i zero = _mm512_setzero_si512();
+        const __m512i last = _mm512_set1_epi32(15);
+        const __m512i deepest = _mm512_set1_epi32((int32_t)BUSTER_TIER0_LOOP_WEIGHT_DEPTHS);
+        __m512i carry = zero;
+        for (uint32_t first = 0; first < count; first += 16)
+        {
+            const __mmask16 lanes = (__mmask16)tier0_lanes(first, count);
+            __m512i depth = _mm512_maskz_loadu_epi32(lanes, marks + first);
+            depth = _mm512_add_epi32(depth, _mm512_alignr_epi32(depth, zero, 15));
+            depth = _mm512_add_epi32(depth, _mm512_alignr_epi32(depth, zero, 14));
+            depth = _mm512_add_epi32(depth, _mm512_alignr_epi32(depth, zero, 12));
+            depth = _mm512_add_epi32(depth, _mm512_alignr_epi32(depth, zero, 8));
+            depth = _mm512_add_epi32(depth, carry);
+            carry = _mm512_permutexvar_epi32(last, depth);
+            const __m512i shift = _mm512_mullo_epi32(_mm512_min_epu32(depth, deepest), _mm512_set1_epi32((int32_t)BUSTER_TIER0_LOOP_WEIGHT_SHIFT));
+            _mm512_mask_storeu_epi32(marks + first, lanes, _mm512_sllv_epi32(_mm512_set1_epi32(1), shift));
+        }
+    }
+    *weights = (uint32_t*)marks;
+    return valid;
+}
+
+// A local's references plus one's weight, at most UINT32_MAX.
+static uint32_t tier0_weigh(uint32_t references, uint32_t weight)
+{
+    const uint32_t sum = references + weight;
+    return sum < weight ? UINT32_MAX : sum;
+}
+
+// Each local's weighted references (tier0_loop_weights; each 1 without `weights`): its LOCAL, LOCAL_ADDRESS, STORE_LOCAL
+// and SET_LOCAL entries (`references` has local_count), and the hidden pointer's that calls pass on
+// (tier0_hidden_references), each 1. A local has none only where nothing references it.
+static void tier0_count_references(const Tier0Function* function, const uint32_t* weights, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
     const uint64_t* values = function->values;
@@ -4654,15 +4737,17 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
     for (uint32_t i = 0; i < function->count; i += 1)
     {
         const uint8_t kind = kinds[i];
+        const uint32_t weight = weights != 0 ? weights[i] : 1;
         if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
         {
-            references[values[i]] += 1;
+            references[values[i]] = tier0_weigh(references[values[i]], weight);
         }
         else if (kind == BUSTER_TYPED_ATOMIC_CAS)
         {
             // A compare-exchange reads its address from the local its value names (#1059), so that a parameter whose
             // only use it is still has its home and its incoming register's save.
-            references[values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT] += 1;
+            const uint64_t local = values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT;
+            references[local] = tier0_weigh(references[local], weight);
         }
     }
     if (function->call_tails != 0 || function->call_result_objects != 0)
@@ -4671,12 +4756,10 @@ static void tier0_count_references(const Tier0Function* function, uint32_t* refe
     }
 }
 
-static __mmask64 tier0_lanes(int64_t first, uint32_t count);
-
 // tier0_count_references for the vector path: the referring entries of 64 at a time as a mask (vpshufbitqmb of their
-// kinds in the five kinds' bitset), then a count per set bit, without a branch per entry: an ATOMIC_CAS's local is its
+// kinds in the five kinds' bitset), then a weight per set bit, without a branch per entry: an ATOMIC_CAS's local is its
 // value's bits from BUSTER_TYPED_CAS_LOCAL_SHIFT, the others' their whole value.
-static void tier0_count_references_vector(const Tier0Function* function, uint32_t* references)
+static void tier0_count_references_vector(const Tier0Function* function, const uint32_t* weights, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
     const uint64_t* values = function->values;
@@ -4694,7 +4777,8 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
         {
             const uint32_t i = first + (uint32_t)__builtin_ctzll(bits);
             bits &= bits - 1;
-            references[values[i] >> (kinds[i] == BUSTER_TYPED_ATOMIC_CAS ? BUSTER_TYPED_CAS_LOCAL_SHIFT : 0)] += 1;
+            const uint64_t local = values[i] >> (kinds[i] == BUSTER_TYPED_ATOMIC_CAS ? BUSTER_TYPED_CAS_LOCAL_SHIFT : 0);
+            references[local] = tier0_weigh(references[local], weights != 0 ? weights[i] : 1);
         }
     }
     if (function->call_tails != 0 || function->call_result_objects != 0)
@@ -4956,11 +5040,12 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tie
 }
 
 // Phase 3: each local's home, and the frame. A parameter whose register the body doesn't touch stays in it. The other
-// locals, most referenced first (by index among equals), take the free caller-saved registers, then (referenced at
-// least twice, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
+// locals, most referenced first (by index among equals), take the free caller-saved registers, then (references worth
+// at least 2, for a push and a pop) the callee-saved ones; a floating local takes a free XMM register. The rest, and
 // every local whose address is taken, get frame slots; a parameter on the stack keeps its incoming slot, unless it takes
-// a register, which the prologue loads from that slot. `references` (local_count) holds each local's references, and
-// `order` (2 * BUSTER_TIER0_HOME_CANDIDATES) is scratch for the bounded eligible prefixes by kind.
+// a register, which the prologue loads from that slot. `references` (local_count) holds each local's references, each
+// weighted by the loops it is in (tier0_loop_weights, #2841), and `order` (2 * BUSTER_TIER0_HOME_CANDIDATES) is scratch
+// for the bounded eligible prefixes by kind.
 static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order, bool vector)
 {
     (void)vector;
@@ -11503,9 +11588,9 @@ static __attribute__((noinline, cold)) Tier0Error tier0_asm_direct(const Tier0Fu
 }
 
 // The references of the direct asm goto bodies' absorbed dispatches (tier0_asm_direct) taken from their exits'
-// temporaries, each the SET_LOCAL's and a LOCAL per label: one no other entry reads then takes no home, nor a
-// callee-saved register's save.
-static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0Function* function, const Tier0Entries* entries, uint32_t* references)
+// temporaries, each the SET_LOCAL's and a LOCAL per label, weighted as the call's entry (tier0_loop_weights): one no
+// other entry reads then takes no home, nor a callee-saved register's save.
+static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0Function* function, const Tier0Entries* entries, const uint32_t* weights, uint32_t* references)
 {
     for (uint32_t i = 0; i < function->count; i += 1)
     {
@@ -11513,7 +11598,8 @@ static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0F
         {
             const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
             const uint64_t temporary = function->values[i + 1];
-            const uint32_t taken = 1 + (body->count - body->exits - 2) / 2;
+            const uint64_t weighted = (uint64_t)(1 + (body->count - body->exits - 2) / 2) * (weights != 0 ? weights[i] : 1);
+            const uint32_t taken = weighted < UINT32_MAX ? (uint32_t)weighted : UINT32_MAX;
             references[temporary] -= references[temporary] >= taken ? taken : references[temporary];
         }
     }
@@ -11684,19 +11770,24 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
     }
     Tier0Choices choices;
     memset(&choices, 0, sizeof(choices));
+    uint32_t* weights = 0;
+    if (error == TIER0_OK && !tier0_loop_weights(function, scratch, &weights))
+    {
+        error = TIER0_ERROR_MEMORY;
+    }
     if (error == TIER0_OK)
     {
         if (BUSTER_VECTOR_PATH(vector))
         {
-            tier0_count_references_vector(function, references);
+            tier0_count_references_vector(function, weights, references);
         }
         else
         {
-            tier0_count_references(function, references);
+            tier0_count_references(function, weights, references);
         }
         if (entries->direct != 0)
         {
-            tier0_direct_references(function, entries, references);
+            tier0_direct_references(function, entries, weights, references);
         }
         frame.object_parameters = tier0_object_parameters(function);
         tier0_assign_homes(function, &frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
