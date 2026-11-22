@@ -232,6 +232,8 @@ static bool ir_switch_table_match(const IrFunction* f, uint32_t terminator, cons
         const bool arm = valid && ir_switch_table_constants(f, f->block_offsets[block], last);
         returns += arm && op == IR_RET;
         const bool branch = arm && op == IR_BR;
+        // An arm that branches to itself would be its own J.
+        valid = valid && (!branch || f->a[last] != block);
         branches += branch;
         mixed |= branch && join != BUSTER_IR_NONE && f->a[last] != join;
         join = branch ? f->a[last] : join;

@@ -309,14 +309,12 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
 
 #include "c_check_tier1_debug.c"
 
-// The emitting body's jump tables (#3298), as ir_switch_tables takes them, in `scratch`: the lowering's tables of
-// `function` (CheckLowerTable, sorted by function, which a binary search finds), each with the symbol its dispatch's
-// GLOBAL_ADDRESS entry names in the typed stream, which the IR's symbol_addr keeps. `*first` is the first one's index in
-// the lowering's tables. None where the lane has no lowering or `function` isn't the emitting body's.
-static IrSwitchTable* check_tier1_switch_tables(const CheckTier1Lane* lane, const Tier0Function* function, Arena* scratch, uint32_t* count, uint32_t* first)
+// Body `b`'s jump tables (#3298), as ir_switch_tables takes them, in `scratch`: the lowering's tables of `function`
+// (CheckLowerTable, sorted by function, which a binary search finds), each with the symbol its dispatch's GLOBAL_ADDRESS
+// entry names in the typed stream, which the IR's symbol_addr keeps. `*first` is the first one's index in the
+// lowering's tables. None where there is no lowering or `function` isn't body `b`'s.
+static IrSwitchTable* check_tier1_switch_tables(const CheckProgramLowered* lowered, uint32_t b, const Tier0Function* function, Arena* scratch, uint32_t* count, uint32_t* first)
 {
-    const CheckProgramLowered* lowered = lane->lowered;
-    const uint32_t b = lane->emitting_body;
     const bool body = lowered != NULL && function->table_count != 0 && lowered->tables != NULL && function == lowered->functions + b;
     const uint32_t total = body ? lowered->table_count : 0;
     uint32_t low = 0;
@@ -367,8 +365,8 @@ struct CheckTier1PassesInput
     bool summary;
     // An original or inlined C body with a potentially volatile indirect access (#2805).
     bool vectorize_volatile;
-    // The body's jump tables (#3298, check_tier1_switch_tables), which a switch of constants' dispatch may load: none in
-    // a summary, whose own code a body with tables doesn't take.
+    // The body's jump tables (#3298, check_tier1_switch_tables), which a switch of constants' dispatch may load. A
+    // summary converts them too: no caller expands a body with labels, so a summary of one is its own code alone.
     const IrSwitchTable* tables;
     uint32_t table_count;
 };
@@ -577,7 +575,8 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     }
     // #3298's switches whose arms only give constants (ir_switch_table.c): the dispatch's jump table holds the constants
     // and the dispatch loads its value, in steps[6] with if-conversion's result, whose arms it then leaves to the
-    // optimizer's cleanup. The values live in steps[6] until the code is published (check_tier1_compile).
+    // optimizer's cleanup. The values live in steps[6] until the code is published (check_tier1_compile), or a summary
+    // copies them (check_tier1_inline_build).
     if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 && input->table_count != 0)
     {
         IrSwitchTableResult switched = { 0 };
@@ -753,12 +752,14 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const bool member = inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count;
     CheckTier1Passes passes = { 0 };
     uint32_t inlined_calls = 0;
-    // The body's jump tables, where #3298's pass may make a switch's of values (check_tier1_switch_tables): a body with
-    // any takes its own pipeline, as the summary skips the pass (no caller expands a body with labels).
+    // The body's jump tables, where #3298's pass may make a switch's of values (check_tier1_switch_tables), the same list
+    // a candidate's summary converts them by (check_tier1_inline_build).
     uint32_t table_count = 0;
     uint32_t table_first = 0;
-    const IrSwitchTable* tables = stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 ? check_tier1_switch_tables(lane, function, scratch, &table_count, &table_first) : NULL;
-    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL && table_count == 0 &&
+    const IrSwitchTable* tables = stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 ?
+                                      check_tier1_switch_tables(lane->lowered, lane->emitting_body, function, scratch, &table_count, &table_first) :
+                                      NULL;
+    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
                      check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
     // A candidate whose callers should expand every call of it makes no code now (#2541 step 2, check_tier1_inline_held):
     // it waits for the emission's last pass, which makes it where some emitted code still refers to it.

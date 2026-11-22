@@ -836,6 +836,13 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     {
         const uint64_t output_mark = output->length;
         const uint64_t analyses_mark = analyses->length;
+        // The body's jump tables (#3298), which its own code takes from the summary converted: no caller expands a body
+        // with labels.
+        uint32_t table_count = 0;
+        uint32_t table_first = 0;
+        const IrSwitchTable* tables = (check_tier1_passes_on(lane) & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 ?
+                                          check_tier1_switch_tables(inlining->lowered, b, function, scratch, &table_count, &table_first) :
+                                          NULL;
         // The lowering is verified as it is made, and an expansion SROA took by SROA.
         const CheckTier1PassesInput input = {
             .function = &expanded,
@@ -843,10 +850,27 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
             .unexpanded = changed && inlined != 0 ? &lowered : NULL,
             .summary = true,
             .vectorize_volatile = vectorize_volatile,
+            .tables = tables,
+            .table_count = table_count,
         };
         IrVerifiedRevision revision = { 0 };
         const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, scalar, certify, NULL, &lane->steps[2], output, analyses, &revision, &summary.passes);
         built = outcome.stage == CHECK_TIER1_COMPILED;
+        // The converted tables' values, from steps[6], which is emptied below, into the summary's arena.
+        int32_t** values = built && summary.passes.tables_converted != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, int32_t*, table_count) : NULL;
+        built = built && (summary.passes.tables_converted == 0 || values != NULL);
+        for (uint32_t k = 0; built && values != NULL && k < table_count; k += 1)
+        {
+            const int32_t* converted = summary.passes.table_values[k];
+            values[k] = converted != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, int32_t, tables[k].count) : NULL;
+            built = converted == NULL || values[k] != NULL;
+            if (built && converted != NULL)
+            {
+                memcpy(values[k], converted, (uint64_t)tables[k].count * sizeof(int32_t));
+            }
+        }
+        summary.passes.table_values = values;
+        summary.passes.tables_converted = built ? summary.passes.tables_converted : 0;
         summary.inlined = summary.passes.unexpanded ? 0 : inlined;
         const IrFunction* optimized = &summary.passes.optimized.function;
         if (built && inlining->sites[b] != 0 && check_tier1_inline_size(inlining, b, optimized->instruction_count))
