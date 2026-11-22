@@ -2239,8 +2239,9 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
 
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
-// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
-// is acted at by the walk's visit throughout, though still compacted. A unit with overload tables (CheckInput.
+// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit, or with a
+// lazy mask beside #113's deferred bodies, is acted at by the walk's visit throughout, though still compacted; under a
+// lazy mask alone the classes act, at the tokens it keeps. A unit with overload tables (CheckInput.
 // overload_heads: one that names the overloadable attribute in an attribute list, whose every function declaration is a
 // candidate) is coded too: the class actions carry the heads through their nodes to their calls as the walk's does.
 static void check_input_expressions_coded_range(CheckInputReader* reader, uint32_t begin, uint32_t stop)

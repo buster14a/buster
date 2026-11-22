@@ -7584,6 +7584,38 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
             }
         }
     }
+    // A unit past the statement heads' 8,192 tokens with a body masked (#2524): the reader's coded walk, its packed
+    // declarations and its statement heads run under the mask, and the lazy object is still the eager one.
+    static char generated[65536];
+    static const char* const masked_header = "#pragma GCC system_header\n"
+                                             "static int unused(int x) { int t = x * 2; while (t > 9) { t -= 3; } return t; }\n"
+                                             "static int used(int x) { return x + 1; }\n";
+    uint32_t length = (uint32_t)snprintf(generated, sizeof(generated), "#include \"lazy.h\"\n");
+    for (uint32_t k = 0; k < 200 && length + 512 < sizeof(generated); k += 1)
+    {
+        length += (uint32_t)snprintf(generated + length, sizeof(generated) - length,
+                                     "int f%u(int a, int* p)\n{\n    int s = used(a) + %u;\n    unsigned long n = 0;\n"
+                                     "    for (int i = 0; i < a; i += 1)\n    {\n        s += p[i] > s ? p[i] - 1 : -s;\n        n += (unsigned long)s;\n"
+                                     "        if (s == %u) { break; }\n    }\n    while (n > 7) { n >>= 1; }\n    return s + (int)n;\n}\n",
+                                     k, k, k * 3);
+    }
+    const bool masked_ready = parse_test_write(header, masked_header, strlen(masked_header)) && parse_test_write(source, generated, length);
+    check_test_expect(test, masked_ready, "the masked unit's fixture is written");
+    const uint32_t masked_routes = executable != NULL ? 4 : 2;
+    for (uint32_t route = 0; masked_ready && route < masked_routes; route += 1)
+    {
+        bool accepted[2] = { false, false };
+        for (uint32_t mode = 0; mode < 2; mode += 1)
+        {
+            unlink(objects[mode]);
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const bool ran = check_test_driver_run(route >= 2 ? executable : NULL, source, objects[mode], (route & 1) != 0, false, false, mode != 0, &checked, &warnings);
+            accepted[mode] = ran && !checked.rejected && warnings == 0;
+        }
+        check_test_expect(test, accepted[0] && accepted[1] && check_test_driver_files_equal(objects[0], objects[1]),
+                          "a long unit with a masked body: eager and lazy modes produce byte-identical objects");
+    }
     unlink(objects[0]);
     unlink(objects[1]);
     unlink(source);
