@@ -766,6 +766,29 @@ static __attribute__((noinline)) void check_test_sparse_next(CheckTest* test)
     arena_release(&owned);
 }
 
+// Read a bounded declarator directly, including valid suffixes of longer specifier lists.
+static uint8_t check_test_named_prefix(const uint8_t* kinds, const uint8_t* roles, uint32_t token, uint32_t count)
+{
+    uint32_t name = token;
+    while (name < count && name - token < 4 && roles[name] == PARSE_ROLE_SPECIFIER)
+    {
+        name += 1;
+    }
+    const uint32_t specifiers = name - token;
+    while (name < count && name - token - specifiers < 2 && kinds[name] == PARSE_KIND_STAR)
+    {
+        name += 1;
+    }
+    if (specifiers == 0 || name + 1 >= count || kinds[name] != PARSE_KIND_IDENTIFIER || roles[name] != PARSE_ROLE_OPERAND)
+    {
+        return 0;
+    }
+    const uint8_t next = kinds[name + 1];
+    const bool delimited = next == PARSE_KIND_SEMI || next == PARSE_KIND_COMMA || next == PARSE_KIND_EQUAL || next == PARSE_KIND_R_PAREN ||
+                           roles[name + 1] == PARSE_ROLE_OPEN_FUNCTION;
+    return delimited ? (uint8_t)(specifiers | ((name - token - specifiers) << 3)) : 0;
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
@@ -854,6 +877,44 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         uint32_t* names = check_test_scan_column(mappings[NAMES] + page, count, 4);
         uint8_t* syntax = check_test_scan_column(mappings[SYNTAX] + page, count + 1, 1);
         uint8_t* visits = check_test_scan_column(mappings[VISITS] + page, count + 1, 1);
+        // One pattern on either side of every 64-byte boundary, with each of its tokens at the guard
+        // on a different length. The scan's output ends at a guard too.
+        uint8_t* prefixes = check_test_scan_column(mappings[SYNTAX] + page, count, 1);
+        static const uint8_t delimiters[] = { PARSE_KIND_COMMA, PARSE_KIND_SEMI, PARSE_KIND_EQUAL, PARSE_KIND_R_PAREN, PARSE_KIND_L_PAREN, PARSE_KIND_PLUS };
+        memset(kinds, 0, count);
+        memset(roles, 0, count);
+        memset(prefixes, 0xa5, count);
+        for (uint32_t start = count % 9; start < count; start += 9)
+        {
+            const uint32_t specifiers = 1 + (start + count / 9) % 5;
+            const uint32_t pointers = (start + count / 7) % 3;
+            const uint32_t name = start + specifiers + pointers;
+            for (uint32_t i = start; i < count && i < name; i += 1)
+            {
+                roles[i] = i < start + specifiers ? PARSE_ROLE_SPECIFIER : PARSE_ROLE_PREFIX;
+                kinds[i] = i < start + specifiers ? PARSE_KIND_TYPE : PARSE_KIND_STAR;
+            }
+            if (name < count)
+            {
+                kinds[name] = PARSE_KIND_IDENTIFIER;
+                roles[name] = PARSE_ROLE_OPERAND;
+            }
+            if (name + 1 < count)
+            {
+                const uint8_t delimiter = delimiters[(start / 9 + count) % BUSTER_ARRAY_LENGTH(delimiters)];
+                kinds[name + 1] = delimiter;
+                roles[name + 1] = delimiter == PARSE_KIND_L_PAREN ? PARSE_ROLE_OPEN_FUNCTION : PARSE_ROLE_NONE;
+            }
+        }
+        Parser prefix_parser = { 0 };
+        prefix_parser.tokens.count = count;
+        prefix_parser.tokens.kinds = kinds;
+        prefix_parser.tree.roles = roles;
+        check_input_named_prefixes(&prefix_parser, prefixes);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            mismatches += prefixes[i] != check_test_named_prefix(kinds, roles, i, count);
+        }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint32_t draw = check_test_random(test);
