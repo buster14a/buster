@@ -399,6 +399,55 @@ static void tier1_frame_execution_outgoing(Tier1FrameExecutionTest* test)
     }
 }
 
+// Check the instruction boundary at which a faulting touch must already see the new CFA offset.
+static void tier1_frame_execution_probe_records(Tier1FrameExecutionTest* test)
+{
+    static const uint32_t amounts[] = { 4095, 4096, 4097, 8191, 8192 };
+    for (uint32_t i = 0; i < sizeof(amounts) / sizeof(amounts[0]); i += 1)
+    {
+        const uint32_t amount = amounts[i];
+        Tier1Frame frame = { .prologue_count = 1 };
+        frame.prologue[0] = (Tier1FrameStep){
+            .kind = TIER1_FRAME_PROBE_ALLOCATE,
+            .base = X86_REGISTER_RSP,
+            .reg = X86_REGISTER_RSP,
+            .amount = amount,
+        };
+        X86Instruction records[8];
+        uint32_t branches[1];
+        uint32_t targets[1];
+        EmissionFrameEvent events[3];
+        Tier1EmitBuffer buffer = {
+            .records = records,
+            .capacity = 8,
+            .branches = branches,
+            .targets = targets,
+            .branch_capacity = 1,
+            .events = events,
+            .event_capacity = 3,
+        };
+        const bool loop = amount == 8192;
+        const uint32_t touches = amount > 4096 ? 2u : 1u;
+        const bool emitted = tier1_frame_emit(&frame, false, &buffer) == TIER1_FRAME_EMIT_OK;
+        tier1_frame_execution_expect(test, emitted && buffer.branch_count == (uint32_t)loop, "only multi-page fixed probes have a branch");
+        if (emitted && !loop)
+        {
+            const bool shape = buffer.count == 2 * touches && buffer.event_count == touches;
+            tier1_frame_execution_expect(test, shape, "one subtraction, touch and CFA update per probed step");
+            for (uint32_t j = 0; shape && j < touches; j += 1)
+            {
+                const uint32_t bytes = j == 0 && amount > 4096 ? 4096 : amount - j * 4096;
+                const X86Instruction sub = records[2 * j];
+                const X86Instruction touch = records[2 * j + 1];
+                tier1_frame_execution_expect(test, sub.form == X86_FORM_SUB_RM64_IMM32 && sub.rm == X86_REGISTER_RSP && sub.immediate == (int32_t)bytes, "subtract the next page or remainder");
+                tier1_frame_execution_expect(test, touch.form == X86_FORM_OR_RM8_IMM8 && touch.mode == BUSTER_X86_MEMORY_BASE && touch.rm == X86_REGISTER_RSP && touch.displacement == 0 && touch.immediate == 0, "touch the byte at the new stack pointer");
+                const EmissionFrameEvent event = events[j];
+                tier1_frame_execution_expect(test, event.kind == EMISSION_FRAME_CFA_OFFSET && event.at.side == EMISSION_LEFT && event.at.boundary == 2 * j + 1 && event.value == 8 + j * 4096 + bytes, "CFA describes the frame at the faulting touch");
+            }
+        }
+    }
+}
+
 static void tier1_frame_execution_probe(Tier1FrameExecutionTest* test, uint32_t shape)
 {
     const uintptr_t boundary = ((uintptr_t)test->stack + 256 * 1024) & ~(uintptr_t)65535;
@@ -612,6 +661,7 @@ static int run_tier1_frame_execution_tests(int argc, char** argv)
                 test.vectors[i] = 0x654300u + i * 267;
             }
             tier1_frame_execution_errors(&test);
+            tier1_frame_execution_probe_records(&test);
             tier1_frame_execution_matrix(&test);
             tier1_frame_execution_outgoing(&test);
             for (uint32_t shape = 0; shape < 3; shape += 1)
