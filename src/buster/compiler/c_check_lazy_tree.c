@@ -216,7 +216,14 @@ static CheckLazyTreeUse check_lazy_tree_use(const Parser* parser, uint32_t token
     {
         const uint8_t role = roles[at];
         const uint32_t parent = parents[at];
-        if (role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_SPECIFIER || (role == PARSE_ROLE_CLOSE_FUNCTION && !expression) || gnu_syntax_attribute_role(role) ||
+        if (role == PARSE_ROLE_CLOSE_KEYWORD && expression)
+        {
+            // A name already inside an expression that is a keyword's operand, as `__builtin_bit_cast(T, f())`'s: a use,
+            // where clang reads it (evaluated or not, a use only keeps more bodies).
+            result = CHECK_LAZY_TREE_USE;
+            done = true;
+        }
+        else if (role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_SPECIFIER || (role == PARSE_ROLE_CLOSE_FUNCTION && !expression) || gnu_syntax_attribute_role(role) ||
             (role >= PARSE_ROLE_CLOSE_ATTRIBUTE && role <= PARSE_ROLE_CLOSE_ATTRIBUTE_LIST))
         {
             done = true;
