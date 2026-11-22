@@ -1357,14 +1357,26 @@ decisions in #154 and on #117's configuration):
   `aligned`, `cleanup`, `constructor`, `destructor`, `ext_vector_type`,
   `fallthrough`, `gnu_inline`, `mode`, `naked`, `overloadable`, `packed`,
   `section`, `target`, `transparent_union`, `used`, `vector_size`, `visibility`
-  and `weak`. Paired underscores are normalized. C attribute queries accept
+  and `weak`. Since #3306 so do the attributes whose consumers came later:
+  `always_inline` and `noinline` (Tier 0's inlining), `noreturn` (the return
+  flow), `format` (`-Wformat`), `deprecated` and `unavailable` (the use
+  warnings and errors, with the attribute's message), `unused`,
+  `warn_unused_result`, and `const` and `pure` (the ignored-result warning).
+  An attribute the checker accepts with no consumer (`cold`, `nonnull`,
+  `sentinel`, `returns_nonnull`, `alloc_align`, `format_arg`, `error`,
+  `flatten`, ...) still answers 0, so glibc's `sys/cdefs.h` leaves macros such
+  as `__COLD` and `__returns_nonnull` empty where clang's `-E` gives them.
+  Paired underscores are normalized. C attribute queries accept
   the corresponding `gnu::` names (`ext_vector_type` and `overloadable` use
   `clang::`) and return **201910** for standard `fallthrough`. Standard
   `deprecated`, `maybe_unused` and `nodiscard` return **201904**, **202106**
   and **202003** now that the checker implements their diagnostics (#1475), including their paired
-  underscore spellings and their extension use in earlier C modes.
+  underscore spellings and their extension use in earlier C modes; `noreturn`
+  and `_Noreturn` return **202202** (#3306).
   `c_alignas`, `c_alignof`, `c_atomic`, `c_generic_selections`, `c_static_assert`
   and `c_thread_local` are features from C11; `c_fixed_enum` from C23.
+  `attribute_deprecated_with_message` and `attribute_unavailable_with_message`
+  are features in every mode (#3306), as clang's are.
   `__has_extension` also exposes these implemented constructs in older modes.
   Builtins use the shared catalog's explicit source and constant-expression
   capabilities, plus the preprocessor's four `__is_target_*` builtins. Native

@@ -903,8 +903,9 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         // the checker reads the source; `barrier` is the spelling that barrier must name.
         const char* barrier;
     } refused[] = {
-        // A clone whose ALIAS a later declaration makes an alias of its own (#2449: clang's "redefinition of 'alias'").
-        { "int target(void) { return 1; }\n#pragma weak alias = target\nint alias(void) __attribute__((alias(\"target\")));\n", "weak", NULL, NULL, NULL },
+        // A second clone of a name a later declaration carries (#2934's second shape: clang's "call to 'a' is ambiguous").
+        { "int t1(void) { return 1; }\nint t2(void) { return 2; }\n#pragma weak a = t1\n#pragma weak a = t2\nint a(void);\nint use(void) { return a(); }\n", "weak",
+          NULL, NULL, NULL },
         { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
         { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp", "-fopenmp" },
         { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
