@@ -3486,8 +3486,9 @@ static void foreign_retain_providers(Foreign* foreign, uint8_t* needed, ForeignL
                                        foreign_library_export_at(foreign, references->name[r], references->length[r], references->hash[r], version) :
                                        UINT32_MAX;
                 library->providers[r] = m;
-                const ForeignLibrary* provider = version.length != 0 && m != UINT32_MAX && m != l ? &foreign->libraries[m] : 0;
-                const bool retained = provider != 0 && !provider->needed && needed[m] == 0 && !foreign_library_lists(library, foreign_library_name(foreign, provider));
+                const bool provided = version.length != 0 && m != UINT32_MAX && m != l;
+                const ForeignLibrary* provider = &foreign->libraries[provided ? m : l];
+                const bool retained = provided && !provider->needed && needed[m] == 0 && !foreign_library_lists(library, foreign_library_name(foreign, provider));
                 if (retained)
                 {
                     needed[m] = 1;
