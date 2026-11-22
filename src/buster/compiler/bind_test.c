@@ -1405,7 +1405,8 @@ static bool bind_test_steps(const Runtime* runtime)
     {
         bind->resolving = true;
         bind->bound = true;
-        bind_resolve(bind, link, 1, link->symbols.count, true);
+        BindMemberWords members = { .first = UINT32_MAX };
+        bind_resolve(bind, link, 1, link->symbols.count, &members);
     }
     result = tmc != 0 && bind->error == BIND_ERROR_NONE && link->symbols.atom[tmc] == 0 && link->symbols.source[tmc] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
     // An import that is no longer one leaves the list.
