@@ -512,8 +512,10 @@ patterns are:
   can feed `cvtsi2s*` directly. A float or double load can feed `cvtts*2si` directly
   for signed 32- or 64-bit results and unsigned 32-bit results. The latter uses
   the 64-bit destination. A conversion to a floating value
-  zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
-  alone, which would otherwise wait for the register's last writer. An unsigned
+  zeroes its destination first, and so does a resize into another register
+  than its operand's (#3308; in place the zero would clobber the operand):
+  `cvtsi2s*`, `cvtss2sd` and `cvtsd2ss` write their low element alone, which
+  would otherwise wait for the register's last writer. An unsigned
   64-bit integer's conversions use the fixed-register path
   (`TIER1_RULE_FLOAT_CONVERT_WIDE`). For integer to floating, an output target
   admitting the unsigned qword register form uses `xorps` followed by

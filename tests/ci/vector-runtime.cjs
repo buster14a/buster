@@ -55,6 +55,29 @@ function reply(body)
         assert.equal(calls, 1);
         assert.equal(timeouts, 1);
     });
+    // find NAME: download-artifact's lookup, ListArtifacts with name_filter (#3301); only artifacts of that name.
+    await check(async () =>
+    {
+        const name = 'vector-product-O3-1-none-0123';
+        let calls = 0;
+        const result = await list_artifacts(env, async (url, request) =>
+        {
+            calls += 1;
+            assert.equal(url, 'https://results.example.invalid/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts');
+            assert.deepEqual(JSON.parse(request.body), {workflow_run_backend_id: run_id, workflow_job_run_backend_id: job_id, name_filter: name});
+            return {ok: true, json: async () => ({artifacts: [{name}]})};
+        }, () => new AbortController().signal, name);
+        assert.deepEqual(result, [name]);
+        assert.equal(calls, 1);
+        assert.deepEqual(await list_artifacts(env, reply({}), AbortSignal.timeout, name), [], 'A lookup that serves nothing is empty, not an error.');
+        await assert.rejects(list_artifacts(env, reply({artifacts: [{name: 'other'}]}), AbortSignal.timeout, name), /another name/);
+        for (const invalid of ['', 'name\nother', 'name\0other', 7, null])
+        {
+            let requests = 0;
+            await assert.rejects(list_artifacts(env, async () => { requests += 1; }, AbortSignal.timeout, invalid), /valid artifact name/);
+            assert.equal(requests, 0);
+        }
+    });
     for (const body of [{}, {artifacts: []}])
     {
         await check(async () => assert.deepEqual(await list_artifacts(env, reply(body)), []));

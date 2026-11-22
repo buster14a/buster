@@ -972,6 +972,38 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 # 64-bit operations and 128-bit products; the program runs in the IR's forms, the typed stream's interpreter and Tier 1.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/overflow-builtins.c
 "$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/overflow-builtins.c
+== Test volatile accesses and compiler barriers through the IR and Tier 1's opt-in passes
+# #3310: each volatile lvalue's load and store is the typed stream's marked LOAD, STORE or SET and the IR's volatile
+# access, and an empty asm statement's "memory" clobber a signal fence; the program runs in the IR's forms, the typed
+# stream's interpreter and Tier 1 against clang.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/volatiles.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/volatiles.c
+objects=$(mktemp -d)
+# Each function's accesses, lowered and promoted: every one is volatile, and each barrier is its fence.
+for counted in stored_twice:8 read_twice:4 discarded:4 bit_fields:12 updated:10 incremented:10 element:8 member:10 mapped:6 \
+    floating:18 wide:6 packed:16 pointer:6 counted:4 barrier:0 barrier_operand:0; do
+    name=${counted%%:*}
+    "$BUSTER_COMPILER" test-ir-source --print "$name" tests/ir-source/volatiles.c > "$objects/$name.ir"
+    test "$(grep -cE 'align=[0-9]+ volatile' "$objects/$name.ir")" -eq "${counted#*:}"
+done
+for name in barrier barrier_operand; do
+    test "$("$BUSTER_COMPILER" test-ir-source --print "$name" tests/ir-source/volatiles.c | grep -c 'fence.void seq_cst signal')" -eq 2
+done
+# Value numbering with memory and the other opt-in passes keep every access outside the frame that the default passes
+# emit (they merged, forwarded and dropped them).
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c tests/ir-source/volatiles.c -o "$objects/default.o"
+"$BUSTER_COMPILER" --tier1 --tier1-strict --tier1-passes=+all -c tests/ir-source/volatiles.c -o "$objects/all.o"
+for name in stored_twice read_twice discarded bit_fields updated incremented element member mapped floating wide packed pointer counted \
+    barrier barrier_operand; do
+    for build in default all; do
+        objdump -d --no-show-raw-insn --disassemble="$name" "$objects/$build.o" | grep '(' | grep -vcE '%rsp|%rbp|lea ' > "$objects/$name.$build" || true
+    done
+    cat "$objects/$name.all"
+    cmp "$objects/$name.default" "$objects/$name.all"
+done
+test "$(cat "$objects/read_twice.all")" -eq 2
+test "$(cat "$objects/barrier.all")" -eq 2
+rm -r "$objects"
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution
