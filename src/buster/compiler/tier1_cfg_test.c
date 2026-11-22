@@ -102,6 +102,7 @@ struct Tier1CfgTestTally
     // don't avoid that sequence's.
     uint64_t avoiding_ranges;
     uint64_t reading_ranges;
+    uint64_t argument_ranges;
     // The opmask class's share: moves of masks, spilled masks, and moves of masks at splits (around calls).
     uint64_t mask_moves;
     uint64_t mask_spills;
@@ -433,18 +434,102 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     return built;
 }
 
+// The register a use reads interval i's value in at the interval's end (#2646), recomputed apart from tier1_cfg_prepare:
+// the last of its value's uses at the position before its end, UINT8_MAX where none is there or names none.
+static uint8_t tier1_cfg_test_end_register(const Tier1CfgInput* input, const Tier1AllocationInput* intervals, uint32_t i)
+{
+    const uint32_t v = intervals->values[i];
+    uint8_t reg = UINT8_MAX;
+    for (uint32_t u = input->use_offsets[v]; input->use_registers != 0 && u < input->use_offsets[v + 1]; u += 1)
+    {
+        const bool inside = intervals->starts[i] <= input->use_positions[u] && input->use_positions[u] < intervals->ends[i];
+        reg = inside ? input->use_positions[u] + 1 == intervals->ends[i] ? input->use_registers[u] : UINT8_MAX : reg;
+    }
+    return reg;
+}
+
+// The interval of the operand interval i's tie hints it to (#2685): its value's definition starts it, its hint value is
+// one of the value's ties, and its named exit is an interval of that value ending there; BUSTER_TIER1_CFG_NONE otherwise.
+static uint32_t tier1_cfg_test_tie_operand(const Tier1CfgInput* input, const Tier1AllocationInput* intervals, uint32_t i)
+{
+    const uint32_t v = intervals->values[i];
+    const uint32_t hint = intervals->hint_values[i];
+    const uint32_t named = intervals->hint_intervals != 0 ? intervals->hint_intervals[i] : BUSTER_TIER1_CFG_NONE;
+    uint32_t operand = BUSTER_TIER1_CFG_NONE;
+    if (input->ties != 0 && hint != BUSTER_TIER1_CFG_NONE && hint != v && (input->ties[2 * v] == hint || input->ties[2 * v + 1] == hint) && named != BUSTER_TIER1_CFG_NONE &&
+        (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0 && intervals->starts[i] == input->definitions[v])
+    {
+        const uint32_t taken = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+        operand = intervals->values[taken] == hint && intervals->ends[taken] == intervals->starts[i] ? taken : BUSTER_TIER1_CFG_NONE;
+    }
+    return operand;
+}
+
+// Whether interval i takes a call's argument registers to avoid: a general one, with no alternate, hinted by nothing or by
+// a tie alone.
+static bool tier1_cfg_test_argument_open(const Tier1CfgInput* input, const Tier1AllocationInput* intervals, uint32_t i)
+{
+    const bool unnamed = intervals->hint_intervals == 0 || intervals->hint_intervals[i] == BUSTER_TIER1_CFG_NONE;
+    const bool unhinted = intervals->hint_values[i] == BUSTER_TIER1_CFG_NONE && unnamed;
+    const bool alone = intervals->alternate_intervals == 0 || intervals->alternate_intervals[i] == BUSTER_TIER1_CFG_NONE;
+    return intervals->classes[i] == BUSTER_TIER1_ALLOCATE_GPR && alone && (unhinted || tier1_cfg_test_tie_operand(input, intervals, i) != BUSTER_TIER1_CFG_NONE);
+}
+
+// The registers interval i avoids for a call (#2823), and in *hint its register hint, recomputed by brute force. An
+// interval whose own end register is r (tier1_cfg_test_end_register) keeps r as its hint, and where
+// tier1_cfg_test_argument_open takes it, avoids every other general register any value's use reads at the position
+// before its end. One with none, where it is open, takes both from the interval its tie names it to
+// (tier1_cfg_test_tie_operand, searched forward), or that interval's, through open intervals with no end register, up to
+// the first with one; the rest have neither.
+static uint32_t tier1_cfg_test_argument_avoided(const Tier1CfgInput* input, const Tier1AllocationInput* intervals, uint32_t i, uint8_t* hint)
+{
+    *hint = tier1_cfg_test_end_register(input, intervals, i);
+    uint32_t source = i;
+    bool walking = *hint == UINT8_MAX;
+    bool open = tier1_cfg_test_argument_open(input, intervals, i);
+    for (uint32_t steps = 0; walking && open && steps < intervals->count; steps += 1)
+    {
+        uint32_t successor = BUSTER_TIER1_CFG_NONE;
+        for (uint32_t j = 0; j < intervals->count; j += 1)
+        {
+            successor = tier1_cfg_test_tie_operand(input, intervals, j) == source ? j : successor;
+        }
+        open = successor != BUSTER_TIER1_CFG_NONE && tier1_cfg_test_argument_open(input, intervals, successor);
+        source = open ? successor : source;
+        walking = open && tier1_cfg_test_end_register(input, intervals, successor) == UINT8_MAX;
+    }
+    const uint8_t reg = tier1_cfg_test_end_register(input, intervals, source);
+    uint32_t avoided = 0;
+    if (open && reg < 32)
+    {
+        const uint32_t position = intervals->ends[source] - 1;
+        for (uint32_t v = 0; v < input->value_count; v += 1)
+        {
+            for (uint32_t u = input->use_offsets[v]; input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR && u < input->use_offsets[v + 1]; u += 1)
+            {
+                avoided |= input->use_positions[u] == position && input->use_registers[u] < 32 ? 1u << input->use_registers[u] : 0;
+            }
+        }
+        avoided &= ~(1u << reg);
+        *hint = reg;
+    }
+    return avoided;
+}
+
 // The registers each range avoids (#2767), recomputed apart from tier1_cfg_crossed: each general range's, those of every
 // sequence strictly inside it whose reader its value isn't, gathered by value with each sequence's operand's and result's,
 // then joined along every phi and its operands until nothing changes; each general range must avoid exactly its value's,
 // and every other range nothing.
-// Without sequences the allocator must have no such column.
+// A call's argument range also avoids the registers the call reads its other arguments in (#2823,
+// tier1_cfg_test_argument_avoided). Without sequences or use registers the allocator must have no such column.
 static bool tier1_cfg_test_avoided(Tier1CfgTestTally* tally, const Tier1CfgInput* input, const Tier1CfgAllocation* result, Arena* scratch)
 {
     const Tier1AllocationInput* intervals = &result->intervals;
-    bool valid = input->sequence_count == 0 ? intervals->avoided_registers == 0 : intervals->avoided_registers != 0;
+    const bool avoids = input->sequence_count != 0 || input->use_registers != 0;
+    bool valid = !avoids ? intervals->avoided_registers == 0 : intervals->avoided_registers != 0;
     const uint64_t saved = scratch->length;
-    uint32_t* masks = valid && input->sequence_count != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), 4) : 0;
-    valid = valid && (input->sequence_count == 0 || masks != 0);
+    uint32_t* masks = valid && avoids ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), 4) : 0;
+    valid = valid && (!avoids || masks != 0);
     if (masks != 0)
     {
         memset(masks, 0, ((uint64_t)input->value_count + 1) * sizeof(uint32_t));
@@ -494,9 +579,12 @@ static bool tier1_cfg_test_avoided(Tier1CfgTestTally* tally, const Tier1CfgInput
         }
         for (uint32_t i = 0; valid && i < intervals->count; i += 1)
         {
-            const uint32_t expected = intervals->classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? masks[intervals->values[i]] : 0;
-            valid = intervals->avoided_registers[i] == expected;
+            uint8_t hint = UINT8_MAX;
+            const uint32_t arguments = tier1_cfg_test_argument_avoided(input, intervals, i, &hint);
+            const uint32_t expected = intervals->classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? masks[intervals->values[i]] | arguments : 0;
+            valid = intervals->avoided_registers[i] == expected && (intervals->register_hints == 0 || intervals->register_hints[i] == hint);
             tally->avoiding_ranges += expected != 0;
+            tally->argument_ranges += arguments != 0;
         }
     }
     arena_pop_to(scratch, saved);
@@ -2764,6 +2852,82 @@ static void tier1_cfg_test_use_registers(Tier1CfgTestTally* tally, Arena* output
     arena_pop_to(output, saved);
 }
 
+// A call's arguments in each other's registers (#2823). Block 0's call at its instruction 3 reads x in r1 and c in r2,
+// and y lives past it in r0. x is bound to r2 (a parameter in its incoming register), so c's register hint, r2, is
+// taken, and the lowest free register, which c took before, was r1: the call's moves then swapped the two through the
+// scratch register. c avoids r1 now and takes another. With `tied`, c is a two-address result tied to l (#2685), a
+// value defined before it whose interval ends at c's definition: c takes l's register, so l takes c's register hint and
+// avoids r1 too, as lua_settable's loads did. With `held`, q holds r4 through the block, so that the scan allocates;
+// without it, the coloring path does.
+static void tier1_cfg_test_call_arguments(Tier1CfgTestTally* tally, Arena* output, Arena* scratch, bool tied, bool held)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 1;
+    builder.instructions[0] = 5;
+    builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x003f;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    builder.use_registers = true;
+    const uint32_t all = builder.registers[BUSTER_TIER1_ALLOCATE_GPR];
+    const uint32_t y = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t x = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1u << 2);
+    const uint32_t q = held ? tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1u << 4) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t l = tied ? tier1_cfg_test_value(&builder, 0, 1, BUSTER_TIER1_ALLOCATE_GPR, all) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t c = tier1_cfg_test_value(&builder, 0, 2, BUSTER_TIER1_ALLOCATE_GPR, all);
+    builder.remat[c] = tied ? 0 : 1;
+    tier1_cfg_test_definition_use(&builder, y);
+    tier1_cfg_test_definition_use(&builder, x);
+    if (held)
+    {
+        tier1_cfg_test_definition_use(&builder, q);
+        tier1_cfg_test_use(&builder, q, 0, 4, true);
+    }
+    if (tied)
+    {
+        tier1_cfg_test_definition_use(&builder, l);
+        tier1_cfg_test_use(&builder, l, 0, 2, true);
+    }
+    tier1_cfg_test_definition_use(&builder, c);
+    tier1_cfg_test_use(&builder, x, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 1;
+    tier1_cfg_test_use(&builder, c, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 2;
+    tier1_cfg_test_use(&builder, y, 0, 4, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input = { 0 };
+    bool built = tier1_cfg_test_build(&builder, output, &input);
+    uint32_t* ties = built && tied ? arena_push_array(output, 2 * (uint64_t)input.value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    built = built && (!tied || ties != 0);
+    for (uint32_t k = 0; ties != 0 && k < 2 * input.value_count; k += 1)
+    {
+        ties[k] = k == 2 * c ? l : BUSTER_TIER1_CFG_NONE;
+    }
+    input.ties = ties;
+    tier1_cfg_test_expect(tally, built, "call arguments: built");
+    const char* name = tied ? held ? "call arguments, tied, held" : "call arguments, tied" : held ? "call arguments, held" : "call arguments";
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "call arguments: allocated");
+        const uint32_t call = input.block_starts[0] + 2 * 3;
+        uint32_t locations[3] = { 0 };
+        uint8_t kinds[3] = { 0 };
+        const bool found = allocated && tier1_cfg_location(&result, x, call, &locations[0], &kinds[0]) && tier1_cfg_location(&result, c, call, &locations[1], &kinds[1]) &&
+                           (!tied || tier1_cfg_location(&result, l, input.block_starts[0] + 2 * 2, &locations[2], &kinds[2]));
+        const bool registers = found && kinds[0] == BUSTER_TIER1_ALLOCATE_REGISTER && kinds[1] == BUSTER_TIER1_ALLOCATE_REGISTER && (!tied || kinds[2] == BUSTER_TIER1_ALLOCATE_REGISTER);
+        tier1_cfg_test_expect(tally, registers && locations[0] == 2, "call arguments: the bound argument keeps its register");
+        tier1_cfg_test_expect(tally, registers && locations[1] != 1 && locations[1] != 2, "call arguments: an argument takes no other argument's register");
+        tier1_cfg_test_expect(tally, registers && (!tied || locations[2] == locations[1]), "call arguments: a tied result takes its operand's register");
+        arena_pop_to(output, mark);
+        tier1_cfg_test_case(tally, &input, output, scratch, name, true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
 static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     static Tier1CfgTestBuilder builders[11];
@@ -3226,6 +3390,10 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_dispatch_entry(&tally, &output, &scratch);
             tier1_cfg_test_use_registers(&tally, &output, &scratch, false);
             tier1_cfg_test_use_registers(&tally, &output, &scratch, true);
+            for (uint32_t variant = 0; variant < 4; variant += 1)
+            {
+                tier1_cfg_test_call_arguments(&tally, &output, &scratch, (variant & 1) != 0, (variant & 2) != 0);
+            }
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
@@ -3286,6 +3454,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         printf("test-tier1-cfg: given dominator trees (#2611): %" PRIu64 " CFGs' anchors the same with and without an added entry, %" PRIu64 " blocks anchored at a latch\n", tally.given_trees, tally.given_latches);
         tier1_cfg_test_expect(&tally, tally.given_latches != 0, "some given tree's block takes a latch laid out before it (#2611)");
         printf("test-tier1-cfg: fixed sequences (#2767): %" PRIu64 " ranges avoid their registers, %" PRIu64 " readers' ranges across their own\n", tally.avoiding_ranges, tally.reading_ranges);
+        printf("test-tier1-cfg: call arguments (#2823): %" PRIu64 " ranges avoid other arguments' registers\n", tally.argument_ranges);
         printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column; %" PRIu64 " values' column sets probed, at most %u in one problem\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed, tally.column_values, tally.column_widest);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);

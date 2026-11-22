@@ -1790,6 +1790,81 @@ static Tier1CfgBoundaries tier1_cfg_boundaries(const Tier1CfgInput* input, const
     return bounds;
 }
 
+// The interval of the operand interval `i`'s tie names (tier1_cfg_ties, #2685), which ends where `i` starts at its
+// value's definition, or BUSTER_TIER1_CFG_NONE where a tie doesn't hint it.
+static uint32_t tier1_cfg_tied_operand(const Tier1CfgInput* input, const Tier1CfgPieces* pieces, uint32_t i)
+{
+    const uint32_t v = pieces->values[i];
+    const uint32_t hint = pieces->hints[i];
+    const uint32_t named = pieces->hint_intervals[i];
+    const bool exit = named != BUSTER_TIER1_CFG_NONE && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0;
+    const uint32_t taken = exit ? named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT : BUSTER_TIER1_CFG_NONE;
+    const bool tied = input->ties != 0 && hint != BUSTER_TIER1_CFG_NONE && hint != v && (input->ties[2 * (uint64_t)v] == hint || input->ties[2 * (uint64_t)v + 1] == hint);
+    const bool defined = taken != BUSTER_TIER1_CFG_NONE && pieces->starts[i] == input->definitions[v] && pieces->ends[taken] == pieces->starts[i] && pieces->values[taken] == hint;
+    return tied && defined ? taken : BUSTER_TIER1_CFG_NONE;
+}
+
+// A general interval whose last use is a call's register argument, and that nothing but that register and a tie hints
+// (#2646: no other value, named interval or alternate), avoids the general registers the call reads its other
+// arguments in (#2823), added to `crossed`. Where its own register is taken, by a value the call reads in another
+// register or one that lives past it, it took the lowest free one, often the register another argument goes to while
+// that argument sat in this one's: the call's parallel move then swapped them through the scratch register, three moves
+// where one was owed. Lua's luaT_callorderiTM calls put the constant for rcx in rsi while the value for rsi sat in rcx. A
+// register it avoids stays its last choice (Tier1AllocationInput.avoided_registers), and a hinted interval keeps its
+// hint.
+//
+// A two-address result takes its dying operand's register (#2685), so the register and the avoided ones go back along
+// the ties to the operand's interval where nothing else hints that one, and to its own tied operand's: lua_settable's
+// `L->top - 2` for rdx and `L->top - 1` for rcx, each a load then an add, loaded each into the other's register.
+//
+// Each position's registers are one pass over the uses, scattered into a column on `scratch`, and each interval reads
+// its end's. Scalar: the scatter's positions collide (a call's arguments share one), and the walks back are chains, one
+// or two ties long. False where `scratch` is short; it ends as it began.
+static bool tier1_cfg_argument_avoidance(const Tier1CfgInput* input, const Tier1CfgPieces* pieces, uint8_t* register_hints, uint32_t count, Arena* scratch, uint32_t* crossed)
+{
+    const uint64_t mark = scratch->length;
+    uint32_t* read = arena_push_array(scratch, (uint64_t)input->position_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    if (read != 0)
+    {
+        memset(read, 0, ((uint64_t)input->position_count + 1) * sizeof(uint32_t));
+        for (uint32_t v = 0; v < input->value_count; v += 1)
+        {
+            const bool general = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR;
+            for (uint32_t u = input->use_offsets[v]; general && u < input->use_offsets[v + 1]; u += 1)
+            {
+                const uint8_t reg = input->use_registers[u];
+                read[input->use_positions[u]] |= reg < 32 ? 1u << reg : 0;
+            }
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint8_t reg = register_hints[i];
+            const uint32_t tied = tier1_cfg_tied_operand(input, pieces, i);
+            const bool unhinted = (tied != BUSTER_TIER1_CFG_NONE || (pieces->hints[i] == BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[i] == BUSTER_TIER1_CFG_NONE)) &&
+                                  pieces->alternates[i] == BUSTER_TIER1_CFG_NONE;
+            const bool argument = reg < 32 && unhinted && pieces->classes[i] == BUSTER_TIER1_ALLOCATE_GPR && pieces->ends[i] != 0;
+            const uint32_t avoided = argument ? read[pieces->ends[i] - 1] & ~(1u << reg) : 0;
+            crossed[i] |= avoided;
+            // Back along the ties, at most one step per interval.
+            uint32_t operand = argument ? tied : BUSTER_TIER1_CFG_NONE;
+            for (uint32_t steps = 0; operand != BUSTER_TIER1_CFG_NONE && steps < count; steps += 1)
+            {
+                const uint32_t next = tier1_cfg_tied_operand(input, pieces, operand);
+                const bool open = register_hints[operand] == UINT8_MAX && pieces->alternates[operand] == BUSTER_TIER1_CFG_NONE && pieces->classes[operand] == BUSTER_TIER1_ALLOCATE_GPR &&
+                                  (next != BUSTER_TIER1_CFG_NONE || (pieces->hints[operand] == BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[operand] == BUSTER_TIER1_CFG_NONE));
+                if (open)
+                {
+                    register_hints[operand] = reg;
+                    crossed[operand] |= avoided;
+                }
+                operand = open ? next : BUSTER_TIER1_CFG_NONE;
+            }
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return read != 0;
+}
+
 // The general registers each of `count` intervals avoids (Tier1CfgInput.sequences, #2767), into `crossed`: those of the
 // fixed sequences that a range of its value's phi web lives across (at positions after the range's start and before its
 // end), but those a sequence leaves to its reader where the range is the reader's (a shift's count in cl); 0 for another
@@ -2417,6 +2492,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         Tier1CfgPieces pieces = { 0 };
         uint64_t interval_count = 0;
         uint64_t split_count = 0;
+        // The intervals' register hints (#2646), which tier1_cfg_argument_avoidance carries back along ties (#2823).
+        uint8_t* argument_hints = 0;
         for (uint32_t pass = 0; ready && pass < 2; pass += 1)
         {
             uint32_t* use_offsets = 0;
@@ -2594,6 +2671,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_body_hints(input, candidate.value_interval_offsets, &pieces);
+                argument_hints = register_hints;
                 candidate.block_starts = input->block_starts;
                 candidate.block_count = input->block_count;
                 candidate.intervals = (Tier1AllocationInput){
@@ -2635,7 +2713,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         // the same in every problem over these intervals. The ranges are whole now, a merged block's having grown past the
         // piece the builder started.
         // And every general range avoids the problem's avoided_general registers (#2819).
-        const bool avoids = input->sequence_count != 0 || input->avoided_general != 0;
+        // And a call's unhinted argument avoids the call's other argument registers (#2823).
+        const bool avoids = input->sequence_count != 0 || input->avoided_general != 0 || argument_hints != 0;
         uint32_t* crossed = ready && avoids ? arena_push_array(output, (uint64_t)candidate.intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         if (crossed != 0 && input->sequence_count == 0)
         {
@@ -2646,6 +2725,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         {
             crossed[i] |= pieces.classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? input->avoided_general : 0;
         }
+        ready = ready && (argument_hints == 0 || tier1_cfg_argument_avoidance(input, &pieces, argument_hints, candidate.intervals.count, scratch, crossed));
         candidate.intervals.avoided_registers = crossed;
         if (ready)
         {
