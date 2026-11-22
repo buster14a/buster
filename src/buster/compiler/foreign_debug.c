@@ -454,7 +454,7 @@ struct ForeignDebugPlan
     uint32_t contribution_count;
     ForeignDebugRelocations* relocations;
     uint32_t relocation_count;
-    // The items of each pass, costliest first.
+    // Lane plans also store the items of each pass, costliest first.
     uint32_t* contribution_order;
     uint32_t* relocation_order;
     // Each object's sections' places in their kinds' output sections (UINT64_MAX for one that isn't a kept debug
@@ -520,7 +520,7 @@ static bool foreign_debug_apart_from_atoms(const LinkAtoms* atoms, String8 slice
 
 // The plan of the selected objects' debug sections (ForeignDebugPlan), in the order of `order` (input order), from
 // `arena`: the sizing pass. Returns the first failure.
-static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const ForeignLink* output, const Foreign* foreign, const uint32_t* order, Arena* arena)
+static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const ForeignLink* output, const Foreign* foreign, const uint32_t* order, bool for_lanes, Arena* arena)
 {
     ForeignLinkResult result = { 0 };
     *plan = (ForeignDebugPlan){ 0 };
@@ -625,12 +625,16 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
             }
         }
     }
-    const uint64_t items = (uint64_t)contribution_capacity + relocation_section_capacity + 1;
     plan->contributions = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignDebugContribution, (uint64_t)contribution_capacity + 1) : 0;
     plan->relocations = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignDebugRelocations, (uint64_t)relocation_section_capacity + 1) : 0;
-    plan->contribution_order = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)contribution_capacity + 1) : 0;
-    plan->relocation_order = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)relocation_section_capacity + 1) : 0;
-    ForeignDebugCost* costs = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignDebugCost, items) : 0;
+    ForeignDebugCost* costs = 0;
+    if (for_lanes && result.error == FOREIGN_LINK_ERROR_NONE)
+    {
+        plan->contribution_order = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)contribution_capacity + 1);
+        plan->relocation_order = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)relocation_section_capacity + 1);
+        const uint64_t items = (uint64_t)contribution_capacity + relocation_section_capacity + 1;
+        costs = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignDebugCost, items);
+    }
     plan->contribution_results = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignLinkResult, (uint64_t)contribution_capacity + 1) : 0;
     plan->relocation_results = result.error == FOREIGN_LINK_ERROR_NONE ? BUSTER_ARENA_PUSH_ARRAY(arena, ForeignLinkResult, (uint64_t)relocation_section_capacity + 1) : 0;
     const bool records = result.error == FOREIGN_LINK_ERROR_NONE && relocation_capacity != 0;
@@ -643,8 +647,8 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
     };
     const bool recorded = relocation_capacity == 0 || (plan->records.offsets != 0 && plan->records.addends != 0 && plan->records.targets != 0 &&
                                                        plan->records.section_kinds != 0 && plan->records.kinds != 0);
-    const bool allocated = plan->contributions != 0 && plan->relocations != 0 && plan->contribution_order != 0 && plan->relocation_order != 0 && costs != 0 &&
-                           plan->contribution_results != 0 && plan->relocation_results != 0 && recorded;
+    const bool ordered = !for_lanes || (plan->contribution_order != 0 && plan->relocation_order != 0 && costs != 0);
+    const bool allocated = plan->contributions != 0 && plan->relocations != 0 && plan->contribution_results != 0 && plan->relocation_results != 0 && recorded && ordered;
     result.error = result.error == FOREIGN_LINK_ERROR_NONE && !allocated ? FOREIGN_LINK_ERROR_MEMORY : result.error;
     // The items, in the objects' order: the contributions with bytes, and the compressed ones of none, whose streams are
     // checked all the same (an empty section keeps its place, which references into it take); and the relocation
@@ -676,8 +680,11 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                 if ((size != 0 && whole[kind].pointer == 0) || (header.sh_flags & SHF_COMPRESSED) != 0)
                 {
                     plan->contributions[item] = (ForeignDebugContribution){ .object = id, .section = section, .kind = kind, .base = base, .size = size };
-                    // Decompressing costs about four times copying.
-                    costs[item] = (ForeignDebugCost){ .cost = (header.sh_flags & SHF_COMPRESSED) != 0 ? 4 * size : size, .item = item };
+                    if (for_lanes)
+                    {
+                        // Decompressing costs about four times copying.
+                        costs[item] = (ForeignDebugCost){ .cost = (header.sh_flags & SHF_COMPRESSED) != 0 ? 4 * size : size, .item = item };
+                    }
                     plan->contribution_results[item] = (ForeignLinkResult){ 0 };
                     plan->contribution_count += 1;
                 }
@@ -706,14 +713,17 @@ static ForeignLinkResult foreign_debug_plan(ForeignDebugPlan* plan, const Foreig
                     .size = size,
                     .first = first,
                 };
-                costs[contribution_capacity + item] = (ForeignDebugCost){ .cost = entries, .item = item };
+                if (for_lanes)
+                {
+                    costs[contribution_capacity + item] = (ForeignDebugCost){ .cost = entries, .item = item };
+                }
                 plan->relocation_results[item] = (ForeignLinkResult){ 0 };
                 plan->relocation_count += 1;
                 first += entries;
             }
         }
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE)
+    if (for_lanes && result.error == FOREIGN_LINK_ERROR_NONE)
     {
         foreign_debug_order(plan->contribution_order, costs, plan->contribution_count);
         foreign_debug_order(plan->relocation_order, costs + contribution_capacity, plan->relocation_count);
@@ -839,7 +849,7 @@ static ForeignLinkResult foreign_debug_build(ForeignLink* output, const Foreign*
 {
     ForeignDebugPlan plan;
     output->debug = (ExecutableDebugSections){ 0 };
-    ForeignLinkResult result = foreign_debug_plan(&plan, output, foreign, order, arena);
+    ForeignLinkResult result = foreign_debug_plan(&plan, output, foreign, order, false, arena);
     for (uint32_t item = 0; result.error == FOREIGN_LINK_ERROR_NONE && item < plan.contribution_count; item += 1)
     {
         foreign_debug_contribute(&plan, foreign, item);
