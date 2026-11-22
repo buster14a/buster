@@ -309,13 +309,15 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
         };
         const uint8_t* kinds = parser->tokens.kinds;
         const uint8_t* roles = parser->tree.roles;
+        // A lazily deferred body's tokens (-flazy-system-headers) were never resolved: they name nothing here.
+        const uint8_t* deferred = input->deferred_tokens;
         for (uint32_t first = 0; valid && pending != 0 && first < count; first += 64)
         {
             const uint64_t lanes = check_input_scan_equal(kinds, first, count, PARSE_KIND_IDENTIFIER) & check_input_scan_equal(roles, first, count, PARSE_ROLE_OPERAND);
             for (uint64_t bits = lanes; valid && bits != 0; bits &= bits - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctzll(bits);
-                const uint32_t declaration = declarations[token];
+                const uint32_t declaration = deferred == NULL || deferred[token] == 0 ? declarations[token] : BUSTER_CHECK_NONE;
                 if (kinds[token] == PARSE_KIND_IDENTIFIER && roles[token] == PARSE_ROLE_OPERAND && declaration < count && declaration != token &&
                     declaration_kinds[declaration] == C_BINDING_FUNCTION)
                 {

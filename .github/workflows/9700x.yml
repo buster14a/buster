@@ -190,6 +190,20 @@ jobs:
                   --base-workflow "$RUNNER_TEMP/base.yml" --workflow "$workflow" --output "$GITHUB_OUTPUT"
           fi
 
+      # The change's affected-test groups (tools/ci/feedback.c, #1427), in the job's summary: advisory, for a local
+      # reproduction (docs/commands/ci.md, "Early hosted feedback and reproductions"). It selects nothing here, every row
+      # still runs the whole inventory, and it never fails the job. Runs without a change list (a push) have none.
+      - name: Publish conservative affected-test groups (advisory)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/files" || exit 0
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/feedback.c -o "$RUNNER_TEMP/feedback"
+          "$RUNNER_TEMP/feedback" --profile affected --files "$RUNNER_TEMP/files" \
+            --inventory tools/ci/correctness.tests --report "$RUNNER_TEMP/feedback-plan.md" > "$RUNNER_TEMP/feedback-affected.tests"
+          cat "$RUNNER_TEMP/feedback-plan.md" >> "$GITHUB_STEP_SUMMARY"
+
   # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
   # "Nightly main measurements"). A pull request, draft or ready: never admitted (#2055); its plain hosted rows
   # qualify it, and its merged first-parent state gets native correctness and measurements in the nightly window. A
@@ -277,6 +291,7 @@ jobs:
           bash tests/ci/hosted-product.sh
           node tests/ci/vector-runtime.cjs
           bash tests/ci/rerun.sh
+          bash tests/ci/feedback.sh
 
   analyze:
     name: Clang Static Analyzer

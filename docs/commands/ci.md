@@ -22,6 +22,87 @@ push trigger among them. `tests/ci/nightly.sh` checks the candidates' evidence
 and coverage. Before the queue, every push ran its own hosted rows (#1271):
 the plain rows in the nightly mode (#2057), and the full matrix before it.
 
+## Early hosted feedback and reproductions (#1427)
+
+Every hosted job that runs the compiler is a drawn item on an AVX-512 runner
+(#2924). Each plain item of a pull request's or a merge-queue candidate's run
+gives its first result at the start of its own run: the step **Early hosted
+feedback (not qualification)**, just before "Run correctness tests within the
+hosted CPU budget". It adds no build: it runs the item's compiler, built or
+installed. It runs the fixed driver corpus (`tests/ci/feedback/`, no random
+seed), which:
+
+- preprocesses, parses and checks a unit;
+- emits two units' objects and links them with clang;
+- runs the program;
+- checks an undeclared-identifier diagnostic.
+
+A failure stops the item before its suite, as the suite's own first failure
+would (`--fail-fast`). The step qualifies nothing: the suite runs the corpus's
+heading, `Test the early driver feedback corpus`, in its deal, and every row,
+item, sanitizer configuration and merge-queue case is unchanged. Sanitizer items
+skip the step, and so do dispatched and nightly runs, whose suites report every
+command. On pull requests and candidates, plain shard 1 also checks that the
+corpus fails on a compiler broken in each area it promises
+(`tests/ci/feedback.sh --compiler`). #2034's accounting counts the early step as
+first useful feedback (`accounting_phase`).
+
+`tools/ci/feedback.sh` records each item's build, early step and suite. Each
+record holds:
+
+- the log and the exact inventory and runner arguments (`command.sh`,
+  `selected.tests`);
+- the revision, configuration and flags;
+- the CPU (`cpu.txt`) and the draw's probe answers (`probe.txt`);
+- the tool pins and the apt manifest;
+- retained failing cases;
+- `result.tsv`, which tells a product failure from an infrastructure failure
+  and an incomplete run (a cancellation or a timeout, which never passes).
+
+The item uploads the records as `feedback-ROW-SANITIZER-O3-shardK-ATTEMPT`.
+To replay one, check out its `revision` clean and run `bash
+/path/to/artifact/reproduce.sh` on Ubuntu 26.04:
+
+- The CPU must pass the vector probe (`tools/ci/vector-probe.c`). A `native`
+  record needs the recorded CPU model too.
+- It uses the original run's prepared offline inputs through `gh` while
+  they're retained. Otherwise it acquires them again and refuses an apt closure
+  that differs from the record.
+- It then runs the item's setup and build steps in order, and the recorded
+  command.
+
+A full rerun on GitHub is `9700x.yml`'s `full` dispatch.
+
+The `changes` job adds an **advisory** affected-test plan to its summary
+(`continue-on-error`). Its dependency map is `feedback_rules` in
+`tools/ci/feedback.c`, and heading ownership is `feedback_heading`:
+
+- Frontend edits select every downstream group; checker edits include
+  emission, execution and diagnostics.
+- Headers, unknown paths and build, toolchain, CI and selector changes expand to
+  every group, as does an empty change list.
+- Documentation is exempt, except the CI and toolchain policy guides.
+- An unclassified heading always runs, every decision has its reason, and a
+  malformed plan publishes no commands.
+
+The plan selects nothing in CI. Locally, `feedback.sh run DIR PROFILE` runs a
+plan through `parallel` with the same records. PROFILE is one of:
+
+- `smoke`: the corpus alone, as the early step runs it;
+- `affected`, the groups of the paths in the file `BUSTER_FEEDBACK_FILES`
+  names;
+- `frontend`, `checker`, `object`, `link` or `diagnostics`, one group;
+- `full`: the whole inventory, as each item's suite runs it.
+
+The `affected` and group profiles always run the corpus and the lexer,
+link-representation and diagnostic-ordering regressions too.
+
+```sh
+bash tests/ci/feedback.sh                                    # in the CI glue fixtures job
+bash tests/ci/feedback.sh --compiler build/compiler          # the corpus's mutants, plain shard 1's step
+BUSTER_COMPILER=build/compiler bash tools/ci/feedback.sh run build/feedback checker --jobs 4
+```
+
 ## The merge queue
 
 `9700x.yml` runs on `merge_group` (`checks_requested`, main, no path filter),

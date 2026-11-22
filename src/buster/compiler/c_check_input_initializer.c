@@ -158,7 +158,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             reader->incomplete_array_types[declaration] = incomplete_type;
         }
         check_input_rare_claim(reader, &reader->initializer_finish_next[declaration]);
-        reader->initializer_finish_next[declaration] = reader->initializer_finish_heads[end];
+        reader->initializer_finish_next[declaration] = check_input_list_head(reader, reader->initializer_finish_heads, end, BUSTER_CHECK_RESOLVE_FINISH);
         reader->initializer_finish_heads[end] = declaration;
         check_input_visit(reader, end, BUSTER_CHECK_RESOLVE_FINISH);
         reader->inference_end = end > reader->inference_end ? end : reader->inference_end;
@@ -239,7 +239,7 @@ static uint32_t check_input_auto_initializer_spelling(const CheckInputReader* re
     uint32_t root = check_input_range_root(reader, begin, end);
     for (uint32_t steps = 0; root >= begin && root < end && steps < end - begin; steps += 1)
     {
-        const uint32_t chosen = reader->selected_tokens[root];
+        const uint32_t chosen = check_input_selection_at(reader, root);
         const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
         const uint8_t role = parser->tree.roles[root];
         const uint8_t kind = parser->tokens.kinds[root];
@@ -277,7 +277,7 @@ static bool check_input_auto_initializer_bit_field(const CheckInputReader* reade
     bool field = false;
     for (uint32_t steps = 0; root >= begin && root < end && steps < end - begin; steps += 1)
     {
-        const uint32_t chosen = reader->selected_tokens[root];
+        const uint32_t chosen = check_input_selection_at(reader, root);
         const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
         if (chosen != BUSTER_CHECK_NONE && selected >= begin && selected < end && selected != root)
         {

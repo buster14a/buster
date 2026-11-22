@@ -805,6 +805,17 @@ static const char* check_driver_interrupt_message(uint32_t detail)
     return messages[rule < BUSTER_ARRAY_LENGTH(messages) ? rule : 0];
 }
 
+// The highlighted ranges clang's diagnostic of an input report has (#2376), as tokens of the output, before its
+// publication at output token `source`; the caller clears them after it (pp_diagnostic_ranges_clear).
+static void check_driver_input_ranges(Preprocessor* pp, const CheckInputReport* report, uint32_t source)
+{
+    // A name that names nothing: the name (clang's Sema::DiagnoseEmptyLookup, its lookup's name range).
+    if (report->message == CHECK_INPUT_UNDECLARED || report->message == CHECK_INPUT_UNDECLARED_CORRECTED)
+    {
+        pp_diagnostic_range_tokens(pp, source, source);
+    }
+}
+
 static const char* check_driver_input_report_message(const CheckInput* input, const CheckInputReport* report)
 {
     const CheckInputLoopDiagnostic* loop = input->loop_diagnostic;
@@ -1090,6 +1101,36 @@ static uint32_t check_driver_file_initializer_end(const Parser* parser, const Ch
               input->graph.source_positions[node] : BUSTER_CHECK_NONE;
     }
     return end;
+}
+
+// The last token of the initializer that holds `token`, or BUSTER_CHECK_NONE outside one (#2252): the one before the
+// first `,` or `;` at the depth of the outermost `=` the parse tree's climb from `token` reaches from its right. clang's
+// AddInitializerToDecl checks the initializer once it is parsed, before the declaration's own checks at that `,` or `;`
+// (a type_tag_for_datatype's).
+static uint32_t check_driver_initializer_last(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t equal = BUSTER_CHECK_NONE;
+    uint32_t at = token;
+    for (uint32_t steps = 0; at < count && steps < count; steps += 1)
+    {
+        const uint32_t parent = parser->tree.parents[at];
+        const bool top = parent >= count || parent == at;
+        equal = !top && parent < at && parser->tokens.kinds[parent] == PARSE_KIND_EQUAL ? parent : equal;
+        at = top ? count : parent;
+    }
+    uint32_t end = BUSTER_CHECK_NONE;
+    uint32_t depth = 0;
+    for (uint32_t t = equal < count ? equal + 1 : count; end == BUSTER_CHECK_NONE && t < count; t += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[t];
+        const bool opener = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        const bool closer = kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE;
+        end = depth == 0 && (kind == PARSE_KIND_COMMA || kind == PARSE_KIND_SEMI || closer) ? t : end;
+        depth = opener ? depth + 1 : closer && depth != 0 ? depth - 1 : depth;
+    }
+    const uint32_t last = end < count && end > equal + 1 ? end - 1 : BUSTER_CHECK_NONE;
+    return last;
 }
 
 static uint32_t check_driver_warning_position(const Parser* parser, const Preprocessor* pp, const CheckInput* input, const CheckRepair* repair,
@@ -2358,8 +2399,16 @@ static void check_driver_x86_reports(const Parser* parser, const Parser* origina
                         (phase == PP_DIAGNOSTIC_DEFERRED ? PP_SEVERITY_DEFERRED_ERROR : PP_SEVERITY_ERROR) : PP_SEVERITY_MAPPED_ERROR) : PP_SEVERITY_WARNING;
                 // Clang's warn_argument_invalid_range is an error by default, so its printer never adds `-Werror,`: the
                 // option alone, whether it is a warning, an error or a fatal error (#1079).
+                const PPDiagnosticRecord* previous = pp->diagnostic_last;
                 pp_diagnose_output_phase(pp, pp_severity, parse_source_index(&parser->tokens, token), publication, phase,
                                    "argument value %s is outside the valid range [%u, %u] [-Wargument-outside-range]", text, event->low, event->high);
+                // A body's is queued as the call is built, after its arguments' constants' commas (#2252, pp_diagnostic_queued).
+                const uint32_t end = phase == PP_DIAGNOSTIC_DEFERRED && effect->node < input->graph.count && input->graph.source_positions != NULL ?
+                                     input->graph.source_positions[effect->node] : BUSTER_CHECK_NONE;
+                if (pp->diagnostic_last != previous && end <= parser->tokens.count)
+                {
+                    pp_diagnostic_queued(pp, previous, end);
+                }
             }
         }
     }
@@ -3910,6 +3959,11 @@ static const char* check_driver_conversion_error(const Parser* parser, Preproces
                                                                  target_declaration, target_node, 0, action,
                                                                  scratch) : NULL;
     *located = result != NULL ? at : *located;
+    // The source expression highlighted (#2376), clang's SrcExpr->getSourceRange() in DiagnoseAssignmentResult.
+    if (result != NULL && source < stream->count)
+    {
+        check_semantic_range(parser, pp, graph->tokens[source], true);
+    }
     return result;
 }
 
@@ -3987,6 +4041,8 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
                 pp_diagnostic_suborder(pp, previous, suborder);
             }
         }
+        // The ranges check_semantic_expression gave the message are its alone (#2376).
+        pp_diagnostic_ranges_clear(pp);
     }
 }
 
@@ -4291,6 +4347,8 @@ static const char* check_driver_overload_address(const Parser* parser, Preproces
     uint32_t argument = BUSTER_CHECK_NONE;
     const char* words = function || other ? check_driver_conversion_error(parser, pp, input, stream, types, spell, report, located, &note_token, &note, &argument,
                                                                           scratch) : NULL;
+    // (Only the conversion's words: its highlighted range is no overload's, #2376.)
+    pp_diagnostic_ranges_clear(pp);
     const char* prefix = "incompatible function pointer types ";
     const bool shaped = words != NULL && strncmp(words, prefix, strlen(prefix)) == 0;
     // The target as the words spell it: between the action's words and the source's, whatever comes before them for
@@ -5438,10 +5496,24 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             const uint32_t sorted = check_driver_publication_position(parser, pp, input->reports[index].sort, publication_end);
                             publication = publication < sorted ? sorted : publication;
                         }
+                        // The reader's "not a compile-time constant" is clang's once the initializer is parsed (#2252): after
+                        // what reading it gave at once, as a comma's -Wunused-value in a bound of its sizeof's type name.
+                        const uint32_t initializer_last = phase == 0 && input->reports[index].message == CHECK_INPUT_CONSTANT_INITIALIZER ?
+                                                          check_driver_initializer_last(parser, located) : BUSTER_CHECK_NONE;
+                        if (initializer_last < count)
+                        {
+                            const uint32_t parsed = check_driver_publication_position(parser, pp, initializer_last, publication_end);
+                            publication = publication < parsed ? parsed : publication;
+                        }
                         // The report's identifier supplies its spelling. Its sorted publication key can be a later
                         // expression's end, as for an attribute count diagnosed after an argument's call error.
                         const CheckInputMessage kind = phase == 0 ? input->reports[index].message : CHECK_INPUT_UNSUPPORTED;
                         const bool named = phase == 0 && located < count && parser->tokens.kinds[located] == PARSE_KIND_IDENTIFIER;
+                        // Its highlighted ranges (#2376), for the kinds whose branch below publishes it alone.
+                        if (phase == 0)
+                        {
+                            check_driver_input_ranges(pp, input->reports + index, source);
+                        }
                         if (kind >= CHECK_INPUT_MUSTTAIL_ARGUMENTS && kind <= CHECK_INPUT_MUSTTAIL_STATEMENT && named)
                         {
                             // clang's musttail attribute where it doesn't go (#147), spelled as clang spells it there.
@@ -6847,6 +6919,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     {
                         check_driver_diagnose(parser, pp, located, message);
                     }
+                    // A report's highlighted ranges, which its message's producer or check_driver_input_ranges set, are its
+                    // alone (#2376).
+                    pp_diagnostic_ranges_clear(pp);
                     if (types->atomic_records && phase == 1 && stream->reports[index].message == CHECK_MESSAGE_ACTION &&
                         stream->reports[index].diagnostic == CHECK_DIAG_MEMBER && node < input->graph.count &&
                         check_common_atomic_member(&input->graph, stream, types, node))
@@ -13614,8 +13689,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // the internal functions used but never defined, unless an error has occurred (clang's
                     // hasErrorOccurred, which counts a warning -Werror promotes); the tentative arrays' warnings; then, again
                     // unless an error has occurred, a promoted one among those included, the unused file-scope declarations'.
+                    // A unit with lazily deferred bodies has them too, from the tokens that were read: a deferred body's
+                    // uses count for nothing, as its errors don't (check_warning_undefined_internal).
                     const bool final_warnings = pp->errors == 0 && !pp->fatal && program_checked && !prefix_only && !repairing && !parse_failed &&
-                                                input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
+                                                !pp->diagnostic_collection_failed && !pp->history_failed;
                     if (final_warnings)
                     {
                         CheckInput undefined_input;
@@ -14918,6 +14995,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler's build can't be identified\n");
     }
     options.published_unused_only = (emit_object || link) && !dump && !dump_static && attested_memo == NULL && attested != CHECK_ATTESTED_MODE_VERIFY;
+    options.statement_controls = (emit_object || link) && !scalar && !dump && !dump_static &&
+                                 !node_window && !node_window_constants && !source_rows;
     const CheckDriverCommand command = {
         .options = options,
         .scalar = scalar,

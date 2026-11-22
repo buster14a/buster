@@ -3535,7 +3535,7 @@ static bool changes_row_policy(Text row)
         { 2, "          ref: ${{ github.sha }}" },
         { 2, "          artifact-name: ${{ inputs.hosted-tools }}" },
         { 2, "        if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')" },
-        { 2, "        run: bash tools/ci/hosted-product.sh build" },
+        { 2, "        run: bash tools/ci/feedback.sh build \"$RUNNER_TEMP/feedback-build\"" },
         { 2, "        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'" },
         { 2, "        uses: ./.github/actions/vector-runtime" },
         { 2, "          script: bash tools/ci/vector-draw.sh product \"$BUSTER_SANITIZER\"" },

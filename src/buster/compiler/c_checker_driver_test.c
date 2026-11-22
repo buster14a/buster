@@ -94,6 +94,18 @@ struct CheckDriverRunModes
     uint64_t differences;
     uint64_t sweep_fixtures;
     uint64_t sweep_nanoseconds;
+    // --carets (#2376, check_test_driver_carets): the command lines run again with carets on by buster and by clang, and
+    // how their whole errors compared: the same, apart only in highlighted ranges' '~', in other source lines (fix-its,
+    // scratch space, a range's lines), or in diagnostics' own lines; and how many of those were printed.
+    bool carets;
+    // --carets-all: print every command line that differs, not the first 64.
+    bool carets_all;
+    uint64_t caret_runs;
+    uint64_t caret_same;
+    uint64_t caret_ranges;
+    uint64_t caret_lines;
+    uint64_t caret_messages;
+    uint64_t caret_shown;
 };
 
 static CheckDriverRunModes check_driver_run_modes = {
@@ -484,6 +496,123 @@ static int check_test_driver_buster_command(char* const* arguments, char** text,
     return status;
 }
 
+// Whether `line` (`length` bytes) is a caret display's: a source line's, behind its gutter, or a caret line's.
+static bool check_test_driver_snippet_line(const char* line, uint64_t length)
+{
+    uint64_t at = 0;
+    while (at < length && line[at] == ' ')
+    {
+        at += 1;
+    }
+    while (at < length && line[at] >= '0' && line[at] <= '9')
+    {
+        at += 1;
+    }
+    at += at < length && line[at] == ' ' ? 1 : 0;
+    return at + 1 < length && line[at] == '|' && line[at + 1] == ' ';
+}
+
+// `text` with its lines rewritten: with `ranges`, each caret line's '~' as spaces and its trailing spaces dropped; else
+// every caret display's line dropped (malloc's; the caller frees it).
+static char* check_test_driver_caret_text(const char* text, bool ranges)
+{
+    const uint64_t length = text != NULL ? strlen(text) : 0;
+    char* result = malloc(length + 1);
+    uint64_t used = 0;
+    for (uint64_t at = 0; result != NULL && at < length;)
+    {
+        const char* end = memchr(text + at, '\n', length - at);
+        const uint64_t size = end != NULL ? (uint64_t)(end - (text + at)) : length - at;
+        const bool snippet = check_test_driver_snippet_line(text + at, size);
+        if (!snippet || ranges)
+        {
+            uint64_t kept = size;
+            memcpy(result + used, text + at, size);
+            for (uint64_t i = 0; snippet && i < size; i += 1)
+            {
+                result[used + i] = result[used + i] == '~' ? ' ' : result[used + i];
+            }
+            while (snippet && kept != 0 && result[used + kept - 1] == ' ')
+            {
+                kept -= 1;
+            }
+            used += kept;
+            result[used++] = '\n';
+        }
+        at += size + 1;
+    }
+    if (result != NULL)
+    {
+        result[used] = 0;
+    }
+    return result;
+}
+
+// --carets (#2376): a command line of buster's that passes -fno-caret-diagnostics and -fsyntax-only, and none of
+// buster's own '--' options, -o or a -M one, run again without it by buster and by the oracle clang, and their whole errors compared (the counters above;
+// the first 64 that differ printed). It measures the caret display over the suite's command lines; it fails nothing.
+static void check_test_driver_carets(char* const* arguments)
+{
+    CheckDriverRunModes* modes = &check_driver_run_modes;
+    char* again[64];
+    uint32_t count = 1;
+    bool named = false;
+    // Only a check alone, which writes nothing a test reads afterwards (an object, a dependency file).
+    bool syntax = false;
+    bool clang_options = modes->clang != NULL;
+    for (uint32_t i = 1; arguments[i] != NULL; i += 1)
+    {
+        const bool caret = strcmp(arguments[i], "-fno-caret-diagnostics") == 0;
+        named |= caret;
+        syntax |= strcmp(arguments[i], "-fsyntax-only") == 0;
+        clang_options &= strncmp(arguments[i], "--", 2) != 0 && strcmp(arguments[i], "-o") != 0 && strncmp(arguments[i], "-M", 2) != 0 &&
+                         count < BUSTER_ARRAY_LENGTH(again) - 1;
+        if (!caret && count < BUSTER_ARRAY_LENGTH(again) - 1)
+        {
+            again[count++] = arguments[i];
+        }
+    }
+    again[count] = NULL;
+    if (named && syntax && clang_options)
+    {
+        char* ours = NULL;
+        char* theirs = NULL;
+        again[0] = (char*)modes->clang;
+        const int their_status = check_test_driver_child(again, &theirs, false, true);
+        again[0] = arguments[0];
+        const int our_status = check_test_driver_child(again, &ours, false, true);
+        char* our_ranges = check_test_driver_caret_text(ours, true);
+        char* their_ranges = check_test_driver_caret_text(theirs, true);
+        char* our_lines = check_test_driver_caret_text(ours, false);
+        char* their_lines = check_test_driver_caret_text(theirs, false);
+        const bool ran = ours != NULL && theirs != NULL && our_ranges != NULL && their_ranges != NULL && our_lines != NULL && their_lines != NULL;
+        const bool same = ran && strcmp(ours, theirs) == 0;
+        const bool ranges = ran && !same && strcmp(our_ranges, their_ranges) == 0;
+        const bool lines = ran && !same && !ranges && strcmp(our_lines, their_lines) == 0;
+        modes->caret_runs += ran ? 1 : 0;
+        modes->caret_same += same ? 1 : 0;
+        modes->caret_ranges += ranges ? 1 : 0;
+        modes->caret_lines += lines ? 1 : 0;
+        modes->caret_messages += ran && !same && !ranges && !lines ? 1 : 0;
+        if (ran && !same && (modes->caret_shown < 64 || modes->carets_all))
+        {
+            modes->caret_shown += 1;
+            printf("carets: %s (status %d, clang %d):", ranges ? "ranges" : lines ? "lines" : "messages", our_status, their_status);
+            for (uint32_t i = 1; again[i] != NULL; i += 1)
+            {
+                printf(" %s", again[i]);
+            }
+            printf("\nours:\n%sclang's:\n%s", ours, theirs);
+        }
+        free(ours);
+        free(theirs);
+        free(our_ranges);
+        free(their_ranges);
+        free(our_lines);
+        free(their_lines);
+    }
+}
+
 // Runs `arguments` (arguments[0] the program), capturing the selected stream into *text and discarding the other. The
 // caller frees *text. Returns the exit status, or -1 if it didn't exit. Buster's runs (arguments[0] --executable's name
 // or /proc/self/exe) and the oracle clang's take the run modes above.
@@ -494,6 +623,10 @@ static int check_test_driver_spawn_stream(char* const* arguments, char** text, b
     const bool clang = !buster && arguments[0] != NULL && modes->server.path != NULL && modes->clang != NULL && strcmp(arguments[0], modes->clang) == 0;
     int status = -1;
     *text = NULL;
+    if (buster && modes->carets && !stdout_capture)
+    {
+        check_test_driver_carets(arguments);
+    }
     if (buster)
     {
         status = check_test_driver_buster_command(arguments, text, stdout_capture, true);
@@ -5257,8 +5390,11 @@ static bool check_test_driver_change_need(const char* from, const char* to, cons
 // V1 has another hash (vna_hash, which the loader compares with vd_hash) is refused against the libB of foo@V1; a copy
 // of libA whose need of libc.so.6's GLIBC_2.2.5 is renamed GLIBC_9.9.9 is refused naming libc.so.6, and so is a copy
 // of that libB with its own need renamed so, which the loader loads for libA's DT_NEEDED though the link doesn't need
-// it. Each case links by both paths, which must write the same bytes or refuse it alike. clang builds the libraries
-// with version scripts.
+// it. Each case links by both paths, which must write the same bytes or refuse it alike, and again with an object of
+// clang's on the line, which makes the link a mixed one through the foreign resolver (#1590): it must link and run with
+// the direct link's DT_NEEDED, or refuse, as the direct link does, with the foreign resolver's words for needs that
+// don't read ("malformed input in libA.so"), and a refusal of either route leaves the output that was there. clang
+// builds the libraries with version scripts.
 static void check_test_driver_versions(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char a_source[] = "int foo(void);\nint a_func(void) { return foo(); }\n";
@@ -5348,20 +5484,34 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
         { "libB's need of GLIBC_9.9.9, libB loaded for libA's DT_NEEDED: refused naming libc.so.6", "", "", "bglibc", false, CHECK_TEST_VERSIONS_VERSION,
           "libc.so.6", "GLIBC_9.9.9", "bglibc/libB.so" },
     };
+    // The object that makes a link a mixed one, which nothing refers to.
+    static const char extra_source[] = "int versioned_extra = 1;\n";
+    // What a refused link must leave at its output.
+    static const char old_output[] = "the output before the link\n";
     char path[3][320];
     char a_path[256];
     char library_a[256];
     char sources[2][256];
-    char outputs[2][256];
+    char extra[2][256];
+    // By route (direct, mixed) and path (vector, --scalar).
+    char outputs[2][2][256];
     snprintf(a_path, sizeof(a_path), "%s/versioned_a.c", directory);
     snprintf(library_a, sizeof(library_a), "%s/libA.so", directory);
     snprintf(sources[0], sizeof(sources[0]), "%s/versioned.c", directory);
     snprintf(sources[1], sizeof(sources[1]), "%s/versioned_defines.c", directory);
-    snprintf(outputs[0], sizeof(outputs[0]), "%s/versioned", directory);
-    snprintf(outputs[1], sizeof(outputs[1]), "%s/versioned-scalar", directory);
+    snprintf(extra[0], sizeof(extra[0]), "%s/versioned_extra.c", directory);
+    snprintf(extra[1], sizeof(extra[1]), "%s/versioned_extra.o", directory);
+    snprintf(outputs[0][0], sizeof(outputs[0][0]), "%s/versioned", directory);
+    snprintf(outputs[0][1], sizeof(outputs[0][1]), "%s/versioned-scalar", directory);
+    snprintf(outputs[1][0], sizeof(outputs[1][0]), "%s/versioned-mixed", directory);
+    snprintf(outputs[1][1], sizeof(outputs[1][1]), "%s/versioned-mixed-scalar", directory);
     bool built = parse_test_write(a_path, a_source, sizeof(a_source) - 1) && parse_test_write(sources[0], program, sizeof(program) - 1) &&
-                 parse_test_write(sources[1], defines_foo, sizeof(defines_foo) - 1);
+                 parse_test_write(sources[1], defines_foo, sizeof(defines_foo) - 1) && parse_test_write(extra[0], extra_source, sizeof(extra_source) - 1);
     char* text = NULL;
+    char* const build_extra[] = { (char*)clang, "-c", "-o", extra[1], extra[0], NULL };
+    built = built && check_test_driver_spawn(build_extra, &text) == 0;
+    free(text);
+    text = NULL;
     for (uint32_t v = 0; built && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
     {
         // DIRECTORY/NAME/libB.so, from NAME.c and NAME.map beside it.
@@ -5413,67 +5563,118 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
         const bool third = cases[c].c[0] != 0;
         snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s:%s%s%s", a_directory, b_directory, third ? ":" : "", third ? c_directory : "");
         const bool linking = cases[c].outcome == CHECK_TEST_VERSIONS_LINKED;
-        int linked[2] = { -1, -1 };
-        char messages[2][700] = { { 0 } };
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        // By route (direct, mixed) and path (vector, --scalar): each link's status and words, and whether a refused one
+        // left the output there.
+        int linked[2][2] = { { -1, -1 }, { -1, -1 } };
+        char messages[2][2][700] = { { { 0 } } };
+        bool kept[2][2] = { { true, true }, { true, true } };
+        for (uint32_t route = 0; route < 2; route += 1)
         {
-            // [--scalar] -o OUTPUT SOURCE -L A [-L C] -L B -lA [-lC] -lB.
-            char* link[16];
-            uint32_t count = 0;
-            link[count++] = (char*)executable;
-            if (scalar != 0)
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
-                link[count++] = "--scalar";
-            }
-            link[count++] = "-o";
-            link[count++] = outputs[scalar];
-            link[count++] = sources[cases[c].defines ? 1 : 0];
-            link[count++] = "-L";
-            link[count++] = a_directory;
-            if (third)
-            {
+                // [--scalar] -o OUTPUT SOURCE [EXTRA.o] -L A [-L C] -L B -lA [-lC] -lB.
+                char* link[18];
+                uint32_t count = 0;
+                link[count++] = (char*)executable;
+                if (scalar != 0)
+                {
+                    link[count++] = "--scalar";
+                }
+                link[count++] = "-o";
+                link[count++] = outputs[route][scalar];
+                link[count++] = sources[cases[c].defines ? 1 : 0];
+                if (route != 0)
+                {
+                    link[count++] = extra[1];
+                }
                 link[count++] = "-L";
-                link[count++] = c_directory;
+                link[count++] = a_directory;
+                if (third)
+                {
+                    link[count++] = "-L";
+                    link[count++] = c_directory;
+                }
+                link[count++] = "-L";
+                link[count++] = b_directory;
+                link[count++] = "-lA";
+                if (third)
+                {
+                    link[count++] = "-lC";
+                }
+                link[count++] = "-lB";
+                link[count] = NULL;
+                const bool sentinel = !linking && parse_test_write(outputs[route][scalar], old_output, sizeof(old_output) - 1);
+                linked[route][scalar] = check_test_driver_spawn(link, &text);
+                snprintf(messages[route][scalar], sizeof(messages[route][scalar]), "%s", text != NULL ? text : "");
+                free(text);
+                text = NULL;
+                uint64_t length = 0;
+                char* after = NULL;
+                if (!linking)
+                {
+                    FILE* file = fopen(outputs[route][scalar], "rb");
+                    after = file != NULL ? calloc(1, sizeof(old_output)) : NULL;
+                    length = after != NULL ? fread(after, 1, sizeof(old_output), file) : 0;
+                    if (file != NULL)
+                    {
+                        fclose(file);
+                    }
+                }
+                kept[route][scalar] = linking || (sentinel && length == sizeof(old_output) - 1 && memcmp(after, old_output, length) == 0);
+                free(after);
             }
-            link[count++] = "-L";
-            link[count++] = b_directory;
-            link[count++] = "-lA";
-            if (third)
-            {
-                link[count++] = "-lC";
-            }
-            link[count++] = "-lB";
-            link[count] = NULL;
-            linked[scalar] = check_test_driver_spawn(link, &text);
-            snprintf(messages[scalar], sizeof(messages[scalar]), "%s", text != NULL ? text : "");
+        }
+        int ran[2] = { -1, -1 };
+        for (uint32_t route = 0; route < 2; route += 1)
+        {
+            char* const run[] = { "env", search, outputs[route][0], NULL };
+            ran[route] = linking && linked[route][0] == 0 ? check_test_driver_spawn(run, &text) : -1;
             free(text);
             text = NULL;
         }
-        char* const run[] = { "env", search, outputs[0], NULL };
-        const int ran = linking && linked[0] == 0 ? check_test_driver_spawn(run, &text) : -1;
-        free(text);
-        text = NULL;
-        char expected[1000];
+        char expected[2][1000];
         if (cases[c].outcome == CHECK_TEST_VERSIONS_VERSION)
         {
             const bool under = strchr(cases[c].lacking, '/') != NULL;
             char requiring[352];
             snprintf(requiring, sizeof(requiring), "%s%s%s", cases[c].by != 0 ? directory : a_library, cases[c].by != 0 ? "/" : "", cases[c].by != 0 ? cases[c].by : "");
-            snprintf(expected, sizeof(expected), "%s%s%s: version '%s' not found (required by %s)", under ? directory : "", under ? "/" : "", cases[c].lacking,
+            snprintf(expected[0], sizeof(expected[0]), "%s%s%s: version '%s' not found (required by %s)", under ? directory : "", under ? "/" : "", cases[c].lacking,
                      cases[c].missing, requiring);
+            snprintf(expected[1], sizeof(expected[1]), "%s", expected[0]);
         }
         else
         {
-            snprintf(expected, sizeof(expected), cases[c].outcome == CHECK_TEST_VERSIONS_REFUSED ? "%s: undefined reference to 'foo@V1'" : "%s isn't a shared library",
+            snprintf(expected[0], sizeof(expected[0]), cases[c].outcome == CHECK_TEST_VERSIONS_REFUSED ? "%s: undefined reference to 'foo@V1'" : "%s isn't a shared library",
+                     a_library);
+            snprintf(expected[1], sizeof(expected[1]), cases[c].outcome == CHECK_TEST_VERSIONS_REFUSED ? "%s: undefined reference to 'foo@V1'" : "malformed input in %s",
                      a_library);
         }
-        const bool right = linking ? linked[0] == 0 && linked[1] == 0 && ran == 0 && check_test_driver_same_files(outputs[0], outputs[1])
-                                   : linked[0] == 1 && linked[1] == 1 && strstr(messages[0], expected) != NULL && strstr(messages[1], expected) != NULL;
-        if (!right)
+        // A linked program's DT_NEEDED, by route: the mixed link keeps the libraries the direct one keeps, libC for libA's
+        // foo@V1 among them, and not libB, which libA's own DT_NEEDED names.
+        char needed[2][512] = { { 0 } };
+        for (uint32_t route = 0; linking && route < 2; route += 1)
         {
-            printf("  %s: link status %d and %d, run status %d: %s%s\n", cases[c].name, linked[0], linked[1], ran, messages[0], messages[1]);
+            if (!check_test_driver_needed(outputs[route][0], needed[route], sizeof(needed[route])))
+            {
+                needed[route][0] = 0;
+            }
         }
-        check_test_expect(test, right, cases[c].name);
+        for (uint32_t route = 0; route < 2; route += 1)
+        {
+            const bool same_needed = needed[route][0] != 0 && strcmp(needed[route], needed[0]) == 0;
+            const bool right = linking ? linked[route][0] == 0 && linked[route][1] == 0 && ran[route] == 0 && check_test_driver_same_files(outputs[route][0], outputs[route][1]) &&
+                                             same_needed
+                                       : linked[route][0] == 1 && linked[route][1] == 1 && strstr(messages[route][0], expected[route]) != NULL &&
+                                             strstr(messages[route][1], expected[route]) != NULL && kept[route][0] && kept[route][1];
+            if (!right)
+            {
+                printf("  %s, %s: link status %d and %d, run status %d, output %s, DT_NEEDED \"%s\": %s%s\n", cases[c].name, route == 0 ? "direct" : "mixed", linked[route][0],
+                       linked[route][1], ran[route], kept[route][0] && kept[route][1] ? "kept" : "replaced", needed[route], messages[route][0], messages[route][1]);
+            }
+            char name[300];
+            snprintf(name, sizeof(name), "%s%s", cases[c].name, route == 0 ? "" : " (mixed)");
+            check_test_expect(test, right, name);
+        }
     }
     for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(variants); v += 1)
     {
@@ -5495,7 +5696,7 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
         snprintf(file, sizeof(file), "%s/%s", directory, changes[c].name);
         rmdir(file);
     }
-    const char* const files[] = { a_path, library_a, sources[0], sources[1], outputs[0], outputs[1] };
+    const char* const files[] = { a_path, library_a, sources[0], sources[1], extra[0], extra[1], outputs[0][0], outputs[0][1], outputs[1][0], outputs[1][1] };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
         unlink(files[f]);
@@ -6975,6 +7176,7 @@ static bool check_test_driver_reports_dense(const Parser* parser, Preprocessor* 
                 {
                     check_driver_diagnose(parser, pp, location, message);
                 }
+                pp_diagnostic_ranges_clear(pp);
             }
         }
         // A directive in an unfinished expression can lie beyond every safely checked prefix. Its original
@@ -7313,6 +7515,43 @@ static bool check_test_driver_files_equal(const char* first, const char* second)
     return equal;
 }
 
+// Both ordinary and scalar object emission must agree on a parameter's binding and the local alias shadowing it.
+static void check_test_driver_named_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char valid_source[] =
+        "typedef unsigned short Word; typedef Word *Ptr;\n"
+        "int fold(Word first, const Word *next, Ptr *last);\n"
+        "int fold(Word first,const Word *next,Ptr *last){ Word local=first; const Word *p=next;\n"
+        "  {typedef long Word; Word extra=**last; local+=extra;} return local+*p; }\n";
+    static const char invalid_source[] = "typedef int Word; int bad(Word first,int first){return first;}\n";
+    char source[192], general[192], ordinary[192];
+    snprintf(source, sizeof(source), "%s/named-declarations.c", directory);
+    snprintf(general, sizeof(general), "%s/named-scalar.o", directory);
+    snprintf(ordinary, sizeof(ordinary), "%s/named-ordinary.o", directory);
+    const char* const sources[] = { valid_source, invalid_source };
+    const char* options[] = { "-std=gnu17" };
+    for (uint32_t rejected = 0; rejected < BUSTER_ARRAY_LENGTH(sources); rejected += 1)
+    {
+        unlink(general);
+        unlink(ordinary);
+        CheckCorpusOracle reference = { 0 }, compiled = { 0 }, scalar = { 0 };
+        uint32_t ordinary_warnings = 0, scalar_warnings = 0;
+        const bool wrote = parse_test_write(source, sources[rejected], strlen(sources[rejected]));
+        const bool ran = wrote && check_corpus_clang_file(clang, options, BUSTER_ARRAY_LENGTH(options), source, &reference) &&
+                         check_test_driver_run(executable, source, ordinary, false, false, false, false, &compiled, &ordinary_warnings) &&
+                         check_test_driver_run(executable, source, general, true, false, false, false, &scalar, &scalar_warnings);
+        const bool status = ran && reference.rejected == (rejected != 0) && compiled.rejected == reference.rejected && scalar.rejected == reference.rejected;
+        const bool same = status && ordinary_warnings == scalar_warnings && (rejected == 0 ? check_test_driver_files_equal(general, ordinary) :
+                          compiled.line == reference.line && compiled.column == reference.column && strcmp(compiled.message, scalar.message) == 0 &&
+                          strstr(compiled.message, "redefinition of parameter") != NULL && access(ordinary, F_OK) != 0 && access(general, F_OK) != 0);
+        check_test_expect(test, same, rejected == 0 ? "named declaration records agree on scoped typedefs and complete emitted objects" :
+                                                   "named parameter records preserve duplicate-name diagnostics at the Clang location");
+    }
+    unlink(source);
+    unlink(general);
+    unlink(ordinary);
+}
+
 static void check_test_driver_lazy(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     const struct
@@ -7412,6 +7651,39 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
                                   "eager and lazy modes produce byte-identical valid objects");
             }
         }
+    }
+    // A unit past the statement heads' 8,192 tokens with a body masked (#2524): with whichever of the reader's paths a
+    // lazy mask leaves on (its coded walk's class actions, its packed declarations and its statement heads), the lazy
+    // object is still the eager one. That the class actions do run under a mask is c_check_lazy_test.c's to require.
+    static char generated[65536];
+    static const char* const masked_header = "#pragma GCC system_header\n"
+                                             "static int unused(int x) { int t = x * 2; while (t > 9) { t -= 3; } return t; }\n"
+                                             "static int used(int x) { return x + 1; }\n";
+    uint32_t length = (uint32_t)snprintf(generated, sizeof(generated), "#include \"lazy.h\"\n");
+    for (uint32_t k = 0; k < 200 && length + 512 < sizeof(generated); k += 1)
+    {
+        length += (uint32_t)snprintf(generated + length, sizeof(generated) - length,
+                                     "int f%u(int a, int* p)\n{\n    int s = used(a) + %u;\n    unsigned long n = 0;\n"
+                                     "    for (int i = 0; i < a; i += 1)\n    {\n        s += p[i] > s ? p[i] - 1 : -s;\n        n += (unsigned long)s;\n"
+                                     "        if (s == %u) { break; }\n    }\n    while (n > 7) { n >>= 1; }\n    return s + (int)n;\n}\n",
+                                     k, k, k * 3);
+    }
+    const bool masked_ready = parse_test_write(header, masked_header, strlen(masked_header)) && parse_test_write(source, generated, length);
+    check_test_expect(test, masked_ready, "the masked unit's fixture is written");
+    const uint32_t masked_routes = executable != NULL ? 4 : 2;
+    for (uint32_t route = 0; masked_ready && route < masked_routes; route += 1)
+    {
+        bool accepted[2] = { false, false };
+        for (uint32_t mode = 0; mode < 2; mode += 1)
+        {
+            unlink(objects[mode]);
+            CheckCorpusOracle checked = { 0 };
+            uint32_t warnings = 0;
+            const bool ran = check_test_driver_run(route >= 2 ? executable : NULL, source, objects[mode], (route & 1) != 0, false, false, mode != 0, &checked, &warnings);
+            accepted[mode] = ran && !checked.rejected && warnings == 0;
+        }
+        check_test_expect(test, accepted[0] && accepted[1] && check_test_driver_files_equal(objects[0], objects[1]),
+                          "a long unit with a masked body: eager and lazy modes produce byte-identical objects");
     }
     unlink(objects[0]);
     unlink(objects[1]);
@@ -9702,6 +9974,11 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_driver_run_modes.differential = true;
         }
+        else if (strcmp(argv[i], "--carets") == 0 || strcmp(argv[i], "--carets-all") == 0)
+        {
+            check_driver_run_modes.carets = true;
+            check_driver_run_modes.carets_all = strcmp(argv[i], "--carets-all") == 0;
+        }
         else if (strcmp(argv[i], "--part") == 0 && i + 1 < argc)
         {
             unsigned index = 0;
@@ -10568,6 +10845,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (check_test_driver_takes())
         {
+            if (!lazy)
+            {
+                check_test_driver_named_declarations(&test, clang, executable, directory);
+            }
             check_test_driver_lazy(&test, clang, executable, directory);
         }
         if (check_test_driver_takes())
@@ -11221,6 +11502,12 @@ static int run_checker_driver_tests(int argc, char** argv)
            modes->in_process ? "in-process" : "as children", modes->server.path != NULL ? "through the server (" : "as children",
            modes->server.path != NULL ? modes->server.version : "", modes->server.path != NULL ? ")" : "", modes->differential ? ", differential" : "",
            modes->in_process_runs, modes->served_runs, modes->child_runs, modes->sweep_fixtures, (double)modes->sweep_nanoseconds / 1e9, modes->differences);
+    if (modes->carets)
+    {
+        printf("checker-driver: carets: %" PRIu64 " command lines again with carets on: %" PRIu64 " the same as clang's, %" PRIu64 " apart only in ranges' '~', %" PRIu64
+               " in other source lines, %" PRIu64 " in diagnostics' own lines\n",
+               modes->caret_runs, modes->caret_same, modes->caret_ranges, modes->caret_lines, modes->caret_messages);
+    }
     const double served_seconds = (double)modes->served_nanoseconds / 1e9;
     const double child_seconds = (double)modes->child_nanoseconds / 1e9;
     const double child_cpu_seconds = (double)modes->child_cpu_nanoseconds / 1e9;

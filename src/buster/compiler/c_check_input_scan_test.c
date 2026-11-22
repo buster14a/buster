@@ -149,7 +149,7 @@ static uint8_t check_test_expression_class(const CheckInputReader* reader, uint3
     return (uint8_t)(acts ? BUSTER_CHECK_EXPRESSION_ACTS | (sparse ? BUSTER_CHECK_EXPRESSION_SPARSE : 0) | code << BUSTER_CHECK_EXPRESSION_CODE_SHIFT : 0);
 }
 
-// The seven columns check_input_output_none fills and the reader's unwritten value-chain tails in the eighth.
+// The eight columns under test include the value-chain tails and the two heads initialized for deferred readers.
 static void check_test_output_none_columns(uint32_t* const* columns, uint32_t count, CheckInput* input, CheckInputReader* reader)
 {
     *input = (CheckInput)
@@ -192,6 +192,8 @@ static void check_test_output_none(CheckTest* test)
         CheckInput input;
         CheckInputReader reader;
         check_test_output_none_columns(columns, count, &input, &reader);
+        CheckDeferred deferred = { 0 };
+        reader.deferred = count % 2 != 0 ? &deferred : NULL;
         check_input_output_none(&input, &reader, count);
         bool exact = true;
         for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
@@ -203,7 +205,9 @@ static void check_test_output_none(CheckTest* test)
             }
             for (uint32_t token = 0; token <= count; token += 1)
             {
-                exact &= columns[column][token] == (columns[column] == reader.last_value ? UINT32_C(0xa5a5a5a5) : BUSTER_CHECK_NONE);
+                const bool head = columns[column] == reader.initializer_finish_heads || columns[column] == reader.activate;
+                const bool untouched = columns[column] == reader.last_value || (reader.deferred == NULL && head);
+                exact &= columns[column][token] == (untouched ? UINT32_C(0xa5a5a5a5) : BUSTER_CHECK_NONE);
             }
         }
         char description[120];
@@ -245,7 +249,8 @@ static void check_test_output_none(CheckTest* test)
             {
                 for (uint32_t token = 0; token <= counts[at]; token += 1)
                 {
-                    exact &= columns[column][token] == (columns[column] == reader.last_value ? UINT32_C(0x63636363) : BUSTER_CHECK_NONE);
+                    const bool untouched = columns[column] == reader.last_value || columns[column] == reader.initializer_finish_heads || columns[column] == reader.activate;
+                    exact &= columns[column][token] == (untouched ? UINT32_C(0x63636363) : BUSTER_CHECK_NONE);
                 }
             }
         }
@@ -392,6 +397,37 @@ static void check_test_sparse_lanes(CheckTest* test)
 // the entries' lists by both paths. Each column's directory ends at a PROT_NONE page, so that a read past its last entry
 // faults; the pool is a dirty arena's, so that a block the columns don't take is never read, and a dirty directory is
 // cleared (`zero` false). Then a fresh arena's directories, which a reserve with `zero` leaves unwritten.
+// Both selection encodings must survive block boundaries and partial vector scans.
+static void check_test_selected_operands(CheckTest* test)
+{
+    enum { count = 97 };
+    uint32_t expected[count];
+    for (uint32_t i = 0; i < count; i += 1) expected[i] = BUSTER_CHECK_NONE;
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    CheckInput input = { 0 };
+    CheckInputReader reader = { .output = &input };
+    bool equal = arena.base != NULL && check_sparse_reserve(&arena, &input.sparse_pool, &reader.selected_sparse, 1, count, false, false);
+    const uint32_t positions[] = { 0, 15, 16, 29, 31, 48, 63, 64, 95, 96 };
+    for (uint32_t i = 0; equal && i < BUSTER_ARRAY_LENGTH(positions); i += 1)
+    {
+        const uint32_t token = positions[i];
+        expected[token] = (i & 1) != 0 ? CHECK_INPUT_SOURCE_SELECTION | i : i;
+        check_input_selection_set(&reader, token, expected[token]);
+    }
+    for (uint32_t end = 1; equal && end <= count; end += 1)
+    {
+        for (uint32_t first = 0; equal && first < end; first += 1)
+        {
+            uint32_t mask = 0;
+            for (uint32_t i = 0; i < 16 && i < end - first; i += 1)
+                mask |= (uint32_t)(expected[first + i] != BUSTER_CHECK_NONE) << i;
+            equal = check_input_selection_at(&reader, first) == expected[first] && check_input_selections_below(&reader, first, end) == mask;
+        }
+    }
+    check_test_expect(test, equal, "ordinary and proof-only selected operands retain exact values and tail masks");
+    arena_release(&arena);
+}
+
 static void check_test_sparse_columns(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -761,10 +797,34 @@ static __attribute__((noinline)) void check_test_sparse_next(CheckTest* test)
     arena_release(&owned);
 }
 
+// Read a bounded declarator directly, including valid suffixes of longer specifier lists.
+static uint8_t check_test_named_prefix(const uint8_t* kinds, const uint8_t* roles, uint32_t token, uint32_t count)
+{
+    uint32_t name = token;
+    while (name < count && name - token < 4 && roles[name] == PARSE_ROLE_SPECIFIER)
+    {
+        name += 1;
+    }
+    const uint32_t specifiers = name - token;
+    while (name < count && name - token - specifiers < 2 && kinds[name] == PARSE_KIND_STAR)
+    {
+        name += 1;
+    }
+    if (specifiers == 0 || name + 1 >= count || kinds[name] != PARSE_KIND_IDENTIFIER || roles[name] != PARSE_ROLE_OPERAND)
+    {
+        return 0;
+    }
+    const uint8_t next = kinds[name + 1];
+    const bool delimited = next == PARSE_KIND_SEMI || next == PARSE_KIND_COMMA || next == PARSE_KIND_EQUAL || next == PARSE_KIND_R_PAREN ||
+                           roles[name + 1] == PARSE_ROLE_OPEN_FUNCTION;
+    return delimited ? (uint8_t)(specifiers | ((name - token - specifiers) << 3)) : 0;
+}
+
 static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
     check_test_sparse_columns(test);
+    check_test_selected_operands(test);
     check_test_sparse_next(test);
     check_test_sparse_wide(test);
     check_test_sparse_lanes(test);
@@ -849,6 +909,44 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
         uint32_t* names = check_test_scan_column(mappings[NAMES] + page, count, 4);
         uint8_t* syntax = check_test_scan_column(mappings[SYNTAX] + page, count + 1, 1);
         uint8_t* visits = check_test_scan_column(mappings[VISITS] + page, count + 1, 1);
+        // One pattern on either side of every 64-byte boundary, with each of its tokens at the guard
+        // on a different length. The scan's output ends at a guard too.
+        uint8_t* prefixes = check_test_scan_column(mappings[SYNTAX] + page, count, 1);
+        static const uint8_t delimiters[] = { PARSE_KIND_COMMA, PARSE_KIND_SEMI, PARSE_KIND_EQUAL, PARSE_KIND_R_PAREN, PARSE_KIND_L_PAREN, PARSE_KIND_PLUS };
+        memset(kinds, 0, count);
+        memset(roles, 0, count);
+        memset(prefixes, 0xa5, count);
+        for (uint32_t start = count % 9; start < count; start += 9)
+        {
+            const uint32_t specifiers = 1 + (start + count / 9) % 5;
+            const uint32_t pointers = (start + count / 7) % 3;
+            const uint32_t name = start + specifiers + pointers;
+            for (uint32_t i = start; i < count && i < name; i += 1)
+            {
+                roles[i] = i < start + specifiers ? PARSE_ROLE_SPECIFIER : PARSE_ROLE_PREFIX;
+                kinds[i] = i < start + specifiers ? PARSE_KIND_TYPE : PARSE_KIND_STAR;
+            }
+            if (name < count)
+            {
+                kinds[name] = PARSE_KIND_IDENTIFIER;
+                roles[name] = PARSE_ROLE_OPERAND;
+            }
+            if (name + 1 < count)
+            {
+                const uint8_t delimiter = delimiters[(start / 9 + count) % BUSTER_ARRAY_LENGTH(delimiters)];
+                kinds[name + 1] = delimiter;
+                roles[name + 1] = delimiter == PARSE_KIND_L_PAREN ? PARSE_ROLE_OPEN_FUNCTION : PARSE_ROLE_NONE;
+            }
+        }
+        Parser prefix_parser = { 0 };
+        prefix_parser.tokens.count = count;
+        prefix_parser.tokens.kinds = kinds;
+        prefix_parser.tree.roles = roles;
+        check_input_named_prefixes(&prefix_parser, prefixes);
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            mismatches += prefixes[i] != check_test_named_prefix(kinds, roles, i, count);
+        }
         for (uint32_t i = 0; i < count; i += 1)
         {
             const uint32_t draw = check_test_random(test);

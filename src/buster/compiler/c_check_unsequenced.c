@@ -1073,16 +1073,46 @@ static uint8_t* check_unseq_marks(const CheckGraph* graph, const uint32_t* paren
     return marks;
 }
 
+// A full expression with just its outer modification cannot conflict with itself. Its pre-modification
+// check precedes its operands' reads. Its post-modification check only tests for another modification.
+// A single unary wrapper adds no sibling access, and its child (the modification) names no read object.
+// This uses marks only in a verified tree, where every child's modifications reach its unique parent.
+static bool check_unseq_sole_modification(const CheckGraph* graph, const uint8_t* marks, uint32_t root)
+{
+    const uint32_t count = graph->count;
+    const CheckOp op = graph->ops[root];
+    const bool wrapper = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITION || op == CHECK_OP_POSITIVE;
+    const uint32_t node = wrapper && graph->operand0[root] < count && graph->operand1[root] >= count && graph->operand2[root] >= count ?
+                          graph->operand0[root] : root;
+    if (!check_unseq_modification(graph->ops[node]))
+    {
+        return false;
+    }
+    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+    {
+        if (operands[i] < count && (marks[operands[i]] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 // A warning's publication, as clang's DiagRuntimeBehavior queues it: in a function at its end, in a file-scope
-// initializer at its declarator's end.
-static void check_unseq_publish(CheckCommonEmission* emission, uint32_t token, const char* message)
+// initializer at its declarator's end. Queued as its full expression completes (#2252): at the end of `end`, the
+// statement expression's value walked, or else of the full expression holding the report's `node`.
+static void check_unseq_publish(CheckCommonEmission* emission, uint32_t token, uint32_t node, uint32_t end, const char* message)
 {
     const Parser* parser = emission->parser;
     const uint32_t boundary = check_common_function_boundary(parser, token);
     const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, emission->input, token) : BUSTER_CHECK_NONE;
+    const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
     check_common_report_evaluated(parser, emission->pp, emission->input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
                                   declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_UNSEQUENCED, false,
                                   message, NULL, 0, emission->scratch);
+    check_common_queue(parser, emission->pp, previous, &emission->input->graph, emission->parents, end != BUSTER_CHECK_NONE ? end : node,
+                       end == BUSTER_CHECK_NONE);
 }
 
 // -Wunsequenced of the full expression whose `count` starts are `starts` (a root, or a brace initializer's values, each
@@ -1155,7 +1185,7 @@ static void check_unseq_check(CheckCommonEmission* emission, CheckUnseqStorage* 
                                                          (int)intern_length(pp->table, name), (const char*)intern_bytes(pp->table, name));
                 if (message != NULL)
                 {
-                    check_unseq_publish(emission, graph->tokens[report->node], message);
+                    check_unseq_publish(emission, graph->tokens[report->node], report->node, own ? BUSTER_CHECK_NONE : value, message);
                 }
             }
         }
