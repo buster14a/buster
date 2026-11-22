@@ -3216,35 +3216,50 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
     }
 }
 
-// -flazy-system-headers defers only system-header bodies. A unit with no deferred body must still publish its
-// translation-unit-final warnings, exactly as a run without the flag does.
+// -flazy-system-headers defers only system-header bodies. A unit must still publish its translation-unit-final
+// warnings, exactly as a run without the flag does: one with no deferred body, and one whose system header has a body
+// the planner defers (an unused static function's), whose user code's internal function is used and never defined.
 static void check_test_driver_lazy_final_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char source_text[] = "static int missing(void);int f(void){return missing();}\n";
+    static const char header_text[] = "#pragma GCC system_header\nstatic int unused(int x){return x+1;}\n";
+    static const char* const source_texts[2] = {
+        "static int missing(void);int f(void){return missing();}\n",
+        "#include \"lazy-final-warning.h\"\nstatic int missing(void);int f(void){return missing();}\n",
+    };
+    char header[PATH_MAX];
     char source[PATH_MAX];
+    snprintf(header, sizeof(header), "%s/lazy-final-warning.h", directory);
     snprintf(source, sizeof(source), "%s/lazy-final-warning.c", directory);
-    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
-    char* expected = NULL;
-    char* arguments[] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", source, NULL };
-    const int oracle = written ? check_test_driver_spawn(arguments, &expected) : -1;
-    const CheckDriverDiagnosticCounts counts = check_test_driver_diagnostic_counts(expected);
-    check_test_expect(test, oracle == 0 && expected != NULL && counts.warnings == 1 && counts.notes == 1,
-                      "a lazy-system-header run without a deferred body has Clang's final warning oracle");
-    for (uint32_t route = 0; written && route < 2; route += 1)
+    for (uint32_t deferring = 0; deferring < 2; deferring += 1)
     {
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        const bool written = parse_test_write(header, header_text, sizeof(header_text) - 1) &&
+                             parse_test_write(source, source_texts[deferring], strlen(source_texts[deferring]));
+        char* expected = NULL;
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", source, NULL };
+        const int oracle = written ? check_test_driver_spawn(arguments, &expected) : -1;
+        const CheckDriverDiagnosticCounts counts = check_test_driver_diagnostic_counts(expected);
+        check_test_expect(test, oracle == 0 && expected != NULL && counts.warnings == 1 && counts.notes == 1,
+                          deferring != 0 ? "a lazy-system-header run with a deferred body has Clang's final warning oracle" :
+                                           "a lazy-system-header run without a deferred body has Clang's final warning oracle");
+        for (uint32_t route = 0; written && route < 2; route += 1)
         {
-            char* run[] = { (char*)(executable != NULL && route != 0 ? executable : "/proc/self/exe"), "-std=gnu17",
-                            "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", "-flazy-system-headers", source,
-                            scalar != 0 ? "--scalar" : NULL, NULL };
-            char* actual = NULL;
-            const int status = check_test_driver_spawn(run, &actual);
-            check_test_expect(test, status == oracle && actual != NULL && expected != NULL && strcmp(actual, expected) == 0,
-                              scalar != 0 ? "lazy-system-headers scalar run publishes the same final warning" :
-                              "lazy-system-headers vector run publishes the same final warning");
-            free(actual);
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                char* run[] = { (char*)(executable != NULL && route != 0 ? executable : "/proc/self/exe"), "-std=gnu17",
+                                "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", "-flazy-system-headers", source,
+                                scalar != 0 ? "--scalar" : NULL, NULL };
+                char* actual = NULL;
+                const int status = check_test_driver_spawn(run, &actual);
+                check_test_expect(test, status == oracle && actual != NULL && expected != NULL && strcmp(actual, expected) == 0,
+                                  deferring != 0 ? (scalar != 0 ? "lazy-system-headers scalar run with a deferred body publishes the same final warning" :
+                                                                  "lazy-system-headers vector run with a deferred body publishes the same final warning") :
+                                                   (scalar != 0 ? "lazy-system-headers scalar run publishes the same final warning" :
+                                                                  "lazy-system-headers vector run publishes the same final warning"));
+                free(actual);
+            }
         }
+        free(expected);
     }
-    free(expected);
     unlink(source);
+    unlink(header);
 }
