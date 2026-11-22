@@ -2074,7 +2074,9 @@ struct CheckInputReader
     uint8_t* designator_valid;
     uint32_t* designator_tokens;
     uint32_t* designator_ranges;
-    uint32_t* selected_tokens; // NONE, a runtime operand token, or SOURCE_SELECTION | a proof-only operand token.
+    // The checked selection of a _Generic or choose expression. Subreaders may supply a private dense column.
+    uint32_t* selected_tokens;
+    CheckSparseColumn selected_sparse;
     uint32_t* selection_type_ends;
     TypeId* selection_types;
     CheckValue* cached_constants;
@@ -2471,6 +2473,28 @@ struct CheckInputReader
     struct CheckConstantFailure* constant_failure;
 };
 
+// Only the closing token of a selection can have an operand here. A proof-only selection sets the high bit.
+static uint32_t check_input_selection_at(const CheckInputReader* reader, uint32_t token)
+{
+    if (reader->selected_tokens != NULL)
+    {
+        return reader->selected_tokens[token];
+    }
+    return check_sparse_present(reader->selected_sparse) ? check_sparse_get(reader->selected_sparse, token) : BUSTER_CHECK_NONE;
+}
+
+static void check_input_selection_set(CheckInputReader* reader, uint32_t token, uint32_t value)
+{
+    if (reader->selected_tokens != NULL)
+    {
+        reader->selected_tokens[token] = value;
+    }
+    else if (check_sparse_present(reader->selected_sparse))
+    {
+        check_sparse_set(reader->output->sparse_pool, reader->selected_sparse, token, value);
+    }
+}
+
 // A constant reading's failure evidence (c_check_constant.c, its `diagnosed`): the first failed action's diagnostic,
 // operation, operand types and names, which a caller reports in clang's words (#147, #1447).
 typedef struct CheckConstantFailure CheckConstantFailure;
@@ -2524,7 +2548,7 @@ typedef enum CheckConstantNames
 static bool check_input_expression_sparse(const CheckInputReader* reader, uint32_t token)
 {
     const CheckInput* input = reader->output;
-    return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || reader->selected_tokens[token] < reader->parser->tokens.count ||
+    return input->expression_regions[token] != 0 || reader->constant_present[token] != 0 || check_input_selection_at(reader, token) < reader->parser->tokens.count ||
            reader->vararg_calls[token] != 0 || reader->designator_tokens[token] != 0 || reader->vla_ends[token] != 0 || check_input_asm_id(input, token) != 0;
 }
 
@@ -3905,6 +3929,15 @@ static uint32_t check_input_scan_below(const uint32_t* column, uint32_t first, u
 {
     const __mmask16 lanes = (__mmask16)check_input_scan_all(first, count);
     return _mm512_mask_cmplt_epu32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, column + first), _mm512_set1_epi32((int32_t)bound));
+}
+
+static uint32_t check_input_selections_below(const CheckInputReader* reader, uint32_t first, uint32_t count)
+{
+    if (reader->selected_tokens != NULL)
+    {
+        return check_input_scan_below(reader->selected_tokens, first, count, BUSTER_CHECK_NONE);
+    }
+    return check_sparse_present(reader->selected_sparse) ? check_sparse_below(reader->selected_sparse, first, count, BUSTER_CHECK_NONE) : 0;
 }
 
 // The latest boundary strictly before token, with the preceding block's answer when this block has none.
@@ -15767,9 +15800,9 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
             check_graph_set_leaf(graph, node, &reader->cached_constants[reader->constant_present[token] - 1]);
         }
     }
-    else if (sparse && reader->selected_tokens[token] < parser->tokens.count)
+    else if (sparse && check_input_selection_at(reader, token) < parser->tokens.count)
     {
-        const uint32_t selected = reader->output->token_nodes[reader->selected_tokens[token]];
+        const uint32_t selected = reader->output->token_nodes[check_input_selection_at(reader, token)];
         supported = selected != BUSTER_CHECK_NONE;
         if (supported)
         {
@@ -17183,7 +17216,10 @@ static void check_input_output_none(CheckInput* input, CheckInputReader* reader,
     memset(input->declarations, 0xff, bytes);
     memset(input->token_nodes, 0xff, bytes);
     memset(reader->initializer_declarations, 0xff, bytes);
-    memset(reader->selected_tokens, 0xff, bytes);
+    if (reader->selected_tokens != NULL)
+    {
+        memset(reader->selected_tokens, 0xff, bytes);
+    }
     if (reader->deferred != NULL)
     {
         memset(reader->initializer_finish_heads, 0xff, bytes);
@@ -17566,10 +17602,11 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     // The columns few tokens have an entry in, sparse (c_check_sparse.c, #628): their directories, which a fresh arena
     // holds zero, and their blocks' pool, of which they take as many pages as their entries' blocks. The deferred reader's
     // lanes write them at once.
-    CheckSparseColumn sparse_columns[12] = { 0 };
+    CheckSparseColumn sparse_columns[13] = { 0 };
+    const uint32_t column_count = counts.groups[CHECK_INPUT_COUNT_SELECTIONS] != 0 ? 13 : 12;
     CheckSparseWide wide_columns[2] = { 0 };
     const bool noderef = intern_find(pp->table, (const uint8_t*)"noderef", 7) != 0 || intern_find(pp->table, (const uint8_t*)"__noderef__", 11) != 0;
-    valid = valid && check_sparse_reserve_wide(arena, &input->sparse_pool, sparse_columns, BUSTER_ARRAY_LENGTH(sparse_columns), wide_columns, noderef ? 2 : 1, count, output_zero, deferred != 0);
+    valid = valid && check_sparse_reserve_wide(arena, &input->sparse_pool, sparse_columns, column_count, wide_columns, noderef ? 2 : 1, count, output_zero, deferred != 0);
     input->attributes = wide_columns[0];
     input->noderef_types = wide_columns[1];
     input->initializer_nodes = sparse_columns[0];
@@ -17584,6 +17621,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     input->label_targets = sparse_columns[9];
     input->case_ranges = sparse_columns[10];
     input->string_ids = sparse_columns[11];
+    reader.selected_sparse = sparse_columns[12];
     if (valid && deferred_tokens != 0)
     {
         uint8_t* retained = arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1);
@@ -17663,7 +17701,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     BUSTER_CHECK_INPUT_ARRAY(initializer_finish_heads, uint32_t);
     reader.string_ids = input->string_ids;
 
-    BUSTER_CHECK_INPUT_ARRAY(selected_tokens, uint32_t);
     BUSTER_CHECK_INPUT_ARRAY(expression_commas, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(conditions, uint8_t);
     BUSTER_CHECK_INPUT_ARRAY(constant_contexts, uint8_t);
