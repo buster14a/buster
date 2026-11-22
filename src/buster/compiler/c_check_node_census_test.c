@@ -1856,9 +1856,11 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
                                "static int after(int x) { if (x) { return 1; } return 2; g = 3; }\n"
                                "static int leaves(int x) { if (x > 2) goto out; return x; out: return x + 1; }\n"
                                "static int spun(int x) { while (1) { if (x) break; x += 1; } return x; }\n"
+                               "static int ends(int x) { if (x) { return 1; } else { return 2; } g = 4; }\n"
+                               "static int forever(int x) { for (;;) { if (x) break; x += 1; } return x; }\n"
                                "int main(void)\n{\n    struct S s;\n    int n = 4;\n    s.a = 1;\n    s.c = 3;\n    nothing(n);\n    early(n);\n"
                                "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s) + twice(n) +\n"
-                               "        values(n, 2) + folded(n) + counted(n) + folds(n) + keeps(n) + sized(n) + floated(n) + after(n) + leaves(n) + spun(n);\n    discards(n);\n}\n";
+                               "        values(n, 2) + folded(n) + counted(n) + folds(n) + keeps(n) + sized(n) + floated(n) + after(n) + leaves(n) + spun(n) + ends(n) + forever(n);\n    discards(n);\n}\n";
     char path[512];
     snprintf(path, sizeof(path), "%s/bodies.c", directory);
     bool valid = parse_test_write(path, text, sizeof(text) - 1);
@@ -1884,7 +1886,7 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
                 shadow.twin_same == shadow.twin_reasons[NODE_TWIN_ATTEMPTED];
     // The return flow's silence by the twin's controls: proved for every body the twin attempts but the one that falls off
     // its end, which the program's own return flow has a warning for, and for none it warns of.
-    kept = kept && (before ? shadow.bodies_whole[1] == expected->kept_whole && shadow.bodies_attempted[1] == expected->kept_attempted && shadow.bodies_dropped == 2 &&
+    kept = kept && (before ? shadow.bodies_whole[1] == expected->kept_whole && shadow.bodies_attempted[1] == expected->kept_attempted && shadow.bodies_dropped == 3 &&
                              shadow.twin_controls != 0 && shadow.twin_loud == 1 && shadow.twin_unsound == 0 &&
                              shadow.twin_silent + 1 == shadow.twin_reasons[NODE_TWIN_ATTEMPTED] :
                              shadow.bodies_lowered[1] == 0 && shadow.twin_controls == 0 && shadow.twin_silent == 0);
@@ -7626,35 +7628,35 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &alone_expected),
                       "node-alone by sweep: the same results, and each sweep's ticks within the run's");
     const NodeBodiesExpected bodies_quiet = {
-        .lowered = 27,
-        .whole = 25,
-        .attempted = 23,
+        .lowered = 29,
+        .whole = 27,
+        .attempted = 25,
         .reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
-        .kept_whole = 25,
+        .kept_whole = 27,
         .kept_attempted = 18,
         .kept_reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 2,
-                          [NODE_BODIES_REACH] = 2 },
-        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 20, [NODE_TWIN_UNWHOLE] = 2, [NODE_TWIN_DROPPED] = 2, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1,
-                          [NODE_TWIN_REACH] = 1 },
-        .locals = { 41, 36 },
+                          [NODE_BODIES_REACH] = 4 },
+        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 20, [NODE_TWIN_UNWHOLE] = 2, [NODE_TWIN_DROPPED] = 3, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1,
+                          [NODE_TWIN_REACH] = 2 },
+        .locals = { 43, 36 },
         .addressed = { 1, 1 },
-        .swept = 22,
+        .swept = 24,
         .taken = 16,
     };
     const NodeBodiesExpected bodies_loud = {
-        .lowered = 27,
-        .whole = 24,
-        .attempted = 22,
+        .lowered = 29,
+        .whole = 26,
+        .attempted = 24,
         .reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
-        .kept_whole = 24,
+        .kept_whole = 26,
         .kept_attempted = 17,
         .kept_reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 2,
-                          [NODE_BODIES_REACH] = 2 },
-        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 19, [NODE_TWIN_UNWHOLE] = 3, [NODE_TWIN_DROPPED] = 2, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1,
-                          [NODE_TWIN_REACH] = 1 },
-        .locals = { 38, 33 },
+                          [NODE_BODIES_REACH] = 4 },
+        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 19, [NODE_TWIN_UNWHOLE] = 3, [NODE_TWIN_DROPPED] = 3, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1,
+                          [NODE_TWIN_REACH] = 2 },
+        .locals = { 40, 33 },
         .addressed = { 1, 1 },
-        .swept = 22,
+        .swept = 24,
         .taken = 15,
     };
     check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), false, &bodies_quiet),
