@@ -1719,10 +1719,11 @@ static void foreign_strings_test_starve(ForeignStringsTest* test, const ForeignS
     }
 }
 
-// Two fixtures starved (#3044). The 1008 fixture flags nothing: it reaches the entry columns, the probe table, the
-// groups, the short bitmaps, the flags, the flagged list and its empty string's head, within 4096 bytes. The 1014 tie
-// with a short receiver, "jk", which ends every string, reaches the long and short bitmaps, the flags, the flagged list,
-// the records, the common suffixes, the work list (a tie of 44, more than 32) and the head pass's heads, within 8192.
+// Two fixtures starved (#3044). The 1008 fixture flags nothing: it reaches the entry columns, the groups, the short
+// bitmaps, the flags, the flagged list, its empty string's head and then the probe table, within 4096 bytes. The 1014
+// tie with a short receiver, "jk", which ends every string, reaches the long and short bitmaps, the flags, the long
+// candidates and their exact check, the flagged list, the records, the common suffixes, the work list (a tie of 44,
+// more than 32), the head pass's heads and the probe table, within 8192.
 static void foreign_strings_test_scratch(ForeignStringsTest* test)
 {
     static const uint8_t owners[] = "aa\0ab\0ac\0ad\0ae\0af\0ag\0ah\0ai\0aj\0ak";
