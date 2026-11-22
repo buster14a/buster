@@ -202,11 +202,18 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     for (uint32_t position = first; room && position < end; position += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint32_t stop = end - position < BUSTER_CHECK_EXPRESSION_CHUNK ? end : position + BUSTER_CHECK_EXPRESSION_CHUNK;
+        const uint64_t start = __rdtsc();
         const uint32_t acting = check_input_expression_compact(reader, position, stop, tokens, classes, dropped);
         check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers);
         check_input_expression_literals(reader, tokens, classes, acting, &literals);
+        const uint64_t prepared = __rdtsc();
         node_front_chunk(front, reader, tokens, classes, acting, &identifiers, &literals);
+        const uint64_t fronted = __rdtsc();
         room = node_alone_write(alone, reader);
+        const uint64_t written = __rdtsc();
+        alone->shadow->alone_prepare_ticks += prepared - start;
+        alone->shadow->alone_front_ticks += fronted - prepared;
+        alone->shadow->alone_write_ticks += written - fronted;
         if (room)
         {
             // The machine on the chunk's roots: its graph is the records' as they stand, and the tests read the reader's
@@ -259,6 +266,7 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     // The verdict, as it stands before the walk acts at the body's first token: a root the front lost comes before any
     // root's refusal, since its expression has no root at all.
     verdict = !room ? BUSTER_NODE_ALONE_BODY_ROOM : node_alone_lost(alone->report) != lost ? BUSTER_NODE_ALONE_BODY_LEFT : verdict;
+    alone->shadow->alone_resets = alone->report->resets;
     alone->shadow->alone_body_openings[alone->shadow->alone_body_count] = opening;
     alone->shadow->alone_body_verdicts[alone->shadow->alone_body_count] = verdict;
     alone->shadow->alone_body_count += 1;

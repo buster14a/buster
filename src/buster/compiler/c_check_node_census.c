@@ -4983,6 +4983,9 @@ struct NodeShadow
     uint64_t alone_records;
     uint64_t alone_ticks;
     uint64_t alone_machine_ticks;
+    uint64_t alone_prepare_ticks;
+    uint64_t alone_front_ticks;
+    uint64_t alone_write_ticks;
     uint64_t alone_sweep_ticks;
     uint64_t alone_roots;
     uint64_t alone_taken;
@@ -4997,7 +5000,9 @@ struct NodeShadow
     // Its verdicts of the bodies the lowering lowered, by what stops it (BUSTER_NODE_ALONE_BODY_*), in bodies and in their
     // tokens; and against the machine on the walk's nodes, for which a body is whole where every root the lowering popped
     // is taken there: the bodies whole for both, for it alone (a root the lowering pops that is no root of the front's:
-    // a braced initializer's element), and for the walk's nodes' alone, which would be a body it wrongly refuses.
+    // a braced initializer's element), and for the walk's nodes' alone (a root the front lost that the lowering never
+    // pops: a condition it folds, a branch it drops). Neither is a difference: a body's verdict here says what the
+    // machine's roots allow, and the statements are another piece's.
     uint64_t alone_verdicts[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_verdict_tokens[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_body_tokens;
@@ -5009,6 +5014,9 @@ struct NodeShadow
     // declaration, which are counted apart: a static object's initializer's values are roots of the front's that the
     // lowering never pops (they are data), so the machine on the walk's nodes is not asked about them.
     uint64_t alone_whole_walk_static;
+    uint64_t alone_bodies_listed;
+    // The times its front lost its waiting values (the arrays' room; a body's largest table), each a body's verdict's.
+    uint64_t alone_resets;
     uint64_t alone_bodies_unread;
     uint64_t swept_differences;
     uint64_t swept_root_differences;
@@ -7311,9 +7319,11 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
         // the machine's two runs), and the machine's first run on the chunks' roots (T, the tests, C and X).
         const uint64_t reading = shadow->alone_ticks > shadow->alone_machine_ticks ? shadow->alone_ticks - shadow->alone_machine_ticks : 0;
         printf("node-shadow: alone bodies=%" PRIu64 " left=%" PRIu64 " postorder-positions=%" PRIu64 " records=%" PRIu64 " roots=%" PRIu64 " taken=%" PRIu64
-               " ticks: its-reading=%" PRIu64 " the-machine's-first-run=%" PRIu64 " a-position=%.1f\n",
+               " ticks: its-reading=%" PRIu64 " (the compaction and the entries %" PRIu64 ", the front %" PRIu64 ", its graph's writing %" PRIu64
+               ") the-machine's-first-run=%" PRIu64 " a-position=%.1f\n",
                shadow->alone_bodies, shadow->alone_bodies_left, shadow->alone_positions, shadow->alone_records, shadow->alone_roots, shadow->alone_taken, reading,
-               shadow->alone_sweep_ticks, shadow->alone_positions != 0 ? (double)(reading + shadow->alone_sweep_ticks) / (double)shadow->alone_positions : 0.0);
+               shadow->alone_prepare_ticks, shadow->alone_front_ticks, shadow->alone_write_ticks, shadow->alone_sweep_ticks,
+               shadow->alone_positions != 0 ? (double)(reading + shadow->alone_sweep_ticks) / (double)shadow->alone_positions : 0.0);
         printf("node-shadow: alone compared=%" PRIu64 " differences=%" PRIu64, shadow->alone_compared, shadow->alone_differences);
         for (uint32_t field = 0; field < BUSTER_NODE_ALONE_FIELDS; field += 1)
         {
@@ -7334,7 +7344,7 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                        shadow->alone_body_tokens != 0 ? 100.0 * (double)shadow->alone_verdict_tokens[verdict] / (double)shadow->alone_body_tokens : 0.0);
             }
         }
-        printf(" not-read=%" PRIu64 "\n", shadow->alone_bodies_unread);
+        printf(" not-read=%" PRIu64 " waiting-values-lost=%" PRIu64 "\n", shadow->alone_bodies_unread, shadow->alone_resets);
         printf("node-shadow: alone bodies whole for it and for the walk's nodes' machine=%" PRIu64 " (tokens %" PRIu64 ") for-it-alone=%" PRIu64 " for-the-walk's-nodes'-alone=%" PRIu64
                " (and with a block's static or extern declaration %" PRIu64 ")\n",
                shadow->alone_whole_both, shadow->alone_whole_both_tokens, shadow->alone_whole_own, shadow->alone_whole_walk, shadow->alone_whole_walk_static);
@@ -7484,10 +7494,10 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             }
             shadow->alone_whole_walk += !own && reader_whole && !statics;
             shadow->alone_whole_walk_static += !own && reader_whole && statics;
-            if (!own && reader_whole && !statics && shadow->alone_listed < node_census_list)
+            if (!own && reader_whole && !statics && shadow->alone_bodies_listed < node_census_list)
             {
-                shadow->alone_listed += 1;
-                printf("node-shadow: alone refuses a body the walk's nodes' machine takes whole file=%s line=%u verdict=%u\n", s->file,
+                shadow->alone_bodies_listed += 1;
+                printf("node-shadow: alone refuses a body whose popped roots the walk's nodes' machine takes file=%s line=%u verdict=%u\n", s->file,
                        node_census_line(s->pp, program->parser, body->opening), verdict);
             }
         }
@@ -7570,6 +7580,10 @@ static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, 
     shadow->alone_records += front->alone_records;
     shadow->alone_ticks += front->alone_ticks;
     shadow->alone_machine_ticks += front->alone_machine_ticks;
+    shadow->alone_resets += front->alone_resets;
+    shadow->alone_prepare_ticks += front->alone_prepare_ticks;
+    shadow->alone_front_ticks += front->alone_front_ticks;
+    shadow->alone_write_ticks += front->alone_write_ticks;
     shadow->alone_sweep_ticks += alone->ticks;
     shadow->alone_roots += alone->expressions;
     // The walk's nodes' roots in their order, each against the other's next one at its token: a token's roots are in the
@@ -8227,7 +8241,7 @@ static bool node_shadow_differs(const NodeShadow* shadow)
            shadow->facts_differences != 0 || shadow->facts_list_differences != 0 || shadow->facts_failures != 0 ||
            shadow->facts_conversions != shadow->facts_conversions_derived || shadow->reads.same_differences != 0 || shadow->reads.misplaced != 0 ||
            shadow->front_differences != 0 || shadow->typed_differences != 0 || shadow->typed_object_differences != 0 || shadow->typed_library_differences != 0 ||
-           shadow->swept_differences != 0 || shadow->alone_differences != 0 || shadow->alone_whole_walk != 0 || shadow->alone_bodies_unread != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
+           shadow->swept_differences != 0 || shadow->alone_differences != 0 || shadow->alone_bodies_unread != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
            shadow->tested_missed != 0 || shadow->tested_policy_differences != 0 || shadow->reader_twin_differences != 0 || shadow->own_count_differences != 0 ||
            shadow->own_quiet_wrong != 0 || shadow->own_quiet_calls_wrong != 0 || shadow->own_quiet_calls_loud != 0 || shadow->own_quiet_casts_wrong != 0 ||
            shadow->own_quiet_orders_wrong != 0 || shadow->own_values_wrong != 0 || shadow->own_tree_wrong != 0 || shadow->own_direct_wrong != 0 ||

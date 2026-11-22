@@ -675,8 +675,14 @@ struct NodeFrontShadow
     uint64_t alone_positions;
     uint64_t alone_records;
     uint64_t alone_ticks;
-    // Of its ticks, the machine's two runs on the chunks' roots (the first is timed in its results, the second keeps them).
+    // Of its ticks, the machine's two runs on the chunks' roots (the first is timed in its results, the second keeps them);
+    // and its reading's parts: the acting tokens' compaction and their entries (the walk's own preparation, made here
+    // for the body), the front, and the records' writing to its graph.
     uint64_t alone_machine_ticks;
+    uint64_t alone_resets;
+    uint64_t alone_prepare_ticks;
+    uint64_t alone_front_ticks;
+    uint64_t alone_write_ticks;
     // The flat front (BUSTER_NODE_FRONT_FLAT, c_check_node_machine_flat.c). Its passes' ticks after the compaction, its
     // own compaction's, and each stage's (BUSTER_NODE_FLAT_STAGE_*); the tokens it visited, the records it made and
     // the places it left empty, the children its tokens hopped over, the tokens with a child past the rings' reach, and
