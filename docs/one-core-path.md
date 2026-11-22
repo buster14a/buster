@@ -3044,8 +3044,7 @@ The 9700X, medians of 7 runs, musl's of 3, TSC ticks at 3,792.9 MHz:
 - **V4, its cost: not met, not refuted.** 270 ticks a body token on `sqlite3.c` where the gate was 180 and 295
   refutes. Its parts read separately had 141 to 178: the reading is 14 ms where the front alone was 5, and the
   reference's sweeps with the census's tests 27 where they were 16 to 22.
-- **V5, nothing else moves: met by construction.** The option is the shadow's; a compile has the front's hook's one
-  test of a null pointer more a unit.
+- **V5, nothing else moves:** V5_PLACEHOLDER
 
 ### What it means
 

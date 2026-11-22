@@ -7651,6 +7651,16 @@ An expression with a token the front left has no root. The fixture has a
 floating constant out of range, a character constant of two characters and
 `_Alignof` of an expression, each in a body whose verdict is a root lost.
 
+**The fixture** (`node_alone_test_fixture`, with the default warnings and
+with `-Wall -Wextra`) is 17 bodies and 440 roots: whole bodies with calls, a
+logical operator, a loop, three declarators at one `;` and a string; a
+bit-field, a `sizeof`, an escape under a label, a braced initializer and a
+block's static table; the three literals and tokens above; an address
+constant multiplied, whose value has a fault; a static table of 64 values,
+whose discards at its `;` are several roots of one token; a loop of 400
+statements, whose condition waits through several chunks; and a table of
+4,200 elements, where the front loses its waiting values.
+
 **Faults.** Fifteen, one at a time, each caught by the fixture
 (`node_alone_test_fixture`):
 
@@ -7658,8 +7668,8 @@ floating constant out of range, a character constant of two characters and
   the graph's node; a call without its arguments;
 - a leaf without its object, and without its constant's kind; a record
   without its type, and without its member;
-- one root kept a token; the tests reading the reader's graph; the front not
-  begun again at a body;
+- one root kept a token; the tests reading the reader's graph; the reader's
+  graph given to the machine for the piece's;
 - a body's lost root not counted; a declaration's discard taken for a root of
   the body's verdict;
 - a literal with a warning's event made a record, and a character constant of

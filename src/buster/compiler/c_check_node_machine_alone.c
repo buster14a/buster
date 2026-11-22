@@ -247,8 +247,9 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
                     }
                     if (root < alone->view.count && alone->view.tokens[root] < reader->parser->tokens.count)
                     {
-                        // The roots of one token (a declaration's discards, one a declarator, at its `;`) are a chain in
-                        // the order they were made, which is the walk's nodes' order too.
+                        // The roots of one token (a table's values, each discarded at its declaration's `;`, that the
+                        // machine does not know for a declaration's discards) are a chain in the order they were made,
+                        // which is the walk's nodes' order too.
                         uint32_t* link = &alone->shadow->alone_roots[alone->view.tokens[root]];
                         while (*link != 0 && *link - 1 != root)
                         {
