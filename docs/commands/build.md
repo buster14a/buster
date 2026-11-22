@@ -1247,7 +1247,10 @@ sources compiled with `-fprofile-instr-generate`, without debug information,
 into an executable left unbaked, since its counters are writable memory outside
 `buster_baked`, which `bake-tables` refuses; that executable compiles each
 source as `-E -P`, `-fsyntax-only` and `-c` (a Ninja step per source, one per
-core at a time), a profile per process; and the `llvm-profdata` beside `clang`
+core at a time), a profile per process, with the units' flags but
+`-ffunction-sections`, which is the host compiler's alone
+([the start's code order](#the-starts-code-order)) and which the compiler
+refuses; and the `llvm-profdata` beside `clang`
 (or on `PATH`) merges them into `pgo/compiler.profdata`, with which every unit
 then compiles (`-fprofile-instr-use`). Each step reruns when its inputs
 change: an edited source retrains the profile, and a new profile recompiles
