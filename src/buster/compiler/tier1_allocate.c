@@ -5,8 +5,7 @@
 // its liveness adapter supplies half-open ranges in loop-contiguous machine order. This is not a second IR.
 // tier1_allocate builds position events, colors unrestricted classes by LIFO reuse in event order (each start takes
 // the register of the most recent end at its pressure level), and defers constrained or overfull classes to
-// tier1_allocate_scan. The scalar production twin uses the same assignment policy with scalar fixed-range filtering;
-// tier1_allocate_scan_reference retains the independent scan for tests. Host ISA changes kernels, not register choices.
+// tier1_allocate_scan. tier1_allocate_scan_reference retains the independent scan for tests.
 // tier1_allocation_verify independently checks fragments, interference and fixed ranges. tier1_resolve_moves orders
 // edge/phi assignments, breaking cycles with a caller-reserved location. No function emits spill machine code.
 //
@@ -81,7 +80,8 @@ struct Tier1AllocationInput
     // every successor of a dispatch loop's join does from the first, which no value's last register says. With
     // BUSTER_TIER1_ALLOCATE_HINT_EXIT, the named interval ends at or before this one starts, and its register at its end
     // is the one (#2553): a block's entry takes its values' places at the exit of a block that dominates it, and a phi
-    // its operand's at a predecessor's.
+    // its operand's at a predecessor's. An interval hinted to its own value that names another value's recipe takes only
+    // a register there: a recipe without one was recomputed, and the interval follows its own value instead (#2834).
     const uint32_t* hint_intervals;
     // Optional, with hint_intervals: per interval, an interval of its class starting before it, whose register at its
     // start the interval takes at its own start before its other hints, where that interval's value still holds it last
@@ -93,6 +93,10 @@ struct Tier1AllocationInput
     // block's successor, or the range that entry takes its opening from (#2774). Where that opening is the value's slot,
     // the edge stores the value there anyway, so the scan with required uses evicts it first once it has no use left.
     const uint32_t* continuation_intervals;
+    // Optional, with hint_values (#2646): per interval, a register of its class it takes where no value hint names one
+    // and the register is free (UINT8_MAX for none): the register a call reads it in, where the call is its last use, so
+    // that the call's moves move nothing for it. It never evicts a value, and the hint is ignored where it isn't allowed.
+    const uint8_t* register_hints;
     // Optional (#2767): per interval, registers of its allowed ones that it takes only where none of its others is free, and
     // never evicts another value for: a range live across a fixed register's sequence, which writes them, so that its
     // consumer would save the range's value around it. A class with any is the scan's.
@@ -103,7 +107,7 @@ struct Tier1AllocationInput
     const uint32_t* use_offsets;
     const uint32_t* use_positions;
     // Optional byte per use: 1 requires a physical register at that position, 0 permits a memory/rematerialized
-    // operand. Required uses trigger reload/resplit in the scalar path. A position denotes one simultaneous phase;
+    // operand. Required uses trigger reload/resplit in the scan. A position denotes one simultaneous phase;
     // a producer uses separate input/output phases when the instruction may reuse a dying input register.
     const uint8_t* use_required;
     // Optional, with use_required (#2574): positions, nondecreasing, where the registers clobber_registers[class] lose
@@ -290,7 +294,8 @@ static bool tier1_allocation_clobbered(const Tier1AllocationInput* input, uint32
 // BUSTER_TIER1_ALLOCATE_MEMORY_HINT where the interval had no register there, as one evicted where it starts has none
 // (#2774). Then come value_count + 1 bytes of each
 // value's first register, which the scan with required uses writes (tier1_allocation_firsts, #2768).
-static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
+// An interval's hint by values: a named interval's opening or closing, its own value's place, or its hint value's.
+static uint8_t tier1_allocation_valued_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval)
 {
     const uint32_t value = last != 0 ? columns->hint_values[interval] : UINT32_MAX;
     const uint32_t named = last != 0 && columns->hint_intervals != 0 ? columns->hint_intervals[interval] : UINT32_MAX;
@@ -299,8 +304,25 @@ static uint8_t tier1_allocation_value_hint(const Tier1AllocationInput* columns, 
     // A hinted interval whose own value already had a place, in an interval earlier in layout, keeps it: a loop's header
     // after its body takes the register the body gave its phi, not its operand's.
     const uint8_t own = value != UINT32_MAX ? last[columns->values[interval]] : UINT8_MAX;
-    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED;
+    // An interval hinted to its own value that names another value's recipe (tier1_cfg_body_hints, #2834) takes the
+    // recipe's register only: a recipe without one there was recomputed, not stored, and its place says nothing of this
+    // value's slot. A phi of sqlite3RunParser's loop, named to the constant that enters it, rested in its slot through
+    // the loop and its back edge stored it there on every token.
+    const uint32_t earlier = named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT;
+    const bool borrowed = named != UINT32_MAX && value == columns->values[interval] && columns->values[earlier] != value;
+    const bool recomputed = borrowed && opening >= 32 && tier1_allocation_spill_kind(columns, earlier) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
+    const bool named_place = opening != UINT8_MAX && opening != BUSTER_TIER1_ALLOCATE_CLOBBERED && !recomputed;
     return named_place ? opening : own != UINT8_MAX ? own : value != UINT32_MAX ? last[value] : UINT8_MAX;
+}
+
+// tier1_allocation_valued_hint's, or where it names none, the register its consumer reads it in (#2646), and in
+// *registered whether it is that register hint alone, which evicts nothing.
+static uint8_t tier1_allocation_value_hint_registered(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval, bool* registered)
+{
+    const uint8_t valued = tier1_allocation_valued_hint(columns, last, interval);
+    const uint8_t named_register = last != 0 && columns->register_hints != 0 ? columns->register_hints[interval] : UINT8_MAX;
+    *registered = valued == UINT8_MAX && named_register != UINT8_MAX;
+    return valued != UINT8_MAX ? valued : named_register;
 }
 
 // The registers an interval takes from `pool`, of the free ones it may take: those it doesn't avoid, where any is left (#2767).
@@ -311,13 +333,22 @@ static uint32_t tier1_allocation_preferred(const Tier1AllocationInput* columns, 
 }
 
 // An interval's hinted register at its start: the register its alternate interval opened with, where its value holds
-// that one still, a settled place, and it is among `free`'s; else tier1_allocation_value_hint's.
-static uint8_t tier1_allocation_start_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval, uint32_t free)
+// that one still, a settled place, and it is among `free`'s; else tier1_allocation_value_hint_registered's, whose
+// *registered says whether it is a register hint alone (#2646).
+static uint8_t tier1_allocation_start_hint_registered(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval, uint32_t free, bool* registered)
 {
     const uint32_t alternate = last != 0 && columns->hint_intervals != 0 && columns->alternate_intervals != 0 ? columns->alternate_intervals[interval] : UINT32_MAX;
     const uint8_t opened = alternate != UINT32_MAX ? last[(uint64_t)columns->value_count + 1 + alternate] : UINT8_MAX;
     const uint8_t preferred = opened < 32 && last[columns->values[alternate]] == opened ? opened : UINT8_MAX;
-    return preferred < 32 && ((free >> preferred) & 1) != 0 ? preferred : tier1_allocation_value_hint(columns, last, interval);
+    const bool taken = preferred < 32 && ((free >> preferred) & 1) != 0;
+    *registered = false;
+    return taken ? preferred : tier1_allocation_value_hint_registered(columns, last, interval, registered);
+}
+
+static uint8_t tier1_allocation_start_hint(const Tier1AllocationInput* columns, const uint8_t* last, uint32_t interval, uint32_t free)
+{
+    bool registered = false;
+    return tier1_allocation_start_hint_registered(columns, last, interval, free, &registered);
 }
 
 static void tier1_allocation_note_opening(const Tier1AllocationInput* columns, uint8_t* last, uint32_t interval, uint32_t chosen)
@@ -676,7 +707,9 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
                 const uint32_t r = (uint32_t)__builtin_ctz(left);
                 others |= claimers[r] != interval ? 1u << r : 0;
             }
-            const uint8_t follow = use_event ? tier1_allocation_value_hint(&columns, last, interval) : tier1_allocation_start_hint(&columns, last, interval, tier1_allocation_preferred(&columns, interval, ~occupied & allowed[interval] & ~others));
+            bool registered = false;
+            const uint8_t follow = use_event ? tier1_allocation_value_hint_registered(&columns, last, interval, &registered) :
+                                               tier1_allocation_start_hint_registered(&columns, last, interval, tier1_allocation_preferred(&columns, interval, ~occupied & allowed[interval] & ~others), &registered);
             // A register the interval avoids (#2767) is taken only as the last free one, never from a recipe.
             const uint32_t avoided = columns.avoided_registers != 0 ? columns.avoided_registers[interval] : 0;
             const bool recomputed = tier1_allocation_spill_kind(&columns, interval) == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
@@ -688,7 +721,8 @@ static inline __attribute__((always_inline)) bool tier1_allocate_scan_uses(const
             // recipe no use requires here (#2618), unless another interval starting here claimed it: the recipe leaves it as
             // an eviction does, recomputed at its next required use. Where a recipe holds the register an edge or a block's entry would keep a loop's value in, the value took
             // another one, and the edges moved it back (luaV_execute's frame objects' addresses and Tier 1's constants).
-            const bool hinted = columns.hints == 0 || columns.hints[interval] == UINT8_MAX;
+            // A register hint alone (#2646) evicts nothing.
+            const bool hinted = (columns.hints == 0 || columns.hints[interval] == UINT8_MAX) && !registered;
             if (hinted && !idle && !recomputed && follow < 32 && ((allowed[interval] >> follow) & 1) != 0 && ((avoided >> follow) & 1) == 0 && !(starting && ((claimed >> follow) & 1) != 0 && claimers[follow] != interval) &&
                 tier1_allocation_yields(&columns, active, occupied, follow, position))
             {
@@ -919,34 +953,25 @@ static inline __attribute__((always_inline)) void tier1_allocation_color(const T
     }
 }
 
-// Keep the cross-product for tiny fixed sets and as an independent scalar reference. All borrowed tails are masked.
-static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* input, bool vector, uint32_t* allowed)
+// The cross-product for small fixed sets, 16 intervals at a time. All borrowed tails are masked.
+static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* input, uint32_t* allowed)
 {
-    (void)vector;
-
     const Tier1AllocationInput columns = *input;
     for (uint32_t f = 0; f < columns.fixed.count; f += 1)
     {
-        for (uint32_t first = 0; first < columns.count; first += BUSTER_VECTOR_PATH(vector) ? 16 : 1)
+        for (uint32_t first = 0; first < columns.count; first += 16)
         {
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                const uint32_t remaining = columns.count - first;
-                const uint32_t length = remaining < 16 ? remaining : 16;
-                const __mmask16 lanes = (__mmask16)((1u << length) - 1);
-                const __m512i start = _mm512_maskz_loadu_epi32(lanes, columns.starts + first);
-                const __m512i end = _mm512_maskz_loadu_epi32(lanes, columns.ends + first);
-                const __m128i classes = _mm_maskz_loadu_epi8(lanes, columns.classes + first);
-                const __mmask16 same = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8((char)columns.fixed.classes[f]));
-                const __mmask16 overlap = lanes & same & _mm512_cmplt_epu32_mask(start, _mm512_set1_epi32((int32_t)columns.fixed.ends[f])) & _mm512_cmpgt_epu32_mask(end, _mm512_set1_epi32((int32_t)columns.fixed.starts[f]));
-                const __m512i current = _mm512_maskz_loadu_epi32(lanes, allowed + first);
-                const __m512i trimmed = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)columns.fixed.registers[f]), current);
-                _mm512_mask_storeu_epi32(allowed + first, overlap, trimmed);
-            }
-            else if (columns.classes[first] == columns.fixed.classes[f] && columns.starts[first] < columns.fixed.ends[f] && columns.ends[first] > columns.fixed.starts[f])
-            {
-                allowed[first] &= ~columns.fixed.registers[f];
-            }
+            const uint32_t remaining = columns.count - first;
+            const uint32_t length = remaining < 16 ? remaining : 16;
+            const __mmask16 lanes = (__mmask16)((1u << length) - 1);
+            const __m512i start = _mm512_maskz_loadu_epi32(lanes, columns.starts + first);
+            const __m512i end = _mm512_maskz_loadu_epi32(lanes, columns.ends + first);
+            const __m128i classes = _mm_maskz_loadu_epi8(lanes, columns.classes + first);
+            const __mmask16 same = _mm_cmpeq_epi8_mask(classes, _mm_set1_epi8((char)columns.fixed.classes[f]));
+            const __mmask16 overlap = lanes & same & _mm512_cmplt_epu32_mask(start, _mm512_set1_epi32((int32_t)columns.fixed.ends[f])) & _mm512_cmpgt_epu32_mask(end, _mm512_set1_epi32((int32_t)columns.fixed.starts[f]));
+            const __m512i current = _mm512_maskz_loadu_epi32(lanes, allowed + first);
+            const __m512i trimmed = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)columns.fixed.registers[f]), current);
+            _mm512_mask_storeu_epi32(allowed + first, overlap, trimmed);
         }
     }
 }
@@ -955,10 +980,8 @@ static void tier1_allocation_filter_fixed_simple(const Tier1AllocationInput* inp
 // register r overlaps iff its prefix maximum fixed end is > start. Ends at start and starts at end do not overlap.
 // Reuse the dead event buckets as start-position lists. Work is O(positions + fixed + events), with 32 register
 // lanes per class; scratch is one u32 per fixed range. Required-use/start events do not query or advance the sweep.
-static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Arena* arena, bool vector, const uint32_t* events, uint32_t event_count, uint32_t* buckets, uint32_t* allowed)
+static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Arena* arena, const uint32_t* events, uint32_t event_count, uint32_t* buckets, uint32_t* allowed)
 {
-    (void)vector;
-
     const Tier1AllocationInput columns = *input;
     bool valid = true;
     if (columns.fixed.count != 0 && columns.count != 0)
@@ -966,10 +989,10 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
         // Avoid index overhead when the cross-product fits sixteen comparisons per input row plus the already-paid
         // position domain. This keeps tiny functions/small fixed sets simple while bounding that work linearly too.
         const uint64_t simple_budget = columns.position_count + 16ull * (columns.count + columns.fixed.count);
-        const bool simple = !BUSTER_VECTOR_PATH(vector) || (uint64_t)columns.fixed.count * columns.count <= simple_budget;
+        const bool simple = (uint64_t)columns.fixed.count * columns.count <= simple_budget;
         if (simple)
         {
-            tier1_allocation_filter_fixed_simple(input, BUSTER_VECTOR_PATH(vector), allowed);
+            tier1_allocation_filter_fixed_simple(input, allowed);
         }
         else
         {
@@ -1022,12 +1045,10 @@ static bool tier1_allocation_filter_fixed(const Tier1AllocationInput* input, Are
 
 // The allocator, compiled twice (tier1_allocate_impl): `hinted`, a constant, says whether the input has hint_values.
 // Without them the body has no hint code at all, so that an input without hints runs the code it ran before them.
-// Both production paths color regular classes; `color` is false only for the independent scan reference. The production
-// class-event column is eight temporary bytes per interval on either host, independent of `vector`'s filtering kernels.
-static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool vector, bool color, bool hinted, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
+// The production path colors regular classes; `color` is false only for the independent scan reference. The production
+// class-event column is eight temporary bytes per interval.
+static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate_body(const Tier1AllocationInput* input, Arena* arena, bool color, bool hinted, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
 {
-    (void)vector;
-
     // A local copy keeps the column pointers in registers: under -fno-strict-aliasing each store below could change
     // *input, and clang would reload them after every one. Its address must not escape, or the stores could alias
     // it as well: the helpers take input and make their own copies.
@@ -1216,7 +1237,7 @@ static inline __attribute__((always_inline)) Tier1AllocationError tier1_allocate
         {
             memset(value_last, UINT8_MAX, tier1_allocation_hint_bytes(&columns));
         }
-        if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, BUSTER_VECTOR_PATH(vector), events, event_count, buckets, allowed))
+        if (error == TIER1_ALLOCATION_OK && columns.fixed.count != 0 && !tier1_allocation_filter_fixed(input, arena, events, event_count, buckets, allowed))
         {
             error = TIER1_ALLOCATION_CAPACITY;
         }
@@ -1478,6 +1499,7 @@ static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
     for (uint32_t i = 0; valid && i < input->count && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS; i += 1)
     {
         valid = input->hint_values[i] == UINT32_MAX || input->hint_values[i] < input->value_count;
+        valid = valid && (input->register_hints == 0 || input->register_hints[i] == UINT8_MAX || input->register_hints[i] < 32);
         const uint32_t alternate = input->alternate_intervals != 0 ? input->alternate_intervals[i] : UINT32_MAX;
         valid = valid && (alternate == UINT32_MAX || (input->hint_intervals != 0 && alternate < input->count && input->classes != 0 && input->starts != 0 &&
                                                       input->classes[alternate] == input->classes[i] && input->starts[alternate] < input->starts[i]));
@@ -1494,55 +1516,44 @@ static bool tier1_allocation_hints_valid(const Tier1AllocationInput* input)
 }
 
 // The hinted copy: valid hints, then the body with its hint code, and with `verdict` another problem's.
-static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
+static __attribute__((noinline)) Tier1AllocationError tier1_allocate_hinted(const Tier1AllocationInput* input, Arena* arena, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
 {
-    return tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, vector, true, true, verdict, result) : TIER1_ALLOCATION_INVALID;
+    return tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, true, true, verdict, result) : TIER1_ALLOCATION_INVALID;
 }
 
-static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1Allocation* result)
+static Tier1AllocationError tier1_allocate_impl(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
-    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, vector, 0, result) : tier1_allocate_body(input, arena, vector, true, false, 0, result);
+    return input != 0 && input->hint_values != 0 ? tier1_allocate_hinted(input, arena, 0, result) : tier1_allocate_body(input, arena, true, false, 0, result);
 }
 
-// #2538: tier1_allocate (or with `vector` false its scalar twin), and another problem's verdict over the same intervals
+// #2538: tier1_allocate, and another problem's verdict over the same intervals
 // (Tier1AllocationVerdict), whose scans share this call's validation and sorted events. Only a hinted input without
 // fixed ranges, as tier1_cfg's are, takes one; `verdict->taken` says so.
-static __attribute__((unused)) Tier1AllocationError tier1_allocate_verdict(const Tier1AllocationInput* input, Arena* arena, bool vector, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
+static __attribute__((unused)) Tier1AllocationError tier1_allocate_verdict(const Tier1AllocationInput* input, Arena* arena, Tier1AllocationVerdict* verdict, Tier1Allocation* result)
 {
     const bool hinted = input != 0 && input->hint_values != 0 && input->fixed.count == 0;
     verdict->taken = false;
     verdict->constraint = false;
-    return hinted ? tier1_allocate_hinted(input, arena, BUSTER_HOST_VECTOR && vector, verdict, result) : tier1_allocate_impl(input, arena, BUSTER_HOST_VECTOR && vector, result);
+    return hinted ? tier1_allocate_hinted(input, arena, verdict, result) : tier1_allocate_impl(input, arena, result);
 }
-
-static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result);
 
 static __attribute__((unused)) Tier1AllocationError tier1_allocate(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier1_allocate_scalar(input, arena, result);
-#else
-    return tier1_allocate_impl(input, arena, true, result);
-#endif
+    return tier1_allocate_impl(input, arena, result);
 }
 
-static __attribute__((unused)) Tier1AllocationError tier1_allocate_scalar(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
-{
-    return tier1_allocate_impl(input, arena, false, result);
-}
-
-// The former scalar policy, independent of regular-class coloring: every class takes the constrained scan, and fixed
-// ranges use the scalar cross-product. Tests retain it as a validity oracle, not as a production host policy (#1395).
+// The former scan policy, independent of regular-class coloring: every class takes the constrained scan. Tests retain it
+// as a validity oracle, not as a production host policy (#1395).
 static __attribute__((unused)) Tier1AllocationError tier1_allocate_scan_reference(const Tier1AllocationInput* input, Arena* arena, Tier1Allocation* result)
 {
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     if (input != 0 && input->hint_values != 0)
     {
-        error = tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, false, false, true, 0, result) : TIER1_ALLOCATION_INVALID;
+        error = tier1_allocation_hints_valid(input) ? tier1_allocate_body(input, arena, false, true, 0, result) : TIER1_ALLOCATION_INVALID;
     }
     else
     {
-        error = tier1_allocate_body(input, arena, false, false, false, 0, result);
+        error = tier1_allocate_body(input, arena, false, false, 0, result);
     }
     return error;
 }
@@ -1835,10 +1846,8 @@ static uint32_t tier1_move_ready_pop(uint32_t* ready, uint32_t* count)
     return result;
 }
 
-static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result, bool vector)
+static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
-    (void)vector;
-
     Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
     const uint64_t saved = arena != 0 ? arena->length : 0;
     Tier1ResolvedMoves output = { 0 };
@@ -1864,7 +1873,7 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
             error = TIER1_ALLOCATION_CAPACITY;
         }
     }
-    if (error == TIER1_ALLOCATION_OK && BUSTER_VECTOR_PATH(vector))
+    if (error == TIER1_ALLOCATION_OK)
     {
         const __m256i scratch = _mm256_set1_epi32((int)input->scratch);
         const __m512i indices = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7);
@@ -1884,18 +1893,6 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
             const __m512i locations = _mm512_slli_epi64(_mm512_cvtepu32_epi64(destinations), 32);
             const __m512i positions = _mm512_add_epi64(indices, _mm512_set1_epi64(i));
             _mm512_mask_storeu_epi64(keys + i, mask, _mm512_or_si512(locations, positions));
-        }
-    }
-    else if (error == TIER1_ALLOCATION_OK)
-    {
-        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && i < input->count; i += 1)
-        {
-            if (input->sources[i] == input->scratch || input->destinations[i] == input->scratch)
-            {
-                error = TIER1_ALLOCATION_INVALID;
-            }
-            uses[i] = input->sources[i] == input->destinations[i] ? UINT32_MAX : 0;
-            keys[i] = ((uint64_t)input->destinations[i] << 32) | i;
         }
     }
     if (error == TIER1_ALLOCATION_OK)
@@ -2000,6 +1997,6 @@ static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(
 static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
     const bool small = input != 0 && input->count <= BUSTER_TIER1_MOVE_SMALL_COUNT;
-    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result, BUSTER_HOST_VECTOR);
+    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result);
     return error;
 }

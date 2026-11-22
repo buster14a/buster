@@ -55,7 +55,8 @@ struct CheckSourceRequest
 {
     // Select the referenced definitions and check their target features, as -c does before its code.
     bool select;
-    // The client emits code: the request's code generation refusals apply (-fPIC), as they do to -c and a link.
+    // The client emits code as -c does: the request's code generation refusals apply as they do to -c's object (-fPIC
+    // among them, which a link's executable takes, #2101).
     bool emits;
     // --scalar's override: the preprocessor's, the checker's, the data's and the selection's scalar twins, and the
     // program's scalar path. `--scalar` among the options asks for it too, as the driver's does (CheckSource.scalar).
@@ -112,7 +113,8 @@ static bool check_source_prepare(CheckSource* source, const char* file, char** o
     source->pp = BUSTER_ARENA_PUSH_ARRAY(&source->arena, Preprocessor, 1);
     source->parser = BUSTER_ARENA_PUSH_ARRAY(&source->arena, Parser, 1);
     const bool allocated = source->identifiers != 0 && source->pp != 0 && source->parser != 0;
-    const bool requested = allocated && check_request_parse(&source->options, &source->refusal, &source->input, file, options, option_count, request.emits, &source->arena);
+    const CheckRequestCode code = request.emits ? CHECK_REQUEST_CODE_OBJECT : CHECK_REQUEST_CODE_NONE;
+    const bool requested = allocated && check_request_parse(&source->options, &source->refusal, &source->input, file, options, option_count, code, &source->arena);
     Preprocessor* pp = source->pp;
     Parser* parser = source->parser;
     CheckCorpusPath* path = &source->path;

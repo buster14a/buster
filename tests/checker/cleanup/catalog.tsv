@@ -78,3 +78,13 @@ buster-fixtures v1 checker-sources
 0069	0069.c	-	cleanup of an __auto_type structure through void
 0070	0070.c	rejected	cleanup of an __auto_type double by an int pointer
 0071	0071.c	rejected	cleanup of an __auto_type int by a double pointer
+# An _Atomic parameter is checked as its value's type, as clang's CheckAssignmentConstraints checks it (#1844): an
+# atomic pointer's, to the variable's type or to void, and an _Atomic _Bool's, which clang's code generation can't
+# select (the lowering refuses it by name), and an atomic integer's or a pointer to another type is clang's error.
+0072	0072.c	-	cleanup taking an atomic pointer
+0073	0073.c	-	cleanup taking an atomic pointer to void
+0074	0074.c	-	cleanup taking a qualified atomic pointer to a qualified type
+0075	0075.c	-	cleanup taking an atomic _Bool
+0076	0076.c	rejected	cleanup of an atomic integer parameter
+0077	0077.c	rejected	cleanup of an atomic pointer to another type
+0078	0078.c	rejected	cleanup of an __auto_type double by an atomic int pointer typedef

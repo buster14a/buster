@@ -4802,32 +4802,6 @@ static uint32_t tier0_register_locals_vector(const Tier0Function* function, cons
 static uint32_t tier0_assign_registers_vector(const Tier0Function* function, Tier0Home* homes, const uint32_t* references, uint32_t taken)
 {
     const uint32_t locals = function->local_count;
-    // The free registers in the order the loop takes them: caller-saved then callee-saved, and XMM.
-    uint32_t general[16] = { 0 };
-    uint32_t callee[BUSTER_TIER0_CALLEE_SAVED + 1] = { 0 };
-    uint32_t xmm[16] = { 0 };
-    uint32_t callers = 0;
-    uint32_t callees = 0;
-    uint32_t xmms = 0;
-    for (uint32_t d = 0; d < BUSTER_TIER0_CALLER_SAVED_DEPTHS; d += 1)
-    {
-        const uint32_t reg = tier0_integer_depths[d];
-        general[callers] = reg;
-        callers += (taken >> reg & 1) == 0 ? 1 : 0;
-    }
-    for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
-    {
-        const uint32_t reg = tier0_callee_saved[c];
-        general[callers + callees] = reg;
-        // The callee-saved registers the first n locals past the caller-saved ones take, as Tier0Frame.saved's bits.
-        callee[callees + 1] = callee[callees] | 1u << c;
-        callees += (taken >> reg & 1) == 0 ? 1 : 0;
-    }
-    for (uint32_t x = 0; x < 16; x += 1)
-    {
-        xmm[xmms] = x;
-        xmms += (taken >> BUSTER_TIER0_XMM(x) & 1) == 0 ? 1 : 0;
-    }
     // Which locals take a register, and of which kind.
     const __m512i is_register = _mm512_set1_epi64((int64_t)(0xffull << (8 * offsetof(Tier0Home, is_register))));
     uint64_t integers = 0;
@@ -4847,43 +4821,75 @@ static uint32_t tier0_assign_registers_vector(const Tier0Function* function, Tie
         integers |= (eligible & ~(uint64_t)floating) << first;
         floatings |= (eligible & floating) << first;
     }
-    const __m512i list = _mm512_loadu_si512(general);
-    const __m512i xmm_list = _mm512_loadu_si512(xmm);
-    const __m512i one = _mm512_set1_epi32(1);
-    uint32_t callee_taken = 0;
-    for (uint32_t first = 0; first < locals; first += 16)
+    // The free registers and each local's rank among its kind, where a local can take a register.
+    uint32_t saved = 0;
+    if ((integers | floatings) != 0)
     {
-        const __mmask16 integer_lanes = (__mmask16)(integers >> first);
-        const __mmask16 floating_lanes = (__mmask16)(floatings >> first);
-        const __m512i counts = _mm512_maskz_loadu_epi32((__mmask16)tier0_lanes(first, locals), references + first);
-        const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
-        __m512i rank = _mm512_setzero_si512();
-        uint64_t others = integers | floatings;
-        while (others != 0)
+        // The free registers in the order the loop takes them: caller-saved then callee-saved, and XMM.
+        uint32_t general[16] = { 0 };
+        uint32_t callee[BUSTER_TIER0_CALLEE_SAVED + 1] = { 0 };
+        uint32_t xmm[16] = { 0 };
+        uint32_t callers = 0;
+        uint32_t callees = 0;
+        uint32_t xmms = 0;
+        for (uint32_t d = 0; d < BUSTER_TIER0_CALLER_SAVED_DEPTHS; d += 1)
         {
-            const uint32_t other = (uint32_t)__builtin_ctzll(others);
-            others &= others - 1;
-            const __m512i key = _mm512_set1_epi32((int32_t)references[other]);
-            const __mmask16 same = (floatings >> other & 1) != 0 ? floating_lanes : integer_lanes;
-            const __mmask16 ahead = _mm512_cmpgt_epu32_mask(key, counts) | (_mm512_cmpeq_epi32_mask(key, counts) & _mm512_cmpgt_epu32_mask(index, _mm512_set1_epi32((int32_t)other)));
-            rank = _mm512_mask_add_epi32(rank, same & ahead, rank, one);
+            const uint32_t reg = tier0_integer_depths[d];
+            general[callers] = reg;
+            callers += (taken >> reg & 1) == 0 ? 1 : 0;
         }
-        // Integer locals: a caller-saved register below `callers`, a callee-saved one below `callers + callees` when
-        // referenced twice; floating ones an XMM register below `xmms`.
-        const __mmask16 caller_lanes = integer_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)callers));
-        const __mmask16 callee_lanes = integer_lanes & ~caller_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)(callers + callees))) &
-                                       _mm512_cmpge_epu32_mask(counts, _mm512_set1_epi32(2));
-        const __mmask16 xmm_lanes = floating_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)xmms));
-        const __mmask16 assigned = caller_lanes | callee_lanes | xmm_lanes;
-        callee_taken += (uint32_t)__builtin_popcount(callee_lanes);
-        const __m512i reg = _mm512_mask_permutexvar_epi32(_mm512_permutexvar_epi32(rank, list), xmm_lanes, rank, xmm_list);
-        // A home in a register: reg in byte 4, is_register in byte 6.
-        const __m512i low = _mm512_or_si512(_mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(reg)), 32), _mm512_set1_epi64(1ll << 48));
-        const __m512i high = _mm512_or_si512(_mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(reg, 1)), 32), _mm512_set1_epi64(1ll << 48));
-        _mm512_mask_storeu_epi64(homes + first, (__mmask8)assigned, low);
-        _mm512_mask_storeu_epi64(homes + first + 8, (__mmask8)(assigned >> 8), high);
+        for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
+        {
+            const uint32_t reg = tier0_callee_saved[c];
+            general[callers + callees] = reg;
+            // The callee-saved registers the first n locals past the caller-saved ones take, as Tier0Frame.saved's bits.
+            callee[callees + 1] = callee[callees] | 1u << c;
+            callees += (taken >> reg & 1) == 0 ? 1 : 0;
+        }
+        for (uint32_t x = 0; x < 16; x += 1)
+        {
+            xmm[xmms] = x;
+            xmms += (taken >> BUSTER_TIER0_XMM(x) & 1) == 0 ? 1 : 0;
+        }
+        const __m512i list = _mm512_loadu_si512(general);
+        const __m512i xmm_list = _mm512_loadu_si512(xmm);
+        const __m512i one = _mm512_set1_epi32(1);
+        uint32_t callee_taken = 0;
+        for (uint32_t first = 0; first < locals; first += 16)
+        {
+            const __mmask16 integer_lanes = (__mmask16)(integers >> first);
+            const __mmask16 floating_lanes = (__mmask16)(floatings >> first);
+            const __m512i counts = _mm512_maskz_loadu_epi32((__mmask16)tier0_lanes(first, locals), references + first);
+            const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int32_t)first), _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
+            __m512i rank = _mm512_setzero_si512();
+            uint64_t others = integers | floatings;
+            while (others != 0)
+            {
+                const uint32_t other = (uint32_t)__builtin_ctzll(others);
+                others &= others - 1;
+                const __m512i key = _mm512_set1_epi32((int32_t)references[other]);
+                const __mmask16 same = (floatings >> other & 1) != 0 ? floating_lanes : integer_lanes;
+                const __mmask16 ahead = _mm512_cmpgt_epu32_mask(key, counts) | (_mm512_cmpeq_epi32_mask(key, counts) & _mm512_cmpgt_epu32_mask(index, _mm512_set1_epi32((int32_t)other)));
+                rank = _mm512_mask_add_epi32(rank, same & ahead, rank, one);
+            }
+            // Integer locals: a caller-saved register below `callers`, a callee-saved one below `callers + callees` when
+            // referenced twice; floating ones an XMM register below `xmms`.
+            const __mmask16 caller_lanes = integer_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)callers));
+            const __mmask16 callee_lanes = integer_lanes & ~caller_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)(callers + callees))) &
+                                           _mm512_cmpge_epu32_mask(counts, _mm512_set1_epi32(2));
+            const __mmask16 xmm_lanes = floating_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)xmms));
+            const __mmask16 assigned = caller_lanes | callee_lanes | xmm_lanes;
+            callee_taken += (uint32_t)__builtin_popcount(callee_lanes);
+            const __m512i reg = _mm512_mask_permutexvar_epi32(_mm512_permutexvar_epi32(rank, list), xmm_lanes, rank, xmm_list);
+            // A home in a register: reg in byte 4, is_register in byte 6.
+            const __m512i low = _mm512_or_si512(_mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(reg)), 32), _mm512_set1_epi64(1ll << 48));
+            const __m512i high = _mm512_or_si512(_mm512_slli_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(reg, 1)), 32), _mm512_set1_epi64(1ll << 48));
+            _mm512_mask_storeu_epi64(homes + first, (__mmask8)assigned, low);
+            _mm512_mask_storeu_epi64(homes + first + 8, (__mmask8)(assigned >> 8), high);
+        }
+        saved = callee[callee_taken];
     }
-    return callee[callee_taken];
+    return saved;
 }
 
 // Whether a parameter is an object (tier0_is_object): an aggregate passed by value (Tier0Frame.object_parameters).
@@ -10685,7 +10691,6 @@ static void tier0_wide_depths_scalar(const Tier0Function* function, Tier0Entries
     floating_depths[count] = (uint32_t)floating;
 }
 
-#if BUSTER_HOST_VECTOR
 // Inclusive prefix sum in sixteen dword lanes; the masks zero the lanes before each shift, not just the indices.
 static __m512i tier0_wide_prefix(__m512i values)
 {
@@ -10697,13 +10702,11 @@ static __m512i tier0_wide_prefix(__m512i values)
     }
     return values;
 }
-#endif
 
 // The same corrected effects, sixteen entries at a time, with masked tails. The ordinary 64-byte depth scan stays
 // unchanged; only a function already sent to deep selection allocates or computes these wider columns.
 static void tier0_wide_depths_vector(const Tier0Function* function, Tier0Entries* entries)
 {
-#if BUSTER_HOST_VECTOR
     const uint32_t count = function->count;
     const uint8_t* kinds = function->kinds;
     const int8_t* integer_effects = entries->integer_effects;
@@ -10734,9 +10737,6 @@ static void tier0_wide_depths_vector(const Tier0Function* function, Tier0Entries
     }
     integer_depths[count] = (uint32_t)integer;
     floating_depths[count] = (uint32_t)floating;
-#else
-    tier0_wide_depths_scalar(function, entries);
-#endif
 }
 
 // The deep entries of a function whose stacks go past the depth tables (selection's TIER0_ERROR_DEPTH): their values in
@@ -13434,7 +13434,7 @@ static void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
 {
     const uint32_t count = function->count;
     const __m512i int32_max = _mm512_set1_epi64(INT32_MAX);
-    for (uint32_t first = 0; first < bits->blocks * 64; first += 8)
+    for (uint32_t first = 0; first < count; first += 8)
     {
         const __mmask8 lanes = (__mmask8)tier0_lanes((int64_t)first, count);
         const __mmask8 lanes_1 = (__mmask8)(tier0_lanes((int64_t)first - 1, count));
@@ -13866,7 +13866,8 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
         // the depth the block starts at.
         __m512i integer_sum = _mm512_maskz_mov_epi8(lanes, integer);
         __m512i floating_sum = _mm512_maskz_mov_epi8(lanes, floating);
-        for (uint32_t step = 1; step < 64; step *= 2)
+        const uint32_t span = count - first < 64 ? count - first : 64;
+        for (uint32_t step = 1; step < span; step *= 2)
         {
             const __m512i zero = _mm512_setzero_si512();
             integer_sum = _mm512_add_epi8(integer_sum, tier0_shift_back(integer_sum, zero, step));
@@ -14632,7 +14633,6 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     }
 }
 
-#if BUSTER_HOST_VECTOR
 // tier0_compile's body, with a function's segment overrides (tier0_apply_segments; 0 without them).
 static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint8_t* segments, Arena* output)
 {
@@ -14649,14 +14649,16 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
     uint64_t** columns[] = { &bits.fits, &bits.count, &bits.zero, &bits.size, &bits.product, &bits.same, &bits.sib, &bits.sequential, &bits.labels, &bits.leaf,
                              &bits.home_const, &bits.one, &bits.two, &bits.rmw };
     bool pushed = tier0_push_entries(&entries, scratch.arena, count);
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+    // A word past the blocks for the labels' target past the last entry (the function's end).
+    const uint64_t words = (uint64_t)blocks + 2;
+    uint64_t* column_words = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, words * BUSTER_ARRAY_LENGTH(columns));
+    pushed = pushed && column_words != 0;
+    if (column_words != 0)
     {
-        // A word past the blocks for the labels' target past the last entry (the function's end).
-        *columns[c] = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)blocks + 2);
-        pushed = pushed && *columns[c] != 0;
-        if (*columns[c] != 0)
+        memset(column_words, 0, words * BUSTER_ARRAY_LENGTH(columns) * sizeof(uint64_t));
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
         {
-            memset(*columns[c], 0, ((uint64_t)blocks + 2) * sizeof(uint64_t));
+            *columns[c] = column_words + words * c;
         }
     }
     bits.sib_log2 = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)blocks * 64 + 64);
@@ -14689,7 +14691,6 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
     scratch_end(scratch);
     return code;
 }
-#endif
 
 // A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
 // its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or
@@ -14728,12 +14729,7 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
-#if BUSTER_HOST_VECTOR
         code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, segments, output) : tier0_compile_scalar_entries(&stripped, segments, output);
-#else
-        (void)vector;
-        code = tier0_compile_scalar_entries(&stripped, segments, output);
-#endif
     }
     scratch_end(scratch);
     return code;
@@ -14746,11 +14742,7 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
-#if !BUSTER_HOST_VECTOR
-    return tier0_compile_scalar(function, output);
-#else
     return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
-#endif
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -633,14 +633,11 @@ static __attribute__((noinline)) void check_test_overloadable_counts(CheckTest* 
                 spelled += named;
                 expected += named && listed;
             }
-            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-            {
-                const CheckInputTokenCounts counts = check_input_count_tokens(&parser, names, groups, BUSTER_ARRAY_LENGTH(names), NULL, NULL, scalar != 0);
-                char description[200];
-                snprintf(description, sizeof(description), "source %u's names of overloadable by the %s path: %u of %u counted, the tree's %u, expected %u", s,
-                         scalar != 0 ? "scalar" : "vector", counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE], spelled, expected, sources[s].counted);
-                check_test_expect(test, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] == expected && expected == sources[s].counted && spelled > expected, description);
-            }
+            const CheckInputTokenCounts counts = check_input_count_tokens(&parser, names, groups, BUSTER_ARRAY_LENGTH(names), NULL, NULL);
+            char description[200];
+            snprintf(description, sizeof(description), "source %u's names of overloadable: %u of %u counted, the tree's %u, expected %u", s,
+                     counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE], spelled, expected, sources[s].counted);
+            check_test_expect(test, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] == expected && expected == sources[s].counted && spelled > expected, description);
         }
         parse_release(&parser);
         pp_release(&pp);

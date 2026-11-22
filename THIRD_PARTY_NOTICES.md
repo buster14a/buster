@@ -17,13 +17,28 @@ the maintainer's confirmation does not purport to grant anyone else's rights.
 
 ## Path and portion inventory
 
+The discarded-comparison suggestion gate in `c_check_common_warnings.c` and
+its original driver fixtures (#2906) use the project default terms. LLVM
+revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaStmt.cpp` was consulted for the left operand's lvalue
+classification and the equality/inequality notes. Clang 23.1.4 is an external
+diagnostic oracle; no upstream implementation or test fixture is imported.
+
 The failed static assertion boolean-conversion recovery in
 `c_check_common_warnings.c` and `c_checker_driver.c`, its driver tests and the
-original `tests/driver/assert_bool_nested*.c` sources (#2409) use the project
+original `tests/driver/assert_bool_*.c` sources (#2409) use the project
 default terms. LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
 `clang/lib/Sema/SemaChecking.cpp` and `clang/lib/Sema/SemaExpr.cpp` were consulted
 for conversion and diagnostic ordering behavior. Clang 23.1.4 is an external
 diagnostic oracle; no upstream implementation or test fixture is imported.
+
+The remaining #2409 requirement formatting in `c_check_semantic_diagnostic.c`,
+extension-prefixed member recovery in `c_parser_impl.c`, retained-expression
+warning recovery in `c_check_common_warnings.c`, and their original runtime
+fixtures `tests/driver/assert_requirement_*.c`, `assert_member_extension*.c`
+and `assert_bool_detached*.c` also use the project default terms. Their
+behavior was compared with Clang 23.1.4 at the same pinned LLVM revision.
+No upstream implementation or fixture is imported by these changes.
 
 The malformed-block-item resume metadata in `c_parser_impl.c` (#2406), its
 semantic-driver checks and the original runtime fixtures under
@@ -274,7 +289,7 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/x86_64_disassembler.c`, `src/buster/compiler/x86_64_disassembly.c`, `src/buster/compiler/x86_64_disassembler_cli.c`, `src/buster/compiler/x86_64_disassembler_test.c`, `examples/disassembler/corpus.c`, `docs/x86-64-disassembler.md` | Original decoder, bounded formatter/command, tests, C corpus and documentation; Default. Decoder indices are built from this repository's encoder catalogue, and generated test operands use its existing generator. Independent raw-byte fixtures are handwritten. GNU as/objdump and Clang run externally as oracles for locally authored inputs; no implementation or external test corpus is imported. uops.info and ISA manuals supply design measurements and instruction facts, not copied implementation. |
 | `src/buster/compiler/main.c`, `src/buster/compiler/main_test.c`, `src/buster/compiler/lane_test.c` | Original integration, input handling, loader regressions and lane tests; Default. The loader fixtures and address-space-limit checks are written for this project; no external fixtures or implementation are imported. |
 | `src/buster/compiler/diagnostic.c`, `src/buster/compiler/diagnostic_test.c`, `src/buster/compiler/diagnostic_benchmark.c`, `src/buster/compiler/c_preprocessor_order_test.c`, `src/buster/compiler/link_order_test.c`, `docs/determinism.md` | Original buffered diagnostic ordering, scalar/vector kernels, tests, measurement harness and documentation; Default. The property tests reuse this repository's fixtures and generators. The diagnostic benchmark's clock, sample selection and conditioning helpers are original; no external implementation, fixtures or generated data are imported. |
-| `src/buster/compiler/dataflow.c`, `src/buster/compiler/dataflow_program.c`, `src/buster/compiler/dataflow_test.c`, `src/buster/compiler/dataflow_benchmark.c`, `docs/dataflow.md` | Original liveness/interference kernels, synthetic CFG generator, tests, benchmark and documentation; Default, with the public-domain SplitMix64 seed-mixing reference below. No external corpus is incorporated. |
+| `src/buster/compiler/dataflow.c`, `src/buster/compiler/dataflow_program.c`, `src/buster/compiler/dataflow_test.c`, `src/buster/compiler/dataflow_sweeps_test.c`, `src/buster/compiler/dataflow_benchmark.c`, `docs/dataflow.md` | Original liveness/interference kernels, synthetic CFG generator, tests, benchmark and documentation; Default, with the public-domain SplitMix64 seed-mixing reference below. No external corpus is incorporated. |
 | `src/buster/compiler/ssa.c`, `src/buster/compiler/ssa_program.c`, `src/buster/compiler/ssa_test.c`, `src/buster/compiler/ssa_benchmark.c`, `src/buster/compiler/ssa_ir.c`, `src/buster/compiler/ssa_ir_test.c`, `docs/ssa.md`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/ssa-2026-10-23/) | Original local-promotion implementation, IR adapter, CFG generator, interpreters, verifier, tests, benchmark and generated observations; Default. Braun et al. (CC 2013), Cytron et al. (TOPLAS 1991) and Cooper, Harvey and Kennedy (2001) supply algorithm descriptions, not copied code or fixtures. The generator is an original deterministic congruential generator; measurement helpers are original. Existing arena/dataflow/dominator/IR APIs, the typed-stream generator and test arithmetic helpers are reused. Sources and integration limits are in `docs/ssa.md`; the measurement record names its source revisions, compiler/CPU, commands and workflow. |
 | `src/buster/compiler/ir.c`, `src/buster/compiler/ir_lower.c`, `src/buster/compiler/ir_test.c`, `src/buster/compiler/ir_lower_test.c`, `src/buster/compiler/ir_benchmark.c`, `src/buster/compiler/ir_lower_benchmark.c`, `docs/ir.md` | Original per-function IR, typed-stream adapter, scalar/vector verifiers, compact CFG/use builders, printer, fixtures, test-only interpreter, benchmarks and documentation; Default. Tests and pipeline measurements reuse this project's Tier 0 generator and typed-stream interpreter. The timing and median helpers are original to this module. No external implementation, generated data or fixture corpus is imported. |
 | `src/buster/compiler/preprocessor_fuzz*.c`, `docs/preprocessor-fuzz.md` | Original independent test harness, generator, comparator, minimizer, tests and benchmark helpers; Default. Generated test programs are produced by this repository's C generator from a recorded seed, case ID and language mode. Clang 23 is an external oracle; no compiler implementation or external test fixtures are imported. |
@@ -300,7 +315,8 @@ Paths below are relative to the repository root. "Default" means
 | `src/buster/compiler/c_predefines.c` | Original predefined macros of the target and the options; Default, with the clang-generated tables noted below. The options' rules follow clang 23's driver (`clang/lib/Driver/ToolChains/Clang.cpp`, `CommonArgs.cpp`, `Arch/X86.cpp`, `SanitizerArgs.cpp`, `ToolChain.cpp`, `ToolChains/Linux.cpp`, `clang/lib/Options/OptionUtils.cpp`, and `clang/include/clang/Options/Options.td`'s option groups, aliases and marshalling) and frontend (`InitPreprocessor.cpp`, `Basic/Targets/X86.cpp`, `Frontend/CompilerInvocation.cpp`, and `clang/include/clang/Basic/Features.def`'s sanitizer features), LLVM 23's `llvm/lib/Support/StringRef.cpp` (how both read a number), and `-march=native`'s detection LLVM 23's `llvm/lib/TargetParser/Host.cpp`: read for their rules (which option wins, which values an option takes and which options clang refuses together, which sanitizers clang supports on x86-64 Linux and which it refuses together, which CPUID bit names which feature, which family and model name which CPU) and written again in C, none of their code copied. The sanitizers' and their groups' names and members are those of clang 23.1.3's `clang/include/clang/Basic/Sanitizers.def`, in its order. |
 | `src/buster/compiler/c_predefines_test.c` | Original tests and table generator; Default. clang runs externally as the oracle and the generator's source of answers, and is not vendored. |
 | `src/buster/compiler/c_preprocessor_test.c` | Original preprocessor tests; Default. Some expected texts are clang 23's `-E` output for the cases' own inputs. `pp_test_keyword_candidates` and `pp_test_feature_names` list names from clang 23's `TokenKinds.def` and companions and from its `Features.def` (names only, noted below). |
-| `src/buster/compiler/c_preprocessor_history.c`, `src/buster/compiler/c_preprocessor_history_impl.c`, `src/buster/compiler/c_preprocessor_history_test.c` | Original expansion-history readers, recording, diagnostic rendering and tests; Default. Shared readers and declarations remain in `c_preprocessor_history.c`; private recording and rendering definitions are in `c_preprocessor_history_impl.c`. Original fixture inputs are checked against the installed Clang as an external oracle. No Clang implementation or external fixture source is copied. |
+| `src/buster/compiler/c_preprocessor_history.c`, `src/buster/compiler/c_preprocessor_history_impl.c`, `src/buster/compiler/c_preprocessor_history_test.c` | Original expansion-history readers, recording, diagnostic rendering and tests; Default. Shared readers and declarations remain in `c_preprocessor_history.c`; private recording and rendering definitions are in `c_preprocessor_history_impl.c`. Original fixture inputs are checked against the installed Clang as an external oracle. No Clang implementation or external fixture source is copied. The caret display (#2376) follows the rules of clang's `TextDiagnostic`, read for behavior ("Unicode column widths" below). |
+| `src/buster/compiler/c_caret_test.c`, `tests/carets/` | Original `test-carets` harness and fixtures (#2376); Default. The installed Clang runs externally as the oracle; no Clang test is copied. |
 | `src/buster/compiler/c_preprocessor_batch_test.c`, [measurement evidence](https://github.com/buster14a/buster-performance/tree/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/preprocessor-cloud-2026-10-23/) | Original macro-batch fixtures, measurement helpers and cloud observations; Default. Existing project benchmarks supply the preprocessor workload and retain their notices. Clang is an external oracle; the downloaded SQLite amalgamation and installed system headers are runtime inputs, not vendored implementation or fixtures. |
 | `src/buster/compiler/c_preprocessor_benchmark.c` | Original benchmark body under Default; the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
 | `src/buster/compiler/c_refine_benchmark.c` | Original benchmark body under Default; the corpus loader and the counter/timing/sort helpers adapted through `c_lexer_benchmark.c` retain MIT. |
@@ -520,6 +536,42 @@ character names and by routines that follow LLVM's.
   was copied there. Clang 23.1.6 runs externally as the oracle of the tests,
   whose fixtures are original.
 
+## Unicode column widths (#2376)
+
+Clang's caret diagnostics place a source line's characters by LLVM's column
+widths, which the caret display (`pp_diagnostic_snippet`) follows.
+
+- **Data:** `src/buster/compiler/c_unicode_widths.inc` holds three range
+  tables copied, as C rows, from `llvm/lib/Support/Unicode.cpp` at the tag
+  `llvmorg-23.1.4` (sha256
+  `5f45338939950fecf74c266d476b80be0d1e3da41c168a7b1f4723c5344af9d5`; the
+  file is the same at `llvmorg-23.1.6`, the oracle clang's release):
+  `charWidth`'s `CombiningCharacterRanges` (367 ranges) and
+  `DoubleWidthCharacterRanges` (126), and the two ranges of `isPrintable`'s
+  `PrintableRanges` that `c_unicode_names.inc`'s printable table doesn't
+  have (U+16D80 to U+16D9D and U+16DA0 to U+16DA9, the draft Chisoi code
+  points the section above names). The file keeps the LLVM Project's
+  `Apache-2.0 WITH LLVM-exception` terms
+  ([LICENSES/LLVM.txt](LICENSES/LLVM.txt)), and since the ranges reflect the
+  Unicode Character Database 18.0.0, the Unicode data notice as well:
+  **Copyright © 1991-2026 Unicode, Inc.**, under the
+  [Unicode License V3](LICENSES/Unicode-3.0.txt). Its header says both. The
+  rows were made from the fetched file's ranges by `grep -o '{0x[0-9A-F]*,
+  0x[0-9A-F]*}'` over each table's lines, and nothing else changed.
+- **Routine:** `unicode_column_width` in `src/buster/compiler/c_unicode_names.c`
+  is a C translation of `charWidth` at the same tag, under that file's LLVM
+  terms (the section above).
+- **Behavior references:** `clang/lib/Frontend/TextDiagnostic.cpp` (sha256
+  `8d12089c0fccde6d638e9b236bc9c36893558a1e2d2a03fcf3fc56e7de520286`) and
+  `clang/lib/Frontend/DiagnosticRenderer.cpp` (sha256
+  `00c0defcd3df5f2e968f214577556b83b0a438bf1a7922b6ba99a283b724e7ef`), and
+  `llvm/lib/Support/ConvertUTF.cpp`'s `isLegalUTF8`, at the same tag, were read
+  for the rules of the caret display in `c_preprocessor_history_impl.c`
+  (`emitSnippetAndCaret`, `emitSnippet`, `printableTextForNextCharacter`,
+  `SourceColumnMap` and the `LastLoc` rule), which is original project code
+  under the default terms; no implementation was copied there. Clang 23.1.6
+  runs externally as the oracle of `test-carets`, whose fixtures are original.
+
 ## RAD Debugger
 
 The lane interface/base-layer reference is
@@ -700,6 +752,15 @@ musl's: they exercise the same instructions, constraints and operand shapes,
 and copy no function of musl's. No file of this tree holds musl's code.
 
 ## C semantic compatibility references
+
+The suppress attribute recovery and its original runtime fixtures (#2332)
+use Clang 23.1.4 externally as a diagnostic and acceptance oracle.
+`clang/lib/Parse/ParseDecl.cpp`, `clang/lib/Parse/ParseDeclCXX.cpp` and
+`clang/lib/Parse/Parser.cpp` at `llvmorg-23.1.4` (revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`) were read as behavior references
+for argument parsing, delimiter recovery and discarded attribute lists.
+No LLVM implementation or test fixtures were copied. The new code and
+fixtures use the project default terms.
 
 The TLS redeclaration diagnostics and for-initializer unused-warning scope fixes
 for #1784 are original project code and fixtures under the default terms.

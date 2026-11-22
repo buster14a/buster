@@ -1700,11 +1700,88 @@ static void foreign_debug_test_kernels(ForeignTestTally* tally, const char* dire
     printf("  relocation kernels: %u sections, %llu copies, each the vector path's run against the exact path's\n", sections, (unsigned long long)runs);
 }
 
+// A complete raw contribution beside a compressed empty stream of the same kind. The other kind has a gap before
+// its second byte and trailing padding from an empty section. Poisoned arena bytes make both gaps observable.
+static void foreign_debug_test_storage(ForeignTestTally* tally)
+{
+    struct StorageFile
+    {
+        Elf64_Shdr sections[7];
+        uint8_t payload[6];
+        Elf64_Chdr compressed;
+        uint8_t stream[8];
+        Elf64_Rela relocation;
+    } file = {
+        .payload = { 1, 2, 3, 4, 5, 6 },
+        .compressed = { .ch_type = ELFCOMPRESS_ZLIB, .ch_addralign = 1 },
+        .stream = { 0x78, 1, 3, 0, 0, 0, 0, 1 },
+        .relocation = { .r_info = ELF64_R_INFO(0, R_X86_64_32), .r_addend = 7 },
+    };
+    const uint64_t payload = offsetof(struct StorageFile, payload);
+    const uint32_t info = sizeof("\0.debug_str");
+    file.sections[1] = (Elf64_Shdr){ .sh_name = 1, .sh_type = SHT_PROGBITS, .sh_offset = payload, .sh_size = 4 };
+    file.sections[2] = (Elf64_Shdr){ .sh_name = 1, .sh_type = SHT_PROGBITS, .sh_flags = SHF_COMPRESSED, .sh_offset = offsetof(struct StorageFile, compressed),
+                                     .sh_size = sizeof(Elf64_Chdr) + sizeof(file.stream) };
+    file.sections[3] = (Elf64_Shdr){ .sh_name = info, .sh_type = SHT_PROGBITS, .sh_offset = payload + 4, .sh_size = 1 };
+    file.sections[4] = (Elf64_Shdr){ .sh_name = info, .sh_type = SHT_PROGBITS, .sh_offset = payload + 5, .sh_size = 1, .sh_addralign = 8 };
+    file.sections[5] = (Elf64_Shdr){ .sh_name = info, .sh_type = SHT_PROGBITS, .sh_addralign = 16 };
+    file.sections[6] = (Elf64_Shdr){ .sh_type = SHT_RELA, .sh_offset = offsetof(struct StorageFile, relocation), .sh_info = 1 };
+    uint32_t relocation = 6;
+    ForeignObject objects[2] = { 0 };
+    objects[1] = (ForeignObject){
+        .elf = { .bytes = { .pointer = (char*)&file, .length = sizeof(file) }, .section_count = BUSTER_ARRAY_LENGTH(file.sections),
+                 .section_names = BUSTER_S8("\0.debug_str\0.debug_info\0") },
+        .symbols = { .count = 1 },
+        .relocations = &relocation,
+        .relocation_count = 1,
+    };
+    const Foreign foreign = { .objects = objects, .object_count = 2, .path = FOREIGN_PATH_VECTOR };
+    const uint32_t order[] = { 0, 1 };
+    ImportObject imported[2] = { 0 };
+    // An adjacent atom, an empty atom, a NOBITS atom and an optional partial overlap in the last SIMD batch.
+    uint8_t* bytes[10] = { [1] = file.payload + 4, [2] = file.payload + 1, [9] = file.payload + 3 };
+    uint64_t sizes[10] = { [1] = 2, [3] = 100 };
+    ForeignLink output = { .link.atoms = { .bytes = bytes, .size = sizes, .count = BUSTER_ARRAY_LENGTH(sizes) }, .objects = imported };
+    for (uint32_t variant = 0; variant < 4; variant += 1)
+    {
+        const bool overlap = variant == 1;
+        const bool relocated = variant == 2;
+        const bool bad_stream = variant == 3;
+        sizes[9] = overlap ? 1 : 0;
+        file.sections[6].sh_size = relocated ? sizeof(Elf64_Rela) : 0;
+        file.stream[7] = bad_stream ? 0 : 1;
+        uint8_t storage[4096];
+        memset(storage, 0xa5, sizeof(storage));
+        Arena arena = { .base = storage, .capacity = sizeof(storage) };
+        const ForeignLinkResult result = foreign_debug_build(&output, &foreign, order, &arena);
+        if (bad_stream)
+        {
+            foreign_test_expect(tally, result.error == FOREIGN_LINK_ERROR_COMPRESSION && result.object == 1 && result.import.section == 2,
+                                "validate an empty compressed stream beside borrowed bytes", 0);
+        }
+        else
+        {
+            const String8 raw = output.debug.sections[EXECUTABLE_SECTION_DEBUG_STR - EXECUTABLE_SECTION_DEBUG_INFO];
+            const String8 padded = output.debug.sections[0];
+            const uint8_t expected[16] = { [0] = 5, [8] = 6 };
+            const bool borrowed = raw.pointer == (char*)file.payload;
+            const uint32_t original = 0x04030201;
+            const uint32_t value = relocated ? 7 : original;
+            foreign_test_expect(tally, result.error == FOREIGN_LINK_ERROR_NONE && raw.length == 4 && borrowed == (!overlap && !relocated) &&
+                                memcmp(raw.pointer, &value, 4) == 0 && memcmp(file.payload, &original, 4) == 0,
+                                "borrow only a complete raw section disjoint from writes", 0);
+            foreign_test_expect(tally, padded.length == sizeof(expected) && memcmp(padded.pointer, expected, sizeof(expected)) == 0,
+                                "clear interior and trailing debug alignment gaps in used arena storage", 0);
+        }
+    }
+}
+
 static bool foreign_debug_test(const char* directory, Arena* arena, bool cross_check, ForeignTestSystem* system)
 {
     ForeignTestTally tally = {
         .check = "foreign DWARF",
     };
+    foreign_debug_test_storage(&tally);
     bool written = system->found;
     foreign_test_expect(&tally, written, "find the system's C runtime", 0);
     for (uint32_t s = 0; written && s < BUSTER_ARRAY_LENGTH(foreign_debug_test_sources); s += 1)

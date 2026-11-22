@@ -2083,9 +2083,8 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize_scalar(const uint8_t* source, uint64_t len
 #define BUSTER_LEX_CHUNK_BYTES (BUSTER_LEX_VECTOR_COUNT * BUSTER_LEX_VECTOR_BYTES)
 // Phase I classifies a chunk's vectors and the next chunk's first one, which Phase II looks ahead into.
 #define BUSTER_LEX_LOOKAHEAD_VECTORS (BUSTER_LEX_VECTOR_COUNT + 1)
-// The stride of a mask's lanes in the Phase I buffers: the lookahead lanes, padded so that each mask's first
-// BUSTER_LEX_VECTOR_COUNT lanes load as an aligned U64x8.
-#define BUSTER_LEX_MASK_LANES (2 * BUSTER_LEX_VECTOR_COUNT)
+// Each chunk owns the eight aligned lanes of each mask, including the first lane the previous chunk looks into.
+#define BUSTER_LEX_MASK_LANES BUSTER_LEX_VECTOR_COUNT
 // All eight bits of c_char_properties are transposed together; the remaining masks are stored separately.
 #define BUSTER_LEX_PROPERTY_MASK_COUNT 8
 
@@ -2310,9 +2309,7 @@ BUSTER_INLINE __m512i shift_in_previous(__m512i current, __m512i previous)
 {
     __m512i indices = _mm512_load_si512(shift_in_indices);
 #if !defined(_MSC_VER)
-#if BUSTER_HOST_VECTOR
     __asm__("" : "+v"(indices));
-#endif
 #endif
     return _mm512_permutex2var_epi8(current, indices, previous);
 }
@@ -2534,7 +2531,7 @@ BUSTER_INLINE __m512i property_masks(__m512i properties)
 
 // Transpose the 8x8 qword matrix into the bitstrings consumed by Phase II: interleave qwords, pairs, then quartets.
 // Keep this at the consumer, so Clang can retain the resulting bitstrings in registers.
-BUSTER_INLINE void transpose_property_masks(const __m512i rows[BUSTER_LEX_LOOKAHEAD_VECTORS], uint64_t o[][BUSTER_LEX_MASK_LANES])
+BUSTER_INLINE void transpose_property_masks(const __m512i rows[BUSTER_LEX_VECTOR_COUNT], uint64_t o[][BUSTER_LEX_MASK_LANES])
 {
     const U64x8 t0_0 = BUSTER_LEX_SHUFFLE(BUSTER_LEX_BITS(rows[0]), BUSTER_LEX_BITS(rows[1]), 0, 8, 2, 10, 4, 12, 6, 14);
     const U64x8 t0_1 = BUSTER_LEX_SHUFFLE(BUSTER_LEX_BITS(rows[0]), BUSTER_LEX_BITS(rows[1]), 1, 9, 3, 11, 5, 13, 7, 15);
@@ -2797,6 +2794,7 @@ struct ChunkTokens
     BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t end_counts[BUSTER_LEX_VECTOR_COUNT];
     const __m512i* raw; // The chunk's vectors, and the next chunk's first one.
     int64_t chunk_position; // The source position of bit 0.
+    uint32_t token_lanes; // Lanes owning a token start or end, including tokens spanning chunks.
     uint32_t special_lanes; // Bit j: lane j has a dot-number, or a prefixed or unknown literal.
 };
 
@@ -2820,8 +2818,10 @@ BUSTER_INLINE OutputCursors write_chunk(const ChunkTokens* t, const uint8_t* sou
     // A token's position is its byte index plus its vector's source position (and 1 more for the exclusive end). The
     // vector's position advances by an add: a broadcast from a general register is 2 uops with an 8-cycle latency on
     // Zen 5.
-    __m512i start_offset = _mm512_set1_epi32((int)(uint32_t)t->chunk_position);
-    for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
+    const unsigned first = (unsigned)BUSTER_LEX_CTZ64(t->token_lanes | (1u << BUSTER_LEX_VECTOR_COUNT));
+    const unsigned end = 64u - (unsigned)BUSTER_LEX_CLZ64(t->token_lanes | 1u);
+    __m512i start_offset = _mm512_set1_epi32((int)(uint32_t)(t->chunk_position + first * BUSTER_LEX_VECTOR_BYTES));
+    for (unsigned j = first; j < end; j += 1)
     {
         // From memory straight to mask registers: 1 uop each, where a general register would take 2.
         const __mmask64 starts_mask = _load_mask64((__mmask64*)&t->starts[j]);
@@ -2947,21 +2947,23 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
 
     // Phase I runs a chunk ahead: its scalar mask stores cannot forward to the 64-byte Phase II loads. The eight
     // property masks instead share a vector store per source lane, then transpose at the consumer. Their rows in
-    // masks are the transpose destination; the other rows retain the scalar masks. Lane 8 supplies lookahead.
+    // masks are the transpose destination; the other rows retain the scalar masks. The next chunk owns its lane zero,
+    // which supplies this chunk's lookahead before the next iteration consumes the complete rows.
     BUSTER_LEX_ALIGN(BUSTER_LEX_VECTOR_BYTES) uint64_t masks[2][NUM_MASKS][BUSTER_LEX_MASK_LANES];
     // Three buffers of vectors: for the chunk being analyzed, the next one (classified), and the previous one (written
     // out).
     __m512i raws[3][BUSTER_LEX_LOOKAHEAD_VECTORS];
     ChunkTokens deferred;
     bool pending = false; // `deferred` has the previous chunk's tokens.
-    __m512i properties[2][BUSTER_LEX_LOOKAHEAD_VECTORS];
+    __m512i properties[2][BUSTER_LEX_VECTOR_COUNT];
     __m512i previous_classes = _mm512_setzero_si512();
     __m512i previous_pairs = _mm512_setzero_si512();
-    for (unsigned j = 0; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
+    for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
     {
         raws[0][j] = load_lane(base, base_offset, begin, length, first_chunk + BUSTER_LEX_VECTOR_BYTES * j);
         classify(raws[0][j], masks[0], j, &properties[0][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
     }
+    raws[0][BUSTER_LEX_VECTOR_COUNT] = load_lane(base, base_offset, begin, length, first_chunk + BUSTER_LEX_CHUNK_BYTES);
     // The vectors of the chunk being analyzed: in the source itself if they (and the next chunk's first one) are all
     // inside it, else in `raws`, with what is outside of it read as newlines.
     const __m512i* chunk_vectors = raws[0];
@@ -2977,16 +2979,11 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         if (BUSTER_LIKELY(!last_chunk))
         {
             uint64_t (*next_o)[BUSTER_LEX_MASK_LANES] = masks[current ^ 1];
-            properties[current ^ 1][0] = properties[current][BUSTER_LEX_VECTOR_COUNT];
-            for (unsigned m = BUSTER_LEX_PROPERTY_MASK_COUNT; m < NUM_MASKS; m += 1)
-            {
-                next_o[m][0] = o[m][BUSTER_LEX_VECTOR_COUNT];
-            }
             const int64_t next_position = base_offset + chunk + BUSTER_LEX_CHUNK_BYTES; // The source position of the next chunk.
             if (BUSTER_LIKELY((next_position >= (int64_t)begin) & (next_position + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES <= (int64_t)length)))
             {
                 const __m512i* next_raw = (const __m512i*)(base + chunk + BUSTER_LEX_CHUNK_BYTES);
-                for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
+                for (unsigned j = 0; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
                 {
                     classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
                 }
@@ -2996,13 +2993,20 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
             {
                 __m512i* next_raw = raws[raw_current == 2 ? 0 : raw_current + 1];
                 next_raw[0] = raw[BUSTER_LEX_VECTOR_COUNT];
-                for (unsigned j = 1; j < BUSTER_LEX_LOOKAHEAD_VECTORS; j += 1)
+                classify(next_raw[0], next_o, 0, &properties[current ^ 1][0], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
+                for (unsigned j = 1; j < BUSTER_LEX_VECTOR_COUNT; j += 1)
                 {
                     next_raw[j] = load_lane(base, base_offset, begin, length, chunk + BUSTER_LEX_CHUNK_BYTES + BUSTER_LEX_VECTOR_BYTES * j);
                     classify(next_raw[j], next_o, j, &properties[current ^ 1][j], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
                 }
+                next_raw[BUSTER_LEX_VECTOR_COUNT] = load_lane(base, base_offset, begin, length, chunk + 2 * BUSTER_LEX_CHUNK_BYTES);
                 chunk_vectors = next_raw;
             }
+        }
+        else
+        {
+            // The last chunk also examines a lookahead lane, padded by load_lane.
+            classify(raw[BUSTER_LEX_VECTOR_COUNT], masks[current ^ 1], 0, &properties[current ^ 1][0], &previous_classes, &previous_pairs, cplusplus, digraphs, separators);
         }
         // III. Write-out of the previous chunk.
         if (pending)
@@ -3011,7 +3015,6 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
             cur_kind = cursors.kind;
             cur_start = cursors.start;
             cur_end = cursors.end;
-            pending = false;
         }
 
         transpose_property_masks(properties[current], o);
@@ -3027,7 +3030,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         }
 
 #define BUSTER_LEX_MASK(m) (*(const U64x8*)o[m])
-#define BUSTER_LEX_NEXT(m) ((m) < BUSTER_LEX_PROPERTY_MASK_COUNT ? BUSTER_LEX_LANE(BUSTER_LEX_BITS(properties[current][BUSTER_LEX_VECTOR_COUNT]), (m) & (BUSTER_LEX_VECTOR_COUNT - 1)) : o[m][BUSTER_LEX_VECTOR_COUNT])
+#define BUSTER_LEX_NEXT(m) ((m) < BUSTER_LEX_PROPERTY_MASK_COUNT ? BUSTER_LEX_LANE(BUSTER_LEX_BITS(properties[current ^ 1][0]), (m) & (BUSTER_LEX_VECTOR_COUNT - 1)) : masks[current ^ 1][m][0])
         U64x8 newline = BUSTER_LEX_MASK(M_NEWLINE);
         U64x8 whitespace = BUSTER_LEX_MASK(M_WHITESPACE);
         U64x8 identifier = BUSTER_LEX_MASK(M_IDENTIFIER);
@@ -3040,7 +3043,6 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         U64x8 star = BUSTER_LEX_MASK(M_STAR);
         U64x8 dot = BUSTER_LEX_MASK(M_DOT);
         const U64x8 exponent_sign = BUSTER_LEX_MASK(M_EXPSIGN);
-        U64x8 nonascii = BUSTER_LEX_MASK(M_NONASCII);
 
         // II. Analysis
 
@@ -3266,7 +3268,7 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         backslash = BUSTER_LEX_MASK(M_BACKSLASH);
         star = BUSTER_LEX_MASK(M_STAR);
         dot = BUSTER_LEX_MASK(M_DOT);
-        nonascii = BUSTER_LEX_MASK(M_NONASCII);
+        const U64x8 nonascii = BUSTER_LEX_MASK(M_NONASCII);
         const U64x8 hash_digraph = BUSTER_LEX_MASK(M_HASHDIG);
         const U64x8 pair_ends = BUSTER_LEX_MASK(M_OP2);
         const U64x8 triple_ends = BUSTER_LEX_MASK(M_OP3);
@@ -3570,6 +3572,8 @@ BUSTER_INLINE int64_t tokenize_chunks(const bool cplusplus, const bool digraphs,
         memcpy(deferred.unknowns, &unknown_starts, sizeof(deferred.unknowns));
         memcpy(deferred.start_counts, &start_counts, sizeof(deferred.start_counts));
         memcpy(deferred.end_counts, &end_counts, sizeof(deferred.end_counts));
+        const U64x8 tokens = BUSTER_LEX_OR(all_starts, all_ends);
+        deferred.token_lanes = _mm512_test_epi64_mask(BUSTER_LEX_NATIVE(tokens), BUSTER_LEX_NATIVE(tokens));
         deferred.raw = raw;
         deferred.chunk_position = chunk_position;
         const U64x8 special = BUSTER_LEX_OR(BUSTER_LEX_OR(dot_numbers, prefix_starts), unknown_starts);
@@ -3703,9 +3707,6 @@ static bool c_tokenize_scalar_only(const uint8_t* source, uint64_t length, uint3
 
 BUSTER_LEXER_ENTRY int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
-#if !BUSTER_HOST_VECTOR
-    return c_tokenize_scalar(source, length, kinds, starts, ends, flags);
-#else
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
@@ -3728,7 +3729,6 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize_vectorized(const uint8_t* source, uint64_t
         result = tokenize_with_flags(flags, source, length, begin, kinds, starts, ends, &written, &restart, &scalar_until);
     }
     return result;
-#endif
 }
 
 // The vectorized path from `begin` (the source's start, past a byte order mark, or the start of a line), until a chunk
@@ -3762,9 +3762,6 @@ static int64_t c_tokenize_from(const uint8_t* source, uint64_t length, uint64_t 
 
 BUSTER_LEXER_ENTRY int64_t c_tokenize(const uint8_t* source, uint64_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
-#if !BUSTER_HOST_VECTOR
-    return c_tokenize_scalar(source, length, kinds, starts, ends, flags);
-#else
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
@@ -3784,21 +3781,10 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize(const uint8_t* source, uint64_t length, ui
         result = c_tokenize_from(source, length, begin, kinds, starts, ends, flags);
     }
     return result;
-#endif
 }
 
 BUSTER_LEXER_ENTRY int64_t c_tokenize_lines(const uint8_t* source, uint64_t length, uint64_t begin, uint8_t* kinds, uint32_t* starts, uint32_t* ends, uint32_t flags)
 {
-#if !BUSTER_HOST_VECTOR
-    uint64_t resume;
-    int64_t result = C_TOKENIZER_ERROR_FILE_TOO_BIG;
-    if (length <= UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
-    {
-        const bool mark = begin == 0 && length >= 3 && source[0] == 0xEF && source[1] == 0xBB && source[2] == 0xBF;
-        result = begin >= length ? 0 : (int64_t)c_tokenize_scalar_range(source, length, mark ? 3 : begin, true, UINT64_MAX, kinds, starts, ends, 0, flags, &resume);
-    }
-    return result;
-#else
     int64_t result;
     if (length > UINT32_MAX - BUSTER_C_TOKENIZER_OUTPUT_SLACK)
     {
@@ -3814,5 +3800,4 @@ BUSTER_LEXER_ENTRY int64_t c_tokenize_lines(const uint8_t* source, uint64_t leng
         result = c_tokenize_from(source, length, mark ? 3 : begin, kinds, starts, ends, flags);
     }
     return result;
-#endif
 }

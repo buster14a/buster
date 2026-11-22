@@ -108,6 +108,7 @@ struct Tier1EmitOptions
     // With BUSTER_TIER1_FRAME_KEEP_POINTER in `frame_flags`: a function without calls keeps no frame pointer
     // (-momit-leaf-frame-pointer's leaf rule, #177; tier1_emit_frame_flags).
     bool omit_leaf_frame_pointer;
+    // The frame colorer's path (#2699): its vector path, or with false its scalar twin.
     bool vector;
     bool rematerialize;
     // Retain each record's IR origin for source/debug publication, without changing allocation or code generation.
@@ -118,6 +119,11 @@ struct Tier1EmitOptions
     // reaches every symbol directly.
     const uint8_t* symbol_access;
     uint32_t symbol_count;
+    // Optional (#2611): the plan's function's dominator tree, current for its revision, as the driver's Tier 1 step holds
+    // the IR's analysis of it (idom, preorder and subtree_end). The CFG consumer's machine CFG is the IR's with at most an
+    // entry added before it, and its anchors (tier1_cfg_anchors) read this tree rather than analyzing that CFG again; null
+    // analyzes it.
+    const Dominators* dominators;
     // #939: check each allocation before code is emitted from it, by the certificate checker of its kind: a CFG
     // allocation's published program (tier1_certificate_cfg_check), a straight-line allocation's fragments
     // (tier1_allocation_certificate_check). A refusal is TIER1_EMIT_CERTIFICATE and the checker's capacity
@@ -193,6 +199,7 @@ struct Tier1EmitPrepared
     // (tier1_select_class_forms, Tier1SelectHoles.vex), and machine rows place their roles below xmm16
     // (tier1_emit_cfg_row).
     bool vex;
+    uint8_t unsigned_dword_memory_forms;
     // The target has AVX512F (#1281's review): zmm16 and on and EVEX's 512-bit moves, which a 64-byte row's roles keep
     // even without AVX512VL (Knights Landing's).
     bool zmm;
@@ -210,6 +217,8 @@ struct Tier1EmitPrepared
     uint32_t x87_count;
     // The function the CFG consumer prepared, whose long double phis its edges copy (tier1_emit_cfg_x87_phis).
     const IrFunction* function;
+    // Allowed register forms for converting an unsigned qword to float or double.
+    uint8_t unsigned_i64_float_forms;
 };
 
 // The CFG consumer's vector encoding level (BUSTER_TIER1_ENCODING_*): legacy SSE's, VEX's or EVEX's.
@@ -287,7 +296,7 @@ struct Tier1EmitResult
     // The references' room: a call's each, and in the CFG consumer a symbol's address's each too, with its options'
     // symbols' access (Tier1EmitOptions.symbol_access).
     uint32_t reference_capacity;
-    // The literals its code loads (#2744, tier1_emit_cfg_literal): each one of the function's vector constants
+    // The literals its code loads (#2744, #1387): an F80 constant at its selected format or one of the function's vector constants
     // (IrFunction.vector_constants) at one width, `literal_count` of them, its bytes past the width zero; a reference whose
     // target is BUSTER_TIER1_EMIT_LITERAL + k is to literal k (the emitted code's EmittedLiteral, which the C driver's
     // merge places in the unit's pool). And by constant, each width's literal (16, 32 and 64 bytes, three entries a
@@ -297,12 +306,17 @@ struct Tier1EmitResult
     uint32_t literal_count;
     uint32_t literal_capacity;
     uint32_t* literal_of;
+    // Private F80 constants' pool indices plus one, indexed by the scalar constant table.
+    uint32_t* x87_literal_of;
     // The nodes of fixed-register rules (tier1_select_fixed_registers), whose sequences take records past a node's share.
     uint32_t fixed_count;
     // In the CFG consumer, the callee-saved registers its values may take (live across a call), and those they took,
     // which the frame saves; and how many values live across a call it gave them.
     uint32_t callee_registers;
     uint32_t callee_used;
+    // In a function with no call and no asm body, the callee-saved registers its values may take where the caller-saved
+    // ones alone spill (#2819, tier1_emit_cfg_leaf), which callee_registers then holds.
+    uint32_t leaf_registers;
     uint32_t crossing_values;
     const uint8_t* symbol_access;
     uint32_t symbol_access_count;
@@ -363,6 +377,12 @@ struct Tier1EmitResult
     // for an unknown row. Null without call-save rows or certification. These are untrusted entry assertions, not
     // proof: the code certificate checks each row's bytes on every incoming edge, alongside the allocated locations.
     uint32_t* entry_rows;
+    // Under certify, each block's values whose slots hold them at its start besides the registers their intervals put
+    // them in (#2870): block b's are entry_slots[entry_slot_offsets[b] .. entry_slot_offsets[b + 1]), the values (the CFG
+    // problem's) whose slot stamps a run of blocks carries into b (tier1_emit_phase), where a store into the slot is then
+    // left out. Untrusted entry assertions too, each proved on b's incoming edge from the predecessor's records.
+    uint32_t* entry_slots;
+    uint32_t* entry_slot_offsets;
     // Each node whose definition the consumer left out (tier1_emit_cfg_dead_definition), 1, else 0.
     uint8_t* dropped;
     // Each machine row's placement as the consumer claims it (#1284, tier1_emit_cfg_row), by node, in a function with rows;
@@ -428,6 +448,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
     uint8_t* required = 0;
     uint8_t* interval_remat = 0;
     uint32_t* hints = 0;
+    uint8_t* register_hints = 0;
     uint8_t* returned = 0;
     uint8_t* operations = 0;
     uint8_t* widths = 0;
@@ -450,6 +471,7 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         required = ir_allocate(output, uses, 1, &ok);
         interval_remat = ir_allocate(output, source->count, 1, &ok);
         hints = ir_allocate(output, (uint64_t)source->count + 1, 4, &ok);
+        register_hints = ir_allocate(output, (uint64_t)source->count + 1, 1, &ok);
         returned = ir_allocate(output, (uint64_t)count + 1, 1, &ok);
         operations = ir_allocate(output, count, 1, &ok);
         widths = ir_allocate(output, count, 1, &ok);
@@ -491,10 +513,10 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
         };
         prepared.recipe_values = values;
         // The model's costs, where it has them, before the marks read them (tier1_rematerialization_model_costs).
-        const bool costed = tier1_rematerialization_model_costs(&prepared.recipes, X86_REGISTER_RSP, costs, reload_costs, options->vector);
+        const bool costed = tier1_rematerialization_model_costs(&prepared.recipes, X86_REGISTER_RSP, costs, reload_costs);
         prepared.recipes.costs = costs;
         prepared.recipes.reload_costs = reload_costs;
-        const bool marked = costed && (BUSTER_VECTOR_PATH(options->vector) ? tier1_rematerialization_marks(&prepared.recipes, marks) : tier1_rematerialization_marks_scalar(&prepared.recipes, marks));
+        const bool marked = costed && tier1_rematerialization_marks(&prepared.recipes, marks);
         if (!marked)
         {
             error = TIER1_EMIT_INVALID;
@@ -540,6 +562,34 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
                 hints[interval] = hints[interval] == BUSTER_IR_NONE && ends ? ties[k] : hints[interval];
             }
             tied |= hints[interval] != BUSTER_IR_NONE;
+            register_hints[interval] = UINT8_MAX;
+        }
+        // A value whose interval ends at a call that reads it in a register takes that register where no tie names
+        // another (#2646, Tier1AllocationInput.register_hints), as the CFG consumer's do: the call's moves then move nothing
+        // for it. A value passed twice takes its first argument's.
+        bool named = false;
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            const bool call = tier1_select_function_call(plan->function, node);
+            const IrCall* called = call ? &plan->function->calls[plan->function->b[node]] : 0;
+            const uint32_t arguments = call ? called->argument_count + (plan->function->op[node] == IR_CALL_INDIRECT) : 0;
+            Tier1SelectPlaces places = { 0 };
+            for (uint32_t argument = 0; argument < arguments; argument += 1)
+            {
+                const Tier1SelectPlace place = argument < called->argument_count ? tier1_select_argument_place(plan->function, called, argument, &places) : (Tier1SelectPlace){ .kind = BUSTER_TIER1_PLACE_STACK };
+                const uint8_t reg = argument == called->argument_count ? tier1_select_callee_register(plan->function, called) :
+                                    place.kind == BUSTER_TIER1_PLACE_GENERAL ? tier1_select_parameter_registers[place.index] :
+                                    place.kind == BUSTER_TIER1_PLACE_VECTOR ? place.index : UINT8_MAX;
+                const uint32_t use = plan->effective_use_offsets[node] + argument;
+                const uint32_t value = use < plan->effective_use_offsets[node + 1] ? plan->effective_use_values[use] : BUSTER_IR_NONE;
+                const uint32_t interval = value < count ? prepared.value_intervals[value] : BUSTER_IR_NONE;
+                const bool ends = interval < source->count && source->values[interval] == value && source->ends[interval] == 2 * node + 1;
+                if (reg != UINT8_MAX && ends && register_hints[interval] == UINT8_MAX)
+                {
+                    register_hints[interval] = reg;
+                    named = true;
+                }
+            }
         }
         // The prospective spill set contains every selected definition. Its alignment determines frame-base
         // reservations before allocation; reducing it to actual spills later cannot add a reservation.
@@ -576,8 +626,9 @@ static Tier1EmitError tier1_emit_prepare(const Tier1SelectPlan* plan, const Tier
             prepared.allocation.use_required = required;
             prepared.allocation.use_count = use;
             prepared.allocation.rematerializable = interval_remat;
-            // Without a tie, no hints: the allocator's copy without them is the cheaper.
-            prepared.allocation.hint_values = tied ? hints : 0;
+            // Without a tie or a call's register, no hints: the allocator's copy without them is the cheaper.
+            prepared.allocation.hint_values = tied || named ? hints : 0;
+            prepared.allocation.register_hints = named ? register_hints : 0;
         }
     }
     if (error == TIER1_EMIT_OK)
@@ -946,33 +997,21 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_fixed(Tier1EmitResult
 // rows (tier1_emit_cfg_records); the code certificate proves the additional homes. A register is owed while its owner
 // is unchanged, so whatever would
 // change the owner, or read or store the register, takes the value back first (tier1_emit_owed).
-// The rows are the 16 general registers' lanes of a vector, and the owners' first 16 locations are theirs, so the vector
-// path compares and blends them whole; `vector` picks it or its scalar twin, which gives the same rows and masks.
+// The rows are the 16 general registers' lanes of a vector, and the owners' first 16 locations are theirs, so the
+// helpers compare and blend them whole.
 typedef struct Tier1EmitSaves Tier1EmitSaves;
 struct Tier1EmitSaves
 {
     uint32_t owed;
-    bool vector;
     uint32_t rows[BUSTER_TIER1_EMIT_GENERAL_REGISTERS];
 };
 
 _Static_assert(BUSTER_TIER1_EMIT_GENERAL_REGISTERS == 16, "the call-save rows are one vector of 16 lanes");
 
-static void tier1_emit_saves_reset(Tier1EmitSaves* saves, bool vector)
+static void tier1_emit_saves_reset(Tier1EmitSaves* saves)
 {
     saves->owed = 0;
-    saves->vector = vector;
-    if (BUSTER_VECTOR_PATH(vector))
-    {
-        _mm512_storeu_si512(saves->rows, _mm512_set1_epi32((int)BUSTER_IR_NONE));
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-        {
-            saves->rows[reg] = BUSTER_IR_NONE;
-        }
-    }
+    _mm512_storeu_si512(saves->rows, _mm512_set1_epi32((int)BUSTER_IR_NONE));
 }
 
 // The owed registers whose values node needs back before its records: every one at the straight-line code's last node,
@@ -1028,53 +1067,21 @@ static Tier1EmitError tier1_emit_repay(Tier1EmitResult* result, Tier1EmitSaves* 
 // The `saved` registers whose rows hold their owners already, which a call needn't store.
 static uint32_t tier1_emit_kept(const Tier1EmitSaves* saves, const Tier1EmitTransitions* transitions, uint32_t saved)
 {
-    uint32_t kept = 0;
-    if (BUSTER_VECTOR_PATH(saves->vector))
-    {
-        kept = _mm512_mask_cmpeq_epi32_mask((__mmask16)saved, _mm512_loadu_si512(saves->rows), _mm512_loadu_si512(transitions->owners));
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-        {
-            kept |= ((saved >> reg) & 1) != 0 && saves->rows[reg] == transitions->owners[reg] ? 1u << reg : 0;
-        }
-    }
-    return kept;
+    return _mm512_mask_cmpeq_epi32_mask((__mmask16)saved, _mm512_loadu_si512(saves->rows), _mm512_loadu_si512(transitions->owners));
 }
 
 // After a call that saved `saved`: their rows hold their owners, and their loads are owed. An owed register the call
 // didn't save is a value nothing reads past it, dropped.
 static void tier1_emit_saved(Tier1EmitSaves* saves, const Tier1EmitTransitions* transitions, uint32_t saved)
 {
-    if (BUSTER_VECTOR_PATH(saves->vector))
-    {
-        _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)saved, _mm512_loadu_si512(transitions->owners)));
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-        {
-            saves->rows[reg] = ((saved >> reg) & 1) != 0 ? transitions->owners[reg] : saves->rows[reg];
-        }
-    }
+    _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)saved, _mm512_loadu_si512(transitions->owners)));
     saves->owed = saved;
 }
 
 // After a fixed registers' sequence, whose saves stored those registers' rows over whatever they held.
 static void tier1_emit_fixed_rows(Tier1EmitSaves* saves, uint32_t fixed)
 {
-    if (BUSTER_VECTOR_PATH(saves->vector))
-    {
-        _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)fixed, _mm512_set1_epi32((int)BUSTER_IR_NONE)));
-    }
-    else
-    {
-        for (uint32_t reg = 0; reg < BUSTER_TIER1_EMIT_GENERAL_REGISTERS; reg += 1)
-        {
-            saves->rows[reg] = ((fixed >> reg) & 1) != 0 ? BUSTER_IR_NONE : saves->rows[reg];
-        }
-    }
+    _mm512_storeu_si512(saves->rows, _mm512_mask_mov_epi32(_mm512_loadu_si512(saves->rows), (__mmask16)fixed, _mm512_set1_epi32((int)BUSTER_IR_NONE)));
 }
 
 // The allocator has already split ordinary spills. Call preservation is local to a bounded machine-register set:
@@ -1352,11 +1359,13 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     // (tier1_emit_cfg_stack_argument): `argument_registers` holds a location for the others alone (a general register's
     // number, or an xmm register's BUSTER_TIER1_EMIT_VECTOR_LOCATION + n), and the callee's at the arguments' count.
     // A static chain (#148) is a general argument in r10, and its indirect call's callee goes to rax instead
-    // (tier1_select_callee_register).
+    // (tier1_select_callee_register). A destination that is a pointer value (#2820) is the last effective use, after the
+    // callee's, which the moves put in rdi, the hidden pointer's register, which no argument takes then.
     const bool indirect = function->op[node] == IR_CALL_INDIRECT;
     const uint8_t callee = tier1_select_callee_register(function, call);
-    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
-    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 2];
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
+    uint32_t sources[BUSTER_ABI_INTEGER_ARGUMENTS + 3];
+    uint32_t destinations[BUSTER_ABI_INTEGER_ARGUMENTS + 3];
     uint32_t vector_sources[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t vector_destinations[BUSTER_ABI_VECTOR_ARGUMENTS];
     uint32_t general = 0;
@@ -1424,6 +1433,13 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     {
         sources[general] = argument_registers[call->argument_count];
         destinations[general] = callee;
+        general += 1;
+    }
+    if (pointer)
+    {
+        sources[general] = argument_registers[call->argument_count + indirect];
+        destinations[general] = X86_REGISTER_RDI;
+        error = sources[general] < BUSTER_TIER1_EMIT_GENERAL_REGISTERS ? error : TIER1_EMIT_ALLOCATION;
         general += 1;
     }
     const Tier1ParallelMoves moves = {
@@ -1498,11 +1514,12 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         };
         error = !staged.valid ? TIER1_EMIT_ALLOCATION : tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
     }
-    // An aggregate result through the hidden pointer (#789): rdi, which no argument takes then, the result object's address.
+    // An aggregate result through the hidden pointer (#789): rdi, which no argument takes then, the result object's
+    // address, or the pointer the moves put there (#2820).
     const bool hidden = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY;
     const bool parts_returned = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_REGISTERS;
-    error = error != TIER1_EMIT_OK || (!hidden && !parts_returned) || (into != 0 && into->valid) ? error : TIER1_EMIT_ALLOCATION;
-    if (error == TIER1_EMIT_OK && hidden)
+    error = error != TIER1_EMIT_OK || (!hidden && !parts_returned) || (hidden && pointer) || (into != 0 && into->valid) ? error : TIER1_EMIT_ALLOCATION;
+    if (error == TIER1_EMIT_OK && hidden && !pointer)
     {
         const X86Instruction address = { .displacement = into->displacement, .reg = X86_REGISTER_RDI, .rm = into->base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_LEA_R64_M };
         error = tier1_emit_append(buffer, address) ? error : TIER1_EMIT_MEMORY;
@@ -1543,7 +1560,8 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_NODE, node), BUSTER_IR_NONE);
     // An aggregate result in registers (#789): each part's bytes into the result object at its offset, exactly (the object
     // may be no larger than the aggregate), a general register's by tier1_emit_store_part and an xmm one's by movss or movsd,
-    // or through the scratch register for any other size.
+    // or through the scratch register for any other size; a whole vector register's by its width's store, and a record's
+    // payload no register is as wide as (#2798) in pieces.
     Tier1SelectPart returned[BUSTER_TIER1_SELECT_RESULT_PARTS];
     const uint32_t returned_count = parts_returned ? tier1_select_result_parts(abi->call.result, abi->result_size, returned) : 0;
     // In the x87's registers (#141): st0's 10 bytes into the first part's 16, then st1's into the second's.
@@ -1561,7 +1579,18 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
         const uint8_t xmm_part = (uint8_t)(part.reg & 0x1f);
         const int32_t displacement = into->displacement + part.offset;
         bool appended = true;
-        if (vector_part && (part.bytes == 4 || part.bytes == 8 || part.bytes >= 16))
+        if (vector_part && tier1_select_part_payload(part.bytes))
+        {
+            // A record's payload (#2798) in pieces that don't write past it (tier0_payload_store), which lose its result
+            // register's value: nothing reads the register after its stores.
+            X86Instruction pieces[4];
+            const uint32_t piece_count = tier0_payload_store(xmm_part, part.bytes, into->base, BUSTER_X86_MEMORY_BASE, displacement, pieces);
+            for (uint32_t j = 0; appended && j < piece_count; j += 1)
+            {
+                appended = tier1_emit_append(buffer, pieces[j]);
+            }
+        }
+        else if (vector_part && (part.bytes == 4 || part.bytes == 8 || part.bytes >= 16))
         {
             // A whole vector register's (#141) by its width's store.
             const uint16_t form = part.bytes >= 16 ? tier1_select_part_form(part.bytes, false) : part.bytes == 8 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSS_XM32_X;
@@ -1615,8 +1644,22 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
     return error;
 }
 
-static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool vector, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+static uint8_t tier1_emit_unsigned_dword_memory_forms(const uint8_t* allowed_forms)
 {
+    return (uint8_t)(x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SS_X_X_RM32) |
+                     (x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SD_X_X_RM32) << 1));
+}
+
+static uint8_t tier1_emit_unsigned_i64_float_forms(const uint8_t* allowed_forms)
+{
+    return (uint8_t)(x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SS_X_X_RM64) |
+                     (x86_target_form_allowed(allowed_forms, X86_FORM_VCVTUSI2SD_X_X_RM64) << 1));
+}
+
+static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+{
+    const uint8_t unsigned_dword_memory_forms = tier1_emit_unsigned_dword_memory_forms(allowed_forms);
+    const uint8_t unsigned_i64_float_forms = tier1_emit_unsigned_i64_float_forms(allowed_forms);
     const uint32_t count = plan->function->instruction_count;
     // The nodes of fixed-register rules, whose sequences and saves take records past their share (tier1_emit_prepare's).
     result->fixed_count = result->prepared.fixed_count;
@@ -1630,7 +1673,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     Tier1SelectCode* code = &result->code;
     Tier1EmitBuffer buffer = { .capacity = (uint32_t)capacity, .branch_capacity = branch_capacity };
     Tier1EmitTransitions transitions = {0};
-    Tier1SelectRequests requests = { .vector = vector };
+    Tier1SelectRequests requests = { 0 };
     if (error == TIER1_EMIT_OK)
     {
         bool ok = true;
@@ -1671,7 +1714,7 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
     result->body_record = buffer.count;
     // The calls' saves (Tier1EmitSaves, #1116): the chain is straight-line code from its entry to its end.
     Tier1EmitSaves saves;
-    tier1_emit_saves_reset(&saves, vector);
+    tier1_emit_saves_reset(&saves);
     for (uint32_t node = 0; error == TIER1_EMIT_OK && node < count; node += 1)
     {
         code->node_first[node] = buffer.count;
@@ -1730,6 +1773,8 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             else if (!calls)
             {
                 holes = tier1_select_holes(plan, transitions.registers, node);
+                holes.unsigned_dword_memory_forms = unsigned_dword_memory_forms;
+                holes.unsigned_i64_float_forms = unsigned_i64_float_forms;
             }
         }
         if (error == TIER1_EMIT_OK)
@@ -1957,7 +2002,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     }
     if (error == TIER1_EMIT_OK && chain)
     {
-        const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, BUSTER_VECTOR_PATH(options->vector), &emitted.liveness);
+        const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, &emitted.liveness);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_LIVENESS, live);
         error = live == TIER1_LIVENESS_OK ? TIER1_EMIT_OK : live == TIER1_LIVENESS_MEMORY ? TIER1_EMIT_MEMORY : live == TIER1_LIVENESS_LIMIT ? TIER1_EMIT_LIMIT : live == TIER1_LIVENESS_UNSUPPORTED ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
     }
@@ -1968,7 +2013,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     Tier1AllocationError allocated = TIER1_ALLOCATION_OK;
     if (error == TIER1_EMIT_OK && chain)
     {
-        allocated = BUSTER_VECTOR_PATH(options->vector) ? tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation) : tier1_allocate_scalar(&emitted.prepared.allocation, output, &emitted.allocation);
+        allocated = tier1_allocate(&emitted.prepared.allocation, output, &emitted.allocation);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_ALLOCATION, allocated);
         error = allocated == TIER1_ALLOCATION_OK ? TIER1_EMIT_OK : allocated == TIER1_ALLOCATION_CAPACITY ? TIER1_EMIT_MEMORY : TIER1_EMIT_ALLOCATION;
     }
@@ -2060,7 +2105,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     }
     if (error == TIER1_EMIT_OK && chain)
     {
-        error = tier1_emit_records(plan, allowed_forms, BUSTER_VECTOR_PATH(options->vector), options->sources, output, scratch, &emitted, error_node);
+        error = tier1_emit_records(plan, allowed_forms, options->sources, output, scratch, &emitted, error_node);
     }
     if (error == TIER1_EMIT_OK && chain && options->sources)
     {

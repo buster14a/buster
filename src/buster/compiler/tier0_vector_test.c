@@ -1249,11 +1249,11 @@ static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_body(
 }
 
 // A function compiled by both paths, which must agree (and tier0_validate take it), its records valid, its branches
-// sized, and encoded by both encoders into `image` (the vector one's) and `scratch` (the scalar one's), which must be the
-// same bytes. Returns the code's length, 0 for a failure or a refusal, and in *error Tier 0's error: only `allowed` may
-// refuse it (TIER0_ERROR_DEPTH where the depths may pass the tables), and every other must compile.
-static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, uint8_t* scratch,
-                                         Tier0Error allowed, Tier0Error* error)
+// sized, and encoded by the encoder into `image`. Returns the code's length, 0 for a failure or a refusal, and in *error
+// Tier 0's error: only `allowed` may refuse it (TIER0_ERROR_DEPTH where the depths may pass the tables), and every other
+// must compile.
+static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, Tier0Error allowed,
+                                         Tier0Error* error)
 {
     const Tier0Check check = tier0_validate(function);
     const Tier0Code scalar = tier0_compile_scalar(function, arena);
@@ -1285,9 +1285,8 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "vectors", "%s: the branches can't be sized", name);
     const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
     const int64_t vector_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, image, room, 0, 0) : -1;
-    const int64_t scalar_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode_scalar(scalar.records, scalar.count, scratch, room, 0, 0) : -1;
-    ready = ready && tier0_test_expect(tally, vector_length > 0 && vector_length == scalar_length && memcmp(image, scratch, (size_t)vector_length) == 0, "vectors",
-                                       "%s: the encoders differ, or fail (%" PRId64 ", %" PRId64 ")", name, vector_length, scalar_length);
+    ready = ready && tier0_test_expect(tally, vector_length > 0, "vectors",
+                                       "%s: the encoder fails (%" PRId64 ")", name, vector_length);
     return ready ? (uint32_t)vector_length : 0;
 }
 
@@ -1371,7 +1370,7 @@ static void tier0_test_vector_programs(Tier0TestTally* tally, uint64_t seed, uin
         }
         const Tier0Function function = tier0_test_vector_function(program);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_ERROR_DEPTH, &error);
+        const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, TIER0_ERROR_DEPTH, &error);
         *too_deep += error == TIER0_ERROR_DEPTH ? 1 : 0;
         *entries += program->count;
         if (length != 0)
@@ -1612,7 +1611,7 @@ static void tier0_test_vector_placement(Tier0TestTally* tally, uint64_t seed, Ti
             snprintf(name, sizeof(name), "%s under %u floats and %u integers", kind->name, floats[c], ints[c]);
             const Tier0Function function = tier0_test_vector_function(program);
             Tier0Error error = TIER0_OK;
-            const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_OK, &error);
+            const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, TIER0_OK, &error);
             tier0_test_expect(tally, error == TIER0_OK, "vectors", "%s: must compile (error %d)", name, error);
             if (k >= BUSTER_TIER0_TEST_VECTOR_SHUFFLE_PD)
             {
@@ -1948,7 +1947,7 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
         uint32_t signature = 0;
         uint32_t result_size = 0;
         Tier0TestVectorRun run = 0;
-        const char* name = "";
+        const char* name;
         if (f == 0)
         {
             // PICK: locals a, b, c, d, e, out and the result's object.
@@ -2125,7 +2124,7 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
         arena_pop_to(&arena, 0);
         const Tier0Function function = tier0_test_vector_written_function(&written, abi, signature, result_size);
         Tier0Error error = TIER0_OK;
-        const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, image + 4 * BUSTER_TIER0_TEST_PAGE, TIER0_OK, &error);
+        const uint32_t length = tier0_test_vector_encode(tally, name, &function, &arena, image, TIER0_OK, &error);
         for (uint32_t k = 0; k < 12; k += 1)
         {
             for (uint32_t w = 0; w < 8; w += 1)
@@ -2137,7 +2136,7 @@ static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestV
         memset(shared->out, 0xa5, sizeof(shared->out));
         memset(shared->results, 0xa5, sizeof(shared->results));
         // The C helpers' wide-vector calling convention also requires a vector host build.
-        const bool ran = length != 0 && BUSTER_HOST_VECTOR && tier0_test_vector_can_run() &&
+        const bool ran = length != 0 && tier0_test_vector_can_run() &&
                          tier0_test_expect(tally, tier0_test_vector_native(image, length, run, shared), "vectors", "%s: the native run failed", name);
         uint8_t expected[64];
         memset(expected, 0xa5, sizeof(expected));
@@ -2594,10 +2593,6 @@ static void tier0_test_vectors(Tier0TestTally* tally, Tier0Tables* tables, uint6
         if (!tier0_test_vector_can_run())
         {
             printf("  vectors: native execution skipped (required CPU features or OS save state unavailable); encoding and interpreter checks run\n");
-        }
-        else if (!BUSTER_HOST_VECTOR)
-        {
-            printf("  vectors: native wide-vector ABI calls skipped (scalar host build); other native runs execute\n");
         }
         tier0_test_vector_baselines(tally, shared, seed);
         tier0_test_vector_rules(tally);

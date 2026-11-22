@@ -519,7 +519,7 @@ static bool check_input_section_unify(CheckInputReader* reader, CheckInputSectio
         else if (existing == BUSTER_CHECK_NONE)
         {
             const String8 declared = check_input_section_declaration_name(reader, event);
-            check_input_section_diagnose(reader, sections, BUSTER_CHECK_NONE, token, reader->parser->tokens.sources[token],
+            check_input_section_diagnose(reader, sections, BUSTER_CHECK_NONE, token, parse_source_index(&reader->parser->tokens, token),
                                          "'%.*s' causes a section type conflict with %s", (int)declared.length, declared.pointer, prior);
             check_input_report(reader, token, CHECK_INPUT_SECTION);
         }

@@ -203,7 +203,7 @@ static void ir_gvn_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena
         {
             ir_optimize_test_expect(test, a.removed > b.removed, "GVN refines cyclic congruences missed by scalar available expressions");
         }
-        ir_optimize_test_expect(test, ir_verify(&a.function, scratch, 0).error == IR_OK && ir_verify_scalar(&b.function, scratch, 0).error == IR_OK, "GVN rewritten functions independently verified");
+        ir_optimize_test_expect(test, ir_verify(&a.function, scratch, 0).error == IR_OK && ir_verify(&b.function, scratch, 0).error == IR_OK, "GVN rewritten functions independently verified");
         for (uint32_t trial = 0; trial < 18; trial += 1)
         {
             const uint64_t input = trial == 17 ? UINT64_MAX : trial;

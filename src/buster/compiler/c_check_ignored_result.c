@@ -134,10 +134,10 @@ static __attribute__((noinline)) bool check_common_ignored_prepare(CheckCommonIg
         }
         uint32_t mark = 0;
         uint32_t tag = 0;
-        for (uint32_t first = check_input_attributed_next(input->attributes, 0, count, scalar); valid && first < count;
-             first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
+        for (uint32_t first = check_input_attributed_next(input->attributes, 0, count); valid && first < count;
+             first = check_input_attributed_next(input->attributes, first + 16, count))
         {
-            for (uint32_t selected = check_input_attributed_group(input->attributes, first, count, scalar); selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(input->attributes, first, count); selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
                 const CheckInputAttributes* attributes = check_input_attributes_at(input, d);
@@ -513,7 +513,7 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
 // warning (SourceManager's isMacroBodyExpansion, isInSystemMacro): a macro's token that no argument substituted.
 static bool check_common_ignored_macro(const Parser* parser, Preprocessor* pp, uint32_t token)
 {
-    const uint32_t source = token < parser->tokens.count ? parser->tokens.sources[token] : BUSTER_PP_NONE;
+    const uint32_t source = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
     bool result = false;
     if (source < pp->output.count && pp->output.flags != NULL && (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0)
     {

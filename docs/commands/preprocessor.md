@@ -113,14 +113,27 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 [--keep] [--seed N] [--count N] [--part K/N] [options] [file...]`, or
 `test-preprocessor --tables path...`:
 
-- without files, the 320 built-in cases (`pp_test_cases`), each preprocessed by
-  the vectorized kernels and their scalar twins. They run in 32 parts, the
+- without files, the 320 built-in cases (`pp_test_cases`), each preprocessed
+  twice, the second time with `PPOptions.scalar` (since #2924 it selects
+  `pp_define`'s scalar body scan alone). They run in 32 parts, the
   header sets below (`--clang`) in 16 and the files (below) a part each (a
   range each past 64), each part in a child process with a directory of its
   own, at most `test_process_cpus()` at once, the output in their order
   (`pp_test_children`, #465). They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
+  vectorized kernels' outputs must also give their digests in
+  `tests/preprocessor-kernels/digests.tsv` (`pp_kernel_digest`: the stream, the
+  expansion history, the directive tables and the diagnostics' counts), a line
+  per kernel comparison of the built-in cases (`test-x86-target`'s `-march`
+  cases among them) and the fuzz batch's sum at its default seed and count,
+  recorded where the scalar twins gave the same outputs before #2924 deleted
+  them. The `print/` lines are the digests of the text `-E -P` prints for each
+  built-in case and the printer tests' runs, recorded where both printers gave
+  it. `BUSTER_PP_RECORD_DIGESTS=FILE` writes the lines instead; record twice,
+  with `$TMPDIR` of two lengths, and mark a case whose digests differ `-` (its
+  outputs hold its directory's name, or follow the host's CPU, as
+  `-march=native`'s do). The
   cases are of our own:
   - on the topics of the C standard's examples;
   - the behaviors probed against GCC and clang;
@@ -175,12 +188,18 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   refused, its message naming the option, or taken without one: the `-f`
   options that change clang's keywords, lexing or `-E` output, which
   `pp_parse_options` models or refuses where their family's last option turns
-  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's vector/scalar text and lookup checks;
+  them on (docs/c-preprocessor.md, "The `-f` options"); the expansion history's checks; #embed's text (against `snprintf`) and lookup checks;
   the search directories' listings (`pp_test_directory_listings`, #653): the opens a listed directory saves after its
   32nd failed probe, the names it can't rule out still opened (another case, a subdirectory, a dangling link,
   `.` and `..`, a name past ASCII or past `NAME_MAX`), a cache another unit shares, a directory with a name past
   ASCII never listed, one of 64 names put off by its first look and listed at its 256th, and every path, file and
   error the same as with listings off;
+  the search directories' answers about a subdirectory (`pp_test_directory_asks`, #2873): a directory asked for a
+  path's first component at the component's third failed probe there, once, and the opens its answer saves; what it
+  can't rule out still opened (a component the directory has, a regular file by its name, another spelling, a name
+  it begins with, `.` and `..`, a component past `NAME_MAX`); a dangling link and a name past ASCII asked as any other, and a name without a
+  `/` never; a cache another unit shares; a listed directory asked nothing; and every path, file and error the same
+  as with the asks off, whose unit opens exactly the candidates the answers spared;
   with no descriptor left after a listing (`pp_test_listing_descriptors`), a ruled-out name's ENOENT and the next
   directory's EMFILE, reported there, against the first directory's EMFILE without listings, and the answers a unit
   sharing the cache then gets;
@@ -249,7 +268,8 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   a time, on random bytes ending at a `PROT_NONE` page and starting at the end
   of one, and on 9 windows worked out by hand, one faulting if the scan passes
   its last line end; and the directives' places (`pp_directive_places`) against
-  their bit-at-a-time twin, each output ending at a `PROT_NONE` page; and 11 files
+  the bit-at-a-time loop it takes for a word of more than 16, each output ending
+  at a `PROT_NONE` page; and 11 files
   made by hand ending at a `PROT_NONE` page (#441: a `\r\n` in a block, across
   64-byte blocks, inside a 4 KB line page and across pages, a `\r` and a `\n`
   alone, a `\r` last), whose line ends `pp_count_lines` must count from many
@@ -264,12 +284,12 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
   two windows or more through windows of N bytes, so that the vectorized side's
   windowed preparation of a whole unit is compared too;
 - with `--tables`, the directive tables of every `.c` and `.h` file under each
-  path, by both kernels, against the oracle (about 0.02 s for `src`, 0.6 s for
-  the C library corpus).
+  path, with `PPOptions.scalar` off and on, against the oracle (about 0.02 s for
+  `src`, 0.6 s for the C library corpus).
 
-In both, the vectorized printer's text must be the scalar printer's byte for
-byte, with line markers and without, and must lex back into the stream's
-spellings.
+In both, the printed text, with line markers and without, must lex back into
+the stream's spellings, and a built-in case's `-P` text must give its recorded
+digest.
 
 Every case and file runs with clang's answers to the feature queries
 (`--clang-features`, the oracle's mode), and a check runs a line of queries both
@@ -470,6 +490,118 @@ constructs and the qualification runs.
 generated block from clang 23 (on `PATH`), to paste over the old one when clang
 changes; `docs/c-preprocessor.md` ("The predefined macros") has the procedure.
 
+## Caret display (#2376)
+
+`pp_render_diagnostic` writes clang's caret display (`TextDiagnostic`'s
+`emitSnippetAndCaret`) under each located line it prints: the primary's, each
+"expanded from" note's and an attached note's (`pp_diagnostic_snippet`, in
+`c_preprocessor_history_impl.c`). Every diagnostic of the front end and of
+code generation goes through it, at `-E`, `parse`, `-fsyntax-only` and `-c`:
+
+```text
+t.c:3:2: warning: hi [-W#warnings]
+    3 | #warning hi
+      |  ^
+```
+
+- **Default.** On, as clang's driver has it: `pp_parse_options` turns it on.
+  `PPOptions.carets` zero, the API's default, which tests and benchmarks that
+  build their options themselves take, leaves it off.
+- **The line.** The place's physical line, from the file's line table
+  (`pp_diagnostic_lines`, built once a file on its first diagnostic; no
+  rescan a diagnostic), up to its first `\n` or `\r`; none at the file's end
+  (a place past its last line end). Its characters as clang prints them:
+  printable ASCII a column each; a tab, spaces to the next stop of 8, counted in
+  bytes since the previous tab or the line's start (clang counts bytes, not
+  columns); a well-formed UTF-8 character LLVM calls printable, itself, in LLVM's
+  columns (`unicode_column_width`: 0 for a combining mark, 2 for a wide
+  character; `c_unicode_widths.inc`); another well-formed one, `<U+XXXX>`; a byte
+  of no well-formed character, `<XX>`. Its trailing NUL bytes past the caret are
+  dropped. The plain runs and the line's end are found 64 bytes at a time; a
+  special character, rare and cold, takes a step of its own, since its size and
+  width come from its bytes and LLVM's range tables.
+- **The gutter.** The place's presumed line (`#line`'s), right-aligned in
+  `max(4, digits(line + N))` columns, `N` 16 or `-fcaret-diagnostics-max-lines=N`
+  in 32-bit arithmetic, as clang's. Where a sum that wraps makes it narrower
+  than the line's own digits, clang indents by a count that wraps too
+  (gigabytes of spaces, which [the fuzzing](../preprocessor-fuzz.md) avoids);
+  ours indents by none.
+- **The caret.** Under the column that holds the place's byte (clang's
+  `byteToContainingColumn`).
+- **Highlighted ranges.** A diagnostic's ranges (`PPDiagnosticRange`, at most
+  `BUSTER_PP_DIAGNOSTIC_RANGES`), which its producer adds just before it and
+  clears just after it (`pp_diagnostic_range_tokens` for output tokens, clang's
+  token range; `pp_diagnostic_range_characters` and
+  `pp_diagnostic_range_offsets` for characters, clang's character range; as
+  `diagnostic_spans` is set), are copied into its collected record and marked
+  with `~` under its columns, but the spaces and tabs at their ends, the caret
+  over them (`highlightRange`). Each is first mapped into the expansion the
+  caret's line is in, as clang's `mapDiagnosticRanges` does on the expansion
+  history (`pp_diagnostic_map_range`): an argument's substitution is clang's
+  macro argument expansion, an expansion's invocation its expansion range; a
+  range inside one macro's argument keeps its own spelling, one across a
+  macro's body maps to its invocation, from its name to its `)`. The primary's
+  maps into its file, each "expanded from macro" note's into that macro's
+  expansion, as spellings in its body. The walks are iterative and bounded.
+  A range's lines widen the snippet around the caret's, as clang's
+  `maybeAddRange` does, to at most the line limit; the gutter then numbers
+  them from the presumed line of the first range's start where it is earlier.
+  A diagnostic with ranges shows its lines at the last one's place too.
+- **Which diagnostics have them** (clang's, diagnostic by diagnostic): a name
+  that names nothing and its corrections (the name); a header not found (its
+  name, quotes or brackets and all); an unknown or nonstandard escape (its
+  backslash and character); an indirection of a non-pointer (its operand); a
+  shift count past the width or negative (the count); a division or remainder
+  by zero (the divisor); an assignment to what isn't assignable, an array or a
+  const (the expression assigned to; not yet the "declared const here" note's
+  declaration); a register variable's address (its operand, without its
+  parentheses); and an incompatible conversion's initializing, assigning,
+  passing or returning (its source expression); an unknown attribute (its
+  name, from its scope); a member of no such member, of a pointer or of no
+  record (the base, and for no record the member's name too); and an
+  assignment as a condition (the assignment). An expression's range is its
+  subtree's tokens, with the parentheses around it unless the diagnostic looks
+  through them (`check_semantic_range`).
+- **None again.** A diagnostic without ranges at the last one's place shows no
+  line, unless the last was a note and this one isn't (clang's `LastLoc` rule;
+  `Preprocessor.diagnostic_caret_location`). A diagnostic counts once its notes
+  are printed, an "expanded from" note once it is; the published diagnostics'
+  owners pass the state on, as they do the include stack's.
+- **Limits.** No line where the caret is past the line's 4,096th byte or the
+  line is longer than 4,096 bytes (`MaxLineLengthToPrint`).
+- **Options.** `-fcaret-diagnostics` and `-fno-caret-diagnostics` (the last
+  wins; off drops the "N warnings generated." line too, as clang's);
+  `-fdiagnostics-show-line-numbers` and `-fno-diagnostics-show-line-numbers`
+  (no gutter); `-fcaret-diagnostics-max-lines=N`, clang's unsigned grammar
+  (decimal, `0x`, `0b`, `0o`, leading-zero octal) on its last occurrence, a
+  malformed value an error.
+- **Not yet** (#2376's later pieces): the other diagnostics' ranges, fix-it
+  lines, the lines of scratch space (a pasted token's, `_Pragma`'s) and a
+  pasted token's range in its macro's note; `-fmessage-length`, `-ftabstop`
+  and colors. The assembler's diagnostics (`assembler_driver.c`) print none.
+  `test-checker-driver --carets` measures what is left over the oracle suite
+  ([the checker guide](checker.md)).
+
+`./build/compiler test-carets [--clang PATH] [--fixtures DIRECTORY]` checks it
+against clang, whole output (`c_caret_test.c`). Its cases are runtime data,
+`tests/carets/catalog.tsv` (header `buster-fixtures v1 carets`), each line ID,
+FILE, FLAGS, OPTIONS and NAME, tab-separated; every `.c` file of the directory
+must be a case's. Each case's command line (OPTIONS, then the file) runs as
+ours, a child of `/proc/self/exe`, and as clang's, both with carets on by
+default, and their exit statuses and standard errors must be the same bytes;
+FLAGS `prefix` marks a command line both refuse for its options, where ours
+prints its usage after clang's error, which must start ours. The cases cover
+the preprocessor's and checker's located diagnostics at a line's start,
+middle and end, under `-fsyntax-only`, `-E` and `-c`; tabs; wide, combining,
+control, zero-width, malformed and draft characters; the same place twice;
+gutters from 4 digits to 10 and every option and value; an include stack; a
+last line without a newline; CR LF and lone CR line ends; NUL bytes; and the
+4,096-byte limits; and ranges: names through macros' bodies and arguments,
+operands, counts and divisors with their parentheses, through a macro, over
+lines and cut to the line limit, escapes in literals and header names not
+found. The other oracle suites still compare with `-fno-caret-diagnostics` on
+both sides.
+
 ## Preprocessor benchmark
 
 The exact commands, pinned inputs and raw reports for the #117 acceptance
@@ -478,8 +610,9 @@ Its invocation scripts take a separate normal shared-host lock for each command.
 
 `./build/compiler benchmark-preprocessor [--clang] [--markers] [--only
 vectorized|scalar] [--read-limit N,...] [--listing-misses N,...] [options] file...` preprocesses each file from nothing per
-run (a new intern table and preprocessor), with the vectorized kernels and their
-scalar twins, 21 passes after a warm-up, and reports the medians of time, cycles
+run (a new intern table and preprocessor), with the vectorized kernels and again
+with `pp_define`'s scalar body scan (`--only scalar`, the one twin #2924 left in
+the preprocessor), 21 passes after a warm-up, and reports the medians of time, cycles
 and instructions per input token and per output token, IPC, each phase's share
 and time (read, lex, refine, directive tables, main loop/setup), the release after the
 run (the files' mappings among it), `-E -P`'s throughput with its printing
@@ -510,8 +643,9 @@ must all give the same output. `--listing-misses` does the same for the failed
 probes after which a search directory's names are first looked at (32 by default; 0 never
 reads them: `docs/c-files.md`, "Search directories' listings"), each with each
 read limit, so that one executable compares listings on and off, in turns.
-The probe counts then also give the directories listed and the opens their
-listings saved.
+The probe counts then also give the directories listed, the directories asked
+for a subdirectory (`docs/c-files.md`, "A search directory asked for a
+subdirectory") and the opens they saved.
 `--clang` also times `clang -E -P` with the same options, a process per file, with `--buster-headers` translated to ours' search and every argument passed (`pp_clang_preprocess`). A failed clang run fails the benchmark and reports no timing.
 Our predefines follow the target options as clang's do; `--predefines FILE`
 still replaces them (the benchmark leaves it out of clang's command line). The
@@ -528,13 +662,13 @@ others, its measurements are informational.
 path...` times definitions and lookups alone (#121): every `.c` and `.h` file
 under the paths is read and prepared once, then each of 21 passes after a
 warm-up, file by file, defines its `#define`s, compiles its macros and looks up
-its identifiers as the main loop's runs test them, by each kernel, which must
-make the same macros. It reports the medians in cycles per `#define`, per macro
+its identifiers as the main loop's runs test them, with the body scan's vector
+and scalar arms, which must make the same macros. It reports the medians in cycles per `#define`, per macro
 compiled and per lookup. `docs/c-preprocessor.md` has the numbers for the C
 library corpus.
 
 `--guard-cost` times the vectorized kernels with the skip of guarded files and
-without it (`PPOptions.no_guard_skip`), in place of the scalar twins: the
+without it (`PPOptions.no_guard_skip`), in place of the scalar body scan: the
 output's tokens must be the same (#120).
 
 `--markers` runs and prints as `-E` without `-P` does: with the expansion starts
@@ -544,7 +678,7 @@ markers and reported as `-E with printing`; of the controls it takes
 `--spelling-cost` alone, and refuses `--clang`. `--spelling-cost` times the
 vectorized kernels with the printer's spellings by `pp_print_spellings`
 (`spellings`) and by its general loop for every chunk (`per-token`,
-`PPOptions.print_per_token`), in place of the scalar twins (#649). Every run's
+`PPOptions.print_per_token`), in place of the scalar body scan (#649). Every run's
 warm-up print, with markers or without, must give the same bytes, whatever the
 implementation and the read limit. Both take the printer's own copies, its
 line markers' batches among them, so the two rows differ in the spellings
@@ -552,10 +686,10 @@ alone, and each row's history in the job is its before. The 9700X job runs
 both, with and without `--markers`, on `main.c` and the frozen `sqlite3.c`
 where it measures the preprocessor, about 13 s.
 
-`./build/compiler benchmark-preprocessor --tables [--only vectorized|scalar]
-path...` times the directive tables alone (#118): every `.c` and `.h` file under
-the paths is read and prepared once, then each of 21 passes after a warm-up
-builds every file's table by each kernel, whose tables must be the same, and it
+`./build/compiler benchmark-preprocessor --tables path...` times the directive
+tables alone (#118): every `.c` and `.h` file under the paths is read and
+prepared once, then each of 21 passes after a warm-up builds every file's
+table, which must be the same in every pass, and it
 reports the medians per input token and per directive, IPC, and the scan's
 share. Run it under the 9700X's lock with `taskset -c 2`;
 `docs/c-preprocessor.md` has the numbers for the C library corpus. The default
@@ -563,22 +697,17 @@ share. Run it under the 9700X's lock with `taskset -c 2`;
 
 `./build/compiler benchmark-preprocessor --embed N` measures instead the text
 `-E` prints for an `#embed`'s N bytes (random, from a fixed seed), by
-`pp_embed_text_vector` and its scalar twin in the printers' pieces, 21 passes
-after a warm-up: medians per input byte, and the text's throughput. The two
-texts must be the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
+`pp_embed_text_vector` in the printers' pieces, 21 passes after a warm-up:
+medians per input byte, and the text's throughput. Every pass's text must be
+the same. Run it pinned to one CPU; `docs/c-preprocessor.md` has
 the 9700X's numbers.
 
-## Scalar-host preparation (#1369)
+## Preparation's request (#1369)
 
-Production preparation chooses vector kernels only when the host build supports
-BUSTER_HOST_VECTOR and the caller has not requested scalar execution. This also
-selects whole-file scalar refinement instead of emulated 512-bit chunk/window
-refinement on baseline hosts. Shared file caches inherit the same preparation
-policy. Explicit low-level window tests still exercise both kernel protocols on
-baseline hosts; the scalar-reference and window-unit fixtures check the default
-host/option policy before those test-only overrides.
-
-This bounded change does not change parser dispatch or replace the scalar hash's
-software AES implementation. Existing token, macro, diagnostic and window twins
-remain the correctness checks. Baseline/AVX2-host end-to-end timing on the approved
-9700X remains pending; no measured speedup is claimed here.
+Preparation always runs the vector kernels: the lexer and the 512-bit
+chunk/window refinement. A caller's request for scalar execution selected
+whole-file scalar refinement until #2924 deleted it, and the scalar host, whose
+builds took the scalar preparation always, went with #2924 too. Shared file
+caches share one preparation. The window tests compare each windowed
+preparation with the whole file's, and each windowed unit with the unit
+prepared whole.

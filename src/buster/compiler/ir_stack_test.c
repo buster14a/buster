@@ -117,7 +117,7 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             }
             if (ir_lower_test_expect(tally, check.error == IR_OK, "stack IR consumer accepts", scalar, pass))
             {
-                ir_lower_test_expect(tally, ir_verify(&transformed, scratch, 0).error == IR_OK && ir_verify_scalar(&transformed, scratch, 0).error == IR_OK, "stack IR verifies after transformation", scalar, pass);
+                ir_lower_test_expect(tally, ir_verify(&transformed, scratch, 0).error == IR_OK, "stack IR verifies after transformation", scalar, pass);
                 ir_stack_test_effects(tally, function, &transformed);
                 ir_stack_test_execute(tally, &transformed, argument, expected, INTERPRETER_OK, execution);
             }
@@ -256,7 +256,7 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
                 break;
             }
             }
-            ok = ir_lower_test_expect(tally, check.error == IR_OK && ir_verify_complete(&next, scratch, true).error == IR_OK && ir_verify_complete(&next, scratch, false).error == IR_OK, "chained stack SSA/optimizers preserve complete verification", scalar, pass);
+            ok = ir_lower_test_expect(tally, check.error == IR_OK && ir_verify_complete(&next, scratch).error == IR_OK, "chained stack SSA/optimizers preserve complete verification", scalar, pass);
             if (ok)
             {
                 ir_stack_test_effects(tally, function, &next);
@@ -337,9 +337,8 @@ static void ir_stack_test_invalid(IrLowerTestTally* tally, IrFunction* function,
                 function->a[i] = BUSTER_IR_NONE;
             }
             const uint64_t scratch_mark = scratch->length;
-            const IrCheck vector = ir_verify(function, scratch, 0);
-            const IrCheck scalar = ir_verify_scalar(function, scratch, 0);
-            ir_lower_test_expect(tally, vector.error == errors[mutation] && vector.error == scalar.error && vector.instruction == scalar.instruction && vector.instruction == i && vector.detail == scalar.detail && scratch->length == scratch_mark, "malformed dynamic IR preserves diagnostic priority and scratch in both verifiers", op, mutation);
+            const IrCheck verified = ir_verify(function, scratch, 0);
+            ir_lower_test_expect(tally, verified.error == errors[mutation] && verified.instruction == i && scratch->length == scratch_mark, "malformed dynamic IR preserves diagnostic priority and scratch in the verifier", op, mutation);
             function->type[i] = type;
             function->a[i] = a;
             function->b[i] = BUSTER_IR_NONE;
@@ -369,7 +368,7 @@ static void ir_stack_test_native_boundary(IrLowerTestTally* tally, Arena* input,
                 Tier1SelectPlan plan = { 0 };
                 const uint64_t mark = output->length;
                 uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, vector != 0, &plan, &node);
+                const Tier1SelectError error = tier1_select_plan(&function, 0, output, scratch, &plan, &node);
                 const uint32_t at = op == 0 ? 0u : 1u;
                 ir_lower_test_expect(tally, error == TIER1_SELECT_OK && plan.patterns[at].rule == rules[op], "native dynamic stack selected by its rule", vector, op);
                 arena_pop_to(output, mark);
@@ -410,27 +409,22 @@ static void ir_stack_test_calls(IrLowerTestTally* tally, Arena* input, Arena* ou
         functions[1].symbol_count = 3;
         const uint32_t symbols[2] = { 1, 2 };
         const uint8_t flags[2] = { BUSTER_IR_INLINE_INTERNAL, BUSTER_IR_INLINE_INTERNAL };
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        const IrInlineUnit unit = { .functions = functions, .symbols = symbols, .flags = flags, .count = 2, .symbol_count = 3 };
+        IrInlineResult inlined = { 0 };
+        uint32_t failed = BUSTER_IR_NONE;
+        const IrCheck check = ir_optimize_inline(&unit, output, scratch, ir_inline_options(), &inlined, &failed);
+        if (ir_lower_test_expect(tally, check.error == IR_OK && inlined.inlined_calls == 0 && inlined.call_count == 1 && inlined.decisions[0] == IR_INLINE_BODY, "inlining preserves callee dynamic lifetime boundary", 0, failed))
         {
-            const IrInlineUnit unit = { .functions = functions, .symbols = symbols, .flags = flags, .count = 2, .symbol_count = 3 };
-            IrInlineOptions options = ir_inline_options();
-            options.scalar = scalar != 0;
-            IrInlineResult inlined = { 0 };
-            uint32_t failed = BUSTER_IR_NONE;
-            const IrCheck check = ir_optimize_inline(&unit, output, scratch, options, &inlined, &failed);
-            if (ir_lower_test_expect(tally, check.error == IR_OK && inlined.inlined_calls == 0 && inlined.call_count == 1 && inlined.decisions[0] == IR_INLINE_BODY, "inlining preserves callee dynamic lifetime boundary", scalar, failed))
-            {
-                const IrInterpreterFunction code[2] = {
-                    { .symbol = 1, .function = &inlined.functions[0] },
-                    { .symbol = 2, .function = &inlined.functions[1] },
-                };
-                const IrInterpreterProgram program = { .functions = code, .function_count = 2 };
-                const InterpreterOptions limits = ir_stack_test_limits();
-                const InterpreterResult result = ir_interpret(&program, 1, 0, 0, &limits, execution);
-                ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 80 && execution->length == 0, "callee early return preserves caller dynamic objects", scalar, result.status);
-            }
-            arena_pop_to(output, output_mark);
+            const IrInterpreterFunction code[2] = {
+                { .symbol = 1, .function = &inlined.functions[0] },
+                { .symbol = 2, .function = &inlined.functions[1] },
+            };
+            const IrInterpreterProgram program = { .functions = code, .function_count = 2 };
+            const InterpreterOptions limits = ir_stack_test_limits();
+            const InterpreterResult result = ir_interpret(&program, 1, 0, 0, &limits, execution);
+            ir_lower_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 80 && execution->length == 0, "callee early return preserves caller dynamic objects", 0, result.status);
         }
+        arena_pop_to(output, output_mark);
     }
     arena_pop_to(input, mark);
 }
@@ -534,7 +528,7 @@ static void ir_stack_test_zero_alias(IrLowerTestTally* tally, Arena* output, Are
     const uint64_t output_mark = output->length;
     const uint64_t twin_mark = twin->length;
     IrFunction function = { 0 };
-    if (ir_lower_test_lower(tally, &source, IR_I64, 2, output, twin, scratch, &function, 131, 2))
+    if (ir_lower_test_lower(tally, &source, IR_I64, 2, output, scratch, &function, 131, 2))
     {
         ir_stack_test_execute(tally, &function, 0, 42, INTERPRETER_OK, execution);
         ir_stack_test_consumers(tally, &function, 0, 42, twin, scratch, execution);
@@ -581,7 +575,7 @@ static void ir_stack_test_class_boundary(IrLowerTestTally* tally, Arena* output,
     InterpreterResult result = interpreter_test_run(&source, execution, &options);
     ir_lower_test_expect(tally, result.status == INTERPRETER_OK, "dynamic kinds pass the typed dispatch gate", result.status, result.entry);
     IrFunction function = { 0 };
-    if (ir_lower_test_lower(tally, &source, IR_VOID, 1, output, twin, scratch, &function, 131, 3))
+    if (ir_lower_test_lower(tally, &source, IR_VOID, 1, output, scratch, &function, 131, 3))
     {
         ir_stack_test_execute(tally, &function, 0, 0, INTERPRETER_OK, execution);
     }
@@ -606,18 +600,15 @@ static void ir_stack_test_class_boundary(IrLowerTestTally* tally, Arena* output,
     // The IR lowers long double (#131): both paths give the constant its 80 bits, 1.0's, after the dynamic effects.
     arena_push(output, 24, 1);
     arena_push(scratch, 40, 1);
-    for (uint32_t vector = 0; vector < 2; vector += 1)
+    IrFunction lowered = { 0 };
+    const IrCheck check = ir_lower_typed(&source, IR_VOID, 1, output, scratch, &lowered);
+    bool constant = false;
+    for (uint32_t i = 0; check.error == IR_OK && i < lowered.instruction_count; i += 1)
     {
-        IrFunction lowered = { 0 };
-        const IrCheck check = ir_lower_typed_path(&source, IR_VOID, 1, output, scratch, &lowered, vector != 0);
-        bool constant = false;
-        for (uint32_t i = 0; check.error == IR_OK && i < lowered.instruction_count; i += 1)
-        {
-            constant |= lowered.op[i] == IR_CONST && lowered.type[i] == IR_F80 && lowered.constants[lowered.a[i]].low == constants[0] && lowered.constants[lowered.a[i]].high == constants[1];
-        }
-        ir_lower_test_expect(tally, check.error == IR_OK && constant && scratch->length == scratch_mark + 40, "F80 lowers after the dynamic effects with scratch restored", vector, check.error);
-        arena_pop_to(output, output_mark + 24);
+        constant |= lowered.op[i] == IR_CONST && lowered.type[i] == IR_F80 && lowered.constants[lowered.a[i]].low == constants[0] && lowered.constants[lowered.a[i]].high == constants[1];
     }
+    ir_lower_test_expect(tally, check.error == IR_OK && constant && scratch->length == scratch_mark + 40, "F80 lowers after the dynamic effects with scratch restored", 1, check.error);
+    arena_pop_to(output, output_mark + 24);
     arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
 }
@@ -661,7 +652,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
         .parameters = &parameter,
     };
     IrFunction function = { 0 };
-    if (ir_lower_test_lower(tally, &source, IR_I64, 2, &output, &twin, &scratch, &function, 131, 0))
+    if (ir_lower_test_lower(tally, &source, IR_I64, 2, &output, &scratch, &function, 131, 0))
     {
         const uint64_t sizes[] = { 0, 8, 15, 16, 17, 4096, 65537, UINT64_MAX - 15, UINT64_MAX - 14, UINT64_MAX };
         const SymbolId symbol = 1;
@@ -688,40 +679,34 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
         arena_pop_to(&twin, 0);
         arena_push(&twin, 24, 1);
         arena_push(&scratch, 40, 1);
-        for (uint32_t vector = 0; vector < 2; vector += 1)
+        for (uint64_t bytes = 0; bytes < total; bytes += 8)
         {
-            for (uint64_t bytes = 0; bytes < total; bytes += 8)
-            {
-                twin.capacity = 24 + bytes;
-                IrFunction result = { .instruction_count = 123 };
-                const IrFunction preserved = result;
-                const IrCheck check = ir_lower_typed_path(&source, IR_I64, 2, &twin, &scratch, &result, vector != 0);
-                const bool good = check.error == IR_OK || (check.error == IR_ERROR_MEMORY && memcmp(&result, &preserved, sizeof(result)) == 0 && twin.length == 24);
-                ir_lower_test_expect(tally, good && scratch.length == 40, "dynamic lowering allocation rollback", bytes, vector);
-                arena_pop_to(&twin, 24);
-            }
+            twin.capacity = 24 + bytes;
+            IrFunction result = { .instruction_count = 123 };
+            const IrFunction preserved = result;
+            const IrCheck check = ir_lower_typed(&source, IR_I64, 2, &twin, &scratch, &result);
+            const bool good = check.error == IR_OK || (check.error == IR_ERROR_MEMORY && memcmp(&result, &preserved, sizeof(result)) == 0 && twin.length == 24);
+            ir_lower_test_expect(tally, good && scratch.length == 40, "dynamic lowering allocation rollback", bytes, 1);
+            arena_pop_to(&twin, 24);
         }
         twin.capacity = capacity;
         arena_pop_to(&scratch, 0);
-        for (uint32_t vector = 0; vector < 2; vector += 1)
+        for (uint32_t mutation = 0; mutation < 5; mutation += 1)
         {
-            for (uint32_t mutation = 0; mutation < 5; mutation += 1)
-            {
-                values[mutation == 0 ? 0 : 3] = mutation < 2 ? 1 : 0;
-                classes[3] = mutation == 2 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
-                classes[0] = mutation == 3 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
-                classes[12] = mutation == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
-                IrFunction result = { .instruction_count = 123 };
-                const IrFunction preserved = result;
-                const uint64_t mark = twin.length;
-                const IrCheck check = ir_lower_typed_path(&source, IR_I64, 2, &twin, &scratch, &result, vector != 0);
-                ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && twin.length == mark && scratch.length == 0 && memcmp(&result, &preserved, sizeof(result)) == 0, "malformed typed stack input refused before allocation", vector, mutation);
-                values[0] = 0;
-                values[3] = 0;
-                classes[3] = BUSTER_TYPED_CLASS_U64;
-                classes[0] = BUSTER_TYPED_CLASS_U64;
-                classes[12] = BUSTER_TYPED_CLASS_U64;
-            }
+            values[mutation == 0 ? 0 : 3] = mutation < 2 ? 1 : 0;
+            classes[3] = mutation == 2 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+            classes[0] = mutation == 3 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+            classes[12] = mutation == 4 ? BUSTER_TYPED_CLASS_U32 : BUSTER_TYPED_CLASS_U64;
+            IrFunction result = { .instruction_count = 123 };
+            const IrFunction preserved = result;
+            const uint64_t mark = twin.length;
+            const IrCheck check = ir_lower_typed(&source, IR_I64, 2, &twin, &scratch, &result);
+            ir_lower_test_expect(tally, check.error == IR_ERROR_STRUCTURE && twin.length == mark && scratch.length == 0 && memcmp(&result, &preserved, sizeof(result)) == 0, "malformed typed stack input refused before allocation", 1, mutation);
+            values[0] = 0;
+            values[3] = 0;
+            classes[3] = BUSTER_TYPED_CLASS_U64;
+            classes[0] = BUSTER_TYPED_CLASS_U64;
+            classes[12] = BUSTER_TYPED_CLASS_U64;
         }
     }
     arena_pop_to(&output, 0);
@@ -753,7 +738,7 @@ static void ir_lower_test_stack(IrLowerTestTally* tally)
         .parameter_count = 1,
         .parameters = &parameter,
     };
-    if (ir_lower_test_lower(tally, &edge_source, IR_I64, 1, &output, &twin, &scratch, &function, 131, 1))
+    if (ir_lower_test_lower(tally, &edge_source, IR_I64, 1, &output, &scratch, &function, 131, 1))
     {
         for (uint64_t condition = 0; condition < 2; condition += 1)
         {

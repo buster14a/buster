@@ -99,7 +99,7 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
         CheckDeferred deferred = { .fail_after_replay = path == 4 };
         const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
         const ParseOptions parsing = { .scalar = path == 1 };
-        const CheckOptions checking = { .scalar = path == 1 };
+        const CheckOptions checking = { 0 };
         bool ready = output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) &&
                      pp_initialize(&pp, &preprocessing, &identifiers) && parse_initialize(&parser, &parsing, preprocessing.language) &&
                      pp_run_source(&pp, "literal-table.c", (const uint8_t*)source, strlen(source)) && parse_translation_unit(&parser, &pp) &&
@@ -152,6 +152,32 @@ static void check_test_literal_table_case(CheckTest* test, const char* source, b
     }
 }
 
+// check_literal_table_shape's grammar a token at a time: a number after a comma or a minus, a minus after a comma, a
+// comma after a number, the list neither empty nor ending in a minus; the numbers' count, or 0.
+static uint32_t check_test_literal_shape_reference(const uint8_t* kinds, uint32_t count)
+{
+    uint32_t numbers = 0;
+    uint8_t previous = PARSE_KIND_COMMA;
+    bool valid = count != 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const uint8_t kind = kinds[i];
+        valid &= (kind == PARSE_KIND_NUMBER && (previous == PARSE_KIND_COMMA || previous == PARSE_KIND_MINUS)) ||
+                 (kind == PARSE_KIND_MINUS && previous == PARSE_KIND_COMMA) || (kind == PARSE_KIND_COMMA && previous == PARSE_KIND_NUMBER);
+        numbers += kind == PARSE_KIND_NUMBER;
+        previous = kind;
+    }
+    return valid && previous != PARSE_KIND_MINUS ? numbers : 0;
+}
+
+static uint32_t check_test_literal_draw(uint64_t* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return (uint32_t)(*state >> 32);
+}
+
 static void check_test_literal_table_shapes(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -167,17 +193,45 @@ static void check_test_literal_table_shapes(CheckTest* test)
             kinds[i] = i % 3 == 0 ? PARSE_KIND_MINUS : i % 3 == 1 ? PARSE_KIND_NUMBER : PARSE_KIND_COMMA;
         }
         const uint32_t expected = count % 3 == 1 ? 0 : (count + 1) / 3;
-        check_test_expect(test, check_literal_table_shape(kinds, 0, count, true) == expected && check_literal_table_shape(kinds, 0, count, false) == expected,
+        check_test_expect(test, check_literal_table_shape(kinds, 0, count) == expected,
                           "literal grammar carries minus/number/comma state across every guarded tail");
         for (uint32_t at = 0; at < count; at += 17)
         {
             const uint8_t saved = kinds[at];
             kinds[at] = PARSE_KIND_PLUS;
-            check_test_expect(test, check_literal_table_shape(kinds, 0, count, true) == 0 && check_literal_table_shape(kinds, 0, count, false) == 0,
+            check_test_expect(test, check_literal_table_shape(kinds, 0, count) == 0,
                               "nonliteral operators make the whole table retain general checking");
             kinds[at] = saved;
         }
     }
+    // Lists of numbers, commas and minuses, mostly well formed: each token, with one chance in 24, takes a kind its
+    // predecessor doesn't allow (a number after a number, a comma after a comma or a minus, a minus after a number or a
+    // minus), at every length to 257 and so at every lane of the 64-token blocks, against the grammar's reading.
+    uint32_t accepted = 0;
+    uint32_t refused = 0;
+    bool same = true;
+    // Its own generator, so that the tests after it draw what they drew before (generated fixtures are keyed by source).
+    uint64_t state = UINT64_C(0x9e3779b97f4a7c15);
+    for (uint32_t trial = 0; ready && trial < 2048; trial += 1)
+    {
+        const uint32_t count = trial % 258;
+        uint8_t* kinds = mapping + page - count;
+        uint8_t previous = PARSE_KIND_COMMA;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint8_t allowed = previous == PARSE_KIND_NUMBER ? PARSE_KIND_COMMA : check_test_literal_draw(&state) % 4 == 0 && previous == PARSE_KIND_COMMA ? PARSE_KIND_MINUS : PARSE_KIND_NUMBER;
+            const uint8_t wrong = previous == PARSE_KIND_NUMBER ? (check_test_literal_draw(&state) % 2 == 0 ? PARSE_KIND_NUMBER : PARSE_KIND_MINUS) :
+                                  previous == PARSE_KIND_MINUS ? (check_test_literal_draw(&state) % 2 == 0 ? PARSE_KIND_COMMA : PARSE_KIND_MINUS) : PARSE_KIND_COMMA;
+            kinds[i] = check_test_literal_draw(&state) % 24 == 0 ? wrong : allowed;
+            previous = kinds[i];
+        }
+        const uint32_t expected = check_test_literal_shape_reference(kinds, count);
+        same &= check_literal_table_shape(kinds, 0, count) == expected;
+        accepted += expected != 0;
+        refused += count != 0 && expected == 0;
+    }
+    check_test_expect(test, same, "literal grammar: the 64-token blocks read random lists as the grammar does at every length");
+    check_test_expect(test, accepted != 0 && refused != 0, "literal grammar: the random lists reach both verdicts");
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, page * 2);
@@ -294,23 +348,20 @@ static void check_test_literal_table_rows_shapes(CheckTest* test)
         uint8_t* kinds = mapping + page - length;
         memcpy(kinds, stream, length);
         const uint32_t expected = check_test_literal_rows_reference(kinds, length, columns);
-        const uint32_t vector = check_literal_table_rows(kinds, 0, length, columns, false);
-        const uint32_t scalar = check_literal_table_rows(kinds, 0, length, columns, true);
-        same = same && vector == scalar && scalar == expected;
+        same = same && check_literal_table_rows(kinds, 0, length, columns) == expected;
         counted = counted && (mutation != 0 || expected == rows * columns);
         mutated = mutated || (mutation != 0 && expected == 0);
         for (uint32_t prefix = length > 192 ? length - 192 : 0; same && trial % 16 == 0 && prefix < length; prefix += 1)
         {
             uint8_t* tail = mapping + page - prefix;
             memmove(tail, kinds, prefix);
-            same = check_literal_table_rows(tail, 0, prefix, columns, false) == check_literal_table_rows(tail, 0, prefix, columns, true) &&
-                   check_literal_table_rows(tail, 0, prefix, columns, true) == check_test_literal_rows_reference(tail, prefix, columns);
+            same = check_literal_table_rows(tail, 0, prefix, columns) == check_test_literal_rows_reference(tail, prefix, columns);
             memcpy(kinds, stream, length);
         }
     }
-    check_test_expect(test, same, "rows grammar: SIMD blocks, scalar twin and the recursive reading agree on tables, mutations and every guarded tail");
+    check_test_expect(test, same, "rows grammar: SIMD blocks and the recursive reading agree on tables, mutations and every guarded tail");
     check_test_expect(test, counted && mutated, "rows grammar: unmutated tables count rows times columns, and mutations reach refusals");
-    check_test_expect(test, check_literal_table_rows(stream, 0, 0, 4, false) == 0 && check_literal_table_rows(stream, 0, 0, 4, true) == 0,
+    check_test_expect(test, check_literal_table_rows(stream, 0, 0, 4) == 0,
                       "rows grammar: an empty table is ineligible");
     if (mapping != MAP_FAILED)
     {
@@ -656,7 +707,7 @@ static void check_test_literal_table_order(CheckTest* test)
         CheckInitializers plans = { 0 };
         const PPOptions preprocessing = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true };
         const ParseOptions parsing = { .scalar = path == 1 };
-        const CheckOptions checking = { .scalar = path == 1 };
+        const CheckOptions checking = { 0 };
         bool valid = output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) &&
                      pp_initialize(&pp, &preprocessing, &identifiers) && parse_initialize(&parser, &parsing, preprocessing.language) &&
                      pp_run_source(&pp, "literal-table-order.c", (const uint8_t*)source, strlen(source)) && parse_translation_unit(&parser, &pp) &&

@@ -271,7 +271,7 @@ static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Pre
             {
                 const uint32_t name = parser->tokens.names[declaration];
                 row->flags = check_lazy_header(parser, pp, firsts[declaration], row->begin, &bindings);
-                const bool system = check_lazy_system(pp, parser->tokens.sources[declaration]) && check_lazy_system(pp, parser->tokens.sources[row->begin]);
+                const bool system = check_lazy_system(pp, parse_source_index(&parser->tokens, declaration)) && check_lazy_system(pp, parse_source_index(&parser->tokens, row->begin));
                 row->flags |= system ? BUSTER_CHECK_LAZY_SYSTEM : 0;
                 if (targets[name] != 0)
                 {
@@ -408,7 +408,6 @@ static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, bool 
     for (uint64_t block = 0; block < count; block += 64)
     {
         const uint32_t live = count - block < 64 ? (uint32_t)(count - block) : 64;
-#if BUSTER_HOST_VECTOR
         if (!scalar)
         {
             const __mmask64 active = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
@@ -431,9 +430,6 @@ static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, bool 
             }
         }
         else
-#else
-        (void)scalar;
-#endif
         {
             for (uint32_t lane = 0; lane < live; lane += 1)
             {

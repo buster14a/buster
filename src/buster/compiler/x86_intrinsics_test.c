@@ -2611,7 +2611,7 @@ static bool x86_intrinsic_decode(const X86IntrinsicObject* object, const Elf64_S
     if (valid)
     {
         const uint8_t* code = object->bytes + section->sh_offset + symbol->st_value;
-        const X86DecodeResult decoded = x86_disassemble_scalar(code, symbol->st_size, function->records, symbol->st_size);
+        const X86DecodeResult decoded = x86_disassemble(code, symbol->st_size, function->records, symbol->st_size);
         function->count = decoded.count;
         valid = decoded.status == X86_DECODE_OK && decoded.consumed == symbol->st_size;
         if (!valid)
