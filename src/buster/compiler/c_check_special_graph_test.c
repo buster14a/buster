@@ -92,7 +92,7 @@ static void check_test_special_graph_bounds(CheckTest* test, TypeTable* table, c
     _Alignas(16) uint8_t scratch_bytes[32768];
     for (uint32_t path = 0; path < 2; path += 1)
     {
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         Arena output = { .base = output_bytes, .length = 7, .capacity = sizeof(output_bytes) - 16 };
         Arena scratch = { .base = scratch_bytes, .length = 13, .capacity = sizeof(scratch_bytes) - 16 };
         CheckStream stream;
@@ -167,7 +167,7 @@ static void check_test_special_graph_guards(CheckTest* test, TypeTable* table, A
                 graph.builtin_capacity = graph.builtin_count;
                 for (uint32_t path = 0; path < 2; path += 1)
                 {
-                    const CheckOptions options = { .scalar = path == 0 };
+                    const CheckOptions options = { 0 };
                     CheckStream stream;
                     const bool checked = check_graph_run(table, &graph, output, scratch, &options, &stream);
                     check_test_expect(test, checked && stream.report_count == (count != arities[family]) &&
@@ -213,7 +213,7 @@ static void check_test_special_graph_history(CheckTest* test, TypeTable* table, 
         }
         for (uint32_t path = 0; path < 2; path += 1)
         {
-            const CheckOptions options = { .scalar = path == 0 };
+            const CheckOptions options = { 0 };
             CheckStream stream;
             const bool accepted = check_graph_run(table, &graph, output, scratch, &options, &stream);
             check_test_expect(test, accepted && stream.report_count == 1 && stream.diagnostics[early] == CHECK_DIAG_INCOMPLETE &&
@@ -307,9 +307,9 @@ static __attribute__((noinline)) void check_test_special_graph(CheckTest* test, 
             .imaginary = 2,
         });
         const uint32_t complex_query = check_test_special_node(&graph, CHECK_OP_BUILTIN_QUERY, CBUILTIN_CONSTANT_P, &complex, 1);
-        const CheckOptions scalar = { .scalar = true };
+        const CheckOptions node_order = { 0 };
         CheckStream expected;
-        const bool checked = check_graph_run(table, &graph, &output, &scratch, &scalar, &expected);
+        const bool checked = check_graph_run(table, &graph, &output, &scratch, &node_order, &expected);
         check_test_expect(test, checked && expected.report_count == 0 && expected.misc_count == 2 && expected.floating_count == 5 &&
                                expected.query_count == 4 && expected.atomic_count == 2, "all generic builtin families retain exactly one compact descriptor per call");
         if (checked)
@@ -355,6 +355,7 @@ static __attribute__((noinline)) void check_test_special_graph(CheckTest* test, 
                                    expected.atomics[1].fence_scope == CHECK_BUILTIN_ATOMIC_FENCE_SYSTEM,
                               "atomic stores retain target bits and proved alignment while a fence has no fabricated memory value");
             const uint64_t mark = output.length;
+            check_test_expect(test, check_test_stream_recorded(&expected, &graph, graph.argument_count, "special-graphs"), "special-graphs: the reference stream is its recorded digest");
             for (uint32_t batch = 1; batch <= BUSTER_CHECK_BATCH; batch += 1)
             {
                 const CheckOptions options = { .batch_size = batch };
@@ -367,7 +368,7 @@ static __attribute__((noinline)) void check_test_special_graph(CheckTest* test, 
             }
             graph.builtin_calls[1].node = size;
             CheckStream invalid;
-            const bool accepted = check_graph_run(table, &graph, &output, &scratch, &scalar, &invalid);
+            const bool accepted = check_graph_run(table, &graph, &output, &scratch, &node_order, &invalid);
             check_test_expect(test, !accepted && invalid.status == CHECK_STATUS_INVALID_GRAPH && invalid.misc == NULL && invalid.floating == NULL &&
                                    invalid.queries == NULL && invalid.atomics == NULL && output.length == mark,
                               "duplicate or out-of-order builtin witnesses reject before output publication");

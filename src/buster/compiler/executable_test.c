@@ -3471,7 +3471,8 @@ static bool executable_test_sort(uint64_t seed)
     uint8_t* bytes = arena_push(scratch.arena, BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES + 8 * BUSTER_EXECUTABLE_TEST_SORT_MOST, 8);
     uint64_t* input = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_EXECUTABLE_TEST_SORT_MOST);
     uint64_t* reference = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, BUSTER_EXECUTABLE_TEST_SORT_MOST);
-    const bool ready = bytes != 0 && input != 0 && reference != 0;
+    uint8_t* sort_space = arena_push(scratch.arena, 8 * BUSTER_EXECUTABLE_TEST_SORT_MOST, 8);
+    const bool ready = bytes != 0 && input != 0 && reference != 0 && sort_space != 0;
     executable_test_expect(&tally, ready, "room for the tables", 0);
     uint64_t state = seed * 0x9E3779B97F4A7C15ull + 13;
     const uint32_t extra = BUSTER_ARRAY_LENGTH(executable_test_sort_counts);
@@ -3533,12 +3534,23 @@ static bool executable_test_sort(uint64_t seed)
             }
             for (uint32_t exact = 0; exact < 2; exact += 1)
             {
+                const uint64_t index = (count * BUSTER_EXECUTABLE_TEST_SORT_PATTERNS + pattern) * 2 + exact;
+                Arena room = {
+                    .base = sort_space,
+                    .capacity = !sorted || exact != 0 ? 8 * count : 0,
+                };
                 memcpy(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES, input, 8 * count);
                 bool in_order = !sorted;
-                const uint64_t mark = scratch.arena->length;
-                const bool done = executable_eh_frame_sort(bytes, count, exact != 0, scratch.arena, &in_order);
-                arena_pop_to(scratch.arena, mark);
-                const uint64_t index = (count * BUSTER_EXECUTABLE_TEST_SORT_PATTERNS + pattern) * 2 + exact;
+                if (room.capacity != 0)
+                {
+                    room.capacity -= 1;
+                    const bool refused = !executable_eh_frame_sort(bytes, count, exact != 0, &room, &in_order);
+                    executable_test_expect(&tally, refused && in_order == sorted && memcmp(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES, input, 8 * count) == 0,
+                                           "short scratch preserves the table", index);
+                    room.capacity += 1;
+                    in_order = !sorted;
+                }
+                const bool done = executable_eh_frame_sort(bytes, count, exact != 0, &room, &in_order);
                 executable_test_expect(&tally, done && in_order == sorted, "whether the table is sorted", index);
                 executable_test_expect(&tally, done && memcmp(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES, reference, 8 * count) == 0, "a stable sort's order", index);
             }

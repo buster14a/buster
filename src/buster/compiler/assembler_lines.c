@@ -31,6 +31,9 @@ static bool asm_line_tables(AsmParser* parser, uint32_t location)
         }
         else
         {
+            // Each new file can append one directory, plus slot zero once. The other half of the existing
+            // reservation holds up to four uint32_t hash slots per directory. Clear only the slots we use.
+            parser->line_directory_slots = (uint32_t*)(parser->line_directories + parser->instruction_capacity + 1);
             parser->line = (AsmLineState){ .file = 1, .line = 1, .flags = ASM_LINE_IS_STMT };
         }
     }
@@ -53,14 +56,60 @@ static bool asm_line_same(String8 a, String8 b)
     return a.length == b.length && memcmp(a.pointer, b.pointer, a.length) == 0;
 }
 
-// A directory's index in the table, or the table's count where it isn't there; its name without a trailing '/'.
-static uint32_t asm_line_find_directory(const AsmParser* parser, String8* name)
+// Positive directory numbers are appended in order. Zero is the empty hash slot.
+static uint32_t asm_line_directory_probe(const AsmParser* parser, String8 name, bool inserting)
+{
+    const uint32_t mask = parser->line_directory_mask;
+    const uint32_t* slots = parser->line_directory_slots;
+    uint32_t at = (uint32_t)link_hash((const uint8_t*)name.pointer, name.length) & mask;
+    while (slots[at] != 0 && (inserting || !asm_line_same(parser->line_directories[slots[at]], name)))
+    {
+        at = (at + 1) & mask;
+    }
+    return at;
+}
+
+static void asm_line_index_directory(AsmParser* parser, uint32_t directory, uint32_t vacant)
+{
+    if (directory >= 8)
+    {
+        if (directory > parser->line_directory_mask / 2)
+        {
+            // Directory 8 starts 32 slots, 16 starts 64, and so on. Rebuild from the ordered names in place.
+            parser->line_directory_mask = 4 * directory - 1;
+            memset(parser->line_directory_slots, 0, (uint64_t)(parser->line_directory_mask + 1) * sizeof(uint32_t));
+            for (uint32_t d = 1; d <= directory; d += 1)
+            {
+                const uint32_t at = asm_line_directory_probe(parser, parser->line_directories[d], true);
+                parser->line_directory_slots[at] = d;
+            }
+        }
+        else
+        {
+            parser->line_directory_slots[vacant] = directory;
+        }
+    }
+}
+
+// Remove one trailing slash and return the earliest directory number, or the count on a miss.
+// An indexed miss also leaves the vacant hash slot for the caller's append.
+static uint32_t asm_line_find_directory(const AsmParser* parser, String8* name, uint32_t* slot)
 {
     name->length = name->length != 0 && name->pointer[name->length - 1] == '/' ? name->length - 1 : name->length;
-    uint32_t result = parser->line_directory_count;
-    for (uint32_t d = 0; d < parser->line_directory_count && result == parser->line_directory_count; d += 1)
+    const uint32_t count = parser->line_directory_count;
+    // Slot zero can be filled by a later .file, even with an existing positive slot's spelling. Its live
+    // value always wins. Until eight positive entries exist the whole table costs only a short scan.
+    const uint32_t scan = parser->line_directory_mask != 0 ? 1 : count;
+    uint32_t result = count;
+    for (uint32_t d = 0; d < scan && result == count; d += 1)
     {
         result = parser->line_directories[d].pointer != 0 && asm_line_same(parser->line_directories[d], *name) ? d : result;
+    }
+    if (result == count && parser->line_directory_mask != 0)
+    {
+        *slot = asm_line_directory_probe(parser, *name, false);
+        const uint32_t found = parser->line_directory_slots[*slot];
+        result = found != 0 ? found : count;
     }
     return result;
 }
@@ -70,7 +119,8 @@ static uint32_t asm_line_find_directory(const AsmParser* parser, String8* name)
 static uint32_t asm_line_directory(AsmParser* parser, String8 name, String8 directory_zero, uint64_t length, bool zero)
 {
     String8 wanted = { .pointer = name.pointer, .length = length };
-    uint32_t result = asm_line_find_directory(parser, &wanted);
+    uint32_t vacant = 0;
+    uint32_t result = asm_line_find_directory(parser, &wanted, &vacant);
     if (wanted.length == 0)
     {
         result = 0;
@@ -85,7 +135,8 @@ static uint32_t asm_line_directory(AsmParser* parser, String8 name, String8 dire
             if (parser->line_dwarf5 && !asm_line_same(name, directory_zero))
             {
                 String8 compilation = directory_zero;
-                if (asm_line_find_directory(parser, &compilation) == parser->line_directory_count && compilation.length != 0)
+                uint32_t unused_slot;
+                if (asm_line_find_directory(parser, &compilation, &unused_slot) == parser->line_directory_count && compilation.length != 0)
                 {
                     parser->line_directories[0] = compilation;
                     parser->line_directory_count = parser->line_directory_count > 1 ? parser->line_directory_count : 1;
@@ -107,6 +158,7 @@ static uint32_t asm_line_directory(AsmParser* parser, String8 name, String8 dire
         }
         parser->line_directories[result] = wanted;
         parser->line_directory_count = result + 1 > parser->line_directory_count ? result + 1 : parser->line_directory_count;
+        asm_line_index_directory(parser, result, vacant);
     }
     return result;
 }

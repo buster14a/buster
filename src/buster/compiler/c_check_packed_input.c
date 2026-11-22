@@ -120,7 +120,7 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
 
 static uint32_t check_input_packed_selection(const CheckInputReader* reader, uint32_t token)
 {
-    const uint32_t selected = reader->selected_tokens[token];
+    const uint32_t selected = check_input_selection_at(reader, token);
     return selected != BUSTER_CHECK_NONE ? selected & ~CHECK_INPUT_SOURCE_SELECTION : BUSTER_CHECK_NONE;
 }
 
@@ -271,7 +271,7 @@ static String8 check_input_packed_name(CheckInputReader* reader, uint32_t tag, b
                 contexts[i] = contexts[depth - 1 - i];
                 contexts[depth - 1 - i] = temporary;
             }
-            const uint32_t source = parser->tokens.sources[token];
+            const uint32_t source = parse_source_index(&parser->tokens, token);
             pp_history_ensure(reader->pp);
             const uint32_t location = pp_expansion_location(reader->pp, source, pp_history_at(reader->pp, source));
             const char* file = "";

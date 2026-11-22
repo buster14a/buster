@@ -65,12 +65,11 @@ static void check_test_overload_index(CheckTest* test, TypeTable* table)
             uint64_t signature = 0;
             ready &= check_overload_signature_hash(&index, table, candidate.type, &arena, &signature);
             const uint64_t key = check_overload_index_key(signature, 1, 1);
-            const uint32_t slot = check_overload_index_find(&index, key, 1, 1, false);
-            const uint32_t scalar_slot = check_overload_index_find(&index, key, 1, 1, true);
+            const uint32_t slot = check_overload_index_find(&index, key, 1, 1);
             const uint32_t head = check_overload_index_head(&index, slot);
             const CheckOverloadResult oracle = check_overload_declare(table, candidates, i, candidate.previous, &candidate, &context);
             const CheckOverloadResult result = check_overload_declare_chain(table, candidates, i, head, &candidate, &context, index.lexical_next, index.checked, UINT32_MAX);
-            ready &= slot != UINT32_MAX && slot == scalar_slot && result.status == oracle.status && result.candidate == oracle.candidate &&
+            ready &= slot != UINT32_MAX && result.status == oracle.status && result.candidate == oracle.candidate &&
                      result.canonical == oracle.canonical && result.object == oracle.object && result.flags == oracle.flags;
             if (ready)
             {
@@ -161,19 +160,17 @@ static void check_test_overload_index(CheckTest* test, TypeTable* table)
         for (uint32_t i = 0; i < index.capacity; i += 1)
         {
             const uint64_t key = (uint64_t)(i + 1) * index.capacity | 1;
-            const uint32_t vector = check_overload_index_find(&index, key, 2, i, false);
-            const uint32_t scalar = check_overload_index_find(&index, key, 2, i, true);
-            probes &= vector == i && scalar == vector;
-            check_overload_index_publish(&index, vector, key, 2, i, i);
+            const uint32_t slot = check_overload_index_find(&index, key, 2, i);
+            probes &= slot == i;
+            check_overload_index_publish(&index, slot, key, 2, i, i);
         }
-        probes &= check_overload_index_find(&index, 1, 3, 99, false) == UINT32_MAX &&
-                  check_overload_index_find(&index, 1, 3, 99, true) == UINT32_MAX;
+        probes &= check_overload_index_find(&index, 1, 3, 99) == UINT32_MAX;
         for (uint32_t i = 0; i < index.capacity; i += 1)
         {
             const uint64_t key = (uint64_t)(i + 1) * index.capacity | 1;
-            probes &= check_overload_index_find(&index, key, 2, i, false) == i && check_overload_index_find(&index, key, 2, i, true) == i;
+            probes &= check_overload_index_find(&index, key, 2, i) == i;
         }
-        check_test_expect(test, probes, "scalar/vector signature probes agree on collisions, distinct scopes and a full table");
+        check_test_expect(test, probes, "signature probes find their slots on collisions, distinct scopes and a full table");
         index.keys = saved_keys;
         if (pages != MAP_FAILED)
         {

@@ -204,21 +204,53 @@ static const IrInterpreterSymbol* ir_interpreter_symbol(const IrInterpreterProgr
     return entry;
 }
 
-// A function's `checked` byte in a run: 0 until its first frame verifies it, then BUSTER_IR_INTERPRETER_VERIFIED, with
-// BUSTER_IR_INTERPRETER_SIMD where it has vectors (ir_function_has_simd), which its frames need and which its IR, not
-// changing while it runs, has at every call.
-#define BUSTER_IR_INTERPRETER_VERIFIED 1u
-#define BUSTER_IR_INTERPRETER_SIMD 2u
-
-// `function`'s verification, the program's function `index`: its first ir_verify_complete in the run, which `checked`
-// keeps with what else its frames need (BUSTER_IR_INTERPRETER_SIMD), or a success at a later call (#134 runs C programs'
-// recursions).
-static IrCheck ir_interpreter_verified(const IrFunction* function, uint32_t index, uint8_t* checked, Arena* arena)
+// A function's immutable frame requirements, found at its first verification in a run and reused on recursive calls.
+typedef struct IrInterpreterLayout IrInterpreterLayout;
+struct IrInterpreterLayout
 {
-    const IrCheck verified = checked[index] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(function, arena);
-    if (checked[index] == 0 && verified.error == IR_OK)
+    uint32_t max_phis;
+    bool verified;
+    bool simd;
+};
+
+// In verified IR every phi belongs to a non-entry block's prefix, and every block ends in a terminator. Only a
+// block with a phi at the current maximum can raise it. Find its first non-phi in the remaining sorted range.
+static uint32_t ir_interpreter_max_phis(const IrFunction* function)
+{
+    uint32_t max_phis = 0;
+    for (uint32_t b = 1; b < function->block_count; b += 1)
     {
-        checked[index] = (uint8_t)(BUSTER_IR_INTERPRETER_VERIFIED | (ir_function_has_simd(function) ? BUSTER_IR_INTERPRETER_SIMD : 0));
+        const uint32_t begin = function->block_offsets[b];
+        uint32_t end = function->block_offsets[b + 1] - 1;
+        if (max_phis < end - begin && function->op[begin + max_phis] == IR_PHI)
+        {
+            uint32_t first = begin + max_phis + 1;
+            while (first < end)
+            {
+                const uint32_t mid = first + (end - first) / 2;
+                if (function->op[mid] == IR_PHI)
+                {
+                    first = mid + 1;
+                }
+                else
+                {
+                    end = mid;
+                }
+            }
+            max_phis = first - begin;
+        }
+    }
+    return max_phis;
+}
+
+static IrCheck ir_interpreter_verified(const IrFunction* function, IrInterpreterLayout* layout, Arena* arena)
+{
+    const IrCheck verified = layout->verified ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(function, arena);
+    if (!layout->verified && verified.error == IR_OK)
+    {
+        layout->max_phis = ir_interpreter_max_phis(function);
+        layout->simd = ir_function_has_simd(function);
+        layout->verified = true;
     }
     return verified;
 }
@@ -318,9 +350,7 @@ static InterpreterStatus ir_interpreter_anchors(const IrInterpreterIncoming* inc
     return status;
 }
 
-// `checked` marks the program's functions verified so far in this execution: a function's IR doesn't change while it
-// runs, so each is verified once, at its first frame, rather than at every call (ir_interpreter_verified).
-static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const IrInterpreterProgram* program, uint32_t function_index, const InterpreterValue* arguments, uint32_t count, const IrInterpreterIncoming* incoming, uint32_t destination, uint32_t owner, const InterpreterOptions* options, uint64_t active_values, uint64_t active_locals, InterpreterRuntime* runtime, uint8_t* checked, Arena* arena)
+static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const IrInterpreterProgram* program, uint32_t function_index, const InterpreterValue* arguments, uint32_t count, const IrInterpreterIncoming* incoming, uint32_t destination, uint32_t owner, const InterpreterOptions* options, uint64_t active_values, uint64_t active_locals, InterpreterRuntime* runtime, IrInterpreterLayout* layout, Arena* arena)
 {
     const IrFunction* function = program->functions[function_index].function;
     const uint64_t mark = arena->length;
@@ -328,9 +358,9 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     IrCheck verified = { .error = IR_ERROR_STRUCTURE };
     if (function != 0)
     {
-        verified = ir_interpreter_verified(function, function_index, checked, arena);
+        verified = ir_interpreter_verified(function, layout, arena);
     }
-    const bool simd = verified.error == IR_OK && (checked[function_index] & BUSTER_IR_INTERPRETER_SIMD) != 0;
+    const bool simd = verified.error == IR_OK && layout->simd;
     if (verified.error == IR_ERROR_MEMORY)
     {
         status = INTERPRETER_RESOURCE;
@@ -371,18 +401,20 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         frame->dynamic.allocation = 0;
         frame->dynamic.saved = 0;
         frame->dynamic.position = 0;
-        frame->values = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, (uint64_t)function->instruction_count + 1);
-        frame->defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)function->instruction_count + 1);
+        // The tail of each frame-owned column holds one block's snapshots, separate from every live instruction.
+        const uint64_t values = (uint64_t)function->instruction_count + 1;
+        frame->values = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, values + layout->max_phis);
+        frame->defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, values + layout->max_phis);
         frame->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, (uint64_t)count + 1);
         frame->slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)function->slot_count + 1);
-        frame->phi_values = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, (uint64_t)function->instruction_count + 1);
-        frame->phi_defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)function->instruction_count + 1);
-        if (frame->values == 0 || frame->defined == 0 || frame->arguments == 0 || frame->slots == 0 || frame->phi_values == 0 || frame->phi_defined == 0)
+        if (frame->values == 0 || frame->defined == 0 || frame->arguments == 0 || frame->slots == 0)
         {
             status = INTERPRETER_RESOURCE;
         }
         else
         {
+            frame->phi_values = frame->values + values;
+            frame->phi_defined = frame->defined + values;
             // The values and their defined bytes start as the arena left them: the verifier proved every reachable use
             // dominated by its definition, so a frame reads only the values it wrote, and ir_interpret reads an
             // instruction's a and b only where ir_value_mask says they are values. Clearing them cost every call
@@ -668,13 +700,13 @@ static inline __attribute__((always_inline)) InterpreterStatus ir_interpreter_en
             {
                 // A value's two words, each by itself: a sanitizer's build makes a copy of the whole 16-byte value,
                 // memory to memory, a call into its runtime at every phi (#2758).
-                frame->phi_values[phi_end].low = frame->values[source].low;
-                frame->phi_values[phi_end].high = frame->values[source].high;
+                frame->phi_values[phi_end - begin].low = frame->values[source].low;
+                frame->phi_values[phi_end - begin].high = frame->values[source].high;
                 if (ir_vector_type(function->type[phi_end]))
                 {
                     frame->vector_phis[vector_phi++] = frame->vector_values[frame->vector_indices[source]];
                 }
-                frame->phi_defined[phi_end] = frame->defined[source];
+                frame->phi_defined[phi_end - begin] = frame->defined[source];
             }
             phi_end += 1;
         }
@@ -684,13 +716,13 @@ static inline __attribute__((always_inline)) InterpreterStatus ir_interpreter_en
         vector_phi = 0;
         for (uint32_t p = begin; p < phi_end; p += 1)
         {
-            frame->values[p].low = frame->phi_values[p].low;
-            frame->values[p].high = frame->phi_values[p].high;
+            frame->values[p].low = frame->phi_values[p - begin].low;
+            frame->values[p].high = frame->phi_values[p - begin].high;
             if (ir_vector_type(function->type[p]))
             {
                 frame->vector_values[frame->vector_indices[p]] = frame->vector_phis[vector_phi++];
             }
-            frame->defined[p] = frame->phi_defined[p];
+            frame->defined[p] = frame->phi_defined[p - begin];
         }
         frame->block = block;
         frame->instruction = phi_end;
@@ -1062,7 +1094,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
     const InterpreterOptions* options = requested_options == 0 ? &defaults : requested_options;
     const uint64_t mark = arena->length;
     IrInterpreterFrame* frames = 0;
-    uint8_t* checked = 0;
+    IrInterpreterLayout* layouts = 0;
     IrInterpreterSymbol* symbols = 0;
     InterpreterRuntime runtime = {
         .memory_capacity = options->max_memories,
@@ -1076,14 +1108,14 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
     {
         frames = BUSTER_ARENA_PUSH_ARRAY(arena, IrInterpreterFrame, options->max_frames);
         runtime.memories = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterMemory, options->max_memories);
-        checked = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)program->function_count + 1);
+        layouts = BUSTER_ARENA_PUSH_ARRAY(arena, IrInterpreterLayout, program->function_count);
         symbols = BUSTER_ARENA_PUSH_ARRAY(arena, IrInterpreterSymbol, UINT64_C(1) << BUSTER_IR_INTERPRETER_SYMBOLS_LOG2);
         result.status = options->max_frames == 0 || options->max_frames == UINT32_MAX ? INTERPRETER_FRAME_LIMIT
-                        : frames == 0 || runtime.memories == 0 || checked == 0 || symbols == 0 ? INTERPRETER_RESOURCE
+                        : frames == 0 || runtime.memories == 0 || layouts == 0 || symbols == 0 ? INTERPRETER_RESOURCE
                                                                                                 : INTERPRETER_OK;
-        if (checked != 0)
+        if (layouts != 0)
         {
-            memset(checked, 0, (uint64_t)program->function_count + 1);
+            memset(layouts, 0, (uint64_t)program->function_count * sizeof(*layouts));
         }
         if (symbols != 0)
         {
@@ -1112,7 +1144,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             // An entry has no call whose records would place its aggregates (#131).
             const IrFunction* function = program->functions[first].function;
             result.status = function != 0 && function->parameter_passed != 0 ? INTERPRETER_INVALID
-                                                                             : ir_interpreter_frame(&frames[0], program, first, arguments, argument_count, 0, BUSTER_IR_NONE, 1, options, 0, 0, &runtime, checked, arena);
+                                                                             : ir_interpreter_frame(&frames[0], program, first, arguments, argument_count, 0, BUSTER_IR_NONE, 1, options, 0, 0, &runtime, &layouts[first], arena);
             if (result.status == INTERPRETER_OK)
             {
                 depth = 1;
@@ -1272,9 +1304,19 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 }
                 case IR_FMA:
                 {
-                    // A fused multiply-add (#1840): one rounding, the first NaN of a, b and c (ir_fma_bits).
-                    const uint64_t third = c < function->instruction_count ? frame->values[c].low : 0;
-                    value.low = ir_fma_bits(type, av.low, bv.low, third);
+                    // A vector's lanes (#2806) are the model's; a scalar is one rounding, the first NaN of a, b and c.
+                    if (ir_vector_type(type))
+                    {
+                        IrSimdValue lanes = { 0 };
+                        status = ir_interpreter_simd_operation(frame, i, &lanes);
+                        wide_value = lanes;
+                        value.low = lanes.words[0];
+                    }
+                    else
+                    {
+                        const uint64_t third = c < function->instruction_count ? frame->values[c].low : 0;
+                        value.low = ir_fma_bits(type, av.low, bv.low, third);
+                    }
                     break;
                 }
                 case IR_STACK_ADDR:
@@ -1584,7 +1626,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         IrCheck target_check = { .error = IR_ERROR_STRUCTURE };
                         if (target != 0)
                         {
-                            target_check = ir_interpreter_verified(target, callee, checked, arena);
+                            target_check = ir_interpreter_verified(target, &layouts[callee], arena);
                         }
                         if (target_check.error == IR_ERROR_MEMORY)
                         {
@@ -1605,7 +1647,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         if (status == INTERPRETER_OK)
                         {
                             status = ir_interpreter_frame(&frames[depth], program, callee, parameters, target->parameter_count, target->variadic ? &incoming : 0, i, depth + 1, options,
-                                                                 active_values, active_locals, &runtime, checked, arena);
+                                                                 active_values, active_locals, &runtime, &layouts[callee], arena);
                             if (status == INTERPRETER_OK)
                             {
                                 // The new frame owns its copied arguments and the staging storage preceding them.

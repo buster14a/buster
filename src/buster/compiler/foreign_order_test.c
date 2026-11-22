@@ -77,7 +77,9 @@ static void foreign_order_test_kernel(ForeignTestTally* tally, Arena* arena)
         Scratch scratch = scratch_begin(arena);
         uint64_t* original = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count + 1);
         uint64_t* expected = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count + 1);
-        for (uint32_t shape = 0; guarded && original != 0 && expected != 0 && shape < 3; shape += 1)
+        // The interleaved tie cases reach 17 keys in each class.
+        const uint32_t shapes = count <= 34 ? 6 : 3;
+        for (uint32_t shape = 0; guarded && original != 0 && expected != 0 && shape < shapes; shape += 1)
         {
             for (uint32_t path = 0; path < 2; path += 1)
             {
@@ -88,8 +90,16 @@ static void foreign_order_test_kernel(ForeignTestTally* tally, Arena* arena)
                 uint32_t every = UINT32_MAX;
                 for (uint32_t i = 0; i < count; i += 1)
                 {
-                    const uint32_t ordinal = shape == 0 ? i : shape == 1 ? UINT32_MAX - 2 - i : 0x80000000u + i * 65537u;
-                    original[i] = ((uint64_t)(i % 5 == 0) << 32) | ((uint64_t)ordinal + 1);
+                    uint32_t library = i % 5 == 0;
+                    uint32_t ordinal = shape == 0 ? i : shape == 1 ? UINT32_MAX - 2 - i : 0x80000000u + i * 65537u;
+                    if (shape >= 3)
+                    {
+                        // Stable ties across the 16-key boundary, in one class alone or both interleaved.
+                        // Three varying bytes in the regular class, two in the library class.
+                        library = shape == 3 ? 0 : shape == 4 ? 1 : i % 2;
+                        ordinal = (i / 2 % 3) * (library == 0 ? 0x01000101u : 0x00010100u);
+                    }
+                    original[i] = ((uint64_t)library << 32) | ((uint64_t)ordinal + 1);
                     names.order[i] = original[i];
                     keys[i] = ((uint64_t)ordinal << 32) | i;
                     expected[i] = keys[i];
@@ -130,7 +140,7 @@ static void foreign_order_test_kernel(ForeignTestTally* tally, Arena* arena)
                 {
                     ordered = (uint32_t)names.order[i] == expected[i] && (uint32_t)(names.order[i] >> 32) == (uint32_t)original[expected[i]] - 1;
                 }
-                foreign_test_expect(tally, ordered, "regular and library-only classes retain every high ordinal bit", 0);
+                foreign_test_expect(tally, ordered, "each class matches the stable first-record order with full-width ordinals", 0);
             }
         }
         foreign_test_expect(tally, original != 0 && expected != 0, "allocate independent order oracles", 0);
@@ -139,18 +149,33 @@ static void foreign_order_test_kernel(ForeignTestTally* tally, Arena* arena)
         foreign_test_edge_release(&sort_edge);
         foreign_test_edge_release(&temporary_edge);
     }
-    for (uint32_t room = 0; room < 2; room += 1)
+    for (uint32_t path = 0; path < 2; path += 1)
     {
+        const ForeignPath mode = path == 0 ? FOREIGN_PATH_EXACT : FOREIGN_PATH_VECTOR;
         uint64_t original[] = { 4, 1, (1ull << 32) | 2, 3 };
+        const uint64_t expected[] = { 1, (2ull << 32) | 3, 3ull << 32, (1ull << 32) | 2 };
         uint64_t order[BUSTER_ARRAY_LENGTH(original)];
-        _Alignas(uint64_t) uint8_t storage[40];
-        memcpy(order, original, sizeof(order));
+        uint64_t storage[BUSTER_ARRAY_LENGTH(original) + 1];
         const Arena saved = thread_context.scratch[0];
-        thread_context.scratch[0] = (Arena){ .base = storage, .capacity = room == 0 ? 8 : sizeof(storage) };
         ForeignNames names = { .order = order, .count = BUSTER_ARRAY_LENGTH(order) };
-        const bool refused = !foreign_name_order(&names, arena, FOREIGN_PATH_VECTOR) && memcmp(order, original, sizeof(order)) == 0 && thread_context.scratch[0].length == 0;
+        for (uint32_t room = 0; room < 2; room += 1)
+        {
+            memcpy(order, original, sizeof(order));
+            thread_context.scratch[0] = (Arena){ .base = (uint8_t*)storage, .capacity = sizeof(storage) - 1 + room };
+            const bool published = foreign_name_order(&names, arena, mode);
+            foreign_test_expect(tally, published == (room != 0) && memcmp(order, room == 0 ? original : expected, sizeof(order)) == 0 &&
+                                thread_context.scratch[0].length == 0, "one scratch column fits exactly and one byte short preserves the raw order", 0);
+        }
+        const uint64_t invalid[] = { 0, 1ull << 32, (2ull << 32) | 1, UINT64_MAX };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
+        {
+            original[3] = invalid[i];
+            memcpy(order, original, sizeof(order));
+            const bool refused = !foreign_name_order(&names, arena, mode);
+            foreign_test_expect(tally, refused && memcmp(order, original, sizeof(order)) == 0 && thread_context.scratch[0].length == 0,
+                                "a bad last key leaves all first-record keys available", 0);
+        }
         thread_context.scratch[0] = saved;
-        foreign_test_expect(tally, refused, "each sort allocation refuses without publishing a partial order", 0);
     }
 }
 

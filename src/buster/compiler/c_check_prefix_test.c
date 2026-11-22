@@ -249,7 +249,7 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
                 snprintf(description, sizeof(description), "%s: prefix and fresh parse match kinds/names/roles/parents/depths/order/sizes: %u%u%u%u%u%u%u",
                          fixture->name, same[0], same[1], same[2], same[3], same[4], same[5], same[6]);
                 check_test_expect(test, same[0] && same[1] && same[2] && same[3] && same[4] && same[5] && same[6], description);
-                check_test_expect(test, memcmp(view->tokens.sources, parser.tokens.sources, (uint64_t)count * sizeof(uint32_t)) == 0 &&
+                check_test_expect(test, parse_sources_equal(&view->tokens, &parser.tokens, count) &&
                                       memcmp(view->tokens.flags, parser.tokens.flags, count) == 0,
                                   "prefix preserves source indices and token flags");
                 bool padded = true;
@@ -259,7 +259,7 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
                     for (uint32_t side = 0; side < 2; side += 1)
                     {
                         const int64_t token = indices[side];
-                        padded &= view->tokens.kinds[token] == PARSE_KIND_END && view->tokens.names[token] == 0 && view->tokens.sources[token] == 0 &&
+                        padded &= view->tokens.kinds[token] == PARSE_KIND_END && view->tokens.names[token] == 0 && parse_source_index(&view->tokens, token) == 0 &&
                                   view->tokens.flags[token] == 0 && view->tree.roles[token] == 0 && view->tree.parents[token] == 0 &&
                                   view->tree.depths[token] == 0 && view->postorder[token] == 0 && view->sizes[token] == 0;
                     }
@@ -275,7 +275,7 @@ static void check_test_prefix_fixture(CheckTest* test, const CheckPrefixFixture*
                 }
                 if (adapted || input.diagnostic_graph)
                 {
-                    const CheckOptions check_options = { .scalar = path_index == 0 };
+                    const CheckOptions check_options = { 0 };
                     CheckStream stream;
                     const bool checked = check_graph_run(&types.table, &input.graph, &values, &scratch, &check_options, &stream) &&
                                          check_input_packed_finalize(&input, view, &types.table, &stream, &scratch);

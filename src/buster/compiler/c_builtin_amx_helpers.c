@@ -25,10 +25,13 @@ static CBuiltinX86Helper cbuiltin_amx_helper(const CBuiltinX86HelperInfo* info, 
     records[count++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RSP, .rm = X86_REGISTER_RBP };
     records[count++] = (X86Instruction){ .form = X86_FORM_SUB_RM64_IMM8, .rm = X86_REGISTER_RSP, .immediate = 64 };
     records[count++] = (X86Instruction){ .form = X86_FORM_AND_RM64_IMM8, .rm = X86_REGISTER_RSP, .immediate = -64 };
-    records[count++] = (X86Instruction){ .form = X86_FORM_XOR_RM32_R32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX };
-    for (uint32_t offset = 0; offset < 64; offset += 8)
+    // All arguments are in GPRs or on the stack. The row helpers require AVX-512F, so VEX.128 VXORPS can
+    // clear all of zmm0 for one store. The other helpers use baseline SSE.
+    records[count++] = (X86Instruction){ .form = row ? X86_FORM_VXORPS_X_X_XM128 : X86_FORM_XORPS_X_XM128, .reg = 0, .rm = 0, .vvvv = 0 };
+    const uint32_t clear_bytes = row ? 64 : 16;
+    for (uint32_t offset = 0; offset < 64; offset += clear_bytes)
     {
-        records[count++] = (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP,
+        records[count++] = (X86Instruction){ .form = row ? X86_FORM_VMOVDQU64_ZM512_Z : X86_FORM_MOVUPS_XM_X, .rm = X86_REGISTER_RSP,
                                             .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)offset };
     }
     records[count++] = (X86Instruction){ .form = X86_FORM_MOV_RM8_IMM8, .rm = X86_REGISTER_RSP,

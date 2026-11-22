@@ -136,6 +136,9 @@ struct EmittedCode
     // An assembly template's code (a naked function's, an asm statement's helper's): its frame events, if any, are the
     // frame the compiler built around the templates, whose own instructions the verifier doesn't read.
     bool assembly;
+    // A Tier 0 body whose frame is the fixed shape alone (emitted_tier0_frame_direct): it has no frame events, and its
+    // unwind descriptor is made from its Tier0Code at its final offsets (unwind_tier0_frame_tails), once it is encoded.
+    bool frame_direct;
     // The producer's failure (Tier 0's Tier0Error, which the emission reports; 0 for none) and its node.
     uint32_t error;
     uint32_t node;
@@ -323,53 +326,74 @@ static uint32_t emitted_tier0_eh_rows(const Tier0Code* code, EmissionFrameRow* r
 // the rows' count.
 static uint32_t emitted_tier0_preserve_rows(const Tier0Code* code, EmissionFrameRow* rows, uint32_t count)
 {
-    // DWARF's numbers of the general registers, by the encoder's; of xmm0 to xmm15, xmm16 to xmm31 and k0 to k7 from these.
-    static const uint8_t dwarf[16] = { 0, 2, 1, 3, 7, 6, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15 };
     const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
-    const uint32_t kept = (uint32_t)__builtin_popcount(code->frame_preserved);
+    const uint32_t preserved = code->frame_preserved;
+    const uint32_t kept = (uint32_t)__builtin_popcount(preserved);
     const uint32_t vectors = code->frame_preserve_vectors;
-    const uint32_t block = tier0_preserve_block_bytes(vectors, code->frame_preserve_vector_bytes, code->frame_preserve_mask_bytes);
-    const uint32_t moves = block != 0 ? tier0_preserve_moves(vectors, code->frame_preserve_mask_bytes) : 0;
+    const uint32_t vector_bytes = code->frame_preserve_vector_bytes;
+    const uint32_t mask_bytes = code->frame_preserve_mask_bytes;
+    const uint32_t block = tier0_preserve_block_bytes(vectors, vector_bytes, mask_bytes);
+    const uint32_t moves = block != 0 ? tier0_preserve_moves(vectors, mask_bytes) : 0;
+    const uint32_t registers = kept + moves;
     // Record boundaries (emitted_from_tier0's rows are before branch sizing). The epilogue: the block's loads, the release,
     // the kept registers' pops, the callee-saved ones', rbp's and the ret (an interrupt service routine's iretq, after its
     // add over the error code where it has one).
     const uint32_t release = code->count - 3 - pushes - kept - (code->frame_interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1u : 0u);
+    // unwind_tier0_frame_tails accepted a closed pointer frame without tails. Its fixed prologue has rbp's three
+    // rules and one per callee-saved push, all after entry and before the first preserved save. Its remaining rules
+    // follow the last preserved restore. Move these two runs back to front, keeping ties within each in order.
+    const uint32_t prologue = 3 + pushes;
+    EmissionFrameRow* saves = rows + registers + prologue;
+    EmissionFrameRow* restores = saves + registers;
+    memmove(restores + registers, rows + prologue, (count - prologue) * sizeof(*rows));
+    memmove(rows + registers, rows, prologue * sizeof(*rows));
+
     uint32_t pushed = 0;
-    for (uint32_t r = 0; r < 16; r += 1)
+    for (uint32_t bits = preserved; bits != 0; bits &= bits - 1)
     {
-        if ((code->frame_preserved & (1u << r)) != 0)
-        {
-            const uint32_t saved = 2 + pushes + pushed + 1;
-            const uint32_t popped = release + 1 + kept - pushed;
-            const int32_t offset = -(int32_t)(16 + 8 * (pushes + pushed + 1));
-            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = 0, .reg = dwarf[r], .kind = EMISSION_FRAME_SAME_VALUE });
-            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = saved, .value = offset, .reg = dwarf[r], .kind = EMISSION_FRAME_OFFSET });
-            count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = popped, .reg = dwarf[r], .kind = EMISSION_FRAME_SAME_VALUE });
-            pushed += 1;
-        }
+        const uint16_t reg = emission_x86_registers[__builtin_ctz(bits)];
+        const uint32_t saved = 2 + pushes + pushed + 1;
+        const uint32_t popped = release + 1 + kept - pushed;
+        const int32_t offset = -(int32_t)(16 + 8 * (pushes + pushed + 1));
+        rows[pushed] = (EmissionFrameRow){ .reg = reg, .kind = EMISSION_FRAME_SAME_VALUE };
+        saves[pushed] = (EmissionFrameRow){ .offset = saved, .value = offset, .reg = reg, .kind = EMISSION_FRAME_OFFSET };
+        restores[registers - 1 - pushed] = (EmissionFrameRow){ .offset = popped, .reg = reg, .kind = EMISSION_FRAME_SAME_VALUE };
+        pushed += 1;
     }
     // The block's slots from the CFA, past rbp's push and the others; its stores after its sub.
     int32_t slot = -(int32_t)(16 + 8 * (pushes + kept) + block);
+    uint32_t remaining = vectors;
+    const uint32_t vector_count = (uint32_t)__builtin_popcount(vectors);
     for (uint32_t k = 0; k < moves; k += 1)
     {
-        // The k-th saved register: a vector register in the numbers' order, then the mask registers.
-        const uint32_t vector_count = (uint32_t)__builtin_popcount(vectors);
-        uint32_t reg = 0;
-        uint32_t seen = 0;
-        for (uint32_t r = 0; k < vector_count && r < 32; r += 1)
+        const bool vector = k < vector_count;
+        uint16_t reg;
+        if (vector)
         {
-            reg = (vectors & (1u << r)) != 0 && seen == k ? (r < 16 ? 17 + r : 67 + (r - 16)) : reg;
-            seen += (vectors & (1u << r)) != 0 ? 1 : 0;
+            const uint32_t r = (uint32_t)__builtin_ctz(remaining);
+            reg = (uint16_t)(r < 16 ? 17 + r : 67 + (r - 16));
+            remaining &= remaining - 1;
         }
-        reg = k < vector_count ? reg : 118 + (k - vector_count);
+        else
+        {
+            reg = (uint16_t)(118 + k - vector_count);
+        }
         const uint32_t stored = 2 + pushes + kept + 1 + k + 1;
         const uint32_t loaded = release - moves + k + 1;
-        count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = 0, .reg = (uint16_t)reg, .kind = EMISSION_FRAME_SAME_VALUE });
-        count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = stored, .value = slot, .reg = (uint16_t)reg, .kind = EMISSION_FRAME_OFFSET });
-        count = emitted_insert_row(rows, count, (EmissionFrameRow){ .offset = loaded, .reg = (uint16_t)reg, .kind = EMISSION_FRAME_SAME_VALUE });
-        slot += k < vector_count ? (int32_t)code->frame_preserve_vector_bytes : 8;
+        rows[kept + k] = (EmissionFrameRow){ .reg = reg, .kind = EMISSION_FRAME_SAME_VALUE };
+        saves[kept + k] = (EmissionFrameRow){ .offset = stored, .value = slot, .reg = reg, .kind = EMISSION_FRAME_OFFSET };
+        restores[k] = (EmissionFrameRow){ .offset = loaded, .reg = reg, .kind = EMISSION_FRAME_SAME_VALUE };
+        slot += vector ? (int32_t)vector_bytes : 8;
     }
-    return count;
+    return count + 3 * registers;
+}
+
+// Whether a Tier 0 frame's probed reservation (#177) has a loop, whose CFA is in r11 (emitted_tier0_probe_rows): a frame
+// without a frame pointer that probes whole pages.
+static bool emitted_tier0_probe_loop(const Tier0Code* code)
+{
+    const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
+    return !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
 }
 
 // A probed reservation's loop without a frame pointer (#177, tier0_emit_probed_reservation): its CFA in r11 from the end
@@ -381,7 +405,7 @@ static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow
 {
     const uint32_t pushes = (uint32_t)__builtin_popcount(code->frame_saved);
     const uint32_t pages = code->frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1);
-    const bool loop = !code->frame_pointer && pages != 0 && tier0_probes_reservation(code->frame_probe, code->frame_size, code->frame_alignment_log2, false);
+    const bool loop = emitted_tier0_probe_loop(code);
     uint32_t result = count;
     if (loop && count + 2 <= room)
     {
@@ -400,6 +424,17 @@ static uint32_t emitted_tier0_probe_rows(const Tier0Code* code, EmissionFrameRow
         result = count + 2;
     }
     return loop && count + 2 > room ? UINT32_MAX : result;
+}
+
+// Whether a Tier 0 body's unwind descriptor can be its frame's fixed shape at its final offsets, with no frame events
+// (EmittedCode.frame_direct): pushes, a reservation, a frame pointer and a realignment, each transition the end of its
+// prologue's or epilogue's record (unwind_tier0_frame_tails), and none of what emitted_from_tier0 adds rows to that
+// shape for: a probed reservation's loop, preserved registers (every interrupt service routine's frame has some) or
+// tail calls' teardowns, an eh_return function's among them (the lowering makes __builtin_eh_return a tail call). Tier
+// 0's frames are never open (Tier 1's are).
+static __attribute__((unused)) bool emitted_tier0_frame_direct(const Tier0Code* code)
+{
+    return !emitted_tier0_probe_loop(code) && emitted_tier0_preserved(code) == 0 && code->tail_count == 0;
 }
 
 // Tier 0's code as the emission takes it: its records, columns, references and labels as they are; with `sources` its

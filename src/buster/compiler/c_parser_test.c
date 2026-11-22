@@ -1808,7 +1808,7 @@ static void parse_test_print_context(const Parser* parser, Preprocessor* pp, uin
     const uint32_t end = token + 12 < parser->tokens.count ? token + 12 : parser->tokens.count;
     for (uint32_t i = begin; i < end && length < sizeof(text) - 64; i += 1)
     {
-        const uint32_t start = pp->output.locations[parser->tokens.sources[i]];
+        const uint32_t start = pp->output.locations[parse_source_index(&parser->tokens, i)];
         const uint32_t stop = parse_token_end(parser, pp, i);
         const uint8_t* bytes = pp_location_bytes(pp, start);
         const uint32_t size = bytes != 0 && stop > start ? (stop - start < 40 ? stop - start : 40) : 0;
@@ -2227,7 +2227,11 @@ static uint64_t parse_test_vector_digest(Parser* parser, Preprocessor* pp, Parse
         if (!result.everything)
         {
             const uint64_t words = (uint64_t)count * sizeof(uint32_t);
-            digest = pp_kernel_fold(digest, kernels.depths, words);
+            for (uint32_t i = 0; i < count; ++i)
+            {
+                const uint32_t depth = parse_bracket_depth(&kernels, i);
+                digest = pp_kernel_fold(digest, &depth, sizeof(depth));
+            }
             digest = pp_kernel_fold(digest, kernels.enclosing, words);
             for (uint32_t block = 0; block < count; block += 64)
             {
@@ -2305,9 +2309,22 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
         kernels->unsupported = false;
         parse_kernels_predeclared(kernels, parser->predeclared, true);
         // K1 on ( [ {, and K3: the typedef pass, then the classification.
-        kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->depths, kernels->enclosing, buffers.open_stack, kernels->bracket_blocks);
+        kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->enclosing, buffers.open_stack, kernels->bracket_blocks);
         if (!kernels->unbalanced)
         {
+            // K1's compressed carry must give each token its scalar absolute depth, including
+            // deep groups across block boundaries. Its live rows are the input to K2 and K3.
+            int32_t depth = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                if (parse_bracket_depth(kernels, token) != (uint32_t)depth)
+                {
+                    parse_test_report("%s: K1 depth at token %u differs from the scalar prefix\n", name, token);
+                    result += 1;
+                    break;
+                }
+                depth += parse_kind_deltas[kinds[token]];
+            }
             parse_typedefs(kernels, kinds, names, count);
         }
         parse_classify_mask_avx512(kernels, kinds, names, count);
@@ -2330,6 +2347,11 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
         // K4 as the vector path runs it, then with windows of fewer lanes and through its deep fallback.
         parse_parents_vector(kernels, count, &buffers);
         const bool deep = !kernels->unbalanced && parse_deepest(kernels, count) > BUSTER_PARSE_MAX_VECTOR_DEPTH;
+        if (!kernels->unbalanced && kernels->deep_node_depths != deep)
+        {
+            parse_test_report("%s: K1's depth bound disagrees with the full node-depth column\n", name);
+            result += 1;
+        }
         tally->deep_units += deep;
         if (!kernels->unbalanced && !deep)
         {
@@ -2379,12 +2401,16 @@ static uint32_t parse_test_check_kernels(Parser* parser, Preprocessor* pp, const
         // K6 leave some of what it reads unwritten (#528), and the vector path doesn't run it.
         const bool everything = kernels->unbalanced || kernels->unsupported || !settled;
         memcpy(copies.check_input, kernels->flags, count);
-        static const uint32_t periods[] = { 0, 2, 3 };
+        // Compare the ordinary K4 key path with a complete full-depth K6 pass and then with the forced block fallbacks.
+        const ParseBlockWork* depth_work = kernels->depth_work;
+        static const uint32_t periods[] = { 0, 0, 2, 3 };
         for (uint32_t p = 0; !everything && p < sizeof(periods) / sizeof(periods[0]); p += 1)
         {
             memcpy(kernels->flags, copies.check_input, count);
             uint64_t blocks = 0;
+            kernels->depth_work = p == 1 ? NULL : depth_work;
             parse_check_avx512_period(kernels, names, parser->tokens.flags, count, copies.typed, &blocks, periods[p]);
+            kernels->depth_work = depth_work;
             uint32_t first = BUSTER_PARSE_NONE;
             if (p == 0)
             {
@@ -2430,7 +2456,7 @@ static uint32_t parse_test_compare_tokens(const ParseTokens* a, const ParseToken
     uint32_t result = a->count != b->count || a->pragma_count != b->pragma_count ? 0 : BUSTER_PARSE_NONE;
     for (uint32_t i = 0; i < a->count && result == BUSTER_PARSE_NONE; i += 1)
     {
-        const bool same = a->kinds[i] == b->kinds[i] && a->names[i] == b->names[i] && a->sources[i] == b->sources[i] && a->flags[i] == b->flags[i];
+        const bool same = a->kinds[i] == b->kinds[i] && a->names[i] == b->names[i] && parse_source_index(a, i) == parse_source_index(b, i) && a->flags[i] == b->flags[i];
         result = same ? BUSTER_PARSE_NONE : i;
     }
     for (uint32_t i = 0; i < a->pragma_count && result == BUSTER_PARSE_NONE; i += 1)
@@ -2530,6 +2556,8 @@ static void parse_test_handoff_stream(PPTokens* output, uint32_t count, uint64_t
         uint8_t kind = C_TOKEN_RAW_IDENTIFIER;
         uint32_t value = 0;
         uint8_t flags = (uint8_t)((r >> 8) % 4 == 0 ? BUSTER_PP_START_OF_LINE : 0) | (uint8_t)((r >> 10) % 2 == 0 ? BUSTER_PP_SPACE : 0);
+        // PP-only name flags must be cleared at the handoff, where their bits become private recovery markers.
+        flags |= (uint8_t)((r >> 11) % 2 == 0 ? BUSTER_PP_NAME_SPACE : 0) | (uint8_t)((r >> 12) % 2 == 0 ? BUSTER_PP_NAME_LINE : 0);
         uint32_t length = 1;
         if (pick < 8)
         {
@@ -2574,6 +2602,7 @@ static void parse_test_handoff_stream(PPTokens* output, uint32_t count, uint64_t
             output->values[i + j] = output->kinds[i + j] == C_TOKEN_RAW_IDENTIFIER ? 1 + (uint32_t)((t >> 8) % (BUSTER_PP_KEYWORD_TABLE + 8)) : 0;
             // A pragma's tokens never start a line; a '#' without PRAGMA_END ends where a token does.
             output->flags[i + j] = !pragma && last ? BUSTER_PP_START_OF_LINE : (uint8_t)((t >> 20) % 2 == 0 ? BUSTER_PP_SPACE : 0);
+            output->flags[i + j] |= (uint8_t)((t >> 21) % 2 == 0 ? BUSTER_PP_NAME_SPACE : 0) | (uint8_t)((t >> 22) % 2 == 0 ? BUSTER_PP_NAME_LINE : 0);
             j += 1;
         }
         i += j;
@@ -2631,7 +2660,7 @@ static void parse_test_handoff_oracle(const PPTokens* output, CLanguage language
             tokens->kinds[w] = kind == C_TOKEN_COLONCOLON ? PARSE_KIND_COLON : parse_kind;
             tokens->names[w] = kind == C_TOKEN_RAW_IDENTIFIER || is_keyword ? output->values[i] : 0;
             tokens->sources[w] = i;
-            tokens->flags[w] = output->flags[i];
+            tokens->flags[w] = output->flags[i] & BUSTER_PARSE_PP_FLAGS;
             w += 1;
             if (kind == C_TOKEN_COLONCOLON)
             {
@@ -2656,7 +2685,7 @@ static bool parse_test_handoff_same(const ParseTokens* got, const ParseTokens* e
         const int64_t before = -1 - (int64_t)p;
         const uint64_t after = (uint64_t)got->count + p;
         same = got->kinds[before] == PARSE_KIND_END && got->kinds[after] == PARSE_KIND_END && got->names[before] == 0 && got->names[after] == 0 &&
-               got->sources[before] == 0 && got->sources[after] == 0 && got->flags[before] == 0 && got->flags[after] == 0;
+               parse_source_index(got, before) == 0 && parse_source_index(got, after) == 0 && got->flags[before] == 0 && got->flags[after] == 0;
     }
     return same;
 }
@@ -2728,7 +2757,39 @@ static uint32_t parse_test_check_handoff(CLanguage language, uint64_t seed)
                 pp_resolve_keywords_range(&pp, 0, pp.output.count);
                 parse_tokens_from_output(&pp.output, &got);
                 const uint32_t kind = parse_test_first_byte(kinds, resolved, count);
-                if (kind != BUSTER_PARSE_NONE || !parse_test_handoff_same(&got, &expected))
+                bool straight = true;
+                for (uint32_t t = 0; t < count && straight; t += 1)
+                {
+                    straight = kinds[t] != C_TOKEN_HASH && kinds[t] != C_TOKEN_COLONCOLON && kinds[t] != BUSTER_PP_KIND_PRAGMA_END;
+                }
+                bool sources = straight == got.identity_sources;
+                if (got.identity_sources)
+                {
+                    // The handoff must leave the initialized backing poison intact for every implicit row.
+                    for (uint32_t t = 0; t < got.count && sources; t += 1)
+                    {
+                        sources = got.sources[t] == UINT32_C(0x5a5a5a5a) && expected.sources[t] == t;
+                    }
+                    for (uint32_t t = 0; t < got.count + 16 && sources; t += 16)
+                    {
+                        const __mmask16 lanes = 0xc56b;
+                        int32_t offsets[16];
+                        uint32_t gathered[16];
+                        uint32_t vector[16];
+                        for (uint32_t l = 0; l < 16; l += 1)
+                        {
+                            offsets[l] = (int32_t)t + (int32_t)l - 1;
+                            const bool live = ((lanes >> l) & 1u) != 0;
+                            gathered[l] = live && (uint32_t)offsets[l] < got.count ? expected.sources[offsets[l]] : 0;
+                            vector[l] = live && t + l < got.count ? expected.sources[t + l] : 0;
+                        }
+                        const __m512i got_gather = parse_source_gather(&got, _mm512_loadu_si512(offsets), lanes);
+                        const __m512i got_vector = parse_source_vector(&got, t, lanes);
+                        sources = _mm512_cmpeq_epi32_mask(got_gather, _mm512_loadu_si512(gathered)) == UINT16_MAX &&
+                                  _mm512_cmpeq_epi32_mask(got_vector, _mm512_loadu_si512(vector)) == UINT16_MAX;
+                    }
+                }
+                if (kind != BUSTER_PARSE_NONE || !sources || !parse_test_handoff_same(&got, &expected))
                 {
                     parse_test_report("handoff: the keyword pass and the conversion differ from the oracle on %u tokens (special %u at %u), first resolved kind at %u\n", count,
                                       special, edges[e], kind);
@@ -2951,7 +3012,7 @@ static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOp
                 const uint32_t* names = parser.tokens.names;
                 // The vector kernels up to K5, as parse_vector runs them, then K6 with its reasons.
                 parse_kernels_predeclared(&kernels, parser.predeclared, true);
-                kernels.unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels.depths, kernels.enclosing, buffers.open_stack, kernels.bracket_blocks);
+                kernels.unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels.enclosing, buffers.open_stack, kernels.bracket_blocks);
                 if (!kernels.unbalanced)
                 {
                     parse_typedefs(&kernels, kinds, names, count);
@@ -2963,7 +3024,7 @@ static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOp
                     if (kernels.flags[i] != 0 && k3_reports < 12)
                     {
                         k3_reports += 1;
-                        const uint32_t start = pp.output.locations[parser.tokens.sources[i]];
+                        const uint32_t start = pp.output.locations[parse_source_index(&parser.tokens, i)];
                         const uint32_t stop = parse_token_end(&parser, &pp, i);
                         const uint8_t* bytes = pp_location_bytes(&pp, start);
                         printf("K3 flags token %u, %.*s (first typedef declarator at %u)\n", i, (int)(stop - start < 40 ? stop - start : 40), (const char*)bytes,
@@ -3008,7 +3069,7 @@ static uint32_t parse_test_explain(char** files, uint32_t file_count, const PPOp
                             uint32_t length = 0;
                             for (uint32_t t = at > 10 ? at - 10 : 0; t < at + 6 && t < count && length < sizeof(text) - 64; t += 1)
                             {
-                                const uint32_t start = pp.output.locations[parser.tokens.sources[t]];
+                                const uint32_t start = pp.output.locations[parse_source_index(&parser.tokens, t)];
                                 const uint32_t stop = parse_token_end(&parser, &pp, t);
                                 const uint8_t* bytes = pp_location_bytes(&pp, start);
                                 const uint32_t size = bytes != 0 && stop > start ? (stop - start < 30 ? stop - start : 30) : 0;
@@ -3084,7 +3145,7 @@ static uint32_t parse_test_print_tree(const char* path, const PPOptions* options
         printf("%u errors%s\n", parser.errors, parser.statistics.whole ? " (the whole unit went to the scalar parser)" : "");
         for (uint32_t t = 0; t < parser.tokens.count; t += 1)
         {
-            const uint32_t location = pp.output.locations[parser.tokens.sources[t]];
+            const uint32_t location = pp.output.locations[parse_source_index(&parser.tokens, t)];
             const char* name;
             uint32_t name_length;
             const uint32_t line = pp_presumed(&pp, location, &name, &name_length);
@@ -3571,7 +3632,7 @@ static const char* parse_test_parse_difference(const Parser* a, const Parser* b)
                          (a->postorder == 0) != (b->postorder == 0) ? "whether a postorder was made" : 0;
     for (uint32_t t = 0; result == 0 && t < count; t += 1)
     {
-        result = a->tokens.kinds[t] != b->tokens.kinds[t] || a->tokens.names[t] != b->tokens.names[t] || a->tokens.sources[t] != b->tokens.sources[t] ||
+        result = a->tokens.kinds[t] != b->tokens.kinds[t] || a->tokens.names[t] != b->tokens.names[t] || parse_source_index(&a->tokens, t) != parse_source_index(&b->tokens, t) ||
                  a->tokens.flags[t] != b->tokens.flags[t] ? "tokens" :
                  a->tree.roles != 0 && (a->tree.roles[t] != b->tree.roles[t] || a->tree.depths[t] != b->tree.depths[t] || a->tree.parents[t] != b->tree.parents[t]) ? "tree" :
                  a->postorder != 0 && (a->postorder[t] != b->postorder[t] || (a->sizes != 0) != (b->sizes != 0) || (a->sizes != 0 && a->sizes[t] != b->sizes[t])) ? "postorder" :
@@ -4060,10 +4121,13 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
 {
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", 0, 0, "", false },
     { PARSE_TEST_DRIVER_TEXT, "", 0, 0, "", false },
-    { PARSE_TEST_DRIVER_TEXT, "int x\n", 0, 1, "%s:1:6: error: expected ';' after top level declarator\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--scalar", 1, "%s:1:6: error: expected ';' after top level declarator\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#error stop\n", 0, 1, "%s:1:2: error: stop\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#include \"driver-none.h\"\n", 0, 1, "%s:1:10: fatal error: 'driver-none.h' file not found\n", false },
+    // Each located diagnostic with its source line, caret and highlighted range (#2376); clang's fix-it line comes with
+    // #2376's later piece.
+    { PARSE_TEST_DRIVER_TEXT, "int x\n", 0, 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--scalar", 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#error stop\n", 0, 1, "%s:1:2: error: stop\n    1 | #error stop\n      |  ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#include \"driver-none.h\"\n", 0, 1, "%s:1:10: fatal error: 'driver-none.h' file not found\n    1 | #include \"driver-none.h\"\n      |          ^~~~~~~~~~~~~~~\n",
+      false },
     { PARSE_TEST_DRIVER_MISSING, 0, 0, 1, "fatal error: can't read '%s': No such file or directory\n", false },
     { PARSE_TEST_DRIVER_DIRECTORY, 0, 0, 1, "fatal error: can't read '%s': Is a directory\n", false },
     { PARSE_TEST_DRIVER_LARGE, 0, 0, 1, "fatal error: can't read '%s': File too large\n", false },
@@ -4073,15 +4137,16 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
     // Errors after a macro's expansion, placed after the invocation by its expansion history, which the driver records
     // only for its diagnostics (PPOptions.defer_history).
-    { PARSE_TEST_DRIVER_TEXT, "#define DECL int x\nDECL\n", 0, 1, "%s:2:5: error: expected ';' after top level declarator\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#define END(a) a\nint y = END(1)\n", 0, 1, "%s:2:15: error: expected ';' after top level declarator\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#define DECL int x\nDECL\n", 0, 1, "%s:2:5: error: expected ';' after top level declarator\n    2 | DECL\n      |     ^\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#define END(a) a\nint y = END(1)\n", 0, 1, "%s:2:15: error: expected ';' after top level declarator\n    2 | int y = END(1)\n      |               ^\n",
+      false },
     // A warning, which the driver prints by preprocessing the unit again for its history: with code after it; and in a
     // unit of directives alone, whose output is empty, after a #if line of 300 expansions, for which the replay's history
     // grows while it runs (parse_test_driver_limits fails that growth too, which the empty output wouldn't show).
-    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only [-W#warnings]\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#warning only\nint x;\n", 0, 0, "%s:1:2: warning: only [-W#warnings]\n    1 | #warning only\n      |  ^\n", false },
     { PARSE_TEST_DRIVER_TEXT,
       "#define A(x) x\n#define B A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)+A(1)\n#define C B+B+B+B+B+B+B+B\n#define D C+C+C+C\n#if D\n#endif\n#warning only\n", 0, 0,
-      "%s:7:2: warning: only [-W#warnings]\n", false },
+      "%s:7:2: warning: only [-W#warnings]\n    7 | #warning only\n      |  ^\n", false },
 };
 
 // Whether a run of case `c` did what it must.
