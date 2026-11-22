@@ -14345,13 +14345,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     int linker_count = 0;
     CheckDriverLibraries libraries = {
+        .linker = { .path_capacity = (uint32_t)linker_capacity },
         .names = arena_push_array(&arena, linker_capacity, sizeof(String8), _Alignof(String8)),
         .directories = arena_push_array(&arena, linker_capacity, sizeof(String8), _Alignof(String8)),
         .required = arena_push_array(&arena, linker_capacity, sizeof(bool), _Alignof(bool)),
         .arguments = BUSTER_ARENA_PUSH_ARRAY(&arena, ForeignArgument, linker_capacity),
     };
-    const bool linker_ready = linker_arguments != NULL && linker_inputs != NULL && input_kinds != NULL && libraries.arguments != NULL && libraries.required != NULL &&
-                              linker_options_initialize(&libraries.linker, (uint32_t)linker_capacity, &arena);
+    const bool linker_ready = linker_arguments != NULL && linker_inputs != NULL && input_kinds != NULL && libraries.arguments != NULL && libraries.required != NULL;
     bool missing_value = false;
     // The code generation and ABI layout options the driver refuses, read as every client of the request reads them
     // (c_check_request.c, #1057).
@@ -14860,7 +14860,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 .flags = as_needed ? BUSTER_FOREIGN_INPUT_AS_NEEDED : 0,
             };
         }
-        else if (linker_options_parse(&libraries.linker, linker_count, linker_arguments, &i))
+        else if (linker_options_parse(&libraries.linker, linker_count, linker_arguments, &i, &arena))
         {
             // Shared output options.
         }
