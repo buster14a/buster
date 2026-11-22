@@ -69,8 +69,9 @@ histogram, a strided store, the induction as data, a call, a volatile load, a
 division, FNV-1a's recurrence, a float sum, bytes summed into a 64-bit total (a width no vector holds), more guards
 than the limit, a reduction's partial value read, an early exit, a step of two). #2808's fixtures, past the frozen
 digest's: counts of comparisons (`count-u8`, `count-i32`), strided loads (`aos-sum`, `rgb-gray` through 32-bit
-indices, `strided-pairs-i16`, `stride8-u8`) and a 32-bit index that wraps within a vector (`narrow-wrap`, whose input
-and result must fault alike).
+indices, `strided-pairs-i16`, `stride8-u8`, and `stride8-i64`, whose last element ends the interpreter's buffer, so a
+load past it faults) and a 32-bit index that wraps within a vector (`narrow-wrap`, whose input and result must fault
+alike).
 Each runs by both parser paths and the pass at six targets of every operation
 the IR has: at most 64, 32 and 16 bytes wide with masked moves, 64 bytes without
 them or masks from a general register, 64 bytes with them but no select of 32-

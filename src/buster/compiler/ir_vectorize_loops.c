@@ -1514,6 +1514,38 @@ static uint32_t ir_vectorize_stride(const IrVectorizeWork* work, uint32_t i)
     return result;
 }
 
+// A strided load's de-interleave at some lanes (#2808): its loads' width, how many, and the bytes from lane 0's element's
+// first to the last lane's element's last, which they cover and never pass; and whether its one load is masked.
+typedef struct IrVectorizeDeinterleave IrVectorizeDeinterleave;
+struct IrVectorizeDeinterleave
+{
+    uint32_t width;
+    uint32_t loads;
+    uint32_t needed;
+    bool masked;
+};
+
+// Row i's de-interleave at `lanes` (#2808): of 64-byte loads where the target permutes and moves them and the lanes are
+// narrower (one load masked to the needed bytes where they are fewer), else of the lanes' own width; as many loads as
+// the needed bytes take, the last ending at their end. False where the target has neither.
+static bool ir_vectorize_deinterleave_shape(const IrVectorizeWork* work, uint32_t lanes, uint32_t i, IrVectorizeDeinterleave* shape)
+{
+    const IrVectorizeTarget* t = work->target;
+    const uint32_t size = work->sizes[i] & 3;
+    const uint32_t k = ir_vectorize_stride(work, i);
+    const uint32_t width = lanes << size;
+    const uint32_t needed = ((lanes - 1) * k + 1) << size;
+    const bool partial = needed < 64;
+    const bool mask = partial && ir_vectorize_has(t->masked[size], 64) && ((t->mask >> __builtin_ctz(64u >> size)) & 1) != 0;
+    const bool wide = width < 64 && ir_vectorize_has(t->moves, 64) && ir_vectorize_has(t->permute2[size], 64) && (!partial || mask);
+    const bool narrow = ir_vectorize_has(t->permute2[size], width);
+    shape->width = wide ? 64 : width;
+    shape->loads = (needed + shape->width - 1) / shape->width;
+    shape->needed = needed;
+    shape->masked = wide && partial;
+    return wide || narrow;
+}
+
 // Whether every vector row's operation is the target's at `lanes` lanes per iteration.
 static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoop* plan, uint32_t lanes)
 {
@@ -1545,7 +1577,8 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
             if (op == IR_LOAD && ir_vectorize_stride(work, i) != 1)
             {
                 // A strided load's de-interleave: its loads, and permutes of two tables of its lanes (#2808).
-                legal = legal && ir_vectorize_has(t->permute2[size], bytes);
+                IrVectorizeDeinterleave shape = { 0 };
+                legal = legal && ir_vectorize_deinterleave_shape(work, lanes, i, &shape);
             }
             else if (op == IR_LOAD || op == IR_STORE || op == IR_COPY || op == IR_PHI)
             {
@@ -2044,35 +2077,51 @@ static uint32_t ir_vectorize_lanes_of(IrVectorizeWork* work, IrVectorizeBuild* b
     return result;
 }
 
-// A strided load's de-interleave (#2808), for k elements per iteration and L lanes of E bytes: k loads of L lanes from
-// lane 0's address, the s-th s * L elements past it, except the last, which ends at the last lane's element instead,
-// k - 1 elements before (k - 1) * L, so that no byte past the scalar loop's last one is read; lane l's element l * k is
-// in the s-th load where s * L <= l * k < (s + 1) * L for s < k - 1, else in the last. The permutes fold them in order:
-// the first takes the first two loads' lanes, and the s-th the s-th load's into the lanes the ones before it placed
-// (vpermt2b to vpermt2q, a lane past L naming the second table's). G makes their k - 1 index vectors in order: returns the
-// first one's row, the next ones' following it.
-static uint32_t ir_vectorize_deinterleave_indices(IrVectorizeWork* work, IrVectorizeBuild* build, const IrVectorizeLoop* plan, uint32_t i)
+// A strided load's de-interleave (#2808), of k elements per iteration and L lanes of E bytes (lane l's element l * k from
+// lane 0's), by loads of M elements (ir_vectorize_deinterleave_shape): the s-th s * M elements past lane 0's but the
+// last, which ends at the last lane's element, so that no byte past the scalar loop's last one is read (one load alone
+// is masked to them instead). Lane l's element is in the last load from (loads - 1) * M on, else in the (l * k / M)-th.
+// The permutes of two tables (vpermt2b to vpermt2q, an index past M naming the second's lane) fold them in order: the
+// first takes the first two loads' elements, and the s-th the s-th load's into the lanes the ones before it placed; one
+// load is permuted with itself. G makes their index vectors in order, and the mask of a masked load after them: returns
+// the first one's row, the next ones' following it, and the mask in *mask.
+static uint32_t ir_vectorize_deinterleave_indices(IrVectorizeWork* work, IrVectorizeBuild* build, const IrVectorizeLoop* plan, uint32_t i, uint32_t* mask)
 {
     const uint32_t lanes = plan->lanes;
-    const uint32_t size = work->sizes[i];
+    const uint32_t size = work->sizes[i] & 3;
     const uint32_t k = ir_vectorize_stride(work, i);
-    const uint32_t vtype = ir_vectorize_vector_type(lanes << size);
+    IrVectorizeDeinterleave shape = { 0 };
+    ir_vectorize_deinterleave_shape(work, lanes, i, &shape);
+    const uint32_t elements = shape.width >> size;
+    const uint32_t vtype = ir_vectorize_vector_type(shape.width);
+    const uint32_t loads = shape.loads;
+    const uint32_t last_start = loads == 1 ? 0 : (shape.needed >> size) - elements;
+    const uint32_t vectors = loads == 1 ? 1 : loads - 1;
     uint32_t first = BUSTER_IR_NONE;
-    for (uint32_t s = 1; s < k; s += 1)
+    for (uint32_t s = 1; s <= vectors; s += 1)
     {
         uint32_t indices[64] = { 0 };
         for (uint32_t l = 0; l < lanes; l += 1)
         {
             // The mutant takes lane 1's element in lane 0.
             const uint32_t element = (l == 0 && work->mutation == BUSTER_IR_VECTORIZE_MUTATE_STRIDE ? 1 : l) * k;
-            const bool last = element >= (k - 1) * lanes;
-            const uint32_t source = last ? k - 1 : element / lanes;
-            const uint32_t place = last ? element - (k - 1) * lanes + (k - 1) : element % lanes;
+            const bool last = element >= (loads - 1) * elements;
+            const uint32_t source = last ? loads - 1 : element / elements;
+            const uint32_t place = last ? element - last_start : element % elements;
             const uint32_t earlier = s == 1 ? place : l;
-            indices[l] = source == s ? lanes + place : source < s ? earlier : 0;
+            indices[l] = loads == 1 ? place : source == s ? elements + place : source < s ? earlier : 0;
         }
-        const uint32_t row = ir_vectorize_vector_constant(build, vtype, size, indices, lanes);
+        const uint32_t row = ir_vectorize_vector_constant(build, vtype, size, indices, elements);
         first = s == 1 ? row : first;
+    }
+    *mask = BUSTER_IR_NONE;
+    if (shape.masked)
+    {
+        const uint32_t mtype = ir_vectorize_mask_type(elements);
+        const uint32_t bits_type = mtype == IR_M8 ? IR_I8 : mtype == IR_M16 ? IR_I16 : mtype == IR_M32 ? IR_I32 : IR_I64;
+        const uint32_t count = shape.needed >> size;
+        const uint32_t bits = ir_vectorize_const(build, bits_type, count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1);
+        *mask = ir_vectorize_row(build, IR_BITCAST, mtype, 0, 0, bits, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
     }
     return first;
 }
@@ -2117,7 +2166,7 @@ static void ir_vectorize_g_splats(IrVectorizeWork* work, IrVectorizeBuild* build
             }
             if (op == IR_LOAD && ir_vectorize_stride(work, i) != 1)
             {
-                work->ones[i] = ir_vectorize_deinterleave_indices(work, build, plan, i);
+                work->ones[i] = ir_vectorize_deinterleave_indices(work, build, plan, i, &work->zeros[i]);
             }
             if ((op == IR_ZEXT || op == IR_SEXT) && work->classes[f->a[i]] == IR_VECTORIZE_CLASS_MASK)
             {
@@ -2193,24 +2242,34 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
     }
     else if (op == IR_LOAD && ir_vectorize_stride(work, i) != 1)
     {
-        // A strided load (#2808): its k loads and the permutes of ir_vectorize_deinterleave_indices.
-        const uint32_t k = ir_vectorize_stride(work, i);
+        // A strided load (#2808): the loads and permutes of ir_vectorize_deinterleave_indices, then, of wider loads, the
+        // lanes' part.
+        IrVectorizeDeinterleave shape = { 0 };
+        ir_vectorize_deinterleave_shape(work, lanes, i, &shape);
+        const uint32_t wide = ir_vectorize_vector_type(shape.width);
         const uint32_t base = ir_vectorize_operand(work, loop, f->a[i], NULL);
-        const int64_t width = (int64_t)lanes << size;
-        const int64_t element = (int64_t)1 << size;
-        for (uint32_t s = 0; s < k; s += 1)
+        for (uint32_t s = 0; s < shape.loads; s += 1)
         {
-            const int64_t offset = s + 1 < k ? (int64_t)s * width : (int64_t)(k - 1) * (width - element);
+            const int64_t offset = s + 1 < shape.loads ? (int64_t)s * shape.width : (int64_t)shape.needed - (int64_t)shape.width;
             const uint32_t pointer = s == 0 ? base : ir_vectorize_offset(build, base, offset);
-            const uint32_t loaded = ir_vectorize_row(build, IR_LOAD, vtype, 0, f->alignment_log2[i], pointer, BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
-            uint32_t extra = build->extras;
-            if (s != 0 && !build->counting)
+            // A masked load's inactive lanes, which no permute reads, take the index vector's.
+            const uint32_t loaded = shape.masked ? ir_vectorize_row(build, IR_MASKED_LOAD, wide, ir_vectorize_lane(size, false), f->alignment_log2[i], pointer, work->zeros[i], work->ones[i], origin) :
+                                                   ir_vectorize_row(build, IR_LOAD, wide, 0, f->alignment_log2[i], pointer, BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
+            const bool permute = s != 0 || shape.loads == 1;
+            const uint32_t extra = build->extras;
+            if (permute && !build->counting)
             {
                 build->view->extra[extra] = loaded;
             }
-            build->extras += s != 0 ? 1 : 0;
+            build->extras += permute ? 1 : 0;
             const uint32_t kind = ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, extra);
-            value = s == 0 ? loaded : ir_vectorize_row(build, IR_INTRINSIC, vtype, size, 0, value, work->ones[i] + s - 1, kind, origin);
+            const uint32_t table = s == 0 ? loaded : value;
+            const uint32_t indices = work->ones[i] + (s == 0 ? 0 : s - 1);
+            value = permute ? ir_vectorize_row(build, IR_INTRINSIC, wide, size, 0, table, indices, kind, origin) : loaded;
+        }
+        if (shape.width != (lanes << size))
+        {
+            value = ir_vectorize_row(build, IR_INTRINSIC, vtype, 0, 0, value, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_EXTRACT, origin);
         }
     }
     else if (op == IR_LOAD)

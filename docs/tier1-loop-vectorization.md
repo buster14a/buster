@@ -165,14 +165,19 @@ appends G, P, VB, T, TM and TX:
   becomes the sources' unsigned one), so the bytes promoted to `int` compare as
   64 lanes of bytes, not 16 of doublewords.
 - **A strided load** (`aos_sum`'s `p[i].x`, 16 bytes apart; `rgb_to_gray`'s
-  `rgb[3 * i + k]`) of k = 2 to 8 elements per iteration loads k vectors of the
-  lanes from lane 0's address, the last ending at the last lane's element (k - 1
-  elements before k vectors' end), so that no byte past the scalar loop's last
-  one is read, and de-interleaves them with k - 1 permutes of two tables
+  `rgb[3 * i + k]`) of k = 2 to 8 elements per iteration covers the bytes from
+  lane 0's element to the last lane's, never past them: with 64-byte loads where
+  the target permutes and moves them and the lanes are narrower, else loads of
+  the lanes' width, as many as those bytes take, the last ending at their end
+  (one 64-byte load of fewer bytes is masked to them). Permutes of two tables
   (`vpermt2b` to `vpermt2q`, `IrVectorizeTarget.permute2`), whose index vectors
-  G holds (`IR_VCONST`). Each access loads its own vectors: the members of one
-  structure aren't grouped. Its overlap test's range is its stride's bytes per
-  iteration, and its tail is the scalar loop's.
+  G holds (`IR_VCONST`), fold the loads into the lanes, one fewer than the
+  loads (a single load is permuted with itself), and the lanes' part of a
+  64-byte result is extracted. At znver5 `aos_sum`'s two fields are two 64-byte
+  loads and one `vpermt2d` each, `rgb_to_gray`'s three channels one masked
+  64-byte load and one `vpermt2b` each. Each access loads its own vectors: the
+  members of one structure aren't grouped. Its overlap test's range is its
+  stride's bytes per iteration, and its tail is the scalar loop's.
 - **A 32-bit index** (`3 * i + 1` of an `int` i, then `sext`): its 64-bit
   extension is affine where the 32-bit value doesn't wrap over the vector
   iterations. G clones the index's chain at the first and the last vector

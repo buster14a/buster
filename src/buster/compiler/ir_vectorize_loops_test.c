@@ -49,7 +49,9 @@ struct IrVectorizeTestFixture
     const char* name;
     // A role per parameter: 'p' a pointer into the shared buffer, 'n' the loop's bound, 'm' a signed bound (negative too),
     // 'r' a count of rows (0 to 4), 's' a start below the bound, 'o' a small offset, 'k' any scalar; and for a 32-bit
-    // index that wraps (#2808), 'w' 0xfffffff8 (a wrap within the first 64-byte vector of 4-byte lanes) and 'q' a pointer that many 4-byte elements before one into the buffer.
+    // index that wraps (#2808), 'w' 0xfffffff8 (a wrap within the first 64-byte vector of 4-byte lanes) and 'q' a pointer that many 4-byte elements before one into the buffer;
+    // and 'z' a pointer to the bound's elements 64 bytes apart whose last 8 bytes end the buffer (#2808: a strided
+    // load's bytes past the last element would be outside it).
     const char* roles;
     // The loops vectorized at 64, 32 and 16 bytes (and at 64 without masked moves).
     uint32_t vectorized[3];
@@ -201,6 +203,11 @@ static uint32_t ir_vectorize_test_arguments(IrVectorizeTest* test, const IrFunct
         {
             value = UINT64_C(0xfffffff8);
         }
+        else if (roles[k] == 'z')
+        {
+            const uint64_t span = length > 0 ? (uint64_t)(length - 1) * 64 + 8 : 64;
+            value = (uint64_t)(uintptr_t)(buffer + BUSTER_IR_VECTORIZE_TEST_BUFFER - span);
+        }
         else if (roles[k] == 'n')
         {
             value = (uint64_t)length;
@@ -247,7 +254,7 @@ static bool ir_vectorize_test_agree(IrVectorizeTest* test, const IrVectorizeTest
         // The same places in the other buffer.
         for (uint32_t k = 0; k < count; k += 1)
         {
-            const bool pointer = fixture->roles[k] == 'p' || fixture->roles[k] == 'q';
+            const bool pointer = fixture->roles[k] == 'p' || fixture->roles[k] == 'q' || fixture->roles[k] == 'z';
             moved[k] = arguments[k];
             moved[k].low = pointer ? arguments[k].low - (uint64_t)(uintptr_t)left + (uint64_t)(uintptr_t)right : arguments[k].low;
         }
@@ -482,6 +489,9 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
             { .name = "rgb-gray", .roles = "ppm", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
             { .name = "strided-pairs-i16", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
             { .name = "stride8-u8", .roles = "pn", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
+            // Elements 64 bytes apart, the last ending the buffer (past 255 of them, its start is before the buffer: both fault):
+            // 2 lanes of 8 bytes at 16 bytes take 5 loads, not 8.
+            { .name = "stride8-i64", .roles = "zn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true },
             { .name = "narrow-wrap", .roles = "qnw", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .faults = true },
         };
         for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(minmax); k += 1)
