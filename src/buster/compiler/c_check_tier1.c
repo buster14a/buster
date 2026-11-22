@@ -323,6 +323,8 @@ struct CheckTier1PassesInput
     // unroller skips it, so that an expanded loop is unrolled once, in its caller, and the summary's size (which the
     // callers' expansion decisions read) is the loop's own.
     bool summary;
+    // An original or inlined C body with a potentially volatile indirect access (#2805).
+    bool vectorize_volatile;
 };
 
 // What Tier 1's passes made of a function (check_tier1_passes): the optimized function and its verified analysis,
@@ -374,7 +376,7 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
         uint32_t* place = certify ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)function->instruction_count + 1) : 0;
         const bool copied = !certify || (order != 0 && place != 0 && tier1_schedule_ir_copy(function, scratch, &original));
         Tier1SinkIrStats sink_stats = { 0 };
-        IrError error = copied ? tier1_schedule_ir_sink(function, scratch, order, scalar, &sink_stats) : IR_ERROR_MEMORY;
+        IrError error = copied ? tier1_schedule_ir_sink(function, scratch, order, &sink_stats) : IR_ERROR_MEMORY;
         error = error == IR_OK && certify && sink_stats.trees != 0 && !tier1_schedule_ir_verify(&original, function, order, place) ? IR_ERROR_STRUCTURE : error;
         arena_pop_to(scratch, mark);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
@@ -393,7 +395,6 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < function->instruction_count ? function->op[check.instruction] : IR_OP_COUNT;
-        stage = outcome.stage;
     }
     return outcome;
 }
@@ -417,7 +418,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     // built again at each use otherwise; the general registers' values, whose longer ranges the allocator spills
     // (#2719), stay as they are. One scan of the types and operations decides, so that a function without such values
     // pays that scan alone.
-    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && ir_function_has_simd_path(input->function, !scalar);
+    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && ir_function_has_simd(input->function);
     // The solver's, in steps[7], before promotion as --tier1-gvn's is. A function it refuses or finds past its limits
     // goes on as it was; any other error is the function's.
     IrGvnResult shared = { 0 };
@@ -472,7 +473,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     IrWideResult wide = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
-        const IrCheck check = scalar ? ir_wide_split_scalar(&promoted, &lane->steps[6], scratch, &wide) : ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
+        const IrCheck check = ir_wide_split(&promoted, &lane->steps[6], scratch, &wide);
         outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
@@ -483,7 +484,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     {
         IrVectorSplitResult pieces = { 0 };
         const uint32_t piece = ir_typed_vector_piece(target->features);
-        const IrCheck check = scalar ? ir_vector_split_scalar(&wide.function, piece, &lane->steps[6], scratch, &pieces) : ir_vector_split(&wide.function, piece, &lane->steps[6], scratch, &pieces);
+        const IrCheck check = ir_vector_split(&wide.function, piece, &lane->steps[6], scratch, &pieces);
         outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
@@ -494,7 +495,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         // The lane owns these columns, including the borrowed promoted columns when no wide split was needed.
         // No later consumer reads their old operands and no analysis revision has been published. Simplify before
         // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
-        ir_truth_simplify(&wide.function, scalar);
+        ir_truth_simplify(&wide.function);
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
@@ -503,14 +504,14 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         // as the originals were, so that a copied `icmp ne (zext c), 0` is c, the branch's comparison. The result
         // borrows the input's tables, which stay live until the optimizer copies them.
         IrThreadResult threaded = { 0 };
-        const IrCheck check = ir_thread(&wide.function, &lane->steps[6], scratch, scalar, &threaded);
+        const IrCheck check = ir_thread(&wide.function, &lane->steps[6], scratch, &threaded);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
         if (stage == CHECK_TIER1_COMPILED && threaded.rounds != 0)
         {
             wide.function = threaded.function;
-            ir_truth_simplify(&wide.function, scalar);
+            ir_truth_simplify(&wide.function);
         }
     }
     if (stage == CHECK_TIER1_COMPILED)
@@ -518,7 +519,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         // #1382's bounded, total scalar arms become selects before any retained analysis is built. The result
         // borrows immutable tables from the promoted/wide input; all stay live until the optimizer copies them.
         IrIfConvertResult converted = { 0 };
-        const IrCheck check = ir_if_convert(&wide.function, &lane->steps[6], scratch, scalar, &converted);
+        const IrCheck check = ir_if_convert(&wide.function, &lane->steps[6], scratch, &converted);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
@@ -554,10 +555,10 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     // --tier1-passes=+vectorize (#2743's measurement): the loop vectorizer, in steps[10], after LICM and before the
     // optimizer, whose SCCP, dead-code removal, CFG cleanup and final verification take its result (its scalar loops
     // and its vector ones alike). A function without a loop it takes goes on as it was, borrowed.
-    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0)
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 && !input->vectorize_volatile)
     {
         IrVectorizeResult vectorized = { 0 };
-        const IrVectorizeOptions options = { .target = lane->vectorize, .scalar = scalar };
+        const IrVectorizeOptions options = { .target = lane->vectorize };
         const IrCheck check = ir_vectorize_loops(&wide.function, &options, &lane->steps[10], scratch, &vectorized);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, NULL);
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
@@ -582,7 +583,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 && !input->summary)
     {
         IrUnrollOptions options = ir_unroll_options();
-        options.scalar = scalar;
         IrUnrollResult unrolled = { 0 };
         const IrCheck check = ir_optimize_unroll(&wide.function, &lane->steps[11], scratch, options, &unrolled);
         const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
@@ -620,7 +620,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED)
     {
         outcome = check_tier1_sink_optimize(lane, &wide.function, scalar, certify, fault, output, analyses, revision, passes);
-        stage = outcome.stage;
     }
     return outcome;
 }
@@ -634,7 +633,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
 static CheckTier1Outcome check_tier1_unroll_own(CheckTier1Lane* lane, bool scalar, bool certify, const CheckTier1Fault* fault, IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
     IrUnrollOptions options = ir_unroll_options();
-    options.scalar = scalar;
     IrUnrollResult unrolled = { 0 };
     const IrCheck check = ir_optimize_unroll(&passes->optimized.function, &lane->steps[11], &lane->scratch, options, &unrolled);
     const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
@@ -666,6 +664,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     // --tier1-passes='s SROA on every body, LICM and the loop vectorizer, each with an arena of its own.
     const uint32_t on = check_tier1_passes_on(lane);
     const bool sroa = (on & BUSTER_CHECK_TIER1_PASS_SROA) != 0;
+    lane->preserve_local_storage = BUSTER_TIER1_PRIVATE_VALUES && (gvn || sroa);
     const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0) |
                                        ((on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 ? 8u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 ? 16u : 0));
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
@@ -703,8 +702,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && !own)
     {
         // A vector wider than the target moves whole is taken, and split below (#1624).
-        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar) :
-                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered, scalar);
+        const IrCheck check = check_tier1_lower_body(lane, function, result_type, function->symbol_count, target->features,
+                                                          &lane->steps[0], scratch, &lowered, sources);
         outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         stage = outcome.stage;
@@ -717,7 +716,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     bool lowered_verified = true;
     const IrFunction original = lowered;
     bool expanded_verified = true;
-    if (stage == CHECK_TIER1_COMPILED && !own && member && check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified))
+    bool vectorize_volatile = lane->vectorize_volatile != NULL && lane->vectorize_volatile[lane->emitting_body] != 0;
+    if (stage == CHECK_TIER1_COMPILED && !own && member && check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified, &vectorize_volatile))
     {
         lowered = expanded;
         lowered_verified = expanded_verified;
@@ -775,6 +775,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .verified = gvn_applied || lowered_verified,
             .unexpanded = !gvn_applied && inlined_calls != 0 ? &original : NULL,
             .numbered = gvn_applied,
+            .vectorize_volatile = vectorize_volatile,
         };
         outcome = check_tier1_passes(lane, &input, target, scalar, certify, fault, &lane->steps[1], &lane->steps[2], &lane->steps[3], &revision, &passes);
         stage = outcome.stage;
@@ -827,7 +828,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         uint32_t node = BUSTER_IR_NONE;
         // Full final SSA verification produced this exact revision and these intervals. No intervening pass mutates
         // it; the revision and both owners remain live until selection and emission have finished (#1055).
-        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, function->symbol_access, function->symbol_count, &lane->steps[0], scratch, !scalar, &plan, &node);
+        const Tier1SelectError selected = tier1_select_plan_verified(ir, &dominance, function->symbol_access, function->symbol_count, &lane->steps[0], scratch, &plan, &node);
         const uint32_t refused = node < ir->instruction_count ? ir->op[node] : IR_OP_COUNT;
         outcome = check_tier1_step(CHECK_TIER1_SELECTION, CHECK_TIER1_CAUSE_SELECTION, selected, node, 0, fault);
         outcome.operation = refused;
@@ -850,6 +851,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,
+            // The optimized function's dominator tree (#2611), current for the planned revision (ir_verified_current).
+            .dominators = &analysis.dominators,
             .certify = certify,
             .sources = sources,
         };
@@ -986,13 +989,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
                 .anchor_count = 2,
                 .record_order = record_order,
             };
-            scheduled = sources && record_order == NULL ? (CheckTier1ScheduleResult){ 0 } : check_tier1_schedule_code(scratch, &schedule, !scalar, certify || sources);
+            scheduled = sources && record_order == NULL ? (CheckTier1ScheduleResult){ 0 } : check_tier1_schedule_code(scratch, &schedule, certify || sources);
             counts->schedule_blocks = scheduled.blocks;
             counts->schedule_moved = scheduled.moved;
         }
         CheckTier1Debug debug = { 0 };
         const bool debug_ready = !sources || !published || !scheduled.ready || !scheduled.verified ||
-                                 check_tier1_debug(function, ir, &emitted, record_order, epilogue, !scalar, output, scratch, &debug);
+                                 check_tier1_debug(function, ir, &emitted, record_order, epilogue, output, scratch, &debug);
         *code = (EmittedCode){
             .records = records,
             .count = selected->count,
@@ -1036,7 +1039,6 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             arena_pop_to(output, mark);
             *code = (EmittedCode){ 0 };
             *counts = (CheckTier1Counts){ 0 };
-            stage = outcome.stage;
         }
     }
     const bool success = outcome.category == CHECK_TIER1_SUCCESS;

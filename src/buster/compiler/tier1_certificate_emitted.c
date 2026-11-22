@@ -15,15 +15,17 @@
 // - Trusted, as the source: the IR and its selection (each node's rule, and what its sequence computes from the
 //   registers it is given: tier1_emit_cfg_kernel, tier1_select_fixed, and a machine row's template, the front end's
 //   records that tier0_operation_valid admits, by the roles they name), the ABI's argument registers and its records of
-//   by-value aggregates, the rematerialization recipes, the frame's layout of the frame base register's offsets, the
-//   CFG with its phis, and x86 semantics' effects of each record (which registers and memory it writes).
+//   by-value aggregates, the rematerialization recipes and tier1_rematerialize's copy of each (a recomputation is checked
+//   to be that copy, not for what it computes), the frame's layout of the frame base register's offsets, the CFG with its
+//   phis, and x86 semantics' effects of each record (which registers and memory it writes).
 // - Untrusted: the allocation, every emitted record and the emitter's account of them: each record's origin
 //   (Tier1Origin), each block's and stub's first record, the references, and each machine row's placement
 //   (Tier1RowPlacement). An origin only says which decoding applies, and a placement only how to place a row's
 //   template; every record is decoded by its own bytes.
 // - A move's record (mov, movss, movsd, movaps, kmov, between registers and the frame base's displacements) is the edit
 //   its bytes say, at the width its form has; a recomputation is a constant's edit only where tier1_rematerialize writes
-//   exactly that record (and its reference) for the value its origin names. A node's records are one ORIGINAL: its
+//   exactly that record (and its reference) for the value its origin names, a 64-bit copy of the frame base register
+//   (a frame address at the base itself, #3149) tried as one before as a move. A node's records are one ORIGINAL: its
 //   operands read where the allocation has them at its use phase, every register and frame byte its records write
 //   killed, its definition where the allocation's interval starts. A call's sequence is checked against what the IR says
 //   it is (its target, al, the result's extension into its register), its arguments read in their ABI registers.
@@ -188,7 +190,8 @@ typedef enum Tier1CertEmittedStepKind
     // An argument's bytes [from, from + size) from its address into to_base + to: a part's staging slots or its stack slot, or
     // a whole aggregate's slots in the outgoing area (`chunks` values of 64 bytes, the last of what is left).
     TIER1_CERT_STEP_COPY,
-    // An argument's 64-byte part from its address into zmm16 and on (`reg`).
+    // An argument's part in a zmm register from its address into zmm16 and on (`reg`): a 64-byte one's whole, a record's
+    // payload of 40, 48 or 56 bytes in pieces (#2798, tier0_payload_load).
     TIER1_CERT_STEP_ZMM,
     // A part into its argument register (`reg`) from its staging slots or its zmm register: `record`.
     TIER1_CERT_STEP_LOAD,
@@ -197,9 +200,9 @@ typedef enum Tier1CertEmittedStepKind
     // A result part from its register (`reg`) into the result object, `to` from the frame base register.
     TIER1_CERT_STEP_STORE,
     // At entry: a parameter's part in its incoming slot into the scratch register (`record`; `to` the slot's offset from
-    // rsp at entry, by the ABI), then its store into the parameter's copy from its register (`reg`, the scratch register's
-    // for a slot's), `to` from the frame base register; and the hidden pointer's into its object, its own storage's
-    // (`record`).
+    // rsp at entry, by the ABI), or a PAYLOAD slot's (#2798) whole into the vector scratch register, then its store into
+    // the parameter's copy from its register (`reg`, the scratch register's for a slot's), `to` from the frame base
+    // register; and the hidden pointer's into its object, its own storage's (`record`).
     TIER1_CERT_STEP_SLOT,
     TIER1_CERT_STEP_PARAMETER,
     TIER1_CERT_STEP_POINTER,
@@ -221,12 +224,15 @@ struct Tier1CertEmittedStep
     uint8_t kind;
     uint8_t reg;
     uint8_t bytes;
-    // The part's value's width: a general register's 8, a vector register's part its bytes (8 for 8 or less), a result's
-    // 4 for a float's.
+    // The part's value's width: a general register's 8, a vector register's part its register's bytes (8 for 8 or less), a
+    // result's 4 for a float's, a PAYLOAD slot's its payload's in a call's slot (#2798) and its slot's at entry.
     uint8_t width;
     bool vector;
     // A COPY into a stack slot (a SPLIT location's, or a STACK one's eightbyte), which the call reads there.
     bool slot;
+    // A STORE's room: the bytes of the call's result object from `to` on, by the IR's size of it, inside which its records
+    // must write (#2798, tier1_cert_emitted_inside).
+    uint32_t room;
 };
 
 typedef struct Tier1CertEmittedBuild Tier1CertEmittedBuild;
@@ -556,8 +562,45 @@ static const Tier1CertEmittedVectorMove* tier1_cert_emitted_vector_move(uint16_t
     return result;
 }
 
+// Record `r` as a recomputation into a general register: the copy tier1_rematerialize writes, into the register the
+// record writes, of the recipe of `node`'s value (its origin's), exactly the record, with its reference. A constant's
+// edit into *edit. A record that is no such copy changes nothing; one whose reference differs is refused.
+static bool tier1_cert_emitted_recomputed(Tier1CertEmittedBuild* build, uint32_t r, uint32_t node, Tier1CertInstruction* edit)
+{
+    const Tier1EmitResult* emitted = build->emitted;
+    const X86Instruction record = emitted->code.records[r];
+    const uint32_t value = node < build->plan->function->instruction_count ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
+    const bool recipe = value != BUSTER_TIER1_CFG_NONE && emitted->cfg_input.rematerializable != 0 && emitted->cfg_input.rematerializable[value] != 0 && emitted->cfg_input.classes[value] == BUSTER_TIER1_ALLOCATE_GPR;
+    const uint8_t candidates[2] = { record.reg, record.rm };
+    bool valid = false;
+    for (uint32_t k = 0; recipe && !valid && k < 2; k += 1)
+    {
+        Tier1Rematerialized copy = { 0 };
+        if (candidates[k] < 16 && tier1_rematerialize(&emitted->prepared.recipes, node, candidates[k], build->base, BUSTER_TIER1_EMIT_BOUNDARY_FLAGS, &copy) && memcmp(&copy.instruction, &record, sizeof(record)) == 0)
+        {
+            const LinkReference expected = {
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = copy.got ? BUSTER_LINK_FIXUP_LOAD_GOT : BUSTER_LINK_FIXUP_PC32,
+                .target = copy.symbol,
+                .addend = copy.addend,
+            };
+            valid = tier1_cert_emitted_take_reference(build, r, copy.symbol != BUSTER_TIER1_REMAT_NO_SYMBOL ? &expected : 0);
+            *edit = (Tier1CertInstruction){
+                .immediate = value,
+                .a = tier1_cert_emitted_gpr(candidates[k], tier1_cert_emitted_width(emitted, value)),
+                .value = value,
+                .op = TIER1_CERT_CONSTANT,
+            };
+        }
+    }
+    return valid;
+}
+
 // Record `r`'s move, as an edit: its form's width, between its registers and frame bytes. A recomputation is decoded
-// where `node` (its origin's value) has a recipe whose copy is exactly the record.
+// where `node` (its origin's value) has a recipe whose copy is exactly the record (tier1_cert_emitted_recomputed): first
+// for a 64-bit copy of the frame base register, a frame address's at a zero displacement (`mov r64, base`, #3149), which
+// would otherwise decode as a move of the base register, a location no value of the certificate's is in; for any other
+// record after the moves.
 static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, uint32_t node, Tier1CertInstruction* edit)
 {
     const Tier1EmitResult* emitted = build->emitted;
@@ -627,8 +670,12 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
     // A move's fields but its registers, its mode and a memory operand's displacement are zero (but a carrier's vinsertps'
     // immediate and vvvv, checked above).
     const bool exact = (insert || (record.immediate == 0 && record.vvvv == 0)) && record.index == 0 && record.decorations == 0 && (!direct || record.displacement == 0);
-    bool valid = a != BUSTER_CERT_NONE && b != BUSTER_CERT_NONE && exact;
-    if (valid)
+    const bool moved = a != BUSTER_CERT_NONE && b != BUSTER_CERT_NONE && exact;
+    // A copy of the frame base register is a recomputed frame address's where it is one (#3149).
+    const bool based = load64 && direct && record.rm == build->base;
+    const bool recomputed = based && tier1_cert_emitted_recomputed(build, r, node, edit);
+    bool valid = recomputed;
+    if (!recomputed && moved)
     {
         *edit = (Tier1CertInstruction){
             .a = a,
@@ -637,33 +684,9 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
         };
         valid = tier1_cert_emitted_take_reference(build, r, 0);
     }
-    else
+    else if (!recomputed)
     {
-        // A recomputation into a general register: the recipe's copy of the value its origin names, into the register the
-        // record writes.
-        const uint32_t value = node < build->plan->function->instruction_count ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
-        const bool recipe = value != BUSTER_TIER1_CFG_NONE && emitted->cfg_input.rematerializable != 0 && emitted->cfg_input.rematerializable[value] != 0 && emitted->cfg_input.classes[value] == BUSTER_TIER1_ALLOCATE_GPR;
-        const uint8_t candidates[2] = { record.reg, record.rm };
-        for (uint32_t k = 0; recipe && !valid && k < 2; k += 1)
-        {
-            Tier1Rematerialized copy = { 0 };
-            if (candidates[k] < 16 && tier1_rematerialize(&emitted->prepared.recipes, node, candidates[k], build->base, BUSTER_TIER1_EMIT_BOUNDARY_FLAGS, &copy) && memcmp(&copy.instruction, &record, sizeof(record)) == 0)
-            {
-                const LinkReference expected = {
-                    .field = X86_FIXUP_DISPLACEMENT,
-                    .kind = copy.got ? BUSTER_LINK_FIXUP_LOAD_GOT : BUSTER_LINK_FIXUP_PC32,
-                    .target = copy.symbol,
-                    .addend = copy.addend,
-                };
-                valid = tier1_cert_emitted_take_reference(build, r, copy.symbol != BUSTER_TIER1_REMAT_NO_SYMBOL ? &expected : 0);
-                *edit = (Tier1CertInstruction){
-                    .immediate = value,
-                    .a = tier1_cert_emitted_gpr(candidates[k], tier1_cert_emitted_width(emitted, value)),
-                    .value = value,
-                    .op = TIER1_CERT_CONSTANT,
-                };
-            }
-        }
+        valid = tier1_cert_emitted_recomputed(build, r, node, edit);
         if (!valid && build->stats->reason == TIER1_CERT_EMITTED_OK)
         {
             tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_DECODE, r);
@@ -698,7 +721,8 @@ static uint32_t tier1_cert_emitted_definition(const Tier1EmitResult* emitted, ui
 }
 
 // A node's uses at most: a call's arguments and its callee, and its by-value aggregates' parts (#789): its register and
-// stack slots' parts and the hidden pointer (a whole aggregate's bytes are read by an ORIGINAL of their own,
+// stack slots' parts and the hidden pointer, or its destination's pointer value (#2820) in its place (a whole
+// aggregate's bytes are read by an ORIGINAL of their own,
 // tier1_cert_emitted_wholes); a return's protocol values and result parts.
 #define BUSTER_CERT_EMITTED_USES (BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 2 + BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS + 1)
 
@@ -813,19 +837,42 @@ static uint32_t tier1_cert_emitted_store_part(uint8_t reg, uint32_t bytes, uint8
 }
 
 // A call's aggregate result's object (#789): its into operand's frame object, at `*displacement` from the frame base
-// register.
-static bool tier1_cert_emitted_into(const Tier1CertEmittedBuild* build, uint32_t node, int32_t* displacement)
+// register, of `*bytes` (the IR's slot's size).
+static bool tier1_cert_emitted_into(const Tier1CertEmittedBuild* build, uint32_t node, int32_t* displacement, uint64_t* bytes)
 {
     const IrFunction* function = build->plan->function;
     const uint32_t into = function->c[node];
-    return into < function->instruction_count && function->op[into] == IR_STACK_ADDR && tier1_emit_cfg_object(function, build->emitted, function->a[into], displacement);
+    const bool found = into < function->instruction_count && function->op[into] == IR_STACK_ADDR && function->a[into] < function->slot_count &&
+                       tier1_emit_cfg_object(function, build->emitted, function->a[into], displacement);
+    *bytes = found ? function->slots[function->a[into]].size : 0;
+    return found;
+}
+
+// Whether records [0, count) write memory only through `base`, inside [to, to + room) (#2798): a call's result part's
+// stores stay in its result object, by the IR's size of it, whatever sequence the selection gives the part (a record's
+// payload in a register wider than it, whose whole store would run past the object).
+static bool tier1_cert_emitted_inside(const X86Instruction* records, uint32_t count, uint8_t base, int32_t to, uint32_t room)
+{
+    bool inside = true;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        uint64_t read = 0;
+        uint64_t written = 0;
+        x86_instruction_effects_scalar(&records[k], &read, &written);
+        const X86FormDescription* description = x86_form_description(records[k].form & (BUSTER_X86_FORM_FIXUP - 1));
+        const int64_t at = records[k].displacement;
+        const int64_t end = at + (description->operand_bytes != 0 ? description->operand_bytes : BUSTER_CERT_MAX_WIDTH);
+        const bool store = (written & BUSTER_X86_RESOURCE_MEMORY) != 0;
+        inside = inside && (!store || (records[k].mode == BUSTER_X86_MEMORY_BASE && records[k].rm == base && at >= to && end <= (int64_t)to + room));
+    }
+    return inside;
 }
 
 // The width of a value of a vector register's part of `bytes`: the part's form's (tier1_select_part_form: movsd's 8 for
-// 8 or less), a result's 4 for a float's (movss's store).
+// 8 or less, a payload's its register's, #2798), a result's 4 for a float's (movss's store).
 static uint8_t tier1_cert_emitted_part_width(bool vector, uint32_t bytes, bool result)
 {
-    return (uint8_t)(!vector ? 8 : result && bytes == 4 ? 4 : bytes <= 8 ? 8 : bytes);
+    return (uint8_t)(!vector ? 8 : result && bytes == 4 ? 4 : bytes <= 8 ? 8 : tier1_select_part_width(bytes));
 }
 
 // Call node `node`'s steps (`*count` of them, into `steps`), in the CFG consumer's order: each by-value aggregate argument's
@@ -894,7 +941,8 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
                 .kind = zmm ? TIER1_CERT_STEP_ZMM : TIER1_CERT_STEP_COPY,
                 .reg = (uint8_t)(zmm ? at : 0),
                 .bytes = part.bytes,
-                .width = zmm ? 64 : slot ? 8 : width,
+                // A stack slot's eightbyte, or a PAYLOAD slot's payload (#2798), its bytes.
+                .width = zmm ? 64 : slot ? (part.bytes > 8 ? part.bytes : 8) : width,
                 .vector = vector,
                 .slot = slot,
             };
@@ -928,11 +976,14 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
         steps[valid ? n : 0] = loads[k];
         n += valid;
     }
+    // A destination that is a pointer value (#2820) is no step: the call reads it in rdi (tier1_cert_emitted_call).
     const bool hidden = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY;
     const bool returned = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_REGISTERS;
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
     int32_t into = 0;
-    valid = valid && ((!hidden && !returned) || tier1_cert_emitted_into(build, node, &into));
-    if (valid && hidden)
+    uint64_t into_bytes = 0;
+    valid = valid && ((!hidden && !returned) || (hidden && pointer) || tier1_cert_emitted_into(build, node, &into, &into_bytes));
+    if (valid && hidden && !pointer)
     {
         valid = n < BUSTER_CERT_EMITTED_STEPS;
         steps[valid ? n : 0] = (Tier1CertEmittedStep){
@@ -956,6 +1007,7 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
         steps[valid ? n : 0] = (Tier1CertEmittedStep){
             .pseudo = pseudo,
             .to = into + results[k].offset,
+            .room = into_bytes > results[k].offset ? (uint32_t)(into_bytes - results[k].offset < UINT32_MAX ? into_bytes - results[k].offset : UINT32_MAX) : 0,
             .kind = TIER1_CERT_STEP_STORE,
             .reg = (uint8_t)(results[k].reg & 0x1f),
             .bytes = results[k].bytes,
@@ -991,19 +1043,24 @@ static bool tier1_cert_emitted_entry_steps(const Tier1CertEmittedBuild* build, u
         for (uint32_t k = 0; valid && k < part_count; k += 1)
         {
             const bool slot = parts[k].reg == BUSTER_ABI_REGISTER_NONE;
-            const bool vector = !slot && (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
-            const uint8_t reg = slot ? (uint8_t)BUSTER_TIER1_SELECT_SCRATCH : (uint8_t)(parts[k].reg & 0x1f);
+            // A PAYLOAD slot's payload (#2798): the slot whole, its register's width, through the vector scratch register.
+            const bool payload = slot && parts[k].bytes > 8;
+            const bool vector = payload || (!slot && (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR);
+            const uint8_t reg = payload ? (uint8_t)BUSTER_TIER1_SELECT_FLOAT_SCRATCH : slot ? (uint8_t)BUSTER_TIER1_SELECT_SCRATCH : (uint8_t)(parts[k].reg & 0x1f);
+            const uint8_t width = tier1_cert_emitted_part_width(vector, parts[k].bytes, false);
             uint8_t base = X86_REGISTER_RSP;
             int32_t incoming = 0;
             valid = n + 2 <= capacity && (!slot || tier1_emit_cfg_incoming(emitted, record->location.stack_offset, &base, &incoming));
             if (valid && slot)
             {
                 steps[n++] = (Tier1CertEmittedStep){
-                    .record = { .displacement = incoming, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 },
+                    .record = { .displacement = incoming, .reg = reg, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = payload ? tier1_select_part_form(parts[k].bytes, true) : X86_FORM_MOV_R64_RM64 },
                     .pseudo = first + 2 * p + k,
                     .to = (int32_t)(8 + record->location.stack_offset),
                     .kind = TIER1_CERT_STEP_SLOT,
-                    .width = 8,
+                    .reg = reg,
+                    .width = width,
+                    .vector = vector,
                 };
             }
             if (valid)
@@ -1020,7 +1077,7 @@ static bool tier1_cert_emitted_entry_steps(const Tier1CertEmittedBuild* build, u
                     .kind = hidden ? TIER1_CERT_STEP_POINTER : TIER1_CERT_STEP_PARAMETER,
                     .reg = reg,
                     .bytes = parts[k].bytes,
-                    .width = tier1_cert_emitted_part_width(vector, parts[k].bytes, false),
+                    .width = width,
                     .vector = vector,
                     .slot = slot,
                 };
@@ -1140,7 +1197,9 @@ static bool tier1_cert_emitted_step(Tier1CertEmittedBuild* build, uint32_t node,
     }
     else if (valid && step->kind == TIER1_CERT_STEP_ZMM)
     {
+        // A 64-byte part's load whole, or a record's payload's (#2798) in pieces that stay inside it.
         expected[expected_count++] = (X86Instruction){ .displacement = (int32_t)step->from, .reg = step->reg, .rm = source, .mode = BUSTER_X86_MEMORY_BASE, .form = tier1_select_part_form(64, true) };
+        expected_count = tier1_select_part_payload(step->bytes) ? tier0_payload_load(step->reg, step->bytes, source, (int32_t)step->from, expected) : expected_count;
         valid = tier1_cert_emitted_add_use(&kernel, value, tier1_cert_emitted_gpr(source, 8));
     }
     else if (valid && (step->kind == TIER1_CERT_STEP_LOAD || step->kind == TIER1_CERT_STEP_SLOT || step->kind == TIER1_CERT_STEP_POINTER))
@@ -1166,7 +1225,12 @@ static bool tier1_cert_emitted_step(Tier1CertEmittedBuild* build, uint32_t node,
         // A result part into the result object: a vector register's whole, or its float's or double's, by its width's
         // store; its other bytes through the scratch register; a general register's (tier1_emit_call's).
         const uint8_t base = build->base;
-        if (step->vector && (step->bytes == 4 || step->bytes == 8 || step->bytes >= 16))
+        if (step->vector && tier1_select_part_payload(step->bytes))
+        {
+            // A record's payload (#2798) in pieces that don't write past it, which lose the register's value.
+            expected_count = tier0_payload_store(step->reg, step->bytes, base, BUSTER_X86_MEMORY_BASE, step->to, expected);
+        }
+        else if (step->vector && (step->bytes == 4 || step->bytes == 8 || step->bytes >= 16))
         {
             const uint16_t form = step->bytes >= 16 ? tier1_select_part_form(step->bytes, false) : step->bytes == 8 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSS_XM32_X;
             expected[expected_count++] = (X86Instruction){ .displacement = step->to, .reg = step->reg, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = form };
@@ -1185,7 +1249,7 @@ static bool tier1_cert_emitted_step(Tier1CertEmittedBuild* build, uint32_t node,
             expected_count = parts;
         }
         const uint32_t location = step->vector ? tier1_cert_emitted_vector(build, step->reg, step->width) : tier1_cert_emitted_gpr(step->reg, 8);
-        valid = valid && tier1_cert_emitted_add_use(&kernel, step->pseudo, location);
+        valid = valid && tier1_cert_emitted_inside(expected, expected_count, base, step->to, step->room) && tier1_cert_emitted_add_use(&kernel, step->pseudo, location);
     }
     // An ORIGINAL of the expected records: its uses read, what they write killed; then the value it defines.
     for (uint32_t k = 0; valid && k < expected_count; k += 1)
@@ -1251,7 +1315,7 @@ static bool tier1_cert_emitted_wholes(Tier1CertEmittedBuild* build, uint32_t nod
 // A call's expected sequence (tier1_emit_call's, for a call without aggregates or stack arguments): a variadic call's
 // al, the call, and its result into its register, extended to its canonical form; its register arguments read in their
 // ABI registers (a static chain's in r10, #148), an indirect call's callee in r10, or with a chain in rax
-// (tier1_select_callee_register).
+// (tier1_select_callee_register), and a destination that is a pointer value (#2820) in rdi.
 static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node, uint32_t destination, Tier1CertEmittedKernel* kernel)
 {
     const IrFunction* function = build->plan->function;
@@ -1259,8 +1323,9 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     const IrCall* call = &function->calls[function->b[node]];
     const IrAbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
     const bool indirect = function->op[node] == IR_CALL_INDIRECT;
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
     const uint32_t offset = build->plan->effective_use_offsets[node];
-    bool valid = build->plan->effective_use_offsets[node + 1] - offset == call->argument_count + (indirect ? 1u : 0u);
+    bool valid = build->plan->effective_use_offsets[node + 1] - offset == call->argument_count + (indirect ? 1u : 0u) + (pointer ? 1u : 0u);
     Tier1SelectPlaces places = { 0 };
     uint32_t vectors = 0;
     for (uint32_t argument = 0; valid && argument < call->argument_count; argument += 1)
@@ -1305,6 +1370,11 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     {
         const uint32_t value = emitted->node_values[build->plan->effective_use_values[offset + call->argument_count]];
         valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_add_use(kernel, value, tier1_cert_emitted_register(build, value, tier1_select_callee_register(function, call)));
+    }
+    if (valid && pointer)
+    {
+        const uint32_t value = emitted->node_values[build->plan->effective_use_values[offset + call->argument_count + (indirect ? 1u : 0u)]];
+        valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_add_use(kernel, value, tier1_cert_emitted_register(build, value, X86_REGISTER_RDI));
     }
     const uint32_t vector_count = abi != 0 ? abi->call.vector_registers : vectors;
     kernel->outgoing = tier1_select_call_stack_bytes(function, call);
@@ -1586,6 +1656,20 @@ static bool tier1_cert_emitted_kills(Tier1CertEmittedBuild* build, const Tier1Ce
     return valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX);
 }
 
+// Whether a record that writes its memory operand leaves the operand's bytes as they were (#2963): an add, or, sub or xor
+// of an immediate zero, or an and of an immediate of every bit, at its form's width, locked or not. The read and the
+// write are one instruction's of the same bytes, so a frame row there keeps its value: a full barrier's `lock or dword
+// [rsp], 0` (musl's a_store, in an asm body) leaves the row at rsp as it was. Its flags are written all the same.
+static bool tier1_cert_emitted_unchanged(X86Instruction record)
+{
+    const X86Effects* effects = x86_effects(record.form);
+    const uint32_t operation = effects->operation;
+    const uint64_t all = x86_width_mask(effects->width);
+    const uint64_t value = x86_immediate_value(record.form, record.immediate, 0);
+    const bool zero = operation == X86_OPERATION_ADD || operation == X86_OPERATION_OR || operation == X86_OPERATION_SUB || operation == X86_OPERATION_XOR;
+    return x86_effects_immediate_kind(effects) == BUSTER_X86_IMMEDIATE_VALUE && ((zero && value == 0) || (operation == X86_OPERATION_AND && value == all));
+}
+
 // Node `node`'s ORIGINALs, its records [first, first + count) its kernel's: its uses in eights, then every register and
 // frame range its records write, killed in eights, then its definition. A general register its records give back is not
 // killed: one that holds its own value at the run's end, followed through the records' full-width copies between general
@@ -1642,11 +1726,11 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         valid = ((written & BUSTER_X86_RESOURCE_GPR(build->base)) == 0 || (build->base == X86_REGISTER_RSP && control)) && ((written & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSP)) == 0 || control);
         valid = valid && (build->frame_pointer == INT64_MIN || (written & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBP)) == 0);
         valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX);
-        // A store into the frame kills the bytes it writes that are the frame's storage; a write the semantics doesn't
-        // bound kills the 64 bytes from its operand on.
+        // A store into the frame kills the bytes it writes that are the frame's storage, but one that leaves them as they
+        // were (tier1_cert_emitted_unchanged); a write the semantics doesn't bound kills the 64 bytes from its operand on.
         int64_t at = 0;
         bool entry = false;
-        if ((written & BUSTER_X86_RESOURCE_MEMORY) != 0 && tier1_cert_emitted_frame_operand(build, records[r], &at, &entry))
+        if ((written & BUSTER_X86_RESOURCE_MEMORY) != 0 && !tier1_cert_emitted_unchanged(record) && tier1_cert_emitted_frame_operand(build, records[r], &at, &entry))
         {
             const X86FormDescription* description = x86_form_description(records[r].form & (BUSTER_X86_FORM_FIXUP - 1));
             const int64_t end = at + (description->operand_bytes != 0 ? description->operand_bytes : BUSTER_CERT_MAX_WIDTH);
@@ -1798,7 +1882,8 @@ static Tier1Origin tier1_cert_emitted_kind(uint32_t origin)
     return (Tier1Origin)(origin >> BUSTER_TIER1_ORIGIN_SHIFT);
 }
 
-// Whether a by-value aggregate's parts at `location` of `size` bytes (#789) take a whole ymm or zmm register (#141).
+// Whether a by-value aggregate's parts at `location` of `size` bytes (#789) take a whole ymm or zmm register (#141): a
+// part's own, or a PAYLOAD slot's (#2798), which a parameter's copy moves through the vector scratch register.
 static bool tier1_cert_emitted_wide_parts(AbiLocation location, uint32_t size)
 {
     Tier1SelectPart parts[2];
@@ -1806,7 +1891,8 @@ static bool tier1_cert_emitted_wide_parts(AbiLocation location, uint32_t size)
     bool wide = false;
     for (uint32_t k = 0; k < count; k += 1)
     {
-        wide |= parts[k].reg != BUSTER_ABI_REGISTER_NONE && (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && parts[k].bytes > 16;
+        const bool vector = parts[k].reg == BUSTER_ABI_REGISTER_NONE ? parts[k].bytes > 8 : (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        wide |= vector && parts[k].bytes > 16;
     }
     return wide;
 }
@@ -2747,32 +2833,43 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
     {
         const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const bool direct = tier1_select_part_direct(parts[k]);
-        const X86Instruction load = {
-            .displacement = direct ? parts[k].offset : tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
-            .reg = (uint8_t)(parts[k].reg & 0x1f),
-            .rm = direct ? source : X86_REGISTER_RSP,
-            .mode = BUSTER_X86_MEMORY_BASE,
-            .form = vector ? tier1_select_part_form(parts[k].bytes, true) : X86_FORM_MOV_R64_RM64,
+        X86Instruction loads[3] = {
+            {
+                .displacement = direct ? parts[k].offset : tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes),
+                .reg = (uint8_t)(parts[k].reg & 0x1f),
+                .rm = direct ? source : X86_REGISTER_RSP,
+                .mode = BUSTER_X86_MEMORY_BASE,
+                .form = vector ? tier1_select_part_form(parts[k].bytes, true) : X86_FORM_MOV_R64_RM64,
+            },
         };
-        valid = at < end && tier1_cert_emitted_exactly(records[at], load);
+        // A record's payload (#2798) in pieces that stay inside it.
+        const uint32_t load_count = vector && tier1_select_part_payload(parts[k].bytes) ? tier0_payload_load(loads[0].reg, parts[k].bytes, source, parts[k].offset, loads) : 1;
+        valid = end - at >= load_count;
+        for (uint32_t j = 0; valid && j < load_count; j += 1)
+        {
+            valid = tier1_cert_emitted_exactly(records[at + j], loads[j]);
+        }
         if (valid && direct)
         {
-            // A split vector's part (#1847): its load reads the result's bytes through the address and defines the part's
-            // value in its register, which the ret reads (tier1_cert_emitted_return).
+            // A split vector's part (#1847) or a payload (#2798): its loads read the result's bytes through the address and
+            // define the part's value in its register, which the ret reads (tier1_cert_emitted_return).
             Tier1CertEmittedKernel kernel = {
                 .referenced = UINT32_MAX,
                 .definition = BUSTER_TIER1_CFG_NONE,
                 .definition_location = BUSTER_CERT_NONE,
             };
-            valid = tier1_cert_emitted_take_reference(build, at, 0) && tier1_cert_emitted_add_use(&kernel, value, tier1_cert_emitted_gpr(source, 8)) &&
-                    tier1_cert_emitted_originals(build, node, &kernel, records + at, 1);
+            for (uint32_t j = 0; valid && j < load_count; j += 1)
+            {
+                valid = tier1_cert_emitted_take_reference(build, at + j, 0);
+            }
+            valid = valid && tier1_cert_emitted_add_use(&kernel, value, tier1_cert_emitted_gpr(source, 8)) && tier1_cert_emitted_originals(build, node, &kernel, records + at, load_count);
             valid = valid && tier1_cert_emitted_define(build, node, build->result_parts + k, tier1_cert_emitted_vector(build, parts[k].reg & 0x1f, tier1_cert_emitted_part_width(true, parts[k].bytes, false)));
         }
         else if (valid)
         {
             valid = tier1_cert_emitted_append_move(build, at, BUSTER_IR_NONE, BUSTER_CERT_NONE);
         }
-        at += 1;
+        at += load_count;
     }
     int32_t hidden_offset = 0;
     valid = valid && (!hidden || tier1_emit_cfg_object(function, emitted, function->slot_count + function->parameter_count, &hidden_offset));
@@ -3309,8 +3406,9 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
         }
     }
     // And the by-value aggregate parameters' parts in incoming slots (#1284: a SPLIT location's, a STACK one's high or low
-    // eightbyte alone), each by the ABI 8 past the return address and its location's offset, which the layout's offset
-    // its load uses must be, from the register it names, as a stack parameter's.
+    // eightbyte alone, a PAYLOAD one's payload in its slot's width, #2798), each by the ABI 8 past the return address and
+    // its location's offset, which the layout's offset its load uses must be, from the register it names, as a stack
+    // parameter's.
     for (uint32_t k = 0; valid && k < build.entry_count; k += 1)
     {
         const Tier1CertEmittedStep step = build.entry_steps[k];
@@ -3321,7 +3419,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
             const bool placed = tier1_cert_emitted_place(&build, step.record.rm, step.record.displacement, &at, &entry);
             const bool incoming = placed && (entry ? at : build.frame_base == INT64_MIN ? INT64_MIN : build.frame_base + at) == step.to;
             valid = incoming || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, UINT32_MAX);
-            tier1_cert_emitted_range(&build, &range, true, step.to, (int64_t)step.to + BUSTER_ABI_SLOT_BYTES);
+            tier1_cert_emitted_range(&build, &range, true, step.to, (int64_t)step.to + step.width);
         }
     }
     // And the pushes' slots and the return address's, by their offsets from rsp at entry.
@@ -3652,7 +3750,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
     {
         const Tier1CertEmittedStep step = build.entry_steps[k];
         const bool registered = step.kind == TIER1_CERT_STEP_POINTER || (step.kind == TIER1_CERT_STEP_PARAMETER && !step.slot);
-        const uint32_t location = step.kind == TIER1_CERT_STEP_SLOT ? tier1_cert_emitted_memory(&build, step.record, 8)
+        const uint32_t location = step.kind == TIER1_CERT_STEP_SLOT ? tier1_cert_emitted_memory(&build, step.record, step.width)
                                   : registered && step.vector ? tier1_cert_emitted_vector(&build, step.reg, step.width)
                                   : registered ? tier1_cert_emitted_gpr(step.reg, 8)
                                                : BUSTER_CERT_NONE;
@@ -3784,6 +3882,30 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
                         };
                         valid = location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX);
                     }
+                }
+            }
+        }
+        // The slots a run of blocks carries in beside the values' registers (#2870, Tier1EmitResult.entry_slots), whose
+        // stores the emitter left out: each asserted, and proved on the block's one incoming edge.
+        for (uint32_t b = 1; valid && emitted->entry_slots != 0 && b < blocks; b += 1)
+        {
+            for (uint32_t k = emitted->entry_slot_offsets[b]; valid && numbers[b] != BUSTER_CERT_NONE && k < emitted->entry_slot_offsets[b + 1]; k += 1)
+            {
+                if (pass == 0)
+                {
+                    fact_offsets[b + 1] += 1;
+                }
+                else
+                {
+                    const uint32_t v = emitted->entry_slots[k];
+                    int32_t offset = 0;
+                    const bool slot = v < values && tier1_emit_cfg_slot(emitted, BUSTER_TIER1_CFG_SPILL + cfg->allocation.spill_ids[v], &offset);
+                    const uint32_t location = slot ? tier1_cert_emitted_frame(&build, offset, tier1_cert_emitted_width(emitted, v)) : BUSTER_CERT_NONE;
+                    facts[fill[b]++] = (Tier1CertFact){
+                        .value = v,
+                        .location = location,
+                    };
+                    valid = location != BUSTER_CERT_NONE || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_DECODE, UINT32_MAX);
                 }
             }
         }

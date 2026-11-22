@@ -553,7 +553,7 @@ static void parallel_test_at_once(ParallelTest* test)
                                      (unsigned long long)i, log, (unsigned long long)i, log);
     }
     const ParallelOptions one = { .jobs = 1 };
-    report = parallel_test_run(test, (String8){ .pointer = text, .length = length }, one, &summary, &results);
+    parallel_test_run(test, (String8){ .pointer = text, .length = length }, one, &summary, &results);
     const String8 logged = parallel_test_read(&test->arena, log);
     parallel_test_check(test, "one at a time", summary.succeeded && summary.peak == 1, logged, "start 1\nend 1\nstart 2\nend 2\nstart 3\nend 3\nstart 4\nend 4\n");
     test->arena.length = 0;
@@ -943,7 +943,7 @@ static void parallel_test_fail_fast(ParallelTest* test)
 
     // A timeout is a failure of its own command, which stops the one beside it; the timed-out one stays "timed out".
     const ParallelOptions timeout = { .jobs = 2, .timeout = BUSTER_PARALLEL_NANOSECONDS, .fail_fast = true };
-    report = parallel_test_run(test, parallel_test_string("== stuck\nexec sleep 30\n== beside\nexec sleep 30\n"), timeout, &summary, &results);
+    parallel_test_run(test, parallel_test_string("== stuck\nexec sleep 30\n== beside\nexec sleep 30\n"), timeout, &summary, &results);
     parallel_test_check(test, "fail-fast: a timeout",
                         !summary.succeeded && summary.failed_fast && summary.failed + summary.stopped == 2 && summary.elapsed < 10 * BUSTER_PARALLEL_NANOSECONDS && results != 0 &&
                             results[0].timed_out,
@@ -1093,7 +1093,10 @@ static void parallel_test_slow_reader(ParallelTest* test)
         .rlim_max = known ? saved.rlim_max : 32,
     };
     const bool lowered = known && saved.rlim_cur > low.rlim_cur && setrlimit(RLIMIT_NOFILE, &low) == 0;
-    report = lowered ? parallel_test_run(test, (String8){ .pointer = text, .length = length }, plain, &summary, &results) : (String8){ 0 };
+    if (lowered)
+    {
+        parallel_test_run(test, (String8){ .pointer = text, .length = length }, plain, &summary, &results);
+    }
     const bool restored = !lowered || setrlimit(RLIMIT_NOFILE, &saved) == 0;
     parallel_test_check(test, "many ended before the report reaches them, with 32 descriptors", lowered && restored && summary.succeeded && summary.passed == 61,
                         (String8){ 0 }, 0);

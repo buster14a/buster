@@ -7,7 +7,6 @@
 // The 9700X invocation takes its shared per-run lock and CPU 2 pin. --only and --after-scalar expose both power states.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -215,7 +214,7 @@ static bool tier1_select_bench_run(Tier1SelectBench* bench, bool vector, bool co
     {
         Tier1SelectPlan plan;
         uint32_t node;
-        valid = tier1_select_plan(&bench->functions[f], 0, &bench->output, &bench->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+        valid = tier1_select_plan(&bench->functions[f], 0, &bench->output, &bench->scratch, &plan, &node) == TIER1_SELECT_OK;
         if (valid && complete)
         {
             const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .rematerialize = true };
@@ -240,7 +239,7 @@ static bool tier1_select_bench_run(Tier1SelectBench* bench, bool vector, bool co
                 }
                 const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
                 uint8_t* bytes = arena_push(&bench->output, capacity, 64);
-                const int64_t encoded = valid && bytes != 0 ? (vector ? x86_encode(code->records, code->count, bytes, capacity, 0, 0) : x86_encode_scalar(code->records, code->count, bytes, capacity, 0, 0)) : -1;
+                const int64_t encoded = valid && bytes != 0 ? x86_encode(code->records, code->count, bytes, capacity, 0, 0) : -1;
                 valid = valid && encoded >= 0;
                 if (valid)
                 {
@@ -396,11 +395,3 @@ int run_tier1_select_benchmark(int argc, char** argv)
     return result;
 }
 
-#else
-int run_tier1_select_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

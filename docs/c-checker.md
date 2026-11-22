@@ -201,8 +201,8 @@ below).
 
 It preprocesses, parses, resolves supported declarations, checks expressions,
 and reports errors with the preprocessor's source locations. A successful check
-returns zero. `--scalar` selects both the scalar parser and the postorder checker
-schedule and the independent scalar binding-event resolver. `--dump-typed`
+returns zero. `--scalar` selects the scalar parser and the independent scalar
+binding-event resolver; the checker has one schedule since #2924. `--dump-typed`
 prints the node types, categories, constants, faults and operand/store
 conversion metadata. `--dump-static` materializes supported static
 definitions as real `Link` atoms and prints their bytes and symbolic fixups.
@@ -229,6 +229,9 @@ are still checked. This mode intentionally accepts a system header whose only
 semantic error is in a deferred body; it departs from standard C diagnostics
 and from Clang's default behavior, as authorized in
 [#155](https://github.com/buster14a/buster/issues/155).
+The unit's end has its warnings in both modes: an internal function used and
+never defined is reported from the tokens that were read, so that a use only a
+deferred body has reports nothing, as that body's errors don't.
 `-fno-lazy-system-headers` restores the default, and the last option wins.
 Both modes use the same checked-reference selection for object publication;
 tests require equal objects for valid inputs. Performance comparisons use the
@@ -397,9 +400,15 @@ command line's `-W[no-]c23-extensions`, `-W[no-]c2x-extensions`,
 `-pedantic-errors`, under the source's `#pragma clang diagnostic` for the group,
 which the preprocessor follows through push and pop, at any depth, for it
 alone. Clang's -Wpre-c23-compat warning of
-it in C23 isn't given. One difference from clang remains: clang takes an
-imaginary one (`5wbi`, a `_Complex _BitInt(4)` that it doesn't let a program
-spell otherwise), which the checker refuses, as GCC does.
+it in C23 isn't given. An imaginary one (#2219: `5wbi`, and `i` or `j` before
+or after the other suffixes, `5iwb`, `5uwbi`, `5wbiu`) is clang's
+`_Complex _BitInt(N)` of the real one's width, a type a program can't spell
+otherwise, which the reader makes (`type_complex` of the `_BitInt`); GCC refuses
+it. Its diagnostics are the real one's: none in C23, -Wc23-extensions before
+it. Past 64 bits its value is a complex constant's parts' limbs ("Complex
+integer constants past 64 bits" below). A failed static assertion prints an
+imaginary constant as clang's StmtPrinter does, its imaginary part's literal
+then `i` (`5iwb` as `5wbi`, `0x10i` as `16i`).
 
 What this compiler's own `main.c` needed (#129) the checker takes as clang 23
 does, each rule checked against clang's answers on probes of it:
@@ -752,7 +761,19 @@ of this reader change and its recorded controls, not whole-compiler acceptance.
 
 Overloadable declarations retain source-position candidate sets. A call selects
 its candidate from the checked argument types; a function address selects from
-the destination function-pointer type. Initializers, casts, assignments,
+the destination function-pointer type. A `void *` destination, an operator's
+operand, a condition and a cast to void take the one candidate whose address is
+available, not made ineligible by an enable_if, as clang does (#2935,
+`check_overload_address`). Otherwise the set has clang's errors: a
+destination of no function-pointer type is "initializing 'T' with an expression
+of incompatible type '<overloaded function type>'" (or "assigning to") with a
+note at each candidate, and an operand is "reference to overloaded function
+could not be resolved; did you mean to call it?", " with no arguments" where
+one candidate takes none, with "possible target for call" at each
+(`check_driver_overload_unresolved`). Where clang then reads that operand as
+the call, it goes on to the expression's next operand, a conditional's
+condition last, and so does the driver; it doesn't check what the call's type
+makes of the expression (`*f`). Initializers, casts, assignments,
 callbacks and returns retain that selected object and conversion on the use
 edge, without rewriting a shared identifier leaf. Candidate availability is
 checked at the use's source position. Function calling conventions participate
@@ -1151,11 +1172,12 @@ Allocation failure follows the reader's ordinary resource failure path.
 `CheckOptions.verify`, selected by the C driver's `--verify`, validates these
 graphs too and checks every counter and purity byte against the reader's
 facts. Mismatches return `CHECK_STATUS_INVALID_GRAPH` and roll back output;
-a purity mismatch names its first node. Generated graphs and fixtures retain
-the ordinary scalar/vector validators as independent oracles. `test-checker`
-checks both recorded schedules with and without verification on its generated
-graphs, compares both validators with each source fixture's recorded facts,
-and mutates every counter and purity byte to check rejection and rollback.
+a purity mismatch names its first node. Generated graphs and fixtures are
+validated by `check_graph_validate`, which `test-checker` compares with its
+definition (the exact path on every node, `check_test_graph_validate_definition`)
+and with each source fixture's recorded facts. It checks the recorded schedules
+with and without verification on its generated graphs, and mutates every counter
+and purity byte to check rejection and rollback.
 
 [The frozen #674 qualification](https://github.com/buster14a/buster-performance/tree/4df43f7d7a685133b6beade655d9e9a306947081/docs/measurements/unclaimed-perf-2026-10-28/issue-674/target/README.md)
 compares `bc1b4861` with `7274e1bc`. Eight physical workers compile the pinned
@@ -1205,6 +1227,14 @@ note. The checker builds the inherited-attribute mask on the first such declarat
 deferred body containing one of these attributes conservatively falls back to source-order checking, so its declaration
 state cannot race another body's token columns. `test-checker-deferred` compares the fallback with the scalar and vector
 readers.
+
+An asm label first given after a definition (#2936) is dropped too, with the same warning at the label's string and the
+definition's note, unless the definition has a label from any declaration of the object, a block's included. The asm
+labels' pass at the reader's end decides it (`check_input_asm_labels`), before an earlier use's error, as clang's
+checkNewAttributesAfterDef comes first. Its warning is reserved, suppressed, where the declaration is merged
+(`check_input_attribute_late`), so that it comes first among that declaration's late attributes and after its own
+attributes' warnings; the pass publishes it. A body's such declaration on a lane goes to source order.
+`tests/checker/asm-label-after-definition` compares whole outputs with clang's in `test-checker-driver`.
 
 ### Typed output
 
@@ -1270,9 +1300,9 @@ the second addition depends on the first even when both tokens have the same
 bracket depth. The checker computes heights from actual operand edges. A node
 is ready only after all its operand values and types have been produced.
 
-The scalar schedule processes graph nodes in postorder, one at a time. So
-does the vector schedule by default, with its leaves and statements' discards
-without their actions ("Node order or regions" below). With its regions
+The checker processes graph nodes in postorder, one at a time, by default, with
+its leaves and statements' discards without their actions ("Node order or
+regions" below). With its regions
 (`CheckOptions.regions`), it finds contiguous regions whose type behavior is
 known to stay within builtin arithmetic types, and checks each region in
 postorder batches (`check_graph_region_postorder`). From the first node not yet done, a batch
@@ -1283,9 +1313,10 @@ and stably groups the ready nodes at each height. The benchmark measured both
 on the same actions, and the postorder batches won ("Level order or
 postorder" below). Operations that can create a pointer, decay an array or
 function, or otherwise intern a derived type are postorder barriers. This
-conservative rule preserves newly allocated `TypeId` numbers across fresh
-scalar and vector type tables. Comparing both schedules in a table already
-populated by one schedule would miss that requirement.
+conservative rule preserves newly allocated `TypeId` numbers across fresh type
+tables, whatever the schedule: `test-checker` compares node order, the
+transitions, level order and regions, each in a fresh table. Comparing them in a
+table already populated by one schedule would miss that requirement.
 
 `CheckOptions.batch_size` is a logical batching limit: zero selects 16 and
 values 1 through 16 are valid. A batch ends at a node that reads a member (in
@@ -1298,7 +1329,7 @@ Irregular types and operations, integer multiplication/division/remainder,
 folding use the scalar semantic action. Singleton frontiers execute directly
 without packing a vector batch.
 
-The vector path completes each leaf without an overload set, a `VALUE` that
+The checker completes each leaf without an overload set, a `VALUE` that
 reads no operand and interns no type (about 45% of `sqlite3.c`'s body nodes),
 without running its action (`check_graph_leaf`, #530). The record is the one
 the action gives: the leaf with its type as operand 0's conversion, or for an
@@ -1306,21 +1337,24 @@ invalid type, that type's diagnostic and a zero value. It writes the records in
 node order: the barrier's leaves in the walk, a region's in its level pass,
 which then schedules only the rest. A separate pass of leaves wrote each
 output cache line twice. When validation is required (an external producer or
-`--verify`), the vector path validates the graph 16 nodes at a time
-(`check_graph_validate_vector`): the operators' classes come from one
-`vpermi2b` table built from the scalar rules, and each argument slice's offset
-from a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin
-or a sideband entry goes to `check_graph_validate_node`, the scalar
-validator's step. Most of that validation's time is the leaves' records it
+`--verify`), the checker validates the graph 16 nodes at a time
+(`check_graph_validate`): the operators' classes come from one `vpermi2b`
+table built from the exact path's rules, and each argument slice's offset from
+a prefix sum. A block with an invalid node, a `VARARGS` or x86 builtin or a
+sideband entry goes to the exact path, `check_graph_validate_node`, a node at a
+time. Most of that validation's time is the leaves' records it
 reads, which since #572 lie one after another, as only `VALUE` nodes have one,
 and since #628 are 32 bytes each, half a cache line, where a 96-byte value took
-two. `test-checker` compares the two
-validators on random graphs whole, with each rule broken, and with their
-columns ending at `PROT_NONE` pages.
+two. `test-checker` compares the validator
+with its definition, the exact path on every node, on random graphs whole, with
+each rule broken, and with their columns ending at `PROT_NONE` pages.
 
-Both schedules call the same semantic-action contract. Scalar fixtures with
-independently stated expected results and the external source oracle therefore
-remain necessary: scalar/vector equality alone cannot validate shared C rules.
+Every schedule calls the same semantic-action contract. Fixtures with
+independently stated expected results, the external source oracle and the
+typed streams' recorded digests (`tests/checker/stream-digests.tsv`, recorded
+where the scalar schedule and node order agreed, before #2924 removed the
+former) check it: equality between schedules alone cannot validate shared C
+rules.
 `CheckStatistics` reports nodes, levels, batches, actual scalar/vector node
 counts, and arena bytes. The node counts describe the path executed, not merely
 which operations could theoretically use SIMD: `vector_nodes` counts the vector
@@ -1341,9 +1375,10 @@ postorder. `benchmark-checker-source` times both in one build, with the same
 actions, type table and graph: its paths `regions` (the postorder batches,
 `CheckOptions.regions`, which were `vector`, the vector path's default, until
 #1050 made it node order: "Node order or regions" below) and `levels`
-(`CheckOptions.level_order`), beside `scalar`. Before it times them, it checks
-that each gives the scalar path's typed stream, and `test-checker` compares both
-orders at every batch size with the scalar path. The measurements below, from
+(`CheckOptions.level_order`), beside `scalar` (the scalar reader's graph, which
+node order checks since #2924). Before it times them, it checks that each gives
+the same typed stream, and `test-checker` compares both orders at every batch
+size with node order. The measurements below, from
 #133, name the postorder batches as they were then.
 
 Level order computes each region node's height from its operands, counts the
@@ -1683,11 +1718,10 @@ the diagnostics are the same bytes):
   clears no column and its main loop writes no zero (`CheckStream.zero_columns`):
   the diagnostics, their operands, the warnings and their ignored kinds take
   no memory where no node has one, and a first write reads no payload row.
-- The vector path writes a discard of an rvalue without its action
+- The checker writes a discard of an rvalue without its action
   (`check_graph_discard`): the operand's value, its conversion to void and the
   cast's provenance, by the same helpers in the same order as the action, where
-  the action would read nothing else (`check_graph_discard_taken`). The scalar
-  path keeps the action, the twin whose streams the tests compare.
+  the action would read nothing else (`check_graph_discard_taken`).
 - `check_graph_constant_contexts` passes over 64 nodes that hold neither a
   context nor a mark at a time, and `check_graph_is_leaf` reads no leaf's record
   without overload candidates.
@@ -1823,6 +1857,26 @@ intermediate `long double` could round twice around a midpoint. Complex
 constants retain real and imaginary components in their source format; GNU
 integer-complex values retain separately masked components. A failed component
 conversion clears the entire constant payload while preserving its fault.
+
+**Complex integer constants past 64 bits** (#2219, `c_check_complex.c`): a
+complex `_BitInt` of 65 bits or more (an imaginary bit-precise constant's, or
+the usual arithmetic conversions', `5wbi * (_BitInt(200))1`) and GNU's
+`_Complex __int128` (`5wbi * (__int128)1`) hold each part as limbs in the wide
+constants' region, as a `_BitInt` past 128 bits holds its own: the real part's
+pointed to from the floating payload's first word and the imaginary part's from
+the imaginary payload's, the words a `_Complex __float128` constant's parts
+already use, which every copy, stream and comparison carries; `integer` keeps
+the real part's low 128 bits. A part read out (`check_complex_component`) is an
+integer constant of the element, its limbs past 128 bits; a conversion into the
+type sets both (`check_complex_wide_set`); `+`, `-`, `*`, `/`, unary `-` and `~`
+fold each part's operation as the element's (`check_complex_part_fold`:
+`check_action_fold_integer` up to 128 bits, `check_wide_fold` past them), `==`
+and `!=` and truth compare the limbs, and static data and the lowering's
+constants write each part's object representation, its bits past the width
+extended from its sign (`check_complex_wide_bytes`). An element of up to 64
+bits keeps both parts in `integer`'s halves, and a complex `_BitInt`'s part
+there extends its sign through its storage in static data, as a `_BitInt`
+does.
 Exotic floating formats retain explicit unsupported folding requirements.
 
 Constraint diagnostics and evaluation faults are separate. An invalid operand
@@ -2575,11 +2629,10 @@ What the lowering covers past scalars (#145's programs):
   function (`check_lower_init_reentry`), from the body's controls 16 kinds at a
   time on the vector path (`check_lower_control_kinds`, shared with the named
   result's search) with a scalar twin. The function's `hidden_size` and
-  `hidden_alignment` give the bytes such a call writes: Tier 1's IR returns
-  them into a slot of its own and copies them there ([the IR](ir.md)), as it
-  did, past 256 bytes by the `memmove` the lowering registers for it
-  (`hidden_copy`, which no Tier 0 entry calls); Tier 0 and the interpreter copy
-  nothing.
+  `hidden_alignment` give the bytes such a call writes. Tier 0, the
+  interpreter and, since #2820, Tier 1 ([the IR](ir.md)) copy nothing: the
+  `memmove` the lowering still registers for such a copy past 256 bytes
+  (`hidden_copy`) is called by none of them.
   Above 128 bytes of explicit constant payload, dense nonvolatile byte-aligned numeric
   plans use a readonly byte image and one call to the target C library's
   `memcpy` (#598). The call returns the destination and discards it, which is the
@@ -2683,7 +2736,7 @@ What the lowering covers past scalars (#145's programs):
   code passes it: its registers from the member, and where none is left a stack
   slot of the union's size and alignment (`getIndirectResult`;
   `abi_finish_transparent` records the union in the ABI table's `transparent`
-  column, which `abi_assign_call` and its vector twin read), and `va_arg` reads
+  column, which `abi_assign`'s vector path and `abi_assign_call` read), and `va_arg` reads
   the member from a slot of the union's size and alignment. Such a union past
   two eightbytes, or whose first member passes as an aggregate, a pair, a
   vector or in memory, is refused by name. And a union made transparent, by a
@@ -3714,8 +3767,13 @@ What the lowering covers past scalars (#145's programs):
     versions that aren't `default`, which takes their count (`f.avx2.0`,
     `f.default.2`). A repeated version has no copy of its own.
     `f.ifunc` is another IFUNC at the resolver.
-    - `check_program_target_copies` makes each version's target. The
-      selection puts the copies after their body
+    - `check_program_target_copies` makes each version's target: its CPU's
+      features (`arch=`'s, or `-march`'s) and the version's own, without the
+      command line's `-m` features or `-march=native`'s list, `default`'s its
+      CPU's alone (`predefines_clone_target`, #2247), as clang's
+      `getFunctionFeatureMap` gives a clone (so a unit built with `-mavx2` has
+      clones without AVX2, and one built with `-march=haswell -mno-avx` has
+      them with AVX). The selection puts the copies after their body
       (`CheckProgram.body_options`), at symbols numbered after the program's
       (`check_program_target_number`).
     - A copy shares its body's locals in the lowering
@@ -3737,9 +3795,19 @@ What the lowering covers past scalars (#145's programs):
       naming its statement (`CheckProgramAsm.statement`), whose index gives
       `%=` its number and an asm goto's local labels and a helper's symbol
       their names, so that the copies' differ. A label a template defines by
-      name is defined once per copy, a duplicate refused as in clang. A naked
-      function's body is still compiled once (`check_program_target_copy_refused`):
-      its templates are its whole code. A group with a reference, or a
+      name is defined once per copy, a duplicate refused as in clang. Sema
+      checks an operand's size against the first version's features, as
+      clang's does for the function's version index 0, whichever clone later
+      fails (`check_input_asm_vector_bits`, of the definition's
+      `target_clones` or the declaration that made the function
+      multiversioned): a 32-byte `"x"` operand passes after `avx2` and is
+      "invalid output size" after `default`. A copy whose version can't place
+      an operand (32 bytes without AVX, 64 without AVX-512F, an opmask without
+      its moves' features) is refused by name at its statement, where clang's
+      code generation fails for that clone. A naked function, whose versions
+      another declaration gives (clang refuses both attributes on one), has
+      its code once per copy too (`check_program_asm_plan_naked`, by body,
+      each copy's plans its own). A group with a reference, or a
     `target_clones` function the unit defines with external linkage, gets its
     resolver `f.resolver`, a weak function (local in a static group), and its
     IFUNCs of that binding. The resolver calls `__cpu_indicator_init` and
@@ -3781,9 +3849,21 @@ What the lowering covers past scalars (#145's programs):
     and `target_clones`' by calling the resolver of a unit of their
     declaration, linked before clang's object of their definition. The
     resolver's result is named among clang's versions' distinct addresses.
-  - *Differences from clang's code.* A naked `target_clones` body is
-    compiled once, with the unit's features, where clang compiles a copy per
-    version (each is valid there). A copy's debug subprogram has no `DW_AT_linkage_name`. The
+    Inline assembly in copies (#2247): a program of a body of asm statements
+    (general, XMM, memory, constant and matching operands, clobbers, an AVX2
+    template, an asm goto) and a naked function whose versions another
+    declaration gives runs at Tier 0 and Tier 1 as clang's build, through the
+    IFUNCs and at each copy's symbol, each call naming the copy whose code
+    ran; Tier 0's object has clang's symbols and places of code. Units of
+    vector and opmask operands some copies can't place have clang's
+    `-fsyntax-only` output under `-mavx2`, `-march=haswell -mno-avx`,
+    `-march=x86-64-v4` and `-mavx512bw`, and their `-c` builds at both tiers
+    succeed where clang's do and fail at the line of clang's first error.
+  - *Differences from clang's code.* A copy whose version can't place an
+    asm operand is refused by name ("inline assembly vector operands of 32
+    bytes without AVX"), once, where clang's code generation reports "could
+    not allocate output register for constraint" (or "input reg") for each
+    such clone and statement. A copy's debug subprogram has no `DW_AT_linkage_name`. The
     resolver is `.text`'s, not a COMDAT section's. Its
     unwind entry is clang's CFI for its frame: the CFA at `rsp + 16` after
     its push, at `rsp + 8` after each return's pop, and at `rsp + 16` again
@@ -3916,7 +3996,9 @@ What the lowering covers past scalars (#145's programs):
   address, computes and stores the result back converted; `__real__` and
   `__imag__` read an lvalue's part or an rvalue's object's; and a constant's
   parts are a floating constant's (a `long double`'s in the function's table),
-  or a complex integer constant's halves, each its part's bits.
+  or a complex integer constant's halves, each its part's bits, or past 64 bits
+  its parts' limbs, a store of each word with the bits past the width extended
+  (#2219, `check_lower_complex_constant`).
   The direct path's executables take the libgcc functions from `libgcc.a`'s
   members (#483): `test-checker-driver --executable` links products and
   quotients of each type by both paths into the same bytes, which need
@@ -4110,8 +4192,12 @@ What the lowering covers past scalars (#145's programs):
   unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
   `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,
   initializer parts with a bit width and `__builtin_dump_struct`'s reads take
-  the bytes that hold the field's bits. A field whose bits are spread over more
-  than 8 bytes (a packed one) is refused. `c_check_program_bit_unit_test.c`
+  the bytes that hold the field's bits. A packed field of up to 64 bits off a
+  byte boundary may lie in 9 bytes (#2999): its read and its store take the
+  first 8 as an integer and the ninth as a byte, joined by shifts on a read and
+  split on a store, as clang's -O0 code does its `i72` (`check_lower_bit_wide`,
+  out of line, apart from the tasks' always-inlined store). A field wider than
+  64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.
@@ -4143,7 +4229,12 @@ What the lowering covers past scalars (#145's programs):
   `ALLOCATE` at each array's declaration (after its bounds) and a
   `STACK_RESTORE` at the block's end and before every `break`, `continue` or
   `goto` that leaves the arrays' scope, restoring the outermost block it
-  leaves; a `return` needs none. The lowering keeps the saved position and each
+  leaves; a `return` needs none. Each array's object and each bound find their
+  statement, whose terminator lists them, by a walk up their parents that leaves
+  its answer at every token it passes, under the walk's body
+  (`check_program_statement`): a declarator's bounds (`a[n][n]...[n]`) and a
+  declaration's declarators (`a0[n], a1[n], ...`) walk the path they share
+  once, where each walked it whole (#2995). The lowering keeps the saved position and each
   array's address in locals of their own (Tier 0's `STACK_SAVE`, `ALLOCA` and
   `STACK_RESTORE`). An array's size is its extents' locals, which its bounds
   set once where they were declared, times its constant dimensions and its
@@ -4242,8 +4333,10 @@ What the lowering covers past scalars (#145's programs):
   after it isn't reported. The function has a prototype of one parameter
   ("'cleanup' function 'f' must take 1 parameter"), to which the variable's
   address converts as clang's `IsAssignConvertCompatible` takes it: `void *`,
-  `_Bool`, or a pointer to a compatible type whatever either's qualifiers
-  ("'cleanup' function 'f' parameter has incompatible type", the spelling of
+  `_Bool`, or a pointer to a compatible type whatever either's qualifiers, or
+  an `_Atomic` one of those, which clang's `CheckAssignmentConstraints` checks
+  as its value's type (`_Atomic(int *)`, `_Atomic(void *)`, `_Atomic _Bool`:
+  #1844) ("'cleanup' function 'f' parameter has incompatible type", the spelling of
   clang's message without its two types). A pointer of another signedness or
   to a pointer of other qualifiers, which an assignment only warns about, is
   an error here. An `__auto_type` variable's parameter type is checked once
@@ -4338,13 +4431,14 @@ What the lowering covers past scalars (#145's programs):
   lowering's call (`check_lower_cleanup`) takes the variable's address,
   which makes its local a frame slot, and drops the result: an aggregate's
   (in memory or in registers), a 128-bit integer's or a vector's lands in a
-  frame object of its own, as a source call's does. The one parameter other
-  than a pointer that clang's Sema takes, a `_Bool`, gets the address's low
-  bit, as clang's code passes it (it bit-casts the address to the `_Bool`);
-  an `_Atomic _Bool`'s, which clang's instruction selection can't take, is
-  refused by name. The body's selection references
+  frame object of its own, as a source call's does. An `_Atomic` pointer
+  parameter gets the address, as a pointer's does (#1844). The one parameter
+  other than a pointer that clang's Sema takes, a `_Bool`, gets the address's
+  low bit, as clang's code passes it (it bit-casts the address to the
+  `_Bool`); an `_Atomic _Bool`'s, which clang's instruction selection can't
+  take ("Cannot select: bitcast FrameIndex"), is refused by name. The body's selection references
   the function. `test-checker`'s sections (`c_check_cleanup_test.c`) compare
-  54 fixtures' acceptance and first errors with clang's, and run programs of
+  78 fixtures' acceptance and first errors with clang's, and run programs of
   each exit, each class of returned value, the named return value's cases,
   statement expressions, switches and the functions' kinds (their parameters
   and results among them) natively against
@@ -5058,8 +5152,7 @@ It also checks that `-c` of each fixture is refused with no object written. The
 deferred readings are `-c`'s, on one, two and three lanes: `-fsyntax-only`
 starts no lanes, so a deferred `-fsyntax-only` reading is source order's. The
 driver reads `--scalar`'s in source order; `test-checker-deferred` compares the
-deferred reader with both paths, and its merge with its scalar twins, on its
-recovered fixtures too.
+deferred reader with both paths on its recovered fixtures too.
 The fixtures cover each pass above, shared records, two errors in one list,
 missing names and a control error after a recovered error, block declarations,
 exclusions, `_Alignas`, a dropped `format`, and enumerators.
@@ -5786,7 +5879,11 @@ An undeclared name that is a typo of a visible one is clang's (#1447,
   recovered and checked as a failed parse's is (`check_driver_typo_edits`,
   `CheckPrefixEdit`, up to 4 readings), its errors at the names first
   (`check_driver_typo_errors`) and a parse error naming one spelling the
-  correction (`Parser.respelled`). An expression statement whose `;` is
+  correction (`Parser.respelled`). A reading whose parse has no view (a
+  tentative tail given back leaves the failed parse itself, of which no type
+  view, repair or prefix can be made) ends the unit as a failed parse without a
+  view does, with its parse's errors alone: the views that failed cleared the
+  one the unit was read as, which its reports would otherwise read (#3000). An expression statement whose `;` is
   missing after its first name or that name's call (`retrn x`, `whil (a) a--`)
   is read on past as if the `;` were there (`ParseDiagnostic.probe`), as
   clang's `ParseExprStatement` does once the name is classified, so that the
@@ -6318,7 +6415,13 @@ The test command fails if the oracle cannot run. It covers:
   spellings C23 doesn't have; their types by `_Generic` and their values by
   static assertions in a C23 source fixture, by both paths and against clang,
   and at run time in a program against clang -O0's
-  (`bit-precise-constants`); and a 129-bit one refused by name.
+  (`bit-precise-constants`); and a 129-bit one refused by name. Their
+  imaginary forms (#2219): each order and case of the suffixes, to 257 bits,
+  and their complex constants' parts; the complex `_BitInt`s of 65 to 200 bits
+  and `_Complex __int128` by actions (`check_test_complex_wide_actions`:
+  conversions, `+ - * /`, unary `-` and `~`, parts, equality, truth and a
+  part's bytes); and static assertions of them against clang in GNU17, GNU23
+  and C99.
 - Named UCNs (`\N{...}`, #1447), which clang reads as its extension in C, in
   identifiers, `#if`'s character constants, literals and a static assertion's
   message, accepted by both paths and the default route, writing an object
@@ -6854,6 +6957,17 @@ keyword, as a value of a conditional's arm or a comma's operand does, and so
 does a `_Generic`'s or `__builtin_choose_expr`'s chosen operand without an
 effect. `-Wunused-value` is in `-Wunused`, `-Wmost` and `-Wall`, with
 `-Wunused-comparison` and `-Wunused-result` under it.
+A discarded equality or inequality supplies its assignment suggestion only
+when its original left operand is an lvalue (#2906,
+`check_common_comparison_lvalue`). The comma and ordinary statement emitters
+share that check. Parentheses, static selections and implicit conversions
+preserve the operand's classification; explicit casts and other rvalues do
+not qualify. A repeated vector swizzle is excluded even though Buster stores
+it as an lvalue with a duplicate-component flag. This follows Clang's
+suggestion rule rather than full assignment validation: const objects and
+arrays still receive notes, and a floating or pointer lvalue can still receive
+the inequality's `|=` suggestion. The existing warning emitter retains its
+locations, macro handling, warning group and severity policy.
 A discarded `&&` or `||` (#1390) is quiet where either operand accepts the
 discard: an ordinary direct call, an assignment, an increment, a volatile read,
 or a nested logical operator, comma, conditional, selection or statement
@@ -6958,8 +7072,11 @@ and check that file-spelled candidates and suppressed warnings do not replay his
 `while` or `?:` condition; a write in that condition is a use of the parameter,
 not an unused-but-set statement write. The `-Wswitch` definition is the one its
 selector's tag type names, so a fixed underlying type and a shadowing tag in
-another scope resolve correctly. The return-flow walk runs for non-aggregate
-functions only where `-Wreturn-type` is enabled, or for a `noreturn` function's
+another scope resolve correctly. The selector is the operand of the condition's
+promotion (the POSITIVE at the condition's `)`), not the node of its first
+token, so `s->kind`, `e[0]`, `get()` and `(e)` warn as in clang; the warning
+stays at the first token, where clang puts it (#3200). The return-flow walk
+runs for non-aggregate functions only where `-Wreturn-type` is enabled, or for a `noreturn` function's
 independent `-Winvalid-noreturn` fall-off warning, and for them takes only the
 warning's walk: the first walk is an aggregate return's alone, whose lowering
 reads its result (#1340). The walk's per-node facts, whether an expression
@@ -7098,17 +7215,20 @@ A failed static assertion's tree is excluded from the rejected unit's warning
 walk. `check_driver_reports_from` therefore calls
 `check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
 Its bounded worklist visits the retained condition tree, using the existing
-integer and floating literal conversion emitters at the error's expression
-boundary and in the preceding diagnostic phase. Conditional conditions are
-checked first in source postorder, as Clang constructs them; the assertion's
-own conversion and nested logical operands then follow the completed
-expression's order. Static selections retain only their selected result,
-explicit casts do not create implicit conversions, and a conditional's arms
-do not inherit its outer boolean context. GNU omitted-middle conditionals
+integer and floating literal conversion emitters. The source span also locates
+retained conditional and comma nodes, including detached operands of static
+selections, through the token-to-node map (`check_common_failed_assert_source`).
+Those nodes are checked first in graph postorder, as Clang constructs their
+source expressions; the assertion's own conversion and nested logical operands
+then follow the completed expression's order. An inner assertion owns its own
+warnings. Explicit casts do not create implicit conversions, and a conditional's
+arms do not inherit its outer boolean context. GNU omitted-middle conditionals
 visit their shared condition once and do not diagnose that saved value as a
-new conversion of the written expression. This keeps the warnings before the
-unchanged assertion error, with the normal command-line and pragma policy,
-including promotion, suppression and fatal/error-limit handling. The original
+new conversion of the written expression. Discarded comma operands reuse the
+ordinary unused-value emitter: source warnings complete with the comma, while a
+block's scalar discarded value keeps its deferred function-end publication.
+The normal command-line and pragma policy applies, including promotion,
+suppression and fatal/error-limit handling. The original
 runtime sources `tests/driver/assert_bool_*.c`, through
 `c_check_assert_bool_driver_test.c`, compare complete Clang diagnostics for
 file, member and block scopes, nested and short-circuited logical operands,
@@ -7116,12 +7236,19 @@ conditional warning order, floating literals, selections, explicit casts,
 unevaluated controls, worklist growth, builtin arguments, repeated failures,
 successful and non-warning controls, unrelated errors, macro expansion notes,
 C17/C23 and both reader choices and lane requests. The focused driver selector
-is `--assert-bool-only`. Clang is the external behavioral oracle; the fixtures
-and implementation are original. The cold path does not reconstruct source
-operands erased by static selections or queries, or restore other warning
-families such as `-Wconstant-logical-operand`; those remain separate recovery
-work. Successful-assertion conditional warning ordering also continues to use
-the ordinary warning walk.
+is `--assert-bool-only`; `--assert-diagnostics-only` also runs requirement
+printing and member-recovery checks. Clang is the external behavioral oracle;
+the fixtures and implementation are original. The cold path cannot recover
+operands that queries or type declarations erased altogether; those and the
+ordinary successful-expression gaps are tracked in
+[#2899](https://github.com/buster14a/buster/issues/2899).
+`-Wconstant-logical-operand`, absent from ordinary expressions too, is tracked
+in [#2900](https://github.com/buster14a/buster/issues/2900).
+The ordinary equality emitter's extra assignment-suggestion note for a
+nonassignable left operand is tracked in
+[#2906](https://github.com/buster14a/buster/issues/2906).
+Successful-assertion conditional warning ordering continues to use the
+ordinary warning walk.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
@@ -7133,15 +7260,15 @@ tests can warn (`check_common_candidate_bits`): a constant whose value an initia
 an assignment's, a conversion's or a call's argument's conversion changes (the
 types alone rule out a widening conversion, before the value's row is read), a
 self-assignment's names, a constant index outside its array, a source comma.
-What its warning tests past them only takes warnings away. The scalar path
-makes the facts in one pass in graph order and the evaluated nodes by a pass
-from the roots down. The vector path works on the graph's tree
-(`check_common_parents`: each node's reader, 16 nodes at a time, each operand
-slot's present children compressed to the front and written a child at a time,
-since a scatter costs as much whatever its mask and most slots are absent; a
-tree where every operand and argument precedes its node and no node has two
-readers, which counting the distinct children against the edges tells, and
-otherwise the scalar path). It visits only the nodes whose operators may have a
+What its warning tests past them only takes warnings away. The facts come
+from the graph's tree (`check_common_parents`: each node's reader, 16 nodes at
+a time, each operand slot's present children compressed to the front and
+written a child at a time, since a scatter costs as much whatever its mask and
+most slots are absent; a tree where every operand and argument precedes its
+node and no node has two readers, which counting the distinct children against
+the edges tells). A graph that isn't one takes the fallback: the facts in one
+pass in graph order and the evaluated nodes by a pass from the roots down
+(#2924 left it for its phase D). The tree path visits only the nodes whose operators may have a
 bit of their own, 16 at a time, and carries each bit up to the first ancestor
 that has it; and takes the evaluated nodes as everything with a parent, then
 clears, with all below them, the roots the control and selection walks left
@@ -7151,8 +7278,8 @@ frames, which would find nothing else. The comma markers' subtree starts come
 from a search back from the operand by doubling steps, then halving, each
 probe's climb stopping at a token shallower than the operand
 (`check_common_emission_subtree_start`), rather than from a column of every
-token's start. `test-checker-driver` checks the parents by both paths and the
-starts against their definitions on random graphs and trees whose columns end
+token's start. `test-checker-driver` checks the parents and the starts against
+their definitions on random graphs and trees whose columns end
 at `PROT_NONE` pages (`c_check_common_tree_test.c`).
 
 The vector warning driver classifies its immutable operator column once
@@ -7173,19 +7300,19 @@ emission scans reuse it instead of reloading four bytes of parent per node.
 Control flow and selections still change their separate evaluated marks.
 Displaced roots, statement expressions and initializer publication still use
 the existing root-order machinery. A graph that fails the tree check keeps
-the original fallback; the scalar driver allocates neither index and still
-visits every node as its independent oracle. Empty graphs allocate nothing,
+the original fallback. Empty graphs allocate nothing,
 and allocation failure reports the existing common-warning capacity error.
 Both indexes belong to the warning driver's scratch region and expire before
 backend processing. Their combined payload is about 1.125 bytes per node;
 this is a storage and scan-work description, not a measured timing result.
 
-`c_check_common_candidates_test.c` compares the lookup and scalar classifier
-with independent operator predicates, every operator across lane boundaries,
+`c_check_common_candidates_test.c` compares the lookup classifier with
+independent operator predicates, every operator across lane boundaries,
 invalid operator IDs, protected input and exact-capacity output tails,
-independent readers, and allocation failure. The tree tests also compare the
-root bitmap with an independent edge walk on valid and rejected trees and
-verify cached, uncached and scalar root enumeration.
+independent readers, and allocation failure, and the token, operator, reach
+and unevaluated scans with their definitions at every length to 300. The tree
+tests also compare the root bitmap with an independent edge walk on valid and
+rejected trees and verify cached and uncached root enumeration.
 
 The expression walk starts only at a root that reaches something or whose
 discarded expression may get the statement's unused-value warning, and enters
@@ -7206,8 +7333,7 @@ scalar path, the twin, tests every comparison; #2451), a plain `x = y` for `-Wse
 an analysis whose diagnostics are ignored. The token passes find their roles
 and kinds 64 tokens at a time, the node passes their operators 16 nodes at a
 time through an operator bitset, and `-Wuninitialized`'s declaration loops a
-sparse column's next entry by its directory (`check_sparse_next`). Each scalar
-path, the twin, visits every item and runs the same tests.
+sparse column's next entry by its directory (`check_sparse_next`).
 A static selection's unselected arms and controlling expression
 (`check_common_unselected_roots`, which `check_common_evaluated` and the
 returned-address check use) are the roots inside its range, from past its
@@ -7495,8 +7621,7 @@ they do per token where little of it was per declaration or expression:
   a list of n elements took about n²/2 steps: on the frozen `sqlite3.c`, 4.05%
   of the whole `-c`'s cycles. Each token now keeps its chain's length beside
   its first and last values (`CheckInputReader.value_counts`), and a parent
-  adds its children's. The scalar path, `--scalar`, walks the chains: the
-  tests that compare the two paths compare the counts with the walks.
+  adds its children's.
 - **One pass before reading.** `check_input_count_tokens` makes every count
   `check_input_run` sizes its tables by (`[`, `asm`, `sizeof`, member
   operators, operands and calls, and the names of the builtin constants, the
@@ -7509,8 +7634,7 @@ they do per token where little of it was per declaration or expression:
   builtins the walk prepares, an attribute's start, and a string or
   `__func__`. The walk in source order tests a bit where it compared the
   token's name and kind with each name and kind: on `sqlite3.c`, 50.8 million
-  instructions fewer, about 70 a token. The scalar path computes each bit with
-  the walk's own tests (`check_input_syntax_of`).
+  instructions fewer, about 70 a token.
 - **Comma contexts.** `check_input_expression_commas` classifies 64 contiguous
   roles at a time, then visits only separators and statement terminators.
   Non-separators' contexts depend directly on their roles; separators inherit
@@ -7642,8 +7766,12 @@ twin computes the same candidate and empty masks. Equal-key candidates stay in
 insertion order through collisions and wraparound, so the first failing
 association and expression/warning handling keep their existing order. Up to
 eight associations use local storage; larger lists reserve a bounded,
-at-most-half-full table from the token span. Allocation and sizing failures
-propagate as resource failures, and each reader restores its scratch mark.
+at-most-half-full table from the list's associations, its top-level commas
+counted with nested groups skipped as the readers skip them. Sized from the
+token span, a chain of selections nested in each other's last association
+cleared a table as large as every selection inside it (#2995). Allocation and
+sizing failures propagate as resource failures, and each reader restores its
+scratch mark.
 The index records exact duplicate and control compatibility-query counts.
 
 For A distinct nominal tags, including pointers to forward-declared tags,
@@ -7788,9 +7916,10 @@ integration, not a new measurement of that combination.
 
 The expressions' walk still took each token it visited through its action's
 chain of about 25 tests of the token's role, kind and columns before it acted,
-every step loading at the token the postorder had reached. Its vector path is
-now the coded walk (`c_check_expression_input.c`); `--scalar` keeps the walk,
-the oracle.
+every step loading at the token the postorder had reached. It is now the coded
+walk (`c_check_expression_input.c`); the walk that visited every token, the
+scalar twin, is gone (#2924), and `test-checker`'s source fixtures check the
+graphs against their recorded digests.
 
 - **Classes.** The classes' pass gives each token the walk acts at a class too
   (`CheckInputExpressionCode`, in the visits byte's bits 2 to 6): which branch
@@ -7816,11 +7945,8 @@ the oracle.
   The actions test none of these as the walk reaches each token. An intrinsic's
   id was the walk's hottest load: a column no other pass reads, so a miss at
   nearly every call.
-  `check_input_expression_code` is the scalar twin, by the walk's tests in their
-  order. The scalar classes' pass computes the codes only for the coded walk:
-  `--scalar`'s walk reads a token's `ACTS` and `SPARSE` bits alone, so it gets
-  no code, and doesn't pay for the code's tests. Baseline builds run the coded
-  walk through the twins, codes and all.
+  The scan test checks the classes against its own reading of the columns
+  (`check_test_expression_class`).
 - **Compaction.** The postorder is read 1,024 positions at a time
   (`check_input_expression_compact`), 16 tokens' bytes gathered from `visits`
   and compressed with their tokens into two arrays on the stack. The column has
@@ -7862,8 +7988,8 @@ the oracle.
     isn't on;
   - the identifier's action only adds the node and writes the words.
 
-  `check_input_identifier_entry` is the scalar twin. Unlike the batch measured
-  below, this needs no flush: the node ids still come from the walk, and only
+  `check_input_identifier_entry` makes an entry a token at a time, for a unit
+  past the gathers' signed 32-bit offsets. Unlike the batch measured below, this needs no flush: the node ids still come from the walk, and only
   the leaves' contents are made ahead.
 
   An action doesn't write its node to the graph: it numbers it into a batch,
@@ -7886,8 +8012,7 @@ the oracle.
   coded walk counts, by class, the tokens it acted at by
   the class's action and those it left to the walk's visit
   (`CheckInput.expression_acted` and `expression_left`). `test-checker` requires
-  it to act by class at tokens of every fixture whose features it takes, and
-  the scalar walk at none. Over its fixtures, each class's action must act and,
+  it to act by class at tokens of every fixture whose features it takes. Over its fixtures, each class's action must act and,
   where it can decline, leave a token; a full run prints both counts per class.
   `benchmark-checker-bindings` prints a file's tokens acted at by class
   (`expression_classed`), declined by their classes' actions
@@ -8078,11 +8203,11 @@ the oracle.
   of the two the last numbers were in, else `pp_find_range`'s search, which
   all lanes take in step); then the two aligned words that hold each
   spelling, four tokens a vector, whose digits one shuffle right-aligns and
-  pairs, quads and lanes multiply out. `check_input_literal_plain` is its
-  scalar twin. The scan test checks both paths on random chunks over three
-  guarded ranges of spellings, and every plain value against
-  `check_literal_number`; `test-checker`'s graph comparisons check the walk's
-  literals against the scalar walk's, which parses every literal.
+  pairs, quads and lanes multiply out; a unit past the gathers' signed 32-bit
+  offsets takes `check_input_literal_plain` for every literal. The scan test
+  checks random chunks over three guarded ranges of spellings, every plain
+  value against `check_literal_number`; `test-checker`'s source fixtures check
+  the graphs the literals make against their recorded digests.
   - **What it costs, on the 9700X.** Most of a literal's cost is the first
     read since the parser of its preprocessor columns and its source: on the
     VM the pass takes 1.7 to 1.9 ms of `sqlite3.c` cold and 0.45 to 0.72 ms
@@ -8222,11 +8347,10 @@ the oracle.
   - **The twins.** The scan test writes random batches of up to 200 nodes,
     after up to 40 a visit made, over random token columns of up to 200 tokens,
     each ending at a `PROT_NONE` page and the byte columns at every alignment,
-    by both paths: the two graphs must agree column for column, the gathered
-    columns must be their tokens', and the records alike. A deliberate one-node
-    difference in the scalar path made it report 1,842 of 38,098 nodes.
-    `test-checker`'s graph comparisons, `test-checker-corpus` and c-testsuite's
-    objects compare the batch's graphs with `--scalar`'s walk.
+    against the batch's definition (`check_test_flush_definition`): the two
+    graphs must agree column for column, the gathered columns must be their
+    tokens', and the records alike. `test-checker`'s source fixtures check the
+    graphs against their recorded digests.
 
   Measured on the 9700X, the frozen corpus's `sqlite3.c` (`-c`, CPU 2, under
   the lock), against `main` at `0eca996a`; the objects are byte-identical by
@@ -8315,24 +8439,24 @@ visit mark is retained even when zero-valued sparse stores are skipped.
 ```sh
 ./build/compiler benchmark-checker --nodes 65535 --shape wide
 ./build/compiler benchmark-checker --nodes 4096 --shape chain
-./build/compiler benchmark-checker --only scalar
-./build/compiler benchmark-checker --only vector
-./build/compiler benchmark-checker --only vector --after-scalar 200
+./build/compiler benchmark-checker --only node
+./build/compiler benchmark-checker --only regions
+./build/compiler benchmark-checker --only regions --after-node 200
 ```
 
 The benchmark calls the production `check_graph_run` API. The timed interval
 includes graph validation, dependency analysis and scheduling, action
 preparation, output allocation, semantic actions and diagnostic collection.
-Graph construction and the scalar reference run are outside timing; each
+Graph construction and the node-order reference run are outside timing; each
 measured output is checked against that reference afterward. The wide shape
 contains independent balanced arithmetic trees; the chain exposes the cost of
 frontiers with only one ready node. The input is synthetic and contains builtin
 unsigned arithmetic, so it does not represent complete source adaptation or a
 real compiler corpus.
 
-One warmup precedes 21 recorded passes. The default alternates scalar/vector
-order; `--only` isolates one measured path, and `--after-scalar` conditions the
-vector path with repeated scalar graph work before each timed sample. Output
+One warmup precedes 21 recorded passes. The default alternates node order and
+regions; `--only` isolates one measured path, and `--after-node` conditions the
+regions with repeated node-order graph work before each timed sample. Output
 reports median nanoseconds per node, useful node throughput, cycles and
 instructions when available, and schedule/memory statistics. A denied or
 multiplexed performance counter is printed as unavailable, never as zero.
@@ -8541,10 +8665,51 @@ ancestors are checked only up to the first subtree containing the source: every
 region above that ancestor also contains the source. A case therefore stops at
 its switch instead of revisiting every enclosing switch. The subtree test uses
 the reader's `postorder_positions` and shared `subtree_sizes`; it allocates no
-new token column and does not require the parser's optional size metadata.
-The scalar reader keeps the full ancestor walk as an independent diagnostic
-oracle. Both use the same strict region-boundary rules, including jumps out of
-nested regions and refusals when entering sibling regions.
+new token column and does not require the parser's optional size metadata. It
+uses strict region-boundary rules, including jumps out of nested regions and
+refusals when entering sibling regions.
+
+The control writer gives a GNU `break` or `continue` in a statement expression
+its nearest enclosing loop's or switch's label (`check_control_region_targets`):
+the nearest ancestor of the region's opening before it (or a `do` statement's)
+that has one, so that a loop's own controlling expression belongs to the loop
+around it. Since every subtree is a run of tokens, a token's answer is its
+parent's label, where the parent qualifies and has one, or else the parent's
+answer. Each token of the body keeps its answer once a walk passes it, and a
+region's walk stops at the first kept token: nested statement expressions, and
+many under one deep statement, walk each token once, where each region walked
+to the body (#2995). The regions are written in token order, outer ones first,
+and a region's statements set the labels of the loops inside it alone, which
+only a later region is inside, so a kept answer stays right.
+
+This walk and the variable-length arrays' (`check_program_statement`) stay
+scalar. Each is a chain of dependent loads up a token's parents, started only
+at a statement expression or at an array's object or bound, and with the
+answers kept it passes a token at most once a body (the arrays' walks, of their
+objects and then of their bounds, twice). A data-parallel form, pointer jumping
+over a body's parents, reads every token of the body in each of its passes to
+answer a few walks. The counts, which no host changes (`-c` of the 614 units in
+`tests/**/*.c` and c-testsuite that compile without flags, the two deep checker
+sources below apart, and of three generated shapes):
+
+| Units | Walks' starts | Their tokens | Parents passed | Without kept answers |
+| --- | ---: | ---: | ---: | ---: |
+| 16 with statement expressions | 45 regions | 37,281 | 244 | 267 |
+| 14 with variable-length arrays | 15 bounds | 4,318 | 74 | 74 |
+| 8,000 nested statement expressions | 8,000 regions | 40,039 | 24,002 | 96,028,000 |
+| an array of 8,000 bounds | 8,000 bounds | 24,017 | 16,004 | 64,024,002 |
+| a declaration of 8,000 arrays | 8,000 bounds | 40,013 | 48,000 | 64,055,998 |
+
+Kept answers cost three stores and a bit for each token a region's walk passes
+(its link on the way up, then its two labels), two stores and a bit for each an
+array's walk passes (its end and its key), and clearing a bit a token for each
+body with a statement expression and for each unit with a variable-length
+array. `CheckProgramOptions.region_target_work` and
+`statement_walk_work` tally the parents passed: test-checker bounds them by
+every program fixture's tokens and twice them, and its program fixtures
+compile and run the deep checker sources (`quadratic-statement-expressions.c`,
+`quadratic-vla-bounds.c`), whose walks pass 717 parents in 1,744 tokens and 856
+in 1,005 (22,673 and 21,099 without kept answers, which fail those bounds).
 
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump
@@ -8703,8 +8868,14 @@ qualifiers at the placeholder), and a declaration's later declarators, which
 must deduce the same type, by C23 `auto`'s deduction below
 (`check_input_c23_auto_deduce`; `BUSTER_CHECK_DECLARATION_GNU_AUTO` keeps
 `__auto_type`'s words in its errors). Declarators that deduce differently are
-clang's error at the declaration, in the checker's words ("'__auto_type'
-deduced types differ within one declaration"). A variably modified deduced
+clang's error at the `__auto_type` or `auto` keyword, in its words (#1844):
+"'__auto_type' deduced as 'int *' in declaration of 'c' and deduced as 'int'
+in declaration of 'd'", each deduction without the specifiers' qualifiers and
+spelled as its initializer spells it (`'T' (aka 'int')`), once a declaration,
+as clang's comparison of its declarators stops there
+(`CheckInputReader.declaration_deduced_first`). The later declarator is
+invalid, its uses quiet (`check_input_invalid_declare`), and the reader goes
+on past the error. A variably modified deduced
 type is the initializer's, whose sizes its own declaration evaluated, and the
 declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
 cast to a variably modified type in the initializer evaluates its bounds once,
@@ -9015,7 +9186,27 @@ change, it refused such a declaration by name.
   "conflicting attribute is here" at that declaration's first token;
   `nomerge` on a statement that evaluates no call, "'X' attribute is ignored
   because there exists no call expression inside the statement"; a `nomerge`
-  of arguments, clang's "'nomerge' attribute takes no arguments"; and
+  of arguments, clang's "'nomerge' attribute takes no arguments". Each
+  attribute's error drops that attribute alone, as clang's
+  `ProcessStmtAttributes` drops it (#1844): the statement's other attributes
+  are checked on (a valid `fallthrough` and `musttail` keep their effects), and
+  the errors are recovered (`check_input_recover_reports`), so the unit's later
+  statements are read on and their attributes' errors given too. They are
+  published once the statement is read (`CheckInputReport.completion` at
+  `check_input_loop_statement_end`), after the statement's own errors, and an
+  inner statement's before those of an outer one that ends with it. Clang's
+  analysis, which reports a misplaced `fallthrough`, runs for no function
+  that ends after such an error (`check_input_fallthrough_placements`'
+  `first_error`). Where clang's Sema drops the statement itself (a return of
+  an undeclared name, a parser error in the expression), it gives none of its
+  attributes' errors, which the checker still does. A statement's attribute
+  lists are its children in the parser's tree, before its keyword, each by
+  its closer: the walks find an attributed `while`'s, `for`'s and `switch`'s
+  keyword past them (`check_input_statement_keyword`), so that its breaks,
+  continues, cases and fallthroughs are its own and a switch's condition is
+  promoted, and the control writer finds an attributed `break`, `continue` or
+  `goto` under its specifiers as a musttail return's (`check_control_attributed`),
+  which on main compiled to nothing; and
   `suppress`'s arguments, string literals through parentheses
   (`suppress(("a"))`, clang's `checkStringLiteralArgumentAttr`); a non-string
   inside them (`suppress((1))`, #2332) is the string error, then the parser's
@@ -11095,15 +11286,20 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   undeclared name is clang's error, and the conditions decide at uses and
   calls, overloads and addresses; a shape the steps don't take (a
   `__builtin_object_size` of the parameter) is kept and decides nothing, as
-  a system header's is, where clang's warns at a call that overflows. Still
-  apart: clang disables an inherited `enable_if` that names a parameter at
-  every call of a redeclaration (its condition's parameters aren't the
-  redeclaration's), which this checker evaluates.
+  a system header's is, where clang's warns at a call that overflows.
 - **Lists.** Each function declaration where some condition holds has its
   list (`CheckInput.condition_declarations`, by the declaration's name
   token): its previous declaration's, then its own, as clang's
-  redeclarations inherit attributes. A use reads the list of the declaration
-  its lookup found. The conditions and lists are data
+  redeclarations inherit attributes. Every diagnose_if is inherited, but an
+  enable_if only by a declaration without one of its own, and then only the
+  previous declaration's first (#2464): clang's attribute merge skips a kind
+  the declaration already has, one it has just inherited included. A list's
+  enable_ifs are therefore one declaration's, which also decides whether a
+  redeclaration's address can be taken (`enable_if(1, "a"),
+  enable_if(x > 0, "b")` leaves a bare redeclaration only `a`). A use reads
+  the list of the declaration its lookup found: a block-scope
+  redeclaration's in its block, a later declaration's or definition's after
+  it. The conditions and lists are data
   (`c_check_condition_eval.c`, `CheckConditionTable`), which the graph keeps
   (`CheckGraph.conditions`) for overload resolution.
 - **Uses.** A diagnose_if condition that names no parameter and holds is
@@ -11141,11 +11337,20 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   a conditional that doesn't read it skips. An unknown result, and an action
   that faults (an overflow, a division by zero, a shift past the width),
   leave a condition unknown, as clang's EvaluateWithSubstitution does: a diagnose_if is then not given, an enable_if doesn't admit the
-  call. The first enable_if that doesn't admit it, in the order clang checks
-  them (the latest declaration's first, each declaration's in source order),
-  is "no matching function for call to 'f'" at the callee, its note
-  "candidate disabled: M" at the declaration the call found; otherwise the
-  diagnose_if conditions that hold are given at the call's `)`.
+  call. An enable_if that the declaration the call found inherits names the
+  parameters of the declaration that wrote it, while clang binds the
+  arguments to the found declaration's, so each parameter it reads is
+  unknown (#2464, `check_condition_disabled`): one that reads a parameter
+  in a shape the steps take (`n < 100`, `n || 1`, `(n, 1)`, `p != 0` with
+  an object's address) disables every call through a later declaration, a
+  definition or a block-scope declaration, and one that reads none
+  (`1 || n`, `sizeof(n)`, `1`) decides as written. A kept shape (a
+  `__builtin_object_size` of the parameter) still decides nothing. A diagnose_if reads the arguments, inherited or
+  not, as clang binds them to the declaration that wrote it. The first
+  enable_if that doesn't admit the call, in source order, is "no matching
+  function for call to 'f'" at the callee, its note "candidate disabled: M"
+  at the declaration the call found; otherwise the diagnose_if conditions
+  that hold are given at the call's `)`.
 - **Overloadable functions** (`c_check_overload.c`). An overloadable
   function's conditions take part in its overload resolution, as clang's do:
   - *Viability.* After a candidate's argument count and conversions, its
@@ -11244,18 +11449,49 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   constants, a comma in an operand of `sizeof`, an alignof or a keyword is
   unevaluated and quiet (`check_input_bound_evaluated`), a comparison takes no
   note (its left operand is no lvalue in a constant), and in a function body
-  the warning is published with the body's queued diagnostics at its end
-  (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it;
-  at file scope it precedes the declarator's fold warning
-  (`c_check_vla_fold_driver_test.c`). A variable bound that no graph walk
-  reads either (#2252: a file-scope cast's, `_Alignof`'s or `sizeof`'s type
-  name, `check_input_vla_bound`) takes the same pass. Left: in a function
-  body, a constant's comma (an enumerator's, a typedef's bound) is published
-  before the body's other queued diagnostics, where clang queues it in source
-  order, as the reader's events reach the body's end first; and in a unit
-  with errors, a file-scope declaration's comma whose initializer is an error
-  (`int b = sizeof(int[(6, 2)]);`) comes after that error, where clang gives
-  it first.
+  "has no effect" is published with the body's queued diagnostics at its end
+  (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it,
+  in the order clang queues them (#2252): clang queues the comma as it reads
+  it, and each other warning as it builds the expression that queues it.
+  The reader finds the commas before the graph's walks find theirs, so a
+  comma's record is ordered by its token (`pp_diagnostic_source_order`),
+  and each walk's record at the body's end by where clang queues it
+  (`check_common_queue`, `pp_diagnostic_queued`): an array index's, an
+  unused result's, an unsequenced modification's, a comparison's and a
+  constant conversion's at the end of its full expression, which clang
+  checks once complete (a for statement's third clause ends at its `)`); a
+  division's, a shift's, an atomic member's and a comma's left operand's at
+  the end of its operator, built then; a null dereference's at its
+  reader's; an x86 builtin's range error at its call's. Publication puts
+  each comma before the first other record there that clang queues after
+  it, the others keeping their order (`pp_diagnostic_source_merge`), so a
+  constant in a `sizeof`'s or a statement expression's operand comes before
+  the array index its full expression holds. A rejected static
+  assertion's comma in a body (`check_common_failed_assert_source`) is
+  ordered as a constant's is, since clang queues it as it reads the
+  assertion. A comparison's and the
+  `void *` cast's question clang gives at once, in a body too, so they are
+  published at the comma. At file scope it precedes the declarator's fold
+  warning (`c_check_vla_fold_driver_test.c`). A variable bound that no graph
+  walk reads either (#2252: a file-scope cast's, `_Alignof`'s or `sizeof`'s
+  type name, `check_input_vla_bound`) takes the same pass. A runtime-sized
+  `sizeof` there is the reader's "initializer element is not a compile-time
+  constant", which is published once the initializer is read, at its last
+  token (`check_driver_initializer_last`), as clang's `AddInitializerToDecl`
+  checks it before the declaration's own checks at its `,` or `;`, so the
+  commas come first. The cost is a token in each collected diagnostic
+  record, a climb to its full expression's root for each published warning
+  clang checks once its full expression is complete (at file scope too,
+  where nothing reads the result), and a pass over the records at
+  publication only in a unit that has such a comma in a body; a unit
+  without diagnostics does no new work. Left: the reader stops at the initializer's error, so a later
+  comma of the unit is not given (the second of
+  `sizeof(int[(6, 2)]) + sizeof(int[(7, 3)])`); and a warning the driver
+  queues to a body's end outside the walks (a shift's without a shift's
+  node, an integer overflow's without its expression's end,
+  `check_driver_warning_position`) keeps its token as its place; and after
+  a unit's second rejected static assertion, a later constant's comma in a
+  body comes after the body's later queued warnings.
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
@@ -11295,13 +11531,19 @@ checker doesn't give anywhere yet
 condition, of a type name's bound that a constant expression reads (`sizeof(int[(1, 2)])`
 within a bound, an `_Alignof`, or a file-scope initializer's `sizeof`: their check reads
 constants again, which would make the constant walk recursive), and a const builtin call's "ignoring return value"
-as a left operand, which clang gives too; in a function body, a constant
-bound's comma warnings come before the body's graph-walked ones rather than
-among them in source order; and, as everywhere in this driver, the uses' errors stop the unit's
+as a left operand, which clang gives too; and, as everywhere in this driver, the uses' errors stop the unit's
 later expression checks, so a call after one such error isn't diagnosed. A
 grouped
 diagnose_if under `-Weverything` meets every other warning that option
-enables, which this checker doesn't all give.
+enables, which this checker doesn't all give. A call an enable_if disables
+gives none of its diagnose_ifs that need the arguments, where clang still
+gives those that hold at its `)`; one that names no parameter, at a
+disabled call's callee, comes after the call's error, where clang gives it
+first; a call in a typeof's operand isn't checked against its
+enable_ifs, where clang's is (a sizeof's is); and an inherited enable_if's
+`__builtin_object_size` of a parameter admits every call, where clang folds
+it to the unknown size, `(size_t)-1` for types 0 and 1 and 0 for 2 and 3,
+which can disable it (`<= 8`, `!= (size_t)-1`).
 
 ## Operand errors (#147)
 
@@ -11373,6 +11615,19 @@ enables, which this checker doesn't all give.
   `__builtin_choose_expr`, `__extension__`) is looked through as clang's
   IgnoreParenImpCasts does, so a selected literal is a literal and
   `_Generic(x, int: 1) == 2` notes nothing (`check_semantic_unselected`).
+  The failed conjunction-term search also looks through those selections: a
+  selected literal alone prints the plain error, while another nonliteral
+  failing term supplies the requirement. Pointer declarators keep the space
+  after their specifiers and between a qualifier and the next pointer.
+  Attributed type names in parentheses with a builtin, typedef or tagged base
+  and a direct pointer chain use the ordinary constant/type reader in private
+  arenas and a copied type table
+  (`check_semantic_requirement_types`): attribute arguments are folded,
+  address-space qualifiers use the type printer's spelling, and ignored
+  attributes disappear. Only a failed requirement containing attributes takes
+  this replay; it cannot change the checked input's types or warning state.
+  More complex declarators and attribute arguments needing unavailable reader
+  state retain their source spelling.
   Still separate: a type name's literals print as written
   (`sizeof(int[0x10])`, clang `int[16]`); a complex value's note.
 - **A failed initializer conversion.** A scalar initializer's INITIALIZE is at
@@ -11675,8 +11930,17 @@ enables, which this checker doesn't all give.
 
 The checker consumes retained pragmas after their existing semantic handlers. An
 unknown directive is not an unsupported C construct: it is ignored, with
-`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall` or `-Wpragmas`).
-Unknown `STDC` directives warn by default. Malformed alignment hints such as
+`-Wunknown-pragmas` policy (normally silent, enabled by `-Wall`, `-Wmost` or `-Wpragmas`).
+Unknown `STDC` directives warn by default ("unknown pragma in STDC namespace"),
+and so does an `STDC FENV_ACCESS`, `FP_CONTRACT` or `CX_LIMITED_RANGE` state
+that is no `ON`, `OFF` or `DEFAULT` ("expected 'ON' or 'OFF' or 'DEFAULT' in
+pragma"). Both are clang's lexer warnings, which the checker issues (#1970):
+they print `[-Wunknown-pragmas]`, follow its options and pragmas as
+`CHECK_WARNING_ID_UNKNOWN_PRAGMA`, an extension that `-pedantic-errors`
+promotes, and are hidden in system headers without `-Wsystem-headers`. A
+directive's line that lacks the name or the state (`#pragma STDC`, `#pragma
+GCC`, `#pragma STDC FP_CONTRACT`) is diagnosed at the line's end, clang's eod
+(`pp_output_line_end`); a `_Pragma`'s, at the `_Pragma`. Malformed alignment hints such as
 `#pragma align 4` and ignored tooling comments use `-Wignored-pragmas`.
 `#pragma comment(lib, "m")` is accepted silently for the current ELF path; this
 is not an implementation of COFF linker directives or automatic library loading.

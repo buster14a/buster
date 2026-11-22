@@ -12,9 +12,10 @@
 // holds Tcl's tclConfig.sh (the distribution's tcl8.6 package, docs/commands/c-testsuite.md). testfixture is built three
 // times, each by SQLite's own configure and Makefile (`configure --with-tcl=DIR CC=... CFLAGS=...`, then `make
 // testfixture`) in a directory of its own: by clang -O0 (the reference), by this compiler's Tier 0 and by its --tier1.
-// The Makefile's `CFLAGS.core=` drops -fPIC, which the driver refuses (#2101); its `-rpath DIR` is the driver's since
-// #1854. Each build's sqlite3.c is the amalgamation its Makefile generates from the tree; with --amalgamation (the frozen
-// corpus's sqlite3.c) each must be that file, byte for byte.
+// The Makefile's `CFLAGS.core=` drops -fPIC, which the driver refused until #2101: testfixture is one link of its sources
+// (main.mk's T.link.tcl), which takes -fPIC since, but the override stays until a run with Tcl builds it without one. Its
+// `-rpath DIR` is the driver's since #1854. Each build's sqlite3.c is the amalgamation its Makefile generates from the
+// tree; with --amalgamation (the frozen corpus's sqlite3.c) each must be that file, byte for byte.
 //
 // Each build's testfixture then runs SQLite's test runner, `testfixture test/testrunner.tcl --jobs N full [PATTERN...]`,
 // in an empty directory of its own: the `full` permutation is every Tcl test script of test/ and ext/ (but the scripts

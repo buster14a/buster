@@ -239,7 +239,7 @@ static uint32_t ir_parse_id(IrParseState* state, char prefix)
     return (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false);
 }
 
-static uint8_t ir_parse_named(IrParseState* state, const char* const* names, uint32_t count)
+static uint8_t ir_parse_named(IrParseState* state, const char* const* names, const uint8_t* lengths, uint32_t count)
 {
     ir_parse_space(state);
     const uint64_t first = state->cursor;
@@ -254,11 +254,43 @@ static uint8_t ir_parse_named(IrParseState* state, const char* const* names, uin
     }
     const uint64_t length = state->cursor - first;
     uint32_t found = count;
-    for (uint32_t index = 0; index < count; index += 1)
+    // Filter the large vocabularies by their literal lengths, 64 enum values at a time.
+    // A surviving lane still has to match every byte. Visit higher enum values first, as the
+    // old scan selected the last matching spelling.
+    const char* token = state->source.pointer + first;
+    if (lengths != NULL && length <= UINT8_MAX)
     {
-        if (strlen(names[index]) == length && memcmp(state->source.pointer + first, names[index], length) == 0)
+        const __m512i wanted = _mm512_set1_epi8((char)length);
+        for (uint32_t end = count; end != 0 && found == count;)
         {
-            found = index;
+            const uint32_t start = (end - 1) & ~63u;
+            const uint32_t lanes = end - start;
+            const __mmask64 active = lanes == 64 ? UINT64_MAX : (UINT64_C(1) << lanes) - 1;
+            const __m512i sizes = _mm512_maskz_loadu_epi8(active, lengths + start);
+            uint64_t candidates = _mm512_mask_cmpeq_epi8_mask(active, sizes, wanted);
+            while (candidates != 0 && found == count)
+            {
+                const uint32_t lane = 63u - (uint32_t)__builtin_clzll(candidates);
+                const uint32_t index = start + lane;
+                if (memcmp(token, names[index], length) == 0)
+                {
+                    found = index;
+                }
+                candidates ^= UINT64_C(1) << lane;
+            }
+            end = start;
+        }
+    }
+    else if (lengths == NULL)
+    {
+        // Tokens contain no NUL, so an equal bounded prefix guarantees name[length] exists.
+        for (uint32_t i = count; i != 0 && found == count; i -= 1)
+        {
+            const char* name = names[i - 1];
+            if (strncmp(token, name, length) == 0 && name[length] == '\0')
+            {
+                found = i - 1;
+            }
         }
     }
     if (found == count)
@@ -297,7 +329,7 @@ static uint8_t ir_parse_lane_type(IrParseState* state, uint8_t* lane)
     if (type == IR_TYPE_COUNT)
     {
         state->cursor = first;
-        type = ir_parse_named(state, ir_type_names, IR_TYPE_COUNT);
+        type = ir_parse_named(state, ir_type_names, ir_type_name_lengths, IR_TYPE_COUNT);
     }
     *lane = (uint8_t)lanes;
     return (uint8_t)type;
@@ -390,7 +422,7 @@ static void ir_parse_types(IrParseState* state, IrParseArray* types)
         bool more = true;
         while (state->result.error == IR_PARSE_OK && more)
         {
-            const uint8_t type = ir_parse_named(state, ir_type_names, IR_TYPE_COUNT);
+            const uint8_t type = ir_parse_named(state, ir_type_names, ir_type_name_lengths, IR_TYPE_COUNT);
             ir_parse_append(state, types, &type);
             more = ir_parse_take(state, ',');
         }
@@ -403,7 +435,7 @@ static void ir_parse_header(IrParseState* state)
     ir_parse_keyword(state, "function");
     ir_parse_types(state, &state->parameters);
     ir_parse_keyword(state, "->");
-    state->result_type = ir_parse_named(state, ir_type_names, IR_TYPE_COUNT);
+    state->result_type = ir_parse_named(state, ir_type_names, ir_type_name_lengths, IR_TYPE_COUNT);
     ir_parse_expect(state, '{');
 }
 
@@ -421,7 +453,7 @@ static void ir_parse_slot(IrParseState* state)
     ir_parse_keyword(state, "align=");
     slot.alignment = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false);
     ir_parse_keyword(state, "type=");
-    slot.type = ir_parse_named(state, ir_type_names, IR_TYPE_COUNT);
+    slot.type = ir_parse_named(state, ir_type_names, ir_type_name_lengths, IR_TYPE_COUNT);
     ir_parse_keyword(state, "flags=");
     slot.flags = (uint8_t)ir_parse_unsigned(state, UINT8_MAX, true);
     ir_parse_append(state, &state->slots, &slot);
@@ -813,7 +845,7 @@ static void ir_parse_instruction(IrParseState* state)
         ir_parse_fail(state, IR_PARSE_SYNTAX);
     }
     ir_parse_expect(state, '=');
-    row.op = ir_parse_named(state, ir_op_names, IR_OP_COUNT);
+    row.op = ir_parse_named(state, ir_op_names, ir_op_name_lengths, IR_OP_COUNT);
     ir_parse_expect(state, '.');
     row.type = ir_parse_lane_type(state, &row.flags);
     // Lanes name a vector operation's elements alone, never a transport's (a load's flags are its access's).
@@ -844,12 +876,12 @@ static void ir_parse_instruction(IrParseState* state)
                     "end",
                 };
                 row.a = ir_parse_id(state, '$');
-                row.b = ir_parse_named(state, edges, 2);
+                row.b = ir_parse_named(state, edges, NULL, 2);
             } break;
             case IR_FENCE:
             {
                 // Its order, and `signal` for a signal fence (#1059).
-                row.a = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
+                row.a = ir_parse_named(state, ir_fence_orders, NULL, BUSTER_IR_FENCE_SEQ_CST + 1);
                 if (state->result.error == IR_PARSE_OK && !ir_parse_end_line(state))
                 {
                     ir_parse_keyword(state, "signal");
@@ -960,11 +992,11 @@ static void ir_parse_instruction(IrParseState* state)
                         "ugt",
                         "uge",
                     };
-                    row.c = ir_parse_named(state, names, IR_PREDICATE_COUNT);
+                    row.c = ir_parse_named(state, names, NULL, IR_PREDICATE_COUNT);
                     // A vector comparison's lanes (#141's element types), whose type is its mask's.
                     if (row.op == IR_VCMP && ir_parse_word(state, "lanes="))
                     {
-                        row.flags = ir_parse_named(state, ir_lane_names, IR_SIMD_LANE_COUNT);
+                        row.flags = ir_parse_named(state, ir_lane_names, NULL, IR_SIMD_LANE_COUNT);
                     }
                 }
                 // An intrinsic's operation (#141), after its operands as a comparison's predicate is.
@@ -980,7 +1012,7 @@ static void ir_parse_instruction(IrParseState* state)
                             third = ir_parse_id(state, '%');
                         }
                     }
-                    row.c = ir_parse_named(state, ir_intrinsic_names, BUSTER_IR_INTRINSIC_COUNT);
+                    row.c = ir_parse_named(state, ir_intrinsic_names, ir_intrinsic_name_lengths, BUSTER_IR_INTRINSIC_COUNT);
                     if (state->result.error == IR_PARSE_OK && ir_intrinsic_ternary(row.c) != (third != BUSTER_IR_NONE))
                     {
                         ir_parse_fail(state, IR_PARSE_SYNTAX);
@@ -1046,7 +1078,7 @@ static void ir_parse_instruction(IrParseState* state)
                 {
                     // A masked access's lanes (#1840), after its alignment or scale, as its flags.
                     ir_parse_keyword(state, "lanes=");
-                    row.flags = (uint8_t)ir_parse_named(state, ir_lane_names, IR_SIMD_LANE_COUNT);
+                    row.flags = (uint8_t)ir_parse_named(state, ir_lane_names, NULL, IR_SIMD_LANE_COUNT);
                 }
                 if (row.op == IR_ATOMIC_RMW)
                 {
@@ -1056,8 +1088,8 @@ static void ir_parse_instruction(IrParseState* state)
                         "add",
                         "cas",
                     };
-                    const uint32_t operation = ir_parse_named(state, operations, 3);
-                    const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
+                    const uint32_t operation = ir_parse_named(state, operations, NULL, 3);
+                    const uint32_t order = ir_parse_named(state, ir_fence_orders, NULL, BUSTER_IR_FENCE_SEQ_CST + 1);
                     row.flags = (uint8_t)(BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0) |
                                           (operation < 3 ? operation << 5 : 0));
                 }
@@ -1070,7 +1102,7 @@ static void ir_parse_instruction(IrParseState* state)
                     // An atomic access's order (#1059), as a fence's is named.
                     if (ir_parse_word(state, "atomic"))
                     {
-                        const uint32_t order = ir_parse_named(state, ir_fence_orders, BUSTER_IR_FENCE_SEQ_CST + 1);
+                        const uint32_t order = ir_parse_named(state, ir_fence_orders, NULL, BUSTER_IR_FENCE_SEQ_CST + 1);
                         row.flags = (uint8_t)(row.flags | BUSTER_IR_ATOMIC | (order <= BUSTER_IR_FENCE_SEQ_CST ? order << BUSTER_IR_ORDER_SHIFT : 0));
                     }
                     // A segment override (#1447), as the printer names it.
@@ -1204,7 +1236,7 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
             function.b[id] = rows[id].b;
             function.c[id] = rows[id].c;
         }
-        state->result.check = ir_verify_complete(&function, state->scratch, BUSTER_VECTOR_PATH(vector));
+        state->result.check = ir_verify_complete(&function, state->scratch);
         if (state->result.check.error == IR_OK)
         {
             *result = function;
@@ -1358,11 +1390,7 @@ static IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scrat
 
 static IrParseResult ir_parse(String8 source, Arena* output, Arena* scratch, IrFunction* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_parse_scalar(source, output, scratch, result);
-#else
     return ir_parse_path(source, output, scratch, result, true);
-#endif
 }
 
 static IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scratch, IrFunction* result)

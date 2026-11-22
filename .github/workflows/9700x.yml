@@ -190,6 +190,20 @@ jobs:
                   --base-workflow "$RUNNER_TEMP/base.yml" --workflow "$workflow" --output "$GITHUB_OUTPUT"
           fi
 
+      # The change's affected-test groups (tools/ci/feedback.c, #1427), in the job's summary: advisory, for a local
+      # reproduction (docs/commands/ci.md, "Early hosted feedback and reproductions"). It selects nothing here, every row
+      # still runs the whole inventory, and it never fails the job. Runs without a change list (a push) have none.
+      - name: Publish conservative affected-test groups (advisory)
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/files" || exit 0
+          cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/feedback.c -o "$RUNNER_TEMP/feedback"
+          "$RUNNER_TEMP/feedback" --profile affected --files "$RUNNER_TEMP/files" \
+            --inventory tools/ci/correctness.tests --report "$RUNNER_TEMP/feedback-plan.md" > "$RUNNER_TEMP/feedback-affected.tests"
+          cat "$RUNNER_TEMP/feedback-plan.md" >> "$GITHUB_STEP_SUMMARY"
+
   # What this run may reuse, and whether its 9700X job is admitted (tools/ci/nightly.c through tools/ci/nightly.sh; docs/ci.md,
   # "Nightly main measurements"). A pull request, draft or ready: never admitted (#2055); its plain hosted rows
   # qualify it, and its merged first-parent state gets native correctness and measurements in the nightly window. A
@@ -272,8 +286,81 @@ jobs:
           bash tests/ci/caches.sh
           bash tests/ci/build-benchmarks.sh
           bash tests/ci/vector-draw.sh
+          # The products' packing and refusals (tools/ci/hosted-product.sh), which the x86-64 rows' build job ran
+          # before #2924; a fake checkout, toolchain and build, no network.
+          bash tests/ci/hosted-product.sh
           node tests/ci/vector-runtime.cjs
           bash tests/ci/rerun.sh
+          bash tests/ci/feedback.sh
+
+  analyze:
+    name: Clang Static Analyzer
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Restore pinned release inputs
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}/hosted-release-inputs
+          key: hosted-inputs-v1-linux-x64-${{ hashFiles('tools/ci/hosted-tools.lock') }}
+      - name: Stage the pinned compiler and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          export BUSTER_HOSTED_RELEASES="$RUNNER_TEMP/hosted-release-inputs"
+          bash tools/ci/hosted-release.sh verify "$BUSTER_HOSTED_RELEASES" ||
+              bash tools/ci/hosted-release.sh prepare "$BUSTER_HOSTED_RELEASES"
+          root="$RUNNER_TEMP/buster-hosted-tools"
+          bash tools/ci/install-hosted-tools.sh "$root"
+          version=$(bash tools/ci/hosted-release.sh version llvm)
+          printf '%s\n' "$root/llvm-$version/bin" "$root/bin" >> "$GITHUB_PATH"
+          bash tools/ci/setup-build-tools.sh "$root/build-tools" >> "$GITHUB_PATH"
+      - name: Analyze each Release compiler translation unit
+        shell: bash
+        env:
+          BUSTER_TOOLCHAIN: path
+          BUSTER_HOST_ARCH: vector
+          BUSTER_DEBUG_INFO: 0
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          export report="$RUNNER_TEMP/clang-analysis"
+          mkdir -p "$report"
+          ./build.sh print-compile-flags --config Release > "$report/flags.nul"
+          ./build.sh print-sources > "$report/sources.nul"
+          test -s "$report/flags.nul"
+          test -s "$report/sources.nul"
+
+          analyze_unit()
+          {
+              local source=$1
+              local -a flags
+              mapfile -d '' -t flags < "$report/flags.nul"
+              clang "${flags[@]}" --analyze -Xanalyzer -analyzer-output=text \
+                  -Xclang -analyzer-werror -ferror-limit=0 -fno-color-diagnostics \
+                  "$source" > "$report/${source##*/}.log" 2>&1
+          }
+          export -f analyze_unit
+          status=0
+          xargs -0 -n 1 -P "$(nproc)" bash -c 'analyze_unit "$1"' _ < "$report/sources.nul" || status=$?
+          awk '/^.+:[0-9]+:[0-9]+: (error|warning): / || /^([^ ]+: )?(fatal )?error: / { print }' \
+              "$report/"*.log | sort -u
+          exit "$status"
+      - name: Preserve complete diagnostic paths
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: clang-static-analyzer-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/clang-analysis/*.log
+          if-no-files-found: ignore
+          retention-days: 14
 
   # One verified release-input acquisition before any hosted shard starts.
   prepare-hosted-tools:
@@ -307,7 +394,10 @@ jobs:
       # one detector's failure must not hide what the others find.
       fail-fast: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
       matrix:
-        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["x86-64"]' || '["x86-64", "native"]') }}
+        # The x86-64 rows, the scalar host's, are gone (#2924, the owner's decision on 2026-11-17): a pull request's
+        # rows are the vector row alone, every other run's the `native` plain row and, where the sanitizer rows run, the
+        # vector pool.
+        host_arch: ${{ fromJSON(github.event_name == 'pull_request' && '["vector"]' || '["native"]') }}
         # The sanitizer rows take far longer than the plain ones: pull requests run the plain builds alone, as nightly
         # backlog runs and an admitted snapshot run do (the `plain` scope: the 9700X's gate), and so do pushes to main
         # in the nightly mode (#2057, until the merge queue carries the full suite). Merge-queue candidates (#1430),
@@ -317,11 +407,11 @@ jobs:
         # available for diagnosis but does not repeat the entire hosted suite.
         sanitizer: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '["none"]' || '["none", "address", "thread", "memory"]') }}
         optimization: [3]
-        # The vector row, one pool of its configurations' items: `none` on a pull request; the four where the sanitizer
-        # rows run; none in the `plain` scope elsewhere, whose `native` rows stay until the vector row replaces them.
-        include: ${{ fromJSON(github.event_name == 'pull_request' && '[{"host_arch":"vector","sanitizer":"none","optimization":3}]' || needs.evidence.outputs.scope == 'plain' && '[]' || '[{"host_arch":"vector","sanitizer":"none address thread memory","optimization":3}]') }}
+        # The vector row, one pool of its configurations' items, where the sanitizer rows run (on a pull request it is
+        # the matrix's own row, `none`); none in the `plain` scope, whose `native` row is its plain row.
+        include: ${{ fromJSON((github.event_name == 'pull_request' || needs.evidence.outputs.scope == 'plain') && '[]' || '[{"host_arch":"vector","sanitizer":"none address thread memory","optimization":3}]') }}
         # The `native` architecture keeps its plain row alone (#2032): tools/ci/nightly.c's plain verdict, the nightly
-        # window's credit from a candidate's run, reads both architectures' plain rows.
+        # window's credit from a candidate's run, reads it.
         exclude:
           - host_arch: native
             sanitizer: address
@@ -339,152 +429,25 @@ jobs:
       host_arch: ${{ matrix.host_arch }}
       sanitizer: ${{ matrix.sanitizer }}
       optimization: ${{ matrix.optimization }}
-      # How many shards the row runs as (#2031), by its own costs (tools/ci/costs/, `costs plan`): the plain rows 4, both
-      # host architectures alike (tools/ci/nightly.c counts their shards as one N). A portable row's shards share its one
-      # build and a shard costs it about a minute of setup, so its TSan and MSan rows run as 7, at their longest
-      # commands (#2703: the x86-64 MSan row finished last in every candidate after #2708, and `costs plan` gives its
-      # longest shard 975 s as 6 and 841 s as 7, TSan's 909 and 872 s, the same runner-minutes); its ASan row runs as 4. The vector row's N is each configuration's items' count (4,
-      # BUSTER_VECTOR_ITEMS), which its draws are sized for. tools/ci/changes.c's self-test checks each number against
-      # the row workflow's lookup (changes_shard_policy).
-      shards: ${{ matrix.host_arch == 'x86-64' && (matrix.sanitizer == 'thread' || matrix.sanitizer == 'memory') && 7 || 4 }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
 
+  # The fuzz campaigns: libFuzzer with ASan, UBSan and leaks, each of the frontend, the ELF import's override and the
+  # crash-replay proof. Each builds the compiler for its runner's CPU and runs it, so they draw AVX-512 runners as one
+  # pool of 3 items, one a campaign (drawn.yml's `fuzz` row, which holds their steps; #2924). Its verdict is the job
+  # the merge queue's coverage credits (tools/ci/nightly.c), and a failed campaign fails this call as its job did.
   fuzz:
-    name: libFuzzer (ASan + UBSan + leaks, ${{ matrix.entry }})
+    name: libFuzzer (ASan + UBSan + leaks)
     needs: [changes, evidence, prepare-hosted-tools]
     # Like the sanitizer rows, not on pull requests, nor in the `plain` scope.
     if: ${{ !cancelled() && needs.prepare-hosted-tools.result == 'success' && github.repository_id == '1421805693' && github.event_name != 'pull_request' && needs.evidence.result == 'success' && needs.evidence.outputs.hosted == 'run' && needs.evidence.outputs.scope == 'full' && (needs.changes.result == 'skipped' || (needs.changes.result == 'success' && needs.changes.outputs.code != 'false')) }}
-    runs-on: ubuntu-26.04
-    timeout-minutes: 45
-    strategy:
-      # A merge-queue candidate's first failing campaign cancels the others, as its test rows fail fast (#1430). The
-      # daily and dispatched runs, and pushes before the nightly mode, run every campaign to its end.
-      fail-fast: ${{ github.event_name == 'merge_group' }}
-      matrix:
-        include:
-          - entry: frontend
-            host_arch: native
-            source: src/buster/compiler/fuzz.c
-          - entry: elf-override
-            host_arch: x86-64
-            source: tests/fuzz/entry_override.c
-          - entry: crash-replay-proof
-            host_arch: x86-64
-            source: tests/fuzz/entry_probe.c
-    defaults:
-      run:
-        shell: bash
-    env:
-      BUSTER_HOST_ARCH: ${{ matrix.host_arch }}
-      BUSTER_SANITIZER: address
-      BUSTER_FUZZ_AVAILABLE: '1'
-      BUSTER_FUZZ_ENTRY: ${{ matrix.source }}
-      BUSTER_LINKER: lld
-    steps:
-      - name: Check out triggering commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-
-      - name: Restore verified hosted release inputs
-        uses: ./.github/actions/hosted-tools
-        with:
-          artifact-name: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
-
-      - name: Install official Clang, sanitizer and libFuzzer runtimes
-        run: bash tools/ci/setup-hosted.sh
-
-      # Before the build, as in the sanitizer rows (#2060). It never fails the job.
-      - name: Report sanitizer host kernel, CPU, seccomp and ptrace state
-        continue-on-error: true
-        run: bash tools/ci/sanitizers.sh host
-
-      - name: Set fatal sanitizer policy and verify detectors
-        run: |
-          bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
-          bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
-
-      - name: Build the selected coverage-instrumented entry and check ordinary dispatch
-        run: |
-          ./build.sh --config Release
-          compiler=$(./build.sh print-output --config Release)
-          test build/compiler -ef "$compiler"
-          printf 'BUSTER_COMPILER=%s\n' "$compiler" >> "$GITHUB_ENV"
-          "$compiler" -fsyntax-only tests/fuzz/corpus/basic.c
-
-      - name: Fuzz the compiler with retained seeds and deterministic mutation seed
-        if: matrix.entry != 'crash-replay-proof'
-        run: |
-          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts"
-          cp tests/fuzz/corpus/* "$RUNNER_TEMP/fuzz-corpus/"
-          clang -c -march=x86-64 tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/object.elf"
-          clang -shared -fPIC tests/fuzz/corpus/basic.c -o "$RUNNER_TEMP/fuzz-corpus/shared.elf"
-          runs=10000
-          if [ "$GITHUB_EVENT_NAME" = schedule ] || [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then runs=100000; fi
-          "$BUSTER_COMPILER" --fuzz -seed=133 -runs="$runs" -max_len=4096 -timeout=10 -rss_limit_mb=4096 \
-            -dict=tests/fuzz/c.dict -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
-            "$RUNNER_TEMP/fuzz-corpus" 2>&1 | tee "$RUNNER_TEMP/fuzzer.log"
-          if [ '${{ matrix.entry }}' = elf-override ]; then
-            grep -Fq 'Buster fuzz entry: ELF import' "$RUNNER_TEMP/fuzzer.log"
-          fi
-
-      - name: Prove entry override, crash preservation and exact-input replay
-        if: matrix.entry == 'crash-replay-proof'
-        run: |
-          mkdir -p "$RUNNER_TEMP/fuzz-corpus" "$RUNNER_TEMP/fuzz-artifacts" "$RUNNER_TEMP/fuzz-replay" "$RUNNER_TEMP/fuzz-planted"
-          printf %s BUSTER_FUZZ_ENTRY_PROBE > "$RUNNER_TEMP/fuzz-corpus/trigger"
-          # The planted abort's stack traces go to reports of their own, each of which must be the probe's; the
-          # audit below still rejects any other diagnostic. configure writes log_path last, and the combined runtime
-          # takes it from whichever of these options it parses last.
-          planted() { env "ASAN_OPTIONS=${ASAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
-              "UBSAN_OPTIONS=${UBSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" \
-              "LSAN_OPTIONS=${LSAN_OPTIONS%log_path=*}log_path=$RUNNER_TEMP/fuzz-planted/report" "$@"; }
-          status=0
-          planted "$BUSTER_COMPILER" --fuzz -seed=133 -runs=2 -artifact_prefix="$RUNNER_TEMP/fuzz-artifacts/" \
-            "$RUNNER_TEMP/fuzz-corpus" > "$RUNNER_TEMP/fuzzer.log" 2>&1 || status=$?
-          test "$status" -eq 77
-          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer.log"
-          artifacts=("$RUNNER_TEMP/fuzz-artifacts/"crash-*)
-          test "${#artifacts[@]}" -eq 1
-          cmp "$RUNNER_TEMP/fuzz-corpus/trigger" "${artifacts[0]}"
-          status=0
-          planted "$BUSTER_COMPILER" --fuzz -runs=1 -artifact_prefix="$RUNNER_TEMP/fuzz-replay/" \
-            "${artifacts[0]}" > "$RUNNER_TEMP/fuzzer-replay.log" 2>&1 || status=$?
-          test "$status" -eq 77
-          grep -Fq 'libFuzzer: deadly signal' "$RUNNER_TEMP/fuzzer-replay.log"
-          reports=("$RUNNER_TEMP/fuzz-planted/"report.*)
-          test "${#reports[@]}" -eq 2
-          for report in "${reports[@]}"; do
-              grep -Fq 'in buster_fuzz_test_input' "$report"
-              grep -Fq 'tests/fuzz/entry_probe.c:' "$report"
-          done
-
-      - name: Reject every unexpected sanitizer diagnostic
-        if: ${{ !cancelled() }}
-        run: bash tools/ci/sanitizers.sh audit "$RUNNER_TEMP/sanitizer-reports"
-
-      - name: Preserve corpus, crash inputs, reports and the matching executable
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: libfuzzer-${{ matrix.entry }}-${{ github.run_attempt }}
-          path: |
-            ${{ runner.temp }}/fuzz-corpus
-            ${{ runner.temp }}/fuzz-artifacts
-            ${{ runner.temp }}/fuzz-replay
-            ${{ runner.temp }}/fuzz-planted
-            ${{ runner.temp }}/fuzzer*.log
-            ${{ runner.temp }}/sanitizer-reports
-            ${{ runner.temp }}/sanitizer-probes
-            build/compiler
-            build/compile_commands.json
-            LICENSE
-            THIRD_PARTY_NOTICES.md
-            LICENSES/
-          if-no-files-found: error
-          retention-days: 14
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/drawn.yml
+    with:
+      row: fuzz
+      hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
 
   benchmarks:
     name: Native tests and benchmarks on Benchpress (Ryzen 7 9700X)
@@ -694,13 +657,12 @@ jobs:
 
       - name: Require the complete native vector feature set
         run: |
-          defines=$(clang -march="$BUSTER_HOST_ARCH" -Isrc -dM -E \
-            -include src/buster/compiler/host_isa.h -x c /dev/null)
-          if ! grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$defines"; then
-            printf '%s\n' '::error::9700X correctness requires BUSTER_HOST_VECTOR=1; vector coverage cannot be qualified by scalar kernels.'
+          # host_isa.h refuses a target without every feature its predicate names (#2924).
+          if ! clang -march="$BUSTER_HOST_ARCH" -Isrc -E -include src/buster/compiler/host_isa.h -x c /dev/null -o /dev/null; then
+            printf '%s\n' '::error::host_isa.h refuses the 9700X'"'"'s target; its correctness can'"'"'t be qualified.'
             exit 1
           fi
-          printf 'Selected host path: vector (%s)\n' "$BUSTER_HOST_ARCH"
+          printf 'Host target: %s\n' "$BUSTER_HOST_ARCH"
 
       - name: Build the external Clang pragma oracle and the Zen 5 executable
         id: compiler_builds
@@ -888,8 +850,9 @@ jobs:
                   cp src/buster/compiler/branch_sizing_benchmark.c src/buster/compiler/branch_sizing_generate.c \
                       "$ab_dir/$side/src/buster/compiler/"
                   # The shared harness includes the host-ISA adapter and the encoder's baked-table header. Keep each
-                  # revision's headers when present; a base predating one uses the current header on this host.
-                  for header in host_isa.h host_scalar.h host_scalar_vectors.h baked.h; do
+                  # revision's headers when present; a base predating one uses the current header on this host. With
+                  # the 9700X's flags a base's host_isa.h before #2924 never reaches its scalar headers.
+                  for header in host_isa.h baked.h; do
                       dest="$ab_dir/$side/src/buster/compiler/$header"
                       if [[ "$side" == before ]] && git cat-file -e "${AB_BASE_SHA}:src/buster/compiler/$header" 2>/dev/null; then
                           git show "${AB_BASE_SHA}:src/buster/compiler/$header" > "$dest"
@@ -899,16 +862,27 @@ jobs:
                   done
               done
               before="$ab_dir/before/src/buster/compiler"
-              new='branch_sizing_lengths(records, count, offsets, vector)'
-              old='branch_sizing_lengths(records, count, offsets, columns.encoded, vector)'
-              interface='branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets, bool vector)'
-              test "$(grep -Fo "$new" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
-              if grep -Fq "$old" "$before/branch_sizing.c"; then
-                  sed -i "s/$new/$old/" "$before/branch_sizing_benchmark.c"
-                  test "$(grep -Fo "$old" "$before/branch_sizing_benchmark.c" | wc -l)" -eq 1
-                  echo 'Baseline harness adaptation: old lengths scratch argument only'
-              # Since the host-ISA adapter, the call reads BUSTER_VECTOR_PATH(vector), so check the definition instead.
-              elif ! grep -Fq "$interface" "$before/branch_sizing.c"; then
+              # The harness is this revision's. A base from before #2924 removed branch sizing's scalar path still
+              # takes the path as a `vector` argument in four internal functions: the harness's calls there get the
+              # vector path's `true`. Each call is the text, its sed replacement and the result, exactly once.
+              if grep -Fq 'uint32_t* offsets, bool vector, uint32_t round_limit)' "$before/branch_sizing.c"; then
+                  harness="$before/branch_sizing_benchmark.c"
+                  adapt()
+                  {
+                      test "$(grep -Fo "$1" "$harness" | wc -l)" -eq 1
+                      sed -i "s|$1|$2|" "$harness"
+                      test "$(grep -Fo "$3" "$harness" | wc -l)" -eq 1
+                  }
+                  adapt 'branch_sizing_allocate(scratch.arena, count, branch_count)' 'branch_sizing_allocate(scratch.arena, count, branch_count, true)' \
+                      'branch_sizing_allocate(scratch.arena, count, branch_count, true)'
+                  adapt 'branch_sizing_lengths(records, count, offsets)' 'branch_sizing_lengths(records, count, offsets, true)' \
+                      'branch_sizing_lengths(records, count, offsets, true)'
+                  adapt 'branch_sizing_worklist(branch_count, &columns, current)' 'branch_sizing_worklist(branch_count, \&columns, current, true)' \
+                      'branch_sizing_worklist(branch_count, &columns, current, true)'
+                  adapt 'result.offsets, round_limit)' 'result.offsets, true, round_limit)' 'result.offsets, true, round_limit)'
+                  adapt 'pool->offsets, measurement.round_limit)' 'pool->offsets, true, measurement.round_limit)' 'pool->offsets, true, measurement.round_limit)'
+                  echo 'Baseline harness adaptation: the vector path argument of a base before #2924'
+              elif ! grep -Fq 'branch_sizing_lengths(const X86Instruction* records, uint64_t count, uint32_t* offsets)' "$before/branch_sizing.c"; then
                   echo 'Unsupported baseline branch_sizing_lengths interface' >&2
                   exit 1
               fi
@@ -920,9 +894,8 @@ jobs:
               for side in before after; do
                   tree="$ab_dir/$side/src"
                   sha256sum "$tree"/buster/compiler/*.[ch]
-                  host_defines=$(clang "${flags[@]}" -I "$tree" -dM -E \
-                      -include "$tree/buster/compiler/host_isa.h" -x c /dev/null)
-                  grep -q '^#define BUSTER_HOST_VECTOR 1$' <<< "$host_defines"
+                  # Each side's host_isa.h takes the flags: the vector paths, before #2924 and since.
+                  clang "${flags[@]}" -I "$tree" -E -include "$tree/buster/compiler/host_isa.h" -x c /dev/null -o /dev/null
                   timeout 60s clang "${flags[@]}" -I "$tree" "$tree/buster/compiler/branch_sizing_benchmark.c" \
                       "$fixture/benchmark-main.c" -o "$ab_dir/$side-module"
                   timeout 60s clang "${flags[@]}" -I "$tree" "$fixture/scaling.c" -o "$ab_dir/$side-scaling"
@@ -1019,8 +992,8 @@ jobs:
 
       - name: Benchmark dominator analysis on synthetic and exported source CFGs
         # The --cfg run is #174's real-function importer smoke: test-ir-source --dominators-cfg writes the
-        # qualified CFGs of the focused fixture and benchmark-dominators --cfg reads them back, checks all three
-        # paths' agreement and times the scalar, vector and AUTO selections by block-count bucket.
+        # qualified CFGs of the focused fixture and benchmark-dominators --cfg reads them back and times the
+        # analysis by block-count bucket.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',dominators,')
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
@@ -1702,25 +1675,19 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir
 
-      - name: Benchmark the IR verifier after scalar work
+      - name: Benchmark the IR verifier alone
         # Where `changes` doesn't rule it out (the module's sources).
         if: needs.changes.outputs.ir != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir --only vector --after-scalar 200
+          taskset -c "$cpu" ./build/compiler benchmark-ir --only verify
 
       - name: Benchmark typed-stream lowering through IR verification
-        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-lowering,')
+        # Also where `changes` doesn't rule it out (the module's sources), as its after-scalar step did before #2924.
+        if: env.MEASURE == 'all' || contains(env.MEASURE, ',ir-lowering,') || needs.changes.outputs.ir_lowering != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-lowering
-
-      - name: Benchmark typed-stream lowering after scalar work
-        # Where `changes` doesn't rule it out (the module's sources).
-        if: needs.changes.outputs.ir_lowering != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
 
       - name: Benchmark the IR of the frozen SQLite source's functions
         # #131: the IR's bytes per source token of the functions -c compiles of the oracle's frozen sqlite3.c, and its
@@ -1736,7 +1703,7 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-source "${source[@]}"
 
-      - name: Benchmark the IR lowering of the frozen SQLite source's functions after scalar work
+      - name: Benchmark the IR lowering of the frozen SQLite source's functions alone
         # Where `changes` doesn't rule it out (the lowering's sources).
         if: needs.changes.outputs.ir_lowering != 'false'
         run: |
@@ -1745,7 +1712,7 @@ jobs:
           corpus=/var/lib/buster-9700x/corpora/preprocessor-391e729af658
           source=(--predefines "$corpus/provenance/gnu17-pinned-predefines.txt" --no-default-config --target=x86_64-linux-gnu -march=znver5 -std=gnu17 -nostdinc -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include" "$corpus/sqlite/sqlite3.c")
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-source --only lower --after-scalar 200 "${source[@]}"
+          taskset -c "$cpu" ./build/compiler benchmark-ir-source --only lower "${source[@]}"
 
       - name: Benchmark the allocation certificates of the frozen SQLite source's functions
         # #939: tier1_cfg.c's allocation of every function -c compiles of the oracle's frozen sqlite3.c, its certificate
@@ -1788,7 +1755,7 @@ jobs:
         # as whole processes on one CPU with their user cycles and instructions (docs/tier1.md has the results). Where
         # `changes` doesn't rule it out (Tier 1's pipeline and the measurement: `tier1_programs`), and on the daily and
         # dispatched runs. #1116 also gates all 34 Lua sources' Tier 1 function bytes against matching clang -O0 bytes,
-        # with luac.c included, and reports sqlite3.c's status, using paired objects rather than linked-executable sizes.
+        # with luac.c included, and #2646 sqlite3.c's, using paired objects rather than linked-executable sizes.
         if: needs.changes.outputs.tier1_programs != 'false'
         timeout-minutes: 5
         run: |
@@ -1810,7 +1777,7 @@ jobs:
           scripts="$PWD/build/tier1-programs-evidence/docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua"
           clang --version | head -1
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler measure-tier1-programs --check-code-size=lua --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
+          taskset -c "$cpu" ./build/compiler measure-tier1-programs --check-code-size --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
 
       - name: Time vector code by both tiers and the base's Tier 1, with the moves around Tier 1's machine rows
         # #1283: test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's own lexer (on
@@ -2041,8 +2008,8 @@ jobs:
   # A merge-queue candidate stops at its first failure (#1430, the owner's choice on 2026-11-12), but GitHub's fail-fast
   # works within one matrix alone: after a row failed, the aggregate still waited for the fuzz campaigns (about 21
   # minutes), the glue fixtures and the auxiliary workflows, so a failure that took seconds to show held the candidate,
-  # its runners and the queue's entries behind it until then (#2703: 22.5 minutes on average). Once the test rows or the
-  # fuzz campaigns have failed, these cancel the candidate's run. Its `Integration qualification` still runs (always())
+  # its runners and the queue's entries behind it until then (#2703: 22.5 minutes on average). Once a test row, fuzz campaign or
+  # the analyzer job fails, these cancel the candidate's run. Its `Integration qualification` still runs (always())
   # and fails at once, as it does in the runs `stale` cancels, and GitHub rebuilds the entries behind. A candidate's
   # run alone: a pull request's tests are its last jobs, and the other runs report every row (#1195's reasons).
   stop-tests:
@@ -2077,6 +2044,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel"
 
+  stop-analyze:
+    name: Stop a failing merge-queue candidate (Clang Static Analyzer)
+    needs: [analyze]
+    if: ${{ failure() && github.event_name == 'merge_group' && github.repository_id == '1421805693' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Cancel this candidate's run
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel"
+
   # A merge-queue candidate's auxiliary workflows (#1430), each called whole where the candidate's own change (its merge
   # against its base) touches a path the workflow's pull_request trigger lists: tools/ci/changes.c reads those lists
   # from the workflows themselves (changes_auxiliary_decide), so the rule is written once. A pull request runs them on
@@ -2086,6 +2069,10 @@ jobs:
     name: Auxiliary (build.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',build,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/build.yml
 
   auxiliary-build-pgo:
@@ -2098,12 +2085,20 @@ jobs:
     name: Auxiliary (selfhost.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',selfhost,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/selfhost.yml
 
   auxiliary-tier1-problem:
     name: Auxiliary (tier1-problem.yml)
     needs: [changes, policy]
     if: ${{ !cancelled() && github.event_name == 'merge_group' && needs.policy.result == 'success' && needs.changes.result == 'success' && contains(needs.changes.outputs.auxiliary, ',tier1-problem,') }}
+    # Its AVX-512 job draws its runner, whose collectors and candidates read the run's jobs (drawn.yml, #2924).
+    permissions:
+      contents: read
+      actions: read
     uses: ./.github/workflows/tier1-problem.yml
 
   qualification:
@@ -2128,7 +2123,7 @@ jobs:
     # waiting for its own rows (hotfix.yml reports the context when the label is added); its candidate runs this job in
     # full, since a merge_group event has no pull request labels.
     name: Integration qualification
-    needs: [changes, evidence, glue, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
+    needs: [changes, evidence, glue, analyze, policy, test, fuzz, benchmarks, auxiliary-build, auxiliary-build-pgo, auxiliary-selfhost, auxiliary-tier1-problem]
     if: ${{ always() && needs.evidence.outputs.retired != 'true' && !(github.event_name == 'workflow_dispatch' && (inputs.purpose == 'backlog' || inputs.purpose == 'snapshot')) && !(github.event_name == 'push' && needs.evidence.outputs.hardware_reason == 'deferred') && !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'hotfix')) }}
     runs-on: ubuntu-26.04
     timeout-minutes: 5
@@ -2143,7 +2138,7 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       # A merge-queue candidate's expected coverage, from this run's own jobs (tools/ci/nightly.c's `coverage`): every
-      # shard 1..N of every row (x86-64 and native, each sanitizer, one N per row), the vector pool's verdict, each
+      # shard 1..N of the native plain row, the vector pool's verdict (its plain and sanitizer configurations), each
       # fuzz campaign and every job of each auxiliary workflow the selector named, all completed and successful, and no
       # job of an auxiliary workflow it didn't name. A job missing, skipped, cancelled, failed or timed out, or a row
       # whose shards disagree, fails it; so does an API failure. The predicate below reads its outcome, so that a test
@@ -2166,6 +2161,7 @@ jobs:
           DCO_RESULT: ${{ needs.policy.result }}
           EVIDENCE_RESULT: ${{ needs.evidence.result }}
           GLUE_RESULT: ${{ needs.glue.result }}
+          ANALYZER_RESULT: ${{ needs.analyze.result }}
           HARDWARE: ${{ needs.evidence.outputs.hardware }}
           HARDWARE_REASON: ${{ needs.evidence.outputs.hardware_reason }}
           TEST_RESULT: ${{ needs.test.result }}

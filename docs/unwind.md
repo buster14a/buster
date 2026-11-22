@@ -17,8 +17,10 @@ The offsets have no trailing sentinel. The consumer does not decode bytes,
 remeasure lengths, or independently verify branch displacements and symbolic
 references supplied by the producer.
 
-Both `unwind_tier0` and `unwind_tier0_scalar` write one `UnwindFunction`, only on
-success. They recognize an ordered subset of pushes of RBX, RBP, R12–R15, an
+`unwind_tier0` writes one `UnwindFunction`, only on
+success. It resolves the records' effects in batches (`x86_instructions_effects`);
+its scalar twin, which resolved them a record at a time, took 1.11 to 2.54 times
+its ticks at every size on the 9700X and went (#2924, [the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-tier0-gate)). They recognize an ordered subset of pushes of RBX, RBP, R12–R15, an
 optional fixed positive stack allocation, and the matching final release,
 reverse pops and return. The body must keep that frame. Every direct branch must
 appear exactly once in the ordered branch columns, and its target must be in the
@@ -153,8 +155,9 @@ as it leaves tail calls'. Tier 1's code no longer publishes its frame as Tier
 ### Row programs (#1056)
 
 The C driver's emission reads every function's frame as frame events at record
-boundaries (`EmittedCode`, [the emission metadata guide](emission-metadata.md)):
-Tier 0's, which its adapter derives from the published frame through
+boundaries (`EmittedCode`, [the emission metadata guide](emission-metadata.md)),
+but a Tier 0 frame of the fixed shape alone ("A fixed frame from Tier 0's frame"
+below): Tier 0's, which its adapter derives from the published frame through
 `unwind_tier0_frame_tails` (its transitions at their records' boundaries when
 given no final offsets), and Tier 1's, its frame emitter's own. After branch
 sizing they resolve into rows (`EmissionFrameRow`: an offset and a rule change)
@@ -181,6 +184,23 @@ values (#1149), including CFA offsets past `INT32_MAX` for every supported
 imm32 allocation plus the pushes and return address. Those fixed shapes retain
 the fixed writer's bytes and vector lowering; larger row-only offsets use
 64-bit LEB operands and cannot narrow into a fixed allocation.
+
+### A fixed frame from Tier 0's frame (#2874)
+
+A Tier 0 frame that is pushes, a reservation, a frame pointer and a
+realignment, and nothing the adapter adds rows to that shape for (a probed
+reservation's loop, preserved registers or tail calls, `emitted_tier0_frame_direct`),
+has no frame events: its rows would be the fixed descriptor's exactly. The
+emission makes that descriptor after branch sizing from the published frame at
+the final offsets (`EmittedCode.frame_direct`, `unwind_tier0_frame_tails` with
+the offsets, which checks each prologue and epilogue record as it does where it
+makes the events), with no events made, resolved or lowered. With `--verify`,
+where Tier 0's fixed-frame analyzer (`unwind_tier0`, which reads the records
+alone) takes the function, its CFI must be the same, as for any Tier 0 frame;
+there are no events for the frame verifier to prove. All of `sqlite3.c`'s
+2,602 functions take it, and their objects are the same bytes; the [emission
+metadata guide](emission-metadata.md)'s "Cost and what remains" has what it
+saves.
 
 ## Format and linker handoff
 
@@ -277,7 +297,8 @@ exception or a thread's cancellation passing through the function); with
 that calls), and the driver to every function.
 
 `check_program_emit` (with `unwind`) resolves each function's frame events
-after branch sizing ("Row programs" above), its bodies' then its helpers' (a
+after branch sizing, or describes a fixed Tier 0 frame from the frame ("Row
+programs" and "A fixed frame from Tier 0's frame" above), its bodies' then its helpers' (a
 frame its producer couldn't describe is an internal compiler error, and with
 `--verify` so are events its records don't establish, `emitted_verify_frames`), and after the last function writes their
 FDEs with one shared CIE into one EH_FRAME atom, each FDE's initial location a
@@ -399,8 +420,8 @@ Per-function allocation and cleanup are inside timing. Program generation,
 signature assignment, initialization and byte-identity preflight are outside.
 It reports 21-pass median and range, nanoseconds and user cycles per typed entry,
 whole-unit time, code/CFI bytes and temporary arena use. Options are
-`--functions N`, `--only baseline|scalar|vector|published` and `--after-scalar MS`.
-The latter runs the scalar CFI emitter alone before every timed path, with the
+`--functions N`, `--only baseline|vector|published` and `--after-scalar MS`.
+The latter runs the exact CFI writer alone before every timed path, with the
 same duration for each; it does not condition with the vector backend chain.
 
 All builds, tests and measurements use the approved 9700X through the shared

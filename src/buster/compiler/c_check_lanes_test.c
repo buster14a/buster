@@ -349,7 +349,7 @@ static void check_lanes_test_compile_order(CheckLanesTestUnit* unit, Preprocesso
         unit->index_arena = arena_reserve(type_index_capacity_bytes(capacity));
         ready = type_initialize(&unit->types, &unit->type_arena, &unit->index_arena, capacity);
     }
-    const CheckOptions check_options = { .scalar = scalar };
+    const CheckOptions check_options = { 0 };
     ready = ready && check_input(&unit->input, parser, pp, &unit->types, &unit->arena, &unit->scratch) &&
             check_graph_run(&unit->types, &unit->input.graph, &unit->output, &unit->scratch, &check_options, &unit->stream) && unit->stream.report_count == 0 &&
             check_asms_run(&unit->asms, &unit->input, &unit->stream, &unit->types, &unit->output, &unit->scratch) &&
@@ -2523,7 +2523,7 @@ static void check_lanes_test_benchmark_sections(CheckLanesTestTally* tally, cons
         { "__asm__(\".section .data.x,\\\"aw\\\",@progbits\\n.byte 11\\n.text\");\nint main(void) { return 0; }\n", 0 },
         { "int f(void) __attribute__((section(\".note.x\")));\nint f(void) { return 17; }\nint main(void) { return f() - 17; }\n", 1 },
     };
-    for (uint32_t i = 0; BUSTER_HOST_VECTOR && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
     {
         char source[PATH_MAX];
         char errors[PATH_MAX];

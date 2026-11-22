@@ -46,6 +46,9 @@ struct Tier1CfgTestBuilder
     uint8_t use_required[BUSTER_TIER1_CFG_TEST_USES];
     // 1 for the definition's own use, at its value's definition position: a required one asks for a register there.
     uint8_t use_definition[BUSTER_TIER1_CFG_TEST_USES];
+    // The register a use reads its value in (#2646), UINT8_MAX for none, given to the input where use_registers asks.
+    uint8_t use_register[BUSTER_TIER1_CFG_TEST_USES];
+    bool use_registers;
     uint32_t phi_count;
     uint32_t phi_value[BUSTER_TIER1_CFG_TEST_PHIS];
     // A phi's operand for each of its block's predecessors, in the order the edges list them.
@@ -91,6 +94,10 @@ struct Tier1CfgTestTally
     uint64_t carried_mutants;
     uint64_t carried_killed;
     uint64_t carried_refused;
+    // #2611: CFGs whose anchors and chosen predecessors were compared with those read from a given dominator tree, as is
+    // and with an entry added before it, and their blocks with a latch among their predecessors.
+    uint64_t given_trees;
+    uint64_t given_latches;
     // #2767: general ranges that avoid a fixed sequence's registers, and ranges of a sequence's reader across it, which
     // don't avoid that sequence's.
     uint64_t avoiding_ranges;
@@ -160,6 +167,9 @@ struct Tier1CfgTestTally
     uint64_t two_freed;
     uint64_t two_fixed;
     uint64_t two_seed;
+    // The values whose column sets were probed (tier1_cfg_test_column_sets), and the most in one problem.
+    uint64_t column_values;
+    uint32_t column_widest;
 };
 
 static void tier1_cfg_test_expect(Tier1CfgTestTally* tally, bool condition, const char* message)
@@ -196,6 +206,7 @@ static void tier1_cfg_test_use(Tier1CfgTestBuilder* builder, uint32_t value, uin
     builder->use_instruction[u] = instruction;
     builder->use_required[u] = required;
     builder->use_definition[u] = 0;
+    builder->use_register[u] = UINT8_MAX;
     builder->use_count += 1;
 }
 
@@ -248,6 +259,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* use_offsets = arena_push_array(arena, builder->value_count + 1, sizeof(uint32_t), 4);
     uint32_t* use_positions = arena_push_array(arena, builder->use_count + 1, sizeof(uint32_t), 4);
     uint8_t* use_required = arena_push(arena, builder->use_count + 1, 1);
+    uint8_t* use_registers = builder->use_registers ? arena_push(arena, builder->use_count + 1, 1) : 0;
     uint32_t* phi_offsets = arena_push_array(arena, blocks + 1, sizeof(uint32_t), 4);
     uint32_t* phi_values = arena_push_array(arena, builder->phi_count + 1, sizeof(uint32_t), 4);
     uint32_t* phi_operand_offsets = arena_push_array(arena, builder->phi_count + 1, sizeof(uint32_t), 4);
@@ -262,7 +274,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* sequence_readers = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
     uint32_t* sequence_operands = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
     uint32_t* sequence_results = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
-    const bool built = (!builder->share_slots || slot_widths != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && sequence_operands != 0 && sequence_results != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
+    const bool built = (!builder->share_slots || slot_widths != 0) && (!builder->use_registers || use_registers != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && sequence_operands != 0 && sequence_results != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
     if (built)
     {
         block_starts[0] = 0;
@@ -315,10 +327,18 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
                     {
                         use_positions[at] = use_positions[at - 1];
                         use_required[at] = use_required[at - 1];
+                        if (use_registers != 0)
+                        {
+                            use_registers[at] = use_registers[at - 1];
+                        }
                         at -= 1;
                     }
                     use_positions[at] = position;
                     use_required[at] = builder->use_required[u];
+                    if (use_registers != 0)
+                    {
+                        use_registers[at] = builder->use_register[u];
+                    }
                     use += 1;
                 }
             }
@@ -374,6 +394,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             .use_offsets = use_offsets,
             .use_positions = use_positions,
             .use_required = use_required,
+            .use_registers = use_registers,
             .phi_offsets = phi_offsets,
             .phi_values = phi_values,
             .phi_operand_offsets = phi_operand_offsets,
@@ -646,9 +667,9 @@ struct Tier1CfgTwoOrders
 // A plain problem and a preferred one over the same values, allocated in one call (tier1_cfg_order_prepare and
 // tier1_cfg_order_run, as the CFG consumer does, with the plain problem's verdict inside the preferred assignment's call
 // or with `verdict` false the plain problem assigned whole first) and in two (tier1_cfg_allocate on each, the order
-// before), on one path. The preferred problem gives each value `chosen[v]` and its definition's registers while bound,
+// before). The preferred problem gives each value `chosen[v]` and its definition's registers while bound,
 // and the general class the plain one's registers and `extra`. `allowed` is a column of the values' room.
-static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, const uint32_t* chosen, uint32_t extra, bool vector, bool verdict, Arena* output, Arena* scratch, uint32_t* allowed)
+static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, const uint32_t* chosen, uint32_t extra, bool verdict, Arena* output, Arena* scratch, uint32_t* allowed)
 {
     const uint64_t mark = output->length;
     Tier1CfgTwoOrders outcome = { 0 };
@@ -656,11 +677,11 @@ static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, c
     // Two calls: the plain problem whole, again unbound where it meets a constraint, then the preferred one whole.
     Tier1CfgInput two = *plain;
     Tier1CfgAllocation first = { 0 };
-    Tier1CfgError first_error = vector ? tier1_cfg_allocate(&two, output, scratch, &first) : tier1_cfg_allocate_scalar(&two, output, scratch, &first);
+    Tier1CfgError first_error = tier1_cfg_allocate(&two, output, scratch, &first);
     if (first_error == TIER1_CFG_CONSTRAINT)
     {
         two.definition_registers = 0;
-        first_error = vector ? tier1_cfg_allocate(&two, output, scratch, &first) : tier1_cfg_allocate_scalar(&two, output, scratch, &first);
+        first_error = tier1_cfg_allocate(&two, output, scratch, &first);
     }
     for (uint32_t v = 0; v < plain->value_count; v += 1)
     {
@@ -670,7 +691,7 @@ static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, c
     preferred_two.allowed_registers = allowed;
     preferred_two.registers[BUSTER_TIER1_ALLOCATE_GPR] = general | extra;
     Tier1CfgAllocation second = { 0 };
-    const Tier1CfgError second_error = first_error != TIER1_CFG_OK ? TIER1_CFG_INVALID : vector ? tier1_cfg_allocate(&preferred_two, output, scratch, &second) : tier1_cfg_allocate_scalar(&preferred_two, output, scratch, &second);
+    const Tier1CfgError second_error = first_error != TIER1_CFG_OK ? TIER1_CFG_INVALID : tier1_cfg_allocate(&preferred_two, output, scratch, &second);
     const bool taken_two = first_error == TIER1_CFG_OK && tier1_cfg_taken(second_error, &second);
     // One call.
     Tier1CfgInput one = *plain;
@@ -688,7 +709,7 @@ static Tier1CfgTwoOrders tier1_cfg_test_two_orders(const Tier1CfgInput* plain, c
     const uint32_t* preferred_allowed = 0;
     Tier1CfgError preferred_error = TIER1_CFG_OK;
     bool taken = false;
-    Tier1CfgError stands = tier1_cfg_order_prepare(&one, output, scratch, vector && BUSTER_HOST_VECTOR, &order);
+    Tier1CfgError stands = tier1_cfg_order_prepare(&one, output, scratch, &order);
     stands = stands == TIER1_CFG_OK ? tier1_cfg_order_run(&one, &preference, output, scratch, &order, &result, &preferred_allowed, &preferred_error, &taken) : stands;
     outcome.agreed = stands == first_error && (one.definition_registers == 0) == (two.definition_registers == 0);
     outcome.verified = true;
@@ -807,7 +828,9 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
     uint32_t* offsets = arena_push_array(arena, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* positions = arena_push_array(arena, (uint64_t)input->use_count + values + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint8_t* required = arena_push(arena, (uint64_t)input->use_count + values + 1, 1);
-    const bool ready = phi != 0 && offsets != 0 && positions != 0 && required != 0;
+    // The uses' registers (#2646) follow their uses; a definition's own use names none.
+    uint8_t* registers = input->use_registers != 0 ? arena_push(arena, (uint64_t)input->use_count + values + 1, 1) : 0;
+    const bool ready = phi != 0 && offsets != 0 && positions != 0 && required != 0 && (input->use_registers == 0 || registers != 0);
     if (ready)
     {
         memset(phi, 0, (uint64_t)values + 1);
@@ -827,6 +850,10 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
                 {
                     positions[count] = input->definitions[v];
                     required[count] = 1;
+                    if (registers != 0)
+                    {
+                        registers[count] = UINT8_MAX;
+                    }
                     count += 1;
                     added = true;
                 }
@@ -834,6 +861,10 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
                 {
                     positions[count] = input->use_positions[u];
                     required[count] = input->use_required != 0 ? input->use_required[u] : 0;
+                    if (registers != 0)
+                    {
+                        registers[count] = input->use_registers[u];
+                    }
                     count += 1;
                 }
             }
@@ -843,9 +874,70 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
         result->use_offsets = offsets;
         result->use_positions = positions;
         result->use_required = required;
+        result->use_registers = registers;
         result->use_count = count;
     }
     return ready;
+}
+
+// The column's set checks (tier1_cfg_column, tier1_cfg_input_valid's two conditions on a value's registers), value by
+// value for the first 48: over `plain`'s prepared intervals, the preferred problem's own column stands; a register
+// outside its class's added to one value's set is refused, and so is one value's definition bound to a register outside
+// its set, every other definition as the preferred problem binds it. Counts the values probed into `tally`.
+static void tier1_cfg_test_column_sets(Tier1CfgTestTally* tally, const Tier1CfgInput* plain, const uint32_t* chosen, uint32_t extra, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    const Tier1CfgPreference preference = {
+        .sets = chosen,
+        .registers = {
+            plain->registers[BUSTER_TIER1_ALLOCATE_GPR] | extra,
+            plain->registers[BUSTER_TIER1_ALLOCATE_VECTOR],
+            plain->registers[BUSTER_TIER1_ALLOCATE_MASK],
+        },
+    };
+    const uint32_t values = plain->value_count;
+    Tier1CfgInput preferred = { 0 };
+    Tier1CfgPrepared prepared = { 0 };
+    uint32_t* column = 0;
+    uint32_t* sets = arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* bound = arena_push_array(output, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    const bool built = sets != 0 && bound != 0 && tier1_cfg_preferred(plain, &preference, output, &preferred);
+    const bool held = built && tier1_cfg_prepare(plain, output, scratch, &prepared) == TIER1_CFG_OK;
+    tier1_cfg_test_expect(tally, !held || tier1_cfg_column(&preferred, &prepared, output, &column) == TIER1_CFG_OK, "the preferred problem's column stands");
+    bool outside = true;
+    bool unallowed = true;
+    for (uint32_t v = 0; held && v < values; v += 1)
+    {
+        sets[v] = preferred.allowed_registers[v];
+        bound[v] = preferred.definition_registers != 0 ? preferred.definition_registers[v] : 0;
+    }
+    for (uint32_t k = 0; held && k < values && k < 48; k += 1)
+    {
+        Tier1CfgInput probe = preferred;
+        probe.allowed_registers = sets;
+        probe.definition_registers = bound;
+        const uint32_t registers = preferred.registers[preferred.classes[k]];
+        const uint32_t set = sets[k];
+        const uint32_t definition = bound[k];
+        // The lowest register outside the class's, and the lowest outside the value's set.
+        const uint32_t foreign = ~registers & (registers + 1);
+        const uint32_t loose = ~set & (set + 1);
+        sets[k] = set | foreign;
+        outside = outside && (foreign == 0 || tier1_cfg_column(&probe, &prepared, output, &column) == TIER1_CFG_INVALID);
+        sets[k] = set;
+        bound[k] = loose;
+        unallowed = unallowed && (loose == 0 || tier1_cfg_column(&probe, &prepared, output, &column) == TIER1_CFG_INVALID);
+        bound[k] = definition;
+        tally->column_values += 1;
+        tally->column_widest = k + 1 > tally->column_widest ? k + 1 : tally->column_widest;
+    }
+    tier1_cfg_test_expect(tally, outside, "the column refuses a register outside its class's, value by value");
+    tier1_cfg_test_expect(tally, unallowed, "the column refuses a definition bound outside its value's set, value by value");
+    if (held)
+    {
+        tier1_cfg_release(&prepared, scratch);
+    }
+    arena_pop_to(output, mark);
 }
 
 // #2538: a case of two problems (tier1_cfg_test_two_orders) on both paths, with a random preference and binding
@@ -871,7 +963,7 @@ static void tier1_cfg_test_two_problems(Tier1CfgTestTally* tally, const Tier1Cfg
     {
         Tier1CfgPrepared prepared = { 0 };
         uint32_t* column = 0;
-        const bool held = tier1_cfg_prepare(&plain, output, scratch, BUSTER_HOST_VECTOR, &prepared) == TIER1_CFG_OK;
+        const bool held = tier1_cfg_prepare(&plain, output, scratch, &prepared) == TIER1_CFG_OK;
         tier1_cfg_test_expect(tally, !held || tier1_cfg_column(&plain, &prepared, output, &column) == TIER1_CFG_INVALID, "another problem's column is refused where fixed ranges cut the intervals");
         if (held)
         {
@@ -880,15 +972,18 @@ static void tier1_cfg_test_two_problems(Tier1CfgTestTally* tally, const Tier1Cfg
         tally->two_fixed += 1;
         plain.fixed = (Tier1FixedIntervals){ 0 };
     }
-    // Each path, with the plain problem's verdict inside the preferred assignment's call and with it assigned whole first.
-    for (uint32_t run = 0; ready && run < 4; run += 1)
+    if (ready)
     {
-        const bool vector = run % 2 == 0;
-        const bool verdict = run < 2;
-        const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, vector, verdict, output, scratch, allowed);
+        tier1_cfg_test_column_sets(tally, &plain, chosen, extra, output, scratch);
+    }
+    // With the plain problem's verdict inside the preferred assignment's call and with it assigned whole first.
+    for (uint32_t run = 0; ready && run < 2; run += 1)
+    {
+        const bool verdict = run == 0;
+        const Tier1CfgTwoOrders outcome = tier1_cfg_test_two_orders(&plain, chosen, extra, verdict, output, scratch, allowed);
         if (!outcome.agreed && tally->failures < 20)
         {
-            printf("test-tier1-cfg: two problems, %s path, %s, bound=%u: the orders disagree (fields %u)\n", vector ? "vector" : "scalar", verdict ? "verdict inside" : "plain first", bind, outcome.differs);
+            printf("test-tier1-cfg: two problems, %s, bound=%u: the orders disagree (fields %u)\n", verdict ? "verdict inside" : "plain first", bind, outcome.differs);
         }
         tier1_cfg_test_expect(tally, outcome.agreed, "one call's verdict, problem and allocation are two calls'");
         tier1_cfg_test_expect(tally, outcome.verified, "the CFG checker accepts the allocation that stands");
@@ -965,375 +1060,365 @@ static bool tier1_cfg_test_continuations(const Tier1CfgInput* input, const Tier1
 
 static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, const char* name, bool mutate, uint8_t temp_slots, uint32_t split_moves, bool must_allocate)
 {
-    Tier1CfgError errors[2] = {
-        TIER1_CFG_INVALID,
-        TIER1_CFG_INVALID,
-    };
-    for (uint32_t path = 0; path < 2; path += 1)
+    const uint64_t output_saved = output->length;
+    Tier1CfgAllocation result = { 0 };
+    const Tier1CfgError error = tier1_cfg_allocate(input, output, scratch, &result);
+    for (uint32_t o = 0; o < input->phi_operand_offsets[input->phi_count]; o += 1)
     {
-        const uint64_t output_saved = output->length;
-        Tier1CfgAllocation result = { 0 };
-        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(input, output, scratch, &result) : tier1_cfg_allocate_scalar(input, output, scratch, &result);
-        errors[path] = error;
-        for (uint32_t o = 0; path == 0 && o < input->phi_operand_offsets[input->phi_count]; o += 1)
+        tally->undefined_operands += input->phi_operands[o] == BUSTER_TIER1_CFG_NONE;
+    }
+    tier1_cfg_test_expect(tally, error == TIER1_CFG_OK || error == TIER1_CFG_CONSTRAINT, name);
+    tier1_cfg_test_expect(tally, error == TIER1_CFG_OK || output->length == output_saved, "a failed allocation restores the output arena");
+    if (error == TIER1_CFG_OK)
+    {
+        tally->allocations += 1;
+        tally->moves += result.move_count;
+        tally->split_moves += result.move_count - result.edge_move_offsets[input->edge_count];
+        tally->split_edges += result.split_edges;
+        tally->spills += result.allocation.spill_count;
+        for (uint32_t v = 0; v < input->value_count; v += 1)
         {
-            tally->undefined_operands += input->phi_operands[o] == BUSTER_TIER1_CFG_NONE;
+            tally->shared_slots += result.allocation.spill_ids[v] != UINT32_MAX;
         }
-        tier1_cfg_test_expect(tally, error == TIER1_CFG_OK || error == TIER1_CFG_CONSTRAINT, name);
-        tier1_cfg_test_expect(tally, error == TIER1_CFG_OK || output->length == output_saved, "a failed allocation restores the output arena");
-        if (error == TIER1_CFG_OK)
+        tally->shared_slots -= result.allocation.spill_count;
+        Tier1CfgCheck check;
+        const bool verified = tier1_cfg_verify(input, &result, scratch, &check);
+        if (!verified && tally->failures < 20)
         {
-            tally->allocations += 1;
-            tally->moves += result.move_count;
-            tally->split_moves += result.move_count - result.edge_move_offsets[input->edge_count];
-            tally->split_edges += result.split_edges;
-            tally->spills += result.allocation.spill_count;
+            printf("test-tier1-cfg: %s: %s (block %u value %u position %u)\n", name, check.reason, check.block, check.value, check.position);
+        }
+        tier1_cfg_test_expect(tally, verified, "the CFG checker accepts the allocation");
+        tier1_cfg_test_expect(tally, tier1_cfg_test_lookup(input, &result), "block intervals match the binary search");
+        tier1_cfg_test_expect(tally, tier1_cfg_test_continuations(input, &result), "each live-out range names its value's range at its first successor's entry");
+        tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, true), "the certificate checker proves the allocation");
+        tier1_cfg_test_expect(tally, tier1_cfg_test_avoided(tally, input, &result, scratch), "each range avoids its phi web's fixed sequences' registers, but its own readings'");
+        if (result.intervals.count <= 600)
+        {
+            tier1_cfg_test_expect(tally, tier1_cfg_test_unshared_verify(input, &result, scratch), "the interval verifier accepts the allocation");
+        }
+        for (uint32_t m = 0; m < result.move_count; m += 1)
+        {
+            const uint32_t class = input->classes[result.move_values[m]];
+            const uint32_t conduit = class * 32 + input->scratch_registers[class];
+            tally->scratch_moves += result.move_sources[m] == conduit || result.move_destinations[m] == conduit;
+            tally->mask_moves += class == BUSTER_TIER1_ALLOCATE_MASK;
+            tally->mask_split_moves += class == BUSTER_TIER1_ALLOCATE_MASK && m >= result.edge_move_offsets[input->edge_count];
+        }
+        for (uint32_t k = 0; k < result.allocation.spill_count; k += 1)
+        {
+            tally->mask_spills += input->classes[result.allocation.spill_values[k]] == BUSTER_TIER1_ALLOCATE_MASK;
+        }
+        tally->temp_slot_cases += result.temp_slots != 0;
+        for (uint32_t b = 0; b < input->block_count; b += 1)
+        {
+            const uint32_t entry = input->block_starts[b];
             for (uint32_t v = 0; v < input->value_count; v += 1)
             {
-                tally->shared_slots += result.allocation.spill_ids[v] != UINT32_MAX;
-            }
-            tally->shared_slots -= result.allocation.spill_count;
-            Tier1CfgCheck check;
-            const bool verified = tier1_cfg_verify(input, &result, scratch, &check);
-            if (!verified && tally->failures < 20)
-            {
-                printf("test-tier1-cfg: %s, %s path: %s (block %u value %u position %u)\n", name, path == 0 ? "vector" : "scalar", check.reason, check.block, check.value, check.position);
-            }
-            tier1_cfg_test_expect(tally, verified, "the CFG checker accepts the allocation");
-            tier1_cfg_test_expect(tally, tier1_cfg_test_lookup(input, &result), "block intervals match the binary search");
-            tier1_cfg_test_expect(tally, tier1_cfg_test_continuations(input, &result), "each live-out range names its value's range at its first successor's entry");
-            tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, true), "the certificate checker proves the allocation");
-            tier1_cfg_test_expect(tally, tier1_cfg_test_avoided(tally, input, &result, scratch), "each range avoids its phi web's fixed sequences' registers, but its own readings'");
-            if (result.intervals.count <= 600)
-            {
-                tier1_cfg_test_expect(tally, tier1_cfg_test_unshared_verify(input, &result, scratch), "the interval verifier accepts the allocation");
-            }
-            for (uint32_t m = 0; m < result.move_count; m += 1)
-            {
-                const uint32_t class = input->classes[result.move_values[m]];
-                const uint32_t conduit = class * 32 + input->scratch_registers[class];
-                tally->scratch_moves += result.move_sources[m] == conduit || result.move_destinations[m] == conduit;
-                tally->mask_moves += class == BUSTER_TIER1_ALLOCATE_MASK;
-                tally->mask_split_moves += class == BUSTER_TIER1_ALLOCATE_MASK && m >= result.edge_move_offsets[input->edge_count];
-            }
-            for (uint32_t k = 0; k < result.allocation.spill_count; k += 1)
-            {
-                tally->mask_spills += input->classes[result.allocation.spill_values[k]] == BUSTER_TIER1_ALLOCATE_MASK;
-            }
-            tally->temp_slot_cases += result.temp_slots != 0;
-            for (uint32_t b = 0; path == 0 && b < input->block_count; b += 1)
-            {
-                const uint32_t entry = input->block_starts[b];
-                for (uint32_t v = 0; v < input->value_count; v += 1)
-                {
-                    uint32_t location = 0;
-                    uint8_t kind = 0;
-                    const uint32_t interval = tier1_cfg_interval_oracle(&result, v, entry);
-                    const uint32_t position = interval != BUSTER_TIER1_CFG_NONE && result.intervals.starts[interval] < entry ? entry - 1 : entry;
-                    const uint32_t fragment = interval != BUSTER_TIER1_CFG_NONE ? tier1_cfg_interval_fragment(&result, interval, position) : BUSTER_TIER1_CFG_NONE;
-                    const bool found = fragment != BUSTER_TIER1_CFG_NONE && tier1_cfg_entry_location(&result, v, entry, &location, &kind);
-                    tally->unread_entries += found && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && result.allocation.kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER;
-                }
-            }
-            for (uint32_t i = 0; path == 0 && result.unread_entries != 0 && i < result.intervals.count; i += 1)
-            {
-                tally->carried_entries += result.unread_entries[i] != 0;
-            }
-            tier1_cfg_test_expect(tally, (result.temp_slots & temp_slots) == temp_slots, "the case uses its temporary slots");
-            tier1_cfg_test_expect(tally, result.move_count - result.edge_move_offsets[input->edge_count] >= split_moves, "the case moves values at its splits");
-            if (mutate && path == 1)
-            {
-                Tier1Allocation* allocation = &result.allocation;
-                // Interference: a register fragment given the register of another value's register fragment that
-                // overlaps it. The later of the two writes then lands on a value the allocation keeps there.
-                uint32_t tried = 0;
-                for (uint32_t i = 0; tried < 8 && i < result.intervals.count; i += 1)
-                {
-                    for (uint32_t f = allocation->fragment_offsets[i]; tried < 8 && f < allocation->fragment_offsets[i + 1]; f += 1)
-                    {
-                        uint32_t other = UINT32_MAX;
-                        for (uint32_t j = 0; allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && other == UINT32_MAX && j < result.intervals.count; j += 1)
-                        {
-                            const bool apart = result.intervals.values[j] != result.intervals.values[i] && result.intervals.classes[j] == result.intervals.classes[i];
-                            for (uint32_t g = allocation->fragment_offsets[j]; apart && other == UINT32_MAX && g < allocation->fragment_offsets[j + 1]; g += 1)
-                            {
-                                const bool overlap = allocation->starts[g] < allocation->ends[f] && allocation->starts[f] < allocation->ends[g];
-                                // A spill or rematerialize fragment has no register: its field is a slot or byte count, not
-                                // a bit allowed_registers can hold, so the shift waits for the kind to say it is a register.
-                                const bool registered = allocation->kinds[g] == BUSTER_TIER1_ALLOCATE_REGISTER;
-                                const bool allowed = registered && allocation->registers[g] < 32 && ((result.intervals.allowed_registers[i] >> allocation->registers[g]) & 1) != 0;
-                                if (registered && overlap && allowed && allocation->registers[g] != allocation->registers[f])
-                                {
-                                    other = g;
-                                }
-                            }
-                        }
-                        if (other != UINT32_MAX)
-                        {
-                            const uint8_t saved = allocation->registers[f];
-                            allocation->registers[f] = allocation->registers[other];
-                            const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->interference_refused);
-                            allocation->registers[f] = saved;
-                            tally->interference_mutants += 1;
-                            tally->interference_killed += rejected;
-                            tried += 1;
-                        }
-                    }
-                }
-                // Slot: a spilled value given the slot of another value of its class whose slot fragment overlaps one of
-                // its own (#1216). Whichever reaches the slot second overwrites the other while the allocation keeps it there.
-                tried = 0;
-                for (uint32_t i = 0; tried < 4 && i < result.intervals.count; i += 1)
-                {
-                    const uint32_t v = result.intervals.values[i];
-                    for (uint32_t f = allocation->fragment_offsets[i]; tried < 4 && f < allocation->fragment_offsets[i + 1]; f += 1)
-                    {
-                        uint32_t other = UINT32_MAX;
-                        for (uint32_t j = 0; allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL && other == UINT32_MAX && j < result.intervals.count; j += 1)
-                        {
-                            const uint32_t w = result.intervals.values[j];
-                            const bool apart = w != v && result.intervals.classes[j] == result.intervals.classes[i] && allocation->spill_ids[w] != allocation->spill_ids[v];
-                            for (uint32_t g = allocation->fragment_offsets[j]; apart && other == UINT32_MAX && g < allocation->fragment_offsets[j + 1]; g += 1)
-                            {
-                                const bool overlap = allocation->starts[g] < allocation->ends[f] && allocation->starts[f] < allocation->ends[g];
-                                other = overlap && allocation->kinds[g] == BUSTER_TIER1_ALLOCATE_SPILL ? w : other;
-                            }
-                        }
-                        if (other != UINT32_MAX)
-                        {
-                            const uint32_t saved = allocation->spill_ids[v];
-                            allocation->spill_ids[v] = allocation->spill_ids[other];
-                            const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->slot_refused);
-                            allocation->spill_ids[v] = saved;
-                            tally->slot_mutants += 1;
-                            tally->slot_killed += rejected;
-                            tried += 1;
-                        }
-                    }
-                }
-                // #2734: an interval of the carried proof's shape that it refused, marked as proven: a recomputed value's one
-                // register fragment, unused, over whole blocks. A block it carries the value to reads the register, which
-                // control now enters without.
-                tried = 0;
-                for (uint32_t i = 0; result.unread_entries != 0 && result.intervals.rematerializable != 0 && tried < 4 && i < result.intervals.count; i += 1)
-                {
-                    const uint32_t f = allocation->fragment_offsets[i];
-                    const uint32_t first = tier1_cfg_block_of(input, result.intervals.starts[i]);
-                    const uint32_t last = tier1_cfg_block_of(input, result.intervals.ends[i] - 1);
-                    const bool shaped = result.unread_entries[i] == 0 && result.intervals.rematerializable[i] != 0 && allocation->fragment_offsets[i + 1] - f == 1 &&
-                                        allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && result.intervals.use_offsets[i] == result.intervals.use_offsets[i + 1] &&
-                                        input->definitions[result.intervals.values[i]] != result.intervals.starts[i] && input->block_starts[first] == result.intervals.starts[i] &&
-                                        input->block_starts[last + 1] == result.intervals.ends[i];
-                    bool operand = false;
-                    for (uint32_t o = 0; shaped && o < input->phi_operand_offsets[input->phi_count]; o += 1)
-                    {
-                        operand = operand || input->phi_operands[o] == result.intervals.values[i];
-                    }
-                    if (shaped && !operand)
-                    {
-                        result.unread_entries[i] = 1;
-                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->carried_refused);
-                        result.unread_entries[i] = 0;
-                        tally->carried_mutants += 1;
-                        tally->carried_killed += rejected;
-                        tried += 1;
-                    }
-                }
-                // Order: a move run before one that reads what it writes, where that location is written once on the
-                // edge or at the split (not the scratch register or a temporary slot): the reader then finds the other
-                // value. The edges' groups of moves, then the splits'.
-                tried = 0;
-                for (uint32_t g = 0; tried < 8 && g < input->edge_count + result.split_count; g += 1)
-                {
-                    const uint32_t low = g < input->edge_count ? result.edge_move_offsets[g] : result.split_move_offsets[g - input->edge_count];
-                    const uint32_t high = g < input->edge_count ? result.edge_move_offsets[g + 1] : result.split_move_offsets[g - input->edge_count + 1];
-                    for (uint32_t m = low; tried < 8 && m < high; m += 1)
-                    {
-                        for (uint32_t n = m + 1; tried < 8 && n < high; n += 1)
-                        {
-                            const uint32_t location = result.move_destinations[n];
-                            const uint32_t class = input->classes[result.move_values[n]];
-                            const bool once = location != class * 32 + input->scratch_registers[class] && location < BUSTER_TIER1_CFG_SPILL + allocation->spill_count;
-                            if (once && result.move_sources[m] == location && result.move_values[m] != result.move_values[n])
-                            {
-                                const uint32_t source = result.move_sources[m];
-                                const uint32_t destination = result.move_destinations[m];
-                                const uint32_t value = result.move_values[m];
-                                result.move_sources[m] = result.move_sources[n];
-                                result.move_destinations[m] = result.move_destinations[n];
-                                result.move_values[m] = result.move_values[n];
-                                result.move_sources[n] = source;
-                                result.move_destinations[n] = destination;
-                                result.move_values[n] = value;
-                                const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->order_refused);
-                                result.move_sources[n] = result.move_sources[m];
-                                result.move_destinations[n] = result.move_destinations[m];
-                                result.move_values[n] = result.move_values[m];
-                                result.move_sources[m] = source;
-                                result.move_destinations[m] = destination;
-                                result.move_values[m] = value;
-                                tally->order_mutants += 1;
-                                tally->order_killed += rejected;
-                                tried += 1;
-                            }
-                        }
-                    }
-                }
-                // Definition: a value whose definition needs a register (its first use is at its definition, required)
-                // and that has a slot elsewhere, written into its slot instead.
-                tried = 0;
-                for (uint32_t i = 0; tried < 8 && i < result.intervals.count; i += 1)
-                {
-                    const uint32_t v = result.intervals.values[i];
-                    const uint32_t first = allocation->fragment_offsets[i];
-                    const uint32_t use = input->use_offsets[v];
-                    const bool required = use < input->use_offsets[v + 1] && input->use_positions[use] == input->definitions[v] && input->use_required[use] != 0;
-                    if (required && result.intervals.starts[i] == input->definitions[v] && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->spill_ids[v] < allocation->spill_count)
-                    {
-                        // A well-formed slot fragment (no register), so that the definition, not the shape, refuses it.
-                        const uint8_t reg = allocation->registers[first];
-                        allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_SPILL;
-                        allocation->registers[first] = UINT8_MAX;
-                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->definition_refused);
-                        allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_REGISTER;
-                        allocation->registers[first] = reg;
-                        tally->definition_mutants += 1;
-                        tally->definition_killed += rejected;
-                        tried += 1;
-                    }
-                }
-                // Destination: a split's move to a register sent to another of its class's registers, not the scratch.
-                tried = 0;
-                for (uint32_t m = result.edge_move_offsets[input->edge_count]; tried < 8 && m < result.move_count; m += 1)
-                {
-                    const uint32_t destination = result.move_destinations[m];
-                    const uint32_t class = input->classes[result.move_values[m]];
-                    const uint32_t others = destination < BUSTER_TIER1_CFG_SPILL && destination / 32 == class && destination % 32 != input->scratch_registers[class] ? input->registers[class] & ~(UINT32_C(1) << (destination % 32)) : 0;
-                    if (others != 0)
-                    {
-                        result.move_destinations[m] = class * 32 + (uint32_t)__builtin_ctz(others);
-                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->destination_refused);
-                        result.move_destinations[m] = destination;
-                        tally->destination_mutants += 1;
-                        tally->destination_killed += rejected;
-                        tried += 1;
-                    }
-                }
-                // k0: a mask's register fragment moved to the class's k0.
-                tried = 0;
-                for (uint32_t f = 0; tried < 8 && f < allocation->fragment_count; f += 1)
-                {
-                    if (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->registers[f] != 0)
-                    {
-                        uint32_t interval = 0;
-                        while (allocation->fragment_offsets[interval + 1] <= f)
-                        {
-                            interval += 1;
-                        }
-                        if (result.intervals.classes[interval] == BUSTER_TIER1_ALLOCATE_MASK)
-                        {
-                            const uint8_t kept = allocation->registers[f];
-                            allocation->registers[f] = 0;
-                            const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->k0_refused);
-                            allocation->registers[f] = kept;
-                            tally->k0_mutants += 1;
-                            tally->k0_killed += rejected;
-                            tried += 1;
-                        }
-                    }
-                }
-                // Shape: each column's bound forged past it, read by nothing once refused.
-                const uint32_t intervals = result.intervals.count;
-                if (input->value_count >= 2 && result.value_interval_offsets[1] < intervals)
-                {
-                    const uint32_t kept = result.value_interval_offsets[1];
-                    result.value_interval_offsets[1] = intervals + 1;
-                    tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                    result.value_interval_offsets[1] = kept;
-                }
-                if (intervals >= 2)
-                {
-                    const uint32_t kept = allocation->fragment_offsets[1];
-                    allocation->fragment_offsets[1] = allocation->fragment_count + 1;
-                    tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                    allocation->fragment_offsets[1] = kept;
-                }
-                // A spill fragment where the allocation has no slots, its columns absent; and a register left on a
-                // slot's or a recomputation's fragment. The first fragment of each kind.
-                bool spilled = false;
-                bool stale = false;
-                for (uint32_t f = 0; (!spilled || !stale) && f < allocation->fragment_count; f += 1)
-                {
-                    const uint8_t kind = allocation->kinds[f];
-                    const uint8_t reg = allocation->registers[f];
-                    const Tier1Allocation kept = *allocation;
-                    if (!spilled && kind == BUSTER_TIER1_ALLOCATE_REGISTER)
-                    {
-                        allocation->kinds[f] = BUSTER_TIER1_ALLOCATE_SPILL;
-                        allocation->registers[f] = UINT8_MAX;
-                        allocation->spill_count = 0;
-                        allocation->spill_ids = 0;
-                        allocation->spill_values = 0;
-                        spilled = true;
-                    }
-                    else if (!stale && kind != BUSTER_TIER1_ALLOCATE_REGISTER)
-                    {
-                        allocation->registers[f] = 0;
-                        stale = true;
-                    }
-                    if (allocation->kinds[f] != kind || allocation->registers[f] != reg)
-                    {
-                        tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                        *allocation = kept;
-                        allocation->kinds[f] = kind;
-                        allocation->registers[f] = reg;
-                    }
-                }
-                // Columns: slots counted without their columns and past the values, a fragment column, the edges'
-                // placements and a move column absent, and fragments that no interval owns, after the last and
-                // before the first.
-                const Tier1CfgAllocation whole = result;
-                result.allocation.spill_count = whole.allocation.spill_count != 0 ? whole.allocation.spill_count : 1;
-                result.allocation.spill_ids = 0;
-                result.allocation.spill_values = 0;
-                tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                result = whole;
-                result.allocation.spill_count = input->value_count + 1;
-                tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                result = whole;
-                result.allocation.starts = 0;
-                tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                result = whole;
-                result.edge_placements = 0;
-                tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                result = whole;
-                if (result.move_count != 0)
-                {
-                    result.move_values = 0;
-                    tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                    result = whole;
-                }
-                result.allocation.fragment_count += 1;
-                tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                result = whole;
-                allocation->fragment_offsets[0] = 1;
-                tier1_cfg_test_shape(tally, input, &result, output, scratch);
-                allocation->fragment_offsets[0] = 0;
-                Tier1CfgCheck again;
-                tier1_cfg_test_expect(tally, tier1_cfg_verify(input, &result, scratch, &again), "the checker accepts the restored allocation");
-                tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, false), "the certificate checker proves the restored allocation");
+                uint32_t location = 0;
+                uint8_t kind = 0;
+                const uint32_t interval = tier1_cfg_interval_oracle(&result, v, entry);
+                const uint32_t position = interval != BUSTER_TIER1_CFG_NONE && result.intervals.starts[interval] < entry ? entry - 1 : entry;
+                const uint32_t fragment = interval != BUSTER_TIER1_CFG_NONE ? tier1_cfg_interval_fragment(&result, interval, position) : BUSTER_TIER1_CFG_NONE;
+                const bool found = fragment != BUSTER_TIER1_CFG_NONE && tier1_cfg_entry_location(&result, v, entry, &location, &kind);
+                tally->unread_entries += found && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE && result.allocation.kinds[fragment] == BUSTER_TIER1_ALLOCATE_REGISTER;
             }
         }
-        else
+        for (uint32_t i = 0; result.unread_entries != 0 && i < result.intervals.count; i += 1)
         {
-            tally->constraints += 1;
+            tally->carried_entries += result.unread_entries[i] != 0;
         }
-        arena_pop_to(output, output_saved);
+        tier1_cfg_test_expect(tally, (result.temp_slots & temp_slots) == temp_slots, "the case uses its temporary slots");
+        tier1_cfg_test_expect(tally, result.move_count - result.edge_move_offsets[input->edge_count] >= split_moves, "the case moves values at its splits");
+        if (mutate)
+        {
+            Tier1Allocation* allocation = &result.allocation;
+            // Interference: a register fragment given the register of another value's register fragment that
+            // overlaps it. The later of the two writes then lands on a value the allocation keeps there.
+            uint32_t tried = 0;
+            for (uint32_t i = 0; tried < 8 && i < result.intervals.count; i += 1)
+            {
+                for (uint32_t f = allocation->fragment_offsets[i]; tried < 8 && f < allocation->fragment_offsets[i + 1]; f += 1)
+                {
+                    uint32_t other = UINT32_MAX;
+                    for (uint32_t j = 0; allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && other == UINT32_MAX && j < result.intervals.count; j += 1)
+                    {
+                        const bool apart = result.intervals.values[j] != result.intervals.values[i] && result.intervals.classes[j] == result.intervals.classes[i];
+                        for (uint32_t g = allocation->fragment_offsets[j]; apart && other == UINT32_MAX && g < allocation->fragment_offsets[j + 1]; g += 1)
+                        {
+                            const bool overlap = allocation->starts[g] < allocation->ends[f] && allocation->starts[f] < allocation->ends[g];
+                            // A spill or rematerialize fragment has no register: its field is a slot or byte count, not
+                            // a bit allowed_registers can hold, so the shift waits for the kind to say it is a register.
+                            const bool registered = allocation->kinds[g] == BUSTER_TIER1_ALLOCATE_REGISTER;
+                            const bool allowed = registered && allocation->registers[g] < 32 && ((result.intervals.allowed_registers[i] >> allocation->registers[g]) & 1) != 0;
+                            if (registered && overlap && allowed && allocation->registers[g] != allocation->registers[f])
+                            {
+                                other = g;
+                            }
+                        }
+                    }
+                    if (other != UINT32_MAX)
+                    {
+                        const uint8_t saved = allocation->registers[f];
+                        allocation->registers[f] = allocation->registers[other];
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->interference_refused);
+                        allocation->registers[f] = saved;
+                        tally->interference_mutants += 1;
+                        tally->interference_killed += rejected;
+                        tried += 1;
+                    }
+                }
+            }
+            // Slot: a spilled value given the slot of another value of its class whose slot fragment overlaps one of
+            // its own (#1216). Whichever reaches the slot second overwrites the other while the allocation keeps it there.
+            tried = 0;
+            for (uint32_t i = 0; tried < 4 && i < result.intervals.count; i += 1)
+            {
+                const uint32_t v = result.intervals.values[i];
+                for (uint32_t f = allocation->fragment_offsets[i]; tried < 4 && f < allocation->fragment_offsets[i + 1]; f += 1)
+                {
+                    uint32_t other = UINT32_MAX;
+                    for (uint32_t j = 0; allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL && other == UINT32_MAX && j < result.intervals.count; j += 1)
+                    {
+                        const uint32_t w = result.intervals.values[j];
+                        const bool apart = w != v && result.intervals.classes[j] == result.intervals.classes[i] && allocation->spill_ids[w] != allocation->spill_ids[v];
+                        for (uint32_t g = allocation->fragment_offsets[j]; apart && other == UINT32_MAX && g < allocation->fragment_offsets[j + 1]; g += 1)
+                        {
+                            const bool overlap = allocation->starts[g] < allocation->ends[f] && allocation->starts[f] < allocation->ends[g];
+                            other = overlap && allocation->kinds[g] == BUSTER_TIER1_ALLOCATE_SPILL ? w : other;
+                        }
+                    }
+                    if (other != UINT32_MAX)
+                    {
+                        const uint32_t saved = allocation->spill_ids[v];
+                        allocation->spill_ids[v] = allocation->spill_ids[other];
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->slot_refused);
+                        allocation->spill_ids[v] = saved;
+                        tally->slot_mutants += 1;
+                        tally->slot_killed += rejected;
+                        tried += 1;
+                    }
+                }
+            }
+            // #2734: an interval of the carried proof's shape that it refused, marked as proven: a recomputed value's one
+            // register fragment, unused, over whole blocks. A block it carries the value to reads the register, which
+            // control now enters without.
+            tried = 0;
+            for (uint32_t i = 0; result.unread_entries != 0 && result.intervals.rematerializable != 0 && tried < 4 && i < result.intervals.count; i += 1)
+            {
+                const uint32_t f = allocation->fragment_offsets[i];
+                const uint32_t first = tier1_cfg_block_of(input, result.intervals.starts[i]);
+                const uint32_t last = tier1_cfg_block_of(input, result.intervals.ends[i] - 1);
+                const bool shaped = result.unread_entries[i] == 0 && result.intervals.rematerializable[i] != 0 && allocation->fragment_offsets[i + 1] - f == 1 &&
+                                    allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && result.intervals.use_offsets[i] == result.intervals.use_offsets[i + 1] &&
+                                    input->definitions[result.intervals.values[i]] != result.intervals.starts[i] && input->block_starts[first] == result.intervals.starts[i] &&
+                                    input->block_starts[last + 1] == result.intervals.ends[i];
+                bool operand = false;
+                for (uint32_t o = 0; shaped && o < input->phi_operand_offsets[input->phi_count]; o += 1)
+                {
+                    operand = operand || input->phi_operands[o] == result.intervals.values[i];
+                }
+                if (shaped && !operand)
+                {
+                    result.unread_entries[i] = 1;
+                    const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->carried_refused);
+                    result.unread_entries[i] = 0;
+                    tally->carried_mutants += 1;
+                    tally->carried_killed += rejected;
+                    tried += 1;
+                }
+            }
+            // Order: a move run before one that reads what it writes, where that location is written once on the
+            // edge or at the split (not the scratch register or a temporary slot): the reader then finds the other
+            // value. The edges' groups of moves, then the splits'.
+            tried = 0;
+            for (uint32_t g = 0; tried < 8 && g < input->edge_count + result.split_count; g += 1)
+            {
+                const uint32_t low = g < input->edge_count ? result.edge_move_offsets[g] : result.split_move_offsets[g - input->edge_count];
+                const uint32_t high = g < input->edge_count ? result.edge_move_offsets[g + 1] : result.split_move_offsets[g - input->edge_count + 1];
+                for (uint32_t m = low; tried < 8 && m < high; m += 1)
+                {
+                    for (uint32_t n = m + 1; tried < 8 && n < high; n += 1)
+                    {
+                        const uint32_t location = result.move_destinations[n];
+                        const uint32_t class = input->classes[result.move_values[n]];
+                        const bool once = location != class * 32 + input->scratch_registers[class] && location < BUSTER_TIER1_CFG_SPILL + allocation->spill_count;
+                        if (once && result.move_sources[m] == location && result.move_values[m] != result.move_values[n])
+                        {
+                            const uint32_t source = result.move_sources[m];
+                            const uint32_t destination = result.move_destinations[m];
+                            const uint32_t value = result.move_values[m];
+                            result.move_sources[m] = result.move_sources[n];
+                            result.move_destinations[m] = result.move_destinations[n];
+                            result.move_values[m] = result.move_values[n];
+                            result.move_sources[n] = source;
+                            result.move_destinations[n] = destination;
+                            result.move_values[n] = value;
+                            const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->order_refused);
+                            result.move_sources[n] = result.move_sources[m];
+                            result.move_destinations[n] = result.move_destinations[m];
+                            result.move_values[n] = result.move_values[m];
+                            result.move_sources[m] = source;
+                            result.move_destinations[m] = destination;
+                            result.move_values[m] = value;
+                            tally->order_mutants += 1;
+                            tally->order_killed += rejected;
+                            tried += 1;
+                        }
+                    }
+                }
+            }
+            // Definition: a value whose definition needs a register (its first use is at its definition, required)
+            // and that has a slot elsewhere, written into its slot instead.
+            tried = 0;
+            for (uint32_t i = 0; tried < 8 && i < result.intervals.count; i += 1)
+            {
+                const uint32_t v = result.intervals.values[i];
+                const uint32_t first = allocation->fragment_offsets[i];
+                const uint32_t use = input->use_offsets[v];
+                const bool required = use < input->use_offsets[v + 1] && input->use_positions[use] == input->definitions[v] && input->use_required[use] != 0;
+                if (required && result.intervals.starts[i] == input->definitions[v] && allocation->kinds[first] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->spill_ids[v] < allocation->spill_count)
+                {
+                    // A well-formed slot fragment (no register), so that the definition, not the shape, refuses it.
+                    const uint8_t reg = allocation->registers[first];
+                    allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_SPILL;
+                    allocation->registers[first] = UINT8_MAX;
+                    const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->definition_refused);
+                    allocation->kinds[first] = BUSTER_TIER1_ALLOCATE_REGISTER;
+                    allocation->registers[first] = reg;
+                    tally->definition_mutants += 1;
+                    tally->definition_killed += rejected;
+                    tried += 1;
+                }
+            }
+            // Destination: a split's move to a register sent to another of its class's registers, not the scratch.
+            tried = 0;
+            for (uint32_t m = result.edge_move_offsets[input->edge_count]; tried < 8 && m < result.move_count; m += 1)
+            {
+                const uint32_t destination = result.move_destinations[m];
+                const uint32_t class = input->classes[result.move_values[m]];
+                const uint32_t others = destination < BUSTER_TIER1_CFG_SPILL && destination / 32 == class && destination % 32 != input->scratch_registers[class] ? input->registers[class] & ~(UINT32_C(1) << (destination % 32)) : 0;
+                if (others != 0)
+                {
+                    result.move_destinations[m] = class * 32 + (uint32_t)__builtin_ctz(others);
+                    const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->destination_refused);
+                    result.move_destinations[m] = destination;
+                    tally->destination_mutants += 1;
+                    tally->destination_killed += rejected;
+                    tried += 1;
+                }
+            }
+            // k0: a mask's register fragment moved to the class's k0.
+            tried = 0;
+            for (uint32_t f = 0; tried < 8 && f < allocation->fragment_count; f += 1)
+            {
+                if (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && allocation->registers[f] != 0)
+                {
+                    uint32_t interval = 0;
+                    while (allocation->fragment_offsets[interval + 1] <= f)
+                    {
+                        interval += 1;
+                    }
+                    if (result.intervals.classes[interval] == BUSTER_TIER1_ALLOCATE_MASK)
+                    {
+                        const uint8_t kept = allocation->registers[f];
+                        allocation->registers[f] = 0;
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->k0_refused);
+                        allocation->registers[f] = kept;
+                        tally->k0_mutants += 1;
+                        tally->k0_killed += rejected;
+                        tried += 1;
+                    }
+                }
+            }
+            // Shape: each column's bound forged past it, read by nothing once refused.
+            const uint32_t intervals = result.intervals.count;
+            if (input->value_count >= 2 && result.value_interval_offsets[1] < intervals)
+            {
+                const uint32_t kept = result.value_interval_offsets[1];
+                result.value_interval_offsets[1] = intervals + 1;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                result.value_interval_offsets[1] = kept;
+            }
+            if (intervals >= 2)
+            {
+                const uint32_t kept = allocation->fragment_offsets[1];
+                allocation->fragment_offsets[1] = allocation->fragment_count + 1;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                allocation->fragment_offsets[1] = kept;
+            }
+            // A spill fragment where the allocation has no slots, its columns absent; and a register left on a
+            // slot's or a recomputation's fragment. The first fragment of each kind.
+            bool spilled = false;
+            bool stale = false;
+            for (uint32_t f = 0; (!spilled || !stale) && f < allocation->fragment_count; f += 1)
+            {
+                const uint8_t kind = allocation->kinds[f];
+                const uint8_t reg = allocation->registers[f];
+                const Tier1Allocation kept = *allocation;
+                if (!spilled && kind == BUSTER_TIER1_ALLOCATE_REGISTER)
+                {
+                    allocation->kinds[f] = BUSTER_TIER1_ALLOCATE_SPILL;
+                    allocation->registers[f] = UINT8_MAX;
+                    allocation->spill_count = 0;
+                    allocation->spill_ids = 0;
+                    allocation->spill_values = 0;
+                    spilled = true;
+                }
+                else if (!stale && kind != BUSTER_TIER1_ALLOCATE_REGISTER)
+                {
+                    allocation->registers[f] = 0;
+                    stale = true;
+                }
+                if (allocation->kinds[f] != kind || allocation->registers[f] != reg)
+                {
+                    tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                    *allocation = kept;
+                    allocation->kinds[f] = kind;
+                    allocation->registers[f] = reg;
+                }
+            }
+            // Columns: slots counted without their columns and past the values, a fragment column, the edges'
+            // placements and a move column absent, and fragments that no interval owns, after the last and
+            // before the first.
+            const Tier1CfgAllocation whole = result;
+            result.allocation.spill_count = whole.allocation.spill_count != 0 ? whole.allocation.spill_count : 1;
+            result.allocation.spill_ids = 0;
+            result.allocation.spill_values = 0;
+            tier1_cfg_test_shape(tally, input, &result, output, scratch);
+            result = whole;
+            result.allocation.spill_count = input->value_count + 1;
+            tier1_cfg_test_shape(tally, input, &result, output, scratch);
+            result = whole;
+            result.allocation.starts = 0;
+            tier1_cfg_test_shape(tally, input, &result, output, scratch);
+            result = whole;
+            result.edge_placements = 0;
+            tier1_cfg_test_shape(tally, input, &result, output, scratch);
+            result = whole;
+            if (result.move_count != 0)
+            {
+                result.move_values = 0;
+                tier1_cfg_test_shape(tally, input, &result, output, scratch);
+                result = whole;
+            }
+            result.allocation.fragment_count += 1;
+            tier1_cfg_test_shape(tally, input, &result, output, scratch);
+            result = whole;
+            allocation->fragment_offsets[0] = 1;
+            tier1_cfg_test_shape(tally, input, &result, output, scratch);
+            allocation->fragment_offsets[0] = 0;
+            Tier1CfgCheck again;
+            tier1_cfg_test_expect(tally, tier1_cfg_verify(input, &result, scratch, &again), "the checker accepts the restored allocation");
+            tier1_cfg_test_expect(tally, tier1_cfg_test_certify(tally, input, &result, output, scratch, false), "the certificate checker proves the restored allocation");
+        }
     }
-    // Both scans refuse the same constrained classes, which the common path leaves to its scan: the paths agree on
-    // whether a case allocates. A fixture always does.
-    tier1_cfg_test_expect(tally, errors[0] == errors[1], "both paths agree on whether a case allocates");
-    tier1_cfg_test_expect(tally, !must_allocate || errors[0] == TIER1_CFG_OK, name);
+    else
+    {
+        tally->constraints += 1;
+    }
+    arena_pop_to(output, output_saved);
+    // A fixture always allocates.
+    tier1_cfg_test_expect(tally, !must_allocate || error == TIER1_CFG_OK, name);
     for (uint32_t bind = 0; bind < 3; bind += 1)
     {
         tier1_cfg_test_two_problems(tally, input, output, scratch, bind);
@@ -1441,7 +1526,6 @@ static bool tier1_cfg_test_generate(Tier1CfgTestBuilder* builder, uint64_t seed,
     };
     DominatorOptions options = dominators_options();
     options.outputs = 0;
-    options.path = DOMINATOR_SCALAR;
     Dominators dominance;
     bool valid = dominators_analyze(arena, scratch, &cfg, options, &dominance) == DOMINATOR_OK;
     // Parameters at the entry's first instruction: two general values, a vector one and a mask.
@@ -1633,11 +1717,11 @@ static void tier1_cfg_test_undefined(Tier1CfgTestTally* tally, Arena* output, Ar
         Tier1CfgInput input;
         const bool built = tier1_cfg_test_build(loop, output, &input);
         tier1_cfg_test_expect(tally, built, "the undefined operands' input");
-        for (uint32_t path = 0; built && path < 2; path += 1)
+        if (built)
         {
             const uint64_t mark = output->length;
             Tier1CfgAllocation result = { 0 };
-            const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+            const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
             Tier1CfgCheck check;
             tier1_cfg_test_expect(tally, error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check), "a phi of undefined operands allocates and checks");
             // The entry's edge is the first: block 0's only successor.
@@ -1783,12 +1867,12 @@ static void tier1_cfg_test_local_phis(Tier1CfgTestTally* tally, Arena* output, A
             {
                 tier1_cfg_test_ordinals(tally, &input, scratch);
             }
-            for (uint32_t path = 0; built && path < 2; path += 1)
+            if (built)
             {
                 const uint64_t mark = output->length;
                 const uint64_t scratch_mark = scratch->length;
                 Tier1CfgAllocation result = { 0 };
-                const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+                const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
                 tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "edge-local phi fixture allocates");
                 if (error == TIER1_CFG_OK)
                 {
@@ -1921,11 +2005,11 @@ static void tier1_cfg_test_dispatch_entry(Tier1CfgTestTally* tally, Arena* outpu
     Tier1CfgInput input = { 0 };
     const bool built = tier1_cfg_test_build(&builder, output, &input);
     tier1_cfg_test_expect(tally, built, "dispatch-entry fixture builds");
-    for (uint32_t path = 0; built && path < 2; path += 1)
+    if (built)
     {
         const uint64_t mark = output->length;
         Tier1CfgAllocation result = { 0 };
-        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
         tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "dispatch-entry fixture allocates");
         if (error == TIER1_CFG_OK)
         {
@@ -2048,33 +2132,30 @@ static void tier1_cfg_test_phi_storage(Tier1CfgTestTally* tally, Arena* output, 
                     },
                 };
                 tier1_cfg_test_ordinals(tally, &input, scratch);
-                for (uint32_t path = 0; path < 2; path += 1)
+                const uint64_t mark = output->length;
+                Arena bounded = *scratch;
+                bounded.capacity = bounded.length + allowance < bounded.capacity ? bounded.length + allowance : bounded.capacity;
+                Tier1CfgPrepared prepared = { 0 };
+                const Tier1CfgError error = tier1_cfg_prepare(&input, output, &bounded, &prepared);
+                tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "wide local-phi preparation fits bounded scratch");
+                if (error == TIER1_CFG_OK)
                 {
-                    const uint64_t mark = output->length;
-                    Arena bounded = *scratch;
-                    bounded.capacity = bounded.length + allowance < bounded.capacity ? bounded.length + allowance : bounded.capacity;
-                    Tier1CfgPrepared prepared = { 0 };
-                    const Tier1CfgError error = tier1_cfg_prepare(&input, output, &bounded, path == 0, &prepared);
-                    tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "wide local-phi preparation fits bounded scratch");
-                    if (error == TIER1_CFG_OK)
+                    const Tier1CfgAllocation* result = &prepared.candidate;
+                    tier1_cfg_test_expect(tally, result->cross_block_values == global, "wide phi operands do not widen global liveness");
+                    tier1_cfg_test_expect(tally, result->edge_local_values == width, "wide phi operands count once per home");
+                    tier1_cfg_test_expect(tally, result->liveness_bytes <= (uint64_t)blocks * 256 && (global != 0 || result->liveness_bytes == 0), "wide phi matrix storage grows only with blocks");
+                    bool tails = true;
+                    for (uint32_t v = 1; tails && v <= width; v += 1)
                     {
-                        const Tier1CfgAllocation* result = &prepared.candidate;
-                        tier1_cfg_test_expect(tally, result->cross_block_values == global, "wide phi operands do not widen global liveness");
-                        tier1_cfg_test_expect(tally, result->edge_local_values == width, "wide phi operands count once per home");
-                        tier1_cfg_test_expect(tally, result->liveness_bytes <= (uint64_t)blocks * 256 && (global != 0 || result->liveness_bytes == 0), "wide phi matrix storage grows only with blocks");
-                        bool tails = true;
-                        for (uint32_t v = 1; tails && v <= width; v += 1)
-                        {
-                            const uint32_t first = result->value_interval_offsets[v];
-                            const uint32_t end = result->value_interval_offsets[v + 1];
-                            tails = end == first + 1 && result->intervals.starts[first] == definitions[v] && result->intervals.ends[first] == starts[v + 1];
-                        }
-                        tier1_cfg_test_expect(tally, tails, "every wide phi operand has exactly its home-tail interval");
-                        tier1_cfg_release(&prepared, &bounded);
+                        const uint32_t first = result->value_interval_offsets[v];
+                        const uint32_t end = result->value_interval_offsets[v + 1];
+                        tails = end == first + 1 && result->intervals.starts[first] == definitions[v] && result->intervals.ends[first] == starts[v + 1];
                     }
-                    tier1_cfg_test_expect(tally, bounded.length == scratch->length, "bounded preparation restores scratch");
-                    arena_pop_to(output, mark);
+                    tier1_cfg_test_expect(tally, tails, "every wide phi operand has exactly its home-tail interval");
+                    tier1_cfg_release(&prepared, &bounded);
                 }
+                tier1_cfg_test_expect(tally, bounded.length == scratch->length, "bounded preparation restores scratch");
+                arena_pop_to(output, mark);
                 if (width == widths[0])
                 {
                     tier1_cfg_test_case(tally, &input, output, scratch, "wide phi operand semantics", true, 0, 0, true);
@@ -2110,6 +2191,135 @@ static void tier1_cfg_test_anchors(Tier1CfgTestTally* tally, const Tier1CfgInput
         same = anchors[b] == anchors_expected[b] && predecessor == chosen_expected[b];
     }
     tier1_cfg_test_expect(tally, same, name);
+    arena_pop_to(scratch, scratch_mark);
+}
+
+// #2611: tier1_cfg_anchors reads a given dominator tree as it reads its own analysis. The input's CFG's tree, given with no
+// shift, and that tree given to the CFG with an entry added before it (shift 1, as the CFG consumer's machine CFG is the
+// IR's with an added entry), each give the anchors and chosen predecessors the analysis of that CFG gives.
+static void tier1_cfg_test_given_tree(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const uint32_t blocks = input->block_count;
+    const uint32_t edges = input->edge_count;
+    const DominatorCfg graph = {
+        .block_count = blocks,
+        .edge_count = edges,
+        .entry = 0,
+        .successor_offsets = input->successor_offsets,
+        .successors = input->successors,
+        .predecessor_offsets = input->predecessor_offsets,
+        .predecessors = input->predecessors,
+    };
+    DominatorOptions options = dominators_options();
+    options.outputs = 0;
+    Dominators tree = { 0 };
+    bool same = dominators_analyze(output, scratch, &graph, options, &tree) == DOMINATOR_OK;
+    // The CFG with an added entry, block 0, whose one successor is the input's entry.
+    uint32_t* successor_offsets = arena_push_array(output, (uint64_t)blocks + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* successors = arena_push_array(output, (uint64_t)edges + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* predecessor_offsets = arena_push_array(output, (uint64_t)blocks + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* predecessors = arena_push_array(output, (uint64_t)edges + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* anchors = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* chosen = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* given_anchors = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* given_chosen = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    same = same && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && anchors != 0 && chosen != 0 && given_anchors != 0 && given_chosen != 0;
+    if (same)
+    {
+        successor_offsets[0] = 0;
+        successors[0] = 1;
+        predecessor_offsets[0] = 0;
+        predecessor_offsets[1] = 0;
+        predecessors[0] = 0;
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            successor_offsets[b + 1] = input->successor_offsets[b] + 1;
+            predecessor_offsets[b + 2] = input->predecessor_offsets[b + 1] + 1;
+        }
+        successor_offsets[blocks + 1] = edges + 1;
+        for (uint32_t e = 0; e < edges; e += 1)
+        {
+            successors[e + 1] = input->successors[e] + 1;
+            predecessors[e + 1] = input->predecessors[e] + 1;
+        }
+    }
+    for (uint32_t shift = 0; same && shift < 2; shift += 1)
+    {
+        Tier1CfgInput plain = *input;
+        plain.dominators = 0;
+        plain.dominator_shift = 0;
+        if (shift != 0)
+        {
+            plain.block_count = blocks + 1;
+            plain.edge_count = edges + 1;
+            plain.successor_offsets = successor_offsets;
+            plain.successors = successors;
+            plain.predecessor_offsets = predecessor_offsets;
+            plain.predecessors = predecessors;
+        }
+        Tier1CfgInput given = plain;
+        given.dominators = &tree;
+        given.dominator_shift = shift;
+        same = tier1_cfg_anchors(&plain, output, scratch, anchors, chosen) && tier1_cfg_anchors(&given, output, scratch, given_anchors, given_chosen);
+        for (uint32_t b = 0; same && b < plain.block_count; b += 1)
+        {
+            same = anchors[b] == given_anchors[b] && chosen[b] == given_chosen[b];
+            // A chosen predecessor laid out before its block that the block dominates: a latch, which the tree's dominance
+            // test chose.
+            const uint32_t j = chosen[b];
+            const uint32_t p = j != BUSTER_TIER1_CFG_NONE ? plain.predecessors[plain.predecessor_offsets[b] + j] : BUSTER_TIER1_CFG_NONE;
+            tally->given_latches += shift == 0 && p != BUSTER_TIER1_CFG_NONE && p < b && dominators_dominates(&tree, b, p) ? 1 : 0;
+        }
+    }
+    tally->given_trees += same ? 1 : 0;
+    tier1_cfg_test_expect(tally, same, "anchors and chosen predecessors read from a given dominator tree, with and without an added entry, are the analysis's (#2611)");
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+}
+
+// #2611: the given tree is the one tier1_cfg_anchors reads. The join's CFG (0 -> 1, 0 -> 2, 1 -> 2) given the tree of a
+// chain 0 -> 1 -> 2, in which 1 dominates 2, anchors 2 at 1, its nearest predecessor; given the tree of a longer chain
+// 0 -> 1 -> 2 -> 3, of another size, the anchors are the analysis's, 2 anchored at its dominator 0.
+static void tier1_cfg_test_tree_read(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    // The chain's views, and the longer chain's.
+    static const uint32_t chain_successor_offsets[2][5] = { { 0, 1, 2, 2, 0 }, { 0, 1, 2, 3, 3 } };
+    static const uint32_t chain_successors[] = { 1, 2, 3 };
+    static const uint32_t chain_predecessor_offsets[2][5] = { { 0, 0, 1, 2, 0 }, { 0, 0, 1, 2, 3 } };
+    static const uint32_t chain_predecessors[] = { 0, 1, 2 };
+    DominatorOptions options = dominators_options();
+    options.outputs = 0;
+    Dominators trees[2] = { { 0 } };
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        // The chain, and the longer one (another size).
+        const DominatorCfg chain = {
+            .block_count = 3 + t,
+            .edge_count = 2 + t,
+            .entry = 0,
+            .successor_offsets = chain_successor_offsets[t],
+            .successors = chain_successors,
+            .predecessor_offsets = chain_predecessor_offsets[t],
+            .predecessors = chain_predecessors,
+        };
+        const bool analyzed = dominators_analyze(output, scratch, &chain, options, &trees[t]) == DOMINATOR_OK;
+        tier1_cfg_test_expect(tally, analyzed, "the chain's dominator tree");
+    }
+    uint32_t anchors[3] = { 0 };
+    uint32_t chosen[3] = { 0 };
+    Tier1CfgInput given = *input;
+    given.dominators = &trees[0];
+    given.dominator_shift = 0;
+    const bool read = given.block_count == 3 && tier1_cfg_anchors(&given, output, scratch, anchors, chosen) && anchors[2] == 1 && anchors[1] == 0;
+    tier1_cfg_test_expect(tally, read, "the anchors read the given tree (#2611)");
+    given.dominators = &trees[1];
+    const bool other = given.block_count == 3 && tier1_cfg_anchors(&given, output, scratch, anchors, chosen) && anchors[2] == 0 && anchors[1] == 0;
+    tier1_cfg_test_expect(tally, other, "a given tree of another size leaves the anchors to the analysis (#2611)");
+    arena_pop_to(output, output_mark);
     arena_pop_to(scratch, scratch_mark);
 }
 
@@ -2220,12 +2430,17 @@ static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Ar
         if (built)
         {
             tier1_cfg_test_anchors(tally, &input, output, scratch, anchors_expected[f], chosen_expected[f], names[f]);
+            tier1_cfg_test_given_tree(tally, &input, output, scratch);
         }
-        for (uint32_t path = 0; built && f < 2 && path < 2; path += 1)
+        if (built && f == 0)
+        {
+            tier1_cfg_test_tree_read(tally, &input, output, scratch);
+        }
+        if (built && f < 2)
         {
             const uint64_t mark = output->length;
             Tier1CfgAllocation result = { 0 };
-            const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+            const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
             Tier1CfgCheck check;
             const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
             tier1_cfg_test_expect(tally, allocated, names[f]);
@@ -2305,11 +2520,11 @@ static void tier1_cfg_test_body_hints(Tier1CfgTestTally* tally, Arena* output, A
     Tier1CfgInput input;
     const bool built = tier1_cfg_test_build(&builder, output, &input);
     tier1_cfg_test_expect(tally, built, "a loop's body before its header: built");
-    for (uint32_t path = 0; built && path < 2; path += 1)
+    if (built)
     {
         const uint64_t mark = output->length;
         Tier1CfgAllocation result = { 0 };
-        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&input, output, scratch, &result) : tier1_cfg_allocate_scalar(&input, output, scratch, &result);
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
         Tier1CfgCheck check;
         const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
         tier1_cfg_test_expect(tally, allocated, "a loop's body before its header: allocated");
@@ -2321,6 +2536,230 @@ static void tier1_cfg_test_body_hints(Tier1CfgTestTally* tally, Arena* output, A
     if (built)
     {
         tier1_cfg_test_case(tally, &input, output, scratch, "a loop's body before its header", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
+// #2834's fixture, tests/driver/tier1_patterns.c's patterns_gsub in small: 0 -> 5, 1 -> 3, 2 -> 3, 7 -> 3, 3 -> 5,
+// 3 -> 4, 5 -> 6, 6 -> 1, 6 -> 8, 8 -> 2, 8 -> 7. The header 5 takes n = phi(s, j) and l = phi(t, k) from the entry 0,
+// which defines s and t, and from the latch 3, where j = phi(n, n, m) and k = phi(l, l, e) join the paths 1 for a
+// character, 2 for a failed match and 7 for a match. 6 defines e, which 8 tests against l; 7 defines m = n + 1 and reads
+// e; 1 defines a character; 8 defines y, which 2 reads. n's and l's ranges in 1 and in 2 are laid out before their
+// header, without an anchor or a sibling: the chain of their phis' hints at 5 leads to j's and k's at 3, laid out after
+// them, whose chosen predecessor is 2, so that it names no other value's range before them (tier1_cfg_body_hints' first
+// loop). Their first ranges, in 1, took the lowest free registers, crossed against s's and t's, and the edge into the
+// loop swapped the two through the scratch register. Each now takes its operand's register at the entry's exit, and
+// neither moves on any edge. Their ranges in 2 keep their values' own places from 1 rather than name the entry's
+// (sqlite3VdbeExec's handlers).
+static void tier1_cfg_test_latch_chain(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 9;
+    const uint32_t instructions[] = { 2, 1, 1, 1, 1, 1, 1, 1, 2 };
+    for (uint32_t b = 0; b < builder.block_count; b += 1)
+    {
+        builder.instructions[b] = instructions[b];
+    }
+    builder.registers[0] = 0x000f;
+    builder.scratch[0] = 11;
+    const uint32_t edges[][2] = {
+        { 0, 5 },
+        { 1, 3 },
+        { 2, 3 },
+        { 7, 3 },
+        { 3, 5 },
+        { 3, 4 },
+        { 5, 6 },
+        { 6, 1 },
+        { 6, 8 },
+        { 8, 2 },
+        { 8, 7 },
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(edges); k += 1)
+    {
+        tier1_cfg_test_edge(&builder, edges[k][0], edges[k][1]);
+    }
+    const uint32_t s = tier1_cfg_test_value(&builder, 0, 0, 0, 0x000f);
+    const uint32_t t = tier1_cfg_test_value(&builder, 0, 1, 0, 0x000f);
+    const uint32_t x = tier1_cfg_test_value(&builder, 1, 0, 0, 0x000f);
+    const uint32_t e = tier1_cfg_test_value(&builder, 6, 0, 0, 0x000f);
+    const uint32_t m = tier1_cfg_test_value(&builder, 7, 0, 0, 0x000f);
+    tier1_cfg_test_definition_use(&builder, s);
+    tier1_cfg_test_definition_use(&builder, t);
+    tier1_cfg_test_definition_use(&builder, x);
+    tier1_cfg_test_definition_use(&builder, e);
+    tier1_cfg_test_definition_use(&builder, m);
+    // Block 3's predecessors are 1, 2 and 7, block 5's 0 and 3, in the edges' order; n and l follow j and k.
+    const uint32_t n = builder.value_count + 2;
+    const uint32_t l = builder.value_count + 3;
+    const uint32_t join_n[] = {
+        n,
+        n,
+        m,
+    };
+    const uint32_t j = tier1_cfg_test_phi(&builder, 3, 0, join_n);
+    const uint32_t join_l[] = {
+        l,
+        l,
+        e,
+    };
+    const uint32_t k = tier1_cfg_test_phi(&builder, 3, 0, join_l);
+    const uint32_t header_n[] = {
+        s,
+        j,
+    };
+    const uint32_t header_l[] = {
+        t,
+        k,
+    };
+    const bool numbered = tier1_cfg_test_phi(&builder, 5, 0, header_n) == n && tier1_cfg_test_phi(&builder, 5, 0, header_l) == l;
+    tier1_cfg_test_expect(tally, numbered, "a latch between a loop's body and its header: phis numbered");
+    // y after the phis: its range in 2 starts with theirs and, unhinted, takes what they leave.
+    const uint32_t y = tier1_cfg_test_value(&builder, 8, 1, 0, 0x000f);
+    tier1_cfg_test_definition_use(&builder, y);
+    tier1_cfg_test_use(&builder, n, 5, 0, true);
+    tier1_cfg_test_use(&builder, l, 8, 0, true);
+    tier1_cfg_test_use(&builder, e, 8, 0, true);
+    tier1_cfg_test_use(&builder, e, 7, 0, true);
+    tier1_cfg_test_use(&builder, n, 7, 0, true);
+    tier1_cfg_test_use(&builder, y, 2, 0, true);
+    tier1_cfg_test_use(&builder, j, 4, 0, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input;
+    const bool built = numbered && tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "a latch between a loop's body and its header: built");
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "a latch between a loop's body and its header: allocated");
+        // The edges n and l take into the loop and around its paths that leave them as they are; 7 -> 3 moves m and
+        // 8 -> 2 y.
+        const uint32_t quiet_edges[][2] = {
+            { 0, 5 },
+            { 6, 1 },
+            { 1, 3 },
+            { 2, 3 },
+            { 3, 5 },
+        };
+        uint32_t moved = 0;
+        for (uint32_t edge = 0; allocated && edge < BUSTER_ARRAY_LENGTH(quiet_edges); edge += 1)
+        {
+            moved += tier1_cfg_test_edge_moves(&input, &result, quiet_edges[edge][0], quiet_edges[edge][1]);
+        }
+        tier1_cfg_test_expect(tally, allocated && moved == 0, "a loop's body before its latch takes its entry's registers: n and l move on no edge");
+        // n's and l's ranges in 2, their second in layout, name no other value's range.
+        uint32_t later_ranges = 0;
+        bool kept = allocated;
+        for (uint32_t i = 0; allocated && i < result.intervals.count; i += 1)
+        {
+            const uint32_t value = result.intervals.values[i];
+            const uint32_t named = result.intervals.hint_intervals[i];
+            const bool later = (value == n || value == l) && result.intervals.starts[i] >= input.block_starts[2] && result.intervals.starts[i] < input.block_starts[3];
+            kept = kept && (!later || named == UINT32_MAX || result.intervals.values[named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT] == value);
+            later_ranges += later;
+        }
+        tier1_cfg_test_expect(tally, kept && later_ranges == 2, "a loop's body's later ranges keep their values' own places, not the entry's");
+        arena_pop_to(output, mark);
+    }
+    if (built)
+    {
+        tier1_cfg_test_case(tally, &input, output, scratch, "a latch between a loop's body and its header", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
+// The registers a call reads its arguments in (#2646, Tier1CfgInput.use_registers). Block 0 defines p (a recipe), w and,
+// with `held`, q, then a, b and v; a call at its instruction 3 reads a in r4, b in r0, which p holds until its use at
+// instruction 5, and w in r4, though w lives on into block 1; block 1, whose phi of p keeps it from continuing block 0's
+// ranges, reads v in r3 at a call. a takes r4, where the lowest free register is r2. b doesn't take r0 from p, which the
+// scan would evict for a value hint (#2618): a register hint evicts nothing. w, which lives past the call, takes no hint
+// from it: the lowest free register at its definition, r1. v enters block 1 in the register it had in block 0, which its
+// value hint names, rather than its register hint's r3. With `held`, q holds r3 through block 0 (its only allowed
+// register), so that v's block 0 register isn't r3 and the classes' masks aren't full, which the scan allocates; without
+// it, the coloring path does.
+static void tier1_cfg_test_use_registers(Tier1CfgTestTally* tally, Arena* output, Arena* scratch, bool held)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 2;
+    builder.instructions[0] = 6;
+    builder.instructions[1] = 3;
+    builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x001f;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    builder.use_registers = true;
+    tier1_cfg_test_edge(&builder, 0, 1);
+    const uint32_t all = builder.registers[BUSTER_TIER1_ALLOCATE_GPR];
+    const uint32_t p = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, all);
+    builder.remat[p] = 1;
+    const uint32_t q = held ? tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1u << 3) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t w = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t a = tier1_cfg_test_value(&builder, 0, 1, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t b = tier1_cfg_test_value(&builder, 0, 2, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t v = tier1_cfg_test_value(&builder, 0, 4, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t phi_operands[] = {
+        p,
+    };
+    const uint32_t phi = tier1_cfg_test_phi(&builder, 1, BUSTER_TIER1_ALLOCATE_GPR, phi_operands);
+    tier1_cfg_test_definition_use(&builder, p);
+    if (held)
+    {
+        tier1_cfg_test_definition_use(&builder, q);
+        tier1_cfg_test_use(&builder, q, 0, 5, true);
+    }
+    tier1_cfg_test_definition_use(&builder, w);
+    tier1_cfg_test_definition_use(&builder, a);
+    tier1_cfg_test_definition_use(&builder, b);
+    tier1_cfg_test_definition_use(&builder, v);
+    tier1_cfg_test_use(&builder, a, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 4;
+    tier1_cfg_test_use(&builder, b, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 0;
+    tier1_cfg_test_use(&builder, w, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 4;
+    tier1_cfg_test_use(&builder, p, 0, 5, true);
+    tier1_cfg_test_use(&builder, phi, 1, 0, true);
+    tier1_cfg_test_use(&builder, v, 1, 1, true);
+    builder.use_register[builder.use_count - 1] = 3;
+    tier1_cfg_test_use(&builder, w, 1, 2, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input = { 0 };
+    const bool built = tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "use registers: built");
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "use registers: allocated");
+        const uint32_t call = input.block_starts[0] + 2 * 3;
+        uint32_t locations[6] = { 0 };
+        uint8_t kinds[6] = { 0 };
+        const bool found = allocated && tier1_cfg_location(&result, a, call, &locations[0], &kinds[0]) && tier1_cfg_location(&result, b, call, &locations[1], &kinds[1]) &&
+                           tier1_cfg_location(&result, p, input.block_starts[0] + 2 * 5, &locations[2], &kinds[2]) &&
+                           tier1_cfg_location(&result, v, input.block_starts[1] - 1, &locations[3], &kinds[3]) &&
+                           tier1_cfg_location(&result, v, input.block_starts[1] + 2 * 1, &locations[4], &kinds[4]) && tier1_cfg_location(&result, w, call, &locations[5], &kinds[5]);
+        bool registers = found;
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            registers &= kinds[k] == BUSTER_TIER1_ALLOCATE_REGISTER;
+        }
+        tier1_cfg_test_expect(tally, registers && locations[0] == 4, "use registers: a call's argument takes the register the call reads it in");
+        tier1_cfg_test_expect(tally, registers && locations[1] != 0 && locations[2] == 0, "use registers: a register hint evicts nothing");
+        tier1_cfg_test_expect(tally, registers && locations[3] == locations[4] && (!held || locations[4] != 3), "use registers: a value hint outranks a register hint");
+        tier1_cfg_test_expect(tally, registers && locations[5] == 1, "use registers: a value that lives past the call takes no hint from it");
+        tier1_cfg_test_expect(tally, allocated && tier1_cfg_test_edge_moves(&input, &result, 0, 1) == 0, "use registers: the edge moves nothing");
+        arena_pop_to(output, mark);
+    }
+    if (built)
+    {
+        tier1_cfg_test_case(tally, &input, output, scratch, held ? "use registers, held" : "use registers", true, 0, 0, true);
     }
     arena_pop_to(output, saved);
 }
@@ -2715,11 +3154,11 @@ static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Are
     Tier1CfgInput k0_input;
     const bool k0_built = tier1_cfg_test_build(k0_swap, output, &k0_input);
     tier1_cfg_test_expect(tally, k0_built, "the k0 fixture builds");
-    for (uint32_t path = 0; k0_built && path < 2; path += 1)
+    if (k0_built)
     {
         const uint64_t before = output->length;
         Tier1CfgAllocation result = { 0 };
-        const Tier1CfgError error = path == 0 ? tier1_cfg_allocate(&k0_input, output, scratch, &result) : tier1_cfg_allocate_scalar(&k0_input, output, scratch, &result);
+        const Tier1CfgError error = tier1_cfg_allocate(&k0_input, output, scratch, &result);
         tier1_cfg_test_expect(tally, error == TIER1_CFG_INVALID && output->length == before, "a mask class with k0 among its registers is refused");
     }
     arena_pop_to(output, k0_saved);
@@ -2782,8 +3221,11 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_undefined(&tally, &output, &scratch);
             tier1_cfg_test_dominance(&tally, &output, &scratch);
             tier1_cfg_test_body_hints(&tally, &output, &scratch);
+            tier1_cfg_test_latch_chain(&tally, &output, &scratch);
             tier1_cfg_test_local_phis(&tally, &output, &scratch);
             tier1_cfg_test_dispatch_entry(&tally, &output, &scratch);
+            tier1_cfg_test_use_registers(&tally, &output, &scratch, false);
+            tier1_cfg_test_use_registers(&tally, &output, &scratch, true);
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
@@ -2805,6 +3247,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
                     tally.oracle = sample % oracle_every == 0;
                     tally.oracle_mutants = sample % (oracle_every * 4) == 0;
                     tier1_cfg_test_case(&tally, &input, &output, &scratch, "generated case", sample % 8 == 0, 0, 0, false);
+                    tier1_cfg_test_given_tree(&tally, &input, &output, &scratch);
                 }
                 arena_pop_to(&output, output_saved);
                 arena_pop_to(&work, work_saved);
@@ -2834,12 +3277,16 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // #2538: the one-call order reaches a taken preference, a refused one, a constraint that frees the definitions and a
         // case with fixed ranges.
         tier1_cfg_test_expect(&tally, count < 500 || (tally.two_taken != 0 && tally.two_refused != 0 && tally.two_freed != 0 && tally.two_fixed != 0), "two problems reach every outcome");
+        // The column's set checks probed past a step of 16 values and into the next's tail.
+        tier1_cfg_test_expect(&tally, count < 500 || tally.column_widest > 16, "the column's set checks reach a second step of values");
         // A malformed shape must fail both, before either reads through it (#1142's review).
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
         printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
+        printf("test-tier1-cfg: given dominator trees (#2611): %" PRIu64 " CFGs' anchors the same with and without an added entry, %" PRIu64 " blocks anchored at a latch\n", tally.given_trees, tally.given_latches);
+        tier1_cfg_test_expect(&tally, tally.given_latches != 0, "some given tree's block takes a latch laid out before it (#2611)");
         printf("test-tier1-cfg: fixed sequences (#2767): %" PRIu64 " ranges avoid their registers, %" PRIu64 " readers' ranges across their own\n", tally.avoiding_ranges, tally.reading_ranges);
-        printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed);
+        printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column; %" PRIu64 " values' column sets probed, at most %u in one problem\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed, tally.column_values, tally.column_widest);
         result = tally.failures == 0 ? 0 : 1;
         arena_release(&work);
         arena_release(&scratch);

@@ -12,9 +12,8 @@ inherit its portability layers, build system, or performance-acceptance machiner
 - Production compiler code is **C**. Use Clang as the host compiler;
   `__attribute__`, `ext_vector_type`, AVX-512 intrinsics, and other deliberate
   Clang/x86-64 extensions are allowed. Do not add compatibility wrappers for
-  GCC, MSVC, or non-Linux host operating systems. Older x86-64 host CPUs use
-  scalar implementations; keep that selection outside hot kernels and preserve
-  the native AVX-512 implementations for capable hosts.
+  GCC, MSVC, or non-Linux host operating systems. The host is AVX-512 with the
+  extensions `host_isa.h` names; older x86-64 CPUs aren't hosts (#2924).
 - Use four spaces, no tabs, `snake_case` functions and local variables,
   `PascalCase` named structs/types, and `BUSTER_`-prefixed uppercase macros.
 - Put opening braces on their own lines. Use braces for conditionals and loops.
@@ -164,11 +163,24 @@ fully audited merely because this rule was added.
   Huijben, and Rietveld, "Compilation on the GPU? A feasibility study", 2022);
   for expression trees, see Bar-On and Vishkin, "Optimal parallel generation
   of a computation tree form" (TOPLAS, 1985).
-- Give each vector path an exact scalar path for the rare cases, which is also
-  its twin and test oracle: both must produce identical output or, where the
-  two algorithms legitimately differ, pass a semantic check. Compare the two
-  on the 9700X: a part that stays scalar says why with those measurements, as
-  "SIMD: what pays" in `docs/object-writer-and-linker.md` does.
+- Give each function one implementation, the vector one (the owner's decision
+  of 2026-11-17, [#2924](https://github.com/buster14a/buster/issues/2924)).
+  Handle the rare cases, the small inputs and the tails inside the vector path:
+  masked loads and stores, wider limits, rare items buffered and processed
+  after the loop. Add no scalar twin, no scalar oracle and no `--scalar` mode.
+  Test the vector path against an external oracle where one exists (clang, GNU
+  as and objdump, the system linkers, c-testsuite, sqlite), and elsewhere
+  against frozen expected outputs or a semantic check (a decode round-trip, IR
+  validation, `interpret-ir` or `interpret-c`). Make sure each test fails
+  when the vector path is broken by trying it on a mutated copy.
+- The scalar twins and fallbacks that exist today go module by module, through
+  #2924's gate. A scalar path is deleted once its vector path is at least as
+  fast on the 9700X in Release. Where the vector path loses, the pair stays,
+  with an issue to make the vector path faster. Until a module's turn comes,
+  its twin tests keep running.
+- A part with no vector implementation is not a twin. It says why it stays
+  scalar with measurements on the 9700X, as "SIMD: what pays" in
+  `docs/object-writer-and-linker.md` does.
 - Design with Zen 5's measured costs from uops.info. On `zmm`, `vpgatherdd` is
   64 uops, one every 12.6 cycles or so, and `vpscatterdd` is 88 uops, one every
   17, so use scalar loads and stores or in-register permutes instead.
@@ -185,9 +197,9 @@ fully audited merely because this rule was added.
   can lose if it adds spills. The inferred mechanism and measured power levels
   are not an AMD specification or a universal threshold.
 - Measure vector stages both back to back and immediately after 100–300 ms
-  of warm lighter work, using a scalar twin or a representative preceding
-  phase. Report nanoseconds as well as cycles, compare across several
-  processes, and distinguish the initial transition from sustained execution.
+  of warm lighter work, using a representative preceding phase. Report
+  nanoseconds as well as cycles, compare across several processes, and
+  distinguish the initial transition from sustained execution.
   The encoder and dataflow benchmarks provide `--only` for isolated runs
   and `--after-scalar MS` for conditioning before each timed vector sample;
   their default interleaved runs do not establish either state alone.
@@ -264,7 +276,7 @@ width, maximum batch size, or a mandatory layout independent of its consumers.
   frontiers are useful only where reordering is legal. Preserve macro state,
   typedef visibility, dependencies, side effects and required diagnostic order.
   Keep stable identities/source locations or explicit remapping when regrouping,
-  and retain exact scalar handling for exceptional cases. Varying legal batch
+  and handle exceptional cases exactly, in the vector path. Varying legal batch
   partitions or scheduling must not change the required results.
 - **Remove unnecessary handoffs.** Prefer fusion, bounded streaming or direct
   emission when measurements show that they eliminate passes, materialization
@@ -275,14 +287,15 @@ width, maximum batch size, or a mandatory layout independent of its consumers.
 
 PRs that introduce or change a stage interface must document its actual
 producer/consumer entry points and contract in the relevant stage document or
-source, and test it against the scalar twin or existing semantic oracle. Cover
-empty/tiny inputs, partial and exceptional batches, vector/chunk boundaries,
-inactive lanes, guarded tails, capacity limits and required ordering; compare
-legal batch partitions. Measure the producer, handoff and consumer together on
-representative small and large workloads, reporting time, useful-item throughput
-and memory costs. Follow the preceding Zen 5 measurement rules for sustained
-vector work and work following lighter phases. Inspect generated assembly for
-significant SIMD changes and preserve generated-program quality.
+source, and test it against an external oracle, frozen outputs or a semantic
+check. Cover empty/tiny inputs, partial and exceptional batches, vector/chunk
+boundaries, inactive lanes, guarded tails, capacity limits and required
+ordering; compare legal batch partitions. Measure the producer, handoff and
+consumer together on representative small and large workloads, reporting time,
+useful-item throughput and memory costs. Follow the preceding Zen 5 measurement
+rules for sustained vector work and work following lighter phases. Inspect
+generated assembly for significant SIMD changes and preserve generated-program
+quality.
 
 When a consumer or full compilation path does not exist yet, record that gap
 and its integration follow-up. Synthetic or kernel-only results do not prove

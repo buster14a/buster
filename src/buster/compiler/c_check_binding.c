@@ -73,7 +73,7 @@ static bool check_input_type_const(const TypeTable* types, TypeId type)
 // Whether a declaration is written in the main file, where Clang gives file-scope unused variables' warnings.
 static bool check_input_in_main_file(const CheckInputReader* reader, uint32_t token)
 {
-    const uint32_t source = token < reader->parser->tokens.count ? reader->parser->tokens.sources[token] : BUSTER_CHECK_NONE;
+    const uint32_t source = token < reader->parser->tokens.count ? parse_source_index(&reader->parser->tokens, token) : BUSTER_CHECK_NONE;
     const uint32_t location = source < reader->pp->output.count && reader->pp->output.locations != NULL ? reader->pp->output.locations[source] : 0;
     const bool result = source < reader->pp->output.count && pp_location_in_main_file(reader->pp, location);
     return result;
@@ -163,17 +163,15 @@ static bool check_input_unused_suppressed(const CheckInput* input, uint32_t toke
     return result;
 }
 
-// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn. The vector path
-// visits the bodies' openings alone (check_sparse_next), a few thousand of sqlite3.c's 716,158 tokens (#1489); the
-// scalar path, its twin, every token.
+// The definition parameters, whose uses alone decide -Wunused-parameter: a prototype's names never warn. It visits the
+// bodies' openings alone (check_sparse_next), a few thousand of sqlite3.c's 716,158 tokens (#1489).
 static bool check_input_parameter_marks(const CheckInput* input, const Parser* parser, uint8_t* marks)
 {
     bool valid = parser != NULL && marks != NULL && check_sparse_present(input->body_declarations) &&
                  check_sparse_present(input->parameters) && check_sparse_present(input->parameter_next);
     const uint32_t count = valid ? parser->tokens.count : 0;
-    const bool vector = valid && BUSTER_VECTOR_PATH(!parser->options.scalar);
-    for (uint32_t opening = check_sparse_next(input->body_declarations, 0, count, vector); valid && opening < count;
-         opening = check_sparse_next(input->body_declarations, opening + 1, count, vector))
+    for (uint32_t opening = check_sparse_next(input->body_declarations, 0, count); valid && opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count))
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         valid = declaration == BUSTER_CHECK_NONE || declaration < parser->tokens.count;
@@ -280,6 +278,9 @@ static uint32_t check_input_use_events(const CBindings* events, uint32_t* list, 
     *declarations = declares;
     return found;
 }
+
+// Defined with the command-line mapping and diagnostic-pragma history in c_check_diagnostic.c.
+static bool check_input_unused_may_report(const Preprocessor* pp, const CheckInput* input);
 
 // -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
 // no use names. Its lexical scope decides completion; a for initializer's scope includes the entire loop statement.
@@ -668,7 +669,8 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     {
         quiet_only = output->reports[r].message == CHECK_INPUT_INVALID_USE;
     }
-    if (valid && unused_columns && quiet_only && events->count != 0)
+    if (valid && unused_columns && quiet_only && events->count != 0 &&
+        (reader->pp == NULL || !reader->pp->options.published_unused_only || check_input_unused_may_report(reader->pp, output)))
     {
         uint8_t* used = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
         uint8_t* used_tokens = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);

@@ -12,7 +12,7 @@
 
 // Empty lists and a final unary minus are ineligible; one trailing comma is allowed. Every predecessor is carried
 // across blocks, including a minus at lane 63. Only the outer braces have been removed from [begin,end).
-static uint32_t check_literal_table_shape(const uint8_t* kinds, uint32_t begin, uint32_t end, bool scalar)
+static uint32_t check_literal_table_shape(const uint8_t* kinds, uint32_t begin, uint32_t end)
 {
     uint32_t count = 0;
     uint32_t previous = PARSE_KIND_COMMA;
@@ -20,30 +20,19 @@ static uint32_t check_literal_table_shape(const uint8_t* kinds, uint32_t begin, 
     for (uint32_t first = begin; valid && first < end;)
     {
         const uint32_t left = end - first;
-        const uint32_t take = scalar ? 1 : left < 64 ? left : 64;
-        if (scalar)
-        {
-            const uint32_t kind = kinds[first];
-            valid = kind == PARSE_KIND_NUMBER ? previous == PARSE_KIND_COMMA || previous == PARSE_KIND_MINUS :
-                    kind == PARSE_KIND_MINUS ? previous == PARSE_KIND_COMMA : kind == PARSE_KIND_COMMA && previous == PARSE_KIND_NUMBER;
-            count += kind == PARSE_KIND_NUMBER;
-            previous = kind;
-        }
-        else
-        {
-            const uint64_t lanes = take == 64 ? UINT64_MAX : (UINT64_C(1) << take) - 1;
-            const __m512i block = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
-            const uint64_t numbers = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_NUMBER));
-            const uint64_t commas = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_COMMA));
-            const uint64_t minus = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_MINUS));
-            const uint64_t number_before = numbers << 1 | (previous == PARSE_KIND_NUMBER);
-            const uint64_t comma_before = commas << 1 | (previous == PARSE_KIND_COMMA);
-            const uint64_t minus_before = minus << 1 | (previous == PARSE_KIND_MINUS);
-            valid = (numbers | commas | minus) == lanes && (numbers & ~(comma_before | minus_before)) == 0 &&
-                    (minus & ~comma_before) == 0 && (commas & ~number_before) == 0;
-            count += (uint32_t)__builtin_popcountll(numbers);
-            previous = kinds[first + take - 1];
-        }
+        const uint32_t take = left < 64 ? left : 64;
+        const uint64_t lanes = take == 64 ? UINT64_MAX : (UINT64_C(1) << take) - 1;
+        const __m512i block = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
+        const uint64_t numbers = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_NUMBER));
+        const uint64_t commas = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_COMMA));
+        const uint64_t minus = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_MINUS));
+        const uint64_t number_before = numbers << 1 | (previous == PARSE_KIND_NUMBER);
+        const uint64_t comma_before = commas << 1 | (previous == PARSE_KIND_COMMA);
+        const uint64_t minus_before = minus << 1 | (previous == PARSE_KIND_MINUS);
+        valid = (numbers | commas | minus) == lanes && (numbers & ~(comma_before | minus_before)) == 0 &&
+                (minus & ~comma_before) == 0 && (commas & ~number_before) == 0;
+        count += (uint32_t)__builtin_popcountll(numbers);
+        previous = kinds[first + take - 1];
         first += take;
     }
     return valid && previous != PARSE_KIND_MINUS ? count : 0;
@@ -68,62 +57,44 @@ static uint64_t check_literal_table_parity(uint64_t bits, bool carry)
 // reads 64 token kinds a block: each kind's predecessor (carried from the block before) and brace depth, the lanes after
 // an odd count of braces (check_literal_table_parity, its carry the depth). A `{` must be at depth 0 and a `}` at 1, so
 // depth stays 0 or 1 and its parity is it; each `}`'s numbers before it, from the table's start, are its rows' columns.
-static uint32_t check_literal_table_rows(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t columns, bool scalar)
+static uint32_t check_literal_table_rows(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t columns)
 {
     uint64_t count = 0;
     uint64_t rows = 0;
-    uint64_t row = 0;
     uint32_t previous = PARSE_KIND_COMMA;
     bool inside = false;
     bool valid = begin < end && columns != 0;
     for (uint32_t first = begin; valid && first < end;)
     {
         const uint32_t left = end - first;
-        const uint32_t take = scalar ? 1 : left < 64 ? left : 64;
-        if (scalar)
+        const uint32_t take = left < 64 ? left : 64;
+        const uint64_t lanes = take == 64 ? UINT64_MAX : (UINT64_C(1) << take) - 1;
+        const __m512i block = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
+        const uint64_t numbers = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_NUMBER));
+        const uint64_t commas = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_COMMA));
+        const uint64_t minus = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_MINUS));
+        const uint64_t opens = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_L_BRACE));
+        const uint64_t closes = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_R_BRACE));
+        const uint64_t after = check_literal_table_parity(opens | closes, inside);
+        const uint64_t before = after << 1 | inside;
+        const uint64_t number_before = numbers << 1 | (previous == PARSE_KIND_NUMBER);
+        const uint64_t comma_before = commas << 1 | (previous == PARSE_KIND_COMMA);
+        const uint64_t minus_before = minus << 1 | (previous == PARSE_KIND_MINUS);
+        const uint64_t open_before = opens << 1 | (previous == PARSE_KIND_L_BRACE);
+        const uint64_t close_before = closes << 1 | (previous == PARSE_KIND_R_BRACE);
+        valid = (numbers | commas | minus | opens | closes) == lanes && ((numbers | minus) & ~after) == 0 && (opens & before) == 0 &&
+                (closes & ~before) == 0 && (numbers & ~(comma_before | minus_before | open_before)) == 0 &&
+                (minus & ~(comma_before | open_before)) == 0 && (commas & ~(number_before | close_before)) == 0 &&
+                (opens & ~comma_before) == 0 && (closes & ~(number_before | comma_before)) == 0;
+        for (uint64_t pending = closes; valid && pending != 0; pending &= pending - 1)
         {
-            const uint32_t kind = kinds[first];
-            valid = kind == PARSE_KIND_NUMBER ? inside && (previous == PARSE_KIND_COMMA || previous == PARSE_KIND_MINUS || previous == PARSE_KIND_L_BRACE) :
-                    kind == PARSE_KIND_MINUS ? inside && (previous == PARSE_KIND_COMMA || previous == PARSE_KIND_L_BRACE) :
-                    kind == PARSE_KIND_COMMA ? previous == PARSE_KIND_NUMBER || previous == PARSE_KIND_R_BRACE :
-                    kind == PARSE_KIND_L_BRACE ? !inside && previous == PARSE_KIND_COMMA :
-                    kind == PARSE_KIND_R_BRACE && inside && (previous == PARSE_KIND_NUMBER || previous == PARSE_KIND_COMMA) && row == columns;
-            row = kind == PARSE_KIND_L_BRACE ? 0 : row + (kind == PARSE_KIND_NUMBER);
-            rows += kind == PARSE_KIND_R_BRACE;
-            count += kind == PARSE_KIND_NUMBER;
-            inside = kind == PARSE_KIND_L_BRACE || (inside && kind != PARSE_KIND_R_BRACE);
-            previous = kind;
+            const uint64_t below = (pending & (0 - pending)) - 1;
+            rows += 1;
+            valid = count + (uint64_t)__builtin_popcountll(numbers & below) == rows * columns;
         }
-        else
-        {
-            const uint64_t lanes = take == 64 ? UINT64_MAX : (UINT64_C(1) << take) - 1;
-            const __m512i block = _mm512_maskz_loadu_epi8((__mmask64)lanes, kinds + first);
-            const uint64_t numbers = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_NUMBER));
-            const uint64_t commas = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_COMMA));
-            const uint64_t minus = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_MINUS));
-            const uint64_t opens = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_L_BRACE));
-            const uint64_t closes = lanes & _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_KIND_R_BRACE));
-            const uint64_t after = check_literal_table_parity(opens | closes, inside);
-            const uint64_t before = after << 1 | inside;
-            const uint64_t number_before = numbers << 1 | (previous == PARSE_KIND_NUMBER);
-            const uint64_t comma_before = commas << 1 | (previous == PARSE_KIND_COMMA);
-            const uint64_t minus_before = minus << 1 | (previous == PARSE_KIND_MINUS);
-            const uint64_t open_before = opens << 1 | (previous == PARSE_KIND_L_BRACE);
-            const uint64_t close_before = closes << 1 | (previous == PARSE_KIND_R_BRACE);
-            valid = (numbers | commas | minus | opens | closes) == lanes && ((numbers | minus) & ~after) == 0 && (opens & before) == 0 &&
-                    (closes & ~before) == 0 && (numbers & ~(comma_before | minus_before | open_before)) == 0 &&
-                    (minus & ~(comma_before | open_before)) == 0 && (commas & ~(number_before | close_before)) == 0 &&
-                    (opens & ~comma_before) == 0 && (closes & ~(number_before | comma_before)) == 0;
-            for (uint64_t pending = closes; valid && pending != 0; pending &= pending - 1)
-            {
-                const uint64_t below = (pending & (0 - pending)) - 1;
-                rows += 1;
-                valid = count + (uint64_t)__builtin_popcountll(numbers & below) == rows * columns;
-            }
-            count += (uint64_t)__builtin_popcountll(numbers);
-            inside = (after >> (take - 1) & 1) != 0;
-            previous = kinds[first + take - 1];
-        }
+        count += (uint64_t)__builtin_popcountll(numbers);
+        inside = (after >> (take - 1) & 1) != 0;
+        previous = kinds[first + take - 1];
         first += take;
     }
     valid = valid && !inside && (previous == PARSE_KIND_R_BRACE || previous == PARSE_KIND_COMMA) && count == rows * columns && count <= UINT32_MAX;
@@ -223,7 +194,7 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
         }
     }
     const __mmask16 lanes = (__mmask16)((1u << count) - 1);
-    const __mmask16 small = valid && !reader->parser->options.scalar ? check_literal_table_small(words, lengths, decoded, lanes) : 0;
+    const __mmask16 small = valid ? check_literal_table_small(words, lengths, decoded, lanes) : 0;
     for (uint32_t lane = 0; valid && lane < count; lane += 1)
     {
         const bool negative = reader->parser->tokens.kinds[tokens[lane] - 1] == PARSE_KIND_MINUS;
@@ -244,7 +215,7 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
     // This preserves uninitialized-value detection instead of unpoisoning the destination.
     const bool scalar_store = true;
 #else
-    const bool scalar_store = reader->parser->options.scalar;
+    const bool scalar_store = false;
 #endif
 #if __has_feature(memory_sanitizer)
 #pragma clang loop vectorize(disable) interleave(disable)
@@ -489,7 +460,6 @@ static CheckLiteralTableSource check_literal_table_span(CheckInputReader* reader
     Preprocessor* pp = reader->pp;
     const PPTokens* output = &pp->output;
     const uint8_t* kinds = reader->parser->tokens.kinds;
-    const uint32_t* sources = reader->parser->tokens.sources;
     CheckLiteralTableSource result = { 0 };
     uint32_t first = begin;
     uint32_t last = end;
@@ -501,8 +471,8 @@ static CheckLiteralTableSource check_literal_table_span(CheckInputReader* reader
     {
         last -= 1;
     }
-    const uint32_t location = first < last ? output->locations[sources[first]] : 0;
-    const uint32_t stop = first < last ? output->values[sources[last - 1]] : 0;
+    const uint32_t location = first < last ? output->locations[parse_source_index(&reader->parser->tokens, first)] : 0;
+    const uint32_t stop = first < last ? output->values[parse_source_index(&reader->parser->tokens, last - 1)] : 0;
     const uint32_t range = first < last ? pp_find_range(pp, location) : BUSTER_PP_NONE;
     if (range != BUSTER_PP_NONE)
     {
@@ -537,7 +507,7 @@ static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTa
 {
     Preprocessor* pp = reader->pp;
     const PPTokens* output = &pp->output;
-    const uint32_t index = reader->parser->tokens.sources[token];
+    const uint32_t index = parse_source_index(&reader->parser->tokens, token);
     const uint32_t location = output->locations[index];
     const uint32_t end = output->values[index];
     const bool number = output->kinds[index] == C_TOKEN_NUMERIC_CONSTANT && end > location;
@@ -545,7 +515,6 @@ static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTa
     // The bytes as written are at least as long as the spelling, which drops a splice's.
     const bool short_number = number && end - location < shortest;
     const bool spanned = number && source->clean_end != 0 && location >= source->clean_begin && end <= source->clean_end;
-    const bool scalar = reader->parser->options.scalar;
     bool valid = true;
     *category = 0;
     if (spanned && !(classify && short_number && spelling == NULL))
@@ -554,8 +523,7 @@ static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTa
         const uint8_t* bytes = source->clean + (location - source->clean_begin);
         if (classify && !short_number)
         {
-            *category = scalar ? check_literal_table_classify_scalar(bytes, end - location, width, false, false, true) :
-                                 check_literal_table_classify(bytes, end - location, width, false, false, true);
+            *category = check_literal_table_classify(bytes, end - location, width, false, false, true);
         }
         if (spelling != NULL)
         {
@@ -582,16 +550,14 @@ static bool check_literal_table_element(CheckInputReader* reader, CheckLiteralTa
         uint32_t kind = BUSTER_CHECK_LITERAL_TABLE_SPLICED;
         if (ranged)
         {
-            kind = scalar ? check_literal_table_classify_scalar(bytes, end - location, width, !final, trigraphs, classify) :
-                            check_literal_table_classify(bytes, end - location, width, !final, trigraphs, classify);
+            kind = check_literal_table_classify(bytes, end - location, width, !final, trigraphs, classify);
         }
         const uint8_t* spelled = bytes;
         uint32_t spelled_length = end - location;
         if (kind == BUSTER_CHECK_LITERAL_TABLE_SPLICED)
         {
             valid = check_input_spelling(reader, token, &spelled, &spelled_length);
-            kind = !valid ? 0 : scalar ? check_literal_table_classify_scalar(spelled, spelled_length, width, false, false, classify) :
-                                         check_literal_table_classify(spelled, spelled_length, width, false, false, classify);
+            kind = !valid ? 0 : check_literal_table_classify(spelled, spelled_length, width, false, false, classify);
         }
         *category = kind;
         if (spelling != NULL)
@@ -617,16 +583,14 @@ static bool check_literal_table_floating_integers(CheckInputReader* reader, Chec
                                                   uint32_t width, uint8_t* payload, uint64_t* converted)
 {
     const uint8_t* kinds = reader->parser->tokens.kinds;
-    const uint32_t* sources = reader->parser->tokens.sources;
     const PPTokens* output = &reader->pp->output;
     const uint32_t unit = width / 8;
     const uint32_t shortest = width == 32 ? 8 : 16;
-    const bool scalar = reader->parser->options.scalar;
     uint32_t index = 0;
     bool valid = true;
     for (uint32_t token = begin; valid && token < end; token += 1)
     {
-        const uint32_t at = sources[token];
+        const uint32_t at = parse_source_index(&reader->parser->tokens, token);
         // A number shorter as written than the shortest integer that may round (check_literal_table_element) passes by
         // its length alone, without a call.
         const bool short_number = kinds[token] == PARSE_KIND_NUMBER && output->kinds[at] == C_TOKEN_NUMERIC_CONSTANT &&
@@ -643,8 +607,7 @@ static bool check_literal_table_floating_integers(CheckInputReader* reader, Chec
             uint32_t category = 0;
             if (spanned)
             {
-                category = scalar ? check_literal_table_classify_scalar(bytes, stop - location, width, false, false, true) :
-                                    check_literal_table_classify(bytes, stop - location, width, false, false, true);
+                category = check_literal_table_classify(bytes, stop - location, width, false, false, true);
             }
             else
             {
@@ -678,8 +641,7 @@ static bool check_literal_table_floating_batch(CheckInputReader* reader, const u
     uint32_t decoded[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint64_t values[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     memcpy(lengths, spelled, (uint64_t)count * sizeof(uint32_t));
-    // The parser's columns/options stay immutable and disjoint from output.
-    const bool scalar = reader->parser->options.scalar;
+    // The parser's columns stay immutable and disjoint from output.
     const uint8_t* kinds = reader->parser->tokens.kinds;
     const uint32_t unit = width / 8;
     bool valid = true;
@@ -691,7 +653,7 @@ static bool check_literal_table_floating_batch(CheckInputReader* reader, const u
         }
     }
     const __mmask16 lanes = (__mmask16)((1u << count) - 1);
-    const __mmask16 small = !scalar ? check_literal_table_small(words, lengths, decoded, lanes) : 0;
+    const __mmask16 small = check_literal_table_small(words, lengths, decoded, lanes);
     for (uint32_t lane = 0; valid && lane < count; lane += 1)
     {
         const bool negative = kinds[tokens[lane] - 1] == PARSE_KIND_MINUS;
@@ -723,11 +685,7 @@ static bool check_literal_table_floating_batch(CheckInputReader* reader, const u
             arena_pop_to(reader->scratch, mark);
         }
     }
-    for (uint32_t lane = 0; valid && scalar && lane < count; lane += 1)
-    {
-        memcpy(destination + (uint64_t)lane * unit, values + lane, unit);
-    }
-    for (uint32_t at = 0; valid && !scalar && at < count; at += 8)
+    for (uint32_t at = 0; valid && at < count; at += 8)
     {
         const uint32_t left = count - at;
         const __mmask8 live = (__mmask8)((1u << (left < 8 ? left : 8)) - 1);
@@ -762,7 +720,6 @@ static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begi
     CheckLiteralTableSource source = check_literal_table_span(reader, begin, end);
     bool valid = converted != NULL && check_literal_table_floating_integers(reader, &source, begin, end, element, width, payload, converted);
     const uint8_t* kinds = reader->parser->tokens.kinds;
-    const uint32_t* sources = reader->parser->tokens.sources;
     const PPTokens* output = &reader->pp->output;
     uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
@@ -774,7 +731,7 @@ static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begi
     {
         if (kinds[token] == PARSE_KIND_NUMBER)
         {
-            const uint32_t at = sources[token];
+            const uint32_t at = parse_source_index(&reader->parser->tokens, token);
             const uint32_t location = output->locations[at];
             const uint32_t stop = output->values[at];
             // In the clean span its bytes are its spelling (check_literal_table_element), without a call.
@@ -925,8 +882,8 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
                     check_action_integer_type(reader->types, element, &width, &is_signed) && (width == 8 || width == 16 || width == 32 || width == 64)));
     }
     const uint32_t count = !eligible        ? 0 :
-                           rows || records ? check_literal_table_rows(parser->tokens.kinds, begin + 1, end - 1, columns, parser->options.scalar) :
-                                             check_literal_table_shape(parser->tokens.kinds, begin + 1, end - 1, parser->options.scalar);
+                           rows || records ? check_literal_table_rows(parser->tokens.kinds, begin + 1, end - 1, columns) :
+                                             check_literal_table_shape(parser->tokens.kinds, begin + 1, end - 1);
     eligible = eligible && count >= BUSTER_CHECK_LITERAL_TABLE_MINIMUM &&
                (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || count / columns <= reader->types->types.extent[type_index(type)]);
     const uint64_t mark = reader->arena->length;

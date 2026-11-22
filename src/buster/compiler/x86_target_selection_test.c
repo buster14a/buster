@@ -63,16 +63,14 @@ static bool x86_target_test_native_kernel(const X86Target* target, const uint8_t
         records[count++] = (X86Instruction){ .form = X86_FORM_VZEROUPPER };
     }
     records[count++] = (X86Instruction){ .form = X86_FORM_RET };
-    uint8_t scalar[BUSTER_X86_ENCODER_CAPACITY(11)];
     uint8_t vector[BUSTER_X86_ENCODER_CAPACITY(11)];
     const X86Target native = x86_target_native();
     uint8_t native_allowed[X86_FORM_COUNT];
     x86_target_forms(&native, native_allowed);
     const bool can_execute = x86_target_validate(native_allowed, records, count) == count;
-    bool passed = x86_target_validate(allowed, records, count) == count;
-    const int64_t bytes = passed ? x86_encode_scalar(records, count, scalar, sizeof(scalar), 0, 0) : -1;
-    passed &= bytes > 0 && x86_encode(records, count, vector, sizeof(vector), 0, 0) == bytes;
-    passed &= bytes > 0 && memcmp(scalar, vector, bytes > 0 ? (size_t)bytes : 0) == 0;
+    bool passed = x86_target_validate(allowed, records, count) == count && x86_validate(records, count) == count;
+    const int64_t bytes = passed ? x86_encode(records, count, vector, sizeof(vector), 0, 0) : -1;
+    passed &= bytes > 0;
     uint8_t lower[X86_FORM_COUNT];
     if (vex)
     {
@@ -103,7 +101,7 @@ static bool x86_target_test_native_kernel(const X86Target* target, const uint8_t
     {
         printf("target %s %s kernel: execution skipped (host features unavailable)\n", profile, evex ? "EVEX" : vex ? "VEX" : "SSE");
     }
-    printf("target %s %s kernel: %s (%lld bytes, exact scalar/vector bytes; lower-profile rejection%s)\n", profile, evex ? "EVEX" : vex ? "VEX" : "SSE", passed ? "pass" : "FAIL", (long long)bytes, can_execute ? "; native execution" : "");
+    printf("target %s %s kernel: %s (%lld bytes; lower-profile rejection%s)\n", profile, evex ? "EVEX" : vex ? "VEX" : "SSE", passed ? "pass" : "FAIL", (long long)bytes, can_execute ? "; native execution" : "");
     fflush(stdout);
     return passed;
 }

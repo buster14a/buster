@@ -116,9 +116,7 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_terminal_test_nati
     const bool mapped = mapping != MAP_FAILED;
     bool ready = mapped && capacity < BUSTER_CBUILTIN_TERMINAL_TEST_PAGE;
     uint8_t* entry = ready ? mapping + BUSTER_CBUILTIN_TERMINAL_TEST_PAGE - capacity : 0;
-    uint8_t scalar[BUSTER_X86_ENCODER_CAPACITY(1)];
     int64_t vector_size = -1;
-    int64_t scalar_size = -1;
     if (ready)
     {
         memset(mapping, 0xa5, BUSTER_CBUILTIN_TERMINAL_TEST_PAGE);
@@ -127,11 +125,10 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_terminal_test_nati
     if (ready)
     {
         vector_size = x86_encode(helper->code.records, helper->code.count, entry, capacity, 0, 0);
-        scalar_size = x86_encode_scalar(helper->code.records, helper->code.count, scalar, sizeof(scalar), 0, 0);
-        ready = vector_size == 2 && scalar_size == 2 && entry[0] == 0x0f && entry[1] == 0x0b && memcmp(entry, scalar, 2) == 0;
+        ready = vector_size == 2 && entry[0] == 0x0f && entry[1] == 0x0b;
         ready &= mprotect(mapping, BUSTER_CBUILTIN_TERMINAL_TEST_PAGE, PROT_READ | PROT_EXEC) == 0;
     }
-    if (cbuiltin_terminal_test_expect(tally, ready, "both encoders emit exact UD2 with bounded output", item))
+    if (cbuiltin_terminal_test_expect(tally, ready, "the encoder emits exact UD2 with bounded output", item))
     {
         fflush(0);
         const pid_t child = fork();

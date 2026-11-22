@@ -551,9 +551,24 @@ struct CallGraphCallees
 {
     // How many functions the call can reach.
     uint32_t count;
+    // The function index when count is one.
+    uint32_t single_target;
     // It reaches an ifunc, or only aliases that lead to no definition (to a declaration, or round a loop of aliases).
     bool ifunc;
     bool lost;
+};
+
+// A call's line number is needed until sizing reports its diagnostics. Filling then needs the count and, for one
+// edge, its target.
+typedef union CallGraphCallSite CallGraphCallSite;
+union CallGraphCallSite
+{
+    uint64_t line;
+    struct
+    {
+        uint32_t count;
+        uint32_t single_target;
+    } edges;
 };
 
 // The functions a call of `name` from translation unit `unit` can reach, written to `callees` unless it is 0. The name
@@ -595,6 +610,7 @@ static CallGraphCallees call_graph_resolve(CallGraphSymbols* symbols, uint32_t u
             const bool taken = own || (!target && linked);
             if (taken && symbols->kinds[definition] == CALL_GRAPH_KIND_FUNCTION)
             {
+                result.single_target = index;
                 if (callees != 0)
                 {
                     callees[result.count] = index;
@@ -847,9 +863,8 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     String8* work_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, alias_capacity + 1);
     bool* work_targets = BUSTER_ARENA_PUSH_ARRAY(work, bool, alias_capacity + 1);
     uint32_t* call_callers = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, call_capacity + 1);
-    uint32_t* call_units = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, call_capacity + 1);
     String8* call_names = BUSTER_ARENA_PUSH_ARRAY(work, String8, call_capacity + 1);
-    uint64_t* call_lines = BUSTER_ARENA_PUSH_ARRAY(work, uint64_t, call_capacity + 1);
+    CallGraphCallSite* call_sites = BUSTER_ARENA_PUSH_ARRAY(work, CallGraphCallSite, call_capacity + 1);
     uint32_t* callers_begin = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, function_capacity + 2);
     bool* calls_itself = BUSTER_ARENA_PUSH_ARRAY(work, bool, function_capacity + 1);
     // Tarjan's algorithm: each function's visit index and lowest reachable index, the component stack, the walk's own
@@ -892,8 +907,8 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
     uint32_t* reach_begin = BUSTER_ARENA_PUSH_ARRAY(work, uint32_t, node_capacity + 2);
     bool memory = fits && symbol_names != 0 && symbol_scopes != 0 && symbol_first != 0 && symbol_last != 0 && symbol_strong_count != 0 && slots != 0 &&
                   definition_kinds != 0 && definition_indices != 0 && definition_next != 0 && definition_bindings != 0 && definition_units != 0 && names != 0 && units != 0 && alias_units != 0 &&
-                  alias_targets != 0 && alias_stamps != 0 && work_units != 0 && work_names != 0 && work_targets != 0 && call_callers != 0 && call_units != 0 && call_names != 0 &&
-                  call_lines != 0 && callers_begin != 0 && calls_itself != 0 && visit != 0 && lowest != 0 && on_stack != 0 && component_stack != 0 &&
+                  alias_targets != 0 && alias_stamps != 0 && work_units != 0 && work_names != 0 && work_targets != 0 && call_callers != 0 && call_names != 0 &&
+                  call_sites != 0 && callers_begin != 0 && calls_itself != 0 && visit != 0 && lowest != 0 && on_stack != 0 && component_stack != 0 &&
                   walk_functions != 0 && walk_calls != 0 && components != 0 && component_begin != 0 && members != 0 && component_first != 0 && queue != 0 &&
                   predecessors != 0 && reached != 0 && path != 0 && allowed_used != 0 && variable_names != 0 && variable_scopes != 0 && variable_slots != 0 &&
                   variable_units != 0 && variable_changes != 0 && variable_named != 0 && variable_states != 0 && state_names != 0 && state_scopes != 0 && state_slots != 0 &&
@@ -1039,9 +1054,8 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
                 else if (call.callee.length != 0 && current != BUSTER_CALL_GRAPH_NONE)
                 {
                     call_callers[call_line_index] = current;
-                    call_units[call_line_index] = unit;
                     call_names[call_line_index] = call.callee;
-                    call_lines[call_line_index] = line_number;
+                    call_sites[call_line_index].line = line_number;
                     call_line_index += 1;
                 }
                 // A variable, by its scope and name, the first definition of each but for another unit's declarations;
@@ -1105,16 +1119,20 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
         uint64_t edge_count = 0;
         for (uint32_t i = 0; i < call_line_index; i += 1)
         {
-            const CallGraphCallees callees = call_graph_resolve(&symbols, call_units[i], call_names[i], 2 * (uint64_t)i, 0);
+            const uint32_t caller = call_callers[i];
+            const uint32_t unit = units[caller];
+            const CallGraphCallees callees = call_graph_resolve(&symbols, unit, call_names[i], 2 * (uint64_t)i, 0);
             if (callees.ifunc || callees.lost)
             {
-                call_graph_append_location(&report, inputs[call_units[i]].name, call_lines[i]);
+                call_graph_append_location(&report, inputs[unit].name, call_sites[i].line);
                 call_graph_append(&report, BUSTER_S8("a call of "));
                 call_graph_append(&report, call_names[i]);
                 call_graph_append(&report, callees.ifunc ? BUSTER_S8(", an ifunc, whose callee is chosen at run time\n") : BUSTER_S8(", an alias that leads to no definition\n"));
                 result.problem_count += 1;
             }
-            callers_begin[call_callers[i] + 2] += callees.count;
+            call_sites[i].edges.count = callees.count;
+            call_sites[i].edges.single_target = callees.single_target;
+            callers_begin[caller + 2] += callees.count;
             edge_count += callees.count;
         }
         memory = edge_count < UINT32_MAX;
@@ -1129,12 +1147,20 @@ static CallGraphResult call_graph_check(Arena* arena, const CallGraphInput* inpu
         {
             const uint32_t caller = call_callers[i];
             uint32_t* written = targets + callers_begin[caller + 1];
-            const CallGraphCallees callees = call_graph_resolve(&symbols, call_units[i], call_names[i], 2 * (uint64_t)i + 1, written);
-            for (uint32_t c = 0; c < callees.count; c += 1)
+            const uint32_t count = call_sites[i].edges.count;
+            if (count == 1)
+            {
+                written[0] = call_sites[i].edges.single_target;
+            }
+            else if (count > 1)
+            {
+                call_graph_resolve(&symbols, units[caller], call_names[i], 2 * (uint64_t)i + 1, written);
+            }
+            for (uint32_t c = 0; c < count; c += 1)
             {
                 calls_itself[caller] = calls_itself[caller] || written[c] == caller;
             }
-            callers_begin[caller + 1] += callees.count;
+            callers_begin[caller + 1] += count;
         }
     }
     if (memory)

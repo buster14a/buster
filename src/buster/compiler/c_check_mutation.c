@@ -279,7 +279,7 @@ static bool check_mutation_add_site(CheckMutationUnit* unit, uint8_t kind, uint3
     if (valid)
     {
         // The site's file is its first token's presumed one: the unit's own if line markers give it the unit's name.
-        const uint32_t location = unit->pp->output.locations[unit->parser->tokens.sources[first]];
+        const uint32_t location = unit->pp->output.locations[parse_source_index(&unit->parser->tokens, first)];
         const char* name = NULL;
         uint32_t length = 0;
         pp_presumed(unit->pp, location, &name, &length);
@@ -578,7 +578,7 @@ static bool check_mutation_read(CheckMutationUnit* unit, const char* name, const
     uint32_t at = 0;
     for (uint32_t token = 0; valid && token < unit->count; token += 1)
     {
-        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t source = parse_source_index(&parser->tokens, token);
         const uint32_t location = pp->output.locations[source];
         const uint32_t range = pp_find_range(pp, location);
         valid = range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE;
@@ -588,7 +588,7 @@ static bool check_mutation_read(CheckMutationUnit* unit, const char* name, const
             at += 1;
         }
         // The two halves of a split `::` share their source.
-        const bool split = token != 0 && parser->tokens.sources[token - 1] == source;
+        const bool split = token != 0 && parse_source_index(&parser->tokens, token - 1) == source;
         valid = valid && (split || (at < (uint64_t)lexed && starts[at] == offset));
         if (valid && split)
         {
@@ -1667,7 +1667,7 @@ static bool check_mutation_campaign(CheckCorpusTally* tally, CheckMutationTally*
             valid = valid && (!edit.valid || check_corpus_clang_file(clang, context.arguments, context.argument_count, path, &oracle));
             if (valid && edit.valid)
             {
-                const uint32_t location = pp.output.locations[parser.tokens.sources[site->first]];
+                const uint32_t location = pp.output.locations[parse_source_index(&parser.tokens, site->first)];
                 const char* name = NULL;
                 uint32_t name_length = 0;
                 const uint32_t line = pp_presumed(&pp, location, &name, &name_length);

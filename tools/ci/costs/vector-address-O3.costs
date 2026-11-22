@@ -25,6 +25,10 @@
 #: cpu 7 0.60 AMD EPYC 9V45 96-Core Processor
 #: cpu 10 0.80 AMD EPYC 9V74 80-Core Processor
 #: cpu 7 0.81 INTEL(R) XEON(R) PLATINUM 8573C
+#: unmeasured Test the early driver feedback corpus
+#: unmeasured Test deterministic work and growth contracts [1 CPU]
+#: unmeasured Test -S of c-testsuite's programs against -c and GNU as
+#: unmeasured Test the caret display against clang
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
 #: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
@@ -37,6 +41,7 @@
 #: derived Test the C lexer as C++
 #: derived Test the C lexer with C11's raw-string prefixes
 #: derived Test the C lexer with the R and LR raw-string prefixes
+#: unmeasured Test the assembly sink against GNU as
 #: unmeasured Compile the lexer's benchmark unit by Tier 1 on one lane and on four [4 CPUs]
 #: unmeasured Link Tier 1's literal pools with clang's and merge their equal entries
 #: peak 47 Check unity fixture ownership without rebuilding
@@ -186,6 +191,8 @@
 #: peak 99 Test Tier 1 integer truth round trips against native and instruction-shape oracles
 #: peak 123 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: peak 101 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+15.0 Test the early driver feedback corpus
+15.0 Test deterministic work and growth contracts [1 CPU]
 0.0 Check unity fixture ownership without rebuilding
 284.0 Test the foreign inputs [8 CPUs]
 170.2 Check the no-recursion rule on the call graph [8 CPUs]
@@ -210,6 +217,7 @@
 62.4 Test mixed-tier single- and multi-file determinism [8 CPUs]
 155.2 Test c-testsuite's programs end to end [4 CPUs]
 226.6 Test c-testsuite's programs with Tier 1's code [4 CPUs]
+15.0 Test -S of c-testsuite's programs against -c and GNU as
 36.4 Reject unfinished SSA-source runs and preserve normal program exits [4 CPUs]
 115.3 Promote and run random C programs of structured and unstructured control flow [4 CPUs]
 41.6 Promote random C programs with their blocks' lifetimes, as --tier1 does [3 CPUs]
@@ -217,6 +225,7 @@
 1350.5 Compare c-testsuite's typed streams, SSA and strict Tier 1 programs [4 CPUs]
 3.3 Run typed aggregate, variadic and indirect source calls and linked units [4 CPUs]
 12.3 Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
+15.0 Test the caret display against clang
 59.1 Test the preprocessor's cases against clang (part 1 of 4)
 37.2 Test the preprocessor's cases against clang (part 2 of 4)
 95.1 Test the preprocessor's cases against clang (part 3 of 4)
@@ -288,6 +297,7 @@
 23.0 Test the x86-64 disassembler against GNU tools
 12.5 Check the frozen SQLite source against Clang
 137.6 Test the scalar and AVX-512 assembly frontends
+15.0 Test the assembly sink against GNU as
 0.8 Assemble a .s and a .S file that -c comes before
 7.4 Test generated-code ISA selection and native records
 9.1 Test binding

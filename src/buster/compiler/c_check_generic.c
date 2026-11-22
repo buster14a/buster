@@ -50,7 +50,26 @@ static TypeId check_generic_key(const TypeTable* types, TypeId type)
     return key != 0 ? key : 1;
 }
 
-static bool check_generic_initialize(CheckInputReader* reader, CheckGenericSet* set, uint32_t token_span, TypeId control, uint32_t source_position)
+// A selection's associations after its control, in [first, end): its top-level commas and one. A group is skipped to its
+// closing token, as the readers' punctuation scans skip it, so each association they read ends at a comma counted here.
+// The set is sized by these, not by the list's tokens, among which are every nested selection's: sized by its tokens, a
+// chain of n selections, one in each other's last association, cleared n^2/2 keys (#2995).
+static uint32_t check_generic_associations(const Parser* parser, uint32_t first, uint32_t end)
+{
+    uint32_t count = 1;
+    uint32_t token = first;
+    while (token < end)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        const bool group = kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE;
+        const uint32_t close = group ? parser->tree.parents[token] : token;
+        count += kind == PARSE_KIND_COMMA;
+        token = !group ? token + 1 : close > token && close < end ? close + 1 : end;
+    }
+    return count;
+}
+
+static bool check_generic_initialize(CheckInputReader* reader, CheckGenericSet* set, uint32_t associations, TypeId control, uint32_t source_position)
 {
     *set = (CheckGenericSet)
     {
@@ -58,9 +77,8 @@ static bool check_generic_initialize(CheckInputReader* reader, CheckGenericSet* 
         .control_key = check_generic_key(reader->types, control),
         .source_position = source_position,
     };
-    // Each association needs at least a type/default, a colon, an expression and its separator/closing token.
-    // This upper bound avoids another punctuation pass, and 64-bit sizing rejects an unrepresentable capacity.
-    const uint64_t maximum = (uint64_t)token_span / 4;
+    // At most half of the capacity is ever occupied; 64-bit sizing rejects an unrepresentable capacity.
+    const uint64_t maximum = associations;
     uint64_t capacity = BUSTER_CHECK_GENERIC_GROUP;
     while (capacity < maximum * 2)
     {
@@ -82,28 +100,11 @@ static bool check_generic_initialize(CheckInputReader* reader, CheckGenericSet* 
     return valid;
 }
 
-static uint32_t check_generic_masks(const TypeId* keys, TypeId key, bool scalar)
+static uint32_t check_generic_masks(const TypeId* keys, TypeId key)
 {
-    (void)scalar;
-
-    uint32_t matches = 0;
-    uint32_t empty = 0;
-    if (BUSTER_SCALAR_PATH(scalar))
-    {
-        // Keep --scalar an independent executable oracle; Clang otherwise folds both branches into the same masks.
-        #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
-        for (uint32_t lane = 0; lane < BUSTER_CHECK_GENERIC_GROUP; lane += 1)
-        {
-            matches |= (uint32_t)(keys[lane] == key) << lane;
-            empty |= (uint32_t)(keys[lane] == 0) << lane;
-        }
-    }
-    else
-    {
-        const __m512i block = _mm512_loadu_si512(keys);
-        matches = _mm512_cmpeq_epi32_mask(block, _mm512_set1_epi32((int)key));
-        empty = _mm512_cmpeq_epi32_mask(block, _mm512_setzero_si512());
-    }
+    const __m512i block = _mm512_loadu_si512(keys);
+    const uint32_t matches = _mm512_cmpeq_epi32_mask(block, _mm512_set1_epi32((int)key));
+    const uint32_t empty = _mm512_cmpeq_epi32_mask(block, _mm512_setzero_si512());
     return matches | (empty << BUSTER_CHECK_GENERIC_GROUP);
 }
 
@@ -154,7 +155,7 @@ static bool check_generic_association(CheckInputReader* reader, CheckGenericSet*
     *matches = false;
     while (valid && !inserted)
     {
-        const uint32_t masks = check_generic_masks(set->keys + group, key, BUSTER_SCALAR_PATH(reader->parser->options.scalar));
+        const uint32_t masks = check_generic_masks(set->keys + group, key);
         uint32_t candidates = masks & UINT16_MAX;
         const uint32_t empty = masks >> BUSTER_CHECK_GENERIC_GROUP;
         while (valid && candidates != 0)

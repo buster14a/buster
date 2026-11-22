@@ -337,9 +337,9 @@ evidence is still required before selecting a production fast-path policy.
 ## Where the checker runs
 
 - **`test-tier1-allocation`** wraps every successful `tier1_allocate` and
-  `tier1_allocate_scalar` call of its fixtures with the fragment checker
+  `tier1_allocate_scan_reference` call of its fixtures with the fragment checker
   (below), and runs the stream fixtures.
-- **`test-tier1-cfg`** checks every allocation both paths make with
+- **`test-tier1-cfg`** checks every allocation it makes with
   `tier1_certificate_cfg` and `tier1_certificate_check`:
   - the eleven fixtures (loops, a critical edge, phi swaps, slot cycles through
     the temporary slot, values and masks across calls) and the random programs
@@ -356,7 +356,7 @@ evidence is still required before selecting a production fast-path policy.
   certificate refused 1,681 of 1,701 interference mutants and 1,537 of 1,551 k0
   mutants; every other refusal of the 34 is one of the structural constraints
   above.
-- **`test-tier1-cfg-source`** certifies every allocation both paths make of
+- **`test-tier1-cfg-source`** certifies every allocation it makes of
   real C (c-testsuite's subset, the frozen `sqlite3.c`, musl's units and the
   SIMD fixtures in the correctness list) and reports the certificates' sizes. A
   refused certificate fails the run.
@@ -375,8 +375,8 @@ evidence is still required before selecting a production fast-path policy.
     guide](tier1-outcomes.md)). A refusal is an internal failure and capacity a
     resource failure, so either fails the compile rather than leaving the body
     to Tier 0, which would hide it.
-- **#938's harness** allocates every problem it adapts by both of buster's
-  allocator paths, and reports an allocation only past its certificate. This
+- **#938's harness** allocates every problem it adapts by buster's allocator,
+  and reports an allocation only past its certificate. This
   goes through `tier1_problem_allocate`, whose gate is `tier1_problem_certify`
   (`tier1_problem_intervals.c`, the fragment checker on the adapter's one-block
   problems). A refusal is `certificate-rejected` in the tally.
@@ -392,7 +392,7 @@ evidence is still required before selecting a production fast-path policy.
 The existing `tier1_allocate_test.c` is now a coordinator; its original fixtures
 are retained **byte-for-byte** in `tier1_allocate_test_cases.c`. Test-only
 wrappers validate every successful `tier1_allocate` and
-`tier1_allocate_scalar` call made by those fixtures and their included suites.
+`tier1_allocate_scan_reference` call made by those fixtures and their included suites.
 They preserve allocator return statuses, output memory, arena state and
 capacity-test boundaries. They are not production allocator wrappers and do
 not automatically intercept unrelated Tier 1 emitter/pipeline test suites.
@@ -527,8 +527,9 @@ computes from the registers it is given: `tier1_emit_cfg_kernel`,
 `tier1_select_fixed`, and a machine row's template, the front end's records
 that `tier0_operation_valid` admits, by the roles they name), the ABI's
 argument registers and its records of by-value aggregates, the
-rematerialization recipes, the frame's displacements from its base register,
-the CFG and its phis, and `x86_semantics.c`'s effects of each record.
+rematerialization recipes and `tier1_rematerialize`'s copy of each, the frame's
+displacements from its base register, the CFG and its phis, and
+`x86_semantics.c`'s effects of each record.
 
 **Untrusted:** the allocation, every emitted record, and the emitter's
 account of them: each record's origin (`Tier1Origin`, marked by
@@ -567,12 +568,24 @@ The decoding:
   which name registers below 16 alone: a vector's `vmovdqa` and `vmovdqu` of 16
   and 32 bytes, and a carrier's VEX `vmovq` and `vinsertps`. A recomputation is a constant's edit only where
   `tier1_rematerialize` writes exactly that record, with its reference, for the
-  value its origin names.
+  value its origin names. A frame address at the frame base register itself is
+  that register's 64-bit copy (`mov r64, rsp` where rsp is the base, `mov r64,
+  rbp` where rbp is, #3149), which is tried as a recomputation first
+  (`tier1_cert_emitted_recomputed`); only otherwise is it a move, of a register
+  no value is in, which the check then refuses. The recipes are trusted, and so
+  is `tier1_rematerialize`'s copy of one: the check proves that the record is
+  the copy that function writes, as the emitter does, not what it computes.
+  `test-tier1-allocation` checks that: every frame base's copy into every
+  register at displacements 0, 8, -32 and 128 against the encoder's lea, and
+  rsp's copies at 0 and -32 run natively.
 - **Nodes.** Each node's records are regenerated from the allocation's
   registers at its use phase and must equal the emitted ones byte for byte. They
   are one instruction: its operands read where the allocation has them, every
   register and frame byte its records write (by their effects) killed, its
-  definition written where its interval starts. A general register the records
+  definition written where its interval starts. A frame byte a read-modify-write
+  leaves as it was is not killed: an add, or, sub or xor of an immediate zero,
+  or an and of an immediate of every bit, at its form's width, locked or not
+  (`tier1_cert_emitted_unchanged`, #2963). A general register the records
   give back is not killed: one holding its own value at the run's end, followed
   through their 64-bit `mov`s between general registers (the compare-exchange's
   save of rax in the scratch register and its restore, #1059). A call's sequence is checked
@@ -596,7 +609,10 @@ The decoding:
   block's memory isn't a value the allocation keeps), and kills every register
   the body touches
   (`IrAsmBody.touched` and `.masks`, callee-saved ones too, which the prologue
-  saved) and the frame bytes its stores write; a record of a form the
+  saved) and the frame bytes its stores write, but not those a read-modify-write
+  leaves as they were (as a node's): musl's full barrier, `lock ; orl
+  $0,(%rsp)`, writes the row at rsp, which a value saved across a call may still
+  hold (#2963); a record of a form the
   semantics' tables don't cover (`cpuid`, the x87's, MMX's) writes no register
   but those, since the front end placed no record of the stack's or control's
   in a body. The saves and reloads of the values live across it in those
@@ -637,12 +653,20 @@ The decoding:
   cover, is left uncertified (`TIER1_CERT_EMITTED_VECTOR`).
 - **By-value aggregates** (#789, #1284). A parameter's copy at entry, from its
   registers and incoming slots (a SPLIT location's, a STACK one's high or low
-  eightbyte alone); a call's argument copies into staging slots below rsp or
+  eightbyte alone, a PAYLOAD one's slot whole through the vector scratch
+  register, #2798); a call's argument copies into staging slots below rsp or
   the reserved frame object when they exceed the red zone's capacity (#1450),
-  zmm16 and on for 64-byte parts, stack slots or the outgoing area whole; its
+  zmm16 and on for zmm parts, stack slots or the outgoing area whole; its
   parts' loads, the hidden pointer's `lea`, the result parts' stores; and the
   function's own result, staged then loaded or copied through the hidden
-  pointer, are regenerated as the emitter writes them and compared. Each part
+  pointer, are regenerated as the emitter writes them and compared. A record's
+  payload no register is as wide as (#2798) is a value of its register's
+  width; its loads and stores in pieces (`tier0_payload_load`,
+  `tier0_payload_store`) are one instruction, the selection's sequence. A
+  call's result parts' stores must also write inside the call's result object,
+  by the IR's size of it (`tier1_cert_emitted_inside`), whatever sequence the
+  selection gives a part: a payload's register stored whole would run past the
+  record. Each part
   is a value of the certificate, defined where its copy puts it and read where
   it is consumed: a part loaded from the wrong slot, or a copy's address
   overwritten before its last piece, fails.
@@ -688,6 +712,22 @@ The decoding:
   one from decoded records; a row-owner claim alone proves nothing. Missing,
   stale, overwritten or wrong-owner rows fail closed. The fact/location
   capacities include every added row; no fixed per-value home limit is assumed.
+- **Slots a run carries in (#2870).** The emitter leaves out a store into a
+  value's slot that a transition stored it into or reloaded it from earlier in
+  the same run of blocks, each the only predecessor of the next in layout
+  (#2784's slot stamps, `tier1_emit_phase`). The allocation's facts give such a
+  value only its register at the run's later blocks' entries, so the slot's
+  bytes were known in the block that stamped them and lost at the next block's
+  start: SQLite's `pagerWriteLargeSector` reloads a loop's bound at the loop's
+  head and evicts it two blocks later with no store, and its code was refused
+  (`TIER1_CERT_EDGE` into the blocks that wait for the bound in its slot), as
+  `--tier1 --verify` and `--tier1 -g` of the frozen `sqlite3.c` were. With
+  `certify` (or `sources`), `Tier1EmitResult.entry_slots` lists, per block, the
+  values held in a register at its entry whose stamp the run carries in, and
+  the decoding asserts each one's slot as one more fact at the value's width.
+  Like the entry rows, these are untrusted: the edge from the run's previous
+  block must prove each from its records. `tests/driver/tier1_patterns.c`'s
+  `patterns_sector` is the shape.
 - **The frame protocol.** The prologue and each epilogue are decoded record by
   record by rsp's offset from its value at entry, each record exactly its form's
   (`push`, the frame pointer's `mov`, `sub`; `add`, the reset from rbp, `pop`),
@@ -760,7 +800,13 @@ fixture with an I8 parameter in `rdi` and an I16 on the stack is certified, and
 its extensions made `mov edi, edi` or a 32-bit load of the slot are refused.
 A compare-exchange with four values live across it, rax among the four
 allocatable registers, is certified; its restore of rax made `mov rax, rax` or
-`mov rax, rcx` is refused. A realigned frame (#1284's review: a 64-byte object
+`mov rax, rcx` is refused. A full barrier in an asm body (#2963: `lock or dword
+[rsp], 0`, which touches the four allocatable registers, with a value in its
+call-save row across it) is certified; aimed at each row a restore after it
+loads, a write that keeps the row (an add, or, sub or xor of zero, an and of
+every bit, 4 or 8 bytes wide, locked or not) is certified, and one that changes
+it (an or of 1, an and of `0x7fffffff`, an adc of 0, a mov of 0, an or of a
+register) is refused. A realigned frame (#1284's review: a 64-byte object
 aligned to 64, a value across a call in rbx) is certified; with its allocation
 moved before rbx's push, its epilogue matched so that every register and the
 return address still come back (its reset from rbp lower by the allocation, and

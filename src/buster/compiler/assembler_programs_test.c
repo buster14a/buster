@@ -274,6 +274,24 @@ static const char asm_test_both_frames_fixture[] =
 static const char asm_test_no_frames_fixture[] = ".cfi_sections\n.text\nf:\n.cfi_startproc\npushq %rbx\n.cfi_def_cfa_offset 16\npopq %rbx\nret\n.cfi_endproc\n";
 static const char asm_test_unused_frames_fixture[] = ".cfi_sections .debug_frame\n.text\nf: ret\n";
 
+// The first procedure spells out the ordinary CIE. Revisit it and other defaults after switching flags and columns,
+// with both frame formats and an FDE in another section, so GNU as checks the CIE pointers and function relocations.
+// The empty simple CIE comes last: GNU as can use it as a prefix and move later ordinary initial rules into FDEs.
+static const char asm_test_cie_identity_fixture[] =
+    ".cfi_sections .eh_frame, .debug_frame\n.text\n"
+    ".cfi_startproc simple\n.cfi_def_cfa 7,8\n.cfi_offset 16,-8\nret\n.cfi_endproc\n"
+    ".cfi_startproc\nret\n.cfi_endproc\n"
+    ".cfi_startproc\n.cfi_signal_frame\nret\n.cfi_endproc\n"
+    ".cfi_startproc\n.cfi_return_column 31\nret\n.cfi_endproc\n"
+    ".cfi_startproc simple\n.cfi_signal_frame\n.cfi_return_column 31\nret\n.cfi_endproc\n"
+    ".section .text.other,\"ax\",@progbits\n"
+    ".cfi_startproc\n.cfi_return_column 0\n.cfi_def_cfa_offset 32\nret\n.cfi_endproc\n"
+    ".cfi_startproc\npushq %rbp\n.cfi_def_cfa_offset 16\npopq %rbp\n.cfi_def_cfa_offset 8\nret\n.cfi_endproc\n"
+    ".cfi_startproc simple\n.cfi_signal_frame\n.cfi_return_column 31\nret\n.cfi_endproc\n"
+    ".cfi_startproc simple\n.cfi_def_cfa 7,8\n.cfi_offset 16,-8\nret\n.cfi_endproc\n"
+    ".cfi_startproc simple\nret\n.cfi_endproc\n"
+    ".cfi_startproc simple\nret\n.cfi_endproc\n";
+
 #include "assembler_groups_test.c"
 
 static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool cross_check)
@@ -304,6 +322,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         { asm_test_gather_fixture, X86_ARCH_V4 },
         { asm_test_debug_frame_fixture, X86_ARCH_BASELINE },
         { asm_test_both_frames_fixture, X86_ARCH_BASELINE },
+        { asm_test_cie_identity_fixture, X86_ARCH_BASELINE },
         { asm_test_no_frames_fixture, X86_ARCH_BASELINE },
         { asm_test_unused_frames_fixture, X86_ARCH_BASELINE },
     };
