@@ -169,7 +169,7 @@ static bool lower_templates_file(LowerTemplatesTotals* totals, const char* file,
 {
     const uint32_t passes = (uint32_t)totals->passes;
     static LowerSource source;
-    const bool valid = lower_source_open(&source, file, options, option_count);
+    const bool valid = lower_source_open(&source, file, options, option_count, false);
     if (valid && source.prepared)
     {
         const uint64_t nodes = totals->nodes;

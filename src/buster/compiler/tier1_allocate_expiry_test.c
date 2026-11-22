@@ -125,25 +125,25 @@ static void tier1_allocation_test_expiry_case(Tier1AllocationTestTally* tally, c
         input.registers[other] = other == class ? fixture->input.registers[0] << shift : 0;
         expected.peak_pressure[other] = other == class ? fixture->expected.peak_pressure[0] : 0;
     }
-    _Alignas(64) uint8_t memory[3][2048];
-    Tier1Allocation ample[3] = { { 0 } };
-    bool produced[3] = { false, false, false };
-    for (uint32_t path = 0; path < 3; path += 1)
+    _Alignas(64) uint8_t memory[2][2048];
+    Tier1Allocation ample[2] = { { 0 } };
+    bool produced[2] = { false, false };
+    for (uint32_t path = 0; path < 2; path += 1)
     {
         memset(memory[path], 0xa5, sizeof(memory[path]));
         Arena arena = { .base = memory[path], .capacity = sizeof(memory[path]), .length = 19 };
-        const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, &arena, &ample[path]) : path == 1 ? tier1_allocate_scalar(&input, &arena, &ample[path]) : tier1_allocate_scan_reference(&input, &arena, &ample[path]);
+        const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, &arena, &ample[path]) : tier1_allocate_scan_reference(&input, &arena, &ample[path]);
         produced[path] = error == TIER1_ALLOCATION_OK;
         bool valid = produced[path] && tier1_allocation_test_expiry_equal(&input, &ample[path], &expected, false);
         valid = valid && arena.length == 19 + expected.retained_bytes && tier1_allocation_verify(&input, &ample[path]) && tier1_allocation_test_occupancy(&input, &ample[path]);
         valid = valid && tier1_allocation_test_expiry_values(&input, &ample[path]);
         tier1_allocation_test_expect(tally, valid, fixture->name);
     }
-    tier1_allocation_test_expect(tally, produced[0] && produced[1] && produced[2] && tier1_allocation_test_expiry_equal(&input, &ample[0], &ample[1], true) &&
-                                      tier1_allocation_test_expiry_equal(&input, &ample[0], &ample[2], false), "focused ample-capacity production paths and scan agree on every logical result field");
-    // Sweep each entry point's own boundary. Both production paths retain the class-event column on either host;
-    // the independent scan reference needs no such scratch and can succeed with less capacity.
-    for (uint32_t path = 0; path < 3; path += 1)
+    tier1_allocation_test_expect(tally, produced[0] && produced[1] && tier1_allocation_test_expiry_equal(&input, &ample[0], &ample[1], false),
+                                 "focused ample-capacity production path and scan agree on every logical result field");
+    // Sweep each entry point's own boundary. The production path retains the class-event column; the independent scan
+    // reference needs no such scratch and can succeed with less capacity.
+    for (uint32_t path = 0; path < 2; path += 1)
     {
         bool failed = false;
         bool succeeded = false;
@@ -156,7 +156,7 @@ static void tier1_allocation_test_expiry_case(Tier1AllocationTestTally* tally, c
             Tier1Allocation before;
             memset(&before, 0x5a, sizeof(before));
             Tier1Allocation output = before;
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, &arena, &output) : path == 1 ? tier1_allocate_scalar(&input, &arena, &output) : tier1_allocate_scan_reference(&input, &arena, &output);
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, &arena, &output) : tier1_allocate_scan_reference(&input, &arena, &output);
             bool prefix = true;
             for (uint32_t i = 0; i < 19; i += 1)
             {
@@ -177,7 +177,7 @@ static void tier1_allocation_test_expiry_case(Tier1AllocationTestTally* tally, c
             tier1_allocation_test_expect(tally, valid, "focused capacity sweep preserves full output on success and prefix/result transaction on failure");
         }
         tier1_allocation_test_expect(tally, failed && succeeded, "focused capacity sweep observes both failure and success without equating entry-point boundaries");
-        const uint32_t expected_minimum = fixture->minimum_capacity[path < 2 ? 0 : 1];
+        const uint32_t expected_minimum = fixture->minimum_capacity[path];
         tier1_allocation_test_expect(tally, expected_minimum == 0 || minimum == expected_minimum, "focused capacity layout has the documented boundary for this entry point and host path");
     }
 }
@@ -344,21 +344,18 @@ static void tier1_allocation_test_expiry(Tier1AllocationTestTally* tally)
         {
             impossible.registers[other] = other == class ? one : 0;
         }
-        for (uint32_t path = 0; path < 2; path += 1)
+        _Alignas(64) uint8_t memory[2048];
+        memset(memory, 0xa5, sizeof(memory));
+        Arena arena = { .base = memory, .capacity = sizeof(memory), .length = 19 };
+        Tier1Allocation before;
+        memset(&before, 0x5a, sizeof(before));
+        Tier1Allocation output = before;
+        const Tier1AllocationError error = tier1_allocate(&impossible, &arena, &output);
+        bool prefix = true;
+        for (uint32_t i = 0; i < 19; i += 1)
         {
-            _Alignas(64) uint8_t memory[2048];
-            memset(memory, 0xa5, sizeof(memory));
-            Arena arena = { .base = memory, .capacity = sizeof(memory), .length = 19 };
-            Tier1Allocation before;
-            memset(&before, 0x5a, sizeof(before));
-            Tier1Allocation output = before;
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&impossible, &arena, &output) : tier1_allocate_scalar(&impossible, &arena, &output);
-            bool prefix = true;
-            for (uint32_t i = 0; i < 19; i += 1)
-            {
-                prefix = prefix && memory[i] == 0xa5;
-            }
-            tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_CONSTRAINT && arena.length == 19 && prefix && memcmp(&output, &before, sizeof(output)) == 0, "two simultaneous values cannot share one register; failure preserves prefix and result");
+            prefix = prefix && memory[i] == 0xa5;
         }
+        tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_CONSTRAINT && arena.length == 19 && prefix && memcmp(&output, &before, sizeof(output)) == 0, "two simultaneous values cannot share one register; failure preserves prefix and result");
     }
 }

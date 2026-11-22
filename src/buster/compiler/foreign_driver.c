@@ -3,9 +3,12 @@
 //
 // Raw built-in linker command. Driver options are removed without reordering foreign_arguments' inputs, archive
 // controls or library-search controls. The caller supplies startup objects and libraries in their desired order;
-// runtime discovery supplies only the default interpreter for a PIE. The default is a static executable at _start;
-// -pie makes a dynamic PIE, -static with -pie a static PIE (GCC's -static-pie line: -static -pie --no-dynamic-linker
-// -z text) and -shared a shared library, without an entry point unless -e names one, with -soname's DT_SONAME. A
+// runtime discovery supplies only the default interpreter for a dynamic executable. The default is a static executable
+// at _start; -pie makes a dynamic PIE, -no-pie a position-dependent dynamic executable (#1503: an ET_EXEC at a fixed
+// address with the interpreter, as GNU ld writes a dynamically linked executable that isn't a PIE; the last of -pie and
+// -no-pie counts), -static with -pie a static PIE (GCC's -static-pie line: -static -pie --no-dynamic-linker -z text),
+// -static with -no-pie or alone a static executable, and -shared a shared library, whatever -no-pie says, without an
+// entry point unless -e names one, with -soname's DT_SONAME. A
 // static executable and a static PIE get the static runtime's handling (IFUNC stubs and IRELATIVE relocations, TLS
 // relaxation, the names libc.a's startup looks for), which a static program without libc doesn't notice but for its
 // IFUNCs: the conversion refuses those unless the entry is glibc's startup (the system's start file and libc.a, by
@@ -79,7 +82,7 @@ struct ForeignDriverWrite
 
 static void foreign_driver_usage(void)
 {
-    fprintf(stderr, "usage: link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared] [-soname NAME] [--dynamic-linker PATH]\n"
+    fprintf(stderr, "usage: link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie|-no-pie] [-shared] [-soname NAME] [--dynamic-linker PATH]\n"
                     "                    [--no-dynamic-linker] [--gc-sections|--no-gc-sections] [--merge-strings|--no-merge-strings]\n"
                     "                    [--dedup-unwind|--no-dedup-unwind] [--startup-applies-irelative]\n"
                     "                    [-rpath PATH] [--enable-new-dtags|--disable-new-dtags]\n"
@@ -87,8 +90,9 @@ static void foreign_driver_usage(void)
                     "Defaults: static executable, a.out, entry _start, the lanes its objects' bytes pay for (--lanes N runs N, at most\n"
                     "one per CPU); GC, string merging and unwind deduplication off.\n"
                     "Supply startup objects and runtime libraries explicitly, in link order, as GCC's driver gives them to GNU ld.\n"
-                    "-pie writes a dynamic PIE, -static -pie a static PIE and -shared a shared library (no entry point without -e).\n"
-                    "Static output searches archives by default; PIE and shared output prefer shared libraries.\n"
+                    "-pie writes a dynamic PIE, -no-pie a position-dependent dynamic executable, -static -pie a static PIE and -shared\n"
+                    "a shared library (no entry point without -e); the last of -pie and -no-pie counts.\n"
+                    "Static output searches archives by default; dynamic and shared output prefer shared libraries.\n"
                     "A static link takes IFUNCs when its entry is glibc's startup, which applies their relocations: the system's crt1.o\n"
                     "or rcrt1.o, as GCC's driver finds them, calling libc.a's __libc_start_main. Other startup needs\n"
                     "--startup-applies-irelative to say it applies them (those between __rela_iplt_start and __rela_iplt_end, or a\n"
@@ -151,6 +155,7 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
     bool valid = inputs != 0 && linker_options_initialize(&driver->linker, (uint32_t)argc + 1, arena);
     uint32_t count = 1;
     bool pie = false;
+    bool no_pie = false;
     bool static_link = false;
     // Scoped -static is only an input-search control; foreign_arguments owns its saved flags and underflow check.
     uint32_t state_depth = 0;
@@ -213,6 +218,13 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         else if (strcmp(argument, "-pie") == 0 || strcmp(argument, "--pie") == 0 || strcmp(argument, "-pic-executable") == 0)
         {
             pie = true;
+            no_pie = false;
+        }
+        else if (strcmp(argument, "-no-pie") == 0 || strcmp(argument, "--no-pie") == 0 || strcmp(argument, "--no-pic-executable") == 0)
+        {
+            // GNU ld's and lld's: the last of -pie and -no-pie counts.
+            pie = false;
+            no_pie = true;
         }
         else if (strcmp(argument, "--push-state") == 0 || strcmp(argument, "--pop-state") == 0)
         {
@@ -354,17 +366,21 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         driver->entry = driver->linker.entry;
         driver->entry_given = true;
     }
-    driver->kind = shared ? RUNTIME_KIND_SHARED : pie && static_link ? RUNTIME_KIND_STATIC_PIE : pie ? RUNTIME_KIND_DYNAMIC : RUNTIME_KIND_STATIC;
+    driver->kind = shared                    ? RUNTIME_KIND_SHARED
+                   : pie && static_link      ? RUNTIME_KIND_STATIC_PIE
+                   : pie                     ? RUNTIME_KIND_DYNAMIC
+                   : no_pie && !static_link  ? RUNTIME_KIND_NO_PIE
+                                             : RUNTIME_KIND_STATIC;
     if (valid && runtime_kind_is_static(driver->kind) && driver->linker.runpath.pointer != NULL)
     {
         fprintf(stderr, "link-foreign: runtime search paths require dynamic output\n");
         valid = false;
     }
     // GNU ld takes -shared with -static as a library that links no shared library; lld and this command refuse it, and
-    // --no-dynamic-linker without -static, a dynamic PIE without an interpreter.
+    // --no-dynamic-linker without -static, a dynamic executable without an interpreter.
     if (valid && ((shared && (static_link || pie)) || (no_interpreter && driver->kind != RUNTIME_KIND_STATIC_PIE)))
     {
-        fprintf(stderr, "link-foreign: unsupported combination of -shared, -static, -pie and --no-dynamic-linker\n");
+        fprintf(stderr, "link-foreign: unsupported combination of -shared, -static, -pie, -no-pie and --no-dynamic-linker\n");
         valid = false;
     }
     if (valid && !driver->help)
@@ -445,7 +461,7 @@ static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkR
     }
     if (shared_library.pointer != 0)
     {
-        fprintf(stderr, "link-foreign: static output cannot use shared library %.*s; use -pie or select an archive with -Bstatic\n",
+        fprintf(stderr, "link-foreign: static output cannot use shared library %.*s; use -pie or -no-pie, or select an archive with -Bstatic\n",
                 (int)shared_library.length, shared_library.pointer);
     }
     else
@@ -854,7 +870,7 @@ static int foreign_driver_link(ForeignDriverRun* run)
     uint64_t object_bytes = 0;
     ends[FOREIGN_DRIVER_STAGE_ARGUMENTS] = run->arguments_end;
     ends[FOREIGN_DRIVER_STAGE_LANES] = run->lanes_end;
-    if (succeeded && !driver.help && driver.kind == RUNTIME_KIND_DYNAMIC && driver.interpreter.length == 0)
+    if (succeeded && !driver.help && runtime_kind_is_dynamic_executable(driver.kind) && driver.interpreter.length == 0)
     {
         succeeded = runtime_discover_interpreter(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
         driver.interpreter = runtime.loader_path;

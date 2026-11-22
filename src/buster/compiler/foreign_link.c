@@ -364,11 +364,12 @@ static ImportResult foreign_link_locals(ForeignLink* output, const ForeignObject
 
 #include "buster/compiler/foreign_unwind_link.c"
 
-// The names the linker defines in a foreign output of `kind`: lld's for any output, which in a dynamic PIE and a shared
-// library are the static PIE runtime's set (the image's and the sections' bounds, _DYNAMIC) with the dynamic runtime's.
+// The names the linker defines in a foreign output of `kind`: lld's for any output, which in a dynamic executable and a
+// shared library are the static PIE runtime's set (the image's and the sections' bounds, _DYNAMIC) with the dynamic
+// runtime's.
 static bool foreign_link_linker_name(RuntimeKind kind, const uint8_t* bytes, uint32_t length)
 {
-    const bool dynamic = kind == RUNTIME_KIND_DYNAMIC || kind == RUNTIME_KIND_SHARED;
+    const bool dynamic = runtime_kind_is_dynamic_executable(kind) || kind == RUNTIME_KIND_SHARED;
     return runtime_linker_name(kind, bytes, length) || (dynamic && runtime_linker_name(RUNTIME_KIND_STATIC_PIE, bytes, length));
 }
 
@@ -1732,9 +1733,9 @@ static void foreign_link_build_begin(ForeignLinkBuild* build)
     *output = (ForeignLink){ 0 };
     ForeignLinkResult result = { 0 };
     LinkCapacity capacity = { 0 };
-    const bool kind_known = kind == RUNTIME_KIND_STATIC || kind == RUNTIME_KIND_STATIC_PIE || kind == RUNTIME_KIND_DYNAMIC || kind == RUNTIME_KIND_SHARED;
-    if (!foreign->started || foreign->failure.error != FOREIGN_ERROR_NONE || !kind_known ||
-        (kind == RUNTIME_KIND_DYNAMIC && (build->interpreter.pointer == 0 || build->interpreter.length == 0)))
+    const bool executable = runtime_kind_is_dynamic_executable(kind);
+    const bool kind_known = kind == RUNTIME_KIND_STATIC || kind == RUNTIME_KIND_STATIC_PIE || executable || kind == RUNTIME_KIND_SHARED;
+    if (!foreign->started || foreign->failure.error != FOREIGN_ERROR_NONE || !kind_known || (executable && (build->interpreter.pointer == 0 || build->interpreter.length == 0)))
     {
         result.error = FOREIGN_LINK_ERROR_INPUT;
     }
@@ -1742,10 +1743,10 @@ static void foreign_link_build_begin(ForeignLinkBuild* build)
     {
         result.error = foreign->libraries[library].needed ? FOREIGN_LINK_ERROR_UNSUPPORTED : FOREIGN_LINK_ERROR_NONE;
     }
-    // A shared library's libraries and versions are a dynamic PIE's, without the interpreter.
-    if (result.error == FOREIGN_LINK_ERROR_NONE && (kind == RUNTIME_KIND_DYNAMIC || kind == RUNTIME_KIND_SHARED))
+    // A shared library's libraries and versions are a dynamic executable's, without the interpreter.
+    if (result.error == FOREIGN_LINK_ERROR_NONE && (executable || kind == RUNTIME_KIND_SHARED))
     {
-        result.error = foreign_link_libraries(output, foreign, arena, kind == RUNTIME_KIND_DYNAMIC ? build->interpreter : (String8){ 0 });
+        result.error = foreign_link_libraries(output, foreign, arena, executable ? build->interpreter : (String8){ 0 });
     }
     build->scratch = scratch_begin(arena);
     uint32_t* order = result.error == FOREIGN_LINK_ERROR_NONE ? foreign_link_order(foreign, build->scratch.arena) : 0;
@@ -1947,10 +1948,10 @@ static bool foreign_link_startup_applies(const Foreign* foreign, RuntimeKind kin
     return options.applies_irelative || (entered && applies);
 }
 
-// The steps after the relocations but the check: the __start_ and __stop_ sections' relocations, a dynamic PIE's copies,
-// the dynamic images' _DYNAMIC, and the refusal of the IFUNCs a fixup reaches that the output can't take
-// (foreign_link_refuse_ifuncs): a shared library's that the loader can't bind, and every one of a static link whose
-// startup applies no IRELATIVE relocation (foreign_link_startup_applies).
+// The steps after the relocations but the check: the __start_ and __stop_ sections' relocations, a dynamic
+// executable's copies, the dynamic images' _DYNAMIC, and the refusal of the IFUNCs a fixup reaches that the output
+// can't take (foreign_link_refuse_ifuncs): a shared library's that the loader can't bind, and every one of a static
+// link whose startup applies no IRELATIVE relocation (foreign_link_startup_applies).
 static void foreign_link_build_end(ForeignLinkBuild* build)
 {
     ForeignLink* output = build->output;
@@ -1961,7 +1962,7 @@ static void foreign_link_build_end(ForeignLinkBuild* build)
         result.import = foreign_link_bounds_relocations(output, foreign, &build->bounds, build->arena);
         result.error = result.import.error != IMPORT_ERROR_NONE ? FOREIGN_LINK_ERROR_IMPORT : FOREIGN_LINK_ERROR_NONE;
     }
-    if (result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_DYNAMIC)
+    if (result.error == FOREIGN_LINK_ERROR_NONE && runtime_kind_is_dynamic_executable(build->kind))
     {
         result = foreign_link_copies(output, foreign, build->arena);
     }
@@ -2041,9 +2042,11 @@ static ForeignLinkError foreign_link_shared_finish(ForeignLink* output, const Fo
 // The step after the check: a dynamic PIE's exports, a shared library's or a static executable's inputs for the writer.
 static void foreign_link_build_finish(ForeignLinkBuild* build)
 {
-    if (build->result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_DYNAMIC)
+    if (build->result.error == FOREIGN_LINK_ERROR_NONE && runtime_kind_is_dynamic_executable(build->kind))
     {
         build->result.error = foreign_link_dynamic_finish(build->output, build->foreign, build->arena);
+        // -no-pie's: an ET_EXEC at a fixed address, with a dynamic PIE's dynamic metadata (#1503).
+        build->output->dynamic.position_dependent = build->kind == RUNTIME_KIND_NO_PIE;
     }
     else if (build->result.error == FOREIGN_LINK_ERROR_NONE && build->kind == RUNTIME_KIND_SHARED)
     {

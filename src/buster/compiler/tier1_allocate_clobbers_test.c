@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Clobbers (Tier1AllocationInput.clobbers, #2574): literal traces of a recomputable value that a clobber evicts from its
-// register and that comes back at its next required use, and of the values it leaves alone; the refusals of malformed
-// clobbers; and random inputs on all three entry points against the interval verifier, the position occupancy oracle and
-// two independent properties: no recomputable value holds a clobbered register across a clobber but where a use requires
-// it there, and clobbers change no allocation of values without recipes. Included by tier1_allocate_test_cases.c.
+// Clobbers (Tier1AllocationInput.clobbers, #2574): literal traces of a recomputable value that a clobber evicts from
+// its register and that comes back at its next required use, and of the values it leaves alone; the refusals of
+// malformed clobbers; and random inputs on both entry points (tier1_allocate and the scan reference) against the
+// interval verifier, the position occupancy oracle and two independent properties: no recomputable value holds a
+// clobbered register across a clobber but where a use requires it there, and clobbers change no allocation of values
+// without recipes. Included by tier1_allocate_test_cases.c.
 
 // The literal traces: one general class of r0 and r1, two values, a clobber at position 4.
 static void tier1_allocation_test_clobber_traces(Tier1AllocationTestTally* tally, Arena* arena)
@@ -102,20 +103,17 @@ static void tier1_allocation_test_clobber_traces(Tier1AllocationTestTally* tally
             .position_count = 12,
             .registers = { 3 },
         };
-        Tier1Allocation outputs[3] = { { 0 } };
-        bool produced = true;
+        Tier1Allocation outputs[2] = { { 0 } };
         const uint64_t saved = arena->length;
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
             const Tier1Allocation* output = &outputs[path];
             bool valid = error == TIER1_ALLOCATION_OK && output->fragment_count == fragments[fixture] && tier1_allocation_verify(&input, output) && tier1_allocation_test_occupancy(&input, output);
             valid = valid && memcmp(output->kinds, expected_kinds[fixture], fragments[fixture]) == 0 && memcmp(output->registers, expected_registers[fixture], fragments[fixture]) == 0;
             valid = valid && memcmp(output->starts, expected_starts[fixture], fragments[fixture] * sizeof(uint32_t)) == 0 && output->spill_count == 0;
-            produced &= error == TIER1_ALLOCATION_OK;
             tier1_allocation_test_expect(tally, valid, names[fixture]);
         }
-        tier1_allocation_test_expect(tally, produced && tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths take the clobbers alike");
         arena_pop_to(arena, saved);
     }
     // Malformed clobbers: without required uses (nothing would take the value back), out of order, past the positions,
@@ -147,10 +145,10 @@ static void tier1_allocation_test_clobber_traces(Tier1AllocationTestTally* tally
         Tier1Allocation before;
         memset(&before, 0x5a, sizeof(before));
         bool refused = true;
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
             Tier1Allocation output = before;
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : path == 1 ? tier1_allocate_scalar(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
+            const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scan_reference(&input, arena, &output);
             refused &= error == TIER1_ALLOCATION_INVALID && arena->length == saved && memcmp(&output, &before, sizeof(output)) == 0;
         }
         tier1_allocation_test_expect(tally, refused, "malformed clobbers are refused, the arena and the result untouched");
@@ -249,20 +247,19 @@ static void tier1_allocation_test_clobbers(Tier1AllocationTestTally* tally, Aren
             .position_count = 144,
             .registers = { registers },
         };
-        Tier1Allocation outputs[3] = { { 0 } };
-        Tier1AllocationError errors[3];
-        for (uint32_t path = 0; path < 3; path += 1)
+        Tier1Allocation outputs[2] = { { 0 } };
+        Tier1AllocationError errors[2];
+        for (uint32_t path = 0; path < 2; path += 1)
         {
-            errors[path] = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : path == 1 ? tier1_allocate_scalar(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
+            errors[path] = path == 0 ? tier1_allocate(&input, arena, &outputs[path]) : tier1_allocate_scan_reference(&input, arena, &outputs[path]);
         }
-        const bool produced = errors[0] == TIER1_ALLOCATION_OK && errors[1] == TIER1_ALLOCATION_OK && errors[2] == TIER1_ALLOCATION_OK;
-        tier1_allocation_test_expect(tally, produced || (errors[0] == TIER1_ALLOCATION_CONSTRAINT && errors[1] == errors[0] && errors[2] == errors[0]), "clobbered allocation or explicit simultaneous-use conflict");
-        for (uint32_t path = 0; produced && path < 3; path += 1)
+        const bool produced = errors[0] == TIER1_ALLOCATION_OK && errors[1] == TIER1_ALLOCATION_OK;
+        tier1_allocation_test_expect(tally, produced || (errors[0] == TIER1_ALLOCATION_CONSTRAINT && errors[1] == errors[0]), "clobbered allocation or explicit simultaneous-use conflict");
+        for (uint32_t path = 0; produced && path < 2; path += 1)
         {
             tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &outputs[path]) && tier1_allocation_test_occupancy(&input, &outputs[path]), "clobbered allocation passes the verifier and the occupancy oracle");
             tier1_allocation_test_expect(tally, tier1_allocation_test_clobbered_free(&input, &outputs[path]), "no recipe holds a clobbered register across a clobber but where a use requires it");
         }
-        tier1_allocation_test_expect(tally, !produced || tier1_allocation_test_equal(&input, &outputs[0], &outputs[1]), "both production paths take the clobbers alike");
         // Without recipes the clobbers reach no value: each path's allocation is the one without them.
         Tier1AllocationInput plain = input;
         plain.rematerializable = 0;
@@ -270,12 +267,12 @@ static void tier1_allocation_test_clobbers(Tier1AllocationTestTally* tally, Aren
         unclobbered.clobbers = 0;
         unclobbered.clobber_count = 0;
         unclobbered.clobber_registers[BUSTER_TIER1_ALLOCATE_GPR] = 0;
-        for (uint32_t path = 0; path < 3; path += 1)
+        for (uint32_t path = 0; path < 2; path += 1)
         {
             Tier1Allocation with = { 0 };
             Tier1Allocation without = { 0 };
-            const Tier1AllocationError a = path == 0 ? tier1_allocate(&plain, arena, &with) : path == 1 ? tier1_allocate_scalar(&plain, arena, &with) : tier1_allocate_scan_reference(&plain, arena, &with);
-            const Tier1AllocationError b = path == 0 ? tier1_allocate(&unclobbered, arena, &without) : path == 1 ? tier1_allocate_scalar(&unclobbered, arena, &without) : tier1_allocate_scan_reference(&unclobbered, arena, &without);
+            const Tier1AllocationError a = path == 0 ? tier1_allocate(&plain, arena, &with) : tier1_allocate_scan_reference(&plain, arena, &with);
+            const Tier1AllocationError b = path == 0 ? tier1_allocate(&unclobbered, arena, &without) : tier1_allocate_scan_reference(&unclobbered, arena, &without);
             tier1_allocation_test_expect(tally, a == b && (a != TIER1_ALLOCATION_OK || tier1_allocation_test_equal(&plain, &with, &without)), "clobbers change no allocation of values without recipes");
         }
         arena_pop_to(arena, saved);

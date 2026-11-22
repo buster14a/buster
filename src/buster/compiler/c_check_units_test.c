@@ -2650,10 +2650,10 @@ static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* e
     char output[PATH_MAX];
     snprintf(output, sizeof(output), "%s/benchmark.txt", directory);
     char* arguments[] = { (char*)executable, "benchmark-check-units", "--units", "3", "--functions", "4", "--lanes", "1,2", "--runs", "1", NULL };
-    const int status = BUSTER_HOST_VECTOR ? check_units_test_run(directory, arguments, output, "/dev/null", false) : 0;
+    const int status = check_units_test_run(directory, arguments, output, "/dev/null", false);
     uint64_t length = 0;
-    char* text = BUSTER_HOST_VECTOR ? check_units_test_read(output, &length) : NULL;
-    const bool reported = !BUSTER_HOST_VECTOR || (text != NULL && strstr(text, "check units, --lanes 1: ") != NULL && strstr(text, "check units, --lanes 2: ") != NULL &&
+    char* text = check_units_test_read(output, &length);
+    const bool reported = (text != NULL && strstr(text, "check units, --lanes 1: ") != NULL && strstr(text, "check units, --lanes 2: ") != NULL &&
                                                   strstr(text, "time-runs: done, 0 failed processes") != NULL);
     check_units_test_expect(tally, status == 0 && reported, "the units' benchmark times each lane count", output);
     free(text);
@@ -2683,18 +2683,15 @@ static void check_units_test_benchmark(CheckUnitsTestTally* tally, const char* e
             refused[10 + a] = (char*)refusals[r][a];
             snprintf(detail + strlen(detail), sizeof(detail) - strlen(detail), "%s%s", a == 0 ? "" : " ", refusals[r][a]);
         }
-        const int refusal = BUSTER_HOST_VECTOR ? check_units_test_run(directory, refused, "/dev/null", "/dev/null", false) : 1;
+        const int refusal = check_units_test_run(directory, refused, "/dev/null", "/dev/null", false);
         check_units_test_expect(tally, refusal == 1, "the units' benchmark took a count or an option it can't", detail);
     }
     // A command that fails every time, as one with an option the driver doesn't take: the same status each run, which
     // time-runs alone would pass.
     char* failing[] = { (char*)executable, "benchmark-check-units", "--units", "2", "--functions", "2", "--lanes", "1", "--runs", "1", "--", "--no-such-option", NULL };
-    const int failed = BUSTER_HOST_VECTOR ? check_units_test_run(directory, failing, "/dev/null", "/dev/null", false) : 1;
+    const int failed = check_units_test_run(directory, failing, "/dev/null", "/dev/null", false);
     check_units_test_expect(tally, failed == 1, "the units' benchmark passed a command that fails", directory);
-    if (BUSTER_HOST_VECTOR)
-    {
-        printf("  benchmark: benchmark-check-units by 1 and 2 lanes; %u counts or options it can't take, and a command that fails, refused\n", (uint32_t)BUSTER_ARRAY_LENGTH(refusals));
-    }
+    printf("  benchmark: benchmark-check-units by 1 and 2 lanes; %u counts or options it can't take, and a command that fails, refused\n", (uint32_t)BUSTER_ARRAY_LENGTH(refusals));
 }
 
 #include "c_check_selectany_driver_test.c"

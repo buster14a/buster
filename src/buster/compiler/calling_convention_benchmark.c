@@ -1,44 +1,45 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The calling convention's benchmark (#137): each vector path of calling_convention.c against its scalar twin, on a
-// table of generated types and on random calls over them (docs/calling-convention.md has the numbers).
+// The calling convention's benchmark (#137): the vector paths of calling_convention.c, on a table of generated types
+// and on random calls over them (docs/calling-convention.md has the numbers).
 //
 // Usage: build/compiler benchmark-calling-convention [--seed N] [--count N] [--only classification|assignment]
-//            [--path vector|scalar] [--after-scalar MS]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...). The cases:
 //   - classification: a table of --count types (32,768), records and unions of 0 to 8 members mostly (scalars,
 //     pointers, bit-fields, arrays, small vectors, nested records and unions, a few packed, under #pragma pack or
 //     aligned) and the pointers, arrays, vectors and aligned typedefs their members have, classified from nothing (the
-//     builtin types aside) by abi_classify_all and abi_classify_all_scalar at each target vector width (16, 32 and 64
-//     bytes), per type and per record member; then, at 16 bytes, by abi_classify and abi_classify_scalar in the
-//     batches a front end hands them as it completes records: windows of the 1, 4 or 16 types it made since its last
-//     call, each in levels of types that depend only on earlier ones, a call per level.
+//     builtin types aside) by abi_classify_all at each target vector width (16, 32 and 64 bytes), per type and per
+//     record member; then, at 16 bytes, by abi_classify in the batches a front end hands it as it completes records:
+//     windows of the 1, 4 or 16 types it made since its last call, each in levels of types that depend only on earlier
+//     ones, a call per level.
 //   - assignment: --count calls (32,768) over the table's types, at 16 bytes: most of 0 to 6 arguments, some of 4 to
 //     14 and a few of 15 to 22, one in four variadic, whose arguments are integers and pointers mostly, then
 //     floating types, records that pass in registers and in memory, and now and then long double, __int128, a complex
-//     type or a vector (abi_benchmark_named_type and abi_benchmark_unnamed_type have the mix); by abi_assign and
-//     abi_assign_scalar, per argument, with the share of arguments abi_assign left to its twin. Then the same calls'
-//     shapes with integers, pointers and doubles alone (assign-simple), each of which needs one register of one class.
+//     type or a vector (abi_benchmark_named_type and abi_benchmark_unnamed_type have the mix); by abi_assign, per
+//     argument, with the share of arguments abi_assign left to its per-call fallback, abi_assign_call. Then the same
+//     calls' shapes with integers, pointers and doubles alone (assign-simple), each of which needs one register of one
+//     class.
 // Every run takes the whole table or every call once, and the defaults are more types and arguments than Zen 5's
 // branch predictor learns from run to run (#144's lesson): on the 9700X, with a table of 4,096 types the
 // classification mispredicts 3 to 10 times less often than with 16,384 or more, and runs up to 2.3 times as fast.
-// Each case first checks that its paths agree (the classification's rows, pass bits, stack bytes, alignments, storage,
-// layouts and results; the assignment's locations and calls), then reports the median of BUSTER_ABI_BENCHMARK_PASSES
-// passes that alternate which path runs first, each sample runs lasting at least BUSTER_ABI_BENCHMARK_SAMPLE_NS:
-// nanoseconds, and cycles, instructions, branch mispredictions and the throttle from the hardware counters (zero when
-// unavailable), per item. The throttle is PMCx1A0's umask 0x08, which #199 reads as the dispatch slots Zen 5's per-core
-// power cap takes. --path times one path alone, back to back; --after-scalar MS runs the case's twin, untimed, for MS
-// ms before each sample of the vector path, the state a compiler's vector phases run in after lighter ones (#199: 100
-// to 300). The exit status is 1 if the arguments are invalid or the paths disagree.
+// Each case first checks its results. For the default seed and --count, the classification's tables (every type's pass
+// bits, and each classified one's row, stack bytes, alignment, storage, layout and result) and the assignment's calls
+// and locations must match digests frozen from main's runs in which the vector paths agreed with the scalar twins #2924
+// removed (abi_benchmark_frozen). For any seed, the batches must classify as abi_classify_all does, and each call
+// assigned alone must get what the batch gave it. Then the case reports the median of BUSTER_ABI_BENCHMARK_PASSES
+// passes, each sample runs lasting at least BUSTER_ABI_BENCHMARK_SAMPLE_NS: nanoseconds, and cycles, instructions,
+// branch mispredictions and the throttle from the hardware counters (zero when unavailable), per item. The throttle is
+// PMCx1A0's umask 0x08, which #199 reads as the dispatch slots Zen 5's per-core power cap takes. The exit status is 1
+// if the arguments are invalid or a check fails.
 //
 // Layout, in this order: the clock, the counters, the medians and the random numbers; the world of types
 // (abi_benchmark_world_build); the measurement (AbiBenchmarkCase, the timed wrappers, abi_benchmark_measure); the
-// classification; the assignment (abi_benchmark_calls, abi_benchmark_deferred); run_calling_convention_benchmark.
+// digests; the classification; the assignment (abi_benchmark_calls, abi_benchmark_deferred);
+// run_calling_convention_benchmark.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -75,7 +76,6 @@ struct String8
 #define BUSTER_ABI_BENCHMARK_MIN_COUNT 16
 #define BUSTER_ABI_BENCHMARK_MAX_COUNT (1u << 18)
 #define BUSTER_ABI_BENCHMARK_MEMBERS 8
-#define BUSTER_ABI_BENCHMARK_AFTER_SCALAR_MAX_MS 10000
 // Room for the types one record makes besides itself (its members' pointers, arrays, vectors and aligned typedefs)
 // past --count, where the world stops, and the few the world makes first.
 #define BUSTER_ABI_BENCHMARK_SLACK_TYPES 64
@@ -87,10 +87,8 @@ struct String8
 // bits 0-7, the umask in bits 8-15 and the event's high nibble in bits 32-35 (benchmark-dataflow's, #199).
 #define BUSTER_ABI_BENCHMARK_THROTTLE_EVENT 0x1000008a0ull
 
-// The variants: the vector path and its twin.
-#define BUSTER_ABI_BENCHMARK_VECTOR 0
-#define BUSTER_ABI_BENCHMARK_SCALAR 1
-#define BUSTER_ABI_BENCHMARK_VARIANTS 2
+// The default seed: its runs at the default --count check their results by the frozen digests.
+#define BUSTER_ABI_BENCHMARK_DEFAULT_SEED 1
 
 // The cases' kinds.
 #define BUSTER_ABI_BENCHMARK_CLASSIFY_ALL 0
@@ -108,6 +106,20 @@ static const uint32_t abi_benchmark_windows[] = {
     1,
     4,
     16,
+};
+
+// The default seed's and --count's digests, from main's runs at bd197b2a6, in which the vector paths agreed with the
+// scalar twins #2924 removed: abi_benchmark_table_digest of classify-all's table at each of abi_benchmark_widths, and
+// abi_benchmark_assignment_digest of the assignment's mix and of its simple mix.
+static const uint64_t abi_benchmark_classify_digests[] = {
+    UINT64_C(0x24e6d3f777700e76),
+    UINT64_C(0xded879c3aa29ec2e),
+    UINT64_C(0x1309837698220d4e),
+};
+
+static const uint64_t abi_benchmark_assign_digests[] = {
+    UINT64_C(0x68122fcf4197e2af),
+    UINT64_C(0x838e403c882f2115),
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -469,17 +481,17 @@ static uint32_t abi_benchmark_dependencies(const TypeTable* table, uint32_t inde
 // ---------------------------------------------------------------------------------------------------------------------
 // The measurement
 
-// What a case measures: its kind and, per variant, what it works on.
+// What a case measures: its kind and what it works on.
 typedef struct AbiBenchmarkCase AbiBenchmarkCase;
 struct AbiBenchmarkCase
 {
     uint32_t kind;
     const char* name;
     const TypeTable* table;
-    // Per variant, the table it classifies into (classify-all starts it again before each run, from the arena that
-    // holds it), or the table the assignment reads.
-    AbiTable* abi[BUSTER_ABI_BENCHMARK_VARIANTS];
-    Arena* arena[BUSTER_ABI_BENCHMARK_VARIANTS];
+    // The table it classifies into (classify-all starts it again before each run, from the arena that holds it), or the
+    // table the assignment reads.
+    AbiTable* abi;
+    Arena* arena;
     uint32_t vector_bytes;
     // How many items a run takes (types or arguments), which each sample's totals are per, and what a classify-all
     // run returns.
@@ -491,8 +503,8 @@ struct AbiBenchmarkCase
     uint32_t batch_count;
     // The assignment.
     AbiSignatures signatures;
-    AbiLocation* locations[BUSTER_ABI_BENCHMARK_VARIANTS];
-    AbiCall* calls[BUSTER_ABI_BENCHMARK_VARIANTS];
+    AbiLocation* locations;
+    AbiCall* calls;
 };
 
 typedef struct AbiBenchmarkOptions AbiBenchmarkOptions;
@@ -500,36 +512,28 @@ struct AbiBenchmarkOptions
 {
     uint64_t seed;
     uint32_t count;
-    // A bit per variant to time (--path), BUSTER_ABI_BENCHMARK_VECTOR's and BUSTER_ABI_BENCHMARK_SCALAR's.
-    uint32_t timed;
-    uint64_t after_scalar;
     bool classification;
     bool assignment;
 };
 
 // What a case's passes measured: nanoseconds, cycles, instructions, branch mispredictions and the throttle's slots per
-// item, per variant and pass.
+// item, per pass.
 typedef struct AbiBenchmarkSamples AbiBenchmarkSamples;
 struct AbiBenchmarkSamples
 {
-    double nanoseconds[BUSTER_ABI_BENCHMARK_VARIANTS][BUSTER_ABI_BENCHMARK_PASSES];
-    double cycles[BUSTER_ABI_BENCHMARK_VARIANTS][BUSTER_ABI_BENCHMARK_PASSES];
-    double instructions[BUSTER_ABI_BENCHMARK_VARIANTS][BUSTER_ABI_BENCHMARK_PASSES];
-    double branch_misses[BUSTER_ABI_BENCHMARK_VARIANTS][BUSTER_ABI_BENCHMARK_PASSES];
-    double throttle[BUSTER_ABI_BENCHMARK_VARIANTS][BUSTER_ABI_BENCHMARK_PASSES];
+    double nanoseconds[BUSTER_ABI_BENCHMARK_PASSES];
+    double cycles[BUSTER_ABI_BENCHMARK_PASSES];
+    double instructions[BUSTER_ABI_BENCHMARK_PASSES];
+    double branch_misses[BUSTER_ABI_BENCHMARK_PASSES];
+    double throttle[BUSTER_ABI_BENCHMARK_PASSES];
 };
 
-// The timed calls, each in a function of its own that starts a 64-byte line, so that every build lays the paths' loops
-// out in lines the same way however much driver code comes before them (docs/dataflow.md, "Where the scalar twin's
-// code falls").
+// The timed calls, each in a function of its own that starts a 64-byte line, so that every build lays their loops out
+// in lines the same way however much driver code comes before them (docs/dataflow.md, "Where the scalar twin's code
+// falls").
 static __attribute__((noinline, aligned(64))) uint32_t abi_benchmark_classify_all_vector(AbiTable* abi, const TypeTable* table)
 {
     return abi_classify_all(abi, table);
-}
-
-static __attribute__((noinline, aligned(64))) uint32_t abi_benchmark_classify_all_scalar(AbiTable* abi, const TypeTable* table)
-{
-    return abi_classify_all_scalar(abi, table);
 }
 
 static __attribute__((noinline, aligned(64))) void abi_benchmark_batches_vector(AbiTable* abi, const TypeTable* table, const TypeId* types, const uint32_t* starts,
@@ -541,82 +545,58 @@ static __attribute__((noinline, aligned(64))) void abi_benchmark_batches_vector(
     }
 }
 
-static __attribute__((noinline, aligned(64))) void abi_benchmark_batches_scalar(AbiTable* abi, const TypeTable* table, const TypeId* types, const uint32_t* starts,
-                                                                               uint32_t batch_count)
-{
-    for (uint32_t b = 0; b < batch_count; b += 1)
-    {
-        abi_classify_scalar(abi, table, types + starts[b], starts[b + 1] - starts[b]);
-    }
-}
-
 static __attribute__((noinline, aligned(64))) void abi_benchmark_assign_vector(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
     abi_assign(abi, signatures, locations, calls);
 }
 
-static __attribute__((noinline, aligned(64))) void abi_benchmark_assign_scalar(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
-{
-    abi_assign_scalar(abi, signatures, locations, calls);
-}
-
-// Readies a variant's run, outside the time: classify-all starts its table again, with only the builtin types
-// classified. Returns false if abi_initialize fails.
-static bool abi_benchmark_prepare(const AbiBenchmarkCase* benchmark, uint32_t variant)
+// Readies a run, outside the time: classify-all starts its table again, with only the builtin types classified.
+// Returns false if abi_initialize fails.
+static bool abi_benchmark_prepare(const AbiBenchmarkCase* benchmark)
 {
     bool result = true;
     if (benchmark->kind == BUSTER_ABI_BENCHMARK_CLASSIFY_ALL)
     {
-        arena_pop_to(benchmark->arena[variant], 0);
-        result = abi_initialize(benchmark->abi[variant], benchmark->arena[variant], benchmark->table, benchmark->vector_bytes);
+        arena_pop_to(benchmark->arena, 0);
+        result = abi_initialize(benchmark->abi, benchmark->arena, benchmark->table, benchmark->vector_bytes);
     }
     return result;
 }
 
-// One run of a variant. Returns false if a classify-all run classified another count of types than the case's.
-static bool abi_benchmark_execute(const AbiBenchmarkCase* benchmark, uint32_t variant)
+// One run. Returns false if a classify-all run classified another count of types than the case's.
+static bool abi_benchmark_execute(const AbiBenchmarkCase* benchmark)
 {
-    AbiTable* abi = benchmark->abi[variant];
+    AbiTable* abi = benchmark->abi;
     bool result = true;
     if (benchmark->kind == BUSTER_ABI_BENCHMARK_CLASSIFY_ALL)
     {
-        const uint32_t classified = variant == BUSTER_ABI_BENCHMARK_VECTOR ? abi_benchmark_classify_all_vector(abi, benchmark->table)
-                                                                            : abi_benchmark_classify_all_scalar(abi, benchmark->table);
-        result = classified == benchmark->classified;
-    }
-    else if (benchmark->kind == BUSTER_ABI_BENCHMARK_BATCHES && variant == BUSTER_ABI_BENCHMARK_VECTOR)
-    {
-        abi_benchmark_batches_vector(abi, benchmark->table, benchmark->types, benchmark->starts, benchmark->batch_count);
+        result = abi_benchmark_classify_all_vector(abi, benchmark->table) == benchmark->classified;
     }
     else if (benchmark->kind == BUSTER_ABI_BENCHMARK_BATCHES)
     {
-        abi_benchmark_batches_scalar(abi, benchmark->table, benchmark->types, benchmark->starts, benchmark->batch_count);
-    }
-    else if (variant == BUSTER_ABI_BENCHMARK_VECTOR)
-    {
-        abi_benchmark_assign_vector(abi, benchmark->signatures, benchmark->locations[variant], benchmark->calls[variant]);
+        abi_benchmark_batches_vector(abi, benchmark->table, benchmark->types, benchmark->starts, benchmark->batch_count);
     }
     else
     {
-        abi_benchmark_assign_scalar(abi, benchmark->signatures, benchmark->locations[variant], benchmark->calls[variant]);
+        abi_benchmark_assign_vector(abi, benchmark->signatures, benchmark->locations, benchmark->calls);
     }
     return result;
 }
 
-// A sample: runs of a variant, each readied outside the time, until they have lasted BUSTER_ABI_BENCHMARK_SAMPLE_NS;
-// their totals in `total` and their count in `runs`.
-static bool abi_benchmark_sample(const AbiBenchmarkCase* benchmark, uint32_t variant, AbiBenchmarkCounters counters, AbiBenchmarkReading* total, uint64_t* runs)
+// A sample: runs, each readied outside the time, until they have lasted BUSTER_ABI_BENCHMARK_SAMPLE_NS; their totals
+// in `total` and their count in `runs`.
+static bool abi_benchmark_sample(const AbiBenchmarkCase* benchmark, AbiBenchmarkCounters counters, AbiBenchmarkReading* total, uint64_t* runs)
 {
     bool valid = true;
     *total = (AbiBenchmarkReading){ 0 };
     *runs = 0;
     while (valid && total->nanoseconds < BUSTER_ABI_BENCHMARK_SAMPLE_NS && *runs < BUSTER_ABI_BENCHMARK_MAX_RUNS)
     {
-        valid = abi_benchmark_prepare(benchmark, variant);
+        valid = abi_benchmark_prepare(benchmark);
         if (valid)
         {
             const AbiBenchmarkReading begin = abi_benchmark_begin(counters);
-            valid = abi_benchmark_execute(benchmark, variant);
+            valid = abi_benchmark_execute(benchmark);
             abi_benchmark_end(counters, begin, total);
             *runs += 1;
         }
@@ -624,84 +604,122 @@ static bool abi_benchmark_sample(const AbiBenchmarkCase* benchmark, uint32_t var
     return valid;
 }
 
-// --after-scalar: runs of the case's twin for at least `milliseconds`, untimed, before a sample of the vector path. A
-// compiler runs its vector phases in short bursts after lighter ones, which let the clock boost (from about 5.31 to
-// 5.52 GHz on the 9700X, over 30 to 300 ms), and at that clock a heavy vector loop runs under the core's power cap
-// until the clock comes down, 5 to 20 ms later (#199). Back-to-back samples miss that state.
-static bool abi_benchmark_after_scalar(const AbiBenchmarkCase* benchmark, uint64_t milliseconds)
+// A sample to warm the caches and the scratch arenas' pages, then the passes.
+static bool abi_benchmark_measure(const AbiBenchmarkCase* benchmark, AbiBenchmarkCounters counters, AbiBenchmarkSamples* samples)
 {
-    const uint64_t end = abi_benchmark_now() + milliseconds * 1000000ull;
-    bool valid = true;
-    while (valid && abi_benchmark_now() < end)
-    {
-        valid = abi_benchmark_prepare(benchmark, BUSTER_ABI_BENCHMARK_SCALAR) && abi_benchmark_execute(benchmark, BUSTER_ABI_BENCHMARK_SCALAR);
-    }
-    return valid;
-}
-
-// A sample of each timed variant to warm the caches and the scratch arenas' pages, then the passes, which alternate
-// which variant runs first.
-static bool abi_benchmark_measure(const AbiBenchmarkCase* benchmark, AbiBenchmarkOptions options, AbiBenchmarkCounters counters, AbiBenchmarkSamples* samples)
-{
-    bool valid = true;
-    for (uint32_t variant = 0; valid && variant < BUSTER_ABI_BENCHMARK_VARIANTS; variant += 1)
-    {
-        AbiBenchmarkReading total;
-        uint64_t runs = 0;
-        valid = (options.timed & (1u << variant)) == 0 || abi_benchmark_sample(benchmark, variant, counters, &total, &runs);
-    }
+    AbiBenchmarkReading total;
+    uint64_t runs = 0;
+    bool valid = abi_benchmark_sample(benchmark, counters, &total, &runs);
     for (uint32_t pass = 0; valid && pass < BUSTER_ABI_BENCHMARK_PASSES; pass += 1)
     {
-        for (uint32_t turn = 0; valid && turn < BUSTER_ABI_BENCHMARK_VARIANTS; turn += 1)
+        valid = abi_benchmark_sample(benchmark, counters, &total, &runs);
+        if (valid)
         {
-            const uint32_t variant = (pass + turn) % BUSTER_ABI_BENCHMARK_VARIANTS;
-            if ((options.timed & (1u << variant)) != 0)
-            {
-                AbiBenchmarkReading total;
-                uint64_t runs = 0;
-                if (variant == BUSTER_ABI_BENCHMARK_VECTOR && options.after_scalar != 0)
-                {
-                    valid = abi_benchmark_after_scalar(benchmark, options.after_scalar);
-                }
-                valid = valid && abi_benchmark_sample(benchmark, variant, counters, &total, &runs);
-                const double items = (double)runs * (double)benchmark->items;
-                samples->nanoseconds[variant][pass] = (double)total.nanoseconds / items;
-                samples->cycles[variant][pass] = (double)total.cycles / items;
-                samples->instructions[variant][pass] = (double)total.instructions / items;
-                samples->branch_misses[variant][pass] = (double)total.branch_misses / items;
-                samples->throttle[variant][pass] = (double)total.throttle / items;
-            }
+            const double items = (double)runs * (double)benchmark->items;
+            samples->nanoseconds[pass] = (double)total.nanoseconds / items;
+            samples->cycles[pass] = (double)total.cycles / items;
+            samples->instructions[pass] = (double)total.instructions / items;
+            samples->branch_misses[pass] = (double)total.branch_misses / items;
+            samples->throttle[pass] = (double)total.throttle / items;
         }
     }
     return valid;
 }
 
-// A row per timed variant: the medians per `unit`, and with `per_secondary` (items per secondary unit, 0 for none) the
-// time and cycles per `secondary` too.
-static void abi_benchmark_print(const char* name, uint32_t timed, const AbiBenchmarkSamples* samples, const char* unit, double per_secondary, const char* secondary)
+// The medians per `unit`, and with `per_secondary` (items per secondary unit, 0 for none) the time and cycles per
+// `secondary` too.
+static void abi_benchmark_print(const char* name, const AbiBenchmarkSamples* samples, const char* unit, double per_secondary, const char* secondary)
 {
-    const char* names[BUSTER_ABI_BENCHMARK_VARIANTS] = {
-        "vector",
-        "scalar",
-    };
-    for (uint32_t variant = 0; variant < BUSTER_ABI_BENCHMARK_VARIANTS; variant += 1)
+    const double nanoseconds = abi_benchmark_median(samples->nanoseconds);
+    const double cycles = abi_benchmark_median(samples->cycles);
+    const double instructions = abi_benchmark_median(samples->instructions);
+    const double branch_misses = abi_benchmark_median(samples->branch_misses);
+    const double throttle = abi_benchmark_median(samples->throttle);
+    printf("  %-13s %8.2f ns/%s %8.2f cycles/%s %8.2f instructions/%s %5.2f IPC %6.3f mispredicts/%s %7.3f throttle/%s", name, nanoseconds, unit, cycles, unit, instructions,
+           unit, cycles != 0 ? instructions / cycles : 0, branch_misses, unit, throttle, unit);
+    if (per_secondary != 0)
     {
-        if ((timed & (1u << variant)) != 0)
+        printf(" %7.2f ns/%s %7.2f cycles/%s", nanoseconds * per_secondary, secondary, cycles * per_secondary, secondary);
+    }
+    printf("\n");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The digests
+
+// FNV-1a over bytes, continuing from hash.
+static uint64_t abi_benchmark_hash(uint64_t hash, const void* data, uint64_t bytes)
+{
+    const uint8_t* byte = data;
+    for (uint64_t i = 0; i < bytes; i += 1)
+    {
+        hash = (hash ^ byte[i]) * UINT64_C(0x100000001b3);
+    }
+    return hash;
+}
+
+// The classification of the types below `count`, field by field: every type's pass bits, and a classified type's row,
+// stack bytes, alignment, storage, layout and result (test-calling-convention's digest).
+static uint64_t abi_benchmark_table_digest(const AbiTable* abi, uint32_t count)
+{
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    for (uint32_t index = 1; index < count; index += 1)
+    {
+        hash = abi_benchmark_hash(hash, &abi->pass[index], sizeof(abi->pass[index]));
+        if ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0)
         {
-            const double nanoseconds = abi_benchmark_median(samples->nanoseconds[variant]);
-            const double cycles = abi_benchmark_median(samples->cycles[variant]);
-            const double instructions = abi_benchmark_median(samples->instructions[variant]);
-            const double branch_misses = abi_benchmark_median(samples->branch_misses[variant]);
-            const double throttle = abi_benchmark_median(samples->throttle[variant]);
-            printf("  %-13s %-6s %8.2f ns/%s %8.2f cycles/%s %8.2f instructions/%s %5.2f IPC %6.3f mispredicts/%s %7.3f throttle/%s", name, names[variant], nanoseconds, unit,
-                   cycles, unit, instructions, unit, cycles != 0 ? instructions / cycles : 0, branch_misses, unit, throttle, unit);
-            if (per_secondary != 0)
-            {
-                printf(" %7.2f ns/%s %7.2f cycles/%s", nanoseconds * per_secondary, secondary, cycles * per_secondary, secondary);
-            }
-            printf("\n");
+            const AbiReturn result = abi->results[index];
+            hash = abi_benchmark_hash(hash, abi->rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES);
+            hash = abi_benchmark_hash(hash, &abi->stack_bytes[index], sizeof(abi->stack_bytes[index]));
+            hash = abi_benchmark_hash(hash, &abi->alignment_log2[index], sizeof(abi->alignment_log2[index]));
+            hash = abi_benchmark_hash(hash, &abi->storage[index], sizeof(abi->storage[index]));
+            hash = abi_benchmark_hash(hash, &abi->layout[index], sizeof(abi->layout[index]));
+            hash = abi_benchmark_hash(hash, &result.kind, sizeof(result.kind));
+            hash = abi_benchmark_hash(hash, &result.flags, sizeof(result.flags));
+            hash = abi_benchmark_hash(hash, &result.part_bytes, sizeof(result.part_bytes));
+            hash = abi_benchmark_hash(hash, result.registers, sizeof(result.registers));
         }
     }
+    return hash;
+}
+
+// An assignment's calls and locations, field by field (test-calling-convention's digest).
+static uint64_t abi_benchmark_assignment_digest(const AbiCall* calls, uint32_t call_count, const AbiLocation* locations, uint64_t location_count)
+{
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    for (uint32_t c = 0; c < call_count; c += 1)
+    {
+        const AbiCall call = calls[c];
+        hash = abi_benchmark_hash(hash, &call.stack_bytes, sizeof(call.stack_bytes));
+        hash = abi_benchmark_hash(hash, &call.stack_alignment_log2, sizeof(call.stack_alignment_log2));
+        hash = abi_benchmark_hash(hash, &call.integer_registers, sizeof(call.integer_registers));
+        hash = abi_benchmark_hash(hash, &call.vector_registers, sizeof(call.vector_registers));
+        hash = abi_benchmark_hash(hash, &call.result.kind, sizeof(call.result.kind));
+        hash = abi_benchmark_hash(hash, &call.result.flags, sizeof(call.result.flags));
+        hash = abi_benchmark_hash(hash, &call.result.part_bytes, sizeof(call.result.part_bytes));
+        hash = abi_benchmark_hash(hash, call.result.registers, sizeof(call.result.registers));
+    }
+    for (uint64_t l = 0; l < location_count; l += 1)
+    {
+        const AbiLocation location = locations[l];
+        hash = abi_benchmark_hash(hash, &location.stack_offset, sizeof(location.stack_offset));
+        hash = abi_benchmark_hash(hash, location.registers, sizeof(location.registers));
+        hash = abi_benchmark_hash(hash, &location.kind, sizeof(location.kind));
+        hash = abi_benchmark_hash(hash, &location.flags, sizeof(location.flags));
+    }
+    return hash;
+}
+
+// Whether a digest of a run at the default seed and --count is the frozen one; other runs have none to match.
+static bool abi_benchmark_frozen(AbiBenchmarkOptions options, const char* what, uint64_t digest, uint64_t frozen)
+{
+    const bool checked = options.seed == BUSTER_ABI_BENCHMARK_DEFAULT_SEED && options.count == BUSTER_ABI_BENCHMARK_DEFAULT_COUNT;
+    const bool result = !checked || digest == frozen;
+    if (!result)
+    {
+        fprintf(stderr, "benchmark-calling-convention: %s: the digest 0x%016" PRIx64 " isn't the frozen 0x%016" PRIx64 "\n", what, digest, frozen);
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -858,18 +876,23 @@ static uint32_t abi_benchmark_records_in_memory(const AbiBenchmarkWorld* world, 
     return result;
 }
 
-// The tables a case classifies into: one per variant, and a reference the twin classified, each in an arena of its own.
+// The tables a case classifies into: the timed one, and the reference abi_classify_all classified, which the batches
+// must match, each in an arena of its own.
+#define BUSTER_ABI_BENCHMARK_TIMED 0
+#define BUSTER_ABI_BENCHMARK_REFERENCE 1
+#define BUSTER_ABI_BENCHMARK_TABLES 2
+
 typedef struct AbiBenchmarkTables AbiBenchmarkTables;
 struct AbiBenchmarkTables
 {
-    AbiTable abi[BUSTER_ABI_BENCHMARK_VARIANTS + 1];
-    Arena arena[BUSTER_ABI_BENCHMARK_VARIANTS + 1];
+    AbiTable abi[BUSTER_ABI_BENCHMARK_TABLES];
+    Arena arena[BUSTER_ABI_BENCHMARK_TABLES];
 };
 
 static bool abi_benchmark_tables_open(AbiBenchmarkTables* tables, const TypeTable* table)
 {
     bool result = true;
-    for (uint32_t t = 0; t < BUSTER_ABI_BENCHMARK_VARIANTS + 1; t += 1)
+    for (uint32_t t = 0; t < BUSTER_ABI_BENCHMARK_TABLES; t += 1)
     {
         tables->arena[t] = arena_reserve(abi_capacity_bytes(table->types.capacity));
         result = result && tables->arena[t].base != 0;
@@ -879,7 +902,7 @@ static bool abi_benchmark_tables_open(AbiBenchmarkTables* tables, const TypeTabl
 
 static void abi_benchmark_tables_close(AbiBenchmarkTables* tables)
 {
-    for (uint32_t t = 0; t < BUSTER_ABI_BENCHMARK_VARIANTS + 1; t += 1)
+    for (uint32_t t = 0; t < BUSTER_ABI_BENCHMARK_TABLES; t += 1)
     {
         arena_release(&tables->arena[t]);
     }
@@ -892,61 +915,55 @@ static bool abi_benchmark_tables_start(AbiBenchmarkTables* tables, uint32_t t, c
     return abi_initialize(&tables->abi[t], &tables->arena[t], table, vector_bytes);
 }
 
-// classify-all at one width: both paths from nothing into tables of their own, which must agree, then timed.
-static bool abi_benchmark_classify_all(const AbiBenchmarkWorld* world, AbiBenchmarkTables* tables, uint32_t vector_bytes, uint32_t classified, AbiBenchmarkOptions options,
+// classify-all at abi_benchmark_widths[w]: from nothing into the timed table, checked by its count and, for the default
+// seed and --count, its frozen digest, then timed.
+static bool abi_benchmark_classify_all(const AbiBenchmarkWorld* world, AbiBenchmarkTables* tables, uint32_t w, uint32_t classified, AbiBenchmarkOptions options,
                                        AbiBenchmarkCounters counters)
 {
     const TypeTable* table = &world->table;
+    const uint32_t vector_bytes = abi_benchmark_widths[w];
+    AbiTable* abi = &tables->abi[BUSTER_ABI_BENCHMARK_TIMED];
     static AbiBenchmarkSamples samples;
-    bool valid = abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_VECTOR, table, vector_bytes) &&
-                 abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_SCALAR, table, vector_bytes);
-    if (valid)
-    {
-        const uint32_t vector_count = abi_classify_all(&tables->abi[BUSTER_ABI_BENCHMARK_VECTOR], table);
-        const uint32_t scalar_count = abi_classify_all_scalar(&tables->abi[BUSTER_ABI_BENCHMARK_SCALAR], table);
-        valid = vector_count == classified && scalar_count == classified &&
-                abi_benchmark_same_tables(&tables->abi[BUSTER_ABI_BENCHMARK_VECTOR], &tables->abi[BUSTER_ABI_BENCHMARK_SCALAR], table->types.count, "classify-all");
-    }
+    char what[64];
+    snprintf(what, sizeof(what), "classify-all at %u-byte vectors", vector_bytes);
+    bool valid = abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_TIMED, table, vector_bytes);
+    valid = valid && abi_classify_all(abi, table) == classified;
+    valid = valid && abi_benchmark_frozen(options, what, abi_benchmark_table_digest(abi, table->types.count), abi_benchmark_classify_digests[w]);
     if (valid)
     {
         const AbiBenchmarkCase benchmark = {
             .kind = BUSTER_ABI_BENCHMARK_CLASSIFY_ALL,
             .name = "classify-all",
             .table = table,
-            .abi = {
-                &tables->abi[BUSTER_ABI_BENCHMARK_VECTOR],
-                &tables->abi[BUSTER_ABI_BENCHMARK_SCALAR],
-            },
-            .arena = {
-                &tables->arena[BUSTER_ABI_BENCHMARK_VECTOR],
-                &tables->arena[BUSTER_ABI_BENCHMARK_SCALAR],
-            },
+            .abi = abi,
+            .arena = &tables->arena[BUSTER_ABI_BENCHMARK_TIMED],
             .vector_bytes = vector_bytes,
             .items = classified,
             .classified = classified,
         };
-        const uint32_t in_memory = abi_benchmark_records_in_memory(world, &tables->abi[BUSTER_ABI_BENCHMARK_SCALAR]);
-        valid = abi_benchmark_measure(&benchmark, options, counters, &samples);
+        const uint32_t in_memory = abi_benchmark_records_in_memory(world, abi);
+        valid = abi_benchmark_measure(&benchmark, counters, &samples);
         if (valid)
         {
             printf("classify-all, %u-byte vectors: %u of the %u records in memory\n", vector_bytes, in_memory, world->record_count);
             const double types_per_member = world->member_count != 0 ? (double)classified / (double)world->member_count : 0;
-            abi_benchmark_print(benchmark.name, options.timed, &samples, "type", types_per_member, "member");
+            abi_benchmark_print(benchmark.name, &samples, "type", types_per_member, "member");
         }
     }
     if (!valid)
     {
-        fprintf(stderr, "benchmark-calling-convention: classify-all at %u-byte vectors failed or the paths disagree\n", vector_bytes);
+        fprintf(stderr, "benchmark-calling-convention: %s failed or its results are wrong\n", what);
     }
     return valid;
 }
 
-// The batches at the base width: both paths' batches into fresh tables, which must agree with the twin's classify-all,
-// then timed (classifying a type again gives it the same row, so runs need no reset).
-static bool abi_benchmark_batches(const AbiBenchmarkWorld* world, AbiBenchmarkTables* tables, const TypeId* types, uint32_t classified, Arena* arena, AbiBenchmarkOptions options,
+// The batches at the base width: into a fresh table, which must match the reference abi_classify_all classified, then
+// timed (classifying a type again gives it the same row, so runs need no reset).
+static bool abi_benchmark_batches(const AbiBenchmarkWorld* world, AbiBenchmarkTables* tables, const TypeId* types, uint32_t classified, Arena* arena,
                                   AbiBenchmarkCounters counters)
 {
     const TypeTable* table = &world->table;
+    AbiTable* abi = &tables->abi[BUSTER_ABI_BENCHMARK_TIMED];
     static AbiBenchmarkSamples samples;
     const uint64_t length = arena->length;
     uint32_t* window_of = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, table->types.count);
@@ -954,20 +971,17 @@ static bool abi_benchmark_batches(const AbiBenchmarkWorld* world, AbiBenchmarkTa
     TypeId* order = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, classified);
     uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)classified + 1);
     bool valid = window_of != 0 && level_of != 0 && order != 0 && starts != 0 &&
-                 abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_VARIANTS, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES);
-    valid = valid && abi_classify_all_scalar(&tables->abi[BUSTER_ABI_BENCHMARK_VARIANTS], table) == classified;
+                 abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_REFERENCE, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES);
+    valid = valid && abi_classify_all(&tables->abi[BUSTER_ABI_BENCHMARK_REFERENCE], table) == classified;
     for (uint32_t s = 0; valid && s < BUSTER_ARRAY_LENGTH(abi_benchmark_windows); s += 1)
     {
         const uint32_t window = abi_benchmark_windows[s];
         const uint32_t batch_count = abi_benchmark_cut_batches(table, types, classified, window, window_of, level_of, order, starts);
-        valid = abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_VECTOR, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES) &&
-                abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_SCALAR, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES);
+        valid = abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_TIMED, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES);
         if (valid)
         {
-            abi_benchmark_batches_vector(&tables->abi[BUSTER_ABI_BENCHMARK_VECTOR], table, order, starts, batch_count);
-            abi_benchmark_batches_scalar(&tables->abi[BUSTER_ABI_BENCHMARK_SCALAR], table, order, starts, batch_count);
-            valid = abi_benchmark_same_tables(&tables->abi[BUSTER_ABI_BENCHMARK_VECTOR], &tables->abi[BUSTER_ABI_BENCHMARK_VARIANTS], table->types.count, "batches") &&
-                    abi_benchmark_same_tables(&tables->abi[BUSTER_ABI_BENCHMARK_SCALAR], &tables->abi[BUSTER_ABI_BENCHMARK_VARIANTS], table->types.count, "batches");
+            abi_benchmark_batches_vector(abi, table, order, starts, batch_count);
+            valid = abi_benchmark_same_tables(abi, &tables->abi[BUSTER_ABI_BENCHMARK_REFERENCE], table->types.count, "batches");
         }
         char name[32];
         snprintf(name, sizeof(name), "batches-%u", window);
@@ -975,27 +989,24 @@ static bool abi_benchmark_batches(const AbiBenchmarkWorld* world, AbiBenchmarkTa
             .kind = BUSTER_ABI_BENCHMARK_BATCHES,
             .name = name,
             .table = table,
-            .abi = {
-                &tables->abi[BUSTER_ABI_BENCHMARK_VECTOR],
-                &tables->abi[BUSTER_ABI_BENCHMARK_SCALAR],
-            },
+            .abi = abi,
             .vector_bytes = BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES,
             .items = classified,
             .types = order,
             .starts = starts,
             .batch_count = batch_count,
         };
-        valid = valid && abi_benchmark_measure(&benchmark, options, counters, &samples);
+        valid = valid && abi_benchmark_measure(&benchmark, counters, &samples);
         if (valid)
         {
             printf("batches, windows of %u types, %u-byte vectors: %u calls of abi_classify, %.2f types each\n", window, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES, batch_count,
                    (double)classified / (double)batch_count);
-            abi_benchmark_print(benchmark.name, options.timed, &samples, "type", 0, 0);
+            abi_benchmark_print(benchmark.name, &samples, "type", 0, 0);
         }
     }
     if (!valid)
     {
-        fprintf(stderr, "benchmark-calling-convention: the batches failed or the paths disagree\n");
+        fprintf(stderr, "benchmark-calling-convention: the batches failed or classified otherwise than abi_classify_all\n");
     }
     arena_pop_to(arena, length);
     return valid;
@@ -1015,9 +1026,9 @@ static bool abi_benchmark_classification(const AbiBenchmarkWorld* world, Arena* 
         abi_benchmark_describe(world, classified, abi_benchmark_levels(table, types, classified, level_of));
         for (uint32_t w = 0; valid && w < BUSTER_ARRAY_LENGTH(abi_benchmark_widths); w += 1)
         {
-            valid = abi_benchmark_classify_all(world, &tables, abi_benchmark_widths[w], classified, options, counters);
+            valid = abi_benchmark_classify_all(world, &tables, w, classified, options, counters);
         }
-        valid = valid && abi_benchmark_batches(world, &tables, types, classified, arena, options, counters);
+        valid = valid && abi_benchmark_batches(world, &tables, types, classified, arena, counters);
     }
     abi_benchmark_tables_close(&tables);
     arena_pop_to(arena, length);
@@ -1266,7 +1277,7 @@ static bool abi_benchmark_calls(AbiBenchmarkCalls* calls, const AbiBenchmarkPool
     return result;
 }
 
-// What abi_assign leaves to its twin, and why (a call may have several reasons).
+// What abi_assign leaves to its per-call fallback, abi_assign_call, and why (a call may have several reasons).
 typedef struct AbiBenchmarkDeferred AbiBenchmarkDeferred;
 struct AbiBenchmarkDeferred
 {
@@ -1282,9 +1293,9 @@ struct AbiBenchmarkDeferred
     uint32_t long_calls;
 };
 
-// abi_assign's rules for which calls go to its twin, mirrored here a call at a time (keep them in step with
-// abi_assign's deferred_lanes), since its results don't tell: the twin's are the same. The prefix sums of a call's
-// registers and stack slots count every argument that needs a register as using it, so a call goes to the twin when an
+// abi_assign's rules for which calls go to abi_assign_call, mirrored here a call at a time (keep them in step with
+// abi_assign's deferred_lanes), since its results don't tell: the fallback's are the same. The prefix sums of a call's
+// registers and stack slots count every argument that needs a register as using it, so a call goes to the fallback when an
 // argument is UNCOUNTED, doesn't fit (the sum of a class it needs past the registers) while a register it needs is
 // still free (inexact), goes to the stack at an offset its alignment doesn't divide or aligned to more than 32 bits hold
 // (padded), is a named WIDE vector of a variadic call, is on the stack with a slot that depends on clang's count (EMPTY,
@@ -1354,24 +1365,51 @@ static AbiBenchmarkDeferred abi_benchmark_deferred(const AbiTable* abi, AbiSigna
     return result;
 }
 
-// One mix's calls over `abi`: both paths over poison of their own, which must agree on every location and call, then
-// timed.
+// Whether each call of a batch, assigned alone, gets the locations and the call the batch gave it.
+static bool abi_benchmark_alone(const AbiTable* abi, AbiSignatures signatures, const AbiLocation* locations, const AbiCall* calls, AbiLocation* alone, const char* what)
+{
+    uint32_t differing = UINT32_MAX;
+    uint64_t first = 0;
+    for (uint32_t c = 0; differing == UINT32_MAX && c < signatures.count; c += 1)
+    {
+        const uint32_t count = signatures.counts[c];
+        const AbiSignatures one = {
+            .results = signatures.results + c,
+            .counts = signatures.counts + c,
+            .named = signatures.named + c,
+            .variadic = signatures.variadic + c,
+            .count = 1,
+            .arguments = signatures.arguments + first,
+        };
+        AbiCall call;
+        abi_assign(abi, one, alone, &call);
+        const bool same = memcmp(alone, locations + first, count * sizeof(AbiLocation)) == 0 && memcmp(&call, &calls[c], sizeof(AbiCall)) == 0;
+        differing = same ? UINT32_MAX : c;
+        first += count;
+    }
+    if (differing != UINT32_MAX)
+    {
+        fprintf(stderr, "benchmark-calling-convention: %s: call %u assigned alone differs from its batch's\n", what, differing);
+    }
+    return differing == UINT32_MAX;
+}
+
+// One mix's calls over `abi`: assigned over poison, checked by each call assigned alone and, for the default seed and
+// --count, by the frozen digest, then timed.
 static bool abi_benchmark_assign_mix(const AbiTable* abi, const TypeTable* table, const AbiBenchmarkPools* pools, bool simple, Arena* arena, AbiBenchmarkOptions options,
                                      AbiBenchmarkCounters counters)
 {
     static AbiBenchmarkSamples samples;
+    const char* name = simple ? "assign-simple" : "assign";
     const uint64_t length = arena->length;
     const uint32_t call_count = options.count;
     AbiBenchmarkCalls calls;
     bool valid = abi_benchmark_calls(&calls, pools, call_count, options.seed ^ 0x5bd1e995ull, simple, arena);
-    AbiLocation* locations[BUSTER_ABI_BENCHMARK_VARIANTS] = { 0 };
-    AbiCall* results[BUSTER_ABI_BENCHMARK_VARIANTS] = { 0 };
-    for (uint32_t variant = 0; valid && variant < BUSTER_ABI_BENCHMARK_VARIANTS; variant += 1)
-    {
-        locations[variant] = BUSTER_ARENA_PUSH_ARRAY(arena, AbiLocation, calls.argument_count);
-        results[variant] = BUSTER_ARENA_PUSH_ARRAY(arena, AbiCall, call_count);
-        valid = locations[variant] != 0 && results[variant] != 0;
-    }
+    AbiLocation* locations = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, AbiLocation, calls.argument_count) : 0;
+    AbiCall* results = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, AbiCall, call_count) : 0;
+    // Room for the longest call assigned alone.
+    AbiLocation* alone = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, AbiLocation, calls.argument_count) : 0;
+    valid = valid && locations != 0 && results != 0 && alone != 0;
     if (valid)
     {
         const AbiSignatures signatures = {
@@ -1382,41 +1420,30 @@ static bool abi_benchmark_assign_mix(const AbiTable* abi, const TypeTable* table
             .count = calls.count,
             .arguments = calls.arguments,
         };
-        memset(locations[BUSTER_ABI_BENCHMARK_VECTOR], 0x5a, calls.argument_count * sizeof(AbiLocation));
-        memset(locations[BUSTER_ABI_BENCHMARK_SCALAR], 0xa5, calls.argument_count * sizeof(AbiLocation));
-        memset(results[BUSTER_ABI_BENCHMARK_VECTOR], 0x5a, (uint64_t)call_count * sizeof(AbiCall));
-        memset(results[BUSTER_ABI_BENCHMARK_SCALAR], 0xa5, (uint64_t)call_count * sizeof(AbiCall));
-        abi_assign(abi, signatures, locations[BUSTER_ABI_BENCHMARK_VECTOR], results[BUSTER_ABI_BENCHMARK_VECTOR]);
-        abi_assign_scalar(abi, signatures, locations[BUSTER_ABI_BENCHMARK_SCALAR], results[BUSTER_ABI_BENCHMARK_SCALAR]);
-        valid = memcmp(locations[BUSTER_ABI_BENCHMARK_VECTOR], locations[BUSTER_ABI_BENCHMARK_SCALAR], calls.argument_count * sizeof(AbiLocation)) == 0 &&
-                memcmp(results[BUSTER_ABI_BENCHMARK_VECTOR], results[BUSTER_ABI_BENCHMARK_SCALAR], (uint64_t)call_count * sizeof(AbiCall)) == 0;
+        memset(locations, 0x5a, calls.argument_count * sizeof(AbiLocation));
+        memset(results, 0x5a, (uint64_t)call_count * sizeof(AbiCall));
+        abi_assign(abi, signatures, locations, results);
+        valid = abi_benchmark_alone(abi, signatures, locations, results, alone, name) &&
+                abi_benchmark_frozen(options, name, abi_benchmark_assignment_digest(results, call_count, locations, calls.argument_count),
+                                     abi_benchmark_assign_digests[simple ? 1 : 0]);
         uint64_t kinds[4] = { 0 };
         for (uint64_t a = 0; valid && a < calls.argument_count; a += 1)
         {
-            kinds[locations[BUSTER_ABI_BENCHMARK_SCALAR][a].kind & 3] += 1;
+            kinds[locations[a].kind & 3] += 1;
         }
         const AbiBenchmarkDeferred deferred = abi_benchmark_deferred(abi, signatures);
         const AbiBenchmarkCase benchmark = {
             .kind = BUSTER_ABI_BENCHMARK_ASSIGN,
-            .name = simple ? "assign-simple" : "assign",
+            .name = name,
             .table = table,
-            .abi = {
-                (AbiTable*)abi,
-                (AbiTable*)abi,
-            },
+            .abi = (AbiTable*)abi,
             .vector_bytes = BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES,
             .items = calls.argument_count,
             .signatures = signatures,
-            .locations = {
-                locations[BUSTER_ABI_BENCHMARK_VECTOR],
-                locations[BUSTER_ABI_BENCHMARK_SCALAR],
-            },
-            .calls = {
-                results[BUSTER_ABI_BENCHMARK_VECTOR],
-                results[BUSTER_ABI_BENCHMARK_SCALAR],
-            },
+            .locations = locations,
+            .calls = results,
         };
-        valid = valid && abi_benchmark_measure(&benchmark, options, counters, &samples);
+        valid = valid && abi_benchmark_measure(&benchmark, counters, &samples);
         if (valid)
         {
             const double arguments = (double)calls.argument_count;
@@ -1425,16 +1452,16 @@ static bool abi_benchmark_assign_mix(const AbiTable* abi, const TypeTable* table
                    benchmark.name, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES, calls.count, calls.variadic_count, calls.argument_count, arguments / calls.count,
                    100.0 * kinds[BUSTER_ABI_LOCATION_REGISTERS] / arguments, 100.0 * kinds[BUSTER_ABI_LOCATION_STACK] / arguments,
                    100.0 * kinds[BUSTER_ABI_LOCATION_SPLIT] / arguments, 100.0 * kinds[BUSTER_ABI_LOCATION_IGNORE] / arguments);
-            printf("%s: the vector path left %.2f%% of the arguments (%u calls, %.2f%%) to the twin: %u calls uncounted, %u inexact, %u padded, %u named wide, %u empty, "
-                   "%u general low, %u demoted, %u long\n",
+            printf("%s: the vector path left %.2f%% of the arguments (%u calls, %.2f%%) to abi_assign_call: %u calls uncounted, %u inexact, %u padded, %u named wide, "
+                   "%u empty, %u general low, %u demoted, %u long\n",
                    benchmark.name, 100.0 * (double)deferred.arguments / arguments, deferred.calls, 100.0 * deferred.calls / calls.count, deferred.uncounted, deferred.inexact,
                    deferred.padded, deferred.wide_named, deferred.empty, deferred.general_low, deferred.demoted, deferred.long_calls);
-            abi_benchmark_print(benchmark.name, options.timed, &samples, "argument", 0, 0);
+            abi_benchmark_print(benchmark.name, &samples, "argument", 0, 0);
         }
     }
     if (!valid)
     {
-        fprintf(stderr, "benchmark-calling-convention: %s failed or the paths disagree\n", simple ? "assign-simple" : "assign");
+        fprintf(stderr, "benchmark-calling-convention: %s failed or its results are wrong\n", name);
     }
     arena_pop_to(arena, length);
     return valid;
@@ -1449,12 +1476,12 @@ static bool abi_benchmark_assignment(const AbiBenchmarkWorld* world, Arena* aren
     AbiTable abi;
     AbiBenchmarkPools pools;
     bool valid = abi_arena.base != 0 && abi_initialize(&abi, &abi_arena, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES);
-    valid = valid && abi_classify_all_scalar(&abi, table) != 0 && abi_benchmark_pools(&pools, world, &abi, arena);
+    valid = valid && abi_classify_all(&abi, table) != 0 && abi_benchmark_pools(&pools, world, &abi, arena);
     valid = valid && abi_benchmark_assign_mix(&abi, table, &pools, false, arena, options, counters);
     valid = valid && abi_benchmark_assign_mix(&abi, table, &pools, true, arena, options, counters);
     if (!valid)
     {
-        fprintf(stderr, "benchmark-calling-convention: the assignment failed or the paths disagree\n");
+        fprintf(stderr, "benchmark-calling-convention: the assignment failed or its results are wrong\n");
     }
     arena_release(&abi_arena);
     arena_pop_to(arena, length);
@@ -1481,9 +1508,7 @@ int run_calling_convention_benchmark(int argc, char** argv)
 {
     uint64_t seed = 1;
     uint64_t count = BUSTER_ABI_BENCHMARK_DEFAULT_COUNT;
-    uint64_t after_scalar = 0;
     const char* only = 0;
-    const char* path = 0;
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
     {
@@ -1496,18 +1521,9 @@ int run_calling_convention_benchmark(int argc, char** argv)
         {
             value = &count;
         }
-        else if (strcmp(argv[i], "--after-scalar") == 0)
-        {
-            value = &after_scalar;
-        }
         if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
         {
             only = argv[i + 1];
-            i += 1;
-        }
-        else if (strcmp(argv[i], "--path") == 0 && i + 1 < argc)
-        {
-            path = argv[i + 1];
             i += 1;
         }
         else if (value != 0 && i + 1 < argc)
@@ -1520,22 +1536,17 @@ int run_calling_convention_benchmark(int argc, char** argv)
             valid = false;
         }
     }
-    valid = valid && count >= BUSTER_ABI_BENCHMARK_MIN_COUNT && count <= BUSTER_ABI_BENCHMARK_MAX_COUNT && after_scalar <= BUSTER_ABI_BENCHMARK_AFTER_SCALAR_MAX_MS;
+    valid = valid && count >= BUSTER_ABI_BENCHMARK_MIN_COUNT && count <= BUSTER_ABI_BENCHMARK_MAX_COUNT;
     valid = valid && (only == 0 || strcmp(only, "classification") == 0 || strcmp(only, "assignment") == 0);
-    valid = valid && (path == 0 || strcmp(path, "vector") == 0 || strcmp(path, "scalar") == 0);
-    // --after-scalar precedes the vector path's samples, which --path scalar leaves out.
-    valid = valid && (after_scalar == 0 || path == 0 || strcmp(path, "vector") == 0);
     if (!valid)
     {
-        fprintf(stderr, "usage: %s [--seed N] [--count N] [--only classification|assignment] [--path vector|scalar] [--after-scalar MS]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--seed N] [--count N] [--only classification|assignment]\n", argv[0]);
     }
     else
     {
         const AbiBenchmarkOptions options = {
             .seed = seed,
             .count = (uint32_t)count,
-            .timed = path == 0 ? 3u : strcmp(path, "vector") == 0 ? 1u << BUSTER_ABI_BENCHMARK_VECTOR : 1u << BUSTER_ABI_BENCHMARK_SCALAR,
-            .after_scalar = after_scalar,
             .classification = only == 0 || strcmp(only, "classification") == 0,
             .assignment = only == 0 || strcmp(only, "assignment") == 0,
         };
@@ -1545,16 +1556,10 @@ int run_calling_convention_benchmark(int argc, char** argv)
             .branch_misses = abi_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_BRANCH_MISSES),
             .throttle = abi_benchmark_counter(PERF_TYPE_RAW, BUSTER_ABI_BENCHMARK_THROTTLE_EVENT),
         };
-        printf("benchmark-calling-convention: seed %" PRIu64 ", %u types and calls, %d interleaved passes' medians", seed, options.count, BUSTER_ABI_BENCHMARK_PASSES);
-        if (path != 0)
-        {
-            printf("; the %s path alone, back to back", path);
-        }
-        if (after_scalar != 0)
-        {
-            printf("; each vector sample after %" PRIu64 " ms of the twin", after_scalar);
-        }
-        printf("\nthrottle: PMCx1A0 umask 0x08, read as the dispatch slots Zen 5's power cap takes (#199)%s\n",
+        printf("benchmark-calling-convention: seed %" PRIu64 ", %u types and calls, %d passes' medians; %s\n", seed, options.count, BUSTER_ABI_BENCHMARK_PASSES,
+               seed == BUSTER_ABI_BENCHMARK_DEFAULT_SEED && options.count == BUSTER_ABI_BENCHMARK_DEFAULT_COUNT ? "results checked against main's frozen digests"
+                                                                                                         : "no frozen digests for this seed and count");
+        printf("throttle: PMCx1A0 umask 0x08, read as the dispatch slots Zen 5's power cap takes (#199)%s\n",
                counters.cycles < 0 ? "; hardware counters unavailable: cycles, instructions, mispredicts and throttle are zero"
                : counters.throttle < 0 ? "; its raw event is unavailable: throttle is zero"
                                        : "");
@@ -1600,11 +1605,3 @@ int run_calling_convention_benchmark(int argc, char** argv)
     return valid ? 0 : 1;
 }
 
-#else
-int run_calling_convention_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

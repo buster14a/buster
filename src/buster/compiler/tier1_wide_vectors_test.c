@@ -8,14 +8,14 @@
 // (aligned, unaligned, through addresses with offsets, a volatile one), constants, a copy, an undef on a path not
 // taken, phis at joins and swapped around a loop, and a frame object's stores and loads. Each is
 // parsed by both parsers and run by the interpreter on random buffers: the expected buffers. Then it is split at both
-// piece widths (16 bytes, x86-64's, and 32, AVX's) by both paths, which must make the same function, with no vector
-// wider than a piece, that both verifiers take and the interpreter runs into the same buffers; optimized and run again;
+// piece widths (16 bytes, x86-64's, and 32, AVX's), which must count the wide vector instructions and leave no vector
+// wider than a piece, that the verifier takes and the interpreter runs into the same buffers; optimized and run again;
 // and, split into 16-byte pieces, planned and emitted by both of Tier 1's paths for the x86-64 baseline (every record
 // among its forms), with rematerialization and without, and run natively on every buffer. And the refusals: a wide
 // vector's addition, comparison, call argument and parameter, which the split refuses as
 // unsupported at 16-byte pieces, and the same functions, no vector in them wider than 64 bytes' pieces, returned as they
-// are at 64; a function without a wide vector, returned as it is; and the scan's vector path against its scalar twin on
-// type columns of every length to 200 with a wide vector at each place.
+// are at 64; a function without a wide vector, returned as it is; and the scan against its definition on type columns
+// of every length to 200 with a wide vector at each place.
 
 #define BUSTER_TIER1_WIDE_VECTOR_CONSTANT_64                                                                                                                                                          \
     "0123456789abcdeffedcba98765432100f1e2d3c4b5a69788796a5b4c3d2e1f0deadbeefcafebabe8000000000000001ffffffffffffffff7fffffffffffffff"
@@ -145,8 +145,8 @@ static const Tier1WideVectorFixture tier1_wide_vector_fixtures[] = {
                 "}\n",
     },
     {
-        // A frame object's: a 64-byte vector stored into it and loaded back, its first 32 bytes too, as the typed
-        // stream's union of a vector and its lanes is (host_scalar_vectors.h's HostV512).
+        // A frame object's: a 64-byte vector stored into it and loaded back, its first 32 bytes too, as a union of a
+        // vector and its lanes is.
         .name = "a frame object's wide vectors",
         .text = "function (ptr) -> void {\n"
                 "  slot $0 size=64 align=64 type=void flags=0x01\n"
@@ -205,14 +205,19 @@ static const char* const tier1_wide_vector_refusals[] = {
 };
 
 // Whether a function has a vector wider than `piece_bytes`.
-static bool tier1_wide_vector_any(const IrFunction* function, uint32_t piece_bytes)
+static uint32_t tier1_wide_vector_count(const IrFunction* function, uint32_t piece_bytes)
 {
-    bool wide = false;
+    uint32_t wide = 0;
     for (uint32_t i = 0; i < function->instruction_count; i += 1)
     {
-        wide |= ir_vector_type(function->type[i]) && ir_type_bits[function->type[i]] > 8 * piece_bytes;
+        wide += ir_vector_type(function->type[i]) && ir_type_bits[function->type[i]] > 8 * piece_bytes;
     }
     return wide;
+}
+
+static bool tier1_wide_vector_any(const IrFunction* function, uint32_t piece_bytes)
+{
+    return tier1_wide_vector_count(function, piece_bytes) != 0;
 }
 
 // One fixture through every stage (the file's comment), at both piece widths.
@@ -241,19 +246,17 @@ static void tier1_wide_vector_program(Tier1WideTest* test, const Tier1WideVector
     {
         const uint64_t mark = test->output.length;
         IrVectorSplitResult vector = { 0 };
-        IrVectorSplitResult scalar = { 0 };
+        // Even a four-piece load needs just one scratch ID per source row. The suite's scratch arena is empty and page-aligned.
+        const uint64_t capacity = test->scratch.capacity;
+        test->scratch.capacity = (uint64_t)function.instruction_count * sizeof(uint32_t);
         const IrCheck split = ir_vector_split(&function, pieces[w], &test->output, &test->scratch, &vector);
-        const IrCheck twin = ir_vector_split_scalar(&function, pieces[w], &test->output, &test->scratch, &scalar);
-        bool piece_ok = tier1_wide_test_expect(test, split.error == IR_OK && twin.error == IR_OK && vector.split && scalar.split, "both paths split the wide vectors");
+        test->scratch.capacity = capacity;
+        bool piece_ok = tier1_wide_test_expect(test, split.error == IR_OK && vector.split, "the split takes the wide vectors");
         if (!piece_ok)
         {
-            printf("test-tier1-wide: %s at %u-byte pieces: split error %u, scalar %u, at %u\n", fixture->name, pieces[w], (unsigned)split.error, (unsigned)twin.error, split.instruction);
+            printf("test-tier1-wide: %s at %u-byte pieces: split error %u at %u\n", fixture->name, pieces[w], (unsigned)split.error, split.instruction);
         }
-        piece_ok = piece_ok && tier1_wide_test_expect(test, tier1_wide_test_same(&vector.function, &scalar.function) && vector.wide == scalar.wide && vector.wide != 0 &&
-                                                                vector.function.vector_constant_count == scalar.function.vector_constant_count &&
-                                                                (vector.function.vector_constant_count == 0 ||
-                                                                 memcmp(vector.function.vector_constants, scalar.function.vector_constants, (uint64_t)vector.function.vector_constant_count * sizeof(IrSimdValue)) == 0),
-                                                  "both paths split it into the same function");
+        piece_ok = piece_ok && tier1_wide_test_expect(test, vector.wide == tier1_wide_vector_count(&function, pieces[w]) && vector.wide != 0, "the split counts the wide vector instructions");
         piece_ok = piece_ok && tier1_wide_test_expect(test, !tier1_wide_vector_any(&vector.function, pieces[w]), "the split leaves no vector wider than a piece");
         tier1_wide_test_expect(test, test->scratch.length == 0, "the split returns the scratch arena");
         IrDominance dominance = { 0 };
@@ -261,8 +264,7 @@ static void tier1_wide_vector_program(Tier1WideTest* test, const Tier1WideVector
         {
             piece_ok = tier1_wide_test_dominance(test, &vector.function, &dominance);
             const IrCheck verified = piece_ok ? ir_verify(&vector.function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-            const IrCheck verified_twin = piece_ok ? ir_verify_scalar(&vector.function, &test->scratch, &dominance) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
-            piece_ok = piece_ok && tier1_wide_test_expect(test, verified.error == IR_OK && verified_twin.error == IR_OK, "both verifiers take the split function with its dominance");
+            piece_ok = piece_ok && tier1_wide_test_expect(test, verified.error == IR_OK, "the verifier takes the split function with its dominance");
             if (!piece_ok)
             {
                 printf("test-tier1-wide: %s at %u-byte pieces: verifier error %u at %u (%u)\n", fixture->name, pieces[w], (unsigned)verified.error, verified.instruction, verified.detail);
@@ -281,10 +283,10 @@ static void tier1_wide_vector_program(Tier1WideTest* test, const Tier1WideVector
             piece_ok = piece_ok && tier1_wide_test_dominance(test, &optimized.function, &dominance);
         }
         // x86-64's pieces natively, every record among the baseline's forms.
-        for (uint32_t run = 0; piece_ok && pieces[w] == 16 && run < 4; run += 1)
+        for (uint32_t run = 0; piece_ok && pieces[w] == 16 && run < 2; run += 1)
         {
             const uint64_t before = test->native_runs;
-            tier1_wide_test_native(test, fixture->name, &optimized.function, &dominance, (run & 1) == 0, (run & 2) != 0, inputs, counts, expected);
+            tier1_wide_test_native(test, fixture->name, &optimized.function, &dominance, true, run != 0, inputs, counts, expected);
             test->vector_native_runs += test->native_runs - before;
             test->native_runs = before;
         }
@@ -304,18 +306,15 @@ static void tier1_wide_vector_refusals_and_scan(Tier1WideTest* test)
         IrFunction function;
         if (tier1_wide_test_parse(test, "a wide vector refusal", tier1_wide_vector_refusals[r], &function))
         {
-            for (uint32_t path = 0; path < 2; path += 1)
-            {
-                IrVectorSplitResult result;
-                memset(&result, 0x5a, sizeof(result));
-                const uint64_t before = test->output.length;
-                const IrCheck check = path == 0 ? ir_vector_split(&function, 16, &test->output, &test->scratch, &result) : ir_vector_split_scalar(&function, 16, &test->output, &test->scratch, &result);
-                const bool refused = check.error == IR_ERROR_UNSUPPORTED && test->output.length == before && test->scratch.length == 0 && !result.split;
-                tier1_wide_test_expect(test, refused, "the split refuses a wide vector it doesn't take, both arenas as they were");
-                test->vector_refused += refused;
-                const IrCheck whole = path == 0 ? ir_vector_split(&function, 64, &test->output, &test->scratch, &result) : ir_vector_split_scalar(&function, 64, &test->output, &test->scratch, &result);
-                tier1_wide_test_expect(test, whole.error == IR_OK && !result.split && result.function.op == function.op, "at 64-byte pieces nothing is wide: the function returned as it is");
-            }
+            IrVectorSplitResult result;
+            memset(&result, 0x5a, sizeof(result));
+            const uint64_t before = test->output.length;
+            const IrCheck check = ir_vector_split(&function, 16, &test->output, &test->scratch, &result);
+            const bool refused = check.error == IR_ERROR_UNSUPPORTED && test->output.length == before && test->scratch.length == 0 && !result.split;
+            tier1_wide_test_expect(test, refused, "the split refuses a wide vector it doesn't take, both arenas as they were");
+            test->vector_refused += refused;
+            const IrCheck whole = ir_vector_split(&function, 64, &test->output, &test->scratch, &result);
+            tier1_wide_test_expect(test, whole.error == IR_OK && !result.split && result.function.op == function.op, "at 64-byte pieces nothing is wide: the function returned as it is");
         }
         arena_pop_to(&test->output, mark);
     }
@@ -357,15 +356,13 @@ static void tier1_wide_vector_refusals_and_scan(Tier1WideTest* test)
                 const IrFunction scan = { .type = types, .instruction_count = length };
                 for (uint32_t piece = IR_V4I32; piece <= IR_V8I32; piece += 1)
                 {
-                    const bool vector = ir_vector_split_present_path(&scan, piece, true);
-                    const bool scalar = ir_vector_split_present_path(&scan, piece, false);
                     const bool expected = place < length && wide[kind] > piece;
-                    agreed &= vector == scalar && scalar == expected;
+                    agreed &= ir_vector_split_present(&scan, piece) == expected;
                 }
             }
         }
     }
-    tier1_wide_test_expect(test, agreed, "the scan's vector path and its scalar twin find a wide vector at every place of every length");
+    tier1_wide_test_expect(test, agreed, "the scan finds a wide vector at every place of every length, and nothing else");
 }
 
 // The wide vectors' tests: the fixtures, the refusals and the scan.
@@ -377,9 +374,9 @@ static void tier1_wide_vectors(Tier1WideTest* test)
     }
     tier1_wide_vector_refusals_and_scan(test);
     tier1_wide_test_expect(test, test->vector_programs == 2 * BUSTER_ARRAY_LENGTH(tier1_wide_vector_fixtures), "every wide vector fixture goes through every stage at both piece widths");
-    tier1_wide_test_expect(test, test->vector_native_runs == 4u * BUSTER_ARRAY_LENGTH(tier1_wide_vector_fixtures) * BUSTER_TIER1_WIDE_TEST_INPUTS,
+    tier1_wide_test_expect(test, test->vector_native_runs == 2u * BUSTER_ARRAY_LENGTH(tier1_wide_vector_fixtures) * BUSTER_TIER1_WIDE_TEST_INPUTS,
                            "every wide vector fixture runs natively at x86-64's pieces on every input by both paths, with rematerialization and without");
-    tier1_wide_test_expect(test, test->vector_refused == 2 * BUSTER_ARRAY_LENGTH(tier1_wide_vector_refusals), "every wide vector refusal on both paths");
+    tier1_wide_test_expect(test, test->vector_refused == BUSTER_ARRAY_LENGTH(tier1_wide_vector_refusals), "every wide vector refusal");
     printf("test-tier1-wide: wide vectors: %u fixtures at 16- and 32-byte pieces through the split, the optimizer and the interpreter, %" PRIu64 " native runs at x86-64's; %u refusals\n",
            (unsigned)BUSTER_ARRAY_LENGTH(tier1_wide_vector_fixtures), test->vector_native_runs, test->vector_refused);
 }

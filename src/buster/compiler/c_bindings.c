@@ -70,9 +70,6 @@ struct CBindings
     uint32_t* point;
     uint32_t* end;
     uint32_t* previous;
-    // Each declare event's chain's first declare handle (#1351): previous's walk to its end, kept as the events are
-    // appended. Zero where a stream's columns came from elsewhere (#113's lanes and merge): readers walk previous then.
-    uint32_t* first;
     uint32_t* depth;
     uint8_t* operation;
     uint8_t* kind;
@@ -107,7 +104,7 @@ struct CBindingReplay
 static __attribute__((unused)) uint64_t c_bindings_bytes(uint32_t names, uint32_t capacity)
 {
     const uint64_t events = (uint64_t)capacity + 1;
-    return (uint64_t)names * C_BINDING_NAMESPACES * 4 + events * (8 * 4 + 2) + 11 * 63;
+    return (uint64_t)names * C_BINDING_NAMESPACES * 4 + events * (7 * 4 + 2) + 10 * 63;
 }
 
 // The table in `arena`, with room for `names` names (each namespace's heads) and `capacity` events. With `zeroed`, the
@@ -127,8 +124,7 @@ static __attribute__((unused)) bool c_bindings_initialize_zeroed(CBindings* bind
     bindings->point = bindings->declaration != 0 ? arena_push_array(arena, (uint64_t)capacity + 1, 4, 64) : 0;
     bindings->end = bindings->point != 0 ? arena_push_array(arena, (uint64_t)capacity + 1, 4, 64) : 0;
     bindings->previous = bindings->end != 0 ? arena_push_array(arena, (uint64_t)capacity + 1, 4, 64) : 0;
-    bindings->first = bindings->previous != 0 ? arena_push_array(arena, (uint64_t)capacity + 1, 4, 64) : 0;
-    bindings->depth = bindings->first != 0 ? arena_push_array(arena, (uint64_t)capacity + 1, 4, 64) : 0;
+    bindings->depth = bindings->previous != 0 ? arena_push_array(arena, (uint64_t)capacity + 1, 4, 64) : 0;
     bindings->operation = bindings->depth != 0 ? arena_push_array(arena, (uint64_t)capacity + 1, 1, 64) : 0;
     bindings->kind = bindings->operation != 0 ? arena_push_array(arena, (uint64_t)capacity + 1, 1, 64) : 0;
     valid = bindings->kind != 0;
@@ -190,10 +186,6 @@ static inline __attribute__((always_inline)) uint32_t c_bindings_append(CBinding
         const uint32_t previous = bindings->heads[key];
         bindings->previous[event] = previous;
         result = event + 1;
-        if (bindings->first != 0)
-        {
-            bindings->first[event] = previous != 0 ? bindings->first[previous - 1] : result;
-        }
         if (operation == C_BINDING_DECLARE)
         {
             bindings->active[bindings->active_count++] = event;
@@ -239,10 +231,6 @@ static bool c_bindings_restore(CBindings* bindings, uint32_t mark, uint32_t poin
         bindings->key[event] = 0;
         bindings->end[event] = BUSTER_C_BINDING_NONE;
         bindings->previous[event] = 0;
-        if (bindings->first != 0)
-        {
-            bindings->first[event] = 0;
-        }
         bindings->depth[event] = 0;
         bindings->kind[event] = 0;
         while (bindings->active_count > mark)

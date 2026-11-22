@@ -112,10 +112,66 @@ void mismatched_bracket(void)
     __attribute__((unused)) (fresh)++[); after;
 }
 #elif BUSTER_CASE == 16
+struct Record { int member; };
+void invalid_initializer_operand(void)
+{
+    __attribute__((unused)) *p = +(struct Record){0};
+    *p;
+    missing_after();
+}
+#elif BUSTER_CASE == 17
+int called(int);
+void invalid_initializer_call(int *p)
+{
+    __attribute__((unused)) *p = called(1, 2);
+    *p;
+    missing_after();
+}
+#elif BUSTER_CASE == 18
+void nested_invalid_binding(int *p)
+{
+    {
+        __attribute__((unused)) *p = 0;
+        *p;
+    }
+    p[0];
+    missing_after();
+}
+#elif BUSTER_CASE == 19
 void mismatched_brace(void)
 {
     __attribute__((unused)) (fresh)++(};
 int following(void) { return 0; }
+#elif BUSTER_CASE == 20
+void preserved_typedef_pointer(void)
+{
+    typedef int kept;
+    __attribute__((unused)) *kept = 0;
+    kept variable = 1;
+    {
+        __attribute__((unused)) *kept = 0;
+        (void)kept;
+    }
+    kept after = variable;
+    (void)after;
+    missing_after();
+}
+#elif BUSTER_CASE == 21
+void preserved_typedef_group(void)
+{
+    typedef int kept;
+    __attribute__((unused)) (kept)++;
+    kept variable = 1;
+    (void)variable;
+    missing_after();
+}
+#elif BUSTER_CASE == 22
+struct FunctionRecord { int member; };
+int invalid_function_initializer(void)
+{
+    __attribute__((unused)) (fresh)(void) = +(struct FunctionRecord){0};
+    return fresh() + undeclared_after;
+}
 #else
 #error unknown BUSTER_CASE
 #endif

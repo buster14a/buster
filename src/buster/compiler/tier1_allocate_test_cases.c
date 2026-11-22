@@ -208,20 +208,17 @@ static void tier1_allocation_test_generated(Tier1AllocationTestTally* tally, Are
             },
         };
         Tier1Allocation vector = { 0 };
-        Tier1Allocation scalar = { 0 };
         Tier1Allocation scan = { 0 };
         Tier1Allocation again = { 0 };
         const Tier1AllocationError vector_error = tier1_allocate(&input, arena, &vector);
-        const Tier1AllocationError scalar_error = tier1_allocate_scalar(&input, arena, &scalar);
         const Tier1AllocationError scan_error = tier1_allocate_scan_reference(&input, arena, &scan);
         const Tier1AllocationError again_error = tier1_allocate(&input, arena, &again);
-        const bool produced = vector_error == TIER1_ALLOCATION_OK && scalar_error == TIER1_ALLOCATION_OK && scan_error == TIER1_ALLOCATION_OK && again_error == TIER1_ALLOCATION_OK;
-        tier1_allocation_test_expect(tally, produced || (input.use_required != 0 && vector_error == TIER1_ALLOCATION_CONSTRAINT && scalar_error == vector_error && scan_error == vector_error && again_error == vector_error), "generated allocation or explicit simultaneous-use conflict");
+        const bool produced = vector_error == TIER1_ALLOCATION_OK && scan_error == TIER1_ALLOCATION_OK && again_error == TIER1_ALLOCATION_OK;
+        tier1_allocation_test_expect(tally, produced || (input.use_required != 0 && vector_error == TIER1_ALLOCATION_CONSTRAINT && scan_error == vector_error && again_error == vector_error), "generated allocation or explicit simultaneous-use conflict");
         if (produced)
         {
-            tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar) && tier1_allocation_verify(&input, &scan), "independent interval verifier");
-            tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scalar) && tier1_allocation_test_occupancy(&input, &scan), "position occupancy oracle");
-            tier1_allocation_test_expect(tally, tier1_allocation_test_equal(&input, &vector, &scalar), "host paths choose identical fragments, registers and spills");
+            tier1_allocation_test_expect(tally, tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scan), "independent interval verifier");
+            tier1_allocation_test_expect(tally, tier1_allocation_test_occupancy(&input, &vector) && tier1_allocation_test_occupancy(&input, &scan), "position occupancy oracle");
             tier1_allocation_test_expect(tally, tier1_allocation_test_equal(&input, &vector, &again), "deterministic repeat");
             tier1_allocation_test_expect(tally, vector.vector_intervals + vector.scalar_intervals == count, "fallback accounting");
             tier1_allocation_test_expect(tally, scan.vector_intervals == 0 && scan.scalar_intervals == count, "the independent reference always uses the scan");
@@ -301,7 +298,7 @@ static void tier1_allocation_test_fixed(Tier1AllocationTestTally* tally, Arena* 
         }
         uint32_t expected[96];
         uint32_t actual[96];
-        uint32_t scalar[96];
+        uint32_t crossed[96];
         for (uint32_t i = 0; i < count; i += 1)
         {
             uint32_t blocked = 0;
@@ -311,7 +308,7 @@ static void tier1_allocation_test_fixed(Tier1AllocationTestTally* tally, Arena* 
             }
             expected[i] = allowed[i] & ~blocked;
             actual[i] = allowed[i];
-            scalar[i] = allowed[i];
+            crossed[i] = allowed[i];
         }
         uint32_t events[288];
         uint32_t event_count = 0;
@@ -353,9 +350,9 @@ static void tier1_allocation_test_fixed(Tier1AllocationTestTally* tally, Arena* 
                 .count = fixed_count,
             },
         };
-        const bool filtered = tier1_allocation_filter_fixed(&input, arena, true, events, event_count, buckets, actual);
-        tier1_allocation_filter_fixed_simple(&input, false, scalar);
-        tier1_allocation_test_expect(tally, filtered && memcmp(expected, actual, count * 4) == 0 && memcmp(expected, scalar, count * 4) == 0, "fixed masks match independent position bitmap and cross-product");
+        const bool filtered = tier1_allocation_filter_fixed(&input, arena, events, event_count, buckets, actual);
+        tier1_allocation_filter_fixed_simple(&input, crossed);
+        tier1_allocation_test_expect(tally, filtered && memcmp(expected, actual, count * 4) == 0 && memcmp(expected, crossed, count * 4) == 0, "fixed masks, by the sweep or the cross product and by the cross product alone, match the independent position bitmap");
         arena_pop_to(arena, saved);
         Tier1AllocationInput prefiltered = input;
         prefiltered.allowed_registers = expected;
@@ -578,30 +575,27 @@ static void tier1_allocation_test_mask_k0(Tier1AllocationTestTally* tally, Arena
         .position_count = 8,
         .registers = { 0, 0, BUSTER_TIER1_ALLOCATE_MASK_REGISTERS },
     };
-    for (uint32_t path = 0; path < 2; path += 1)
+    const uint64_t saved = arena->length;
+    Tier1Allocation output = { 0 };
+    const Tier1AllocationError error = tier1_allocate(&input, arena, &output);
+    bool k0 = false;
+    for (uint32_t f = 0; error == TIER1_ALLOCATION_OK && f < output.fragment_count; f += 1)
     {
-        const uint64_t saved = arena->length;
-        Tier1Allocation output = { 0 };
-        const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scalar(&input, arena, &output);
-        bool k0 = false;
-        for (uint32_t f = 0; error == TIER1_ALLOCATION_OK && f < output.fragment_count; f += 1)
-        {
-            k0 |= output.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && output.registers[f] == 0;
-        }
-        tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_OK && !k0 && tier1_allocation_verify(&input, &output), "masks allocate in k1 to k7");
-        // A mask fragment moved to k0: outside every mask value's registers.
-        for (uint32_t f = 0; error == TIER1_ALLOCATION_OK && f < output.fragment_count; f += 1)
-        {
-            if (output.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER)
-            {
-                const uint8_t kept = output.registers[f];
-                output.registers[f] = 0;
-                tier1_allocation_test_expect(tally, !tier1_allocation_verify(&input, &output), "the interval verifier rejects a mask in k0");
-                output.registers[f] = kept;
-            }
-        }
-        arena_pop_to(arena, saved);
+        k0 |= output.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER && output.registers[f] == 0;
     }
+    tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_OK && !k0 && tier1_allocation_verify(&input, &output), "masks allocate in k1 to k7");
+    // A mask fragment moved to k0: outside every mask value's registers.
+    for (uint32_t f = 0; error == TIER1_ALLOCATION_OK && f < output.fragment_count; f += 1)
+    {
+        if (output.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER)
+        {
+            const uint8_t kept = output.registers[f];
+            output.registers[f] = 0;
+            tier1_allocation_test_expect(tally, !tier1_allocation_verify(&input, &output), "the interval verifier rejects a mask in k0");
+            output.registers[f] = kept;
+        }
+    }
+    arena_pop_to(arena, saved);
     // A call's range over all eight registers, k0 among them: taken, and the masks over it leave their registers.
     input.fixed = (Tier1FixedIntervals){
         .starts = fixed_starts,
@@ -610,14 +604,10 @@ static void tier1_allocation_test_mask_k0(Tier1AllocationTestTally* tally, Arena
         .classes = fixed_classes,
         .count = 1,
     };
-    for (uint32_t path = 0; path < 2; path += 1)
-    {
-        const uint64_t saved = arena->length;
-        Tier1Allocation output = { 0 };
-        const Tier1AllocationError error = path == 0 ? tier1_allocate(&input, arena, &output) : tier1_allocate_scalar(&input, arena, &output);
-        tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_OK && output.spill_count == 3 && tier1_allocation_verify(&input, &output), "a fixed range over every opmask register, k0 among them");
-        arena_pop_to(arena, saved);
-    }
+    Tier1Allocation fixed = { 0 };
+    const Tier1AllocationError fixed_error = tier1_allocate(&input, arena, &fixed);
+    tier1_allocation_test_expect(tally, fixed_error == TIER1_ALLOCATION_OK && fixed.spill_count == 3 && tier1_allocation_verify(&input, &fixed), "a fixed range over every opmask register, k0 among them");
+    arena_pop_to(arena, saved);
     // Each refusal: the class with k0, an interval allowed k0, a hint of k0, a fixed range past k7.
     for (uint32_t failure = 0; failure < 4; failure += 1)
     {
@@ -626,15 +616,12 @@ static void tier1_allocation_test_mask_k0(Tier1AllocationTestTally* tally, Arena
         allowed[1] = failure == 1 ? 0x03 : BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
         hints[2] = failure == 2 ? 0 : UINT8_MAX;
         fixed_registers[0] = failure == 3 ? 0x1ff : BUSTER_TIER1_ALLOCATE_MASK_FILE;
-        for (uint32_t path = 0; path < 2; path += 1)
-        {
-            const uint64_t saved = arena->length;
-            Tier1Allocation before;
-            memset(&before, 0xa5, sizeof(before));
-            Tier1Allocation output = before;
-            const Tier1AllocationError error = path == 0 ? tier1_allocate(&broken, arena, &output) : tier1_allocate_scalar(&broken, arena, &output);
-            tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_INVALID && arena->length == saved && memcmp(&output, &before, sizeof(output)) == 0, "a mask allowed k0 is refused");
-        }
+        const uint64_t saved = arena->length;
+        Tier1Allocation before;
+        memset(&before, 0xa5, sizeof(before));
+        Tier1Allocation output = before;
+        const Tier1AllocationError error = tier1_allocate(&broken, arena, &output);
+        tier1_allocation_test_expect(tally, error == TIER1_ALLOCATION_INVALID && arena->length == saved && memcmp(&output, &before, sizeof(output)) == 0, "a mask allowed k0 is refused");
     }
     allowed[1] = BUSTER_TIER1_ALLOCATE_MASK_REGISTERS;
     hints[2] = UINT8_MAX;
@@ -705,6 +692,41 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
     };
     Tier1ResolvedMoves output = { 0 };
     tier1_allocation_test_expect(tally, tier1_resolve_moves(&broken, arena, &output) == TIER1_ALLOCATION_INVALID, "duplicate move destinations rejected");
+    // A move from or to the scratch register is refused, in each lane of the indexed resolver's steps and of the small
+    // set's: 6 and 24 moves among registers 0 to 23, the scratch (30) put in each one's source and then its destination.
+    for (uint32_t i = 0; i < 24; i += 1)
+    {
+        sources[i] = (i + 1) % 24;
+        destinations[i] = i;
+    }
+    const uint32_t sizes[] = { 6, 24 };
+    bool resolved = true;
+    bool refused = true;
+    for (uint32_t s = 0; s < 2; s += 1)
+    {
+        const Tier1ParallelMoves moves = {
+            .sources = sources,
+            .destinations = destinations,
+            .count = sizes[s],
+            .scratch = 30,
+        };
+        const uint64_t saved = arena->length;
+        resolved = resolved && tier1_resolve_moves(&moves, arena, &output) == TIER1_ALLOCATION_OK;
+        arena_pop_to(arena, saved);
+        for (uint32_t k = 0; k < sizes[s]; k += 1)
+        {
+            for (uint32_t side = 0; side < 2; side += 1)
+            {
+                uint32_t* edited = side == 0 ? sources : destinations;
+                const uint32_t kept = edited[k];
+                edited[k] = 30;
+                refused = refused && tier1_resolve_moves(&moves, arena, &output) == TIER1_ALLOCATION_INVALID && arena->length == saved;
+                edited[k] = kept;
+            }
+        }
+    }
+    tier1_allocation_test_expect(tally, resolved, "moves away from the scratch register resolve");
+    tier1_allocation_test_expect(tally, refused, "a move from or to the scratch register is refused in each lane");
 }
 
 static void tier1_allocation_test_required(Tier1AllocationTestTally* tally, Arena* arena)
@@ -732,61 +754,57 @@ static void tier1_allocation_test_required(Tier1AllocationTestTally* tally, Aren
         .position_count = 10,
         .registers = { 2, 0 },
     };
-    for (uint32_t variant = 0; variant < 2; variant += 1)
+    const uint64_t saved = arena->length;
+    Tier1Allocation allocation = { 0 };
+    const Tier1AllocationError error = tier1_allocate(&input, arena, &allocation);
+    bool valid = error == TIER1_ALLOCATION_OK && tier1_allocation_verify(&input, &allocation) && tier1_allocation_test_occupancy(&input, &allocation) && allocation.fragment_count > 4 && allocation.spill_count == 2;
+    uint64_t registers[32] = { 0 };
+    uint64_t slots[2] = { 0 };
+    const uint64_t values[] = { UINT64_C(0x0123456789abcdef), UINT64_C(0xfedcba9876543210) };
+    for (uint32_t p = 0; valid && p < 10; p += 1)
     {
-        const uint64_t saved = arena->length;
-        Tier1Allocation allocation = { 0 };
-        const Tier1AllocationError error = variant == 0 ? tier1_allocate(&input, arena, &allocation) : tier1_allocate_scalar(&input, arena, &allocation);
-        bool valid = error == TIER1_ALLOCATION_OK && tier1_allocation_verify(&input, &allocation) && tier1_allocation_test_occupancy(&input, &allocation) && allocation.fragment_count > 4 && allocation.spill_count == 2;
-        uint64_t registers[32] = { 0 };
-        uint64_t slots[2] = { 0 };
-        const uint64_t values[] = { UINT64_C(0x0123456789abcdef), UINT64_C(0xfedcba9876543210) };
-        for (uint32_t p = 0; valid && p < 10; p += 1)
+        // Apply stores as one phase, then reloads: a freed register may hold a different value after the latter.
+        for (uint32_t i = 0; i < 2; i += 1)
         {
-            // Apply stores as one phase, then reloads: a freed register may hold a different value after the latter.
-            for (uint32_t i = 0; i < 2; i += 1)
+            for (uint32_t f = allocation.fragment_offsets[i] + 1; f < allocation.fragment_offsets[i + 1]; f += 1)
             {
-                for (uint32_t f = allocation.fragment_offsets[i] + 1; f < allocation.fragment_offsets[i + 1]; f += 1)
+                if (allocation.starts[f] == p && allocation.kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL)
                 {
-                    if (allocation.starts[f] == p && allocation.kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL)
-                    {
-                        slots[allocation.spill_ids[i]] = registers[allocation.registers[f - 1]];
-                    }
-                }
-            }
-            for (uint32_t i = 0; i < 2; i += 1)
-            {
-                for (uint32_t f = allocation.fragment_offsets[i]; f < allocation.fragment_offsets[i + 1]; f += 1)
-                {
-                    if (allocation.starts[f] == p)
-                    {
-                        if (allocation.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER)
-                        {
-                            registers[allocation.registers[f]] = p == starts[i] ? values[i] : slots[allocation.spill_ids[i]];
-                        }
-                        else if (p == starts[i])
-                        {
-                            slots[allocation.spill_ids[i]] = values[i];
-                        }
-                    }
-                }
-                for (uint32_t use = offsets[i]; use < offsets[i + 1]; use += 1)
-                {
-                    if (uses[use] == p)
-                    {
-                        Tier1AllocationLocation location = { 0 };
-                        valid = valid && tier1_allocation_location(&input, &allocation, i, p, &location) && location.kind == BUSTER_TIER1_ALLOCATE_REGISTER && registers[location.reg] == values[i];
-                    }
+                    slots[allocation.spill_ids[i]] = registers[allocation.registers[f - 1]];
                 }
             }
         }
-        tier1_allocation_test_expect(tally, valid, "repeated required-use reload/resplit preserves values");
-        arena_pop_to(arena, saved);
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            for (uint32_t f = allocation.fragment_offsets[i]; f < allocation.fragment_offsets[i + 1]; f += 1)
+            {
+                if (allocation.starts[f] == p)
+                {
+                    if (allocation.kinds[f] == BUSTER_TIER1_ALLOCATE_REGISTER)
+                    {
+                        registers[allocation.registers[f]] = p == starts[i] ? values[i] : slots[allocation.spill_ids[i]];
+                    }
+                    else if (p == starts[i])
+                    {
+                        slots[allocation.spill_ids[i]] = values[i];
+                    }
+                }
+            }
+            for (uint32_t use = offsets[i]; use < offsets[i + 1]; use += 1)
+            {
+                if (uses[use] == p)
+                {
+                    Tier1AllocationLocation location = { 0 };
+                    valid = valid && tier1_allocation_location(&input, &allocation, i, p, &location) && location.kind == BUSTER_TIER1_ALLOCATE_REGISTER && registers[location.reg] == values[i];
+                }
+            }
+        }
     }
+    tier1_allocation_test_expect(tally, valid, "repeated required-use reload/resplit preserves values");
+    arena_pop_to(arena, saved);
     uses[4] = 2;
-    const uint64_t saved = arena->length;
-    Tier1Allocation allocation = { .splits = 987 };
-    tier1_allocation_test_expect(tally, tier1_allocate(&input, arena, &allocation) == TIER1_ALLOCATION_CONSTRAINT && allocation.splits == 987 && arena->length == saved, "impossible simultaneous required operands fail transactionally");
+    Tier1Allocation refused = { .splits = 987 };
+    tier1_allocation_test_expect(tally, tier1_allocate(&input, arena, &refused) == TIER1_ALLOCATION_CONSTRAINT && refused.splits == 987 && arena->length == saved, "impossible simultaneous required operands fail transactionally");
 }
 
 static void tier1_allocation_test_guarded(Tier1AllocationTestTally* tally, Arena* arena)
@@ -862,7 +880,7 @@ static void tier1_allocation_test_guarded(Tier1AllocationTestTally* tally, Arena
             .count = count,
         };
         uint8_t marks[65];
-        tier1_allocation_test_expect(tally, tier1_rematerialization_marks(&recipes, marks) && tier1_rematerialization_marks_scalar(&recipes, marks), "rematerialization input columns end at guard pages");
+        tier1_allocation_test_expect(tally, tier1_rematerialization_marks(&recipes, marks), "rematerialization input columns end at guard pages");
         arena_pop_to(arena, saved);
     }
     for (uint32_t c = 0; c < 12; c += 1)
@@ -882,7 +900,7 @@ static void tier1_allocation_test_rematerialization(Tier1AllocationTestTally* ta
     uint64_t values[129];
     uint16_t costs[129];
     uint16_t reloads[129];
-    uint8_t scalar[129];
+    uint8_t expected[129];
     uint8_t vector[129];
     const uint64_t samples[] = { 0, 1, UINT32_MAX, UINT64_MAX, UINT64_C(0x123456789abcdef0), INT32_MAX, (uint64_t)(int64_t)INT32_MIN, UINT64_C(0x80000000) };
     for (uint32_t i = 0; i < 129; i += 1)
@@ -905,9 +923,13 @@ static void tier1_allocation_test_rematerialization(Tier1AllocationTestTally* ta
     for (uint32_t count = 0; count <= 129; count += 1)
     {
         input.count = count;
-        memset(scalar, 0x5a, sizeof(scalar));
+        // A recipe's mark is its eligibility; the bytes past the count keep their canary.
+        for (uint32_t i = 0; i < 129; i += 1)
+        {
+            expected[i] = i < count ? (tier1_rematerialization_eligible(&input, i) ? 1 : 0) : 0x5a;
+        }
         memset(vector, 0x5a, sizeof(vector));
-        tier1_allocation_test_expect(tally, tier1_rematerialization_marks(&input, vector) && tier1_rematerialization_marks_scalar(&input, scalar) && memcmp(scalar, vector, sizeof(scalar)) == 0, "rematerialization scalar/vector and tail canary");
+        tier1_allocation_test_expect(tally, tier1_rematerialization_marks(&input, vector) && memcmp(expected, vector, sizeof(expected)) == 0, "rematerialization marks are each recipe's eligibility, and the tail canary holds");
     }
     input.count = 1;
     input.costs = input.reload_costs = 0;
@@ -934,9 +956,131 @@ static void tier1_allocation_test_rematerialization(Tier1AllocationTestTally* ta
     tier1_allocation_test_expect(tally, !tier1_rematerialize(&input, 0, 9, 5, 0, &copy), "frame displacement overflow rejected");
     input.count = UINT32_MAX;
     vector[0] = 0xa5;
-    tier1_allocation_test_expect(tally, !tier1_rematerialization_marks(&input, vector) && !tier1_rematerialization_marks_scalar(&input, vector) && vector[0] == 0xa5, "oversized recipe count rejected before reading columns");
+    tier1_allocation_test_expect(tally, !tier1_rematerialization_marks(&input, vector) && vector[0] == 0xa5, "oversized recipe count rejected before reading columns");
     input.count = BUSTER_TIER1_REMAT_MAX_VALUES + 1;
     tier1_allocation_test_expect(tally, !tier1_rematerialization_marks(&input, vector) && !tier1_rematerialize(&input, 0, 0, 4, 0, &copy), "recipe limit shared by marking and materialization");
+}
+
+// #3149: a frame address's copy, from each of the 16 general registers as the frame base into each destination, at
+// displacements 0, 8, -32 and 128: the lea `lea r64, [base + displacement]` but where the displacement is 0 and the
+// base's low three bits are rsp's or rbp's (rsp, rbp, r12, r13), whose lea needs a SIB byte or a zero disp8: there the
+// base's register copy, `mov r64, base`, one byte shorter by the encoder. Elsewhere the copy is the lea's record
+// exactly, so the code is byte for byte what it was. The Zen 5 model prices the copy at displacement 0 from rsp as its
+// register copy, `mov rax, rsp`, below the lea's at 8, and neither above the reload's: both stay rematerializable.
+static void tier1_allocation_test_frame_copies(Tier1AllocationTestTally* tally)
+{
+    const int32_t displacements[] = {
+        0,
+        8,
+        -32,
+        128,
+    };
+    const uint8_t operation = BUSTER_TIER1_REMAT_STACK;
+    const uint8_t width = 8;
+    const uint8_t stable = BUSTER_TIER1_REMAT_STABLE;
+    uint32_t copies = 0;
+    uint32_t leas = 0;
+    uint32_t shorter = 0;
+    uint32_t exact = 0;
+    bool valid = x86_encoder_initialize();
+    for (uint32_t d = 0; valid && d < BUSTER_ARRAY_LENGTH(displacements); d += 1)
+    {
+        const uint64_t value = (uint64_t)(int64_t)displacements[d];
+        const Tier1RematerializationInput input = {
+            .operations = &operation,
+            .widths = &width,
+            .flags = &stable,
+            .values = &value,
+            .count = 1,
+        };
+        for (uint8_t base = 0; valid && base < 16; base += 1)
+        {
+            for (uint8_t destination = 0; valid && destination < 16; destination += 1)
+            {
+                Tier1Rematerialized copy = { 0 };
+                const X86Instruction lea = {
+                    .displacement = displacements[d],
+                    .reg = destination,
+                    .rm = base,
+                    .mode = BUSTER_X86_MEMORY_BASE,
+                    .form = X86_FORM_LEA_R64_M,
+                };
+                const bool copied = displacements[d] == 0 && ((base & 7) == X86_REGISTER_RSP || (base & 7) == X86_REGISTER_RBP);
+                valid = tier1_rematerialize(&input, 0, destination, base, 0, &copy) && copy.symbol == BUSTER_TIER1_REMAT_NO_SYMBOL && x86_validate(&copy.instruction, 1) == 1;
+                uint8_t bytes[2][BUSTER_X86_ENCODER_CAPACITY(1)];
+                const int64_t made = valid ? x86_encode(&copy.instruction, 1, bytes[0], sizeof(bytes[0]), 0, 0) : -1;
+                const int64_t reference = valid ? x86_encode(&lea, 1, bytes[1], sizeof(bytes[1]), 0, 0) : -1;
+                if (copied)
+                {
+                    const bool move = copy.instruction.form == X86_FORM_MOV_R64_RM64 && copy.instruction.mode == BUSTER_X86_REGISTER_DIRECT && copy.instruction.reg == destination &&
+                                      copy.instruction.rm == base && copy.instruction.displacement == 0 && copy.instruction.index == 0 && copy.instruction.immediate == 0;
+                    copies += move;
+                    shorter += made == 3 && reference == 4;
+                }
+                else
+                {
+                    leas += memcmp(&copy.instruction, &lea, sizeof(lea)) == 0;
+                    exact += made > 0 && made == reference && memcmp(bytes[0], bytes[1], (size_t)made) == 0;
+                }
+            }
+        }
+    }
+    // 4 bases of 16 at displacement 0, 16 destinations each: 64 copies; the other 12 bases and the 3 other displacements' 16.
+    tier1_allocation_test_expect(tally, valid && copies == 64 && shorter == 64, "a zero frame displacement from rsp, rbp, r12 or r13 is the base's register copy, 3 bytes for the lea's 4");
+    tier1_allocation_test_expect(tally, valid && leas == 960 && exact == 960, "every other frame address's copy is its lea, the same bytes");
+    // The model's costs, from rsp as both consumers ask for them: the copy at 0 and the lea at 8 against the reload.
+    const uint8_t operations[2] = {
+        BUSTER_TIER1_REMAT_STACK,
+        BUSTER_TIER1_REMAT_STACK,
+    };
+    const uint8_t widths[2] = {
+        8,
+        8,
+    };
+    const uint8_t flags[2] = {
+        BUSTER_TIER1_REMAT_STABLE,
+        BUSTER_TIER1_REMAT_STABLE,
+    };
+    const uint64_t values[2] = {
+        0,
+        8,
+    };
+    uint16_t costs[2] = { 0 };
+    uint16_t reloads[2] = { 0 };
+    uint8_t marks[2] = { 0 };
+    Tier1RematerializationInput costed = {
+        .operations = operations,
+        .widths = widths,
+        .flags = flags,
+        .values = values,
+        .count = 2,
+    };
+    const bool modeled = x86_zen5_initialize() && tier1_rematerialization_model_costs(&costed, X86_REGISTER_RSP, costs, reloads);
+    costed.costs = costs;
+    costed.reload_costs = reloads;
+    const bool marked = modeled && tier1_rematerialization_marks(&costed, marks);
+    // The model's own latencies of the two records, as the consumers' frame base gives them: rsp's register copy, and a
+    // lea from rsp. The copy at 0 is priced as the register copy, strictly below the lea (#3149), the lea at 8 as the lea.
+    const X86Instruction register_copy = {
+        .reg = X86_REGISTER_RAX,
+        .rm = X86_REGISTER_RSP,
+        .mode = BUSTER_X86_REGISTER_DIRECT,
+        .form = X86_FORM_MOV_R64_RM64,
+    };
+    const X86Instruction lea = {
+        .displacement = 8,
+        .reg = X86_REGISTER_RAX,
+        .rm = X86_REGISTER_RSP,
+        .mode = BUSTER_X86_MEMORY_BASE,
+        .form = X86_FORM_LEA_R64_M,
+    };
+    const uint16_t copy_latency = modeled ? x86_zen5_columns[X86_COST_LATENCY][x86_zen5_id(&register_copy)] : BUSTER_X86_COST_UNKNOWN;
+    const uint16_t lea_latency = modeled ? x86_zen5_columns[X86_COST_LATENCY][x86_zen5_id(&lea)] : BUSTER_X86_COST_UNKNOWN;
+    const bool measured = copy_latency != BUSTER_X86_COST_UNKNOWN && lea_latency != BUSTER_X86_COST_UNKNOWN && copy_latency != 0 && copy_latency < lea_latency;
+    tier1_allocation_test_expect(tally, marked && measured && costs[0] == copy_latency && costs[1] == lea_latency && costs[1] <= reloads[1] && costs[0] <= reloads[0] && marks[0] == 1 && marks[1] == 1,
+                                 "the model prices a zero displacement's copy as rsp's register copy, below a lea, neither above a reload, and both stay rematerializable");
+    printf("frame copies: %u register copies of a base (%u 3 bytes for the lea's 4), %u leas the same bytes; model latency (cycles * 256) of rsp's copy %u, of a lea from it %u, of a reload %u\n",
+           copies, shorter, exact, (uint32_t)costs[0], (uint32_t)costs[1], (uint32_t)reloads[0]);
 }
 
 // Generated machine code has no Clang UBSan function-type prefix before its first byte. Only this actual JIT call
@@ -959,10 +1103,13 @@ static void tier1_allocation_test_native_recipes(Tier1AllocationTestTally* tally
         0,
         (uint64_t)(int64_t)-32,
         123,
+        0,
     };
-    for (uint32_t fixture = 0; fixture < 9; fixture += 1)
+    // Fixtures 7 and 9 are frame addresses from rsp, at -32 (a lea) and at 0 (rsp's register copy, #3149).
+    for (uint32_t fixture = 0; fixture < 10; fixture += 1)
     {
-        const uint8_t operation = fixture == 7 ? BUSTER_TIER1_REMAT_STACK : fixture == 8 ? BUSTER_TIER1_REMAT_SYMBOL : BUSTER_TIER1_REMAT_INTEGER;
+        const bool frame = fixture == 7 || fixture == 9;
+        const uint8_t operation = frame ? BUSTER_TIER1_REMAT_STACK : fixture == 8 ? BUSTER_TIER1_REMAT_SYMBOL : BUSTER_TIER1_REMAT_INTEGER;
         const uint8_t width = 8;
         const uint8_t stable = BUSTER_TIER1_REMAT_STABLE;
         const Tier1RematerializationInput input = {
@@ -973,7 +1120,7 @@ static void tier1_allocation_test_native_recipes(Tier1AllocationTestTally* tally
             .count = 1,
         };
         Tier1Rematerialized copy = { 0 };
-        const uint8_t destination = fixture == 6 || fixture == 7 ? 10 : 0;
+        const uint8_t destination = fixture == 6 || frame ? 10 : 0;
         bool valid = tier1_rematerialize(&input, 0, destination, 4, fixture == 6 ? 1 : 0, &copy);
         X86Instruction records[8] = { 0 };
         uint32_t count = 0;
@@ -991,7 +1138,7 @@ static void tier1_allocation_test_native_recipes(Tier1AllocationTestTally* tally
             count += 1;
             expected = 0;
         }
-        else if (fixture == 7)
+        else if (frame)
         {
             records[count] = (X86Instruction){
                 .rm = 4,
@@ -1008,7 +1155,7 @@ static void tier1_allocation_test_native_recipes(Tier1AllocationTestTally* tally
             };
             count += 1;
         }
-        else if (fixture == 7)
+        else if (frame)
         {
             records[count] = (X86Instruction){
                 .rm = 10,
@@ -1119,13 +1266,13 @@ static void tier1_allocation_test_native(Tier1AllocationTestTally* tally, Arena*
         .position_count = 208,
         .registers = { mask, 0 },
     };
-    for (uint32_t variant = 0; variant < 6; variant += 1)
+    for (uint32_t variant = 0; variant < 3; variant += 1)
     {
         const uint64_t saved = arena->length;
-        input.rematerializable = variant < 2 || variant >= 4 ? remat : 0;
-        input.use_required = variant >= 4 ? required : 0;
+        input.rematerializable = variant != 1 ? remat : 0;
+        input.use_required = variant == 2 ? required : 0;
         Tier1Allocation allocation = { 0 };
-        const Tier1AllocationError error = (variant & 1) == 0 ? tier1_allocate(&input, arena, &allocation) : tier1_allocate_scalar(&input, arena, &allocation);
+        const Tier1AllocationError error = tier1_allocate(&input, arena, &allocation);
         bool valid = error == TIER1_ALLOCATION_OK && tier1_allocation_verify(&input, &allocation);
         X86Instruction records[1024];
         uint32_t count = 0;
@@ -1319,6 +1466,7 @@ static int run_tier1_allocate_tests(int argc, char** argv)
         tier1_allocation_test_avoided(&tally, &arena, seed);
         tier1_allocation_test_guarded(&tally, &arena);
         tier1_allocation_test_rematerialization(&tally);
+        tier1_allocation_test_frame_copies(&tally);
         tier1_allocation_test_native(&tally, &arena, seed);
         tier1_allocation_test_native_recipes(&tally);
         printf("test-tier1-allocation: %" PRIu64 " checks, %" PRIu64 " failures, seed %" PRIu64 "\n", tally.checks, tally.failures, seed);

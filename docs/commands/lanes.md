@@ -32,7 +32,16 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   the child's mapping, a 64 GiB reservation that grows in its own slot past its
   share, its base fixed, through a copy that grew it first, refused past the
   limit as a reservation without changing, and its slot freed by its release
-  (#1118);
+  (#1118), and, in a child with the limits fixed as a command has them,
+  reservations taken together (#2873, `arena_reservation_map`): two next to
+  each other in the stretch's upper half, zero-filled where they push and
+  advised huge pages from their reservation; an arena of base pages and one
+  of tables in the lower half; a small arena's release leaving it mapped and
+  a large one's unmapping it, until 32 have been kept; a pool giving an arena
+  back; an arena's base pages committed at once and then four times what is
+  committed where commit isn't charged, 64 KB and within twice where it is;
+  and a full half, compact reservations and limits that aren't fixed each
+  leaving a reservation a mapping of its own;
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;

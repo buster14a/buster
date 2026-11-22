@@ -1,0 +1,10 @@
+int value = 1;
+int value __asm__("value_label") __attribute__((used));
+int other = 2;
+extern int other __asm__("other_label");
+int leading = 3;
+__attribute__((used)) int leading __asm__("leading_label");
+int tentative;
+int tentative __asm__("tentative_label");
+int extern_tentative;
+extern int extern_tentative __asm__("extern_tentative_label");

@@ -15,7 +15,7 @@ requirements. [Command index](README.md).
   headers and global symbols parsed into columns of the round's own, their
   records exchanged over fixed hash partitions into each partition's tables,
   archive members loaded in frontier rounds (for the needed shared libraries'
-  references too), and COMDAT groups picked by signature; GNU ld's results
+  unversioned references too), and COMDAT groups picked by signature; GNU ld's results
   where they don't depend on the archives' order, lld's where they do. Each
   phase has a vector path and an exact twin.
   `foreign_test.c` holds its tests (`main.c` includes both;
@@ -69,6 +69,14 @@ and every COMDAT group's fate.
   defines, needed and under `--as-needed` (the member loads), and under
   `--as-needed` with nothing needing it (nothing loads); and a thin archive
   that holds another archive's member (GNU ar's `/N:M`);
+- versioned library references (#2911): a needed library's `foo@V1` leaves
+  an archive's unversioned `foo` unloaded, including when `--as-needed`
+  retains the library in a later round. Regular references still extract,
+  and a definition already loaded stays eligible for export by its bare name.
+  The raw `link-foreign` cases run their executables and inspect `.dynsym`.
+  `--cross-check` compares the no-extraction output with GNU ld/lld; the
+  selected-definition controls preserve Buster's existing export-by-name
+  behavior, which differs from their version-sensitive export selection;
 - with `--cross-check`, which needs `ld.bfd`, `ld.lld`, `cc` and (for the C++
   cases) `g++`: each program and case linked by GNU ld (`--trace` twice, `-Map`
   and `-y`) and by lld (`--why-extract`, `-Map` and `-y`). The members each

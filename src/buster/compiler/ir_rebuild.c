@@ -164,9 +164,7 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
     const uint64_t scratch_mark = owners ? scratch->length : 0;
     if (owners)
     {
-        check = ir_verify_complete(source, scratch, true);
-        const IrCheck scalar = check.error == IR_OK ? ir_verify_complete(source, scratch, false) : check;
-        check = scalar.error == IR_OK ? check : scalar;
+        check = ir_verify_complete(source, scratch);
     }
     const uint32_t blocks = owners && plan != NULL && plan->blocks != NULL ? plan->block_count : owners ? source->block_count : 0;
     const uint32_t rows = owners && plan != NULL && plan->rows != NULL ? plan->instruction_count : owners ? source->instruction_count : 0;
@@ -482,9 +480,7 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
     }
     if (check.error == IR_OK)
     {
-        check = ir_verify_complete(&candidate, scratch, true);
-        const IrCheck scalar = check.error == IR_OK ? ir_verify_complete(&candidate, scratch, false) : check;
-        check = scalar.error == IR_OK ? check : scalar;
+        check = ir_verify_complete(&candidate, scratch);
     }
     if (owners)
     {

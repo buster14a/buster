@@ -29,7 +29,6 @@
 // run_refinement_benchmark.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -651,11 +650,3 @@ int run_refinement_benchmark(int argc, char** argv)
     return result;
 }
 
-#else
-int run_refinement_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

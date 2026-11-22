@@ -973,7 +973,11 @@ static bool foreign_test_same_trace(const Foreign* foreign, const ForeignTestLin
         {
             const uint32_t symbol = round->first_symbol + s;
             const uint32_t id = foreign_symbol_object(foreign, symbol);
-            if (round->symbols.name_id[s] == name - 1 && id != 0 && our_count < BUSTER_FOREIGN_TEST_TRACE_LINES)
+            const ForeignObject* holder = &foreign->objects[id];
+            // A library's versioned reference is traced as name@VERSION, not by this bare-name -y request.
+            const bool versioned = holder->library != 0 &&
+                                   foreign->libraries[holder->library - 1].library.references.version[symbol - holder->global_begin] > VER_NDX_GLOBAL;
+            if (round->symbols.name_id[s] == name - 1 && id != 0 && !versioned && our_count < BUSTER_FOREIGN_TEST_TRACE_LINES)
             {
                 const bool definition = round->symbols.section[s] != SHN_UNDEF && !foreign_test_discarded(foreign, symbol);
                 const bool weak = ELF64_ST_BIND(round->symbols.info[s]) == STB_WEAK && round->symbols.section[s] != BUSTER_FOREIGN_SECTION_COMMON;
@@ -1048,6 +1052,30 @@ static bool foreign_test_merged(const Foreign* foreign, uint32_t id, uint32_t se
     return section != SHN_UNDEF && section < object->elf.section_count && (import_section_header(&object->elf, section).sh_flags & SHF_MERGE) != 0;
 }
 
+// The resolver deliberately keeps a library's versioned reference under its bare name for executable exports.
+// That bare name can remain undefined while ld resolves name@VERSION to a nondefault shared-library export.
+static bool foreign_test_only_versioned_references(const Foreign* foreign, uint32_t name)
+{
+    bool versioned = false;
+    bool unversioned = (foreign->names.flags[name] & BUSTER_FOREIGN_NAME_REGULAR_REFERENCED) != 0;
+    for (uint32_t l = 0; !unversioned && l < foreign->library_count; l += 1)
+    {
+        const ForeignLibrary* library = &foreign->libraries[l];
+        const ImportReferences* references = &library->library.references;
+        for (uint32_t r = 0; library->needed && !unversioned && r < references->count; r += 1)
+        {
+            const bool same = references->weak[r] == 0 && references->length[r] == foreign->names.length[name] &&
+                              memcmp(references->name[r], foreign->names.bytes[name], references->length[r]) == 0;
+            if (same)
+            {
+                versioned = versioned || references->version[r] > VER_NDX_GLOBAL;
+                unversioned = references->version[r] <= VER_NDX_GLOBAL;
+            }
+        }
+    }
+    return versioned && !unversioned;
+}
+
 // The cross-check of one case: the linkers' links of `linker_arguments`, against `foreign`'s resolution. With `bfd` and
 // `lld`, the linker's result must be the resolution's; a linker the case leaves out is still run, and its differences
 // are counted apart, quietly: they are the documented ones, and the count shows they still are.
@@ -1067,7 +1095,7 @@ static void foreign_test_against(ForeignTestTally* tally, const char* what, cons
     {
         const bool linker_name = runtime_linker_name(RUNTIME_KIND_STATIC, foreign->names.bytes[n], foreign->names.length[n]) ||
                                  runtime_linker_name(RUNTIME_KIND_DYNAMIC, foreign->names.bytes[n], foreign->names.length[n]);
-        if (foreign->names.resolution[n] == FOREIGN_RESOLUTION_UNDEFINED && !linker_name && undefined[0] == 0)
+        if (foreign->names.resolution[n] == FOREIGN_RESOLUTION_UNDEFINED && !linker_name && undefined[0] == 0 && !foreign_test_only_versioned_references(foreign, n))
         {
             snprintf(undefined, sizeof(undefined), "%.*s", (int)foreign->names.length[n], foreign->names.bytes[n]);
         }
@@ -1506,6 +1534,15 @@ static const ForeignTestSource foreign_test_sources[] = {
     { "dep_plain.c", "", "int main(void) { return 0; }\n" },
     { "dep_library.c", "-fPIC", "extern int dep_foo(void); int dependent(void) { return dep_foo(); }\n" },
     { "dep_foo.c", "", "int dep_foo(void) { return 4; }\n" },
+    { "ver_main.c", "", "extern int ver_call(void); int main(void) { return ver_call(); }\n" },
+    { "ver_start.s", "", ".text\n.globl _start\n.type _start,@function\n_start:\ncall ver_call\nmov %eax,%edi\nmov $60,%eax\nsyscall\n.size _start,.-_start\n.section .note.GNU-stack,\"\",@progbits\n" },
+    { "ver_weak_main.c", "", "extern int ver_weak_call(void); int main(void) { return ver_weak_call(); }\n" },
+    { "ver_reference.c", "", "extern int ver_foo(void); int ver_direct(void) { return ver_foo(); }\n" },
+    { "ver_member.c", "", "int ver_foo(void) { return 99; }\n" },
+    { "ver_a.c", "-fPIC", "extern int ver_foo(void); int ver_call(void) { return ver_foo(); }\n" },
+    { "ver_weak.c", "-fPIC", "extern int ver_foo(void) __attribute__((weak)); int ver_weak_call(void) { return ver_foo ? ver_foo() : 0; }\n" },
+    { "ver_base.c", "-fPIC", "int ver_foo(void) { return 11; }\n" },
+    { "ver_b.c", "-fPIC", "int ver_impl(void) { return 11; }\n__asm__(\".symver ver_impl,ver_foo@VER_1\");\n" },
 };
 
 static const char foreign_test_header_text[] =
@@ -1617,6 +1654,12 @@ static const ForeignTestCase foreign_test_cases[] = {
     { "a library's reference", { "dep_main.o", "libdep.so", "libdepfoo.a" }, true, true, false },
     { "an as-needed library's reference", { "dep_main.o", "--as-needed", "libdep.so", "--no-as-needed", "libdepfoo.a" }, true, true, false },
     { "an as-needed library nothing needs", { "dep_plain.o", "--as-needed", "libdep.so", "--no-as-needed", "libdepfoo.a" }, true, false, false },
+    { "a versioned library reference skips an unversioned member", { "ver_main.o", "libverA.so", "libverfoo.a", "libverB.so" }, true, true, false },
+    { "an as-needed versioned library reference skips an unversioned member", { "ver_main.o", "--as-needed", "libverA.so", "--no-as-needed", "libverfoo.a", "libverB.so" }, true, true, false },
+    { "a weak versioned library reference skips an unversioned member", { "ver_weak_main.o", "libverWeak.so", "libverfoo.a", "libverB.so" }, true, true, false },
+    { "an object's unversioned reference still loads the member", { "ver_main.o", "ver_reference.o", "libverA.so", "libverfoo.a", "libverB.so" }, true, true, false },
+    { "an executable definition beside a versioned library reference", { "ver_main.o", "ver_member.o", "libverA.so", "libverfoo.a", "libverB.so" }, true, true, false },
+    { "a versioned reference cannot predate a later ordinary reference", { "ver_main.o", "libverA.so", "libverfoo.a", "ver_member.o", "ver_reference.o", "libverB.so" }, true, true, false },
     { "a thin archive of another archive's member", { "ar_main.o", "libnest.a", "libsecond.a", "liblate.a" }, true, false, false },
 };
 
@@ -1855,6 +1898,57 @@ static const ForeignTestOutcome foreign_test_outcomes[] = {
         0,
     },
     {
+        "a versioned library reference skips an unversioned member",
+        {
+            { "ver_call", FOREIGN_RESOLUTION_SHARED, "libverA.so", 0, 0, 0 },
+        },
+        { 0 },
+        0,
+    },
+    {
+        "an as-needed versioned library reference skips an unversioned member",
+        {
+            { "ver_call", FOREIGN_RESOLUTION_SHARED, "libverA.so", 0, 0, 0 },
+        },
+        { 0 },
+        0,
+    },
+    {
+        "a weak versioned library reference skips an unversioned member",
+        {
+            { "ver_weak_call", FOREIGN_RESOLUTION_SHARED, "libverWeak.so", 0, 0, 0 },
+        },
+        { 0 },
+        0,
+    },
+    {
+        "an object's unversioned reference still loads the member",
+        {
+            { "ver_call", FOREIGN_RESOLUTION_SHARED, "libverA.so", 0, 0, 0 },
+            { "ver_foo", FOREIGN_RESOLUTION_STRONG, "libverfoo.a(ver_member.o)", 0, 0, 1 },
+        },
+        { "libverfoo.a(ver_member.o)" },
+        1,
+    },
+    {
+        "an executable definition beside a versioned library reference",
+        {
+            { "ver_call", FOREIGN_RESOLUTION_SHARED, "libverA.so", 0, 0, 0 },
+            { "ver_foo", FOREIGN_RESOLUTION_STRONG, "ver_member.o", 0, 0, 1 },
+        },
+        { 0 },
+        0,
+    },
+    {
+        "a versioned reference cannot predate a later ordinary reference",
+        {
+            { "ver_call", FOREIGN_RESOLUTION_SHARED, "libverA.so", 0, 0, 0 },
+            { "ver_foo", FOREIGN_RESOLUTION_STRONG, "ver_member.o", 0, 0, 1 },
+        },
+        { 0 },
+        0,
+    },
+    {
         "a thin archive of another archive's member",
         {
             { "first", FOREIGN_RESOLUTION_STRONG, "libnest_inner.a)", 0, 0, 1 },
@@ -1958,6 +2052,7 @@ static bool foreign_test_compiled(bool cross_check, const char* directory, Forei
     static const char* const comdat_back[] = { "co_early.o", "co_late.o" };
     static const char* const probe[] = { "pb_strong.o" };
     static const char* const dependency[] = { "dep_foo.o" };
+    static const char* const versioned[] = { "ver_member.o" };
     bool made = c;
     made = made && foreign_test_archive(directory, "librule.a", rule, 4, false, arena) != 0;
     made = made && foreign_test_archive(directory, "libwk.a", weak, 3, false, arena) != 0;
@@ -1970,6 +2065,7 @@ static bool foreign_test_compiled(bool cross_check, const char* directory, Forei
     made = made && foreign_test_archive(directory, "libsh.a", shared, 1, false, arena) != 0;
     made = made && foreign_test_archive(directory, "libpb.a", probe, 1, false, arena) != 0;
     made = made && foreign_test_archive(directory, "libdepfoo.a", dependency, 1, false, arena) != 0;
+    made = made && foreign_test_archive(directory, "libverfoo.a", versioned, 1, false, arena) != 0;
     if (cplusplus)
     {
         made = made && foreign_test_archive(directory, "libco.a", comdat, 2, false, arena) != 0;
@@ -2006,6 +2102,40 @@ static bool foreign_test_compiled(bool cross_check, const char* directory, Forei
         0,
     };
     made = made && object_test_run(dependency_arguments, output, errors) == 0;
+    // libA's strong and libWeak's weak ver_foo references acquire VER_1 from the bootstrap library. The provider
+    // on the final line has only the nondefault ver_foo@VER_1; an intervening archive's bare name cannot satisfy it.
+    char version_script[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    char version_option[BUSTER_FOREIGN_TEST_PATH_BYTES + 32];
+    char version_base[BUSTER_FOREIGN_TEST_PATH_BYTES];
+    snprintf(version_script, sizeof(version_script), "%s/ver.map", directory);
+    snprintf(version_option, sizeof(version_option), "-Wl,--version-script=%s", version_script);
+    snprintf(version_base, sizeof(version_base), "%s/libverBase.so", directory);
+    static const char version_map[] = "VER_1 { global: ver_foo; local: *; };\n";
+    made = made && foreign_test_write(version_script, version_map, sizeof(version_map) - 1);
+    static const char* const version_libraries[][3] = {
+        { "libverBase.so", "ver_base.o", "-Wl,-soname,libverB.so" },
+        { "libverB.so", "ver_b.o", "-Wl,-soname,libverB.so" },
+        { "libverA.so", "ver_a.o", "-Wl,-soname,libverA.so" },
+        { "libverWeak.so", "ver_weak.o", "-Wl,-soname,libverWeak.so" },
+    };
+    for (uint32_t v = 0; made && v < BUSTER_ARRAY_LENGTH(version_libraries); v += 1)
+    {
+        snprintf(library, sizeof(library), "%s/%s", directory, version_libraries[v][0]);
+        snprintf(library_object, sizeof(library_object), "%s/%s", directory, version_libraries[v][1]);
+        char* version_arguments[] = {
+            (char*)"cc",
+            (char*)"-shared",
+            (char*)"-nostdlib",
+            (char*)"-Wl,--no-as-needed",
+            (char*)version_libraries[v][2],
+            (char*)"-o",
+            library,
+            library_object,
+            v < 2 ? version_option : version_base,
+            0,
+        };
+        made = object_test_run(version_arguments, output, errors) == 0;
+    }
     // A thin archive of another archive's member, as GNU ar writes one when given the archive (a member named "/N:M"),
     // the other archive GNU ar's too, so that its member's name is in its header (the test reads it there).
     char nested[BUSTER_FOREIGN_TEST_PATH_BYTES];
@@ -2882,6 +3012,135 @@ static bool foreign_test_extended(const char* directory, Arena* arena)
 #include "buster/compiler/foreign_debug_test.c"
 #include "buster/compiler/foreign_corpus_test.c"
 
+// The raw driver must preserve the extraction decision through conversion and executable output (#2911). Reuse
+// the compiled cases' versioned libraries: an unselected member stays out, while an ordinary reference or explicit
+// object definition makes its bare ver_foo an executable export that libA's versioned reference can bind at runtime.
+static bool foreign_test_versioned_driver(bool cross_check, const char* directory, Arena* arena)
+{
+    const uint64_t saved = arena->length;
+    ForeignTestTally tally = {
+        .check = "versioned library archive driver",
+    };
+    Runtime runtime;
+    const bool found = runtime_import(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;
+    foreign_test_expect(&tally, found, "find system loader for versioned archive fixtures", 0);
+    static const char* const names[] = {
+        "ver_start.o",
+        "libverA.so",
+        "libverfoo.a",
+        "libverB.so",
+        "ver_member.o",
+        "ver_reference.o",
+    };
+    char* files[BUSTER_ARRAY_LENGTH(names)];
+    bool ready = found;
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(names); f += 1)
+    {
+        files[f] = foreign_test_path(directory, names[f], arena);
+        ready = ready && files[f] != 0;
+    }
+    foreign_test_expect(&tally, ready, "prepare versioned archive fixture paths", 0);
+    for (uint32_t fixture = 0; ready && fixture < 3; fixture += 1)
+    {
+        const int expected_status = fixture == 0 ? 11 : 99;
+        String8 reference = { 0 };
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(foreign_test_lanes); l += 1)
+            {
+                char name[64];
+                char lanes[16];
+                snprintf(name, sizeof(name), "versioned_archive_%u_%u_%u", fixture, path, foreign_test_lanes[l]);
+                snprintf(lanes, sizeof(lanes), "%u", foreign_test_lanes[l]);
+                char* arguments[20];
+                uint32_t count = 0;
+                arguments[count++] = (char*)"-pie";
+                arguments[count++] = (char*)"--dynamic-linker";
+                arguments[count++] = runtime.loader_path.pointer;
+                arguments[count++] = (char*)"--lanes";
+                arguments[count++] = lanes;
+                if (path != 0)
+                {
+                    arguments[count++] = (char*)"--scalar";
+                }
+                arguments[count++] = files[0];
+                if (fixture != 0)
+                {
+                    arguments[count++] = files[fixture + 3];
+                }
+                arguments[count++] = (char*)"--as-needed";
+                arguments[count++] = files[1];
+                arguments[count++] = (char*)"--no-as-needed";
+                arguments[count++] = files[2];
+                arguments[count++] = files[3];
+                const String8 bytes = foreign_driver_test_invoke(&tally, directory, name, "-o", arguments, count, true, expected_status, arena);
+                const DynamicTestImage image = dynamic_test_image(bytes);
+                Elf64_Sym symbol = { 0 };
+                const bool exported = image.valid && foreign_dynamic_test_symbol(&image, "ver_foo", &symbol) != 0 && symbol.st_shndx != SHN_UNDEF;
+                foreign_test_expect(&tally, image.valid && exported == (fixture != 0), "only selected executable definitions export the library's bare name", name);
+                if (path == 0 && l == 0)
+                {
+                    reference = bytes;
+                }
+                else
+                {
+                    foreign_test_expect(&tally, foreign_driver_test_same(reference, bytes), "versioned archive output agrees across paths and lanes", name);
+                }
+            }
+        }
+        static const char* const linkers[] = {
+            "ld.bfd",
+            "ld.lld",
+        };
+        // The archive-skipping case agrees with both linkers. The selected-definition controls above preserve
+        // Buster's direct path's by-name exports; GNU ld and lld don't export a bare definition for a versioned
+        // DSO reference alone, so their runtime binding isn't the contract those controls check.
+        for (uint32_t linker = 0; cross_check && fixture == 0 && linker < BUSTER_ARRAY_LENGTH(linkers); linker += 1)
+        {
+            ForeignTestPath executable;
+            ForeignTestPath output;
+            ForeignTestPath errors;
+            snprintf(executable, sizeof(executable), "%s/versioned_archive_oracle_%u_%u", directory, fixture, linker);
+            snprintf(output, sizeof(output), "%s/versioned_archive_oracle.out", directory);
+            snprintf(errors, sizeof(errors), "%s/versioned_archive_oracle.err", directory);
+            char* arguments[20];
+            uint32_t count = 0;
+            arguments[count++] = (char*)linkers[linker];
+            arguments[count++] = (char*)"-o";
+            arguments[count++] = executable;
+            arguments[count++] = (char*)"-pie";
+            arguments[count++] = (char*)"--dynamic-linker";
+            arguments[count++] = runtime.loader_path.pointer;
+            arguments[count++] = files[0];
+            if (fixture != 0)
+            {
+                arguments[count++] = files[fixture + 3];
+            }
+            arguments[count++] = (char*)"--as-needed";
+            arguments[count++] = files[1];
+            arguments[count++] = (char*)"--no-as-needed";
+            arguments[count++] = files[2];
+            arguments[count++] = files[3];
+            arguments[count] = 0;
+            const bool linked = object_test_run(arguments, output, errors) == 0;
+            foreign_test_expect(&tally, linked, "reference linker accepts versioned archive fixture", linkers[linker]);
+            if (linked)
+            {
+                foreign_test_expect(&tally, foreign_driver_test_run(directory, executable, output, errors, arena) == expected_status,
+                                    "reference versioned archive fixture returns the expected status", linkers[linker]);
+                const String8 bytes = foreign_test_read(arena, executable);
+                const DynamicTestImage image = dynamic_test_image(bytes);
+                Elf64_Sym symbol = { 0 };
+                const bool exported = image.valid && foreign_dynamic_test_symbol(&image, "ver_foo", &symbol) != 0 && symbol.st_shndx != SHN_UNDEF;
+                foreign_test_expect(&tally, image.valid && exported == (fixture != 0), "reference executable exports only selected bare definitions", linkers[linker]);
+            }
+        }
+    }
+    runtime_release(&runtime);
+    arena_pop_to(arena, saved);
+    return foreign_test_report(&tally);
+}
+
 static int run_foreign_tests(int argc, char** argv)
 {
     uint64_t seed = 1;
@@ -2969,6 +3228,7 @@ static int run_foreign_tests(int argc, char** argv)
         passed = foreign_strings_test(seed) && passed;
         passed = foreign_strings_output_test(directory, &arena, cross_check) && passed;
         passed = foreign_driver_test(directory, &arena, cross_check, &system) && passed;
+        passed = foreign_test_versioned_driver(cross_check, directory, &arena) && passed;
         passed = foreign_driver_dedup_test(directory, &arena) && passed;
         passed = foreign_driver_pipeline_test(directory, &arena) && passed;
         passed = foreign_debug_test(directory, &arena, cross_check, &system) && passed;

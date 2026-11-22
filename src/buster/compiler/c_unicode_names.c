@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
-// Clang-following component: see THIRD_PARTY_NOTICES.md ("Unicode character names") and LICENSES/LLVM.txt. Part of
-// the LLVM Project, under the Apache License v2.0 with LLVM Exceptions: its name matching and diagnostic text are a C
-// translation of llvm/lib/Support/UnicodeNameToCodepoint.cpp and clang/lib/Basic/Diagnostic.cpp at llvm-project
-// 2875c6073a7e. Local modifications Copyright (c) 2026 David Gonzalez Martin, under the same terms.
+// Clang-following component: see THIRD_PARTY_NOTICES.md ("Unicode character names", "Unicode column widths") and
+// LICENSES/LLVM.txt. Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions: its name matching
+// and diagnostic text are a C translation of llvm/lib/Support/UnicodeNameToCodepoint.cpp and
+// clang/lib/Basic/Diagnostic.cpp at llvm-project 2875c6073a7e, and its column width one of llvm/lib/Support/Unicode.cpp
+// at llvmorg-23.1.4. Local modifications Copyright (c) 2026 David Gonzalez Martin, under the same terms.
 //
 // Unicode character names (#1447): what a named universal character name, \N{NAME}, stands for, as clang 23 reads one
 // (LLVM's llvm/lib/Support/UnicodeNameToCodepoint.cpp, whose rules these follow), and the text clang's diagnostics of a
@@ -17,6 +18,8 @@
 //   nearestMatchesForCodepointName gives clang's "did you mean" notes.
 // - unicode_escape_*: clang's EscapeStringForDiagnostic and EscapeSingleCodepointForDiagnostic, the way its diagnostics
 //   print a name's bytes and a character.
+// - unicode_column_width: LLVM's charWidth (llvm/lib/Support/Unicode.cpp at llvmorg-23.1.4, the same at 23.1.6), the
+//   columns clang's caret diagnostics give a character of a source line (#2376), from c_unicode_widths.inc's ranges.
 //
 // All of it is a cold path: only a literal or a token with a \N reads the table. The stored names are sorted by their
 // loose keys and front-coded in buckets, which an exact or a loose lookup finds by a binary search over their first
@@ -38,6 +41,7 @@ struct UnicodeNameRange
 };
 
 #include "buster/compiler/c_unicode_names.inc"
+#include "buster/compiler/c_unicode_widths.inc"
 
 // The entry points' linkage, so that the executable has one copy of the table (about 300 KB): main.c's units call the
 // lexer's home's (BUSTER_LEXER_ENTRY), and so does a unit of its own that includes the lexer and is linked into the
@@ -59,6 +63,7 @@ struct UnicodeNameRange
 
 BUSTER_UNICODE_ENTRY __attribute__((unused)) bool unicode_name_strict(const uint8_t* name, uint32_t length, uint32_t* code_point);
 BUSTER_UNICODE_ENTRY __attribute__((unused)) bool unicode_name_loose(const uint8_t* name, uint32_t length, uint32_t* code_point);
+BUSTER_UNICODE_ENTRY __attribute__((unused)) int32_t unicode_column_width(uint32_t code_point);
 
 // The longest name a lookup reads (a longer one is no name: the longest stored one has 88 bytes).
 #define BUSTER_UNICODE_NAME_BYTES 128
@@ -527,6 +532,18 @@ static __attribute__((unused)) bool unicode_is_printable(uint32_t code_point)
 static __attribute__((unused)) bool unicode_is_formatting(uint32_t code_point)
 {
     return unicode_in_ranges(unicode_formatting_ranges, BUSTER_ARRAY_LENGTH(unicode_formatting_ranges), code_point);
+}
+
+// LLVM's charWidth (llvm/lib/Support/Unicode.cpp), by which clang's caret diagnostics place a source line's characters
+// (#2376): -1 for a character LLVM's isPrintable doesn't take (its table has c_unicode_widths.inc's draft code points
+// too), 0 for a combining mark, 2 for a wide character, else 1. A cold path: only a diagnostic's source line with a
+// character past ASCII asks.
+BUSTER_UNICODE_ENTRY int32_t unicode_column_width(uint32_t code_point)
+{
+    const bool printable = unicode_is_printable(code_point) || unicode_in_ranges(unicode_draft_printable_ranges, BUSTER_ARRAY_LENGTH(unicode_draft_printable_ranges), code_point);
+    const bool combining = unicode_in_ranges(unicode_combining_ranges, BUSTER_ARRAY_LENGTH(unicode_combining_ranges), code_point);
+    const bool wide = unicode_in_ranges(unicode_double_width_ranges, BUSTER_ARRAY_LENGTH(unicode_double_width_ranges), code_point);
+    return !printable ? -1 : combining ? 0 : wide ? 2 : 1;
 }
 
 // The length of the well-formed UTF-8 sequence at `bytes` (of `length`), with its code point, or 0 (LLVM's

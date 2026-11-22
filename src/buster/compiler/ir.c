@@ -10,7 +10,7 @@
 // No column has readable padding: ir_verify uses masked tails and scalar indexed byte loads, never a gather of four
 // bytes from a one-byte type. Rewrites build new columns; CFG and use lists are explicitly rebuilt when needed.
 //
-// Entry points: ir_create; ir_verify and ir_verify_scalar; ir_build_cfg; ir_build_uses; ir_print. All allocations are
+// Entry points: ir_create; ir_verify; ir_build_cfg; ir_build_uses; ir_print. All allocations are
 // transactional and all scratch is returned. Input/output/scratch arenas must be disjoint. Raw column pointers must
 // cover their declared logical counts; the verifier can check IDs and ranges, not a caller's mapping ownership.
 // docs/ir.md records operand meanings, the producer/consumer contract and acceptance that needs #133/#134/#138.
@@ -840,7 +840,6 @@ struct IrUses
 
 static __attribute__((unused)) IrError ir_create(Arena* arena, const IrSizes* sizes, IrFunction* result);
 static __attribute__((unused)) IrCheck ir_verify(const IrFunction* function, Arena* scratch, const IrDominance* dominance);
-static __attribute__((unused)) IrCheck ir_verify_scalar(const IrFunction* function, Arena* scratch, const IrDominance* dominance);
 static __attribute__((unused)) IrError ir_build_cfg(const IrFunction* function, Arena* arena, Arena* scratch, IrCfg* result);
 static __attribute__((unused)) IrError ir_build_uses(const IrFunction* function, Arena* arena, Arena* scratch, IrUses* result);
 static __attribute__((unused)) IrError ir_print(const IrFunction* function, Arena* scratch, FILE* output);
@@ -865,26 +864,32 @@ static const uint16_t ir_type_bits[IR_TYPE_COUNT] = {
     [IR_M32] = 32,
     [IR_M64] = 64,
 };
-static const char* const ir_type_names[IR_TYPE_COUNT] = {
-    "void",
-    "i1",
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "i128",
-    "f32",
-    "f64",
-    "f80",
-    "ptr",
-    "v4i32",
-    "v8i32",
-    "v16i32",
-    "m8",
-    "m16",
-    "m32",
-    "m64",
-};
+// The printer's spellings and the text reader's length column have the same enum order.
+#define BUSTER_IR_NAME_TEXT(word) word,
+#define BUSTER_IR_NAME_LENGTH(word) (sizeof(word) - 1),
+
+#define BUSTER_IR_TYPE_SPELLINGS(X) \
+    X("void") \
+    X("i1") \
+    X("i8") \
+    X("i16") \
+    X("i32") \
+    X("i64") \
+    X("i128") \
+    X("f32") \
+    X("f64") \
+    X("f80") \
+    X("ptr") \
+    X("v4i32") \
+    X("v8i32") \
+    X("v16i32") \
+    X("m8") \
+    X("m16") \
+    X("m32") \
+    X("m64")
+static const char* const ir_type_names[IR_TYPE_COUNT] = { BUSTER_IR_TYPE_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_type_name_lengths[IR_TYPE_COUNT] = { BUSTER_IR_TYPE_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_TYPE_SPELLINGS
 // A vector operation's lanes' names (#141's element types), by IrSimdLane, and its vector type's, by its width (16, 32 or
 // 64 bytes) and lanes: `add.v16i8` is an add of v4i32's 16 bytes as 8-bit lanes, its flags I8.
 static const char* const ir_lane_names[IR_SIMD_LANE_COUNT] = { "i32", "i8", "i16", "i64", "f32", "f64" };
@@ -893,78 +898,80 @@ static const char* const ir_lane_type_names[3][IR_SIMD_LANE_COUNT] = {
     { "v8i32", "v32i8", "v16i16", "v4i64", "v8f32", "v4f64" },
     { "v16i32", "v64i8", "v32i16", "v8i64", "v16f32", "v8f64" },
 };
-static const char* const ir_op_names[IR_OP_COUNT] = {
-    "invalid",
-    "const",
-    "undef",
-    "param",
-    "copy",
-    "add",
-    "sub",
-    "mul",
-    "sdiv",
-    "udiv",
-    "srem",
-    "urem",
-    "and",
-    "or",
-    "xor",
-    "shl",
-    "lshr",
-    "ashr",
-    "neg",
-    "not",
-    "fadd",
-    "fsub",
-    "fmul",
-    "fdiv",
-    "fneg",
-    "icmp",
-    "fcmp",
-    "select",
-    "trunc",
-    "zext",
-    "sext",
-    "ftrunc",
-    "fext",
-    "sitofp",
-    "uitofp",
-    "fptosi",
-    "fptoui",
-    "inttoptr",
-    "ptrtoint",
-    "bitcast",
-    "stack_addr",
-    "symbol_addr",
-    "address",
-    "load",
-    "store",
-    "call",
-    "call_indirect",
-    "phi",
-    "br",
-    "cbr",
-    "switch",
-    "ret",
-    "unreachable",
-    "alloca",
-    "stack_save",
-    "stack_restore",
-    "br_indirect",
-    "vconst",
-    "vcmp",
-    "vselect",
-    "lifetime",
-    "fence",
-    "intrinsic",
-    "rmw",
-    "masked_load",
-    "masked_store",
-    "compress_store",
-    "gather",
-    "fma",
-    "scatter",
-};
+#define BUSTER_IR_OP_SPELLINGS(X) \
+    X("invalid") \
+    X("const") \
+    X("undef") \
+    X("param") \
+    X("copy") \
+    X("add") \
+    X("sub") \
+    X("mul") \
+    X("sdiv") \
+    X("udiv") \
+    X("srem") \
+    X("urem") \
+    X("and") \
+    X("or") \
+    X("xor") \
+    X("shl") \
+    X("lshr") \
+    X("ashr") \
+    X("neg") \
+    X("not") \
+    X("fadd") \
+    X("fsub") \
+    X("fmul") \
+    X("fdiv") \
+    X("fneg") \
+    X("icmp") \
+    X("fcmp") \
+    X("select") \
+    X("trunc") \
+    X("zext") \
+    X("sext") \
+    X("ftrunc") \
+    X("fext") \
+    X("sitofp") \
+    X("uitofp") \
+    X("fptosi") \
+    X("fptoui") \
+    X("inttoptr") \
+    X("ptrtoint") \
+    X("bitcast") \
+    X("stack_addr") \
+    X("symbol_addr") \
+    X("address") \
+    X("load") \
+    X("store") \
+    X("call") \
+    X("call_indirect") \
+    X("phi") \
+    X("br") \
+    X("cbr") \
+    X("switch") \
+    X("ret") \
+    X("unreachable") \
+    X("alloca") \
+    X("stack_save") \
+    X("stack_restore") \
+    X("br_indirect") \
+    X("vconst") \
+    X("vcmp") \
+    X("vselect") \
+    X("lifetime") \
+    X("fence") \
+    X("intrinsic") \
+    X("rmw") \
+    X("masked_load") \
+    X("masked_store") \
+    X("compress_store") \
+    X("gather") \
+    X("fma") \
+    X("scatter")
+static const char* const ir_op_names[IR_OP_COUNT] = { BUSTER_IR_OP_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_op_name_lengths[IR_OP_COUNT] = { BUSTER_IR_OP_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_OP_SPELLINGS
 
 // The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
 // followed by their bytes (vector64, mask8).
@@ -995,51 +1002,55 @@ static const char* const ir_form_names[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUST
 
 // An intrinsic's operations' names in the text form (BUSTER_IR_INTRINSIC_*), after its operands as a comparison's
 // predicate is.
-static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
-    "mulhu",
-    "pdep",
-    "pext",
-    "bzhi",
-    "bextr",
-    "splat",
-    "tzcnt",
-    "bsf",
-    "lzcnt",
-    "bsr",
-    "popcnt",
-    "bswap",
-    "saddo",
-    "ssubo",
-    "smulo",
-    "extract",
-    "widen",
-    "insert",
-    "permute",
-    "shuffle",
-    "align",
-    "shuffle_lanes",
-    "extend",
-    "truncate",
-    "shift",
-    "lane_op",
-    "permute2",
-    "ternlog",
-    "compress",
-    "expand",
-    "funnel",
-    "dot",
-    "aes",
-    "lane_extract",
-    "lane_insert",
-    "movemask",
-    "reduce",
-    "lane_unary",
-    "fround",
-    "cvtt",
-    "bitshuffle",
-    "quadword_op",
-    "pairwise",
-};
+#define BUSTER_IR_INTRINSIC_SPELLINGS(X) \
+    X("mulhu") \
+    X("pdep") \
+    X("pext") \
+    X("bzhi") \
+    X("bextr") \
+    X("splat") \
+    X("tzcnt") \
+    X("bsf") \
+    X("lzcnt") \
+    X("bsr") \
+    X("popcnt") \
+    X("bswap") \
+    X("saddo") \
+    X("ssubo") \
+    X("smulo") \
+    X("extract") \
+    X("widen") \
+    X("insert") \
+    X("permute") \
+    X("shuffle") \
+    X("align") \
+    X("shuffle_lanes") \
+    X("extend") \
+    X("truncate") \
+    X("shift") \
+    X("lane_op") \
+    X("permute2") \
+    X("ternlog") \
+    X("compress") \
+    X("expand") \
+    X("funnel") \
+    X("dot") \
+    X("aes") \
+    X("lane_extract") \
+    X("lane_insert") \
+    X("movemask") \
+    X("reduce") \
+    X("lane_unary") \
+    X("fround") \
+    X("cvtt") \
+    X("bitshuffle") \
+    X("quadword_op") \
+    X("pairwise")
+static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = { BUSTER_IR_INTRINSIC_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_intrinsic_name_lengths[BUSTER_IR_INTRINSIC_COUNT] = { BUSTER_IR_INTRINSIC_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_INTRINSIC_SPELLINGS
+#undef BUSTER_IR_NAME_LENGTH
+#undef BUSTER_IR_NAME_TEXT
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
 static const char* const ir_fence_orders[BUSTER_IR_FENCE_SEQ_CST + 1] = {
@@ -1450,10 +1461,10 @@ typedef enum IrRule
     X(IR_SEXT,          1, 1, BUSTER_IR_INTS, IR_RULE_EXTEND, 0) \
     X(IR_FTRUNC,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FTRUNC, 0) \
     X(IR_FEXT,          1, 1, BUSTER_IR_FLOATS, IR_RULE_FEXTEND, 0) \
-    X(IR_SITOFP,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FROM_INT, 0) \
-    X(IR_UITOFP,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FROM_INT, 0) \
-    X(IR_FPTOSI,        1, 1, BUSTER_IR_INTS, IR_RULE_FROM_FLOAT, 0) \
-    X(IR_FPTOUI,        1, 1, BUSTER_IR_INTS, IR_RULE_FROM_FLOAT, 0) \
+    X(IR_SITOFP,        1, 1, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_FROM_INT, 0) \
+    X(IR_UITOFP,        1, 1, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_FROM_INT, 0) \
+    X(IR_FPTOSI,        1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_FROM_FLOAT, 0) \
+    X(IR_FPTOUI,        1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_FROM_FLOAT, 0) \
     X(IR_INTTOPTR,      1, 1, 1u << IR_PTR, IR_RULE_FROM_INT, 0) \
     X(IR_PTRTOINT,      1, 1, BUSTER_IR_INTS, IR_RULE_FROM_POINTER, 0) \
     X(IR_BITCAST,       1, 1, BUSTER_IR_VALUES, IR_RULE_BITCAST, 0) \
@@ -1485,7 +1496,7 @@ typedef enum IrRule
     X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_COMPRESS_STORE, 7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0) \
-    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64), IR_RULE_FMA, 0) \
+    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64) | BUSTER_IR_VECTORS, IR_RULE_FMA, 0) \
     X(IR_SCATTER,       3, 7, 1u << IR_VOID, IR_RULE_SCATTER, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
@@ -1613,6 +1624,11 @@ static IrSimdOperation ir_lane_operation(uint32_t op)
         case IR_FSUB: result = IR_SIMD_FSUB; break;
         case IR_FMUL: result = IR_SIMD_FMUL; break;
         case IR_FDIV: result = IR_SIMD_FDIV; break;
+        case IR_FMA: result = IR_SIMD_FMA; break;
+        case IR_SITOFP: result = IR_SIMD_SITOFP; break;
+        case IR_UITOFP: result = IR_SIMD_UITOFP; break;
+        case IR_FPTOSI: result = IR_SIMD_FPTOSI; break;
+        case IR_FPTOUI: result = IR_SIMD_FPTOUI; break;
         case IR_VCMP: result = IR_SIMD_COMPARE; break;
         case IR_VSELECT: result = IR_SIMD_SELECT; break;
         default: break;
@@ -1765,102 +1781,27 @@ static bool ir_gather_index_valid(uint32_t type, uint32_t lane, uint32_t index)
 // (an invalid operation of numbers), the default NaN.
 static uint64_t ir_fma_bits(uint32_t type, uint64_t a, uint64_t b, uint64_t c)
 {
-    const bool d = type == IR_F64;
-    const uint64_t exponent = d ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
-    const uint64_t mantissa = d ? UINT64_C(0x000fffffffffffff) : UINT64_C(0x007fffff);
-    const uint64_t quiet = d ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
-    const uint64_t operands[3] = {
-        a,
-        b,
-        c,
-    };
-    uint64_t result = 0;
-    bool found = false;
-    for (uint32_t k = 0; k < 3; k += 1)
-    {
-        const bool nan = (operands[k] & exponent) == exponent && (operands[k] & mantissa) != 0;
-        result = !found && nan ? (operands[k] & (exponent | mantissa | (d ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000)))) | quiet : result;
-        found = found || nan;
-    }
-    if (!found && d)
-    {
-        double x = 0;
-        double y = 0;
-        double z = 0;
-        memcpy(&x, &a, sizeof(x));
-        memcpy(&y, &b, sizeof(y));
-        memcpy(&z, &c, sizeof(z));
-        const double r = __builtin_fma(x, y, z);
-        memcpy(&result, &r, sizeof(r));
-    }
-    else if (!found)
-    {
-        const uint32_t bits[3] = {
-            (uint32_t)a,
-            (uint32_t)b,
-            (uint32_t)c,
-        };
-        float x = 0;
-        float y = 0;
-        float z = 0;
-        memcpy(&x, &bits[0], sizeof(x));
-        memcpy(&y, &bits[1], sizeof(y));
-        memcpy(&z, &bits[2], sizeof(z));
-        const float r = __builtin_fmaf(x, y, z);
-        uint32_t word = 0;
-        memcpy(&word, &r, sizeof(word));
-        result = word;
-    }
-    const bool invalid = !found && (result & exponent) == exponent && (result & mantissa) != 0;
-    result = invalid ? (d ? UINT64_C(0xfff8000000000000) : UINT64_C(0xffc00000)) : result;
-    return result;
+    return ir_simd_fma_bits(type == IR_F64, a, b, c);
 }
 
 #endif
-// How many of this thread's scans for SIMD values or vectors (ir_function_has_simd_path, ir_function_has_vectors_path)
-// took the vector path: test-tier1-masks and test-ir-simd read it to check that a scalar run takes each scan's scalar
-// twin, as --scalar promises (#141's review). main.c's units share it, as lane.c's arena_small_floor, so that a command
-// whose scans run in a home's copy of the code (ir_source's, the checker's) counts them in the same variable
-// (./build.sh check-call-graph's split state).
-#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
-extern _Thread_local uint64_t ir_scan_vector_paths;
-#elif defined(BUSTER_UNIT)
-_Thread_local uint64_t ir_scan_vector_paths;
-#else
-static _Thread_local uint64_t ir_scan_vector_paths;
-#endif
-
 #ifndef BUSTER_IR_STORAGE_ONLY
 // Consumers call only after structural verification. Refuse the entire function before allocating/rebuilding
 // scalar-only state, including SIMD ABI metadata and unused vector payloads rather than only executable rows. The
-// instructions' types and operations, the scan's bulk, go 64 at a time on the vector path and one at a time on its scalar
-// twin, which must agree; the other columns are a few entries each.
-static bool ir_function_has_simd_path(const IrFunction* function, bool vector)
+// instructions' types and operations, the scan's bulk, go 64 at a time; the other columns are a few entries each.
+static __attribute__((unused)) bool ir_function_has_simd(const IrFunction* function)
 {
-    (void)vector;
-
     // A machine row (#141) is the IR's vectors' and masks' too, as opaque to the passes that take no SIMD value.
     bool found = function->vector_constant_count != 0 || function->row_count != 0 || function->result_type >= IR_V4I32;
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
     {
-        ir_scan_vector_paths += 1;
-        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
-        {
-            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
-            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
-            const __m512i ops = _mm512_maskz_loadu_epi8(active, function->op + first);
-            const __mmask64 simd = _mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V4I32)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCONST)) |
-                                   _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCMP)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VSELECT));
-            found = simd != 0;
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
-        {
-            found = function->type[i] >= IR_V4I32 || function->op[i] == IR_VCONST || function->op[i] == IR_VCMP || function->op[i] == IR_VSELECT;
-        }
+        const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+        const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+        const __m512i ops = _mm512_maskz_loadu_epi8(active, function->op + first);
+        const __mmask64 simd = _mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V4I32)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCONST)) |
+                               _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCMP)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VSELECT));
+        found = simd != 0;
     }
     for (uint32_t i = 0; !found && i < function->parameter_count; i += 1)
     {
@@ -1883,34 +1824,20 @@ static bool ir_function_has_simd_path(const IrFunction* function, bool vector)
 
 // Whether a function has vectors (#141's, which the SSA promoter, the optimizers and Tier 1's selector refuse): a vector
 // type anywhere, its constants or its operations, in its instructions, its parameters, calls and slots. A function whose
-// only SIMD values are masks (#179) has none. The instructions 64 at a time on the vector path, one at a time on its
-// scalar twin, which must agree.
-static bool ir_function_has_vectors_path(const IrFunction* function, bool vector)
+// only SIMD values are masks (#179) has none. The instructions 64 at a time.
+static __attribute__((unused)) bool ir_function_has_vectors(const IrFunction* function)
 {
-    (void)vector;
-
     bool found = function->vector_constant_count != 0 || function->row_count != 0 || ir_vector_type(function->result_type);
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
     {
-        ir_scan_vector_paths += 1;
-        for (uint32_t first = 0; !found && first < function->instruction_count; first += 64)
-        {
-            const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
-            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
-            const __m512i ops = _mm512_maskz_loadu_epi8(active, function->op + first);
-            const __mmask64 vectors = _mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V4I32)) & ~_mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V16I32 + 1));
-            const __mmask64 operations = _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCONST)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCMP)) |
-                                         _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VSELECT));
-            found = (vectors | operations) != 0;
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; !found && i < function->instruction_count; i += 1)
-        {
-            found = ir_vector_type(function->type[i]) || function->op[i] == IR_VCONST || function->op[i] == IR_VCMP || function->op[i] == IR_VSELECT;
-        }
+        const uint32_t count = function->instruction_count - first < 64 ? function->instruction_count - first : 64;
+        const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i types = _mm512_maskz_loadu_epi8(active, function->type + first);
+        const __m512i ops = _mm512_maskz_loadu_epi8(active, function->op + first);
+        const __mmask64 vectors = _mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V4I32)) & ~_mm512_mask_cmpge_epu8_mask(active, types, _mm512_set1_epi8(IR_V16I32 + 1));
+        const __mmask64 operations = _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCONST)) | _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VCMP)) |
+                                     _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_VSELECT));
+        found = (vectors | operations) != 0;
     }
     for (uint32_t i = 0; !found && i < function->parameter_count; i += 1)
     {
@@ -1931,30 +1858,6 @@ static bool ir_function_has_vectors_path(const IrFunction* function, bool vector
     return found;
 }
 
-static __attribute__((unused)) bool ir_function_has_vectors(const IrFunction* function)
-{
-#if !BUSTER_HOST_VECTOR
-    return ir_function_has_vectors_path(function, false);
-#else
-    return ir_function_has_vectors_path(function, true);
-#endif
-}
-
-static __attribute__((unused)) bool ir_function_has_simd_scalar(const IrFunction* function);
-
-static __attribute__((unused)) bool ir_function_has_simd(const IrFunction* function)
-{
-#if !BUSTER_HOST_VECTOR
-    return ir_function_has_simd_scalar(function);
-#else
-    return ir_function_has_simd_path(function, true);
-#endif
-}
-
-static __attribute__((unused)) bool ir_function_has_simd_scalar(const IrFunction* function)
-{
-    return ir_function_has_simd_path(function, false);
-}
 
 static IrCheck ir_check(IrError error, uint32_t instruction, uint32_t detail)
 {
@@ -2400,8 +2303,16 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_EXTEND: valid = ir_integer(ta) && ir_type_bits[ta] < ir_type_bits[type]; break;
             case IR_RULE_FTRUNC: valid = ir_floating(ta) && ir_type_bits[ta] > ir_type_bits[type]; break;
             case IR_RULE_FEXTEND: valid = ir_floating(ta) && ir_type_bits[ta] < ir_type_bits[type]; break;
-            case IR_RULE_FROM_INT: valid = ir_integer(ta); break;
-            case IR_RULE_FROM_FLOAT: valid = ir_floating(ta); break;
+            // A vector conversion (#2806) is one lane at a time, i32 with f32 or i64 with f64, the float lane in the
+            // flags. A scalar conversion's flags stay clear. inttoptr and ptrtoint stay scalar.
+            case IR_RULE_FROM_INT:
+                valid = ir_vector_type(type) ? (op == IR_SITOFP || op == IR_UITOFP) && ta == type && ir_lane_valid(op, f->flags[i]) :
+                        ir_integer(ta) && f->flags[i] == 0;
+                break;
+            case IR_RULE_FROM_FLOAT:
+                valid = ir_vector_type(type) ? (op == IR_FPTOSI || op == IR_FPTOUI) && ta == type && ir_lane_valid(op, f->flags[i]) :
+                        ir_floating(ta) && f->flags[i] == 0;
+                break;
             case IR_RULE_FROM_POINTER: valid = ta == IR_PTR; break;
             // Bits for bits of the same width; a mask (#179) only to or from an integer of its width (i8 to i64, the
             // boundary an opmask's kmov to and from a general register is), or to itself.
@@ -2618,8 +2529,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && operand_types[2] == ir_lane_mask(tb, f->flags[i]); break;
             // A gather's index of an element per lane, of 32 or 64 bits, and its mask at its lanes (#1840).
             case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && operand_types[2] == ir_lane_mask(type, f->flags[i]); break;
-            // A fused multiply-add's three operands are its result's type (#1840).
-            case IR_RULE_FMA: valid = ta == type && tb == type && operand_types[2] == type; break;
+            // A fused multiply-add's three operands are its result's type (#1840). A vector's lanes are floats or
+            // doubles (#2806); a scalar's flags stay clear.
+            case IR_RULE_FMA:
+                valid = ta == type && tb == type && operand_types[2] == type &&
+                        (ir_vector_type(type) ? ir_lane_valid(op, f->flags[i]) : f->flags[i] == 0);
+                break;
             // A scatter's (#1840) `c` is its two extra values' index, no kind's: its stored vector's lanes, a dword's or a
             // qword's, take b's index elements, and its mask is of those lanes.
             case IR_RULE_SCATTER:
@@ -2837,26 +2752,24 @@ static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t firs
     return active & (bad | defer);
 }
 
-// The verifier's and the derived arrays' hot functions (this one, ir_cfg_validated, ir_check_dominance, ir_verify_path
-// and ir_uses_path) stay out of line and start lines of their own, so that where the code before them ends doesn't
+// The verifier's and the derived arrays' hot functions (this one, ir_cfg_validated, ir_check_dominance, ir_verify
+// and ir_uses_validated) stay out of line and start lines of their own, so that where the code before them ends doesn't
 // move their loops within lines, which changed their times between builds of the same code (#786).
-static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunction* f, bool vector)
+static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunction* f)
 {
-    (void)vector;
-
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     uint32_t block = 0;
     uint32_t first = 0;
     // The first 64 types, which only a function of more than 128 instructions looks up apart (ir_operand_types).
     __m512i head = _mm512_setzero_si512();
-    if (BUSTER_VECTOR_PATH(vector) && f->instruction_count > 2 * 64)
+    if (f->instruction_count > 2 * 64)
     {
         head = _mm512_loadu_si512(f->type);
     }
     while (check.error == IR_OK && first < f->instruction_count)
     {
         const uint32_t remaining = f->instruction_count - first;
-        const uint32_t count = BUSTER_VECTOR_PATH(vector) && remaining > BUSTER_IR_VECTOR_COUNT ? BUSTER_IR_VECTOR_COUNT : BUSTER_VECTOR_PATH(vector) ? remaining : 1;
+        const uint32_t count = remaining > BUSTER_IR_VECTOR_COUNT ? BUSTER_IR_VECTOR_COUNT : remaining;
         __mmask16 expected = 0;
         while (block < f->block_count && f->block_offsets[block + 1] - first <= count)
         {
@@ -2864,15 +2777,7 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunc
             block += 1;
         }
         __mmask16 actual = 0;
-        uint32_t pending = 1;
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            pending = ir_check_batch(f, head, first, count, &actual);
-        }
-        else if (f->op[first] < IR_OP_COUNT)
-        {
-            actual = ir_terminator_table[f->op[first]];
-        }
+        uint32_t pending = ir_check_batch(f, head, first, count, &actual);
         const uint32_t bad_terms = actual ^ expected;
         pending |= bad_terms;
         while (check.error == IR_OK && pending != 0)
@@ -3045,7 +2950,7 @@ static IrError ir_build_cfg(const IrFunction* f, Arena* arena, Arena* scratch, I
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_rows(f, true);
+        check = ir_check_rows(f);
     }
     if (check.error == IR_OK)
     {
@@ -3265,35 +3170,20 @@ struct IrUseBatch
     uint32_t count;
 };
 
-static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance, bool vector)
+static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance)
 {
-    (void)vector;
-
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
-    uint32_t bad = 0;
-    if (BUSTER_VECTOR_PATH(vector))
+    const __m512i definition_blocks = _mm512_loadu_si512(batch->definition_blocks);
+    const __m512i use_blocks = _mm512_loadu_si512(batch->use_blocks);
+    const __mmask16 same = _mm512_cmpeq_epi32_mask(definition_blocks, use_blocks);
+    uint32_t bad = same & _mm512_cmpge_epu32_mask(_mm512_loadu_si512(batch->definitions), _mm512_loadu_si512(batch->positions));
+    if (dominance)
     {
-        const __m512i definition_blocks = _mm512_loadu_si512(batch->definition_blocks);
-        const __m512i use_blocks = _mm512_loadu_si512(batch->use_blocks);
-        const __mmask16 same = _mm512_cmpeq_epi32_mask(definition_blocks, use_blocks);
-        bad = same & _mm512_cmpge_epu32_mask(_mm512_loadu_si512(batch->definitions), _mm512_loadu_si512(batch->positions));
-        if (dominance)
-        {
-            const __m512i definition_leave = _mm512_loadu_si512(batch->definition_leave);
-            const __m512i use_leave = _mm512_loadu_si512(batch->use_leave);
-            bad |= ~same & (_mm512_cmpeq_epi32_mask(definition_leave, _mm512_setzero_si512()) | _mm512_cmpeq_epi32_mask(use_leave, _mm512_setzero_si512()) | _mm512_cmpgt_epu32_mask(_mm512_loadu_si512(batch->definition_enter), _mm512_loadu_si512(batch->use_enter)) | _mm512_cmplt_epu32_mask(definition_leave, use_leave));
-        }
-        bad &= (1u << batch->count) - 1u;
+        const __m512i definition_leave = _mm512_loadu_si512(batch->definition_leave);
+        const __m512i use_leave = _mm512_loadu_si512(batch->use_leave);
+        bad |= ~same & (_mm512_cmpeq_epi32_mask(definition_leave, _mm512_setzero_si512()) | _mm512_cmpeq_epi32_mask(use_leave, _mm512_setzero_si512()) | _mm512_cmpgt_epu32_mask(_mm512_loadu_si512(batch->definition_enter), _mm512_loadu_si512(batch->use_enter)) | _mm512_cmplt_epu32_mask(definition_leave, use_leave));
     }
-    else
-    {
-        for (uint32_t lane = 0; lane < batch->count; lane += 1)
-        {
-            const bool same = batch->definition_blocks[lane] == batch->use_blocks[lane];
-            const bool invalid = same ? batch->definitions[lane] >= batch->positions[lane] : dominance && (batch->definition_leave[lane] == 0 || batch->use_leave[lane] == 0 || batch->definition_enter[lane] > batch->use_enter[lane] || batch->definition_leave[lane] < batch->use_leave[lane]);
-            bad |= (uint32_t)invalid << lane;
-        }
-    }
+    bad &= (1u << batch->count) - 1u;
     if (bad != 0)
     {
         const uint32_t first = (uint32_t)__builtin_ctz(bad);
@@ -3304,7 +3194,7 @@ static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance, bool 
 
 // The exact check of instruction i's operands, in ir_operand's order: each defined before its use within a block and,
 // with a dominator tree, in a block that dominates the use's. A phi's incoming value is used at its predecessor's end.
-// The scalar twin checks every instruction so, and the vector path the lanes its batch leaves to it.
+// It checks the lanes the vector batches (ir_dominance_batch) leave to it.
 static IrCheck ir_check_operands(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t i)
 {
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
@@ -3391,20 +3281,13 @@ static __mmask16 ir_dominance_batch(const IrFunction* f, const IrCfg* cfg, const
     return pending;
 }
 
-static __attribute__((noinline, aligned(64))) IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
+static __attribute__((noinline, aligned(64))) IrCheck ir_check_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance)
 {
-    (void)vector;
-
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
-    const uint32_t step = BUSTER_VECTOR_PATH(vector) ? BUSTER_IR_VECTOR_COUNT : 1;
-    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += step)
+    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += BUSTER_IR_VECTOR_COUNT)
     {
         const uint32_t remaining = f->instruction_count - first;
-        uint32_t pending = 1;
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            pending = ir_dominance_batch(f, cfg, dominance, first, remaining < BUSTER_IR_VECTOR_COUNT ? remaining : BUSTER_IR_VECTOR_COUNT);
-        }
+        uint32_t pending = ir_dominance_batch(f, cfg, dominance, first, remaining < BUSTER_IR_VECTOR_COUNT ? remaining : BUSTER_IR_VECTOR_COUNT);
         while (check.error == IR_OK && pending != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(pending);
@@ -3473,14 +3356,12 @@ static IrCheck ir_check_dominance_view(const IrFunction* f, const IrDominance* d
 
 // Complete the SSA proof of the exact revision that passed a structural graph check. Shape, rows, phi edges,
 // switch cases and the CFG must be unchanged and live. This is not an entry point for unverified or mutated IR.
-static __attribute__((unused)) IrCheck ir_verify_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, bool vector)
+static __attribute__((unused)) IrCheck ir_verify_dominance(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance)
 {
-    (void)vector;
-
     IrCheck check = ir_check_dominance_view(f, dominance);
     if (check.error == IR_OK)
     {
-        check = ir_check_dominance(f, cfg, dominance, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_dominance(f, cfg, dominance);
     }
     if (check.error == IR_OK)
     {
@@ -3490,10 +3371,8 @@ static __attribute__((unused)) IrCheck ir_verify_dominance(const IrFunction* f, 
     return check;
 }
 
-static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scratch, const IrDominance* dominance, bool vector)
+static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scratch, const IrDominance* dominance)
 {
-    (void)vector;
-
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     bool ok = true;
     uint32_t* seen = ir_allocate(scratch, f->block_count, 4, &ok);
@@ -3511,22 +3390,13 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
     {
         check = ir_check_dominance_view(f, dominance);
     }
-    // The phis and switches, which the vector path finds 64 operations at a time.
-    const uint32_t step = BUSTER_VECTOR_PATH(vector) ? 64 : 1;
-    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += step)
+    // The phis and switches, found 64 operations at a time.
+    for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += 64)
     {
         const uint32_t remaining = f->instruction_count - first;
-        uint64_t pending = 0;
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            const __mmask64 active = remaining >= 64 ? (__mmask64)-1 : ((__mmask64)1 << remaining) - 1;
-            const __m512i op = _mm512_maskz_loadu_epi8(active, f->op + first);
-            pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_PHI)) | _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_SWITCH));
-        }
-        else
-        {
-            pending = f->op[first] == IR_PHI || f->op[first] == IR_SWITCH;
-        }
+        const __mmask64 active = remaining >= 64 ? (__mmask64)-1 : ((__mmask64)1 << remaining) - 1;
+        const __m512i op = _mm512_maskz_loadu_epi8(active, f->op + first);
+        uint64_t pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_PHI)) | _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_SWITCH));
         while (check.error == IR_OK && pending != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
@@ -3536,7 +3406,7 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_dominance(f, cfg, dominance, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_dominance(f, cfg, dominance);
     }
     if (check.error == IR_OK)
     {
@@ -3549,10 +3419,8 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
 // Full structural verification with its CFG retained for the next consumer of the same immutable revision.
 // The arenas are distinct: scratch is restored on every path; a failed check restores arena and leaves result
 // untouched. No proof or graph survives mutation, even when the function's pointers and counts stay equal.
-static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena* arena, Arena* scratch, bool vector, IrCfg* result)
+static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena* arena, Arena* scratch, IrCfg* result)
 {
-    (void)vector;
-
     const uint64_t mark = arena->length;
     const uint64_t temporary = scratch->length;
     IrCfg cfg = { 0 };
@@ -3563,7 +3431,7 @@ static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena*
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_rows(f, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_rows(f);
     }
     if (check.error == IR_OK)
     {
@@ -3571,7 +3439,7 @@ static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena*
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_graph(f, &cfg, scratch, 0, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_graph(f, &cfg, scratch, 0);
     }
     if (check.error == IR_OK)
     {
@@ -3585,15 +3453,13 @@ static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena*
     return check;
 }
 
-static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool vector)
+static __attribute__((noinline, aligned(64))) IrCheck ir_verify(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
 {
-    (void)vector;
-
     const uint64_t mark = scratch->length;
     IrCheck check = ir_check_shape(f);
     if (check.error == IR_OK)
     {
-        check = ir_check_rows(f, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_rows(f);
     }
     IrCfg cfg = { 0 };
     if (check.error == IR_OK)
@@ -3602,27 +3468,14 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFun
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_graph(f, &cfg, scratch, dominance, BUSTER_VECTOR_PATH(vector));
+        check = ir_check_graph(f, &cfg, scratch, dominance);
     }
     arena_pop_to(scratch, mark);
     return check;
 }
 
-static IrCheck ir_verify(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
-{
-#if !BUSTER_HOST_VECTOR
-    return ir_verify_scalar(f, scratch, dominance);
-#else
-    return ir_verify_path(f, scratch, dominance, true);
-#endif
-}
 
-static IrCheck ir_verify_scalar(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
-{
-    return ir_verify_path(f, scratch, dominance, false);
-}
-
-// #1634: the vector twin's place for each of a batch's 48 fixed operands: bit k of the batch's operand mask is column
+// #1634: the builder's place for each of a batch's 48 fixed operands: bit k of the batch's operand mask is column
 // k % 3 (a, b, c) of lane k / 3, so ascending bits run in ir_operand's order. Each entry is lane << 2 | column.
 static const uint8_t ir_uses_slots[48] = {
     0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14, 16, 17, 18, 20,
@@ -3632,7 +3485,7 @@ static const uint8_t ir_uses_slots[48] = {
 // Bit 3 * lane of the 48, where pdep deposits a 16-lane mask's bit for that lane's operand a; b's are one bit higher.
 #define BUSTER_IR_USES_LANE_BITS UINT64_C(0x249249249249)
 
-// One batch of up to 16 instructions from first, for either pass of the vector twin: with uses zero, counts each
+// One batch of up to 16 instructions from first, for either pass of the builder: with uses zero, counts each
 // operand's value in `counts` (offsets + 1); otherwise places each use at its value's cursor in `counts`. One byte
 // permute of the opcode tables gives every instruction's fixed operands, and pdep spreads the three column masks into
 // one 48-bit mask whose ascending bits are ir_operand's order; the loops read each operand from its column, with no
@@ -3730,13 +3583,11 @@ static uint64_t ir_uses_batch(const IrFunction* f, uint32_t first, uint32_t coun
 }
 
 // The use lists of a verified function, which ir_build_uses verifies first; a caller that has just verified it, as the
-// optimizer has, builds them without verifying it again (#786). Arena and scratch are disjoint. The scalar twin decodes
-// each operand with ir_operand; the vector twin (#1634) decodes 16 instructions at once in ir_uses_batch. Both count
-// each value's uses, sum the counts into offsets, then place every use in instruction order, then operand order.
-static __attribute__((noinline, aligned(64))) IrError ir_uses_path(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result, bool vector)
+// optimizer has, builds them without verifying it again (#786). Arena and scratch are disjoint. It decodes 16
+// instructions at once in ir_uses_batch (#1634): it counts each value's uses, sums the counts into offsets, then places
+// every use in instruction order, then operand order.
+static __attribute__((noinline, aligned(64))) IrError ir_uses_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
 {
-    (void)vector;
-
     const uint64_t mark = arena->length;
     const uint64_t temporary = scratch->length;
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
@@ -3755,32 +3606,15 @@ static __attribute__((noinline, aligned(64))) IrError ir_uses_path(const IrFunct
         }
     }
     uint64_t total = 0;
-    if (check.error == IR_OK && BUSTER_VECTOR_PATH(vector))
+    if (check.error == IR_OK)
     {
-        // A count can't wrap before the total passes UINT32_MAX, which refuses the function as the scalar twin does.
+        // A count can't wrap before the total passes UINT32_MAX, which refuses the function.
         for (uint32_t first = 0; first < f->instruction_count; first += BUSTER_IR_VECTOR_COUNT)
         {
             const uint32_t count = f->instruction_count - first < BUSTER_IR_VECTOR_COUNT ? f->instruction_count - first : BUSTER_IR_VECTOR_COUNT;
             total += ir_uses_batch(f, first, count, uses.offsets + 1, 0);
         }
         check.error = total > UINT32_MAX ? IR_ERROR_LIMIT : IR_OK;
-    }
-    for (uint32_t i = 0; check.error == IR_OK && !BUSTER_VECTOR_PATH(vector) && i < f->instruction_count; i += 1)
-    {
-        const uint64_t count = ir_operand_count(f, i);
-        total += count;
-        if (total > UINT32_MAX)
-        {
-            check.error = IR_ERROR_LIMIT;
-        }
-        else
-        {
-            for (uint32_t p = 0; p < count; p += 1)
-            {
-                const IrOperand operand = ir_operand(f, i, p, 0);
-                uses.offsets[operand.value + 1] += 1;
-            }
-        }
     }
     if (check.error == IR_OK)
     {
@@ -3798,23 +3632,10 @@ static __attribute__((noinline, aligned(64))) IrError ir_uses_path(const IrFunct
             uses.offsets[value + 1] += uses.offsets[value];
             cursor[value] = uses.offsets[value];
         }
-        for (uint32_t first = 0; BUSTER_VECTOR_PATH(vector) && first < f->instruction_count; first += BUSTER_IR_VECTOR_COUNT)
+        for (uint32_t first = 0; first < f->instruction_count; first += BUSTER_IR_VECTOR_COUNT)
         {
             const uint32_t count = f->instruction_count - first < BUSTER_IR_VECTOR_COUNT ? f->instruction_count - first : BUSTER_IR_VECTOR_COUNT;
             ir_uses_batch(f, first, count, cursor, uses.uses);
-        }
-        for (uint32_t i = 0; !BUSTER_VECTOR_PATH(vector) && i < f->instruction_count; i += 1)
-        {
-            const uint64_t count = ir_operand_count(f, i);
-            for (uint32_t p = 0; p < count; p += 1)
-            {
-                const IrOperand operand = ir_operand(f, i, p, 0);
-                uses.uses[cursor[operand.value]] = (IrUse){
-                    .instruction = i,
-                    .operand = operand.position,
-                };
-                cursor[operand.value] += 1;
-            }
         }
         uses.arena_bytes = arena->length - mark;
         *result = uses;
@@ -3827,15 +3648,6 @@ static __attribute__((noinline, aligned(64))) IrError ir_uses_path(const IrFunct
     return check.error;
 }
 
-static __attribute__((unused)) IrError ir_uses_validated_scalar(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
-{
-    return ir_uses_path(f, arena, scratch, result, false);
-}
-
-static IrError ir_uses_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
-{
-    return ir_uses_path(f, arena, scratch, result, true);
-}
 
 static IrError ir_build_uses(const IrFunction* f, Arena* arena, Arena* scratch, IrUses* result)
 {
