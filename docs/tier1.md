@@ -175,7 +175,9 @@ applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 (the jump threading), `merge` (CFG cleanup's merges, below), `licm`, `sroa`
 (on every function, with #1282's options, before the solver and promotion),
 `memory` (value numbering with memory in the optimizer, #2718: [its
-guide](ir-memory-value-numbering.md)), `vectors` (#2781's value numbering and
+guide](ir-memory-value-numbering.md)), `promote` (a loop's global scalars kept
+in registers, #3309, before SSA promotion: [the optimization
+guide](ir-optimization.md#a-loops-global-scalars-in-registers-3309)), `vectors` (#2781's value numbering and
 LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
 [its guide](tier1-loop-vectorization.md)), `unroll` (#2755's [loop
 unrolling](tier1-loop-unrolling.md)), `gvn` (as `--tier1-gvn`), `inline`
@@ -196,7 +198,8 @@ SROA, as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
-(slots), `gvn_removed` and `loads_forwarded` (value numbering with memory's);
+(slots), `gvn_removed`, `loads_forwarded` (value numbering with memory's) and
+`globals_promoted` (the keys `promote` kept in registers);
 with `vectorize`, a `tier1-vectorize` line gives the loops examined (each back
 edge's header once, outer loops included), those vectorized by their widest
 vector (`bytes16`, `bytes32`, `bytes64`), their reductions and run-time overlap

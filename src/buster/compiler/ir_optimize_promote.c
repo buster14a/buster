@@ -28,7 +28,8 @@
 //   caller keeps the pass off in a unit with an alias, ifunc or weakref, whose two names are one object), or this
 //   symbol's at a constant offset whose bytes don't meet the key's. Any other address (a pointer the loop loaded, a
 //   parameter, an indexed access of the symbol) may be the key's, and refuses the loop.
-// The caller also keeps the pass off for a body with a volatile access, whatever the IR's flags say (#3310).
+// The caller also keeps the pass off for a body with a volatile access, whatever the IR's flags say (#3310), and for a
+// unit with an asm statement, which may be a barrier the IR doesn't carry (an empty one with a memory clobber).
 //
 // Loops are taken outermost first; a key an enclosing loop promoted is a slot's in the loops inside it. A loop promotes
 // at most BUSTER_IR_PROMOTE_LOOP_KEYS keys, each a value live across the whole loop.

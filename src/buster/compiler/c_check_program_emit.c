@@ -557,7 +557,8 @@ struct CheckTier1Lane
     // a loop's globals (#3309) takes it too.
     const uint8_t* vectorize_volatile;
     // Whether the unit may name one object by two symbols or have a weak symbol of no object (an alias, ifunc, weakref,
-    // weak or weak_import attribute, or `#pragma weak`): the promotion of a loop's globals (#3309) then doesn't run.
+    // weak or weak_import attribute, or `#pragma weak`), or has an asm statement: the promotion of a loop's globals
+    // (#3309) then doesn't run.
     bool promote_refused;
     uint32_t emitting_body;
     X86Target target;
@@ -1958,13 +1959,16 @@ static uint8_t* check_program_vectorize_volatile(const CheckProgram* program, Ar
 }
 
 // Whether the promotion of a loop's globals (#3309) may run in the unit: no symbol names another's object (an alias,
-// ifunc or weakref) and none may be weak and so have no object, whose address is 0 (a weak or weak_import attribute, or
-// `#pragma weak`). The pass's preheader load may be one the loop never made, and it takes two symbols' objects apart.
+// ifunc or weakref), none may be weak and so have no object, whose address is 0 (a weak or weak_import attribute, or
+// `#pragma weak`), and no asm statement is in it. The pass's preheader load may be one the loop never made, and it takes
+// two symbols' objects apart.
 static bool check_program_promote_unit(const CheckProgram* program)
 {
     const CheckInput* input = program->input;
     const CheckInputSymbolPragmas* pragmas = input->symbol_pragmas;
-    bool allowed = program->alias_count == 0;
+    // An asm statement may be a compiler barrier the IR doesn't carry: an empty one with a memory clobber lowers to
+    // nothing, so a loop with one looks like a loop without.
+    bool allowed = program->alias_count == 0 && input->asm_count == 0;
     for (uint32_t p = 0; allowed && pragmas != NULL && p < pragmas->count; p += 1)
     {
         allowed = pragmas->records[p].kind != CHECK_SYMBOL_PRAGMA_WEAK;

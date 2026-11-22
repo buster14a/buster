@@ -6586,6 +6586,184 @@ static void check_test_driver_tier1_vectorize(CheckTest* test, const char* clang
     unlink(unit);
 }
 
+// #3309's promotion of a loop's global scalars (--tier1-passes=+promote): loops that update and read globals of each
+// scalar type, fields, a union's overlapping members, constant and variable array elements, with breaks, early returns,
+// gotos, a switch's exits, nested loops and zero-trip calls, beside the shapes it must refuse (a call in the loop, a store
+// or load through a pointer that may be the global, an escaped address, a volatile and an _Atomic global), a digest of
+// every global printed after each step. With --verify's certificates: no fallback, the frozen count of promoted keys, and
+// clang -O0's output. The issue's kernel's assembly then keeps its globals out of the loop: only the preheader's loads
+// and the exit's write-back addresses name them. Each refusal's own unit promotes nothing, and its positive control one.
+static const char check_test_tier1_promote_source[] =
+    "#include <stdint.h>\n"
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "long g_a, g_b;\n"
+    "static int s_c;\n"
+    "char g_ch;\n"
+    "short g_sh;\n"
+    "float g_f;\n"
+    "double g_d = 1.5;\n"
+    "long *g_p;\n"
+    "long g_arr[16];\n"
+    "struct S { int x; int y; long z; } g_s;\n"
+    "union U { long l; int i[2]; } g_u;\n"
+    "volatile long g_v;\n"
+    "_Atomic long g_at;\n"
+    "long g_alias;\n"
+    "long g_same = 7;\n"
+    "__attribute__((noinline)) void kernel(int n) { for (int i = 0; i < n; i++) { g_a += i; g_b ^= g_a; } }\n"
+    "__attribute__((noinline)) int breaks(int n, int stop) { int i; for (i = 0; i < n; i++) { if (i == stop) break; if (i & 1) s_c += i; } return i; }\n"
+    "__attribute__((noinline)) long early(int n, int stop) { for (int i = 0; i < n; i++) { g_a += 3; if (i == stop) return g_a; } return -g_a; }\n"
+    "__attribute__((noinline)) void callee(void) { g_a *= 2; }\n"
+    "__attribute__((noinline)) void calls(int n) { for (int i = 0; i < n; i++) { g_a += 1; if (i == 3) callee(); } }\n"
+    "__attribute__((noinline)) void aliasing(long *p, int n) { for (int i = 0; i < n; i++) { g_alias += 1; *p += 10; } }\n"
+    "__attribute__((noinline)) long reads_through(long *p, int n) { long s = 0; for (int i = 0; i < n; i++) { g_alias += 1; s += *p; } return s; }\n"
+    "__attribute__((noinline)) void small_types(int n) { for (int i = 0; i < n; i++) { g_ch += 3; g_sh -= 7; g_f += 0.5f; g_d *= 1.0001; } }\n"
+    "__attribute__((noinline)) void nested(int n) { for (int i = 0; i < n; i++) { g_b += 1; for (int j = 0; j < i; j++) { g_a += j; } } }\n"
+    "__attribute__((noinline)) void fields(int n) { for (int i = 0; i < n; i++) { g_s.x += 1; g_s.y += g_s.x; g_s.z ^= g_s.y; } }\n"
+    "__attribute__((noinline)) void unions(int n) { for (int i = 0; i < n; i++) { g_u.l += 1; g_u.i[1] += 2; } }\n"
+    "__attribute__((noinline)) void arrays(int n) { for (int i = 0; i < n; i++) { g_arr[3] += i; g_arr[i & 15] += 1; g_arr[5] += 2; } }\n"
+    "__attribute__((noinline)) void arrays2(int n) { for (int i = 0; i < n; i++) { g_arr[3] += i; g_arr[4] -= 1; } }\n"
+    "__attribute__((noinline)) void atomics(int n) { for (int i = 0; i < n; i++) { g_at += 1; g_a += 1; } }\n"
+    "__attribute__((noinline)) void atomic_loads(int n) { for (int i = 0; i < n; i++) { g_a += g_at; } }\n"
+    "__attribute__((noinline)) void same(int n) { for (int i = 0; i < n; i++) { g_same = 7; } }\n"
+    "__attribute__((noinline)) long readonly(int n) { long s = 0; for (int i = 0; i < n; i++) { s += g_b; } return s; }\n"
+    "__attribute__((noinline)) void pointers(int n) { for (int i = 0; i < n; i++) { g_p = &g_arr[i & 7]; } }\n"
+    "__attribute__((noinline)) int gotos(int n) { int i = 0; for (;;) { g_a += 2; if (++i >= n) goto out; if (g_a > 1000) goto far; } out: return 1; far: return 2; }\n"
+    "__attribute__((noinline)) void switches(int n) { for (int i = 0; i < n; i++) { switch (i % 4) { case 0: g_a += 1; break; case 1: g_b += 2; break; case 2: if (i > 50) return; break; default: g_a ^= g_b; } } }\n"
+    "__attribute__((noinline)) void escaped(int n) { long *q = &g_a; for (int i = 0; i < n; i++) { g_a += 1; *q += 2; } }\n"
+    "__attribute__((noinline)) void whiles(int n) { while (n-- > 0) { g_a += n; } do { g_b += 1; } while (g_b < 5); }\n"
+    "__attribute__((noinline)) void nan_kept(int n) { for (int i = 0; i < n; i++) { if (i > 5) g_f = g_f; } }\n"
+    "static uint64_t digest = 1469598103934665603u;\n"
+    "static void mix(const void* p, size_t bytes) { const uint8_t* c = p; for (size_t i = 0; i < bytes; i += 1) { digest = (digest ^ c[i]) * 1099511628211u; } }\n"
+    "static void mix64(uint64_t value) { mix(&value, 8); }\n"
+    "static void globals(void) { mix(&g_a, 8); mix(&g_b, 8); mix(&s_c, 4); mix(&g_ch, 1); mix(&g_sh, 2); mix(&g_f, 4); mix(&g_d, 8); mix(g_arr, sizeof(g_arr)); mix(&g_s, sizeof(g_s)); mix(&g_u, 8); mix(&g_alias, 8); mix(&g_same, 8); }\n"
+    "int main(void)\n"
+    "{\n"
+    "    kernel(1000); globals(); kernel(0); globals();\n"
+    "    mix64((uint64_t)breaks(100, 37)); mix64((uint64_t)breaks(10, 37)); mix64((uint64_t)breaks(0, 3)); globals();\n"
+    "    mix64((uint64_t)early(10, 4)); mix64((uint64_t)early(10, 40)); mix64((uint64_t)early(0, 0)); globals();\n"
+    "    calls(10); aliasing(&g_alias, 5); aliasing(&g_a, 5); mix64((uint64_t)reads_through(&g_alias, 6)); globals();\n"
+    "    small_types(1000); nested(30); fields(20); unions(9); arrays(40); arrays2(40); globals();\n"
+    "    for (int i = 0; i < 17; i++) { g_v += 1; }\n"
+    "    atomics(13); atomic_loads(5); same(4); mix64((uint64_t)readonly(9)); pointers(11); mix64((uint64_t)(g_p - g_arr)); mix64((uint64_t)g_v); mix64((uint64_t)g_at); globals();\n"
+    "    g_a = 0; mix64((uint64_t)gotos(5)); mix64((uint64_t)gotos(5000)); globals();\n"
+    "    g_a = 0; g_b = 0; switches(30); globals(); switches(100); escaped(4); g_b = 0; whiles(6); globals();\n"
+    "    memset(&g_f, 0xff, sizeof(g_f)); nan_kept(10); globals();\n"
+    "    printf(\"%016llx\\n\", (unsigned long long)digest);\n"
+    "    return 0;\n"
+    "}\n";
+
+// The keys the fixture's functions promote (--tier1-report's globals_promoted), frozen. The refusals (calls, aliasing,
+// reads_through, escaped, atomics, atomic_loads, and main, which accesses a volatile global) promote none.
+#define BUSTER_CHECK_TEST_TIER1_PROMOTED 34u
+
+// A unit of its own and the keys it must promote: each refusal's shape, then its control without the hazard.
+typedef struct CheckTestTier1PromoteUnit CheckTestTier1PromoteUnit;
+struct CheckTestTier1PromoteUnit
+{
+    const char* source;
+    uint64_t promoted;
+};
+
+static const CheckTestTier1PromoteUnit check_test_tier1_promote_units[] = {
+    { "volatile long v; void f(int n) { for (int i = 0; i < n; i++) v += i; }\n", 0 },
+    { "long g; volatile long v; void f(int n) { for (int i = 0; i < n; i++) g += i; v = 1; }\n", 0 },
+    { "_Atomic long a; void f(int n) { for (int i = 0; i < n; i++) a += i; }\n", 0 },
+    { "_Atomic long a; long g; void f(int n) { for (int i = 0; i < n; i++) g += a; }\n", 0 },
+    { "long g; void h(void); void f(int n) { for (int i = 0; i < n; i++) { g += i; h(); } }\n", 0 },
+    { "long g; void f(long* p, int n) { for (int i = 0; i < n; i++) { g += i; *p = 0; } }\n", 0 },
+    { "long g; long f(long* p, int n) { long s = 0; for (int i = 0; i < n; i++) { g += i; s += *p; } return s; }\n", 0 },
+    { "long g __attribute__((weak)); void f(int n) { for (int i = 0; i < n; i++) g += i; }\n", 0 },
+    { "long g; extern long h __attribute__((alias(\"g\"))); void f(int n) { for (int i = 0; i < n; i++) { g += i; h ^= g; } }\n", 0 },
+    { "long g; void f(int n) { for (int i = 0; i < n; i++) { g += i; __atomic_thread_fence(__ATOMIC_SEQ_CST); } }\n", 0 },
+    { "long g; void f(int n) { for (int i = 0; i < n; i++) { g += i; __asm__ volatile(\"\" ::: \"memory\"); } }\n", 0 },
+    { "long g; void f(int n) { for (int i = 0; i < n; i++) g += i; }\n", 1 },
+    { "long g; long k; void f(long* p, int n) { long s = 0; for (int i = 0; i < n; i++) { g += i; s += k; } *p = s; }\n", 2 },
+};
+
+static void check_test_driver_tier1_promote(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char unit[512];
+    snprintf(unit, sizeof(unit), "%s/tier1-promote.c", directory);
+    const bool written = parse_test_write(unit, check_test_tier1_promote_source, strlen(check_test_tier1_promote_source));
+    check_test_expect(test, written, "the promotion's fixture is written");
+    char reference[512];
+    snprintf(reference, sizeof(reference), "%s/tier1-promote-clang", directory);
+    char* reference_arguments[8] = { (char*)clang, "-O0", "-w", "-o", reference, unit, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(reference_arguments, &text) == 0;
+    free(text);
+    char expected[256] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the promotion's fixture runs");
+    char program[512];
+    snprintf(program, sizeof(program), "%s/tier1-promote", directory);
+    char* arguments[12] = { (char*)executable, "--tier1", "--tier1-passes=+promote", "--tier1-report", "--verify", "-w", "-o", program, unit, NULL };
+    text = NULL;
+    const bool built = ran && check_test_driver_spawn(arguments, &text) == 0;
+    uint64_t internal = UINT64_MAX;
+    uint64_t fallbacks = UINT64_MAX;
+    uint64_t promoted = UINT64_MAX;
+    const bool clean = built && check_test_tier1_field(text, "internal_failures", &internal) && internal == 0 && check_test_tier1_field(text, "fallbacks", &fallbacks) && fallbacks == 0 &&
+                       check_test_tier1_field(text, "globals_promoted", &promoted);
+    free(text);
+    char message[256];
+    snprintf(message, sizeof(message), "--tier1-passes=+promote compiles the fixture without a fallback and promotes %llu keys, %u expected", (unsigned long long)promoted,
+             BUSTER_CHECK_TEST_TIER1_PROMOTED);
+    check_test_expect(test, clean && promoted == BUSTER_CHECK_TEST_TIER1_PROMOTED, message);
+    char actual[256] = { 0 };
+    check_test_expect(test, clean && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
+                      "the promotion's fixture by --tier1 runs as clang -O0's build does");
+    unlink(program);
+    // The issue's kernel: each line of its assembly that names g_a or g_b loads it before the loop or takes its address
+    // for the write-back; none stores it or reads it in the loop.
+    char* assembly[12] = { (char*)executable, "--tier1", "--tier1-passes=+promote", "-w", "-S", "-o", "-", unit, NULL };
+    text = NULL;
+    const bool assembled = ran && check_test_driver_spawn_stream(assembly, &text, true) == 0 && text != NULL;
+    const char* kernel = assembled ? strstr(text, "\nkernel:\n") : NULL;
+    const char* end = kernel != NULL ? strstr(kernel, "\n\tret") : NULL;
+    uint32_t loads = 0;
+    uint32_t addresses = 0;
+    uint32_t others = 0;
+    for (const char* line = kernel; line != NULL && line < end; line = strchr(line + 1, '\n'))
+    {
+        const char* next = strchr(line + 1, '\n');
+        const char* named = strstr(line + 1, "g_a(%rip)");
+        named = named == NULL || (next != NULL && named > next) ? strstr(line + 1, "g_b(%rip)") : named;
+        const bool names = named != NULL && (next == NULL || named < next);
+        const bool load = names && strncmp(line + 1, "\tmov g_", 7) == 0;
+        const bool address = names && strncmp(line + 1, "\tlea g_", 7) == 0;
+        loads += load ? 1u : 0u;
+        addresses += address ? 1u : 0u;
+        others += names && !load && !address ? 1u : 0u;
+    }
+    snprintf(message, sizeof(message), "the promoted kernel names its globals in %u loads and %u write-back addresses alone (%u other accesses)", loads, addresses, others);
+    check_test_expect(test, end != NULL && loads == 2 && addresses == 2 && others == 0, message);
+    free(text);
+    for (uint32_t u = 0; u < BUSTER_ARRAY_LENGTH(check_test_tier1_promote_units); u += 1)
+    {
+        const CheckTestTier1PromoteUnit* shape = &check_test_tier1_promote_units[u];
+        char path[512];
+        char object[512];
+        snprintf(path, sizeof(path), "%s/tier1-promote-%u.c", directory, u);
+        snprintf(object, sizeof(object), "%s/tier1-promote-%u.o", directory, u);
+        const bool unit_written = parse_test_write(path, shape->source, strlen(shape->source));
+        char* compile[12] = { (char*)executable, "--tier1", "--tier1-passes=+promote", "--tier1-report", "--verify", "-c", "-o", object, path, NULL };
+        text = NULL;
+        const bool compiled = unit_written && check_test_driver_spawn(compile, &text) == 0;
+        uint64_t keys = UINT64_MAX;
+        const bool reported = compiled && check_test_tier1_field(text, "globals_promoted", &keys);
+        free(text);
+        snprintf(message, sizeof(message), "the promotion's unit %u promotes %llu keys, %llu expected: %s", u, (unsigned long long)keys, (unsigned long long)shape->promoted, shape->source);
+        check_test_expect(test, reported && keys == shape->promoted, message);
+        unlink(object);
+        unlink(path);
+    }
+    unlink(reference);
+    unlink(unit);
+}
+
 // #1282's inlining: the unit's always_inline functions of internal linkage expanded into their callers by --tier1, the
 // x86 intrinsics' wrappers above all, whose vectors pass and return by value: their byte-wise copies into fresh slots,
 // split by SROA and promoted. A static always_inline helper of a struct by value (copies by integers), and a static
