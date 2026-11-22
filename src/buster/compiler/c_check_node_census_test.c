@@ -6341,46 +6341,72 @@ static bool node_window_test_debug_driver(const char* directory)
     return same;
 }
 
-// On a unit large enough to use retained statement roots the implicit cast still belongs to
-// the typed dump, and an explicit cast around eh_return still affects the native unwind path.
+// Get the ordinary native object before requesting the typed dump, which selects a separate reader path.
+static bool node_window_test_statement_outputs(char* source, char* object, char* dump_object, bool scalar, char** dump)
+{
+    char* args[] = { "/proc/self/exe", "-nostdinc", "-c", "-o", object, source, scalar ? "--scalar" : NULL, NULL };
+    char* diagnostics = NULL;
+    bool valid = check_test_driver_spawn(args, &diagnostics) == 0;
+    free(diagnostics);
+    if (valid)
+    {
+        char* dump_args[] = { "/proc/self/exe", "-nostdinc", "-c", "--dump-typed", "-o", dump_object, source, scalar ? "--scalar" : NULL, NULL };
+        valid = check_test_driver_spawn_stream(dump_args, dump, true) == 0 && *dump != NULL && (*dump)[0] != '\0';
+    }
+    return valid;
+}
+
+// Compare both large-unit readers with an independently ineligible small unit. Appending typedefs crosses the
+// threshold without moving either function's dump tokens or changing anything the object needs to contain.
 static bool node_window_test_statement_driver(const char* directory)
 {
     char source[PATH_MAX];
-    char objects[2][PATH_MAX];
+    char small[PATH_MAX];
+    char large[PATH_MAX];
+    char dump_object[PATH_MAX];
     snprintf(source, sizeof(source), "%s/discard.c", directory);
-    snprintf(objects[0], sizeof(objects[0]), "%s/discard.o", directory);
-    snprintf(objects[1], sizeof(objects[1]), "%s/discard-scalar.o", directory);
+    snprintf(small, sizeof(small), "%s/discard-small.o", directory);
+    snprintf(large, sizeof(large), "%s/discard-large.o", directory);
+    snprintf(dump_object, sizeof(dump_object), "%s/discard-dump.o", directory);
     FILE* file = fopen(source, "w");
-    if (file == NULL)
+    bool same = file != NULL;
+    if (same)
     {
-        return false;
+        same = fputs("int x; void update(void){ x++; }\n"
+                     "void unwind(long offset, void *target){ (void)__builtin_eh_return(offset,target); }\n", file) >= 0;
+        same = fclose(file) == 0 && same;
     }
-    for (uint32_t i = 0; i < 2052; i += 1)
+    char* expected_dump = NULL;
+    same = same && node_window_test_statement_outputs(source, small, dump_object, false, &expected_dump);
+    // The update has three rows: its lvalue, its increment, and the implicit void conversion at the semicolon.
+    const char* third = same ? strstr(expected_dump, "\n2 token=") : NULL;
+    unsigned op = 0;
+    char type[16];
+    same = third != NULL && sscanf(third, "\n2 token=%*u op=%u type=%15s", &op, type) == 2 && op == CHECK_OP_CAST && strcmp(type, "void") == 0;
+    if (same)
     {
-        fprintf(file, "typedef int Pad%u;\n", i);
+        file = fopen(source, "a");
+        same = file != NULL;
+        if (same)
+        {
+            for (uint32_t i = 0; same && i < 2052; i += 1)
+            {
+                same = fprintf(file, "typedef int Pad%u;\n", i) > 0;
+            }
+            same = fclose(file) == 0 && same;
+        }
     }
-    fputs("int x; void update(void){ x++; }\n"
-          "void unwind(long offset, void *target){ (void)__builtin_eh_return(offset,target); }\n", file);
-    bool same = fclose(file) == 0;
-    char* dumps[2] = { NULL, NULL };
     for (uint32_t mode = 0; same && mode < 2; mode += 1)
     {
-        char* args[] = { "/proc/self/exe", "-nostdinc", "-c", "-o", objects[mode], source, mode == 0 ? NULL : "--scalar", NULL };
-        char* diagnostics = NULL;
-        same = check_test_driver_spawn(args, &diagnostics) == 0;
-        free(diagnostics);
+        char* dump = NULL;
+        same = node_window_test_statement_outputs(source, large, dump_object, mode != 0, &dump) &&
+               check_test_driver_files_equal(small, large) && strcmp(expected_dump, dump) == 0;
+        free(dump);
     }
-    same = same && check_test_driver_files_equal(objects[0], objects[1]);
-    for (uint32_t mode = 0; same && mode < 2; mode += 1)
-    {
-        char* args[] = { "/proc/self/exe", "-nostdinc", "-c", "--dump-typed", "-o", objects[mode], source, mode == 0 ? NULL : "--scalar", NULL };
-        same = check_test_driver_spawn_stream(args, &dumps[mode], true) == 0 && dumps[mode] != NULL;
-    }
-    same = same && dumps[0][0] != '\0' && strcmp(dumps[0], dumps[1]) == 0;
-    free(dumps[1]);
-    free(dumps[0]);
-    unlink(objects[1]);
-    unlink(objects[0]);
+    free(expected_dump);
+    unlink(dump_object);
+    unlink(large);
+    unlink(small);
     unlink(source);
     return same;
 }
