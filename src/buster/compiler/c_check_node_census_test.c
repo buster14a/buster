@@ -1727,6 +1727,77 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
     return same && counts;
 }
 
+// A body's entries from its controls and its roots' tapes (c_check_node_census.c's node_bodies_begin; docs/node-machine.md,
+// "A body's entries from its controls and its tapes"): its fixture, read with `options`. Each lowered body the piece
+// attempts is made again from the program's controls and the machine's tapes, and must be the lowered function's entry
+// for entry.
+// - Attempted: an initialization, a branch and a return; a void body, whose implicit return ends it, and one that
+//   returns early; calls in two statements, whose rows are the body's; a loop whose condition is branches (`&&`), so
+//   that its branches go to the control's own label and the control writes none; a do statement, whose branch is taken
+//   where its condition holds, under `||`; two postfix updates through an address, whose temporaries are the body's
+//   locals after its declared ones; a for statement with a continue and a break, each a jump; a body that falls off its
+//   end; a goto; and main, whose implicit return is zero.
+// - Left out: a result of another class (long double) in a body whose every root the machine takes; a switch; and
+//   bodies with a root the machine does not take (a braced initializer, a bit-field; and, where -Wfor-loop-analysis is
+//   enabled, the for statement's, whose clauses the census's test refuses).
+// `expected`: the lowered bodies, those whose every root the machine takes, those attempted, and the others by reason.
+typedef struct NodeBodiesExpected NodeBodiesExpected;
+struct NodeBodiesExpected
+{
+    uint32_t lowered;
+    uint32_t whole;
+    uint32_t attempted;
+    uint32_t reasons[NODE_BODIES_REASONS];
+};
+
+static bool node_bodies_test_fixture(const char* directory, char** options, uint32_t option_count, const NodeBodiesExpected* expected)
+{
+    static const char text[] = "struct S { int a; unsigned b : 3; long c; };\nint g;\nint h(int);\n"
+                               "static int plain(int x, int y) { int t = x * 2; if (y > 3) { t += y; } return t + g; }\n"
+                               "static void nothing(int x) { g = x; }\n"
+                               "static void early(int x) { if (x) return; g = 1; }\n"
+                               "static int loops(struct S* s, int n) { long r = h(n) + h(n + 1); while (n > 0 && s->a != n) { r += s->c; n -= h(1); } return (int)r; }\n"
+                               "static int both(int a, int b) { if (a && b) { return 1; } else { return 2; } }\n"
+                               "static int either(int a, int b) { int r = 0; do { r += a; a -= 1; } while (a > 0 || b > r); return r; }\n"
+                               "static int post(int* p) { int v = (*p)++; return v + p[1]++; }\n"
+                               "static int counts(int n) { int s = 0; for (int i = 0; i < n; i++) { if (i == 3) continue; if (i == 7) break; s += h(i); } return s; }\n"
+                               "static int falls(int x) { if (x) { return 1; } g = 2; }\n"
+                               "static int jumps(int x) { if (x > 2) goto out; x += h(x); out: return x; }\n"
+                               "long double wide(int x) { for (;;) { g = x; } }\n"
+                               "static int chosen(int c) { switch (c) { case 1: return 2; default: return c + 3; } }\n"
+                               "static int braces(int i) { int v[3] = { 1, i, 3 }; return v[0] + v[2]; }\n"
+                               "static int field(struct S* s) { return s->b + 1; }\n"
+                               "int main(void)\n{\n    struct S s;\n    int n = 4;\n    s.a = 1;\n    s.c = 3;\n    nothing(n);\n    early(n);\n"
+                               "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s);\n}\n";
+    char path[512];
+    snprintf(path, sizeof(path), "%s/bodies.c", directory);
+    bool valid = parse_test_write(path, text, sizeof(text) - 1);
+    NodeShadow shadow = { .bodies = true, .passes = 0, .repeat = 1 };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const bool same = valid && !node_shadow_differs(&shadow) && shadow.bodies_different == 0 && shadow.bodies_same == shadow.bodies_attempted && shadow.bodies_entries != 0;
+    bool counts = shadow.bodies_lowered == expected->lowered && shadow.bodies_whole == expected->whole && shadow.bodies_attempted == expected->attempted;
+    for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
+    {
+        counts = counts && shadow.bodies_reasons[reason] == expected->reasons[reason];
+    }
+    if (!same || !counts)
+    {
+        fprintf(stderr, "test-checker: node-bodies: %s, %s: %" PRIu64 " bodies lowered (%u expected), every root the machine's in %" PRIu64 " (%u), %" PRIu64 " attempted (%u), %" PRIu64
+                " the lowered function's, %" PRIu64 " differ, %" PRIu64 " entries; left out:",
+                valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.bodies_lowered, expected->lowered, shadow.bodies_whole, expected->whole,
+                shadow.bodies_attempted, expected->attempted, shadow.bodies_same, shadow.bodies_different, shadow.bodies_entries);
+        for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
+        {
+            fprintf(stderr, " %s %" PRIu64 " (%u)", node_bodies_reason_names[reason], shadow.bodies_reasons[reason], expected->reasons[reason]);
+        }
+        fprintf(stderr, "\n");
+    }
+    unlink(path);
+    return same && counts;
+}
+
 // The test whose name `name` (`length` bytes) is, or NODE_CENSUS_TESTS.
 static uint32_t node_census_test_named(const char* name, uint32_t length)
 {
@@ -7402,6 +7473,22 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-alone: the same with the default warnings");
     check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &alone_expected),
                       "node-alone by sweep: the same results, and each sweep's ticks within the run's");
+    const NodeBodiesExpected bodies_quiet = {
+        .lowered = 15,
+        .whole = 13,
+        .attempted = 11,
+        .reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
+    };
+    const NodeBodiesExpected bodies_loud = {
+        .lowered = 15,
+        .whole = 12,
+        .attempted = 10,
+        .reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
+    };
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), &bodies_quiet),
+                      "node-bodies: a body's entries made from its controls and its roots' tapes are the lowered function's");
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), &bodies_loud),
+                      "node-bodies: the same with more warnings, one body fewer for a test's refusal");
     // The flat front beside the lean one, its twin: on the shadow's fixture, at the chunks' ends, where the lean front's
     // stack is full, and past its own rings' reach.
     const uint8_t flat = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_FLAT;
