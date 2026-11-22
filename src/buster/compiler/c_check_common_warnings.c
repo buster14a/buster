@@ -181,6 +181,20 @@ static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_
                                  uint32_t id, CheckWarningSeverity severity, const char* message, const CheckCommonNote* notes, uint32_t note_count,
                                  Arena* scratch)
 {
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    // #2850's producer against the diagnostics (BUSTER_TEST_NODE_BODIES_LOG): a common warning's token and its notes'.
+    if (__builtin_expect(node_bodies_checking, 0) && token < parser->tokens.count)
+    {
+        node_bodies_check_token(parse_origin(parser, token), "a-common-warning", message);
+    }
+    for (uint32_t n = 0; __builtin_expect(node_bodies_checking, 0) && n < note_count; n += 1)
+    {
+        if (notes[n].token < parser->tokens.count)
+        {
+            node_bodies_check_token(parse_origin(parser, notes[n].token), "a-common-warning's-note", notes[n].message);
+        }
+    }
+#endif
     const char* option = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[id].option : NULL;
     const bool error = severity >= CHECK_WARNING_ERROR;
     // (An error by default names its group alone, as clang's does.)

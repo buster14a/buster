@@ -470,6 +470,10 @@ struct NodeMachine
     // two columns are the caller's (node_machine_begin_reader).
     const CheckInput* input;
     const Parser* parser;
+    // The unit's enumerations' definitions before the walk, as the tags' columns have them (the reader lists them in its
+    // output at its end, CheckInput.enum_definitions): node_producer_begin's, for node_machine_root_loud. None otherwise.
+    const CheckInputEnumDefinition* reader_enums;
+    uint32_t reader_enum_count;
     uint32_t* reader_declarations;
     uint8_t* reader_facts;
     uint32_t reader_objects;
