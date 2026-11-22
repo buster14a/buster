@@ -427,6 +427,9 @@ struct PPOptions
     bool published_unused_only;
     // Ordinary native output may carry an implicit discard on the expression that produces its value.
     bool statement_controls;
+    // The same path for a reader whose output is not a compile's fresh one (measure-node-machine --shadow
+    // --statement-controls: the shadow's pipeline reads a unit as -c does). No compile sets it.
+    bool statement_controls_anywhere;
     // Ordered semantic warning options; a valued option's operand is never captured as diagnostic policy. The
     // arena owns the pointer slice; argument strings have the same borrowed lifetime as -D/-I option strings.
     const char* const* semantic_warning_options;
