@@ -4724,6 +4724,36 @@ static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t 
     return slot;
 }
 
+// Whether a function's own result parts, `count` of them, are loaded straight from the result's address in general
+// register `source` on the way out (#3311), each an eightbyte whole in a general register or an xmm one, so that no
+// load reads past the object, and none staged in the red zone; and the order they are loaded in, into `order`: the part
+// whose register is `source` last, so that no load overwrites the address before another reads through it. Before
+// #3311 every such part was copied into the red zone and loaded from there, four instructions more for two eightbytes.
+static bool tier1_select_result_eightbytes(const Tier1SelectPart* parts, uint32_t count, uint8_t source, uint32_t* order)
+{
+    bool eightbytes = count != 0 && count <= 2;
+    uint32_t last = count;
+    for (uint32_t k = 0; eightbytes && k < count; k += 1)
+    {
+        const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        eightbytes = parts[k].bytes == 8 && parts[k].reg != BUSTER_ABI_REGISTER_NONE && (vector || parts[k].reg < 16) && parts[k].offset == 8 * k;
+        last = !vector && parts[k].reg == source ? k : last;
+    }
+    uint32_t at = 0;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        if (k != last)
+        {
+            order[at++] = k;
+        }
+    }
+    if (last < count)
+    {
+        order[at] = last;
+    }
+    return eightbytes;
+}
+
 // Whether a function's own result parts, `count` of them, fit the red zone's slots, as its return stages them all at
 // once (#1847, the #1645 review's bound): tier1_select_result_parts admits no other, and its consumer and the code's
 // certificate refuse one.

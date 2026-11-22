@@ -55,6 +55,10 @@ requirements. [Command index](README.md).
   hand-written IR through the split into 16- and 32-byte pieces by both paths,
   the interpreter and the optimizer, natively at x86-64's pieces, with its
   refusals and its scan's two paths (`tier1_wide_vectors_test.c`).
+  A register-class aggregate's fields stay in registers (#3311: SROA's
+  widening, the function's own scalar parameters and result, and its result's
+  eightbytes loaded straight from their slot; the [IR optimization
+  guide](ir-optimization.md#register-class-aggregates-in-registers-3311)).
   The convention's rarer aggregate shapes are taken; those of vectors still
   refuse explicitly ([the Tier 1 guide](../../docs/tier1.md)'s list). AVX-512's
   masks (#179) are selected (`kmov`, `kand`, `kor`, `kxor`, `knot`, and loads,

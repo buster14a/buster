@@ -2222,6 +2222,23 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
     Tier1EmitError error = ignored || (source < 16 && source != BUSTER_TIER1_SELECT_SCRATCH && (part_count != 0 || x87_parts != 0 || found)) ? TIER1_EMIT_OK : TIER1_EMIT_ALLOCATION;
     // Every staged part's slots in the red zone (#1847): a split vector's parts take none, loaded straight from `source`.
     error = error == TIER1_EMIT_OK && !tier1_select_result_staged(parts, part_count) ? TIER1_EMIT_UNSUPPORTED : error;
+    // Eightbytes whole (#3311, tier1_select_result_eightbytes): each loaded straight from `source`, the part in `source`'s
+    // register last, and nothing staged.
+    uint32_t order[BUSTER_TIER1_SELECT_RESULT_PARTS] = { 0 };
+    const bool eightbytes = error == TIER1_EMIT_OK && tier1_select_result_eightbytes(parts, part_count, source, order);
+    for (uint32_t j = 0; error == TIER1_EMIT_OK && eightbytes && j < part_count; j += 1)
+    {
+        const uint32_t k = order[j];
+        const bool vector_part = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+        const X86Instruction load = {
+            .displacement = parts[k].offset,
+            .reg = (uint8_t)(parts[k].reg & 0x1f),
+            .rm = source,
+            .mode = BUSTER_X86_MEMORY_BASE,
+            .form = vector_part ? tier1_select_part_form(8, true) : X86_FORM_MOV_R64_RM64,
+        };
+        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+    }
     for (uint32_t k = x87_parts; error == TIER1_EMIT_OK && k-- > 0;)
     {
         const X86Instruction load = { .form = X86_FORM_FLD_M80, .rm = source, .mode = BUSTER_X86_MEMORY_BASE, .displacement = (int32_t)(16 * k) };
@@ -2232,12 +2249,12 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
     // bytes, #1847) aren't staged: each is loaded straight from `source`, a general register no load overwrites; and
     // neither is a record's payload no register is as wide as (#2798), loaded from it in pieces that stay inside it
     // (tier0_payload_load).
-    for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
+    for (uint32_t k = 0; error == TIER1_EMIT_OK && !eightbytes && k < part_count; k += 1)
     {
         const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);
         error = tier1_select_part_direct(parts[k]) || tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, staged, source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;
     }
-    for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
+    for (uint32_t k = 0; error == TIER1_EMIT_OK && !eightbytes && k < part_count; k += 1)
     {
         const bool vector_part = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const bool direct = tier1_select_part_direct(parts[k]);
