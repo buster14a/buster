@@ -50,3 +50,13 @@ overload-same-parameters	overload-same-parameters.c	rejected	return types alone 
 overload-identical-address	overload-identical-address.c	rejected	identical signatures still form an overload set for typed addresses, assignments and arguments
 object-repeated-clones	object-repeated-clones.c	rejected	each object clone made before a reference is a candidate, newest first
 object-repeated-forward	object-repeated-forward.c	rejected	forward targets order an object's candidates by when their clones are made
+object-invalid-redeclaration	object-invalid-redeclaration.c	rejected	an invalid redeclaration after an object clone moves A's earlier declaration first among the candidates
+object-invalid-redeclarations	object-invalid-redeclarations.c	rejected	invalid redeclarations after an object clone alternate each one's previous declaration as clang's lookup filter does
+object-invalid-between-clones	object-invalid-between-clones.c	rejected	invalid redeclarations between three object clones order the ambiguous reference's candidates
+object-invalid-type-redeclaration	object-invalid-type-redeclaration.c	rejected	a redeclaration of another type after an object clone is invalid in the candidates' order too
+overload-operand	overload-operand.c	rejected	a function clone's lookup set as an operator's operand is unresolved with possible targets at the pragma and the declaration
+overload-operand-contexts	overload-operand-contexts.c	rejected	a function clone's lookup set returned, assigned, compared, negated and cast to void
+later-alias-attribute	later-alias-attribute.c	rejected	a later alias attribute on a function clone's name redefines the clone
+later-object-alias-attribute	later-object-alias-attribute.c	rejected	a later alias attribute on an object clone's name redefines the clone, noted at the target
+later-ifunc-attribute	later-ifunc-attribute.c	rejected	a later ifunc attribute on a clone's name redefines the clone
+declared-later-alias-attribute	declared-later-alias-attribute.c	rejected	a later alias attribute redefines the clone where the name was declared before the pragma

@@ -3372,6 +3372,12 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             break;
         }
         case BUSTER_TIER1_FLOAT_RESIZE:
+            // Legacy cvtss2sd and cvtsd2ss merge into their destination's upper lanes: break that dependency where the
+            // destination isn't the operand's own register (#3308), whose zero would clobber the operand.
+            if (x != (holes->left & 15))
+            {
+                tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+            }
             tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->resize, x, holes->left & 15));
             break;
         case BUSTER_TIER1_FLOAT_FROM_BITS:

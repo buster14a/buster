@@ -319,6 +319,12 @@
 // takes it (another kind's value is its own whole: a constant's top bits are its own).
 #define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
 #define BUSTER_TYPED_ACCESS_SEGMENT (UINT64_C(3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT)
+// A LOAD's, STORE's or SET's volatile access (#3310): one of a volatile-qualified lvalue, below the segment's bits, on a
+// scalar class's (an integer's, a floating value's or a 128-bit integer's, whose `value` holds nothing else but an atomic
+// marker and the segment). A function with one says so (Tier0Function.volatiles). Tier 0 emits every access anyway and
+// strips the bit out of line (tier0_segments_strip); the IR keeps it as BUSTER_IR_VOLATILE, which no pass removes,
+// merges or forwards (BUSTER_IR_OBSERVABLE).
+#define BUSTER_TYPED_ACCESS_VOLATILE (UINT64_C(1) << 61)
 #define BUSTER_TYPED_SEGMENT_FS 1
 #define BUSTER_TYPED_SEGMENT_GS 2
 #define BUSTER_TYPED_SEGMENT_SS 3
@@ -694,6 +700,9 @@ struct Tier0Function
     // their paths never see one, and the compilation adds each to its entry's records after (tier0_apply_segments).
     // ir_lower refuses such a function, which Tier 0 compiles.
     bool segments;
+    // Whether a LOAD, STORE or SET is a volatile access (#3310, BUSTER_TYPED_ACCESS_VOLATILE), which validation and
+    // compilation strip as they strip the segment overrides.
+    bool volatiles;
     // Vector transport: 0 preserves the EVEX path; 16 uses SSE2 and 32 uses AVX.
     // This is the generated function's target, never the compiler host's ISA.
     uint8_t vector_bytes;
@@ -2875,6 +2884,9 @@ static bool tier0_convert_records(uint32_t to, uint32_t from, uint8_t to_registe
         const bool wide = tier0_class_bytes(as) == 8;
         const uint32_t form = to == BUSTER_TYPED_CLASS_F32 ? (wide ? X86_FORM_CVTSI2SS_X_RM64 : X86_FORM_CVTSI2SS_X_RM32)
                                                            : (wide ? X86_FORM_CVTSI2SD_X_RM64 : X86_FORM_CVTSI2SD_X_RM32);
+        // Legacy cvtsi2ss/sd write the low lane alone and keep the rest, so they wait on the register's last value: its
+        // zero (xorps) breaks that dependency (#3308), as tier0_emit_u64_convert's and Tier 1's do.
+        tier0_add(tier0_rr(X86_FORM_XORPS_X_XM128, to_register, to_register));
         source.form = (uint16_t)form;
         tier0_add(source);
     }
@@ -2889,6 +2901,13 @@ static bool tier0_convert_records(uint32_t to, uint32_t from, uint8_t to_registe
     }
     else if (to != from)
     {
+        // cvtss2sd and cvtsd2ss merge into their destination as cvtsi2ss/sd do: a home's operand zeroes it first (#3308).
+        // In place (the operand's own register) the dependency is the operand's, so needs no break, and the zero would
+        // clobber it.
+        if (from_home || to_register != from_register)
+        {
+            tier0_add(tier0_rr(X86_FORM_XORPS_X_XM128, to_register, to_register));
+        }
         source.form = (uint16_t)(from == BUSTER_TYPED_CLASS_F32 ? X86_FORM_CVTSS2SD_X_XM32 : X86_FORM_CVTSD2SS_X_XM64);
         tier0_add(source);
     }
@@ -9075,7 +9094,8 @@ static void tier0_select_u64_convert(bool to_u64, int32_t depth, int32_t floatin
 //     inexact one only where it has a fraction, as C's conversion does (#429's review): truncating both ways and choosing
 //     raised them for nothing. A value out of U64's range (C leaves it undefined) gives the signed truncation's result,
 //     its top bit flipped.
-// The red zone form keeps to the operand's and the result's registers, its scratch values in red zone temporaries 0 to 2
+// Both forms zero the result's register before the conversion, which breaks its dependence on the value the register
+// held (#3308). The red zone form keeps to the operand's and the result's registers, its scratch values in red zone temporaries 0 to 2
 // instead: from U64, x's copy in temporary 0 and the result's bits in temporary 1; to U64, 2^63 in temporary 0, setae's
 // byte in temporary 1 (shifted into the top bit in place) and the bias in temporary 2. It is as exact, and raises the
 // same exceptions, but its loads wait for the stores before them: as the only form, it took a conversion-heavy loop to
@@ -9115,8 +9135,9 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
     }
     else if (!to_u64)
     {
-        // x halved in its own register (x's copy in temporary 0), x's sign tested in its copy, and the exponent raised in
-        // the result's bits in temporary 1.
+        // x halved in its own register (x's copy in temporary 0), and the exponent raised in the result's bits in
+        // temporary 1. x's sign needs no test of its own: a shift by 1 sets OF to its operand's top bit, x's (the or kept
+        // it), and SF to 0, so ge (SF = OF) is x's sign clear; which leaves the record for the result's zero (#3308).
         const bool single = class == BUSTER_TYPED_CLASS_F32;
         const uint8_t x = tier0_integer_depths[depth - 1];
         const uint8_t result = (uint8_t)floating;
@@ -9125,8 +9146,8 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
         tier0_put(writer, tier0_instruction(X86_FORM_ADD_R32_RM32, x, x, direct, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_OR_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 1));
-        tier0_put(writer, tier0_red_zone(writer, X86_FORM_CMP_RM64_IMM8, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_CMOVGE_R64_RM64, x, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_XORPS_X_XM128, result, result, direct, 0, 0));
         tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTSI2SS_X_RM64 : X86_FORM_CVTSI2SD_X_RM64, result, x, direct, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOV_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 63));
@@ -14692,10 +14713,10 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
     return code;
 }
 
-// A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
-// its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or
-// ATOMIC_CAS's value. Another
-// kind's value is its own whole (a constant's top bits are its own).
+// A function with segment overrides (#1447, Tier0Function.segments) or volatile accesses (#3310, Tier0Function.volatiles),
+// out of line: its values without them, in a copy of its values column (`values`), and each entry's override
+// (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's value. Another kind's value is its own whole
+// (a constant's top bits are its own).
 static void tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
 {
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -14705,7 +14726,8 @@ static void tier0_segments_strip(const Tier0Function* function, uint64_t* values
         const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
         const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_ATOMIC_RMW ||
                             kind == BUSTER_TYPED_ATOMIC_CAS;
-        values[i] = access ? value & ~BUSTER_TYPED_ACCESS_SEGMENT : value;
+        const bool marked = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
+        values[i] = access ? value & ~(BUSTER_TYPED_ACCESS_SEGMENT | (marked ? BUSTER_TYPED_ACCESS_VOLATILE : 0)) : value;
         segments[i] = access ? (uint8_t)segment : 0;
     }
 }
@@ -14729,7 +14751,10 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
-        code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, segments, output) : tier0_compile_scalar_entries(&stripped, segments, output);
+        stripped.volatiles = false;
+        // A function with volatile accesses alone has no override to add.
+        const uint8_t* overrides = function->segments ? segments : 0;
+        code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, overrides, output) : tier0_compile_scalar_entries(&stripped, overrides, output);
     }
     scratch_end(scratch);
     return code;
@@ -14737,12 +14762,12 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
 
 static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, false) : tier0_compile_scalar_entries(function, 0, output);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_compile_segments(function, output, false) : tier0_compile_scalar_entries(function, 0, output);
 }
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -15872,6 +15897,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
+        stripped.volatiles = false;
         check = vector ? tier0_validate_entries(&stripped) : tier0_validate_scalar_entries(&stripped);
     }
     scratch_end(scratch);
@@ -15880,10 +15906,10 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
 
 static Tier0Check tier0_validate(const Tier0Function* function)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, true) : tier0_validate_entries(function);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_validate_segments(function, true) : tier0_validate_entries(function);
 }
 
 static Tier0Check tier0_validate_scalar(const Tier0Function* function)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, false) : tier0_validate_scalar_entries(function);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_validate_segments(function, false) : tier0_validate_scalar_entries(function);
 }
