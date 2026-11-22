@@ -7510,8 +7510,9 @@ static uint32_t check_lower_wrapper_of(const CheckLowerWriter* writer, uint32_t 
 // constant byte offset from its start (#2983): its object in *object and the offset in *offset. The checker's value says
 // so for an array (`buf`, `s.name`) and for a static object's address constant; for an automatic object's address it
 // keeps no constant, so `&x`, `&a[i]` and `p + i` (or `p - i`) of a constant i and a cast of a pointer are taken apart
-// here, down their one pointer operand at most `steps` operators, each one's move added to the offset.
-static bool check_lower_wrapper_address(const CheckLowerWriter* writer, uint32_t node, uint32_t steps, uint32_t* object, int64_t* offset)
+// here, down their one pointer operand at most `steps` operators, each one's move added to the offset. Where `node`
+// itself is an array, *own is its bytes, the closest subobject that a query of mode 1 or 3 bounds by; else UINT64_MAX.
+static bool check_lower_wrapper_address(const CheckLowerWriter* writer, uint32_t node, uint32_t steps, uint32_t* object, int64_t* offset, uint64_t* own)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
@@ -7529,6 +7530,12 @@ static bool check_lower_wrapper_address(const CheckLowerWriter* writer, uint32_t
         const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
         const bool last = step == steps;
         uint32_t next = BUSTER_CHECK_NONE;
+        if (step == 0)
+        {
+            const bool array = value.category == CHECK_LVALUE && type_kind_is_array(kind) && type_is_complete(types, value.type) &&
+                               (type_inherited_flags(types, value.type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
+            *own = array ? type_size(types, value.type) : UINT64_MAX;
+        }
         if (designated)
         {
             *object = value.object;
@@ -7588,29 +7595,43 @@ static bool check_lower_wrapper_address(const CheckLowerWriter* writer, uint32_t
 }
 
 // __builtin_object_size's answer in mode `mode` (__builtin_dynamic_object_size's too) for `argument`, a call's, which a
-// wrapper's query of the parameter it binds reads (#2983), as clang's code answers the query once it has inlined the
-// wrapper: where the argument points into a named object of a complete, fixed type (as the checker's own bound of a
-// named object, check_input_builtin_evidence) or a string literal (check_lower_wrapper_address), the bytes from there to
-// its end, 0 past it. Its modes 1 and 3 are 0's and 2's: clang's code generation leaves the query to LLVM's objectsize,
-// which knows objects, not subobjects, so through a wrapper `s.a`'s bound is `s`'s. Anything else is unknown: (size_t)-1
-// for modes 0 and 1, 0 for 2 and 3, as the checker's unknown answers are.
-static uint64_t check_lower_wrapper_size(const CheckLowerWriter* writer, uint32_t argument, uint32_t mode)
+// wrapper's query of the parameter it binds reads (#2983), as clang's code answers it, of a parameter `declared` with
+// pass_object_size (CheckProgramWrapper.sizes) or not. Where the argument points into a named object of a complete,
+// fixed type (as the checker's own bound of a named object, check_input_builtin_evidence) or a string literal
+// (check_lower_wrapper_address), at a constant offset: the bytes from there to its end, 0 past it.
+// - A parameter without the attribute: clang's code generation leaves the query to LLVM's objectsize once the wrapper
+//   is inlined, which knows objects, not subobjects, so modes 1 and 3 answer as 0 and 2 do (through glibc 2.39's
+//   wrappers `strcpy (s.a, ...)` is bounded by `s`).
+// - One with pass_object_size(M) whose mode the query's takes (clang's areBOSTypesCompatible: the same one, 0's for a
+//   query of 1, 3's for a query of 2): the bound clang's caller computes in mode M and passes, where modes 1 and 3 know
+//   the closest subobject, an array argument's own bytes (glibc 2.40's Clang overloads bound `s.a` by `a`). Mode 3
+//   knows no other subobject. A query of another mode is LLVM's again.
+// Anything else is unknown: (size_t)-1 for modes 0 and 1, 0 for 2 and 3, as the checker's unknown answers are.
+static uint64_t check_lower_wrapper_size(const CheckLowerWriter* writer, uint32_t argument, uint32_t mode, uint8_t declared)
 {
     const CheckProgram* program = writer->program;
     const CheckInput* input = program->input;
     const TypeTable* types = program->types;
     uint32_t object = 0;
     int64_t offset = 0;
-    const bool address = check_lower_wrapper_address(writer, argument, 8, &object, &offset) && object - 1 < input->token_count && offset >= 0;
+    uint64_t own = UINT64_MAX;
+    const bool address = check_lower_wrapper_address(writer, argument, 8, &object, &offset, &own) && object - 1 < input->token_count && offset >= 0;
     const uint32_t string = address && check_sparse_present(input->string_ids) ? check_sparse_get(input->string_ids, object - 1) : BUSTER_CHECK_NONE;
-    const uint32_t declared = address && object < program->object_count && program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE;
-    const uint32_t declaration = declared != BUSTER_CHECK_NONE ? declared : object - 1;
+    const uint32_t found = address && object < program->object_count && program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = found != BUSTER_CHECK_NONE ? found : object - 1;
     const TypeId type = address && string >= input->string_count && declaration < input->token_count ? input->declared_types[declaration] : 0;
     const bool named = type != 0 && check_action_kind(types, type) != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(types, type) &&
                        (type_inherited_flags(types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
     const bool known = string < input->string_count || named;
     const uint64_t size = string < input->string_count ? input->strings[string].byte_count : named ? type_size(types, type) : 0;
-    return !known ? (mode < 2 ? UINT64_MAX : 0) : (uint64_t)offset <= size ? size - (uint64_t)offset : 0;
+    const uint64_t rest = (uint64_t)offset <= size ? size - (uint64_t)offset : 0;
+    const uint32_t passed = declared != 0 ? (uint32_t)(declared - 1) & 3 : 0;
+    const bool caller = declared != 0 && (passed == mode || (passed == 0 && mode == 1) || (passed == 3 && mode == 2));
+    const uint32_t asked = caller ? passed : mode & 2;
+    const bool subobject = (asked & 1) != 0;
+    const uint64_t closest = own < rest ? own : rest;
+    const bool answered = known && (!subobject || asked == 1 || own != UINT64_MAX);
+    return !answered ? (asked < 2 ? UINT64_MAX : 0) : subobject ? closest : rest;
 }
 
 // The answer of query `node` (__builtin_object_size or __builtin_dynamic_object_size) where its operand is a parameter of
@@ -7661,7 +7682,7 @@ static void check_lower_wrapper_call(CheckLowerWriter* writer, uint32_t node, ui
         frame->temporaries[p] = check_lower_temporary(writer, check_lower_class(writer, stream->argument_conversions[first + p].type));
         for (uint32_t mode = 0; mode < 4; mode += 1)
         {
-            frame->sizes[p][mode] = check_lower_wrapper_size(writer, graph->argument_nodes[first + p], mode);
+            frame->sizes[p][mode] = check_lower_wrapper_size(writer, graph->argument_nodes[first + p], mode, wrapper->sizes[p]);
         }
     }
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth, .address = true });

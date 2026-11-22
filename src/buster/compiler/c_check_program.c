@@ -155,7 +155,11 @@ struct CheckProgramBody
 // gnu_inline one too (glibc's __fortify_function wrappers), where the unit emits none of its own. Its body is one
 // statement: `return E;` (`node` E with its conversion to the result) or, in a void function, `E;`; E's nodes are
 // `first` to `node`. Its parameters' objects are CheckProgram.wrapper_parameters' `parameter_count` from
-// `parameter_first`, 0 for an unnamed one.
+// `parameter_first`, 0 for an unnamed one, and their pass_object_size attributes `sizes` (CheckInputAttributes'
+// object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
+// A wrapper's parameters at most: glibc's take five.
+#define BUSTER_CHECK_WRAPPER_PARAMETERS 8u
+
 typedef struct CheckProgramWrapper CheckProgramWrapper;
 struct CheckProgramWrapper
 {
@@ -164,10 +168,8 @@ struct CheckProgramWrapper
     uint32_t first;
     uint32_t parameter_first;
     uint32_t parameter_count;
+    uint8_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS];
 };
-
-// A wrapper's parameters at most: glibc's take five.
-#define BUSTER_CHECK_WRAPPER_PARAMETERS 8u
 
 typedef struct CheckProgramRegion CheckProgramRegion;
 struct CheckProgramRegion

@@ -1113,6 +1113,12 @@ static bool check_program_wrapper_body(const CheckProgram* full, const CheckProg
             .first = first,
             .parameter_count = count,
         };
+        // Its parameters' pass_object_size attributes: clang's caller computes such a bound itself (#2983).
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, body->declaration);
+        for (uint32_t p = 0; attributes != NULL && attributes->object_sizes != NULL && attributes->object_size_count == count && p < count; p += 1)
+        {
+            wrapper->sizes[p] = attributes->object_sizes[p];
+        }
     }
     return valid;
 }
