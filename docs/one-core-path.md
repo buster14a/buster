@@ -2,8 +2,10 @@
 
 Status: design, with its first two steps, step 2's first three pieces and
 its tests' loop on the window, the first part of step 3 and steps 4's and
-5's censuses measured. Of all this, only what step 5's allocation kept as
-the kernel's own is in a compile: three changes to those rows, merged.
+5's censuses measured, step 2's ceiling in a compile, and the first piece of
+the redesign that ceiling led to, the body boundary, measured on a scaffold.
+Of all this, only what step 5's allocation kept as the kernel's own is in a
+compile: three changes to those rows, merged.
 [#2850](https://github.com/buster14a/buster/issues/2850) has the design whole:
 the budget, the data design and what would refute it. It is
 [#672](https://github.com/buster14a/buster/issues/672)'s per-core research
@@ -18,8 +20,10 @@ middle (`check-input` to `lower`) 18 of them, about 38 a body node, and gets
 there by making what a rule decides on a byte its producer wrote: T's, C's and
 X's rules as arithmetic over byte columns, 64 records to a register, and the
 leaves and lookups, which no lane helps, from words that are one load away.
-Step 0 ran the lanes on the real nodes with the leaves and lookups given: 16.7
-and 20.6 cycles a taken node on `sqlite3.c` and musl, at its gate of 20. Step 1
+Step 0 met its 20-cycle gate on the dumped nodes with leaves and lookups given.
+Producing the packed template key in T and repairing distant operand lanes
+before X gave 13.76 cycles per taken SQLite node and 18.05 on musl on repeated
+passes, or 18.29 and 19.37 after scalar work. Step 1
 measured the leaves and lookups: every record is T's, a leaf takes about 5
 cycles, and a lookup takes 18 to 63 by its operator, 25 to 46 on average,
 where the gate was 10 and the design's own refutation line 20. T is bound by
@@ -55,7 +59,18 @@ uses. The set's and the silence tests, which decide what the machine takes,
 then run on that window, their loop 64 records a step over bytes read out of
 the kernel's records: exact, and 55 ticks a record on `sqlite3.c` where the
 tests as a pass over T's columns read 87. The loop itself is 0.7 of them,
-and 38 are the tests that read T's records still.
+and 38 are the tests that read T's records still. What a compile gains for
+all of it has a ceiling, read on main with each taken expression replaced
+by one leaf: 31 ms of `sqlite3.c`'s 112 with every whole tape taken, 11 with
+those that hold no call, where the machine itself costs about 10; and with
+no taken expression left the stages from `check-input` to `lower` are still
+57 ms. So the redesign takes whole bodies outside the reader, and its first
+piece is the boundary where such a body comes back: its lowered function
+supplied at the lowering, its tokens masked from the reader. With a recording
+of an ordinary compile as the supplier it is exact by default flags on four
+corpora, and `sqlite3.c` with 2,589 of its 2,668 bodies supplied compiles in
+64.9 ms where the ordinary compile takes 110.9. The piece's gate was 56: the
+host alone, with every body free, costs about that.
 Step 4's census counted Tier 0's row: 117 cycles
 and 295 instructions a typed entry in `-c sqlite3.c`, 64.7 cycles a token,
 Tier 0 itself 38 of them and the unwind table, the atoms and the emission's
@@ -99,9 +114,10 @@ token; the issue has each row's source:
 
 | step | what | gate | state |
 | --- | --- | --- | --- |
-| 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | measured: 16.7 and 20.6 cycles, 0.025 and 0.045 mispredicted |
-| 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2 |
-| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35. The tests on the window measured: exact; 54.1 TSC ticks a record on `sqlite3.c` where their pass over T's columns reads 83.0 (gate 40, refuted at 65): the loop 0.7, its inputs 8.9, and 37.2 the tests that read T's records still. Their second half's first piece: an operator a constant sends for nothing is left out of the loop's list (20,898 of 48,645): 48.7. Its second: the tree's tests listed by the operator above (6 operators for 27,794 records), and an expression with nothing listed has its verdict from the window alone (21,157 of 50,993): 42.0. Its third: a call with no test to make is left out of the list (12,064 of 12,918) and a statement that discards nothing is not listed (35,069 expressions with nothing listed): 35.8. Its fourth: a pointer's cast to void or to a pointer, its subscript by a constant and its sum with one are left out of the list (9,744 of 15,688 listed operators; 41,456 expressions with nothing listed): 31.2. C on the window measured: C's templates, contexts and targets for the expressions with no call, logical operator, update or comma (63% of `sqlite3.c`'s placed expressions), exact; 12.6 TSC ticks a record of theirs where C on T's columns reads 40.2, and 13.9 with its bytes, where its gate was 10. A call on the window measured: the kernel makes each argument's conversion (every one for 99.6%, 98.8% and 98.0% of the calls) and C's answers for a call are made on the window from them, exact; 86%, 84% and 86% of the placed expressions are decided there, at 8.2 TSC ticks a record of theirs on `sqlite3.c` and 9.2 with its bytes (gate 10); the kernel in place reads 1.2 ticks a record more, where its gate was 1.0 |
+| 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | met on the frozen SQLite and musl streams: 13.76 and 18.05 cycles on repeated passes, 18.29 and 19.37 after scalar work, with the largest of the 20 round means at 19.59 |
+| 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2. On the later call-argument rules, completing a call in one visit gave 27.00 on SQLite in lean mode. |
+| 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35. The tests on the window measured: exact; 54.1 TSC ticks a record on `sqlite3.c` where their pass over T's columns reads 83.0 (gate 40, refuted at 65): the loop 0.7, its inputs 8.9, and 37.2 the tests that read T's records still. Their second half's first piece: an operator a constant sends for nothing is left out of the loop's list (20,898 of 48,645): 48.7. Its second: the tree's tests listed by the operator above (6 operators for 27,794 records), and an expression with nothing listed has its verdict from the window alone (21,157 of 50,993): 42.0. Its third: a call with no test to make is left out of the list (12,064 of 12,918) and a statement that discards nothing is not listed (35,069 expressions with nothing listed): 35.8. Its fourth: a pointer's cast to void or to a pointer, its subscript by a constant and its sum with one are left out of the list (9,744 of 15,688 listed operators; 41,456 expressions with nothing listed): 31.2. C on the window measured: C's templates, contexts and targets for the expressions with no call, logical operator, update or comma (63% of `sqlite3.c`'s placed expressions), exact; 12.6 TSC ticks a record of theirs where C on T's columns reads 40.2, and 13.9 with its bytes, where its gate was 10. A call on the window measured: the kernel makes each argument's conversion (every one for 99.6%, 98.8% and 98.0% of the calls) and C's answers for a call are made on the window from them, exact; 86%, 84% and 86% of the placed expressions are decided there, at 8.2 TSC ticks a record of theirs on `sqlite3.c` and 9.2 with its bytes (gate 10); the kernel in place reads 1.2 ticks a record more, where its gate was 1.0. Its ceiling in a compile, measured: with each whole tape's expression replaced by one leaf the middle falls from 87.6 ms to 56.7 on `sqlite3.c` (to 60.2 with the tapes the tests decide on the window alone, to 76.3 with those that hold no call, label or temporary), against about 10 ms for the machine: step 2 whole is about 1.23 times, and a first compile that takes no call gains nothing |
+| the redesign, 1 | The body boundary: a body's lowered function from outside the reader (#2524's step 3's boundary) | exact; `-c sqlite3.c` in 56 ms with its bodies supplied (refuted at 62); nothing moves with none supplied | measured on a scaffold, with a recording as the supplier: exact by default flags on `sqlite3.c`, Lua, `main.c` and musl, and not yet with `-Wall -Wextra` (the unused analysis lacks a supplied body's uses) nor for a unit whose unit-end warnings a supplied body's uses decide; 64.9 ms with 84% of the bodies' tokens supplied, a line that reaches 56.5 at 100%: refuted; 1,215.957 M and 1,215.946 M instructions with none supplied. Its gate on a masked unit's reader is merged (#3272) |
 | 3 | The front's row, into the window | 35 cycles a token or less | first part measured, in the shadow: the node machine's front writes the kernel's window and the kernel reads it in place, exact; the kernel with its inputs 29.9 TSC ticks a record on `sqlite3.c` (gate 35), 38.4 on Lua, 61.5 on musl. The lexer's and the parser's rows are not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates. Designed (#2874): a body's row at 14 cycles a typed entry. Its first piece, Tier 0's back half on byte templates, measured in the shadow: exact, and refuted on its cost (62.8 cycles an entry where today's back half takes 43.7). Its second, in the compile: a fixed frame's unwind descriptor from Tier 0's frame, the objects unchanged, 403 cycles a body where main's frame events take 1,512 (its gate 300), 4.0 cycles a token less on `sqlite3.c` |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted. Allocated: 14.3 to 15.0 on `sqlite3.c` and 25.0 on musl as one command, each row to the issue that removes it or kept. The kept rows optimized in the compile since (#2885, #2903, #2941): the row about 12 on `sqlite3.c`. Whether the budget's line moves to it is not settled |
@@ -123,6 +139,42 @@ is its twin.
   mispredicted branches.
 - By part on `sqlite3.c`: T 2.6, C 2.4, the keys 1.1, the template's lookup 3.7,
   X 6.8.
+
+The follow-up recomputes distant operands on the scalar path, applies parent-independent
+context rules once per block and checks a packed 64-bit template key against one
+table row. Both paths took exactly the same nodes. All 346,998 SQLite entries
+and 154,132 musl entries matched, including those from expressions whose operands
+cross a block boundary. The table lookup also matched the original dictionary
+for every learned key and over 300,000 unknown queries on each stream.
+[Implementation and controls](https://github.com/buster14a/buster-performance/tree/f73e875502710c7f95f24bb4be11adc4c6c63dde/docs/measurements/per-core-step0-2850-2026-11-21/packed-template-keys)
+
+| Locked 9700X, per taken node | SQLite cycles | SQLite branch misses | musl cycles | musl branch misses |
+| --- | ---: | ---: | ---: | ---: |
+| Repeated passes | 14.17 | 0.019 | 18.72 | 0.045 |
+| After 200 ms of the scalar twin | 19.17 | 0.020 | 19.94 | 0.059 |
+
+Each cell is the median of five paired round means, with two fresh processes per
+variant per round and 21 timed passes per process. The five musl after-scalar
+rounds ranged from 19.41 to 20.61 cycles per taken node. Input production and
+ordinary source compilation are measured separately.
+[Raw counters, ranges and exact sources](https://github.com/buster14a/buster-performance/tree/162b41a41bec79bec1b71941c8b1960f4c11a665/docs/measurements/per-core-step0-2850-2026-11-21/qualification/qualpack)
+
+A second five-round run put musl after scalar work at 20.14 on that version.
+For expressions spanning a distant operand, the revised version repairs the
+scalar type facts and contexts before the shared template lookup and output
+sweep. Musl measured 18.40 cycles on repeated passes and 19.86 after scalar work
+(19.36–19.94 across those five rounds). SQLite measured 14.12 and 19.15. Every
+one of the 20 round means met the 20-cycle gate. The highest median branch
+miss rate was 0.055 per taken node and every entry still matched.
+[Paired rerun, full counters and sanitizer results](https://github.com/buster14a/buster-performance/tree/67d089abc0fa325b3bd76435e4d937ee5426fed1/docs/measurements/per-core-step0-2850-2026-11-21/qualification/qualrepair)
+
+T can also produce the packed template key while its deciding bytes are live.
+Repairing the distant lanes before X retained all 346,998 SQLite entries and
+154,132 musl entries. SQLite measured 13.7625 cycles per taken node on repeated
+passes and 18.2908 after the scalar twin. Musl measured 18.0476 and 19.3685.
+The largest of the 20 round means was 19.588 and the largest median branch-miss
+rate was 0.0555 per taken node.
+[Producer and full qualification](https://github.com/buster14a/buster-performance/tree/3272eaf9c4bfc10d14f7bdfc1dc4970acacafcc3/docs/measurements/per-core-step0-2850-2026-11-21/qualification/qualproduced)
 
 ## Step 1: the fact words
 
@@ -227,6 +279,31 @@ kernel's functions (`perf record`, 121 runs of the unit):
   `sqlite3.c` and about 8 on musl to step 0's 16.7 and 20.6: 29 to 33 a node,
   inside the 38 the budget gives a body node, with 5 to 9 left for the
   statements and the front's own pass.
+
+### Operand placement and call arguments on the later rules
+
+On `f4f8dd9a1`, the lean kernel checks the call argument conversions used by
+the later C pass. Two experiments on that revision measured improvements over
+six-operation dispatch. The price includes building the lists for each body.
+
+| Locked 9700X, cycles per taken leaf or lookup | SQLite reference | SQLite candidate | Paired difference | Rounds faster |
+| --- | ---: | ---: | ---: | ---: |
+| List each lookup with its first operand | 28.365 | 27.470 | −1.250 | 5/5 |
+| Complete the callee and its arguments together | 28.5125 | 26.995 | −1.4675 | 4/4 |
+
+Both changes also improved the complete timed pass in every SQLite lean round.
+The first reduced it by a paired median of 0.610 cycles per window record and
+the second by 0.515. Every run across SQLite, Lua and musl matched the original
+record, order and decoy checks. These comparisons used separate executables
+and rotations. The 10-cycle Step 1 gate remains open.
+[Lookup layouts](https://github.com/buster14a/buster-performance/tree/31d3ef51e03e3a6e5a1ab0fc54d1469466aef321/docs/measurements/per-core-step1-2850-2026-11-21/lookup-list-layouts)
+· [Call conversions](https://github.com/buster14a/buster-performance/tree/296c5d0edbcb3d6fe287f9a28d2d91c8e04f6371/docs/measurements/per-core-step1-2850-2026-11-21/call-conversions)
+
+The public compiler at `fbef2d68d` took 113.044 ms for fresh `-c` on the
+9,507,037-byte frozen SQLite file. That gives 84.10 MB/s. The separate counter
+series measured 870.34 user and kernel cycles per preprocessed token. The target
+is 9.507 ms for the complete object.
+[Seven-round public baseline](https://github.com/buster14a/buster-performance/tree/296c5d0edbcb3d6fe287f9a28d2d91c8e04f6371/docs/measurements/window-compile-2850-2026-11-21/ce67967f5/sqlite)
 
 ### The figures are a difference of two passes (#2872)
 
@@ -2709,6 +2786,199 @@ tape that lost a segment's override. This piece closes them. No compile takes an
   campaign's sweep; with the first compile behind its option the tests' own drivers run through the machine.
 - **Next:** the walk's truth through a cast ([#3204](https://github.com/buster14a/buster/issues/3204)), then the
   first compile that takes expressions, behind an option.
+
+## Step 2's ceiling: the middle without its taken expressions
+
+[The record](https://github.com/buster14a/buster-performance/tree/e5e5b4d20/docs/measurements/takeover-2850-2026-11-22)
+(`e5e5b4d20`; main `d541430bf`; the 9700X, CPU 2, one lane, Release, under the lock). No pull request's code: the
+counter is an experiment's patch on the shadow, and the rest is a transform of the source.
+
+Step 2 ends with one summary node where a taken expression's nodes were. Every piece before this one was gated on
+the machine's cost a record. None read what a compile gains for a record it takes, and the one option a compile has
+(`--node-window`) prices its own discovery scan and switches the statement controls' path off, so it prices no node:
+it costs `-c sqlite3.c` 14.3 M instructions at this main. This piece reads the other side, before any more of the
+machine is built: what the stages from `check-input` to `lower` take when each expression the window takes costs the
+compile one leaf.
+
+### What it is
+
+- **The slice count.** `measure-node-machine --shadow --window-rows --passes 0` with a counter that sorts each
+  expression whose tape X makes whole on the window by what the tests said of it (nothing listed; listed, then silent
+  on T's records; refused) and by what its tape names of its function's: a call's row, a label of its own, a
+  temporary, a branch to its control's label.
+- **The ceiling.** `sqlite3.c` preprocessed (`-E`: 716,136 tokens, and the ordinary object but for its file's name).
+  The same counter prints each whole tape's expression's tokens and root, and a transform replaces each such full
+  expression of a statement, a condition or a `switch` by one leaf, a volatile global, under the root the reader
+  makes. A `return`'s value and an initializer stay as they are (7,670 expressions, 22,743 records). Every variant
+  ends with one function that names each static function and object: without it the calls' removal leaves 179 of
+  2,399 static functions referenced, and the selection lowers no other. Each variant is then compiled by main,
+  seven `--time-stages` runs, in a rotating order.
+
+### What it measured
+
+In records, of 321,434 swept on `sqlite3.c` (49,839 tapes, 278,842 records):
+
+| the tests | plain | with a call | with a label, a temporary or a control's branch | all |
+| --- | ---: | ---: | ---: | ---: |
+| nothing listed, silent | 126,473 (39.3%) | 77,522 | 20,255 | 224,250 (69.8%) |
+| listed, then silent on T's records | 27,816 | 12,679 | 14,052 | 54,547 (17.0%) |
+| refused | | | | 45 |
+
+The stages' medians, ms; the middle is `check-input` to `lower`:
+
+| | none replaced | plain | nothing listed | all whole tapes |
+| --- | ---: | ---: | ---: | ---: |
+| records replaced | 0 | 119,834 | 215,630 | 256,069 |
+| `check-input` | 42.4 | 37.8 | 31.8 | 29.5 |
+| `check-expressions` | 10.7 | 9.0 | 6.5 | 5.1 |
+| `check-program` | 19.2 | 16.2 | 12.2 | 13.8 |
+| `lower` | 11.8 | 9.9 | 7.0 | 5.8 |
+| **the middle** | **87.6** | **76.3** | **60.2** | **56.7** |
+| **less than none replaced** | | **11.3** | **27.4** | **30.9** |
+| a record replaced, ns | | 95 | 127 | 121 |
+
+### What it means
+
+- **Step 2's ceiling on `sqlite3.c` is about 31 ms of 112**, with every whole tape taken at no cost: 27 with the
+  tapes the tests decide on the window alone, 11 with the plain ones. A record a taken expression no longer makes is
+  worth 95 to 127 ns, 520 to 700 cycles.
+- **The machine's own cost is about a third of it.** The shadow's first-run readings on these chunks are about 120
+  TSC ticks a record swept (the front 55, the kernel with its names' pass 22, the tests 27 to 38, C 8, X 9): 10 ms a
+  compile, whatever it takes. Net, step 2 whole is about 21 ms, 1.23 times, as "What it says of step 2" summed it
+  (1.22 to 1.27) from the other side; 17 ms with nothing listed; 1 ms with the plain tapes.
+- **A first compile that takes no call gains nothing.** The slice that needs no call's row, no label and no
+  temporary is 39% of the records and is the one that does not pay. What stands between the window and a call in a
+  compile: an expression's placement and its root's target and sense without the graph's T and the reference's C,
+  the calls' rows' contents and the labels' places in X's rows, and a local's read and write events for the passes
+  that warn. None of it is on the window.
+- **With every taken expression gone the middle is still 57 ms.** A profile of that variant: the reader's walks that
+  are no expression's 15.5 ms (the declarations 5.5 of them, the names' resolution 3.7), the kernel 12.2 (its peak is
+  185 MB where the whole unit's is 237: the memory follows the tokens, not the nodes), the program and its controls
+  7.1, the lowering 5.0, the warnings 4.6. That part is #2524's steps 3 and 4 and the file scope (#2531), and it is
+  six times the whole target.
+- **The bound is rough to a millisecond or two either way.** The stand-in is one leaf where a summary node is one
+  node and its rows' splice, and its own lowering and emission fall in the later stages, which the middle leaves out.
+
+## The redesign's first piece: the body boundary
+
+[The record](https://github.com/buster14a/buster-performance/tree/7694601a3/docs/measurements/takeover-2850-2026-11-22#the-body-boundary-with-a-recorded-supplier-boundary--boundary-b1)
+(`7694601a3`; main `f1fcdf2a0`; the times on the 9700X, CPU 2, one lane, Release, under the lock; the exactness runs
+on Develop builds). Its code is a scaffold on the branch `claude/2850-boundary-scaffold` and is not on main: of this
+piece only the gate on a masked unit's reader is merged
+([#3272](https://github.com/buster14a/buster/pull/3272)).
+[The redesign](https://github.com/buster14a/buster/issues/2850#issuecomment-7078174378) and
+[the boundary's specification, as amended](https://github.com/buster14a/buster/issues/2524#issuecomment-7079102369)
+are on the issues.
+
+Step 2 as written takes an expression at a time inside the reader, and its ceiling is the section above: 31 ms with a
+machine that costs 10, and 57 ms of middle left. The redesign takes whole function bodies outside the reader instead,
+in windows (the stream), and leaves the reader the file scope and the bodies the stream refuses. Its first piece is
+not the stream. It is the place where a body taken that way comes back into the unit, built and measured with a
+supplier that costs nothing to write, so that what the host costs when bodies are free is read before anything is
+built on that figure.
+
+### What it is
+
+- **The boundary.** A supplied body's tokens are masked from the reader as a lazily deferred body's are
+  (`-flazy-system-headers`' mask), but its function stays defined. Its opening stays among the program's bodies with a
+  record that has no controls. The lowering takes its `Tier0Function` whole, after its part's ABI wiring and before
+  `check_lower_finish`. From the supplier come also the objects it references (which the symbols' numbering and the
+  selection read), its string literals' tokens (whose records the reader then makes in their order, for the data
+  emission) and its jump tables (numbered among the unit's where its switches' would have been).
+- **Why the whole function.** The first specification spliced a body's entries between the lowering's prologue and its
+  end, with each call's types. Type ids are not the same when a body is masked: a file-scope expression after a body
+  that makes types has its operands at type 608 in a whole read and 568 in a masked one. A lowered function names
+  nothing by type, only symbols, and a symbol's id is its object's rank among the needed objects in token order.
+- **The supplier** is a recording: an ordinary compile writes each unit's bodies (`BUSTER_BOUNDARY_RECORD`), and a
+  compile of the same unit takes them (`BUSTER_BOUNDARY_SUPPLY`, all of the eligible ones or a selection). The
+  recording names every token by its index in the unit's own parse, as a command of several units reads each through
+  a view without its attested declarations and a mask holds the view off.
+- **What refuses a body,** which is then read as ever: a block-scope `static` or `extern` (its objects are data the
+  reader makes); a label whose address the code takes; a helper's, an initializer pool's or `errno`'s symbol (each
+  numbered from the unit's nodes); any asm statement (its number names the unit's asm helper even where its function
+  has no row for it); a tail call; a diagnostic in it; `-g`.
+- **The mask's own gate (B4, merged).** A lazy mask turned the reader's coded walk, its packed simple declarations and
+  its statement heads off for the whole unit. They stay on now, so that a unit with some bodies taken reads the rest
+  as an untaken unit does.
+
+### What it measured
+
+Exactness (B1), Develop builds: the ordinary compile, the recording, and the compile with every eligible body
+supplied and with each half of them.
+
+| by default flags | bodies | supplied | their tokens | refused |
+| --- | ---: | ---: | ---: | --- |
+| `sqlite3.c` | 2,668 | 2,589 | 480,204 | 79 with a block-scope `static` or `extern` |
+| Lua, 34 units | 1,096 | 1,081 | 156,805 | 14 with `static` or `extern`, 1 with labels as values |
+| `main.c` | 1,498 | 1,358 | 285,353 | 114 `static` or `extern`, 11 asm, 10 objects, 4 helpers, 1 pool |
+| musl, 1,336 units | 2,756 | 2,161 | 249,484 | 510 asm, 68 `static` or `extern`, 17 with a diagnostic |
+
+Every variant's objects and diagnostics are the ordinary compile's. With `-Wall -Wextra` the objects are and the
+diagnostics are not: the reader's unused analysis lacks a supplied body's uses of its parameters and of the unit's
+declarations, and warns of them. And a unit of four lines shows a hole by default flags that the corpora don't have: a
+`static` function used and never defined warns at the unit's end (`-Wundefined-internal`), the driver gives a unit
+with a mask no unit-end warnings, and the supplied compile is silent where the ordinary one warns.
+
+The time (B2), `--time-stages` medians of seven rounds, ms; all 43 objects of a run are one:
+
+| frozen `sqlite3.c` | ordinary | supplied, 76% of the bodies' tokens | supplied, 84% (with jump tables) |
+| --- | ---: | ---: | ---: |
+| `check-input` | 41.49 | 28.11 | 26.54 |
+| `check-expressions` | 10.50 | 2.95 | 2.06 |
+| `check-program` | 18.83 | 6.58 | 5.24 |
+| `lower` | 11.48 | 3.35 | 2.70 |
+| `check-input` to `lower` | 85.76 | 43.07 | 38.58 |
+| Tier 0 and emission | 8.77 | 8.91 | 8.92 |
+| total | 110.93 | 69.50 | 64.92 |
+| peak, MB | 238.4 | 230.7 | 230.8 |
+
+With half of the eligible bodies the totals are 91.2 to 94.1. Reading the recording is 1.7 ms of the supplied
+compile. With nothing recorded or supplied (B3) the scaffold reads 111.32 ms against main's 111.73 in seven ABBA
+rounds, 1,215.946 M instructions against 1,215.957 M.
+
+What the stream must cover, from the recording's census of `sqlite3.c`'s bodies: they use 9 of the 22 control kinds
+and 56 of the 69 expression ops, and
+
+| constructs supported | bodies whole | their tokens |
+| --- | ---: | ---: |
+| every op that 2% of the bodies have, with END, EVALUATE, RETURN and INITIALIZE | 24.8% | 4.6% |
+| and BRANCH_FALSE | 47.3% | 13.3% |
+| and JUMP | 86.3% | 53.1% |
+| and the rest but SWITCH and CASE | 96.9% | 79.8% |
+
+Of the 2,589 supplied bodies, 2,587 have a reference list equal to the set of objects their function names. The other
+two name one more: `memmove` and `memset`, which the unit declares and the lowering's own copies call.
+
+Profiles of the compile with every body masked, 243.8 M cycles a run: the kernel is 25.3% of it and
+`clear_page_erms` alone 18.2% (7.7 ms), `memset` 4.4%. Its peak is 216 to 222 MB against the whole unit's 238.
+
+### What it means
+
+- **The boundary is real and exact where it was built.** A unit takes its bodies' code from outside the reader, in
+  whole or in part, and its object is the ordinary one to the byte on four corpora. What it lacks: the uses for the
+  unused analysis; the unit-end warnings, which the driver gives no unit with a mask; and block-scope statics, which
+  are 15% of `sqlite3.c`'s body tokens (`sqlite3VdbeExec` among them).
+- **Its gate on the total is refuted, and what refutes it is the host.** 0%, 76% and 84% of the bodies' tokens are a
+  line of 0.544 ms a percent: 56.5 ms with every body supplied and costing nothing, where the gate allowed 56 for
+  everything. The bodies' checking and lowering is 46 ms of today's 111 for the bodies that were supplied. What the
+  line leaves at its end is the reader's passes over every token (21 ms with every body masked), the front (16),
+  Tier 0 and emission (9), the file scope's own checking and the supply, on memory that barely moves.
+- **A masked token costs by being there: how much is an estimate.** Two readings that are not one experiment: the
+  bodies' tokens removed from a preprocessed source left 14.2 ms between `check-input` and `lower`, at main
+  `d541430bf`; masked in place in the frozen source they leave 25.5, at `0b150b71b`. The profile says where the
+  difference would be: pages the reader's columns touch for tokens nothing reads. A reader that reads a view of the
+  unit without the taken bodies' tokens, as it reads a view without a unit's attested declarations, is the order's
+  third step. It is not built, and what it saves is not measured.
+- **There is no small first slice of the stream.** Coverage by constructs is nothing until the expression language is
+  there whole with branches and jumps. What takes bodies takes nearly all of them or nearly none, so the stream's
+  first piece is a second middle for the language as code uses it, and whether that may be on main beside the first
+  is [#2924](https://github.com/buster14a/buster/issues/2924)'s question, asked on the issue and not answered.
+- **A supplier that makes the function has the references.** They need no walk of their own on that path.
+- **Where this leaves the target, as an estimate.** Nothing past the boundary is built. If a stream took every body
+  at no cost and a view saved what the two readings above differ by, `sqlite3.c` would compile in about half of
+  today's time. The front (16 ms) and the kernel's share (13 to 14 ms of the ordinary and of the supplied compile) are
+  each more than the 9.5 ms the whole compile may take, and Tier 0 with the emission (9) is nearly all of it. Each is
+  another row's redesign (steps 3 to 5 above).
 
 ## Step 4's first piece: a census of Tier 0's row
 

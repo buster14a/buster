@@ -178,7 +178,7 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
     valid &= chosen != BUSTER_CHECK_NONE;
     if (valid)
     {
-        reader->selected_tokens[close] = chosen;
+        check_input_selection_set(reader, close, chosen);
         check_input_sparse_mark(reader, close, chosen < reader->parser->tokens.count);
         association = separator + 1;
         while (association < close)
@@ -226,7 +226,7 @@ static bool check_input_selection(CheckInputReader* reader, uint32_t close)
             selected &= root != BUSTER_CHECK_NONE;
             if (selected)
             {
-                reader->selected_tokens[close] = root;
+                check_input_selection_set(reader, close, root);
                 check_input_sparse_mark(reader, close, root < reader->parser->tokens.count);
                 check_input_constant_fold_warning(reader, first, separator, &control, true, first, false);
                 check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? close : next, CHECK_WARNING_INTEGER_OVERFLOW);

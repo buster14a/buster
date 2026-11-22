@@ -227,7 +227,7 @@ static uint32_t check_constant_overload_token(const CheckConstantInput* input, u
             result = root + 1;
             break;
         }
-        const uint32_t chosen = reader->selected_tokens != NULL ? reader->selected_tokens[root] : BUSTER_CHECK_NONE;
+        const uint32_t chosen = check_input_selection_at(reader, root);
         const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
         if (chosen != BUSTER_CHECK_NONE && selected >= input->first && selected < input->end && selected != root)
         {
@@ -2334,9 +2334,9 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
                 check_input_noderef_set(reader->output, token, check_input_noderef_at(reader->output, root));
-                if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
+                if ((check_input_selection_at(reader, token) & CHECK_INPUT_SOURCE_SELECTION) != 0)
                 {
-                    reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
+                    check_input_selection_set(reader, token, root | CHECK_INPUT_SOURCE_SELECTION);
                 }
             }
             if (valid && input->proof_values != 0)
@@ -2409,9 +2409,9 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint32_t root = check_constant_range_root(input, chosen_first, chosen_end);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
                 check_input_noderef_set(reader->output, token, check_input_noderef_at(reader->output, root));
-                if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
+                if ((check_input_selection_at(reader, token) & CHECK_INPUT_SOURCE_SELECTION) != 0)
                 {
-                    reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
+                    check_input_selection_set(reader, token, root | CHECK_INPUT_SOURCE_SELECTION);
                 }
             }
             if (valid && input->proof_values != 0)

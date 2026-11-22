@@ -7638,6 +7638,20 @@ What would move it:
   [#3202](https://github.com/buster14a/buster/issues/3202),
   [#3203](https://github.com/buster14a/buster/issues/3203)) and then the
   first compile that takes expressions are next.
+- **What a compile gains, measured from the other side:** with each expression
+  whose tape the window makes whole replaced by one leaf in the source, main's
+  stages from `check-input` to `lower` fall from 87.6 ms to 56.7 on `sqlite3.c`,
+  and to 76.3 where only the tapes with no call, label or temporary are
+  replaced ([the one-core path](one-core-path.md#step-2s-ceiling-the-middle-without-its-taken-expressions)).
+  Against the 10 ms the window's sweeps cost a compile, that is the sum above,
+  1.23 times, and nothing for a first compile that takes no call.
+- **Step 3's boundary, measured apart from the machine:** a body's lowered
+  function supplied at the lowering with its tokens masked from the reader,
+  the supplier a recording of an ordinary compile. Exact by default flags on
+  four corpora, and `sqlite3.c` with 84% of its bodies' tokens supplied
+  compiles in 64.9 ms where the ordinary compile takes 110.9: the host alone
+  costs about 56 with every body free
+  ([the one-core path](one-core-path.md#the-redesigns-first-piece-the-body-boundary)).
 - **`sizeof` and `_Alignof`,** which the front leaves: 1.5% of `sqlite3.c`'s
   taken expressions and most of musl's missing 5% of nodes.
 - **Where the sweeps run:** 164 cycles a node in the tight loop, 199 a body's

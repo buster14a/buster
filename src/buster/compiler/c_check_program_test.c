@@ -2765,6 +2765,7 @@ static void check_test_program_boundary_target(CheckTest* test, const char* sour
                 const bool atomic_kinds = memchr(types.table.types.kind, BUSTER_TYPE_KIND_ATOMIC, types.table.types.count) != NULL;
                 check_test_expect(test, counted.builtins == twin.builtins && counted.integer_builtins == twin.integer_builtins && counted.atomics == twin.atomics &&
                                             counted.lane_calls == twin.lane_calls && counted.lane_arguments == twin.lane_arguments &&
+                                            counted.transport_entries == twin.transport_entries && counted.transport_locals == twin.transport_locals &&
                                             (strstr(name, "node-counts-masks") == NULL || (!atomic_kinds && twin.atomics != 0)),
                                   "the lowering's node counts are their scalar twin's");
                 uint32_t writes = 0;
@@ -6307,12 +6308,15 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         check_test_program_boundary(test, "int main(void){}", "implicit-main-return", true, true, 0, 0);
         check_test_program_boundary(test, "int tested(int n){int x=n+1;return x*2;}", "program-rollback", true, true, 0, 1);
         // The node counts' terms (check_lower_node_counts): the builtins of each kind, a vector's libm builtins, whose lanes
-        // call the C library, and past 16 nodes the masks' partial tails; and with an _Atomic type, the rules for every node.
+        // call the C library, and past 16 nodes the masks' partial tails; and with an _Atomic type, updates that need atomic storage.
         check_test_program_boundary(test,
             "typedef float V __attribute__((vector_size(16)));"
             "int tested(int n){V v={n,2,3,4};V w=__builtin_elementwise_sin(v);V p=__builtin_elementwise_pow(v,w);"
             "int o;return (int)(w[0]+p[1])+__builtin_popcount(n)+__builtin_add_overflow(n,1,&o)+(int)__builtin_fabs((double)n);}",
             "node-counts-vector-libm", true, true, 0, 3);
+        // A scalar result of a transport vector's subscript still needs the vector operand's entries and locals.
+        check_test_program_boundary(test, "typedef int V __attribute__((vector_size(128)));int tested(V v,int i){return v[i];}",
+                                    "node-counts-transport-subscript", true, true, 0, 0);
         check_test_program_boundary(test, "_Atomic int a;int tested(int n){a+=n;int x=a;return x+__builtin_popcount(n);}", "node-counts-atomic-type", true, true, 1, 1);
         // The atomic builtins on plain objects, which the ops' masks count (no _Atomic kind in the table).
         check_test_program_boundary(test,

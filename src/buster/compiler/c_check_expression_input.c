@@ -1280,6 +1280,41 @@ static inline __attribute__((always_inline)) bool check_input_expression_termina
     {
         region->result = values.first;
     }
+    if (input->discard_roots != NULL && !condition && region == NULL && values.count == 1 && batch->count != 0 &&
+        values.first == batch->base + batch->count - 1 && input->overload_heads == NULL && input->graph.fp_environments == NULL)
+    {
+        const uint32_t place = batch->count - 1;
+        const CheckOp op = batch->ops[place];
+        const Parser* parser = reader->parser;
+        const uint32_t owner = parser->tree.parents[token];
+        const bool block = owner < input->token_count && (parser->tree.roles[owner] == PARSE_ROLE_CLOSE_BODY || parser->tree.roles[owner] == PARSE_ROLE_CLOSE_BLOCK);
+        if (block && parser->tree.roles[token] == PARSE_ROLE_TERMINATOR &&
+            (op == CHECK_OP_CALL || op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
+             (op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_LOGICAL_OR) ||
+             (op == CHECK_OP_CAST && reader->query_types[batch->tokens[place]] == BUSTER_TYPE_VOID)))
+        {
+            // The source end of the operand is the semicolon or a closing grouping parenthesis before it.
+            // The program can recover this same token from the end and a single bit on the physical node.
+            uint32_t end = reader->ends[batch->tokens[place]] + 1;
+            while (end < token && token - end <= 8 && parser->tokens.kinds[end] == PARSE_KIND_R_PAREN)
+            {
+                end += 1;
+            }
+            if (end == token)
+            {
+                input->discard_roots[values.first / 64] |= UINT64_C(1) << (values.first % 64);
+                if (input->statement_heads != NULL)
+                {
+                    input->statement_heads[token] = values.first + 1;
+                }
+                if (reader->region_roots != NULL)
+                {
+                    reader->region_roots[token] = values.first;
+                }
+                return true;
+            }
+        }
+    }
     uint32_t last = BUSTER_CHECK_NONE;
     for (uint32_t value = acted ? values.first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
     {
@@ -1287,6 +1322,10 @@ static inline __attribute__((always_inline)) bool check_input_expression_termina
                                                        CHECK_INPUT_FORM_DISCARD);
         if (discard != BUSTER_CHECK_NONE)
         {
+            if (value == values.first && input->statement_heads != NULL)
+            {
+                input->statement_heads[token] = discard + 1;
+            }
             if (reader->region_roots != NULL)
             {
                 if (last == BUSTER_CHECK_NONE)
@@ -2200,8 +2239,9 @@ static __attribute__((noinline)) uint32_t check_input_window_actions(CheckInputR
 
 // The coded walk: the postorder a chunk at a time, compacted to the tokens the walk acts at, each acted at by its class.
 // A DROP's action is nothing but its children's chains joined, which no parent reads (its first value is NONE, as the
-// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit or deferred
-// is acted at by the walk's visit throughout, though still compacted. A unit with overload tables (CheckInput.
+// reader's setup wrote it), so the compaction leaves its tokens out. A unit with expressions past its limit, or with a
+// lazy mask beside #113's deferred bodies, is acted at by the walk's visit throughout, though still compacted; under a
+// lazy mask alone the classes act, at the tokens it keeps. A unit with overload tables (CheckInput.
 // overload_heads: one that names the overloadable attribute in an attribute list, whose every function declaration is a
 // candidate) is coded too: the class actions carry the heads through their nodes to their calls as the walk's does.
 static void check_input_expressions_coded_range(CheckInputReader* reader, uint32_t begin, uint32_t stop)
@@ -2209,7 +2249,10 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     const CheckInput* input = reader->output;
     const uint32_t count = reader->parser->tokens.count;
     // Every token's expression ends by the count, so that within these limits none is past them.
-    const bool coded = input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit >= count && input->token_count >= count;
+    // A lazily deferred body's tokens are ignored (check_input_run copies the mask), so their classes don't act and the
+    // compaction leaves them out; #113's are read later by their own walk, which the mask alone holds off.
+    const bool masked = input->deferred_tokens != NULL && reader->deferred != NULL;
+    const bool coded = input->diagnostic_limits == NULL && !masked && reader->expression_limit >= count && input->token_count >= count;
     const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];

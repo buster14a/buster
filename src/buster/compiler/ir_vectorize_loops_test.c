@@ -39,7 +39,7 @@ struct IrVectorizeTest
     uint64_t digest;
 };
 
-#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0x34033ad4f0b6e03a)
+#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0x06750f862900fb32)
 
 typedef struct IrVectorizeTestFixture IrVectorizeTestFixture;
 struct IrVectorizeTestFixture
@@ -82,6 +82,8 @@ static const IrVectorizeTestFixture ir_vectorize_test_fixtures[] = {
     { .name = "popcount-u64", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 1 },
     { .name = "stencil-u8", .roles = "ppn", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "axpy-f32", .roles = "ppkn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
+    { .name = "fma-f32", .roles = "ppkn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
+    { .name = "sitofp-i32", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .floating = true },
     { .name = "start-offset", .roles = "ppsno", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
     { .name = "uniform-load", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 1 },
     { .name = "two-loops", .roles = "ppm", .vectorized = { 2, 2, 2 }, .refusal = IR_VECTORIZE_REFUSALS, .byte_masks = 2 },

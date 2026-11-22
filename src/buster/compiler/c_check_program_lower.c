@@ -7025,7 +7025,13 @@ static void check_lower_eh_return(CheckLowerWriter* writer, uint32_t node)
     CheckLowerAbi* abi = writer->abi;
     // The statement's node, or its conversion (to void) or cast of the call.
     const uint32_t root = writer->statement;
-    const bool alone = node == root || (root < graph->count && (graph->ops[root] == CHECK_OP_CONVERT || graph->ops[root] == CHECK_OP_CAST) && graph->operand0[root] == node);
+    const CheckInput* input = writer->program->input;
+    // A retained root is itself the operand of the statement's implicit void cast. If that root
+    // is an explicit cast, its child call is two conversions away from the original statement.
+    const bool retained = root < graph->count && input->discard_roots != NULL &&
+                          (input->discard_roots[root / 64] & (UINT64_C(1) << (root % 64))) != 0;
+    const bool alone = node == root || (!retained && root < graph->count && (graph->ops[root] == CHECK_OP_CONVERT || graph->ops[root] == CHECK_OP_CAST) &&
+                                       graph->operand0[root] == node);
     if (!alone && !writer->track)
     {
         check_lower_fail(writer, CHECK_PROGRAM_INVALID);
@@ -19516,12 +19522,89 @@ static CheckLowerNodeCounts check_lower_node_counts_scalar(const CheckProgram* p
     return counts;
 }
 
+// Each valid type whose kind is neither a vector, atomic nor wrapper contributes no transport or atomic room.
+// A gather reads four bytes of the kind column. Clamp the last three indices to the last complete word and shift
+// its selected byte into the low bits, so even a type at the end of a page reads only the allocated column.
+static __mmask16 check_lower_plain_reserve_types(const TypeTable* types, __mmask16 active, __m512i ids)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __mmask16 nonzero = _mm512_mask_cmpneq_epi32_mask(active, ids, zero);
+    __mmask16 plain = active & ~nonzero;
+    if (nonzero != 0)
+    {
+        const __m512i index = _mm512_srli_epi32(ids, BUSTER_TYPE_INDEX_SHIFT);
+        const __m512i begin = _mm512_min_epu32(index, _mm512_set1_epi32((int)(types->types.count - 4)));
+        const __m512i word = _mm512_mask_i32gather_epi32(zero, nonzero, begin, types->types.kind, 1);
+        const __m512i shift = _mm512_slli_epi32(_mm512_sub_epi32(index, begin), 3);
+        const __m512i kind = _mm512_and_si512(_mm512_srlv_epi32(word, shift), _mm512_set1_epi32(255));
+        const __mmask16 before = _mm512_mask_cmplt_epu32_mask(nonzero, kind, _mm512_set1_epi32(BUSTER_TYPE_KIND_VECTOR));
+        const __mmask16 after = _mm512_mask_cmpgt_epu32_mask(nonzero, kind, _mm512_set1_epi32(BUSTER_TYPE_KIND_ATOMIC));
+        plain |= before | _mm512_mask_cmplt_epu32_mask(after, kind, _mm512_set1_epi32(BUSTER_TYPE_KIND_WRAPPERS));
+    }
+    return plain;
+}
+
+// An atomic or a transport vector elsewhere in the unit does not give its scalar nodes vector or atomic room.
+// The reserve rule reads the result, its two conversion types and for updates and subscripts also the left operand.
+// A vector builtin has its own rule even for a scalar result. Only the exceptional nodes run the full rule.
+static CheckLowerNodeCounts check_lower_node_counts_typed(const CheckProgram* program)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckNodeConversions)));
+    CheckLowerNodeCounts counts = { 0 };
+    for (uint32_t first = 0; first < graph->count; first += 16)
+    {
+        const uint32_t remaining = graph->count - first;
+        const __mmask16 active = remaining < 16 ? (__mmask16)((1u << remaining) - 1) : (__mmask16)UINT16_MAX;
+        const __m512i ops = _mm512_maskz_loadu_epi32(active, graph->ops + first);
+        const __m512i result = _mm512_maskz_loadu_epi32(active, stream->value_types + first);
+        const __mmask16 ordinary = _mm512_mask_cmpneq_epi32_mask(active, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_VECTOR));
+        __mmask16 plain = check_lower_plain_reserve_types(types, ordinary, result);
+        const __mmask16 typed = _mm512_mask_cmpneq_epi32_mask(plain, result, zero);
+        if (typed != 0)
+        {
+            const CheckConversion* operands = stream->conversions[first].operands;
+            const __m512i a = _mm512_mask_i32gather_epi32(zero, typed, offsets, &operands[0].type, 1);
+            const __m512i b = _mm512_mask_i32gather_epi32(zero, typed, offsets, &operands[1].type, 1);
+            plain = (plain & ~typed) | check_lower_plain_reserve_types(types, check_lower_plain_reserve_types(types, typed, a), b);
+        }
+        const __m512i updates = _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_PRE_INCREMENT));
+        const __mmask16 left_type = _mm512_mask_cmple_epu32_mask(plain, updates, _mm512_set1_epi32(CHECK_OP_BIT_XOR_ASSIGN - CHECK_OP_PRE_INCREMENT)) |
+                                    _mm512_mask_cmpeq_epi32_mask(plain, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN)) |
+                                    _mm512_mask_cmpeq_epi32_mask(plain, ops, _mm512_set1_epi32(CHECK_OP_SUBSCRIPT));
+        if (left_type != 0)
+        {
+            const __m512i left = _mm512_maskz_loadu_epi32(left_type, graph->operand0 + first);
+            const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)first), lanes);
+            const __mmask16 present = _mm512_mask_cmplt_epu32_mask(left_type, left, nodes);
+            const __m512i ids = _mm512_mask_i32gather_epi32(zero, present, left, stream->value_types, sizeof(TypeId));
+            plain = (plain & ~present) | check_lower_plain_reserve_types(types, present, ids);
+        }
+        const __mmask16 integer = _mm512_mask_cmpeq_epi32_mask(plain, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_UNARY)) |
+                                  _mm512_mask_cmpeq_epi32_mask(plain, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW));
+        const __mmask16 builtin = integer | _mm512_mask_cmpeq_epi32_mask(plain, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_MISC)) |
+                                            _mm512_mask_cmpeq_epi32_mask(plain, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_FLOAT));
+        counts.integer_builtins += (uint32_t)__builtin_popcount(integer);
+        counts.builtins += (uint32_t)__builtin_popcount(builtin);
+        counts.atomics += (uint32_t)__builtin_popcount(_mm512_mask_cmpeq_epi32_mask(plain, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_ATOMIC)));
+        for (uint32_t exceptions = active & ~plain; exceptions != 0; exceptions &= exceptions - 1)
+        {
+            check_lower_node_count(program, first + (uint32_t)__builtin_ctz(exceptions), &counts);
+        }
+    }
+    return counts;
+}
+
 _Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the graph's ops load 16 to a vector");
 
 // The same, by 16 nodes' ops at a time. Every term but the atomic types' and the libm builtins' is the op's alone: masks
 // of the ops' compares, which population counts add up. A node's type or its update's destination is _Atomic only where
 // the type table has an _Atomic kind (type_strip_aligned's base is a type of the table too), so a unit without one, which
-// is nearly every unit, reads no node's type; a unit with one takes the rules for every node. A vector builtin's node,
+// is nearly every unit, reads no node's type; a unit with one checks the typed candidates. A vector builtin's node,
 // rare, takes the rules for its lane calls, of which the masks count no other term; in a unit with vector types, a
 // product, division, remainder or shift (check_lower_lanewise_op) takes its one term, its lanes' room
 // (check_lower_lanewise_room), whose type says whether it runs element by element. The loads are masked to the graph's
@@ -19548,7 +19631,8 @@ static CheckLowerNodeCounts check_lower_node_counts(const CheckProgram* program)
     CheckLowerNodeCounts counts = { 0 };
     if (atomic_types || transport_types)
     {
-        counts = check_lower_node_counts_scalar(program);
+        const bool columns = types->types.count >= 4 && program->stream != NULL && program->stream->dense_values == NULL && program->stream->value_types != NULL;
+        counts = columns ? check_lower_node_counts_typed(program) : check_lower_node_counts_scalar(program);
     }
     else
     {
