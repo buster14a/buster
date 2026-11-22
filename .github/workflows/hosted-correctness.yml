@@ -45,6 +45,8 @@ env:
   # Nothing here reads the executable's debug information, which takes a fifth of the build's time; the inventory's own
   # build.sh calls (check-call-graph) configure and build in the checkout's tree.
   BUSTER_DEBUG_INFO: '0'
+  # The prepared offline inputs' handoff, which a feedback record names so that its replay prefers them (#1427).
+  BUSTER_FEEDBACK_HOSTED_TOOLS: ${{ inputs.hosted-tools }}
   # The vector row's configurations (#2033): its sanitizers, `none` on a pull request and all four on the runs that run
   # the sanitizer rows, whose shards are one pool of items (tools/ci/vector-draw.sh). An item is a configuration's
   # initial and its shard: `m2` is memory's shard 2 of its 4. They are listed the costliest first, the order in which the
@@ -295,9 +297,9 @@ jobs:
       - name: Build the external Clang pragma oracle, the clang server and the compiler
         # A native row's shard builds its own, for the CPU it runs on; so does a vector configuration's item 1, on a CPU
         # its probe qualified, for the configuration's items: the build runs the executable (the post-link step's
-        # baked tables, #590).
+        # baked tables, #590). tools/ci/feedback.sh records its log, revision, CPU and flags, and a replay script (#1427).
         if: env.BUSTER_SHARD != '' && (inputs.host_arch == 'native' || env.BUSTER_VECTOR_BUILDER == '1')
-        run: bash tools/ci/hosted-product.sh build
+        run: bash tools/ci/feedback.sh build "$RUNNER_TEMP/feedback-build"
 
       # The vector configuration's item 1 packs its build as a portable row's build job does (tools/ci/hosted-product.sh):
       # the ownership check on the build's tree, its sanitizer reports so far, then the product with its identity, which
@@ -475,6 +477,21 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # Each plain item's first result, at the start of its own run (#1427; docs/commands/ci.md, "Early hosted feedback
+      # and reproductions"): the fixed driver corpus (tests/ci/feedback/) through the item's compiler, in seconds. It
+      # never qualifies anything: the item's suite runs the corpus's heading in its deal as well. A pull request's or a
+      # merge-queue candidate's item stops here when it fails, as its suite would at its first failure; other runs report
+      # every command, and their suites run the heading.
+      - name: Early hosted feedback (not qualification)
+        if: env.BUSTER_SHARD != '' && env.BUSTER_SANITIZER == 'none' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+        run: bash tools/ci/feedback.sh run "$RUNNER_TEMP/feedback-early" smoke --jobs "$(nproc)" --timeout 120 --fail-fast
+
+      # Once a plain row, on its shard 1: the corpus fails on a compiler broken in each area it promises (its mutants in
+      # tests/ci/feedback.sh, a few seconds).
+      - name: Check that the early corpus detects a regression in each promised area
+        if: env.BUSTER_SHARD == '1' && env.BUSTER_SANITIZER == 'none' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+        run: bash tests/ci/feedback.sh --compiler "$BUSTER_COMPILER"
+
       - name: Run correctness tests within the hosted CPU budget
         if: env.BUSTER_SHARD != ''
         run: |
@@ -495,14 +512,29 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = pull_request ] || [ "$GITHUB_EVENT_NAME" = merge_group ]; then
               fail_fast=(--fail-fast)
           fi
-          "$BUSTER_COMPILER" parallel --github --jobs "$(nproc)" --timeout "$timeout" "${fail_fast[@]}" \
+          # The full inventory through tools/ci/feedback.sh (#1427), which runs `parallel --github` with these arguments
+          # and records the exact command, the item's CPU and flags, and its first failure, for the artifact below.
+          bash tools/ci/feedback.sh run "$RUNNER_TEMP/feedback-suite" full --jobs "$(nproc)" --timeout "$timeout" "${fail_fast[@]}" \
             --shard "$BUSTER_SHARD/$shards" \
-            --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs" < tools/ci/correctness.tests
+            --costs "tools/ci/costs/$BUSTER_HOST_ARCH-$BUSTER_SANITIZER-O$BUSTER_SANITIZER_OPTIMIZATION.costs"
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
           if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then
               find "$oracle" -type f -mtime +2 -delete
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
+
+      # The item's feedback records (its build's, its early result's and its suite's): each with result.tsv, which tells a
+      # product failure from an infrastructure failure and an incomplete run, and reproduce.sh, which replays it from a
+      # clean checkout of its revision on a CPU that passes the vector probe (tools/ci/feedback.sh replay).
+      - name: Preserve exact feedback records and reproductions
+        if: ${{ always() && env.BUSTER_SHARD != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: feedback-${{ inputs.host_arch }}-${{ env.BUSTER_SANITIZER }}-O${{ inputs.optimization }}-shard${{ env.BUSTER_SHARD }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/feedback-*/
+          overwrite: false
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Preserve failed source SSA comparison inputs
         if: ${{ failure() && env.BUSTER_SHARD != '' }}

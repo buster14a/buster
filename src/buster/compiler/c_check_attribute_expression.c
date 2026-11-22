@@ -365,7 +365,7 @@ static bool check_input_bound_evaluated(const Parser* parser, uint32_t comma, ui
 // clang's warnings of the comma operators' left operands in an attribute's expression argument [first, end) (#1447,
 // Sema's CheckCommaOperands), each once however often the argument is read: -Wunused-value's, or -Wunused-comparison's
 // with its note at an equality, where check_input_attribute_unused_of says the operand's value is unused. A constant array
-// bound's too (#2202, `bound`), which no graph walk reads: there clang queues them in a function body to its end.
+// bound's too (#2202, `bound`), which no graph walk reads: there clang queues a "has no effect" in a function body to its end.
 static void check_input_attribute_unused(CheckInputReader* reader, uint32_t first, uint32_t end, bool bound)
 {
     const Parser* parser = reader->parser;
@@ -384,6 +384,9 @@ static void check_input_attribute_unused(CheckInputReader* reader, uint32_t firs
             const bool retained = check_warning_set_add(&reader->source_warning_keys, key);
             reader->output->resource |= !retained;
             const bool comparison = unused.message >= BUSTER_CHECK_UNUSED_EQUALITY;
+            // Only the "has no effect" one is queued (DiagIfReachable): a comparison's and the `void *` cast's question
+            // clang gives at once, in a function body too (#2252), as check_common_report_discarded does an expression's.
+            const bool queued = bound && unused.message == BUSTER_CHECK_UNUSED_COMMA;
             const CheckWarningEvent event =
             {
                 .id = comparison ? CHECK_WARNING_ID_UNUSED_COMPARISON : CHECK_WARNING_ID_UNUSED_VALUE,
@@ -391,7 +394,7 @@ static void check_input_attribute_unused(CheckInputReader* reader, uint32_t firs
                 .token = unused.token,
                 .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                 .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                .completion = bound ? check_input_unused_completion(parser, unused.token) : unused.token + 1,
+                .completion = queued ? check_input_unused_completion(parser, unused.token) : unused.token + 1,
                 .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = unused.message },
             };
             const CheckWarningNote note =

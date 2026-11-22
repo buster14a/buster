@@ -147,7 +147,7 @@ static void tier1_frame_emit_touch(Tier1EmitBuffer* buffer)
 }
 
 // The records of a probed allocation that change its CFA rule (#1056): r11's subtraction to the loop's bound, the loop's
-// jne and the remainder's subtraction, BUSTER_TIER1_FRAME_NONE for those it hasn't.
+// jne (the page subtraction itself for a single-page fixed probe) and the remainder's subtraction.
 typedef struct Tier1FrameProbeRecords Tier1FrameProbeRecords;
 struct Tier1FrameProbeRecords
 {
@@ -155,6 +155,12 @@ struct Tier1FrameProbeRecords
     uint32_t exit;
     uint32_t remainder;
 };
+
+static void tier1_frame_emit_probe_step(uint32_t amount, Tier1EmitBuffer* buffer)
+{
+    tier1_frame_emit_add(buffer, tier1_frame_emit_immediate(X86_FORM_SUB_RM64_IMM32, X86_REGISTER_RSP, (int32_t)amount));
+    tier1_frame_emit_touch(buffer);
+}
 
 static Tier1FrameProbeRecords tier1_frame_emit_probe_allocate(uint32_t amount, Tier1EmitBuffer* buffer)
 {
@@ -167,8 +173,7 @@ static Tier1FrameProbeRecords tier1_frame_emit_probe_allocate(uint32_t amount, T
         positions.bound = buffer->count;
         tier1_frame_emit_add(buffer, tier1_frame_emit_immediate(X86_FORM_SUB_RM64_IMM32, BUSTER_TIER1_FRAME_EMIT_SCRATCH, (int32_t)pages));
         const uint32_t loop = buffer->count;
-        tier1_frame_emit_add(buffer, tier1_frame_emit_immediate(X86_FORM_SUB_RM64_IMM32, X86_REGISTER_RSP, BUSTER_TIER1_FRAME_PAGE_BYTES));
-        tier1_frame_emit_touch(buffer);
+        tier1_frame_emit_probe_step(BUSTER_TIER1_FRAME_PAGE_BYTES, buffer);
         tier1_frame_emit_add(buffer, tier1_frame_emit_register(X86_FORM_CMP_RM64_R64, BUSTER_TIER1_FRAME_EMIT_SCRATCH, X86_REGISTER_RSP));
         positions.exit = buffer->count;
         tier1_frame_emit_branch(buffer, X86_FORM_JNE_REL8, loop);
@@ -176,8 +181,7 @@ static Tier1FrameProbeRecords tier1_frame_emit_probe_allocate(uint32_t amount, T
     if (remainder != 0)
     {
         positions.remainder = buffer->count;
-        tier1_frame_emit_add(buffer, tier1_frame_emit_immediate(X86_FORM_SUB_RM64_IMM32, X86_REGISTER_RSP, (int32_t)remainder));
-        tier1_frame_emit_touch(buffer);
+        tier1_frame_emit_probe_step(remainder, buffer);
     }
     return positions;
 }
@@ -235,7 +239,11 @@ static bool tier1_frame_emit_cfa(const Tier1FrameStep* step, Tier1FrameCfa* cfa,
     {
         const int64_t amount = step->amount;
         const uint32_t pages = step->kind == TIER1_FRAME_PROBE_ALLOCATE ? step->amount & ~(BUSTER_TIER1_FRAME_PAGE_BYTES - 1) : 0;
-        if (rsp && pages != 0)
+        if (rsp && pages == BUSTER_TIER1_FRAME_PAGE_BYTES)
+        {
+            tier1_frame_emit_event(out, out_count, probe.exit, EMISSION_FRAME_CFA_OFFSET, 0, cfa->offset + pages);
+        }
+        else if (rsp && pages != 0)
         {
             // r11 = rsp - pages, the loop's bound: the CFA is r11's through the loop, rsp's again where rsp reaches it.
             tier1_frame_emit_event(out, out_count, probe.bound, EMISSION_FRAME_CFA, emission_x86_registers[BUSTER_TIER1_FRAME_EMIT_SCRATCH], cfa->offset + pages);
@@ -460,7 +468,16 @@ static Tier1FrameEmitError tier1_frame_emit(const Tier1Frame* frame, bool epilog
                 tier1_frame_emit_add(&temporary, tier1_frame_emit_immediate(tier1_frame_emit_form(X86_FORM_ADD_RM64_IMM8, X86_FORM_ADD_RM64_IMM32, step.amount), X86_REGISTER_RSP, (int32_t)step.amount));
                 break;
             case TIER1_FRAME_PROBE_ALLOCATE:
-                probe = tier1_frame_emit_probe_allocate(step.amount, &temporary);
+                if (step.amount >= BUSTER_TIER1_FRAME_PAGE_BYTES && step.amount < 2u * BUSTER_TIER1_FRAME_PAGE_BYTES)
+                {
+                    tier1_frame_emit_probe_step(BUSTER_TIER1_FRAME_PAGE_BYTES, &temporary);
+                    probe = tier1_frame_emit_probe_allocate(step.amount - BUSTER_TIER1_FRAME_PAGE_BYTES, &temporary);
+                    probe.exit = step_first;
+                }
+                else
+                {
+                    probe = tier1_frame_emit_probe_allocate(step.amount, &temporary);
+                }
                 break;
             case TIER1_FRAME_SAVE_VARIADIC_INTEGER:
                 tier1_frame_emit_add(&temporary, tier1_frame_emit_memory(X86_FORM_MOV_RM64_R64, step.reg, step.base, step.offset));

@@ -49,6 +49,7 @@ struct CheckInputSymbolPragmas
 {
     CheckInputSymbolPragma* records;
     uint32_t count;
+    bool has_asm_label; // A redefine_extname directive attached a label to a declaration.
 };
 
 static const CheckInputSymbolPragma* check_input_symbol_warning(const CheckInput* input, const CheckWarningEvent* event)
@@ -648,6 +649,7 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
                     const uint32_t first = check_input_symbol_lower(uses, unique, object);
                     record->after_use = first < unique && (uint32_t)(uses[first] >> 32) == object && (uint32_t)uses[first] < record->token;
                     valid = check_input_symbol_attribute(reader, record, selected);
+                    history->has_asm_label |= valid;
                 }
             }
         }

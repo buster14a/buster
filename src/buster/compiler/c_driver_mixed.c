@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Mixed-input commands (#1120): the unit scheduler keeps C and assembly objects in memory, then the ordinary foreign
-// resolver consumes them beside files and archives in argv order. C-only links without selected named archives retain
-// their direct link path, including the DSO version checks and runtime snapshot.
+// resolver consumes them beside files and archives in argv order, with the DSO version checks of the direct link path
+// (ForeignCommand.library_versions, #1590). C-only links without selected named archives retain their direct link path
+// and runtime snapshot.
 
 static int check_driver_assembly(const CheckDriverCommand* command, const PPOptions* preprocessing, CheckUnitsUnit* unit,
                                  CheckUnitsLane* lane, FILE* errors)
@@ -150,6 +151,8 @@ static bool check_driver_mixed_link(const CheckDriverCommand* command, const Che
                 .directory_count = system_begin + defaults,
                 .undefined = undefined,
                 .undefined_count = 1,
+                // The libraries' versions checked as the direct path checks them (#1590).
+                .library_versions = true,
             },
             .output = foreign_string(command->output != NULL ? command->output : "a.out"),
             .entry = undefined[0],

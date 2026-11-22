@@ -7216,12 +7216,16 @@ walk. `check_driver_reports_from` therefore calls
 `check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
 Its bounded worklist visits the retained condition tree, using the existing
 integer and floating literal conversion emitters. The source span also locates
-retained conditional and comma nodes, including detached operands of static
-selections, through the token-to-node map (`check_common_failed_assert_source`).
-Those nodes are checked first in graph postorder, as Clang constructs their
-source expressions; the assertion's own conversion and nested logical operands
-then follow the completed expression's order. An inner assertion owns its own
-warnings. Explicit casts do not create implicit conversions, and a conditional's
+retained comma nodes, including detached operands of static selections, through
+the token-to-node map (`check_common_failed_assert_source`). Those nodes are
+checked first in graph postorder, as Clang constructs their source expressions;
+the assertion's own conversion and nested logical operands then follow the
+completed expression's order. A full conditional's condition is not this walk's:
+`check_common_conditional_conversions` publishes it once at construction for
+every retained conditional, and for each one a declaration/type query erased
+from the reader's sparse receipt (#2899), in the deferred phase the comma's
+marker shares, so that at one boundary a conditional built in a comma's right
+operand comes first. An inner assertion owns its own warnings. Explicit casts do not create implicit conversions, and a conditional's
 arms do not inherit its outer boolean context. GNU omitted-middle conditionals
 visit their shared condition once and do not diagnose that saved value as a
 new conversion of the written expression. Discarded comma operands reuse the
@@ -7238,17 +7242,15 @@ successful and non-warning controls, unrelated errors, macro expansion notes,
 C17/C23 and both reader choices and lane requests. The focused driver selector
 is `--assert-bool-only`; `--assert-diagnostics-only` also runs requirement
 printing and member-recovery checks. Clang is the external behavioral oracle;
-the fixtures and implementation are original. The cold path cannot recover
-operands that queries or type declarations erased altogether; those and the
-ordinary successful-expression gaps are tracked in
+the fixtures and implementation are original. `--query-bool-only` checks the
+erased and successful-expression conversions of
 [#2899](https://github.com/buster14a/buster/issues/2899).
 `-Wconstant-logical-operand`, absent from ordinary expressions too, is tracked
 in [#2900](https://github.com/buster14a/buster/issues/2900).
 The ordinary equality emitter's extra assignment-suggestion note for a
 nonassignable left operand is tracked in
 [#2906](https://github.com/buster14a/buster/issues/2906).
-Successful-assertion conditional warning ordering continues to use the
-ordinary warning walk.
+A successful assertion's conditionals are the construction pass's too.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
@@ -11449,18 +11451,49 @@ clang's `diagnose_if(condition, message, "warning" | "error")` and
   constants, a comma in an operand of `sizeof`, an alignof or a keyword is
   unevaluated and quiet (`check_input_bound_evaluated`), a comparison takes no
   note (its left operand is no lvalue in a constant), and in a function body
-  the warning is published with the body's queued diagnostics at its end
-  (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it;
-  at file scope it precedes the declarator's fold warning
-  (`c_check_vla_fold_driver_test.c`). A variable bound that no graph walk
-  reads either (#2252: a file-scope cast's, `_Alignof`'s or `sizeof`'s type
-  name, `check_input_vla_bound`) takes the same pass. Left: in a function
-  body, a constant's comma (an enumerator's, a typedef's bound) is published
-  before the body's other queued diagnostics, where clang queues it in source
-  order, as the reader's events reach the body's end first; and in a unit
-  with errors, a file-scope declaration's comma whose initializer is an error
-  (`int b = sizeof(int[(6, 2)]);`) comes after that error, where clang gives
-  it first.
+  "has no effect" is published with the body's queued diagnostics at its end
+  (`check_input_unused_completion`), as clang's `DiagIfReachable` defers it,
+  in the order clang queues them (#2252): clang queues the comma as it reads
+  it, and each other warning as it builds the expression that queues it.
+  The reader finds the commas before the graph's walks find theirs, so a
+  comma's record is ordered by its token (`pp_diagnostic_source_order`),
+  and each walk's record at the body's end by where clang queues it
+  (`check_common_queue`, `pp_diagnostic_queued`): an array index's, an
+  unused result's, an unsequenced modification's, a comparison's and a
+  constant conversion's at the end of its full expression, which clang
+  checks once complete (a for statement's third clause ends at its `)`); a
+  division's, a shift's, an atomic member's and a comma's left operand's at
+  the end of its operator, built then; a null dereference's at its
+  reader's; an x86 builtin's range error at its call's. Publication puts
+  each comma before the first other record there that clang queues after
+  it, the others keeping their order (`pp_diagnostic_source_merge`), so a
+  constant in a `sizeof`'s or a statement expression's operand comes before
+  the array index its full expression holds. A rejected static
+  assertion's comma in a body (`check_common_failed_assert_source`) is
+  ordered as a constant's is, since clang queues it as it reads the
+  assertion. A comparison's and the
+  `void *` cast's question clang gives at once, in a body too, so they are
+  published at the comma. At file scope it precedes the declarator's fold
+  warning (`c_check_vla_fold_driver_test.c`). A variable bound that no graph
+  walk reads either (#2252: a file-scope cast's, `_Alignof`'s or `sizeof`'s
+  type name, `check_input_vla_bound`) takes the same pass. A runtime-sized
+  `sizeof` there is the reader's "initializer element is not a compile-time
+  constant", which is published once the initializer is read, at its last
+  token (`check_driver_initializer_last`), as clang's `AddInitializerToDecl`
+  checks it before the declaration's own checks at its `,` or `;`, so the
+  commas come first. The cost is a token in each collected diagnostic
+  record, a climb to its full expression's root for each published warning
+  clang checks once its full expression is complete (at file scope too,
+  where nothing reads the result), and a pass over the records at
+  publication only in a unit that has such a comma in a body; a unit
+  without diagnostics does no new work. Left: the reader stops at the initializer's error, so a later
+  comma of the unit is not given (the second of
+  `sizeof(int[(6, 2)]) + sizeof(int[(7, 3)])`); and a warning the driver
+  queues to a body's end outside the walks (a shift's without a shift's
+  node, an integer overflow's without its expression's end,
+  `check_driver_warning_position`) keeps its token as its place; and after
+  a unit's second rejected static assertion, a later constant's comma in a
+  body comes after the body's later queued warnings.
 - **Cost.** A unit without these attributes tests a reader flag where
   declarations are read and a count where uses and calls are; the steps are
   built only for these attributes.
@@ -11500,9 +11533,7 @@ checker doesn't give anywhere yet
 condition, of a type name's bound that a constant expression reads (`sizeof(int[(1, 2)])`
 within a bound, an `_Alignof`, or a file-scope initializer's `sizeof`: their check reads
 constants again, which would make the constant walk recursive), and a const builtin call's "ignoring return value"
-as a left operand, which clang gives too; in a function body, a constant
-bound's comma warnings come before the body's graph-walked ones rather than
-among them in source order; and, as everywhere in this driver, the uses' errors stop the unit's
+as a left operand, which clang gives too; and, as everywhere in this driver, the uses' errors stop the unit's
 later expression checks, so a call after one such error isn't diagnosed. A
 grouped
 diagnose_if under `-Weverything` meets every other warning that option

@@ -150,9 +150,10 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         .entry = foreign_string("_start"),
         .kind = RUNTIME_KIND_STATIC,
         .path = FOREIGN_PATH_VECTOR,
+        .linker = { .path_capacity = (uint32_t)argc + 1 },
     };
     char** inputs = argc >= 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)argc + 2) : 0;
-    bool valid = inputs != 0 && linker_options_initialize(&driver->linker, (uint32_t)argc + 1, arena);
+    bool valid = inputs != 0;
     uint32_t count = 1;
     bool pie = false;
     bool no_pie = false;
@@ -169,10 +170,11 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
                             (foreign_starts_with(argument, "-o") && argument[2] != 0);
         const bool interpreter = strcmp(argument, "-dynamic-linker") == 0 || strcmp(argument, "--dynamic-linker") == 0 || foreign_starts_with(argument, "--dynamic-linker=");
         const bool lanes = strcmp(argument, "--lanes") == 0 || foreign_starts_with(argument, "--lanes=");
-        if (linker_options_parse(&driver->linker, argc, argv, &i))
+        if (linker_options_parse(&driver->linker, argc, argv, &i, arena))
         {
             valid = driver->linker.error == NULL && !driver->linker.resource;
-            if (!valid)
+            // As with the input array above, a failed initial path-array reservation returns the usage diagnostic.
+            if (!valid && (!driver->linker.resource || driver->linker.paths != NULL))
             {
                 linker_options_diagnose(&driver->linker, "link-foreign: ");
             }
@@ -412,6 +414,32 @@ static SymbolId foreign_driver_entry(const ForeignDriver* driver, const Foreign*
     const uint64_t hash = link_hash((const uint8_t*)driver->entry.pointer, driver->entry.length);
     const uint32_t name = driver->entry.length != 0 ? foreign_find_name(foreign, (const uint8_t*)driver->entry.pointer, (uint32_t)driver->entry.length, hash) : 0;
     return name != 0 ? converted->names[name - 1] : 0;
+}
+
+// A shared library's version that the resolution refuses (#1590, ForeignCommand.library_versions), worded as the direct
+// path words it (c_checker_driver.c): a needed library's reference that no library exports at its version, as GNU ld
+// words it, and a version a loaded library needs of another that that one doesn't define, as glibc's loader words it;
+// each library by its path.
+static void foreign_driver_version_error(const Foreign* foreign)
+{
+    const ForeignFailure* failure = &foreign->failure;
+    const ForeignLibrary* library = &foreign->libraries[failure->library];
+    const String8 path = foreign->inputs[library->input].path;
+    if (failure->error == FOREIGN_ERROR_LIBRARY_UNDEFINED)
+    {
+        const ImportReferences* references = &library->library.references;
+        const String8 version = library->versions.reference_versions[failure->reference];
+        fprintf(stderr, "link-foreign: %.*s: undefined reference to '%.*s@%.*s'\n", (int)path.length, path.pointer, (int)references->length[failure->reference],
+                (const char*)references->name[failure->reference], (int)version.length, version.pointer);
+    }
+    else
+    {
+        const RuntimeVersionNeeds* needs = &library->versions.needs;
+        const String8 provider = foreign->inputs[foreign->libraries[failure->provider].input].path;
+        const String8 version = needs->name[failure->reference];
+        fprintf(stderr, "link-foreign: %.*s: version '%.*s' not found (required by %.*s)\n", (int)provider.length, provider.pointer, (int)version.length, version.pointer,
+                (int)path.length, path.pointer);
+    }
 }
 
 static void foreign_driver_conversion_error(const Foreign* foreign, ForeignLinkResult result, RuntimeKind kind)
@@ -870,7 +898,12 @@ static int foreign_driver_link(ForeignDriverRun* run)
     {
         foreign_run_lanes(&foreign, lanes, 0);
         succeeded = foreign.failure.error == FOREIGN_ERROR_NONE;
-        if (!succeeded)
+        const bool versions = foreign.failure.error == FOREIGN_ERROR_LIBRARY_UNDEFINED || foreign.failure.error == FOREIGN_ERROR_LIBRARY_VERSION;
+        if (versions)
+        {
+            foreign_driver_version_error(&foreign);
+        }
+        else if (!succeeded)
         {
             static const char* const messages[] = {
                 "none",
@@ -883,6 +916,8 @@ static int foreign_driver_link(ForeignDriverRun* run)
                 "input needs an LTO plugin",
                 "out of memory",
                 "cannot start linker workers",
+                "a library's reference undefined at its version",
+                "a version a library needs undefined",
             };
             const uint32_t error = (uint32_t)foreign.failure.error;
             fprintf(stderr, "link-foreign: %s", error < BUSTER_ARRAY_LENGTH(messages) ? messages[error] : "input resolution failed");

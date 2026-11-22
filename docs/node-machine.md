@@ -6059,14 +6059,13 @@ evaluated as branches has no shape: its template's row in
 `NodeRowsTables.templates` is no entry, where the piece before had the mark
 that lists its expression.
 
-**What it lists.** A tested value with a conversion of its own, whose part
-has no room for the test. One conversion does that: a qualified `_Bool`'s
-read, which the lowering converts to bool again by four entries
-([#3185](https://github.com/buster14a/buster/issues/3185)): nine with its own
-entry and the test's four, and a record has eight slots. Its row stays as it
-was and its expression is listed: none of the three corpora's, and 560 of
-the compiler's own source's 40,195 (759 such values in the count
-before the specification), which declares its flags `const bool`.
+A branch test needs all four slots in the conversion part of a narrow
+value's row. In the original count, normalizing a qualified `_Bool` again used
+those slots. The compiler's own source had 759 such values, which sent 560 of
+its 40,195 expressions to the reference lowering. SQLite, Lua and musl had
+none. A qualifier change now uses zero entries, so the window can write the
+branch there. Converting an `unsigned char` to `_Bool` still needs the
+nonzero test. [Issue #3185](https://github.com/buster14a/buster/issues/3185).
 
 **One sweep makes two lists, and a loop goes down the second.** The update's
 sweep of masks, 64 records a step, compresses a chunk's updates' numbers into

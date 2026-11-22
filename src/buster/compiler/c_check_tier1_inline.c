@@ -70,8 +70,11 @@ struct CheckTier1Summary
 {
     CheckTier1Passes passes;
     Arena frozen;
+    // Built by the summary's lane before publication. Slot marks, if present, live beside the optimized body.
+    const IrInlineBody* shape;
     uint32_t inlined;
     bool vectors;
+    bool vectorize_volatile;
 };
 
 // The emission's generations of its inlining tables.
@@ -161,7 +164,7 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
     uint32_t* states = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
     CheckTier1Summary* summaries = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckTier1Summary, (uint64_t)count + 1) : 0;
     Arena* arenas = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, Arena, 2 * BUSTER_CHECK_EMIT_MAX_LANES) : 0;
-    uint32_t* word = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 1) : 0;
+    uint32_t* word = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_TIER1_PRIVATE_VALUES ? 2 : 1) : 0;
     const bool columns = candidates != 0 && classes != 0 && (!stage || (cyclic != 0 && states != 0 && summaries != 0 && arenas != 0 && word != 0));
     // Per body, whether an internal candidate keeps its code whatever its callers expand (CheckTier1Inline.rooted), and
     // whether the emission gave it none (CheckTier1Inline.dead).
@@ -389,10 +392,17 @@ static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inl
             memset(indices, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
             memset(stacked, 0, (uint64_t)count + 1);
         }
+        // The second stage word belongs to the private-value build. A vector introduced through any chain
+        // of inline summaries can run GVN on a formerly scalar body. Publish this with the ready word.
+        bool vector_bodies = false;
         // Each candidate's direct calls in the unit (CheckTier1Inline.sites), by every lowered body's.
         for (uint32_t b = 0; b < count; b += 1)
         {
             const Tier0Function* function = &functions[b];
+            if (BUSTER_TIER1_PRIVATE_VALUES && inlining->ready[b] != 0 && function->vectors)
+            {
+                vector_bodies = true;
+            }
             for (uint32_t c = 0; inlining->ready[b] != 0 && c < function->call_count; c += 1)
             {
                 const SymbolId target = function->call_targets[c];
@@ -492,6 +502,10 @@ static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inl
             inlining->held[b] = held ? BUSTER_CHECK_TIER1_INLINE_HELD : 0;
         }
         arena_pop_to(scratch, mark);
+        if (BUSTER_TIER1_PRIVATE_VALUES)
+        {
+            inlining->stage[1] = vector_bodies;
+        }
         lane_publish(inlining->stage, BUSTER_CHECK_TIER1_INLINE_READY);
         state = BUSTER_CHECK_TIER1_INLINE_READY;
     }
@@ -534,17 +548,21 @@ static bool check_tier1_inline_single(const CheckTier1Inline* inlining, uint32_t
     return inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_SMALL && inlining->rooted[b] == 0 && inlining->sites[b] == 1;
 }
 
+// Whether a body of this size is offered in its candidate class.
+static bool check_tier1_inline_size(const CheckTier1Inline* inlining, uint32_t b, uint32_t count)
+{
+    const uint32_t limit = check_tier1_inline_single(inlining, b) ? BUSTER_CHECK_TIER1_INLINE_SINGLE_SIZE : BUSTER_CHECK_TIER1_INLINE_SMALL_SIZE;
+    return inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS || count <= limit;
+}
+
 // Whether candidate body `b`'s ready summary may be copied into a caller at `target`: its target's features are the
 // caller's, and a small one is within its class's size.
 static bool check_tier1_inline_offered(const CheckTier1Inline* inlining, uint32_t b, const X86Target* target)
 {
     const X86Target* own = check_tier1_inline_target(inlining->program, b);
     const bool features = (own->features & ~target->features) == 0 && (own->extensions & ~target->extensions) == 0;
-    const bool always = inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS;
     const bool ready = __atomic_load_n(&inlining->states[b], __ATOMIC_ACQUIRE) == BUSTER_CHECK_TIER1_INLINE_READY;
-    const uint32_t size = check_tier1_inline_single(inlining, b) ? BUSTER_CHECK_TIER1_INLINE_SINGLE_SIZE :
-                                                                   BUSTER_CHECK_TIER1_INLINE_SMALL_SIZE;
-    return features && ready && (always || check_tier1_inline_function(inlining, b)->instruction_count <= size);
+    return features && ready && check_tier1_inline_size(inlining, b, check_tier1_inline_function(inlining, b)->instruction_count);
 }
 
 // Whether the call at `node` of `function` passes an aggregate by value or gives one back: its expansion copies the
@@ -571,7 +589,7 @@ static bool check_tier1_inline_aggregates(const IrFunction* function, uint32_t n
 // steps[4], before the expansion. *vectors is whether the body's source has vectors (Tier0Function.vectors) or an
 // expanded callee's summary's does (CheckTier1Summary.vectors).
 static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inline* inlining, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar,
-                                      IrFunction* result, uint32_t* inlined, bool* verified, bool* vectors)
+                                      IrFunction* result, uint32_t* inlined, bool* verified, bool* vectors, bool* vectorize_volatile)
 {
     const CheckProgram* program = inlining->program;
     *inlined = 0;
@@ -633,6 +651,8 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         uint32_t* symbols = BUSTER_ARENA_PUSH_ARRAY(columns, uint32_t, members);
         uint8_t* flags = BUSTER_ARENA_PUSH_ARRAY(columns, uint8_t, members);
         uint32_t* limits = BUSTER_ARENA_PUSH_ARRAY(columns, uint32_t, members);
+        // The sort's other buffer has one pointer-sized cell per member and lives through the expansion.
+        const IrInlineBody** shapes = (const IrInlineBody**)(sorted == keys ? sorting : keys);
         const bool unit_fits = functions != 0 && symbols != 0 && flags != 0 && limits != 0;
         uint32_t position = 0;
         for (uint32_t k = 0; unit_fits && k < members; k += 1)
@@ -640,6 +660,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
             const uint32_t b = (uint32_t)sorted[k];
             const bool self = b == UINT32_MAX;
             functions[k] = self ? *lowered : *check_tier1_inline_function(inlining, b);
+            shapes[k] = self ? NULL : inlining->summaries[b].shape;
             symbols[k] = (uint32_t)(sorted[k] >> 32);
             flags[k] = self ? 0 : check_tier1_inline_flags(inlining, b);
             limits[k] = self ? 0 :
@@ -669,7 +690,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         IrInlineResult expanded = { 0 };
         uint32_t failed = BUSTER_IR_NONE;
         // (A unit that didn't fit is no unit, which the inliner refuses.)
-        const IrCheck check = unit_fits ? ir_optimize_inline(&unit, &lane->steps[4], scratch, options, &expanded, &failed) : ir_check(IR_ERROR_MEMORY, BUSTER_IR_NONE, 0);
+        const IrCheck check = unit_fits ? ir_inline_with_shapes(&unit, &lane->steps[4], scratch, options, shapes, &expanded, &failed) : ir_check(IR_ERROR_MEMORY, BUSTER_IR_NONE, 0);
         for (uint32_t call = check.error == IR_OK ? expanded.call_offsets[position] : 0; check.error == IR_OK && call < expanded.call_offsets[position + 1]; call += 1)
         {
             *inlined += expanded.decisions[call] == IR_INLINE_SELECTED;
@@ -684,7 +705,12 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
                 const bool selected = expanded.decisions[call] == IR_INLINE_SELECTED;
                 const uint32_t node = expanded.call_nodes[call];
                 aggregates = aggregates || (selected && check_tier1_inline_aggregates(lowered, node));
-                *vectors = *vectors || (selected && inlining->summaries[inlining->candidates[lowered->a[node]] - 1].vectors);
+                if (selected)
+                {
+                    const CheckTier1Summary* callee = &inlining->summaries[inlining->candidates[lowered->a[node]] - 1];
+                    *vectors |= callee->vectors;
+                    *vectorize_volatile |= callee->vectorize_volatile;
+                }
             }
         }
     }
@@ -724,6 +750,24 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     return changed;
 }
 
+// Full GVN and SROA can observe storage identity. Restricted GVN can run after expansion introduces
+// vectors from another body. A unit with such a body shares storage form across its inline summaries.
+static IrCheck check_tier1_lower_body(const CheckTier1Lane* lane, const Tier0Function* function, IrType type, uint32_t symbols, uint64_t target, Arena* output, Arena* scratch, IrFunction* result, bool sources)
+{
+    bool direct = BUSTER_TIER1_PRIVATE_VALUES && !sources && !lane->preserve_local_storage;
+    if (direct && (check_tier1_passes_on(lane) & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0)
+    {
+        const CheckTier1Inline* inlining = lane->inlining;
+        direct = !function->vectors;
+        if (direct && inlining != NULL && inlining->stage != NULL)
+        {
+            check_tier1_inline_stage(scratch, inlining);
+            direct = inlining->stage[1] == 0;
+        }
+    }
+    return ir_lower_typed_target_path(function, type, symbols, output, scratch, result, target, true, sources, direct);
+}
+
 // Candidate body `b`'s summary, built by this lane: its stream lowered at its own target in steps[1], its calls expanded
 // from its callees' summaries (check_tier1_inline_expand) in steps[4] and [5], and Tier 1's passes (check_tier1_passes,
 // with promotion in steps[2]), whose function and analysis go to this lane's two arenas of the run
@@ -749,15 +793,16 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
         // for check_tier1_passes' split (#1624), else a summary of a function with one is refused and its calls stay calls
         // (the compiler's own scalar-host build, whose AVX-512 types are wider than x86-64's: #2541). Under -g with its
         // source identities, which its callers' expansions carry as an instance's (#2541 step 3).
-        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
-                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
+        check = check_tier1_lower_body(lane, function, result_type, inlining->symbol_count, target->features,
+                                          &lane->steps[1], scratch, &lowered, inlining->sources);
     }
     IrFunction expanded = lowered;
     uint32_t inlined = 0;
     bool verified = true;
     bool vectors = function->vectors;
-    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified, &vectors);
-    CheckTier1Summary summary = { .vectors = vectors };
+    bool vectorize_volatile = lane->vectorize_volatile != NULL && lane->vectorize_volatile[b] != 0;
+    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified, &vectors, &vectorize_volatile);
+    CheckTier1Summary summary = { .vectors = vectors, .vectorize_volatile = vectorize_volatile };
     bool built = false;
     if (check.error == IR_OK)
     {
@@ -769,11 +814,31 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
             .verified = verified,
             .unexpanded = changed && inlined != 0 ? &lowered : NULL,
             .summary = true,
+            .vectorize_volatile = vectorize_volatile,
         };
         IrVerifiedRevision revision = { 0 };
         const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, scalar, certify, NULL, &lane->steps[2], output, analyses, &revision, &summary.passes);
         built = outcome.stage == CHECK_TIER1_COMPILED;
         summary.inlined = summary.passes.unexpanded ? 0 : inlined;
+        const IrFunction* optimized = &summary.passes.optimized.function;
+        if (built && inlining->sites[b] != 0 && check_tier1_inline_size(inlining, b, optimized->instruction_count))
+        {
+            const uint64_t shape_mark = output->length;
+            IrInlineBody shape = { 0 };
+            if (ir_inline_shape(optimized, true, output, &shape))
+            {
+                IrInlineBody* retained = arena_push_array(output, 1, sizeof(*retained), _Alignof(IrInlineBody));
+                if (retained != NULL)
+                {
+                    *retained = shape;
+                    summary.shape = retained;
+                }
+            }
+            if (summary.shape == NULL)
+            {
+                arena_pop_to(output, shape_mark);
+            }
+        }
         arena_pop_to(output, built ? output->length : output_mark);
         arena_pop_to(analyses, built ? analyses->length : analyses_mark);
     }
@@ -874,7 +939,7 @@ static bool check_tier1_inline_summary(CheckTier1Lane* lane, const CheckTier1Inl
 // steps[4] and steps[5], verified where *verified; or false, and `lowered` stays the body's. The unit stage runs first,
 // once.
 static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar, bool certify, IrFunction* result,
-                               uint32_t* inlined, bool* verified)
+                               uint32_t* inlined, bool* verified, bool* vectorize_volatile)
 {
     const CheckTier1Inline* inlining = lane->inlining;
     const Tier0Function* function = &inlining->lowered->functions[caller];
@@ -893,7 +958,7 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
             }
         }
         bool vectors = false;
-        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified, &vectors);
+        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified, &vectors, vectorize_volatile);
     }
     return changed;
 }
@@ -1007,10 +1072,15 @@ static bool check_tier1_inline_held(CheckTier1Lane* lane, uint32_t b, const X86T
     if (held && inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS)
     {
         const uint64_t mark = lane->scratch.length;
-        IrInlineBody shape = { 0 };
+        IrInlineBody built = { 0 };
+        const IrInlineBody* shape = inlining->summaries[b].shape;
         const uint32_t limit = check_tier1_inline_single(inlining, b) ? BUSTER_CHECK_TIER1_INLINE_SINGLE_COST :
                                                                          BUSTER_CHECK_TIER1_INLINE_SMALL_COST;
-        held = ir_inline_shape(check_tier1_inline_function(inlining, b), true, &lane->scratch, &shape) && shape.supported && shape.cost <= limit;
+        if (shape == NULL && ir_inline_shape(check_tier1_inline_function(inlining, b), true, &lane->scratch, &built))
+        {
+            shape = &built;
+        }
+        held = shape != NULL && shape->supported && shape->cost <= limit;
         arena_pop_to(&lane->scratch, mark);
     }
     // It waits (BUSTER_CHECK_TIER1_INLINE_WAITING), which the last pass reads once the lanes are done: this lane alone
