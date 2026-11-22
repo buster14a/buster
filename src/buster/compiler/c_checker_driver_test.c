@@ -7447,6 +7447,43 @@ static bool check_test_driver_files_equal(const char* first, const char* second)
     return equal;
 }
 
+// Both ordinary and scalar object emission must agree on a parameter's binding and the local alias shadowing it.
+static void check_test_driver_named_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char valid_source[] =
+        "typedef unsigned short Word; typedef Word *Ptr;\n"
+        "int fold(Word first, const Word *next, Ptr *last);\n"
+        "int fold(Word first,const Word *next,Ptr *last){ Word local=first; const Word *p=next;\n"
+        "  {typedef long Word; Word extra=**last; local+=extra;} return local+*p; }\n";
+    static const char invalid_source[] = "typedef int Word; int bad(Word first,int first){return first;}\n";
+    char source[192], general[192], ordinary[192];
+    snprintf(source, sizeof(source), "%s/named-declarations.c", directory);
+    snprintf(general, sizeof(general), "%s/named-scalar.o", directory);
+    snprintf(ordinary, sizeof(ordinary), "%s/named-ordinary.o", directory);
+    const char* const sources[] = { valid_source, invalid_source };
+    const char* options[] = { "-std=gnu17" };
+    for (uint32_t rejected = 0; rejected < BUSTER_ARRAY_LENGTH(sources); rejected += 1)
+    {
+        unlink(general);
+        unlink(ordinary);
+        CheckCorpusOracle reference = { 0 }, compiled = { 0 }, scalar = { 0 };
+        uint32_t ordinary_warnings = 0, scalar_warnings = 0;
+        const bool wrote = parse_test_write(source, sources[rejected], strlen(sources[rejected]));
+        const bool ran = wrote && check_corpus_clang_file(clang, options, BUSTER_ARRAY_LENGTH(options), source, &reference) &&
+                         check_test_driver_run(executable, source, ordinary, false, false, false, false, &compiled, &ordinary_warnings) &&
+                         check_test_driver_run(executable, source, general, true, false, false, false, &scalar, &scalar_warnings);
+        const bool status = ran && reference.rejected == (rejected != 0) && compiled.rejected == reference.rejected && scalar.rejected == reference.rejected;
+        const bool same = status && ordinary_warnings == scalar_warnings && (rejected == 0 ? check_test_driver_files_equal(general, ordinary) :
+                          compiled.line == reference.line && compiled.column == reference.column && strcmp(compiled.message, scalar.message) == 0 &&
+                          strstr(compiled.message, "redefinition of parameter") != NULL && access(ordinary, F_OK) != 0 && access(general, F_OK) != 0);
+        check_test_expect(test, same, rejected == 0 ? "named declaration records agree on scoped typedefs and complete emitted objects" :
+                                                   "named parameter records preserve duplicate-name diagnostics at the Clang location");
+    }
+    unlink(source);
+    unlink(general);
+    unlink(ordinary);
+}
+
 static void check_test_driver_lazy(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     const struct
@@ -10707,6 +10744,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (check_test_driver_takes())
         {
+            if (!lazy)
+            {
+                check_test_driver_named_declarations(&test, clang, executable, directory);
+            }
             check_test_driver_lazy(&test, clang, executable, directory);
         }
         if (check_test_driver_takes())
