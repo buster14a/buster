@@ -952,9 +952,6 @@ struct CheckLowerWriter
     bool kept_address;
     bool scalar;
     bool track;
-    // Whether an entry's append goes out of line (check_lower_append_slow): `track`, or a unit with thread-locals of
-    // position-independent code (#2101, `tls_models`), so that every other append tests one byte, as it tested `track`.
-    bool append_slow;
     bool sources;
     // Whether the vector path tries #624's two- and three-node fragments (check_lower_batch_expression): only where its
     // caller asks, as its test does (c_check_program_batch_test.c). No compile does: on the 9700X, sqlite3.c's statements
@@ -2592,8 +2589,9 @@ static inline __attribute__((always_inline)) void check_lower_append_entry(Check
     }
 }
 
-// An append of a writer that tracks its stacks or has thread-locals of position-independent code
-// (CheckLowerWriter.append_slow): a thread-local's entry is check_lower_tls's, and any other is written as it is.
+// An append of a writer that has thread-locals of position-independent code (CheckLowerWriter.tls_models): a
+// thread-local's entry is check_lower_tls's, and any other is written as it is, through check_lower_emit_tracked where
+// the writer tracks its stacks.
 static __attribute__((noinline)) void check_lower_append_slow(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
 {
     if (writer->tls_models != NULL && check_lower_tls_entry(writer, kind, value))
@@ -2608,8 +2606,7 @@ static __attribute__((noinline)) void check_lower_append_slow(CheckLowerWriter* 
 
 // Appends an entry of a class the function takes: check_lower_emit's, and the entries of the half-precision classes'
 // (check_lower_half_entry), which check_lower_emit writes through it. A writer that tracks its stacks appends through
-// check_lower_emit_tracked, and one with thread-locals of position-independent code through check_lower_append_slow;
-// every other append tests one byte for both (CheckLowerWriter.append_slow).
+// check_lower_emit_tracked, and one with thread-locals of position-independent code through check_lower_append_slow.
 static inline __attribute__((always_inline)) void check_lower_append(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
 {
     const uint32_t count = writer->count;
@@ -2617,13 +2614,13 @@ static inline __attribute__((always_inline)) void check_lower_append(CheckLowerW
     {
         check_lower_resource(writer, count >= BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage");
     }
-    else if (writer->append_slow && writer->tls_models == NULL)
-    {
-        check_lower_emit_tracked(writer, kind, class, value);
-    }
-    else if (writer->append_slow)
+    else if (__builtin_expect(writer->tls_models != NULL, 0))
     {
         check_lower_append_slow(writer, kind, class, value);
+    }
+    else if (writer->track)
+    {
+        check_lower_emit_tracked(writer, kind, class, value);
     }
     else if (writer->output->status == CHECK_PROGRAM_OK)
     {
@@ -20382,7 +20379,6 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .provisional_runtimes = shared->provisional_runtimes,
         .tls_models = shared->tls_models,
         .provisional_tls = shared->provisional_tls,
-        .append_slow = shared->tls_models != NULL,
         .table_current = BUSTER_CHECK_NONE,
         .tables = shared->lowered->tables,
         .table_count = shared->lowered->table_count,
@@ -20673,7 +20669,6 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->tail = BUSTER_CHECK_NONE;
         writer->chain = BUSTER_CHECK_NONE;
         writer->track = body.count != body.entry_count || shared->terminal;
-        writer->append_slow = writer->track || writer->tls_models != NULL;
         writer->body = program->bodies + b;
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.
         const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
