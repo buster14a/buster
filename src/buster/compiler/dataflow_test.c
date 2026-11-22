@@ -98,6 +98,7 @@ static bool dataflow_test_inputs_equal(const Dataflow* a, const Dataflow* b)
         if (a->block_count != 0)
         {
             result = result && memcmp(a->postorder, b->postorder, (uint64_t)a->block_count * sizeof(uint32_t)) == 0;
+            result = result && memcmp(a->backward, b->backward, (uint64_t)a->block_count * sizeof(uint32_t)) == 0;
         }
         if (bytes != 0)
         {
@@ -366,6 +367,7 @@ static bool dataflow_test_order(const Dataflow* graph, Arena* scratch)
     bool result = graph->block_count == 0 || seen != 0;
     if (result && graph->block_count != 0)
     {
+        // Each order visits every block once: seen counts up to 1 in the postorder and to 2 in the backward order.
         memset(seen, 0, graph->block_count);
         for (uint32_t position = 0; result && position < graph->block_count; position += 1)
         {
@@ -376,6 +378,15 @@ static bool dataflow_test_order(const Dataflow* graph, Arena* scratch)
                 seen[block] = 1;
             }
         }
+        for (uint32_t position = 0; result && position < graph->block_count; position += 1)
+        {
+            const uint32_t block = graph->backward[position];
+            result = block < graph->block_count && seen[block] == 1;
+            if (result)
+            {
+                seen[block] = 2;
+            }
+        }
     }
     arena_pop_to(scratch, mark);
     return result;
@@ -384,7 +395,7 @@ static bool dataflow_test_order(const Dataflow* graph, Arena* scratch)
 // One solve, checked without a second solver. Afterwards the graph holds that solve's rows and the count is returned.
 static uint64_t dataflow_test_solve(DataflowTestTally* tally, Dataflow* graph, Arena* scratch, bool reachability)
 {
-    dataflow_test_expect(tally, dataflow_test_order(graph, scratch), "postorder does not visit every block once");
+    dataflow_test_expect(tally, dataflow_test_order(graph, scratch), "an order does not visit every block once");
     const uint64_t iterations = dataflow_liveness(graph);
     uint64_t expected_iterations = 0;
     dataflow_test_expect(tally, iterations != 0, "a solve counted no sweep");
@@ -586,6 +597,94 @@ static void dataflow_test_known(DataflowTestTally* tally, Arena* memory, Arena* 
             valid = vector.postorder[position] == 7 - position;
         }
         dataflow_test_expect(tally, valid, "eight-block chain is not in reverse order");
+    }
+    arena_pop_to(memory, mark);
+}
+
+// The CFG of #2995's loop nest, `for (i0 = 0; i0 < a; i0++) ... for (iK = 0; iK < a; iK++) r++;`, with exits at the
+// headers: block 0 is the entry, 1 the exit, and level k has a preheader 2 + 3k that sets ik, a header 3 + 3k that
+// tests it against a and leaves to the enclosing latch, and a latch 4 + 3k that increments it; the innermost body
+// 2 + 3K increments r. Value 0 is a, 1 is r, 2 + k is ik and 2 + K is u, set at the entry and used in the body alone.
+// Each ik crosses every inner level's back edge to reach the innermost blocks, which the postorder alone took a sweep
+// apiece for; u is live through the headers only along forward edges, which the backward order alone took a sweep apiece
+// for. The two orders in turn settle the whole nest in at most three sweeps and one that changes nothing.
+static void dataflow_test_loop_nest(DataflowTestTally* tally, Arena* memory, Arena* scratch, uint32_t levels)
+{
+    const uint64_t mark = memory->length;
+    const uint32_t blocks = 3 + 3 * levels;
+    const uint32_t values = 3 + levels;
+    const uint32_t body = 2 + 3 * levels;
+    tally->blocks = blocks;
+    tally->values = values;
+    tally->shape = BUSTER_DATAFLOW_SHAPE_NESTED_LOOP;
+    Dataflow graph = { 0 };
+    bool valid = dataflow_create(memory, blocks, values, 2 + 4 * levels, &graph);
+    if (valid)
+    {
+        uint32_t edges = 0;
+        for (uint32_t block = 0; block < blocks; block += 1)
+        {
+            graph.successor_offsets[block] = edges;
+            const uint64_t row = (uint64_t)block * graph.row_words;
+            const uint32_t level = block >= 2 ? (block - 2) / 3 : 0;
+            const uint32_t role = block >= 2 ? (block - 2) % 3 : 3;
+            const uint32_t induction = 2 + level;
+            if (block == 0)
+            {
+                graph.successors[edges] = 2;
+                edges += 1;
+                graph.def[row] |= 1u | 2u;
+                graph.def[row + (2 + levels) / 64] |= 1ull << ((2 + levels) % 64);
+            }
+            else if (block == 1)
+            {
+                graph.use[row] |= 2u;
+            }
+            else if (block == body)
+            {
+                graph.successors[edges] = body - 1;
+                edges += 1;
+                graph.use[row] |= 2u;
+                graph.def[row] |= 2u;
+                graph.use[row + (2 + levels) / 64] |= 1ull << ((2 + levels) % 64);
+            }
+            else if (role == 0)
+            {
+                graph.successors[edges] = block + 1;
+                edges += 1;
+                graph.def[row + induction / 64] |= 1ull << (induction % 64);
+            }
+            else if (role == 1)
+            {
+                graph.successors[edges] = level + 1 < levels ? block + 2 : body;
+                graph.successors[edges + 1] = level != 0 ? block - 2 : 1;
+                edges += 2;
+                graph.use[row] |= 1u;
+                graph.use[row + induction / 64] |= 1ull << (induction % 64);
+            }
+            else
+            {
+                graph.successors[edges] = block - 1;
+                edges += 1;
+                graph.use[row + induction / 64] |= 1ull << (induction % 64);
+                graph.def[row + induction / 64] |= 1ull << (induction % 64);
+            }
+        }
+        graph.successor_offsets[blocks] = edges;
+        valid = edges == graph.edge_count && dataflow_postorder(&graph, scratch);
+    }
+    dataflow_test_expect(tally, valid, "loop nest setup failed");
+    if (valid)
+    {
+        const uint64_t iterations = dataflow_test_solve(tally, &graph, scratch, levels <= 64);
+        dataflow_test_expect(tally, iterations <= 4, "the loop nest did not settle in a bounded number of sweeps");
+        // The innermost body holds every value; without a header, every value but a.
+        bool full = true;
+        for (uint32_t value = levels != 0 ? 0 : 1; value < values; value += 1)
+        {
+            full = full && (graph.in[(uint64_t)body * graph.row_words + value / 64] & (1ull << (value % 64))) != 0;
+        }
+        dataflow_test_expect(tally, full, "a value is missing from the innermost body");
     }
     arena_pop_to(memory, mark);
 }
@@ -856,6 +955,7 @@ static void dataflow_test_limits(DataflowTestTally* tally, Arena* memory, Arena*
             memcpy(graph.successor_offsets, offsets, sizeof(offsets));
             memcpy(graph.successors, targets, sizeof(targets));
             memset(graph.postorder, 0xA5, 3 * sizeof(uint32_t));
+            memset(graph.backward, 0xA5, 3 * sizeof(uint32_t));
             switch (variant)
             {
                 case 0: graph.successor_offsets[0] = 1; break;
@@ -869,7 +969,7 @@ static void dataflow_test_limits(DataflowTestTally* tally, Arena* memory, Arena*
             bool untouched = true;
             for (uint32_t block = 0; block < 3; block += 1)
             {
-                untouched = untouched && graph.postorder[block] == 0xA5A5A5A5u;
+                untouched = untouched && graph.postorder[block] == 0xA5A5A5A5u && graph.backward[block] == 0xA5A5A5A5u;
             }
             dataflow_test_expect(tally, !accepted && untouched && scratch->length == scratch_mark,
                 "malformed CFG accepted or modified order/scratch");
@@ -885,6 +985,8 @@ static void dataflow_test_limits(DataflowTestTally* tally, Arena* memory, Arena*
         {
             dataflow_test_expect(tally, graph.postorder[0] == 2 && graph.postorder[1] == 1 && graph.postorder[2] == 0,
                 "chain is not in postorder");
+            dataflow_test_expect(tally, graph.backward[0] == 2 && graph.backward[1] == 1 && graph.backward[2] == 0,
+                "chain's backward order does not start at its exit");
         }
     }
     arena_pop_to(memory, mark);
@@ -948,6 +1050,11 @@ static int run_dataflow_tests(int argc, char** argv)
         {
             dataflow_test_limits(&tally, &memory, &scratch);
             dataflow_test_known(&tally, &memory, &scratch);
+            dataflow_test_loop_nest(&tally, &memory, &scratch, 0);
+            dataflow_test_loop_nest(&tally, &memory, &scratch, 1);
+            dataflow_test_loop_nest(&tally, &memory, &scratch, 5);
+            dataflow_test_loop_nest(&tally, &memory, &scratch, 64);
+            dataflow_test_loop_nest(&tally, &memory, &scratch, 700);
             dataflow_test_repeated_edges(&tally, &memory, &scratch);
             dataflow_test_interference(&tally);
             dataflow_test_guards(&tally, &memory, &scratch);

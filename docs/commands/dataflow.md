@@ -36,13 +36,19 @@ liveness and interference primitives in `dataflow.c`:
   block with a reverse-reachability oracle;
 - the sweep search (`dataflow_sweeps_test.c`), on every graph: for each value,
   a 0-1 breadth-first search backwards from its uses finds the sweep in which
-  the solver first sets each block's bit, without a fixpoint. The `in` rows
-  must hold exactly the pairs it reaches, and the iteration count must be 2
-  plus the latest of those sweeps' distances, or 1 when nothing is live
+  the solver, alternating the postorder and the backward order, first sets
+  each block's bit, without a fixpoint. The `in` rows must hold exactly the
+  pairs it reaches, and the iteration count must be 2 plus the latest of those
+  sweeps' distances, or 1 when nothing is live
   ([the reasoning](../dataflow.md#the-sweep-search));
+- #2995's loop nest (`for` loops exiting at their headers, an outer induction
+  variable live in the innermost blocks and a value used only there), at 0, 1,
+  5, 64 and 700 levels: at most four sweeps, the innermost body holding every
+  value ([the two orders](../dataflow.md#the-two-orders));
 - handwritten graphs: disconnected cycles, a self-loop without a use, a value
   both used and defined in one block, every combination of the transfer
-  function's three input bits, the exact postorder of a chain, and repeated
+  function's three input bits, the exact postorder and backward order of a
+  chain, and repeated
   successor/self/exit edges, which must solve to the deduplicated graph's rows
   in as many sweeps;
 - interference: empty rows and every bit position in rows of 512, 1,024 and
