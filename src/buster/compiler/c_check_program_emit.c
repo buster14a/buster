@@ -531,7 +531,12 @@ struct CheckEmitGrowth
 // Value numbering with memory (#2718, ir_optimize_memory.c), off by default; past the driver's own bits
 // (c_checker_driver.c's BUSTER_CHECK_DRIVER_PASS_GVN and INLINE).
 #define BUSTER_CHECK_TIER1_PASS_MEMORY 2048u
-#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS)
+// #3298's switches whose arms only give constants, as loads of their jump tables' values (ir_switch_table.c), on by
+// default.
+#define BUSTER_CHECK_TIER1_PASS_TABLES 4096u
+#define BUSTER_CHECK_TIER1_PASSES_DEFAULT                                                                                                                              \
+    (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \
+     BUSTER_CHECK_TIER1_PASS_TABLES)
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
      BUSTER_CHECK_TIER1_PASS_MEMORY)
@@ -571,6 +576,9 @@ struct CheckTier1Lane
     uint16_t passes;
     // Whether an optional pass needs the source locals' storage identity before promotion.
     bool preserve_local_storage;
+    // The lowering whose jump tables the emitting body's switches load (#3298, check_tier1_switch_tables), which the
+    // emission sets; null for none.
+    const CheckProgramLowered* lowered;
 };
 
 // A body's CheckTier1Inline.held byte (#2541 step 2): one the unit stage may hold back, and one whose code waits for the
@@ -672,6 +680,8 @@ struct CheckTier1Counts
     uint32_t gvn_removed;
     // The loads value numbering with memory forwarded (#2718).
     uint32_t loads_forwarded;
+    // The switches whose dispatch loads its jump table's values (#3298).
+    uint32_t value_tables;
     // --tier1-passes=+unroll's (#2755): each loop's outcome, the copies the unrolled ones hold, the reductions they split
     // and the instructions they added.
     uint16_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
@@ -726,6 +736,7 @@ struct CheckTier1Report
     uint64_t sroa_split;
     uint64_t gvn_removed;
     uint64_t loads_forwarded;
+    uint64_t value_tables;
     uint64_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
     uint64_t unroll_copies;
     uint64_t unroll_reductions;
@@ -1965,6 +1976,7 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     lane->tier1->passes = run->lanes->tier1_passes;
     lane->tier1->vectorize_volatile = run->vectorize_volatile;
     lane->tier1->emitting_body = b;
+    lane->tier1->lowered = run->lowered;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
                                                             !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, run->sources, lane->scratch,
@@ -5965,7 +5977,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         const SymbolId symbol = result->lowered.case_symbol_base + t;
         const SymbolId labels_base = result->lowered.case_symbol_base + result->lowered.table_count;
         valid = atom != 0 && link_define_symbol(&result->link, symbol, atom, 0, size);
-        for (uint32_t i = 0; valid && i < table->count; i += 1)
+        // A table whose switch's arms only give constants (#3298): its function's code loads the values themselves.
+        const EmittedCode* owner = table->function < count ? run.codes + table->function : NULL;
+        const int32_t* values = NULL;
+        for (uint32_t k = 0; owner != NULL && k < owner->value_table_count; k += 1)
+        {
+            values = owner->value_tables[k].table == t ? owner->value_tables[k].values : values;
+        }
+        if (valid && values != NULL)
+        {
+            memcpy(data, values, size);
+        }
+        for (uint32_t i = 0; valid && values == NULL && i < table->count; i += 1)
         {
             valid = link_add_fixup(&result->link, atom, i * 4, BUSTER_LINK_FIXUP_PC32, labels_base + table->entries[i], (int64_t)i * 4) != 0;
         }
@@ -6146,6 +6169,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.sroa_split += compiled ? counts->sroa_split : 0;
         lanes->tier1_report.gvn_removed += compiled ? counts->gvn_removed : 0;
         lanes->tier1_report.loads_forwarded += compiled ? counts->loads_forwarded : 0;
+        lanes->tier1_report.value_tables += compiled ? counts->value_tables : 0;
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_UNROLL_OUTCOMES; k += 1)
         {
             lanes->tier1_report.unroll_outcomes[k] += compiled ? counts->unroll_outcomes[k] : 0;

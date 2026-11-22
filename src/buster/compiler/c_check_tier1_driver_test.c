@@ -494,6 +494,119 @@ static const char check_test_tier1_labels_source[] =
     "    return 0;\n"
     "}\n";
 
+// #3298's switches of constants: each `vt_` function's switch has arms that only give one value a constant (returned,
+// or set and broken out of, the default's or the switch's end's among them), which Tier 1 makes a load of its jump
+// table's values; each `jt_` function's must stay a jump table (an arm with an effect, two values that vary by arm, an
+// i64 constant past 32 bits). Every selector's value around and past each switch's cases is printed folded, which
+// clang -O0's build prints too.
+static const char check_test_tier1_value_tables_source[] =
+    "#include <stdio.h>\n"
+    "static int vt_dense(int x)\n"
+    "{\n"
+    "    switch (x) { case 0: return 3; case 1: return 7; case 2: return 1; case 3: return 9; case 4: return 2; case 5: return 8; case 6: return 4; case 7: return 6;\n"
+    "                 case 8: return 5; case 9: return 0; case 10: return 11; case 11: return 13; case 12: return 17; case 13: return 19; case 14: return 23; case 15: return 29; default: return -1; }\n"
+    "}\n"
+    "static int vt_assign(int x)\n"
+    "{\n"
+    "    int r;\n"
+    "    switch (x) { case 0: r = 3; break; case 1: r = 7; break; case 2: r = 1; break; case 3: r = 9; break; case 4: r = 2; break; case 5: r = 8; break; default: r = -40; break; }\n"
+    "    return r * 3 + x;\n"
+    "}\n"
+    "static int vt_sparse(int x)\n"
+    "{\n"
+    "    switch (x) { case -7: return 100; case -3: return -100; case -1: return 5; case 2: return 77; case 5: return 77; case 9: return -2147483647 - 1; case 10: return 2147483647; default: return 12; }\n"
+    "}\n"
+    "static int vt_end(unsigned x, int seed)\n"
+    "{\n"
+    "    int r = 1000;\n"
+    "    switch (x) { case 1: r = 5; break; case 2: r = 6; break; case 4: r = -7; break; case 5: r = 8; break; case 7: r = 9; break; }\n"
+    "    return r + seed;\n"
+    "}\n"
+    "static signed char vt_char(unsigned char c)\n"
+    "{\n"
+    "    switch (c) { case 'a': return -1; case 'b': return -128; case 'c': return 127; case 'e': return 0; case 'f': return 33; case 'z': return 5; default: return -9; }\n"
+    "}\n"
+    "static unsigned short vt_short(short x)\n"
+    "{\n"
+    "    unsigned short r;\n"
+    "    switch (x) { case -2: r = 65535; break; case -1: r = 1; break; case 0: r = 30000; break; case 1: r = 40000; break; case 3: r = 7; break; default: r = 9; break; }\n"
+    "    return r;\n"
+    "}\n"
+    "static long long vt_long(unsigned long long x)\n"
+    "{\n"
+    "    switch (x) { case 3: return -5; case 4: return 2147483647; case 5: return -2147483647 - 1; case 6: return 0; case 8: return 1; default: return -77; }\n"
+    "}\n"
+    "static unsigned vt_unsigned(long long x)\n"
+    "{\n"
+    "    unsigned r = 4;\n"
+    "    switch (x) { case 100: r = 4294967295u; break; case 101: r = 2147483648u; break; case 102: r = 3; break; case 104: r = 1; break; default: break; }\n"
+    "    return r;\n"
+    "}\n"
+    "static int vt_two(int x, int y)\n"
+    "{\n"
+    "    int a;\n"
+    "    int b;\n"
+    "    switch (x & 7) { case 0: a = 10; break; case 1: a = 20; break; case 2: case 3: a = 30; break; case 4: a = 40; break; default: a = 50; break; }\n"
+    "    switch (y) { case 0: b = 1; break; case 1: b = 2; break; case 2: b = 4; break; case 3: b = 8; break; default: b = 16; break; }\n"
+    "    return a * 100 + b + y;\n"
+    "}\n"
+    "static _Bool vt_bool(int x)\n"
+    "{\n"
+    "    switch (x) { case 0: return 1; case 1: return 0; case 2: return 1; case 3: return 1; case 4: return 0; default: return 0; }\n"
+    "}\n"
+    "static int jt_effect_count;\n"
+    "static int jt_effect(int x)\n"
+    "{\n"
+    "    switch (x) { case 0: return 3; case 1: return 4; case 2: jt_effect_count += 1; return 5; case 3: return 6; default: return 7; }\n"
+    "}\n"
+    "static int jt_pair(int x)\n"
+    "{\n"
+    "    int a;\n"
+    "    int b;\n"
+    "    switch (x) { case 0: a = 1; b = 9; break; case 1: a = 2; b = 8; break; case 2: a = 3; b = 7; break; case 3: a = 4; b = 6; break; default: a = 5; b = 5; break; }\n"
+    "    return a * 10 + b;\n"
+    "}\n"
+    "static long long jt_wide(int x)\n"
+    "{\n"
+    "    switch (x) { case 0: return 1; case 1: return 1099511627776LL; case 2: return 3; case 3: return 4; default: return 5; }\n"
+    "}\n"
+    "static int jt_through(int x)\n"
+    "{\n"
+    "    int r = 0;\n"
+    "    switch (x) { case 0: r = 1; case 1: r += 2; break; case 2: r = 5; break; case 3: r = 6; break; default: r = 9; break; }\n"
+    "    return r;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long sum = 0;\n"
+    "    for (int i = -12; i <= 24; i += 1)\n"
+    "    {\n"
+    "        sum = sum * 31 + (unsigned)vt_dense(i);\n"
+    "        sum = sum * 31 + (unsigned)vt_assign(i);\n"
+    "        sum = sum * 31 + (unsigned)vt_sparse(i);\n"
+    "        sum = sum * 31 + (unsigned)vt_end((unsigned)i, i * 3);\n"
+    "        sum = sum * 31 + (unsigned)vt_char((unsigned char)(i + 'a' - 2));\n"
+    "        sum = sum * 31 + (unsigned)vt_char((unsigned char)(i * 11));\n"
+    "        sum = sum * 31 + vt_short((short)i);\n"
+    "        sum = sum * 31 + (unsigned long long)vt_long((unsigned long long)i);\n"
+    "        sum = sum * 31 + vt_unsigned(i + 100);\n"
+    "        sum = sum * 31 + (unsigned)vt_two(i, i - 2);\n"
+    "        sum = sum * 31 + vt_bool(i);\n"
+    "        sum = sum * 31 + (unsigned)jt_effect(i);\n"
+    "        sum = sum * 31 + (unsigned)jt_pair(i);\n"
+    "        sum = sum * 31 + (unsigned long long)jt_wide(i);\n"
+    "        sum = sum * 31 + (unsigned)jt_through(i);\n"
+    "    }\n"
+    "    static const long long extremes[] = { -2147483647LL - 1, 2147483647LL, -1, 4294967295LL, -4294967296LL, 9223372036854775807LL };\n"
+    "    for (int k = 0; k < 6; k += 1)\n"
+    "    {\n"
+    "        sum = sum * 31 + (unsigned)vt_dense((int)extremes[k]) + (unsigned)vt_sparse((int)extremes[k]) + (unsigned)vt_end((unsigned)extremes[k], 1);\n"
+    "        sum = sum * 31 + (unsigned long long)vt_long((unsigned long long)extremes[k]) + vt_unsigned(extremes[k]) + vt_short((short)extremes[k]);\n"
+    "    }\n"
+    "    printf(\"%llu %d\\n\", sum, jt_effect_count);\n"
+    "    return 0;\n"
+    "}\n";
+
 // The variadic definitions' fixture (#789): va_start, va_arg of integers, pointers and an int, va_copy, unnamed arguments
 // past the registers (in the overflow area), five named ones before them, a va_list handed to vsnprintf, a variadic
 // function that reads none, and one whose result crosses a call after it read its overflow area, which takes a
@@ -1479,6 +1592,8 @@ struct CheckTestTier1Build
     uint64_t code_uncertified;
     // The IR instructions #866's congruence solver removed (--tier1-gvn's), 0 without it.
     uint64_t gvn_removed;
+    // The switches whose jump tables hold their constants (#3298).
+    uint64_t value_tables;
     bool reported;
 };
 
@@ -1539,7 +1654,7 @@ static bool check_test_tier1_build_names(const char* executable, const char* sou
                       check_test_tier1_field(text, "call_stores", &build->call_stores) && check_test_tier1_field(text, "machine_rows", &build->machine_rows) &&
                       check_test_tier1_field(text, "row_moves", &build->row_moves) && check_test_tier1_field(text, "code_certified", &build->code_certified) &&
                       check_test_tier1_field(text, "code_uncertified", &build->code_uncertified) &&
-                      check_test_tier1_field(text, "gvn_removed", &build->gvn_removed);
+                      check_test_tier1_field(text, "gvn_removed", &build->gvn_removed) && check_test_tier1_field(text, "value_tables", &build->value_tables);
     const bool taken = check_test_tier1_taken(text, names, name_count);
     if (status != 0 && text != NULL)
     {
@@ -2901,6 +3016,89 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
     unlink(source);
     unlink(reference);
     unlink(tier0);
+}
+
+// #3298's value tables' fixture: by --tier1, every function Tier 1's, by each path with and without rematerialization,
+// and with --tier1-passes=-tables, its program prints what clang -O0's build of it prints. The `vt_` functions'
+// switches load their tables' values, so that their code has no indirect jump, and the `jt_` functions' keep theirs;
+// --tier1-report counts the tables converted, and none without the pass.
+static void check_test_driver_tier1_value_tables(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_VALUE_TABLES_RECORDS = 4096,
+        // vt_dense, vt_assign, vt_sparse, vt_end, vt_char, vt_short, vt_long, vt_unsigned, vt_two's two and vt_bool.
+        CHECK_TEST_TIER1_VALUE_TABLES_CONVERTED = 11,
+    };
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-value-tables.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-value-tables-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_value_tables_source, sizeof(check_test_tier1_value_tables_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+    free(text);
+    char expected[512] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the value tables fixture runs");
+    const bool ready = ran && (x86_semantics_initialized || x86_semantics_initialize()) && x86_disassembler_initialize();
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_VALUE_TABLES_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_VALUE_TABLES_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_VALUE_TABLES_RECORDS, sizeof(uint32_t));
+    static const char* const converted_names[] = { "vt_dense", "vt_assign", "vt_sparse", "vt_end", "vt_char", "vt_short", "vt_long", "vt_unsigned", "vt_two", "vt_bool" };
+    static const char* const kept_names[] = { "jt_effect", "jt_pair", "jt_wide", "jt_through" };
+    for (uint32_t variant = 0; ready && records != NULL && offsets != NULL && types != NULL && variant < 5; variant += 1)
+    {
+        // Each path with and without rematerialization, then the pass turned off.
+        const bool rematerialize = (variant & 1) != 0;
+        const bool scalar = variant == 2 || variant == 3;
+        const char* option = variant == 4 ? "--tier1-passes=-tables" : NULL;
+        char output[512];
+        char object[512];
+        snprintf(output, sizeof(output), "%s/tier1-value-tables-%u", directory, variant);
+        snprintf(object, sizeof(object), "%s/tier1-value-tables-%u.o", directory, variant);
+        CheckTestTier1Build build;
+        CheckTestTier1Build object_build;
+        const char* const everything = "";
+        const bool built = check_test_tier1_build_names(executable, source, &everything, 1, output, rematerialize, scalar, false, false, option, &build);
+        const bool compiled = check_test_tier1_build_names(executable, source, &everything, 1, object, rematerialize, scalar, true, false, option, &object_build);
+        check_test_expect(test, built && compiled, "the value tables fixture compiles by --tier1, every function Tier 1's");
+        char actual[512] = { 0 };
+        const bool same = built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0;
+        check_test_expect(test, same, "the value tables fixture prints clang's build's output");
+        if (!same)
+        {
+            fprintf(stderr, "test-checker: value tables variant %u: expected %s, got %s\n", variant, expected, actual);
+        }
+        check_test_expect(test, built && build.value_tables == (variant == 4 ? 0 : CHECK_TEST_TIER1_VALUE_TABLES_CONVERTED),
+                          "--tier1-report counts each switch of constants' table, and none without the pass");
+        if (built && build.value_tables != (variant == 4 ? 0 : CHECK_TEST_TIER1_VALUE_TABLES_CONVERTED))
+        {
+            fprintf(stderr, "test-checker: value tables variant %u: %" PRIu64 " tables converted\n", variant, build.value_tables);
+        }
+        for (uint32_t k = 0; compiled && k < BUSTER_ARRAY_LENGTH(converted_names) + BUSTER_ARRAY_LENGTH(kept_names); k += 1)
+        {
+            const bool kept = k >= BUSTER_ARRAY_LENGTH(converted_names);
+            const char* name = kept ? kept_names[k - BUSTER_ARRAY_LENGTH(converted_names)] : converted_names[k];
+            uint32_t registers = 0;
+            uint32_t memory = 0;
+            uint32_t trailing = 0;
+            bool one = true;
+            const bool decoded = check_test_tier1_jumps(object, name, records, CHECK_TEST_TIER1_VALUE_TABLES_RECORDS, offsets, types, &registers, &memory, &trailing, &one);
+            const bool indirect = registers != 0 || memory != 0;
+            char message[160];
+            snprintf(message, sizeof(message), "%s %s an indirect jump%s", name, kept || variant == 4 ? "keeps" : "has no", variant == 4 ? " without the pass" : "");
+            check_test_expect(test, decoded && indirect == (kept || variant == 4), message);
+        }
+        unlink(output);
+        unlink(object);
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(source);
+    unlink(reference);
 }
 
 // Whether the function `name` in `-c`'s object at `path` saves the argument registers in its prologue as a variadic
