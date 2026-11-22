@@ -2690,12 +2690,16 @@ static void check_lower_instruction(CheckLowerWriter* writer, uint8_t kind, uint
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_INSTRUCTION, .node = kind, .type = class, .value = value });
 }
 
-// Whether a conversion from `from` to `to` (check_lower_conversion) writes no entry and can't fail: neither type is
-// complex, both have one class on the stack, a value's or both an aggregate's address, and `to` isn't _Bool, whose
-// conversion normalizes even a _Bool's value, nor a _BitInt, whose conversion extends a value from its width
-// (check_lower_scalar_conversion), and `from` is a _BitInt only where `to` is one: a _BitInt past 128 bits, an
-// aggregate, converts to another aggregate, a __float128 (check_lower_limb_conversion). An array's decay to a pointer, a
-// pointer's to another and a change of qualifiers are such conversions, which need no task.
+// A qualifier change preserves a _Bool value. Other U8 values still need the nonzero test when converted to
+// _Bool. Atomic loads normalize their raw bytes separately in check_lower_atomic_buffer_value.
+static inline __attribute__((always_inline)) bool check_lower_conversion_empty_by_class(uint8_t source, uint8_t from_facts, uint8_t target, uint8_t to_facts)
+{
+    return source == target && source < BUSTER_TYPED_CLASSES && ((from_facts ^ to_facts) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) == 0 &&
+           ((from_facts | to_facts) & (BUSTER_CHECK_LOWER_TYPE_COMPLEX | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
+           (to_facts & ~from_facts & BUSTER_CHECK_LOWER_TYPE_BOOL) == 0;
+}
+
+// Whether a conversion writes no entry and can't fail. Aggregates occupy the address class on the stack.
 static inline __attribute__((always_inline)) bool check_lower_conversion_empty(const CheckLowerWriter* writer, TypeId from, TypeId to)
 {
     uint32_t from_info = 0;
@@ -2716,8 +2720,7 @@ static inline __attribute__((always_inline)) bool check_lower_conversion_empty(c
     const uint8_t to_facts = (uint8_t)(to_info >> 8);
     const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)from_info;
     const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)to_info;
-    return source == target && source < BUSTER_TYPED_CLASSES && ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
-           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 && (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+    return check_lower_conversion_empty_by_class(source, from_facts, target, to_facts);
 }
 
 static void check_lower_convert(CheckLowerWriter* writer, TypeId from, TypeId to)
@@ -4893,7 +4896,7 @@ static inline __attribute__((always_inline)) void check_lower_scalar_conversion_
             check_lower_emit(writer, BUSTER_TYPED_DISCARD, source, 0);
         }
     }
-    else if ((check_lower_facts(writer, to) & BUSTER_CHECK_LOWER_TYPE_BOOL) != 0)
+    else if ((check_lower_facts(writer, to) & BUSTER_CHECK_LOWER_TYPE_BOOL) != 0 && (check_lower_facts(writer, from) & BUSTER_CHECK_LOWER_TYPE_BOOL) == 0)
     {
         if (check_lower_narrow(source))
         {

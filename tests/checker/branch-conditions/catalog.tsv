@@ -7,3 +7,4 @@ shapes	shapes.c	-	branch-condition-shapes
 order	order.c	-	branch-condition-order
 # A condition on an lvalue at an absolute address (#3028): each form's body has the lvalue's load, and the two whose truth stays known have none.
 absolute	absolute.c	-	branch-condition-absolute
+qualified-bool	qualified-bool.c	-	branch-condition-qualified-bool
