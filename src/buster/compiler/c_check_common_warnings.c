@@ -2912,7 +2912,14 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
                                   (conditional_source && conditional_range && signed_width <= unsigned_width &&
                                    check_common_conditional_nonnegative(emission, conditional));
         }
-        if (integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width))
+        bool warn = integer && !unsigned_operands && left_signed != right_signed && !constant_suppressed && (left_signed ? left_width <= right_width : right_width <= left_width);
+        if (warn && (check_stream_flags(stream, node) & BUSTER_CHECK_ICE) != 0)
+        {
+            // AnalyzeComparison exempts the comparison itself when it is a strict integer constant expression (#3300).
+            const CheckValue comparison = check_stream_value(stream, node);
+            warn = !check_action_integer_constant(&comparison, 0);
+        }
+        if (warn)
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                 check_stream_type(stream, left),

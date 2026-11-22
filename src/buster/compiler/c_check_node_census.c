@@ -1789,7 +1789,13 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         const bool a_safe = node_census_integer_constant(s, a, &value) && value >= 0;
         const bool b_safe = node_census_integer_constant(s, b, &value) && value >= 0;
         const bool mixed = (a_wide && bs && !b_safe) || (b_wide && as && !a_safe);
-        tests |= integers && mixed ? UINT64_C(1) << NODE_CENSUS_SIGN_COMPARE : 0;
+        bool warn = integers && mixed;
+        if (warn && (flags & BUSTER_CHECK_ICE) != 0)
+        {
+            const CheckValue comparison = node_view_value(s, node);
+            warn = !check_action_integer_constant(&comparison, 0);
+        }
+        tests |= warn ? UINT64_C(1) << NODE_CENSUS_SIGN_COMPARE : 0;
     }
     if (policy->ordered && op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && binary)
     {

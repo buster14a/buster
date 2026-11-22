@@ -370,7 +370,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
-  `-Wsign-compare` retains the original unsignedness of both operands before narrow integer promotion (#1391).
+  `-Wsign-compare` skips comparisons that are themselves integer constant expressions (#3300). A comparison
+  containing an evaluated assignment or comma operator still gets the usual signedness checks.
+  The warning retains the original unsignedness of both operands before narrow integer promotion (#1391).
   An `unsigned char` or `unsigned short` promoted to `int` cannot become negative. An ordinary conditional's
   result is also nonnegative when both arms are nonnegative integer constant expressions, unsigned values, boolean results or
   nested such conditionals (`check_common_conditional_nonnegative`). An integer constant expression's condition
