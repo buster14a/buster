@@ -2884,6 +2884,9 @@ static bool tier0_convert_records(uint32_t to, uint32_t from, uint8_t to_registe
         const bool wide = tier0_class_bytes(as) == 8;
         const uint32_t form = to == BUSTER_TYPED_CLASS_F32 ? (wide ? X86_FORM_CVTSI2SS_X_RM64 : X86_FORM_CVTSI2SS_X_RM32)
                                                            : (wide ? X86_FORM_CVTSI2SD_X_RM64 : X86_FORM_CVTSI2SD_X_RM32);
+        // Legacy cvtsi2ss/sd write the low lane alone and keep the rest, so they wait on the register's last value: its
+        // zero (xorps) breaks that dependency (#3308), as tier0_emit_u64_convert's and Tier 1's do.
+        tier0_add(tier0_rr(X86_FORM_XORPS_X_XM128, to_register, to_register));
         source.form = (uint16_t)form;
         tier0_add(source);
     }
@@ -2898,6 +2901,13 @@ static bool tier0_convert_records(uint32_t to, uint32_t from, uint8_t to_registe
     }
     else if (to != from)
     {
+        // cvtss2sd and cvtsd2ss merge into their destination as cvtsi2ss/sd do: a home's operand zeroes it first (#3308).
+        // In place (the operand's own register) the dependency is the operand's, so needs no break, and the zero would
+        // clobber it.
+        if (from_home || to_register != from_register)
+        {
+            tier0_add(tier0_rr(X86_FORM_XORPS_X_XM128, to_register, to_register));
+        }
         source.form = (uint16_t)(from == BUSTER_TYPED_CLASS_F32 ? X86_FORM_CVTSS2SD_X_XM32 : X86_FORM_CVTSD2SS_X_XM64);
         tier0_add(source);
     }
@@ -9084,7 +9094,8 @@ static void tier0_select_u64_convert(bool to_u64, int32_t depth, int32_t floatin
 //     inexact one only where it has a fraction, as C's conversion does (#429's review): truncating both ways and choosing
 //     raised them for nothing. A value out of U64's range (C leaves it undefined) gives the signed truncation's result,
 //     its top bit flipped.
-// The red zone form keeps to the operand's and the result's registers, its scratch values in red zone temporaries 0 to 2
+// Both forms zero the result's register before the conversion, which breaks its dependence on the value the register
+// held (#3308). The red zone form keeps to the operand's and the result's registers, its scratch values in red zone temporaries 0 to 2
 // instead: from U64, x's copy in temporary 0 and the result's bits in temporary 1; to U64, 2^63 in temporary 0, setae's
 // byte in temporary 1 (shifted into the top bit in place) and the bias in temporary 2. It is as exact, and raises the
 // same exceptions, but its loads wait for the stores before them: as the only form, it took a conversion-heavy loop to
@@ -9124,8 +9135,9 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
     }
     else if (!to_u64)
     {
-        // x halved in its own register (x's copy in temporary 0), x's sign tested in its copy, and the exponent raised in
-        // the result's bits in temporary 1.
+        // x halved in its own register (x's copy in temporary 0), and the exponent raised in the result's bits in
+        // temporary 1. x's sign needs no test of its own: a shift by 1 sets OF to its operand's top bit, x's (the or kept
+        // it), and SF to 0, so ge (SF = OF) is x's sign clear; which leaves the record for the result's zero (#3308).
         const bool single = class == BUSTER_TYPED_CLASS_F32;
         const uint8_t x = tier0_integer_depths[depth - 1];
         const uint8_t result = (uint8_t)floating;
@@ -9134,8 +9146,8 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
         tier0_put(writer, tier0_instruction(X86_FORM_ADD_R32_RM32, x, x, direct, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_OR_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 1));
-        tier0_put(writer, tier0_red_zone(writer, X86_FORM_CMP_RM64_IMM8, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_CMOVGE_R64_RM64, x, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_XORPS_X_XM128, result, result, direct, 0, 0));
         tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTSI2SS_X_RM64 : X86_FORM_CVTSI2SD_X_RM64, result, x, direct, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOV_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 63));
