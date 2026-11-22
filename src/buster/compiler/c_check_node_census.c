@@ -5025,6 +5025,7 @@ struct NodeShadow
     uint64_t alone_verdict_before[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_verdict_scanned_tokens[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_scans_listed;
     uint64_t alone_body_tokens;
     uint64_t alone_whole_both;
     uint64_t alone_whole_both_tokens;
@@ -7543,6 +7544,16 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             }
             shadow->alone_whole_walk += !own && reader_whole && !statics;
             shadow->alone_whole_walk_static += !own && reader_whole && statics;
+            const bool unscanned = verdict == BUSTER_NODE_ALONE_BODY_LEFT && fronted->alone_body_scanned[low] == 0;
+            const bool misscanned = verdict != BUSTER_NODE_ALONE_BODY_LEFT && fronted->alone_body_scanned[low] != 0;
+            if ((unscanned || misscanned) && shadow->alone_scans_listed < node_census_list)
+            {
+                // The scan and the front disagree on the body: listed, since the scan is to refuse a body before its reading.
+                shadow->alone_scans_listed += 1;
+                printf("node-shadow: alone %s file=%s line=%u verdict=%u tokens=%" PRIu64 "\n",
+                       unscanned ? "the scan finds no lost root in a body the front lost one of" : "the scan finds a lost root in a body the front lost none of", s->file,
+                       node_census_line(s->pp, program->parser, body->opening), verdict, tokens);
+            }
             if (!own && reader_whole && !statics && shadow->alone_bodies_listed < node_census_list)
             {
                 shadow->alone_bodies_listed += 1;
