@@ -198,6 +198,36 @@ static void check_boundary_unit_prepare(const CheckProgram* program)
             const uint32_t body = check_boundary_body_of(program, input->strings[s].token);
             check_boundary_unit.string_bodies[s] = body != BUSTER_CHECK_NONE ? body + 1 : 0;
         }
+        // BUSTER_BOUNDARY_NAME_OF=TOKEN[,TOKEN...]: those tokens' spellings beside the recording, for a person.
+        const char* name_of = getenv("BUSTER_BOUNDARY_NAME_OF");
+        if (name_of != NULL && program->identifiers != NULL)
+        {
+            char names[800];
+            snprintf(names, sizeof(names), "%s.tokens", check_boundary.path);
+            FILE* file = fopen(names, "w");
+            while (file != NULL && *name_of != 0)
+            {
+                char* end = NULL;
+                const uint32_t origin = (uint32_t)strtoul(name_of, &end, 10);
+                for (uint32_t token = 0; token < input->token_count; token += 1)
+                {
+                    if (parse_origin(program->parser, token) == origin)
+                    {
+                        const uint32_t identifier = program->parser->tokens.names[token];
+                        fprintf(file, "%u\t%s\n", origin, identifier != 0 && identifier < program->identifiers->count ? (const char*)intern_bytes(program->identifiers, identifier) : "?");
+                    }
+                }
+                name_of = *end == ',' ? end + 1 : end;
+                if (end == name_of && *end != 0)
+                {
+                    break;
+                }
+            }
+            if (file != NULL)
+            {
+                fclose(file);
+            }
+        }
         check_boundary_unit.op_masks = calloc(2 * ((uint64_t)program->body_count + 1), sizeof(uint64_t));
         check_boundary_unit.node_counts = calloc((uint64_t)program->body_count + 1, sizeof(uint32_t));
         for (uint32_t node = 0; check_boundary_unit.op_masks != NULL && check_boundary_unit.node_counts != NULL && node < input->graph.count; node += 1)
