@@ -642,7 +642,8 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
         const bool open_parameter = repair != NULL && event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER &&
                                     event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER && event->completion >= repair->original_closed;
         promoted = !unit_end && !open_parameter && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
-                   event->kind != CHECK_WARNING_EVENT_SHIFT_SIGN && (repair == NULL || check_repair_warning_event(repair, event)) &&
+                   event->kind != CHECK_WARNING_EVENT_SHIFT_SIGN && event->kind != CHECK_WARNING_EVENT_BOOL_CONVERSION &&
+                   (repair == NULL || check_repair_warning_event(repair, event)) &&
                    check_driver_warning_severity(pp, input, event) >= CHECK_WARNING_ERROR;
     }
     return promoted;
@@ -2961,7 +2962,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
         const CheckWarningEvent* event = view->events + i;
         const bool late = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END;
         const bool retained = late == (step >= view->count) && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
-                              event->kind != CHECK_WARNING_EVENT_SHIFT_SIGN &&
+                              event->kind != CHECK_WARNING_EVENT_SHIFT_SIGN && event->kind != CHECK_WARNING_EVENT_BOOL_CONVERSION &&
                               (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
                               (repair == NULL || check_repair_warning_event(repair, event)) &&
                               (input->interrupt_range_count == 0 || check_driver_interrupt_kept(input, event->token));
