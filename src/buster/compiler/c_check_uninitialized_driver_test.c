@@ -238,9 +238,11 @@ static void check_test_driver_uninitialized(CheckTest* test, const char* clang, 
             const int expected_status = errors != 0 ? 1 : 0;
             char reference[4096] = { 0 };
             bool reference_fits = false;
-            // Standard driver parts have one CPU. Their default/scalar routes are supplemented by the focused
-            // --uninitialized-only run under the correctness inventory's existing two-CPU diagnostic grant.
-            const uint32_t routes = require_deferred ? 4u : 3u;
+            // Standard driver parts have one CPU. Their default/scalar/window routes are supplemented by the focused
+            // --uninitialized-only run under the correctness inventory's existing two-CPU diagnostic grant. The window
+            // route reads discarded local assignments and returns as native window summaries (#2850), whose rows are
+            // the proof's reads and writes.
+            const uint32_t routes = require_deferred ? 5u : 4u;
             for (uint32_t route = cases[c].clang_lines ? 0u : 1u; route < routes; route += 1)
             {
                 char* arguments[24] =
@@ -269,6 +271,10 @@ static void check_test_driver_uninitialized(CheckTest* test, const char* clang, 
                 }
                 else if (route == 3)
                 {
+                    arguments[used++] = "--node-window-assignments";
+                }
+                else if (route == 4)
+                {
                     arguments[used++] = "--deferred-bodies";
                     arguments[used++] = "--lanes";
                     arguments[used++] = "2";
@@ -290,13 +296,13 @@ static void check_test_driver_uninitialized(CheckTest* test, const char* clang, 
                 }
                 const bool same = !cases[c].clang_lines || route == 0 || (reference_fits && strcmp(reference, lines) == 0);
                 const bool located = expected == 0 || check_test_uninitialized_location(unit, source, cases[c].variable, text, policy == 1);
-                const bool deferred = route != 3 || (text != NULL && strstr(text, "time-check\tdeferred-lanes\t2\n") != NULL &&
+                const bool deferred = route != 4 || (text != NULL && strstr(text, "time-check\tdeferred-lanes\t2\n") != NULL &&
                                                      strstr(text, "time-check\tdeferred-merged\tyes\n") != NULL);
                 const bool good = fit && text != NULL && status == expected_status && counts.warnings == warnings &&
                                   counts.errors == errors && counts.notes == expected && counts.fatal == 0 && same && located && deferred &&
                                   (access(object, F_OK) == 0) == (status == 0);
                 snprintf(description, sizeof(description), "uninitialized %s policy=%u route=%u: counts, use, status%s%s", cases[c].name, policy, route,
-                         cases[c].clang_lines ? ", Clang lines" : ", independent unsafe-path control", route == 3 ? ", admitted lanes" : "");
+                         cases[c].clang_lines ? ", Clang lines" : ", independent unsafe-path control", route == 4 ? ", admitted lanes" : "");
                 check_test_expect(test, good, description);
                 if (!good)
                 {

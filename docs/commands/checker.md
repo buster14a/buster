@@ -381,10 +381,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   A reverse expression pass identifies an actual unsafe read, including a post-loop read reached after zero
   iterations. The existing diagnostic publisher retains its warning family, spelling, notes and policy; the
   analysis does not add a general `-Wsometimes-uninitialized` diagnostic engine. Missing control coverage,
-  detached statement-expression regions or cleanup chains keep the original warning conservatively.
+  detached statement-expression regions or cleanup chains keep the original warning conservatively. A native
+  window summary (#2850) has no operand nodes; its rows are its reads and writes in evaluation order.
   `c_check_uninitialized_driver_test.c` reads the original `tests/driver/uninitialized-for/` fixtures. Quiet and
   definitely uninitialized cases compare complete Clang lines; unsafe joins independently pin Buster's existing
-  diagnostic to a marked read. Normal driver parts cover default/scalar readers. Run
+  diagnostic to a marked read. Normal driver parts cover the default, scalar and `--node-window-assignments`
+  readers. Run
   `test-checker-driver --uninitialized-only --executable build/compiler` under a two-CPU grant for the additional
   admitted deferred-reader checks; it shares the existing two-CPU diagnostic inventory group with sign comparisons.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,

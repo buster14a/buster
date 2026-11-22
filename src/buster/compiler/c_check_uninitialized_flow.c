@@ -87,13 +87,39 @@ static uint32_t check_common_init_scope(const Parser* parser, uint32_t declarati
     return scope;
 }
 
+static uint64_t check_common_init_slot(const CheckCommonInitFlow* flow, uint64_t object)
+{
+    const uint32_t count = flow->program->input->token_count;
+    const uint32_t slot = object != 0 && object <= count ? flow->slots[object - 1] : 0;
+    return slot != 0 ? UINT64_C(1) << (slot - 1) : 0;
+}
+
 static uint64_t check_common_init_object(const CheckCommonInitFlow* flow, uint32_t node)
 {
     const CheckStream* stream = flow->program->stream;
-    const uint32_t object = node < stream->count ? check_stream_object(stream, node) : 0;
-    const uint32_t count = flow->program->input->token_count;
-    const uint32_t slot = object != 0 && object <= count && check_stream_category(stream, node) == CHECK_LVALUE ? flow->slots[object - 1] : 0;
-    return slot != 0 ? UINT64_C(1) << (slot - 1) : 0;
+    const uint32_t object = node < stream->count && check_stream_category(stream, node) == CHECK_LVALUE ? check_stream_object(stream, node) : 0;
+    return check_common_init_slot(flow, object);
+}
+
+// The objects a VALUE reads while they are still in `incoming`, and in `writes` those it writes. A plain value reads its
+// own lvalue unless that is not a read. A native window's summary (#2850) has no operand nodes: its rows are its
+// accesses in evaluation order, so a row's read after an earlier row's write of the same object is safe.
+static uint64_t check_common_init_value(const CheckCommonInitFlow* flow, uint32_t node, uint64_t incoming, uint64_t* writes)
+{
+    const CheckInput* input = flow->program->input;
+    const CheckInputWindowSummary* summary = check_input_window_summary(input, node);
+    uint64_t read = summary == NULL && flow->nonread[node] == 0 ? incoming & check_common_init_object(flow, node) : 0;
+    uint64_t write = 0;
+    for (uint32_t r = 0; summary != NULL && r < summary->count; r += 1)
+    {
+        const CheckInputWindowRow* row = input->window_rows + summary->first + r;
+        const bool access = (row->flags & (BUSTER_CHECK_WINDOW_READ | BUSTER_CHECK_WINDOW_WRITE)) != 0;
+        const uint64_t object = access ? check_common_init_slot(flow, row->value) : 0;
+        read |= (row->flags & BUSTER_CHECK_WINDOW_READ) != 0 ? object & incoming & ~write : 0;
+        write |= (row->flags & BUSTER_CHECK_WINDOW_WRITE) != 0 ? object : 0;
+    }
+    *writes = write;
+    return read;
 }
 
 static uint64_t check_common_init_fact(const CheckCommonInitFlow* flow, const uint64_t* facts, uint32_t node)
@@ -179,9 +205,11 @@ static void check_common_init_reduce(CheckCommonInitFlow* flow, uint32_t node)
     {
         write = 0;
     }
-    if (op == CHECK_OP_VALUE && flow->nonread[node] == 0)
+    if (op == CHECK_OP_VALUE)
     {
-        read |= check_common_init_object(flow, node);
+        uint64_t rows = 0;
+        read |= check_common_init_value(flow, node, UINT64_MAX, &rows);
+        write |= rows;
     }
     if (op == CHECK_OP_ASSIGN || check_common_write_op(op))
     {
@@ -220,7 +248,8 @@ static void check_common_init_descend(CheckCommonInitFlow* flow, uint32_t node, 
             check_common_init_incoming(flow, graph->argument_nodes[first + a], incoming);
         }
     }
-    uint64_t read = op == CHECK_OP_VALUE && flow->nonread[node] == 0 ? incoming & check_common_init_object(flow, node) : 0;
+    uint64_t rows = 0;
+    uint64_t read = op == CHECK_OP_VALUE ? check_common_init_value(flow, node, incoming, &rows) : 0;
     while (read != 0)
     {
         const uint32_t bit = (uint32_t)__builtin_ctzll(read);
@@ -492,9 +521,10 @@ static bool check_common_init_body(const Parser* parser, const CheckProgram* pro
                 flow.reads[node - first] = 0;
                 flow.writes[node - first] = 0;
             }
-            if (graph->ops[node] == CHECK_OP_VALUE && evaluated[node] != 0 && nonread[node] == 0 && flow.covered[node - first] == 0)
+            if (graph->ops[node] == CHECK_OP_VALUE && evaluated[node] != 0 && flow.covered[node - first] == 0)
             {
-                eligible &= ~check_common_init_object(&flow, node);
+                uint64_t rows = 0;
+                eligible &= ~check_common_init_value(&flow, node, UINT64_MAX, &rows);
             }
         }
         for (uint32_t i = 0; i < body->count; i += 1)
@@ -545,12 +575,11 @@ static bool check_common_uninitialized_flow(const Parser* parser, const CheckInp
                                             const uint8_t* addressed, uint32_t* first_read, uint32_t* first_write, Arena* scratch)
 {
     const uint32_t count = input->token_count;
-    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     const bool available = program != NULL && program->status == CHECK_PROGRAM_OK && program->controls != NULL && program->bodies != NULL && program->body_count != 0 &&
                            program->input == input && program->stream == stream && input->token_nodes != NULL;
     uint32_t candidates_count = 0;
-    for (uint32_t declaration = available ? check_common_next_entry(input->declaration_bodies, 0, count, vector) : count; declaration < count;
-         declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count, vector))
+    for (uint32_t declaration = available ? check_common_next_entry(input->declaration_bodies, 0, count) : count; declaration < count;
+         declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count))
     {
         candidates_count += check_common_init_candidate(parser, input, types, parameters, addressed, first_read, first_write, declaration) ? 1u : 0u;
     }
@@ -563,8 +592,8 @@ static bool check_common_uninitialized_flow(const Parser* parser, const CheckInp
         memset(slots, 0, count);
         uint32_t at = 0;
         bool ordered = true;
-        for (uint32_t declaration = check_common_next_entry(input->declaration_bodies, 0, count, vector); declaration < count;
-             declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count, vector))
+        for (uint32_t declaration = check_common_next_entry(input->declaration_bodies, 0, count); declaration < count;
+             declaration = check_common_next_entry(input->declaration_bodies, declaration + 1, count))
         {
             if (check_common_init_candidate(parser, input, types, parameters, addressed, first_read, first_write, declaration))
             {
@@ -579,7 +608,7 @@ static bool check_common_uninitialized_flow(const Parser* parser, const CheckInp
             valid = temporary != NULL;
             if (valid)
             {
-                candidates = c_bindings_sort(candidates, temporary, candidates_count, vector, UINT32_MAX);
+                candidates = c_bindings_sort(candidates, temporary, candidates_count, true, UINT32_MAX);
             }
         }
         uint32_t body = 0;
