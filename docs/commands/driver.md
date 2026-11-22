@@ -444,13 +444,19 @@ from the command's common options and its recorded language. The single-input
 kernels, option boundaries and a `.S` preprocessing/reassembly execution round-trip.
 
 C-only links retain the existing direct path, including its shared-library
-version validation and runtime snapshot. Mixed links validate the shared
-libraries' versions as the direct path does (#1590,
-`ForeignCommand.library_versions`): a needed library's versioned reference
-binds only to an export at its version and keeps an `--as-needed` library
-that exports it, unless the referring library's `DT_NEEDED` names one, and
-the loaded libraries' version needs are checked before anything is written;
-version needs that don't read are refused as malformed input. When a `-lNAME` or `-l:FILE` request
+validation and runtime snapshot. Mixed links validate shared libraries'
+references and version needs as the direct path does (#1590, #2910,
+`ForeignCommand.library_versions`). A needed library's strong unversioned
+reference requires a default library export or a surviving executable
+definition with default or protected visibility; a versioned reference
+requires an export at that version. An `--as-needed` provider is retained
+unless the executable satisfies the reference or the referring library's
+`DT_NEEDED` already names it. Unversioned retention waits for archive
+resolution and COMDAT selection. Missing strong references are refused
+unless a dependency is absent from the link, and the loaded libraries'
+version needs are checked before anything is written. Weak references do
+not retain providers or cause these refusals. Version needs that don't read
+are refused as malformed input. When a `-lNAME` or `-l:FILE` request
 selects a populated archive, the source command uses the mixed/foreign path
 (#1470), so that archive gets the same lazy member selection and input ordering
 as a positional archive. Empty archives retain the direct path. The selection

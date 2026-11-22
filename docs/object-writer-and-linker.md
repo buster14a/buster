@@ -4742,18 +4742,18 @@ it. It writes every kind the direct path writes: static executables (with
   such a reference that no library exports is refused, unless the library's
   `DT_NEEDED` names a library the link doesn't have, and then the version
   needs of the libraries the program loads, each against the library its
-  entry's file names. The names stay unversioned in the resolution, so a
-  library's unversioned reference keeps no library, as before, and a
-  versioned one loads no archive member by its bare name (`foreign_fold`,
-  #2911): GNU ld and lld key a library's versioned reference as
+  entry's file names. Unversioned references also retain providers and are
+  checked as described below (#2910). The names stay unversioned in the
+  resolution, and a library's versioned reference loads no archive member by
+  its bare name (`foreign_fold`, #2911): GNU ld and lld key it as
   `name@VERSION`, which no unversioned definition, an archive member's or the
   executable's, satisfies.
   Both passes are scalar on lane 0, shared by both paths, over the needed
   libraries' versioned references and the loaded libraries' needs: a lookup is
   two probes of an index per library before its provider (the exports' and
   the hidden exports', which each library's read indexes on the lanes), and
-  each reference is looked up once, the follow recording the first that no
-  library exports. On the 9700X a C program's mixed link with `-lm` (21 and
+  each reference is looked up once. Before #2910's unversioned extension,
+  on the 9700X a C program's mixed link with `-lm` (21 and
   26 references of `libc.so.6` and `libm.so.6`, 9 needs) takes 104,000 more
   instructions than main's (26.24 to 26.35 million, +0.40%) and 1.5 to 1.9%
   more user cycles (main again: -0.05 to +0.75%); the first version, which
@@ -4761,6 +4761,30 @@ it. It writes every kind the direct path writes: static executables (with
   lookup (`libc.so.6` has 537) and looked every reference up twice, took
   307,000 more ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/library-versions-1590-2026-11-17)).
   The direct link of the same program is unchanged.
+- **Unversioned library references in mixed source links (#2910).** Under
+  the same source-driver flag, a needed library's strong unversioned
+  reference binds to a default library export or a surviving strong, common
+  or weak executable definition with default/protected visibility. A hidden
+  or internal definition cannot satisfy the loader. The provider lookup
+  accepts a default version but never a non-default-only export.
+  Provider IDs are cached beside the existing library metadata, one lookup
+  per strong reference. Unversioned retention waits for the ordinary
+  archive rounds and COMDAT/winner selection, then adds one frontier of
+  needed providers and resumes resolution. This prevents an unnecessary
+  provider from pulling in archive members before an executable definition
+  is known. After the last frontier, retention is rebuilt from regular
+  roots, excluding executable-satisfied edges; a provider already kept for
+  a library can also become a root through a later regular reference.
+  Extracted archive members remain, as in the resolver's existing monotone
+  loading rule. Output name columns grow geometrically across frontiers.
+  A library's own `DT_NEEDED` suppresses direct retention of that provider.
+  Every unmatched strong reference of a finally needed library is refused,
+  unless its dependencies include a library absent from the link; weak
+  references are ignored. These checks follow the final winners and precede
+  conversion, so refusal leaves an existing output untouched. Both paths
+  share the index probes and closure decisions; raw `link-foreign` leaves
+  the flag off. The #1590 measurements above predate this extension; they
+  do not measure its additional work.
 - **The static kinds and shared libraries (#394).** A static executable and a
   static PIE get what `dynamic.c` gives the direct path's: the start file's
   ABI note and the link's `__tls_get_addr`, which `libc.a` doesn't define and
