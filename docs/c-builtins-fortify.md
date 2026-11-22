@@ -144,12 +144,20 @@ The lowering now expands a direct call of such a wrapper in its caller
   of a complete, fixed type, or a string literal, at a constant offset (an
   array, `&x`, `&a[i]`, `p + i` with a constant `i`, a pointer's cast), the
   bytes from there to the object's end; otherwise the unknown answers. Modes 1
-  and 3 answer as 0 and 2 do: clang's code generation leaves such a query to
-  LLVM's objectsize, which knows objects and not subobjects, so through a
-  wrapper `strcpy (s.a, ...)` is bounded by `s`, not by `s.a` (GCC's build
-  bounds it by `s.a`). The fortified call then keeps its check where the bound
-  is known and the length isn't proven within it (`check_lower_fortify`), as
-  clang's code does.
+  and 3 (the closest subobject) depend on where clang computes the bound:
+  - a parameter without `pass_object_size` (glibc 2.39's wrappers): clang's
+    code generation leaves the query to LLVM's objectsize after inlining,
+    which knows objects and not subobjects, so modes 1 and 3 answer as 0 and 2
+    do, and `strcpy (s.a, ...)` is bounded by `s` (GCC's build bounds it by
+    `s.a`);
+  - a parameter with `pass_object_size(M)` (glibc 2.40's Clang overloads),
+    queried in a mode M's value serves (clang's `areBOSTypesCompatible`): the
+    caller's front end computes it in mode M, where modes 1 and 3 bound an
+    array argument by its own bytes, so `strcpy (s.a, ...)` is bounded by
+    `s.a`. Mode 3 knows no other subobject.
+
+  The fortified call then keeps its check where the bound is known and the
+  length isn't proven within it (`check_lower_fortify`), as clang's code does.
 
 The two tiers both lower from the expanded typed stream, so `-c`, `--tier1`,
 `-S`, `-g` and an executable all take the checks.
