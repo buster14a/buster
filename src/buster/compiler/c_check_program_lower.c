@@ -1315,11 +1315,11 @@ static uint64_t check_lower_segment_override(const TypeTable* types, TypeId type
 }
 
 // Whether an access of a class's value at an object of `type` is a volatile one the typed stream marks (#3310,
-// BUSTER_TYPED_ACCESS_VOLATILE): a volatile-qualified lvalue's, of a scalar class (not a vector's or a mask's, whose
-// value is its bytes).
+// BUSTER_TYPED_ACCESS_VOLATILE): a volatile-qualified lvalue's, of any class (#3329: a vector's or a mask's too, whose
+// bytes in its value's low bits the mark leaves as they are).
 static bool check_lower_volatile(uint8_t class, TypeId type)
 {
-    return (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0 && class != BUSTER_TYPED_CLASS_VECTOR && class != BUSTER_TYPED_CLASS_MASK;
+    return (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0 && class != BUSTER_TYPED_CLASS_VOID;
 }
 
 // A volatile access's mark (check_lower_volatile), which marks the function (CheckLowerWriter.volatile_entries); 0 for any
@@ -2375,7 +2375,7 @@ static uint8_t check_lower_track_bytes(const CheckLowerWriter* writer, uint8_t k
                 kind == BUSTER_TYPED_CONST ? (value < writer->vector_constant_count ? writer->vector_constant_bytes[value] : 0) :
                 kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL ? (value < writer->local_count && writer->local_sizes != NULL ? writer->local_sizes[value] : 0) :
                 kind == BUSTER_TYPED_DUP   ? (top != 0 ? writer->stack_bytes[top] : 0) :
-                                             value;
+                                             value & ~(BUSTER_TYPED_ACCESS_SEGMENT | BUSTER_TYPED_ACCESS_VOLATILE);
     }
     return bytes <= UINT8_MAX ? (uint8_t)bytes : 0;
 }
@@ -3743,7 +3743,8 @@ static bool check_lower_copy_node_volatile(CheckLowerWriter* writer, uint32_t no
 // `keep` (an assignment's value). Small copies use Tier 0's bounded COPY; larger nonvolatile ones call memmove through the ordinary
 // runtime-symbol and ABI path, preserving live values and returning the destination without a temporary. memmove permits
 // the same source and destination, which C aggregate assignment does too. The nonvolatile stream never grows with size.
-// Volatile copies retain the previous inline pieces: a library may skip accesses when the ranges are the same.
+// Volatile copies retain the previous inline pieces: a library may skip accesses when the ranges are the same. Their COPY
+// entries carry a volatile access's mark (#3329, BUSTER_TYPED_ACCESS_VOLATILE), which the IR's pieces keep.
 // A kept small destination goes in a temporary: its consumer's class is read from the entry before it (tier0_validate),
 // which a COPY, of class VOID, can't give.
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
@@ -3765,7 +3766,8 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     }
     else if (!keep && size <= BUSTER_TIER0_MAX_COPY_BYTES)
     {
-        check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
+        writer->volatile_entries = writer->volatile_entries || volatile_copy;
+        check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size | (volatile_copy ? BUSTER_TYPED_ACCESS_VOLATILE : 0));
     }
     else if (size > BUSTER_TIER0_MAX_COPY_BYTES && !volatile_copy)
     {
@@ -3784,6 +3786,7 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     {
         const uint32_t source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         const uint32_t destination = keep ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) : BUSTER_CHECK_NONE;
+        writer->volatile_entries = writer->volatile_entries || volatile_copy;
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, source);
         if (keep)
         {
@@ -3799,7 +3802,7 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
             check_lower_offset(writer, offset);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
             check_lower_offset(writer, offset);
-            check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, piece);
+            check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, piece | (volatile_copy ? BUSTER_TYPED_ACCESS_VOLATILE : 0));
         }
         if (keep)
         {

@@ -536,7 +536,9 @@ round trip and the IR's three forms against clang.
 
 A `load` or a `store` with `BUSTER_IR_VOLATILE` is a volatile lvalue's access,
 from the typed stream's `BUSTER_TYPED_ACCESS_VOLATILE` (`ir_typed_access`),
-printed as `volatile` after its alignment. It is in `BUSTER_IR_OBSERVABLE`: no
+printed as `volatile` after its alignment: a load's or a store's of any type, a
+vector's included, and each piece of a volatile aggregate's copy (#3329, a marked
+`COPY`, whose pieces are integers that don't overlap). It is in `BUSTER_IR_OBSERVABLE`: no
 pass removes, merges, forwards or moves it, and value numbering with memory
 counts it as a write of general memory. Before #3310 only a volatile local's
 slot (`BUSTER_IR_SLOT_VOLATILE`) carried the qualifier, and `+memory` merged two

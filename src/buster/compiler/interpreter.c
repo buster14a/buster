@@ -1649,7 +1649,9 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         const uint32_t i = next;
         const uint32_t kind = end ? BUSTER_TYPED_RETURN : entry_kinds[i];
         const uint32_t class = end ? BUSTER_TYPED_CLASS_VOID : entry_classes[i];
-        const uint64_t value = end ? 0 : entry_values[i];
+        // A volatile access's mark (#3310, #3329) is the IR's: the interpreter makes every access anyway.
+        const bool marked = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_COPY;
+        const uint64_t value = end ? 0 : marked ? entry_values[i] & ~BUSTER_TYPED_ACCESS_VOLATILE : entry_values[i];
         next += !end;
         // Validate the dispatch domain before classifying effects. Machine rows, frame addresses and tail-call
         // intrinsics have no model here, but a bit builtin's row (#1374, ir_simd_typed_bits) and a signed overflow builtin's
