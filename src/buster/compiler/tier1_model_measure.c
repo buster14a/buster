@@ -429,7 +429,7 @@ static bool tier1_model_program(const Tier1ModelCase* entry, Tier1ModelExperimen
         records[count++] = (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = registers[i], .immediate = 7 };
     }
     uint8_t prefix[512];
-    const int64_t prefix_length = x86_encode_scalar(records, count, prefix, sizeof(prefix), 0, 0);
+    const int64_t prefix_length = x86_validate(records, count) == count ? x86_encode(records, count, prefix, sizeof(prefix), 0, 0) : -1;
     valid &= prefix_length > 0;
     if (valid)
     {
@@ -483,15 +483,13 @@ static bool tier1_model_program(const Tier1ModelCase* entry, Tier1ModelExperimen
         }
         if (valid)
         {
-            int64_t length = x86_encode_scalar(records, count, program->code, BUSTER_X86_COST_CODE_SIZE, offsets, 0);
+            int64_t length = x86_encode(records, count, program->code, BUSTER_X86_COST_CODE_SIZE, offsets, 0);
             valid = length > 0 && offsets[loop] % 64 == 0;
             if (valid)
             {
                 records[branch].displacement = (int32_t)offsets[loop] - (int32_t)offsets[branch + 1];
-                length = x86_encode_scalar(records, count, program->code, BUSTER_X86_COST_CODE_SIZE, offsets, 0);
-                uint8_t vector[BUSTER_X86_COST_CODE_SIZE];
-                const int64_t vector_length = x86_encode(records, count, vector, sizeof(vector), 0, 0);
-                valid = vector_length == length && length > 0 && memcmp(vector, program->code, length) == 0;
+                length = x86_encode(records, count, program->code, BUSTER_X86_COST_CODE_SIZE, offsets, 0);
+                valid = length > 0;
             }
             if (valid)
             {

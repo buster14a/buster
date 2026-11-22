@@ -2220,6 +2220,7 @@ static uint32_t lane_from_task_index(uint64_t task_index)
 
 static Range64 range_part(uint64_t count, uint64_t part, uint64_t parts)
 {
+    assert(parts != 0);
     const uint64_t share = count / parts;
     const uint64_t longer = count % parts;
     const uint64_t begin = part * share + (part < longer ? part : longer);

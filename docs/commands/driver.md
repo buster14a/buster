@@ -12,11 +12,13 @@ requirements. [Command index](README.md).
   options] file.c` preprocesses, parses and checks the file and prints the
   diagnostics as clang does, with exit status 0 for a unit without errors and
   1 otherwise; `-c [-o file.o]` also writes the object, its functions through
-  Tier 0 ([the checker guide](../../docs/c-checker.md)); and with neither option it
+  Tier 0 ([the checker guide](../../docs/c-checker.md)), and `-S [-o file.s]` its
+  assembly in its place ([-S](#-s-1362)); and with none of them it
   links an executable (`-o`, `a.out` by default), for pure-C inputs by the direct path, bound
   against the C runtime's snapshot and the shared libraries `-lNAME` names
   (found through `-LDIR`, as needed: `runtime_libraries_import`), `--verify`
-  checking every function's records with `x86_validate`, `--check-transitions`
+  checking every function's records with `x86_validate`, `--node-window` consuming the first [reader-time native rows](lowering.md#compiling-with-the-window-2850),
+  `--node-window-constants` folding [integer arithmetic inside an ordinary expression](lowering.md#integer-arithmetic-inside-an-ordinary-expression), `--check-transitions`
   checking the expressions by #1050's memoized transitions (opt-in, each hit's
   action run too with `--verify`), `--lower-all`
   lowering every definition, referenced or not (#129's test option; `-c` and
@@ -226,8 +228,10 @@ requirements. [Command index](README.md).
 ## Build-system integration (#1113)
 
 Dependency files (`-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`),
-buffered standard input (`-`), the explicit `-static`/`-static-pie`/`-pie`
-link modes, stderr-only `-v`, and the common `-print-*` and numeric-version
+buffered standard input (`-`), the explicit `-static`/`-static-pie`/`-pie`/`-no-pie`
+link modes (`-no-pie`, #1503: a position-dependent dynamic executable, with
+Clang's precedence; `c_driver_no_pie_test.c` compares its links with clang and
+GNU ld's), stderr-only `-v`, and the common `-print-*` and numeric-version
 probes are handled by the driver. `c_dependency_driver.c` owns dependency
 collection, naming and publication; `c_driver_information.c` owns the
 information probes; `string8.h` is the bounded byte slice those modules share
@@ -300,8 +304,7 @@ discarded: unknown names and unsupported spellings of known groups still warn.
 Option operands and filenames after `--` are not warning options.
 
 Recognizing a warning name does not implement its consumer or its parameter
-semantics; known but unimplemented warnings remain #1365's work. `-Wa,`,
-`-Wp,` and `-Wl,` are classified as driver transports and do not become warning
+semantics. `-Wa,`, `-Wp,` and `-Wl,` are classified as driver transports and do not become warning
 names. This change adds no assembler or preprocessor forwarding. Optional
 spelling suggestions are omitted because the existing catalog does not record
 which Clang groups have diagnostics, which its suggestion search requires.
@@ -320,6 +323,46 @@ errors. The behavioral references are LLVM revision
 [`Options.td`](https://github.com/llvm/llvm-project/blob/7a941dfb2877a0b8cf30323fefa85ad019e0b0f5/clang/include/clang/Options/Options.td)
 and `CompilerInvocation.cpp`'s `addDiagnosticArgs`; no upstream implementation
 or fixture is imported.
+
+## Warning capabilities (#1365)
+
+The explicit capability inventory in `c_preprocessor_warning_options.c` refuses
+effective positive requests for these families until their consumers are complete:
+
+| Warning options | Capability |
+| --- | --- |
+| `-Wconversion` | Partial: implemented constant/enum diagnostics do not cover the requested narrowing, sign and floating conversions. |
+| `-Wshadow`, `-Wsign-conversion`, `-Wunused-macros` | Recognized; the requested warning analysis is unavailable. |
+| `-Wmissing-prototypes`, `-Wmissing-variable-declarations`, `-Wstrict-prototypes`, `-Wnested-externs`, `-Wredundant-decls` | Recognized; the requested warning analysis is unavailable. |
+| `-Wundef`, `-Wcast-qual`, `-Wpointer-arith`, `-Wswitch-enum`, `-Wvla`, `-Wimplicit-fallthrough`, `-Wcomma`, `-Wfloat-equal` | Recognized; the requested warning analysis is unavailable. |
+
+For example, `-Wshadow` and `-Werror=shadow` fail with an error naming the
+original option and missing family. This is a Buster capability refusal,
+independent of source contents, warning promotion, error limits and `-w`.
+It applies before source processing in preprocessing/dependency-only,
+syntax-only and object commands, preserving existing outputs and dependencies.
+A source diagnostic pragma cannot satisfy a missing command-line capability.
+
+Disabling and demotion controls (`-Wno-shadow`, `-Wno-error=shadow`) remain
+accepted. Demotion does not cancel an enabling request. A later disable of the
+whole family or an ancestor cancels it: `-Wsign-conversion -Wno-conversion`
+succeeds, whereas `-Wconversion -Wno-sign-conversion` still requests the rest
+of the incomplete family and fails. `-Wno-everything` cancels preceding family
+requests; a subsequent explicit request enables them again.
+
+Broad positive groups retain Buster's documented delivered subset, including
+`-Wall`, `-Wextra` and `-Weverything`. `__has_warning` retains its existing
+recognition contract. This inventory covers the families named in #1365;
+recognition of other names or valued options is still separate from a promise
+of complete diagnostic coverage. Implemented subgroups such as
+`-Wconstant-conversion` and `-Wenum-conversion` remain available independently.
+
+`test-checker-driver` checks the refusal contract with independent family names,
+enables, disables, promotion/demotion and ancestor ordering on both kernels in
+`-E`, `-fsyntax-only` and `-c` modes. It also checks dependency-only commands,
+stdin, deferred multi-lane requests, option operands, post-`--` filenames,
+feature queries, source pragmas, preserved outputs and absence of new artifacts.
+These fixtures assert Buster's refusal rather than claiming Clang emits it.
 
 ## Numeric driver options
 
@@ -406,7 +449,10 @@ selects a populated archive, the source command uses the mixed/foreign path
 (#1470), so that archive gets the same lazy member selection and input ordering
 as a positional archive. Empty archives retain the direct path. The selection
 keeps `-L` directory order and static runtime mode; named DSOs on an archive
-link keep their named-search identity and as-needed state. Exact `-l:FILE`
+link keep their named-search identity and as-needed state. `-no-pie`'s
+mixed links use its runtime's startup files (`crt1.o`, `crtbegin.o`,
+`crtend.o`) and write the same position-dependent executable through the
+foreign resolver. Exact `-l:FILE`
 DSO-only links retain the direct importer's existing refusal. No new runtime or
 writer mode is introduced. `-c` and syntax checking do not resolve libraries.
 Selected nonempty `.a` files also use the mixed path when they are GNU ld scripts
@@ -439,8 +485,157 @@ Existing unsupported C code-generation and linker options remain refusals.
 clang -std=c17 -O2 -Wall -Wextra -Wno-unused-function -DBUSTER_DRIVER_MIXED_STANDALONE src/buster/compiler/c_driver_mixed_test.c -o /tmp/buster-mixed-test && /tmp/buster-mixed-test ./build/compiler clang
 ```
 
+The mixed archive regressions include a needed library's versioned reference
+(#2911). An archive between the referring library and its provider must stay
+unloaded for that reference alone. Both reader paths at one and three lanes
+check execution and defined dynamic symbols: an ordinary reference
+still extracts, and a source definition or a member loaded for another name
+still exports the unversioned definition that the library uses at runtime.
+
 The last command runs the focused original argv-level fixtures, also included
 in `test-checker-driver`: own/Clang objects, object-only links, lazy archives,
 shared libraries, runtime modes, scalar/multiple lanes and worker caps, parallel
 `.S`, positional languages, stdin, compile-only output and failure preservation.
 
+
+## -S (#1362)
+
+`-S` writes each C source's assembly where `-c` writes its object: GNU as's
+AT&T syntax, which assembles into the object `-c` writes (the assembly sink's
+form contract, below), compiled by Tier 0 or with `--tier1` as `-c` compiles it.
+Its output is `-o FILE`, standard output with `-o -`, and otherwise each
+source's base name with `.s` in the current directory, as clang names it (`-o`
+with several sources is refused, as with `-c`). `-fsyntax-only` takes precedence
+over `-S`, and `-S` over `-c`, whichever comes first, as clang's phases do. It
+runs the compile `-c` runs, its diagnostics and their promotions alike, and
+writes its file only after the unit's code and data are made: a unit with an
+error, or one the sink refuses, writes nothing and leaves an existing file as it
+was.
+
+The emission keeps each function's records for it (`CheckProgramLanes.assembly`,
+`CheckProgramCode.assembly_code`: copies of the records and branch columns in
+the emission's output arena, after branch sizing) and runs the bodies in one
+window (`--emit-window` is 0 under `-S`), whose records it keeps whole; nothing
+else changes, and a command without `-S` copies nothing.
+
+What it doesn't print yet it refuses by name, before the source is read where
+the options say so, and otherwise naming the source and the symbol:
+
+- debug information (`-g`) and inline assembly (asm statements, naked
+  functions, file-scope assembly): the design's stages 3 and 4;
+- thread-local storage, section groups, common symbols, patchable function
+  entries, multiversioned functions' resolvers, and the other refusals of the
+  sink below;
+- assembly and linker inputs beside the C sources.
+
+The unwind tables are the `.eh_frame` section's bytes with their symbolic
+relocations (`.long function-.`), as `-c`'s object has them, not CFI
+directives, which are stage 4's. `-save-temps` is still an unknown argument.
+
+The acceptance (`test-assembly-output --c-testsuite DIRECTORY --subset FILE`,
+the inventory's row): each program of `tests/c-testsuite/subset.txt`, at Tier 0
+and with `--tier1`, by this executable's `-S` and `-c`; GNU as's object of the
+text must be `-c`'s by the form contract's comparison (below), and the program
+linked from GNU as's object (`-lm` for the programs that call libm) must print
+the expected output and exit 0. All 440 compiles pass, with `--option
+-march=native` too. `--compare SOURCE` compares a source without a link (the
+repository's standalone tools, up to 4,300 lines, pass at both tiers, with
+`-march=native -O2` too), and `--option ARGUMENT` adds an argument to every
+compile.
+
+```sh
+./build/compiler -S -o main.s main.c
+./build/compiler --tier1 -S main.c -o - | less
+./build/compiler test-assembly-output --c-testsuite build/c-testsuite --subset tests/c-testsuite/subset.txt
+./build/compiler test-assembly-output --option -march=native --compare tools/ci/costs.c
+```
+
+## The assembly sink (#1362)
+
+`src/buster/compiler/assembly_output.c` prints a unit of the link
+representation as GNU as's AT&T assembly: the text `-S` writes ([the
+design](https://github.com/buster14a/buster/issues/1362#issuecomment-6721142506)'s
+stages 1 and 2), which describes the object `-c` writes. It prints from the symbolic emission
+view (`AssemblyView`), never from the object: the link's atoms, symbols and
+fixups, which hold every relocation's target and addend, and each `TEXT` atom's
+instruction records as the emission sized and encoded them, with their branch
+columns (`AssemblyCode`). It reads the encoder's form table, the matcher's suffix
+widths and the disassembler's register names, and changes none of them.
+
+The form contract, which its tests hold GNU as to:
+
+- **Instructions.** Each record in AT&T syntax, with the pseudo-prefixes GNU as
+  takes to keep the record's own encoding where its default is another one:
+  `{load}` on the integer instructions' load direction between registers (03,
+  0B ... 3B, 8A and 8B) and `{load}` or `{store}` on the vector moves', `{evex}`
+  where a VEX encoding would do, `{vex}` where an EVEX one would be GNU as's
+  choice, and `{disp32}` on a rel32 jmp or jcc to a label. A size suffix only
+  where the operands leave the width open (another form of the mnemonic reads
+  the same registers but memory or an immediate of another width: `movl $1,
+  8(%rsp)`, `fldt`, `cvtsi2sdl`, `vfpclasspdz`), as objdump prints them. A
+  record GNU as encodes otherwise whatever it is written as
+  (`assembly_escaped`: the encoder tests' `x86_assembler_prefers_another_form`
+  in 64-bit mode, such as `81 /0` with an immediate an imm8 holds) is its bytes,
+  `.byte`, after a comment naming it; never another encoding.
+- **Relocations.** A fixup is its target's name and its addend as the source
+  writes it, never a field's bytes: a PC-relative field's addend is the link's
+  plus the distance from the field to the instruction's end
+  (`x86_fixup_distance`), which the assembler takes off again. A call is
+  `name@PLT`, a GOT slot `name@GOTPCREL(%rip)`, an absolute immediate `$name`
+  (R_X86_64_32, 32S or 64 by the instruction's field), an absolute displacement
+  `name(%base,%index,scale)` (32S), and data `.quad name`, `.long name`, `.long
+  name-.`, `.quad name-.` and `@SIZE`.
+- **Labels and names.** A symbol's label at its offset, under its own name
+  (quoted where GNU as's plain names don't spell it), but an unnamed or
+  temporary symbol's and each branch target's under a local `.Lbuster.` name,
+  which no object keeps; a link with a name of that prefix, or two symbols of
+  one name, is refused.
+- **Data and sections.** Each atom in its section (its descriptor's, or its
+  class's object section, `object_class_sections`), in atom order, after
+  `.p2align` with int3 in code and zeros elsewhere, as the object writer fills
+  its gaps; rows of `.byte`, `.zero` for runs of zeros and for zero-fill
+  sections, and `.string` and `.ascii` in string pools.
+
+What the sink doesn't print yet it refuses with the reason naming it
+(`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, linked-order
+sections, common and unique symbols, code without records (inline assembly's),
+the C runtime's `.init` and `.fini` fragments, and fixups GNU as can't spell
+where they are. A view that contradicts itself (records that don't encode to
+their atom's bytes, a symbol inside an instruction, a branch without a target, a
+fixup off every field) is `ASSEMBLY_INVALID`, an internal error. An arena too
+small for the text or the tables is `ASSEMBLY_FULL`; each failure leaves both
+arenas as they were.
+
+Per record and per symbol the writer is scalar: formatting is variable-length
+text, and only `-S` runs it. Data's rows of sixteen bytes, the bulk of a large
+unit's text, go through an AVX-512 VBMI kernel (`assembly_byte_row`: the
+nibbles' digits by `vpermb`, the line's 80 bytes gathered by two more). Its
+throughput has not been measured on the 9700X.
+
+```sh
+./build/compiler test-assembly-output [--cross-check] [--keep]
+```
+
+`test-assembly-output` (`assembly_output_test.c`, the assembler's unit) builds
+units the way the emission does, from the assembler's matcher's records of Intel
+text (independent of the sink's printer), sized by branch sizing and encoded by
+the encoder: a unit of every piece the contract lists, compared piece by piece
+with its expected spellings, and a small unit compared whole; each refusal and
+invalid view by its reason; output arenas short of the text at lengths across
+it, and scratch arenas short of the tables up to the first that holds them,
+which must print the same text; and the data rows' kernel against libc's
+formatting of random rows. With `--cross-check`, GNU as assembles each printed
+unit, and its object must be `object_build`'s object of the unit by the
+assembler tests' comparator (`object_test_same_as`) after two normalizations of
+the form contract: an assembler resolves a PC-relative reference to a local
+symbol of the field's own section itself (`call helper@PLT` to a static
+function), where the object writer leaves a relocation, so the comparison applies
+those relocations to our object first; and GNU as lists an undefined
+`_GLOBAL_OFFSET_TABLE_` in an object with a GOT reference, which the comparison
+skips. Then the form sweep: every form the matcher admits for a target of every
+feature but the branches (whose targets are labels, the program fixture's), two
+random records each, printed and assembled each in a 16-byte slot of its own,
+must be the encoder's bytes; a form the installed GNU as doesn't know is counted
+as skipped, and any other message of GNU as's fails its form. With binutils
+2.42, all 4,474 forms' 8,948 records match (175 of them escaped), none skipped.
+`--keep` keeps the sources and objects and prints the program's text.

@@ -68,6 +68,40 @@ struct IrInterpreterTestNumber
     const char* name;
 };
 
+// The interpreters' value masks (interpreter_value_masks, #2758) against each IR type's bits (ir_type_bits, all of
+// them from 128 up), and a value's sign extension (interpreter_value_signed) against a 128-bit shift's.
+static void ir_interpreter_test_masks(IrInterpreterTestTally* tally)
+{
+    const InterpreterValue samples[] = {
+        { .low = 0 },
+        { .low = 1 },
+        { .low = 0x7f },
+        { .low = 0x80 },
+        { .low = 0x8000 },
+        { .low = 0x80000000u },
+        { .low = UINT64_C(0x8000000000000000) },
+        { .low = UINT64_C(0x123456789abcdef0), .high = UINT64_C(0xfedcba9876543210) },
+        { .low = 0, .high = 0x8000 },
+        { .low = UINT64_MAX, .high = UINT64_MAX },
+    };
+    for (uint32_t type = 0; type < IR_TYPE_COUNT; type += 1)
+    {
+        const uint32_t bits = ir_type_bits[type] < 128 ? ir_type_bits[type] : 128;
+        const unsigned __int128 mask = bits == 128 ? ~(unsigned __int128)0 : ((unsigned __int128)1 << bits) - 1;
+        ir_interpreter_test_expect(tally, interpreter_value_mask((uint8_t)type) == mask, "an IR type's value mask is its bits'");
+        for (uint32_t s = 0; bits != 0 && s < sizeof(samples) / sizeof(samples[0]); s += 1)
+        {
+            const InterpreterValue masked = interpreter_value_from_integer(interpreter_value_integer(samples[s]), (uint8_t)type);
+            ir_interpreter_test_expect(tally, interpreter_value_integer(masked) == (interpreter_value_integer(samples[s]) & mask), "a value made of a type keeps its bits alone");
+            const unsigned __int128 shifted = (interpreter_value_integer(samples[s]) & mask) << (128 - bits);
+            __int128 extended = 0;
+            memcpy(&extended, &shifted, sizeof(extended));
+            extended >>= 128 - bits;
+            ir_interpreter_test_expect(tally, interpreter_value_signed(samples[s], (uint8_t)type) == extended, "a value's sign extension is a 128-bit shift's");
+        }
+    }
+}
+
 static void ir_interpreter_test_numbers(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const IrInterpreterTestNumber cases[] = {
@@ -325,6 +359,73 @@ static void ir_interpreter_test_control(IrInterpreterTestTally* tally, Arena* me
     arena_pop_to(memory, mark);
 }
 
+// A wide run between single-phi blocks, with the carried value in its last position. The two arms of the first
+// join supply either a 128-bit constant or undef; all the other phis in the wide run have defined inputs.
+static void ir_interpreter_test_phi_runs(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    const uint32_t joins = 65;
+    const uint32_t width = 33;
+    const uint32_t phis = joins - 1 + width;
+    const IrSizes sizes = {
+        .instruction_count = 6 + phis + joins,
+        .block_count = 3 + joins,
+        .constant_count = 1,
+        .extra_count = 2 * phis + 2,
+        .parameter_count = 1,
+    };
+    IrFunction function = { 0 };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_interpreter_test_expect(tally, created, "mixed-width phi fixture allocation");
+    if (created)
+    {
+        const InterpreterValue bits = { .low = UINT64_C(0x1122334455667788), .high = UINT64_C(0xfedcba9876543210) };
+        function.result_type = IR_I128;
+        function.parameter_types[0] = IR_I1;
+        function.constants[0] = (IrConstant){ .low = bits.low, .high = bits.high };
+        ir_interpreter_test_instruction(&function, 0, IR_PARAM, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 1, IR_CONST, IR_I128, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 2, IR_UNDEF, IR_I128, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 3, IR_CBR, IR_VOID, 0, 1, 2);
+        function.block_offsets[1] = 4;
+        function.block_offsets[2] = 5;
+        ir_interpreter_test_instruction(&function, 4, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_BR, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        uint32_t i = 6;
+        uint32_t extra = 0;
+        uint32_t carried = 1;
+        for (uint32_t b = 3; b < function.block_count; b += 1)
+        {
+            function.block_offsets[b] = i;
+            const uint32_t count = b == 3 + joins / 2 ? width : 1;
+            for (uint32_t p = 0; p < count; p += 1)
+            {
+                ir_interpreter_test_instruction(&function, i++, IR_PHI, IR_I128, extra, b == 3 ? 2 : 1, BUSTER_IR_NONE);
+                if (b == 3)
+                {
+                    function.extra[extra++] = 2;
+                    function.extra[extra++] = 2;
+                }
+                function.extra[extra++] = b == 3 ? 1 : b - 1;
+                function.extra[extra++] = p + 1 == count ? carried : 1;
+            }
+            carried = i - 1;
+            const bool last = b + 1 == function.block_count;
+            ir_interpreter_test_instruction(&function, i++, last ? IR_RET : IR_BR, IR_VOID, last ? carried : b + 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        function.block_offsets[function.block_count] = i;
+        const IrInterpreterFunction binding = { .symbol = 71, .function = &function };
+        const IrInterpreterProgram program = { .functions = &binding, .function_count = 1 };
+        for (uint32_t arm = 0; arm < 2; arm += 1)
+        {
+            const InterpreterValue argument = { .low = arm };
+            const InterpreterResult result = ir_interpreter_test_run(tally, &program, 71, &argument, 1, 0, execution, arm != 0 ? INTERPRETER_OK : INTERPRETER_UNDEFINED, bits, "mixed-width phis carry both words and definedness");
+            ir_interpreter_test_expect(tally, result.steps == i - 1 && result.function == 0 && result.entry == i - 1, "both arms reach the final return after the same phi steps");
+        }
+    }
+    arena_pop_to(memory, mark);
+}
+
 static void ir_interpreter_test_dominance(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     const uint64_t mark = memory->length;
@@ -429,6 +530,15 @@ static void ir_interpreter_test_calls(IrInterpreterTestTally* tally, Arena* memo
         ir_interpreter_test_run(tally, &program, 10, &argument, 1, 0, execution, INTERPRETER_OK, argument, "recursive calls use explicit arena frames");
         ir_interpreter_test_run(tally, &program, 77, &argument, 1, 0, execution, INTERPRETER_OK, argument, "indirect calls resolve internal function pointer tokens");
         InterpreterOptions options = interpreter_default_options();
+        // All 129 frames are live at the base case. Their values fit in 80 KiB with the frame and symbol tables;
+        // reserving another pair of instruction-sized columns per frame exceeded it.
+        options.max_frames = 129;
+        options.max_memories = 1;
+        const uint64_t capacity = execution->capacity;
+        execution->capacity = execution->length + (80u << 10);
+        ir_interpreter_test_run(tally, &program, 10, &argument, 1, &options, execution, INTERPRETER_OK, argument, "phi-free recursion fits its bounded arena");
+        execution->capacity = capacity;
+        options = interpreter_default_options();
         options.max_frames = 8;
         ir_interpreter_test_run(tally, &program, 77, &argument, 1, &options, execution, INTERPRETER_FRAME_LIMIT, (InterpreterValue){ 0 }, "recursive call depth limit");
         options = interpreter_default_options();
@@ -895,6 +1005,67 @@ static void ir_interpreter_test_mappings(IrInterpreterTestTally* tally, Arena* m
     arena_pop_to(memory, mark);
 }
 
+// A run's symbols (IrInterpreterSymbol, #2758) where two data symbols share an entry: their addresses read in turn, each
+// filling the entry the other held, give each one's bytes, and a symbol of that entry that names nothing stays
+// INTERPRETER_SYMBOL after the entry held a symbol that names something.
+static void ir_interpreter_test_symbols(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
+{
+    const uint64_t mark = memory->length;
+    const SymbolId first = 30;
+    const uint32_t entry = ir_interpreter_symbol_entry(first);
+    SymbolId second = first + 1;
+    while (ir_interpreter_symbol_entry(second) != entry)
+    {
+        second += 1;
+    }
+    SymbolId third = second + 1;
+    while (ir_interpreter_symbol_entry(third) != entry)
+    {
+        third += 1;
+    }
+    IrFunction function = { 0 };
+    const IrSizes sizes = {
+        .instruction_count = 10,
+        .block_count = 1,
+    };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_interpreter_test_expect(tally, created, "shared symbol entry fixture allocation");
+    if (created)
+    {
+        function.result_type = IR_I64;
+        function.block_offsets[1] = 10;
+        ir_interpreter_test_instruction(&function, 0, IR_SYMBOL_ADDR, IR_PTR, first, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 1, IR_LOAD, IR_I8, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 2, IR_SYMBOL_ADDR, IR_PTR, second, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 3, IR_LOAD, IR_I8, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 4, IR_SYMBOL_ADDR, IR_PTR, first, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 5, IR_LOAD, IR_I8, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 6, IR_ADD, IR_I8, 1, 3, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 7, IR_MUL, IR_I8, 6, 5, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 8, IR_ZEXT, IR_I64, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_interpreter_test_instruction(&function, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const IrInterpreterFunction code[] = {
+            { .symbol = 10, .function = &function },
+        };
+        uint8_t bytes[2] = { 3, 5 };
+        const InterpreterBinding data[] = {
+            { .symbol = first, .bytes = &bytes[0], .size = 1, .writable = false },
+            { .symbol = second, .bytes = &bytes[1], .size = 1, .writable = false },
+        };
+        const IrInterpreterProgram program = {
+            .functions = code,
+            .function_count = 1,
+            .bindings = data,
+            .binding_count = 2,
+        };
+        ir_interpreter_test_run(tally, &program, 10, 0, 0, 0, execution, INTERPRETER_OK, (InterpreterValue){ .low = (3 + 5) * 3 }, "symbols sharing a run's entry each give their own address");
+        // The third symbol, which names nothing, at the second's place: the entry the first holds then answers for none.
+        function.a[2] = third;
+        ir_interpreter_test_run(tally, &program, 10, 0, 0, 0, execution, INTERPRETER_SYMBOL, (InterpreterValue){ 0 }, "a symbol naming nothing stays unresolved in a shared entry");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static bool ir_interpreter_test_roundtrip(const IrFunction* original, Arena* source_memory, Arena* output, Arena* scratch, IrFunction* parsed)
 {
     FILE* first = tmpfile();
@@ -1073,8 +1244,10 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
         if (memory.base != 0 && execution.base != 0)
         {
             ir_interpreter_test_simd(&tally, &memory, &execution);
+            ir_interpreter_test_masks(&tally);
             ir_interpreter_test_numbers(&tally, &memory, &execution);
             ir_interpreter_test_control(&tally, &memory, &execution);
+            ir_interpreter_test_phi_runs(&tally, &memory, &execution);
             ir_interpreter_test_dominance(&tally, &memory, &execution);
             ir_interpreter_test_calls(&tally, &memory, &execution);
             ir_interpreter_test_native_callbacks(&tally, &memory, &execution);
@@ -1086,6 +1259,7 @@ static __attribute__((unused)) int run_ir_interpreter_tests(int argc, char** arg
             ir_interpreter_test_memory(&tally, &memory, &execution);
             ir_interpreter_test_atomic_rmw(&tally, &memory, &execution);
             ir_interpreter_test_mappings(&tally, &memory, &execution);
+            ir_interpreter_test_symbols(&tally, &memory, &execution);
             ir_interpreter_test_generated(&tally, seed, count);
         }
         arena_release(&memory);

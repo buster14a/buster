@@ -5,17 +5,12 @@
 
 static int run_x86_disassembler(int argc, char** argv)
 {
-    bool scalar = false;
     bool assembly = false;
     const char* path = 0;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)
     {
-        if (strcmp(argv[i], "--scalar") == 0)
-        {
-            scalar = true;
-        }
-        else if (strcmp(argv[i], "--assembly") == 0)
+        if (strcmp(argv[i], "--assembly") == 0)
         {
             assembly = true;
         }
@@ -48,13 +43,12 @@ static int run_x86_disassembler(int argc, char** argv)
     while (valid && consumed < size)
     {
         X86Decoded decoded[1024];
-        const X86DecodeResult result = scalar ? x86_disassemble_scalar(bytes + consumed, size - consumed, decoded, BUSTER_ARRAY_LENGTH(decoded)) : x86_disassemble(bytes + consumed, size - consumed, decoded, BUSTER_ARRAY_LENGTH(decoded));
+        const X86DecodeResult result = x86_disassemble(bytes + consumed, size - consumed, decoded, BUSTER_ARRAY_LENGTH(decoded));
         char text[64 * 1024];
         uint32_t used = 0;
         for (uint64_t i = 0; i < result.count && valid; i += 1)
         {
-            const int64_t length = assembly ? (scalar ? x86_disassembly_format_scalar(&decoded[i], text + used, sizeof(text) - used - 1) : x86_disassembly_format(&decoded[i], text + used, sizeof(text) - used - 1)) :
-                                             x86_disassembly_listing(&decoded[i], bytes + consumed, (uint32_t)consumed, text + used, sizeof(text) - used - 1, scalar);
+            const int64_t length = assembly ? x86_disassembly_format(&decoded[i], text + used, sizeof(text) - used - 1) : x86_disassembly_listing(&decoded[i], bytes + consumed, (uint32_t)consumed, text + used, sizeof(text) - used - 1);
             valid = length >= 0;
             if (valid)
             {
@@ -80,7 +74,7 @@ static int run_x86_disassembler(int argc, char** argv)
     valid = valid && flushed && !ferror(stdout);
     if (!valid)
     {
-        fprintf(stderr, "disassemble: %s at byte 0x%llx; usage: disassemble [--scalar] [--assembly] raw-binary\n", status == X86_DECODE_TRUNCATED ? "truncated instruction" : status == X86_DECODE_UNSUPPORTED ? "unsupported instruction or prefix sequence" : "input or formatting failure", (unsigned long long)consumed);
+        fprintf(stderr, "disassemble: %s at byte 0x%llx; usage: disassemble [--assembly] raw-binary\n", status == X86_DECODE_TRUNCATED ? "truncated instruction" : status == X86_DECODE_UNSUPPORTED ? "unsupported instruction or prefix sequence" : "input or formatting failure", (unsigned long long)consumed);
     }
     return valid ? 0 : 1;
 }

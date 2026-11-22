@@ -27,30 +27,32 @@ Contracts 1 and 2 of
   in a u32 column, and the function's length. The caller then encodes the
   records with `x86_encode` (and its fixup ends) and adds their fixups with
   `link_add_code_fixups`.
-- **Lengths** come from `x86_measure` on the vector path and
-  `x86_measure_scalar` on the scalar path. These give the offsets and total
+- **Lengths** come from `x86_measure`, which gives the offsets and total
   length of the same valid 64-bit-mode records without a machine-code buffer
   ([the encoder's contract](x86-64-encoder.md#lengths-without-bytes)).
 
-`size_branches` is the vector path and `size_branches_scalar` its twin: the
-same phases a branch or a record at a time, the oracle of the tests, with the
-same result, rounds included. Like `x86_encode`, both are internal functions of
-the code generator: they take what `branch_sizing_validate` accepts and check
-nothing about it in their loops, as the owner decided for the encoder in #182
+`size_branches` has one implementation, the vector one: #2924 removed its
+scalar twin, `size_branches_scalar`, after
+[the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17)
+measured the vector path 6.4 to 20 times as fast in every row (two of its phase
+timings still lose on small functions: #2946). The tests' oracle is their own
+relaxation over the records. Like `x86_encode`, `size_branches` is an internal
+function of the code generator: it takes what `branch_sizing_validate` accepts
+and checks nothing about it in its loops, as the owner decided for the encoder in #182
 ("validation belongs to the tests and to debugging"). `branch_sizing_validate`
 checks the record count, then each branch in order (its index below the count
 and above the one before, its target at most the count, its form a branch's
 rel8 one, without a segment override or the fixup flag), then every record
-with `x86_validate`, and reports the first error. The two paths fail only on
-what costs nothing to check: more records than `x86_encode` takes, a function
+with `x86_validate`, and reports the first error. Sizing fails only on what
+costs nothing to check: more records than `x86_encode` takes, a function
 that could pass `INT32_MAX` bytes with every branch long, or no scratch
 memory; then the records are as they were.
 
 `branch_sizing_validate_branches` is that check without `x86_validate`: the
 record count, then each branch, with the same first error, taking records
 `x86_validate` would reject. It is for a code generator whose records are valid
-by construction, but whose branch columns the two paths still read and write by:
-an index or a target past the function would have them read and write outside
+by construction, but whose branch columns sizing still reads and writes by: an
+index or a target past the function would have it read and write outside
 the records and the offsets. The C driver's emission runs it on Tier 0's code
 and runs `x86_validate` only under `--verify` (#532). On the 9700X, `-c` of the
 frozen `sqlite3.c` writes the same object with either check. #520's stage clock
@@ -60,16 +62,16 @@ it takes 0.517 ms, 1.33 times the encoder's time. The whole compile is 5.9 ms
 (3.1%) faster against main, and 5.0 ms faster on one executable with a switch
 between the checks, in 133 M fewer user instructions ([the
 record](https://github.com/buster14a/buster-performance/tree/518da9bd10a7e23b2d84bdd783f6feb0a6bceab7/docs/measurements/branch-columns-532-2026-10-27)).
-Its vector path takes 16 branches at a time: masks of the indices that aren't
+It takes 16 branches at a time: masks of the indices that aren't
 below the count or above the branch before (the vector before's last lane, by
 `valignd`), of the targets past the count and of the forms that aren't a
-branch's, then the first lane with an error, whose error is the first of the
-scalar order (the index's, the target's, the form's). It gathers the forms only
+branch's, then the first lane with an error, whose error is the first in the
+contract's order (the index's, the target's, the form's). It gathers the forms only
 for the records below the count, and looks each up in a bitmap of the 17 forms
 over the 512 form numbers from `JMP_REL8`'s: `vpermd` takes the dword and
-`vprorvd` rotates the form's bit to bit 0. Its twin,
-`branch_sizing_validate_branches_scalar`, a branch at a time over the list of
-forms, is `branch_sizing_validate`'s first part.
+`vprorvd` rotates the form's bit to bit 0. It is `branch_sizing_validate`'s
+first part; its scalar twin, `branch_sizing_validate_branches_scalar`, went
+with #2924.
 
 ## Results
 
@@ -164,10 +166,9 @@ spans hold a branch the last round grew (found by comparing the two prefix
 buffers), takes the lowest marked branch, sums the at most 64 growths in its
 span, and if it is out of range grows it and marks its own neighbours. A
 verification round follows. Each growth costs a bounded amount of work, so
-sizing is linear in the branches whatever the function's shape. The vector
-path marks 16 neighbours at a time (their indices and ranks against the grown
-branch's, and their growths against zero, as a mask), the scalar path one at a
-time, and both mark the same branches.
+sizing is linear in the branches whatever the function's shape. It marks 16
+neighbours at a time (their indices and ranks against the grown branch's, and
+their growths against zero, as a mask).
 
 ### Ranks
 
@@ -175,15 +176,14 @@ The ranks are computed only once a branch has grown in the first round: most
 small functions settle there, with every displacement D0. The table has an
 entry per 32 records, their branch bits in the low half and the number of
 branches before them in the high half, so a rank is an entry's count plus a
-popcount of its bits below the target's. The vector path builds the bits from
-a byte map with `vptestmb` (64 records at a time), gathers each target's entry
+popcount of its bits below the target's. It builds the bits from a byte map with `vptestmb` (64 records at a time), gathers each target's entry
 as a qword (8 at a time) and counts with `vpopcntd`.
 
 ### Offsets
 
 Each record's final offset is its first round's plus P at its rank. The pass
 starts at the table entry that holds the first long branch, since the records
-before it keep theirs. The vector path takes 16 records at a time: the branches
+before it keep theirs. It takes 16 records at a time: the branches
 before them come from the table, the branches among them before each record
 from a `vpopcntd` of their branch bits masked per lane (at most 15), and a
 `vpermd` looks each one's P up among the 16 from there. No step waits for the
@@ -195,10 +195,8 @@ The lengths phase passes the whole function to `x86_measure`, which computes
 16 records' lengths at a time and writes their offsets directly. It reads
 only the template flags needed for length, shares the encoder's length rules,
 and omits machine-code assembly and stores. There is no encoded-byte scratch
-column, `BUSTER_BRANCH_SIZING_CHUNK`, or pass to rebase chunks' offsets.
-`x86_measure_scalar` gets lengths from the scalar encoder's independent form
-rules, using a bounded local buffer for one instruction. Both paths produce
-the same initial offsets and total length as `x86_encode`.
+column, `BUSTER_BRANCH_SIZING_CHUNK`, or pass to rebase chunks' offsets. It
+produces the same initial offsets and total length as `x86_encode`.
 
 The branch map, ranks, growths, prefixes and worklist still come from one push
 on the thread's scratch arena (lane.c), cut into cache-line-aligned columns,
@@ -216,8 +214,7 @@ accepts:
 ```
 
 With no `--measure`, it reports `x86_encode` of already-sized records,
-`size_branches`, `size_branches_scalar`, and `size_encode`, followed by the
-phase comparisons. `size_encode` sizes each function and immediately encodes
+`size_branches`, and `size_encode`, followed by the phase comparisons. `size_encode` sizes each function and immediately encodes
 its final records in the same timed interval; it checks that encoding returns
 the sized length. Both encoding rows produce offsets without collecting
 fixup ends. Adding the separately timed sizing and encoding rows does not
@@ -225,11 +222,11 @@ measure the combined interval.
 
 `--only ROW` selects a workload, `--measure NAME` isolates one entry or one
 path through a phase (for example, `vector-lengths`), and `--samples N`
-changes the default 21 samples. `--after-scalar MS` runs the corresponding
-scalar work for at least that many milliseconds before every recorded sample,
-outside its timed interval. A nonzero value, at most 1,000 ms, requires one
-isolated vector measurement. For `size_encode` its conditioning is scalar
-sizing followed by scalar encoding. For example, under the benchmark host's
+changes the default 21 samples. `--after-scalar MS` keeps the core busy with
+scalar work (an FNV-1a hash of the pool's records) for at least that many
+milliseconds before every recorded sample, outside its timed interval. A
+nonzero value, at most 1,000 ms, requires one isolated measurement. For
+example, under the benchmark host's
 lock and pinned to an allowed CPU:
 
 ```sh
@@ -247,11 +244,10 @@ do not describe the processor's throughput. The default phase table reports
 differences between cumulative phase medians, in both cycles and nanoseconds
 per branch.
 
-The scalar sizing path now uses `x86_measure_scalar`; the historical scalar
-path used the vector encoder for its lengths. Its old timings are therefore
-not a baseline for the speedup of the vector change. Compare the old and new
-vector paths with the same workload, harness and conditioning, and include
-`size_encode` when assessing the effect on the caller.
+Compare old and new versions with the same workload, harness and conditioning,
+and include `size_encode` when assessing the effect on the caller. The
+"Results" and "Zen 5's costs" sections below are historical: their scalar
+columns are the path #2924 removed.
 
 ## Compiled code
 
@@ -443,23 +439,23 @@ are as before.
 ## Correctness
 
 `./build/compiler test-branch-sizing` (AGENTS.md, "Branch sizing tests"): every
-function sized is one `branch_sizing_validate` accepts; both paths must give
-identical records, offsets, lengths, rounds, long branches and evaluations; and
-each result must be the reference's (relaxation over the records, each record
-re-encoded by `x86_encode_scalar`), pass `x86_validate`, have
-`x86_encode_scalar`'s offsets and length, aim every branch at its label's
+function sized is one `branch_sizing_validate` accepts, and each result must be
+the reference's (relaxation over the records, each record
+re-encoded by `x86_encode`), pass `x86_validate`, have
+`x86_encode`'s offsets and length, aim every branch at its label's
 record, and be long exactly where a rel8 can't reach. The checks cover every
 form number, `branch_sizing_validate`'s errors at every place, probes at every
 displacement around both rel8 limits over branches that grow or don't, random
 functions of every shape (with filler of every form, and with other round
 limits), chains of 1 to 1,000 links both ways, every column ending at a
-`PROT_NONE` page, and no scratch memory to spare. Both paths of
-`branch_sizing_validate_branches` must take every function sized, give each of
-`branch_sizing_validate`'s errors but `x86_validate`'s on every form number and
-at every place, and on random functions broken 0 to 3 times at random, and stay
-inside columns that end at `PROT_NONE` pages. With `--cross-check`, GNU as
+`PROT_NONE` page, and no scratch memory to spare. `branch_sizing_validate_branches`
+must take every function sized, give each of `branch_sizing_validate`'s errors
+but `x86_validate`'s on every form number and at every place, give the
+contract's first error (as the test states it, with the forms from the form
+table) on random functions broken 0 to 3 times at random, and stay inside
+columns that end at `PROT_NONE` pages. With `--cross-check`, GNU as
 relaxes 404 of the functions printed as source with labels, and its bytes must
-be `x86_encode_scalar`'s of the sized records.
+be `x86_encode`'s of the sized records.
 
 ## Next steps
 
@@ -505,9 +501,8 @@ branches that cross chunk boundaries.
 
 Disposition: retain the **eliminated** full-encode/discarded-byte handoff.
 `x86_measure` replaces old encoded scratch/chunk rebasing; the caller emits
-machine bytes only after sizing. The scalar measure's bounded one-instruction
-buffer is an independent oracle, not a retained whole-function byte stream.
-`test-branch-sizing` covers exact twins, independent fixed-point expectations,
+machine bytes only after sizing. `test-branch-sizing` covers independent
+fixed-point expectations,
 GNU as, partial/guarded arrays, exhaustion and long chains. Existing matched
 [qualification](https://github.com/buster14a/buster-performance/blob/a00d16e47b6f1090b8a0424ab0dd8cb4e6016713/docs/measurements/x86-lengths-2026-10-23/refinement.md) distinguishes
 complete sizing/encoding from kernel screens. Future source-driven selection /

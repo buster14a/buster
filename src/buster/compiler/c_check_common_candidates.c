@@ -58,6 +58,8 @@ static const uint8_t check_common_candidate_classes[128] =
     [CHECK_OP_INITIALIZE] = 1u << CHECK_COMMON_CANDIDATE_REACH,
     [CHECK_OP_CONVERT] = (1u << CHECK_COMMON_CANDIDATE_REACH) | (1u << CHECK_COMMON_CANDIDATE_RETURN),
     [CHECK_OP_CONDITION] = 1u << CHECK_COMMON_CANDIDATE_REACH,
+    [CHECK_OP_DIVIDE_ASSIGN] = 1u << CHECK_COMMON_CANDIDATE_REACH,
+    [CHECK_OP_REMAINDER_ASSIGN] = 1u << CHECK_COMMON_CANDIDATE_REACH,
     [CHECK_OP_SHIFT_LEFT_ASSIGN] = (1u << CHECK_COMMON_CANDIDATE_REACH) | (1u << CHECK_COMMON_CANDIDATE_SHIFT),
     [CHECK_OP_SHIFT_RIGHT_ASSIGN] = (1u << CHECK_COMMON_CANDIDATE_REACH) | (1u << CHECK_COMMON_CANDIDATE_SHIFT),
     [CHECK_OP_SELECT] = 1u << CHECK_COMMON_CANDIDATE_SELECT,
@@ -67,51 +69,23 @@ _Static_assert(CHECK_OP_COUNT <= BUSTER_ARRAY_LENGTH(check_common_candidate_clas
 _Static_assert(CHECK_COMMON_CANDIDATE_COUNT == 8, "one byte holds the common-warning candidate classes");
 _Static_assert(CHECK_OP_VALUE == 0, "zeroed invalid operators have no candidate classes");
 
-// The classifier's scalar twin, expressed as the consumers' operator predicates rather than reading the vector table.
-static uint8_t check_common_candidate_scalar(CheckOp op)
-{
-    const bool reach = op == CHECK_OP_INITIALIZE || op == CHECK_OP_ASSIGN || op == CHECK_OP_CONVERT || op == CHECK_OP_CALL ||
-                       op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_COMMA || op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND ||
-                       op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_DEREFERENCE ||
-                       op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT ||
-                       op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN;
-    const bool compare = op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
-    const bool returned = op == CHECK_OP_ADDRESS || op == CHECK_OP_CONVERT;
-    const bool call = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86;
-    const bool selected = op == CHECK_OP_SELECT;
-    const bool masked = op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF || op == CHECK_OP_CONDITIONAL ||
-                        op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
-    const bool discard = op == CHECK_OP_CAST || op == CHECK_OP_COMMA;
-    const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT || op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN;
-    const uint8_t result = (uint8_t)((reach ? 1u << CHECK_COMMON_CANDIDATE_REACH : 0u) |
-                                     (compare ? 1u << CHECK_COMMON_CANDIDATE_COMPARE : 0u) |
-                                     (returned ? 1u << CHECK_COMMON_CANDIDATE_RETURN : 0u) |
-                                     (call ? 1u << CHECK_COMMON_CANDIDATE_CALL : 0u) |
-                                     (selected ? 1u << CHECK_COMMON_CANDIDATE_SELECT : 0u) |
-                                     (masked ? 1u << CHECK_COMMON_CANDIDATE_MASK : 0u) |
-                                     (discard ? 1u << CHECK_COMMON_CANDIDATE_DISCARD : 0u) |
-                                     (shift ? 1u << CHECK_COMMON_CANDIDATE_SHIFT : 0u));
-    return result;
-}
-
-// Classifies every node once, 64 at a time on the vector path: four operator vectors narrowed to one byte vector, one
-// table lookup and eight mask tests, writing four adjacent 16-node masks per class. Operators outside CHECK_OP_COUNT
+// Classifies every node once, 64 at a time: four operator vectors narrowed to one byte vector, one table lookup and
+// eight mask tests, writing four adjacent 16-node masks per class. Operators outside CHECK_OP_COUNT
 // become VALUE before the lookup, so an invalid operator has no class and cannot alias a real one. The tail takes masked
 // 16-node loads and every output mask is written, including the empty classes and the last block's high zero bits.
 // No graph column other than ops is read.
-static bool check_common_candidates_build(const CheckGraph* graph, Arena* scratch, bool scalar, CheckCommonCandidates* candidates)
+static bool check_common_candidates_build(const CheckGraph* graph, Arena* scratch, CheckCommonCandidates* candidates)
 {
     const uint32_t count = graph->count;
     const CheckOp* operators = graph->ops;
     const uint32_t blocks = (uint32_t)(((uint64_t)count + 15) / 16);
     uint16_t* masks = blocks != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint16_t, (uint64_t)blocks * CHECK_COMMON_CANDIDATE_COUNT) : NULL;
     const bool valid = blocks == 0 || masks != NULL;
-    const bool vector = !BUSTER_SCALAR_PATH(scalar);
     const __m512i low = _mm512_loadu_si512(check_common_candidate_classes);
     const __m512i high = _mm512_loadu_si512(check_common_candidate_classes + 64);
     const __m512i limit = _mm512_set1_epi32(CHECK_OP_COUNT);
     uint32_t block = 0;
-    for (; valid && vector && count - block * 16 >= 64; block += 4)
+    for (; valid && count - block * 16 >= 64; block += 4)
     {
         const uint32_t first = block * 16;
         const __m512i a = _mm512_loadu_si512(operators + first);
@@ -140,32 +114,13 @@ static bool check_common_candidates_build(const CheckGraph* graph, Arena* scratc
         const uint32_t first = block * 16;
         const uint32_t live = count - first < 16 ? count - first : 16;
         const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
-        if (vector)
+        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, operators + first);
+        const __mmask16 present = _mm512_mask_cmplt_epu32_mask(lanes, ops, limit);
+        const __m512i classes = _mm512_permutex2var_epi8(low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(ops)), high);
+        for (uint32_t kind = 0; kind < CHECK_COMMON_CANDIDATE_COUNT; kind += 1)
         {
-            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, operators + first);
-            const __mmask16 present = _mm512_mask_cmplt_epu32_mask(lanes, ops, limit);
-            const __m512i classes = _mm512_permutex2var_epi8(low, _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(ops)), high);
-            for (uint32_t kind = 0; kind < CHECK_COMMON_CANDIDATE_COUNT; kind += 1)
-            {
-                masks[(uint64_t)kind * blocks + block] = (uint16_t)_mm512_mask_test_epi8_mask((__mmask64)present, classes,
-                                                                                            _mm512_set1_epi8((char)(1u << kind)));
-            }
-        }
-        else
-        {
-            uint16_t selected[CHECK_COMMON_CANDIDATE_COUNT] = { 0 };
-            for (uint32_t lane = 0; lane < live; lane += 1)
-            {
-                const uint8_t classes = check_common_candidate_scalar(operators[first + lane]);
-                for (uint32_t kind = 0; kind < CHECK_COMMON_CANDIDATE_COUNT; kind += 1)
-                {
-                    selected[kind] |= (classes & (1u << kind)) != 0 ? (uint16_t)(1u << lane) : 0u;
-                }
-            }
-            for (uint32_t kind = 0; kind < CHECK_COMMON_CANDIDATE_COUNT; kind += 1)
-            {
-                masks[(uint64_t)kind * blocks + block] = selected[kind];
-            }
+            masks[(uint64_t)kind * blocks + block] = (uint16_t)_mm512_mask_test_epi8_mask((__mmask64)present, classes,
+                                                                                        _mm512_set1_epi8((char)(1u << kind)));
         }
     }
     *candidates = (CheckCommonCandidates)
@@ -177,9 +132,8 @@ static bool check_common_candidates_build(const CheckGraph* graph, Arena* scratc
     return valid;
 }
 
-// A class's candidates in ascending node order. The scalar path keeps the original scan's oracle behavior: every node
-// is returned and the consumer applies its own tests. A vector caller uses only a successfully built index.
-static uint32_t check_common_next_candidate(const CheckCommonCandidates* candidates, CheckCommonCandidate kind, CheckCommonScan* scan, bool vector)
+// A class's candidates in ascending node order, from a successfully built index.
+static uint32_t check_common_next_candidate(const CheckCommonCandidates* candidates, CheckCommonCandidate kind, CheckCommonScan* scan)
 {
     const uint32_t count = candidates->count;
     const uint16_t* masks = candidates->masks;
@@ -192,8 +146,7 @@ static uint32_t check_common_next_candidate(const CheckCommonCandidates* candida
         {
             const uint32_t first = scan->next;
             const uint32_t live = count - first < 16 ? count - first : 16;
-            const uint32_t selected = vector ? masks[column + first / 16] :
-                                               live == 16 ? 0xffffu : (1u << live) - 1;
+            const uint32_t selected = masks[column + first / 16];
             scan->next = first + live;
             check_common_scan_list(scan, first, (__mmask16)selected);
         }

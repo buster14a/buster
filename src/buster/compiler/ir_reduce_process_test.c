@@ -190,10 +190,9 @@ static void ir_reduce_test_process(IrReduceTest* test)
                               ir_reduce_same_failure(reduced.failure, failure) && (hang ? reduced.limits != 0 : reduced.faults != 0),
                               "a crashing or hanging smaller candidate cannot replace the original failure");
         ir_reduce_test_expect(test, status <= IR_REDUCE_CACHE_LIMIT &&
-                              ir_verify_complete(&reduced.function, &scratch, true).error == IR_OK &&
-                              ir_verify_complete(&reduced.function, &scratch, false).error == IR_OK &&
+                              ir_verify_complete(&reduced.function, &scratch).error == IR_OK &&
                               scratch.length == 0 && function.instruction_count == 3 && function.constants[0].low == 7,
-                              "candidate process faults preserve both authoritative validity and the original case");
+                              "candidate process faults preserve the verifier's validity and the original case");
         arena_pop_to(&output, 0);
     }
     arena_release(&scratch);

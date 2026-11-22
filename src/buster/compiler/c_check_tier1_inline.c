@@ -92,14 +92,14 @@ static uint64_t check_tier1_inline_generations = 0;
 // are found 16 tokens at a time, as the emission's scan of them is (check_input_attributed_next), with its scalar twin.
 #define BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE 1u
 #define BUSTER_CHECK_TIER1_INLINE_ROOTED 2u
-static void check_tier1_inline_marks(const CheckProgram* program, bool scalar, uint8_t* marks)
+static void check_tier1_inline_marks(const CheckProgram* program, uint8_t* marks)
 {
     const CheckInput* input = program->input;
     const uint32_t tokens = input->token_count;
     const CheckSparseWide attributes = input->attributes;
-    for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
+    for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
     {
-        for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
+        for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
             const CheckInputAttributes* records = input->declarations[token] == token ? check_input_attributes_at(input, token) : 0;
@@ -178,7 +178,7 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
     if (marks != 0)
     {
         memset(marks, 0, (uint64_t)input->token_count + 1);
-        check_tier1_inline_marks(program, scalar, marks);
+        check_tier1_inline_marks(program, marks);
         // What else keeps an object's code: static data's references to it, an alias's of it.
         for (uint32_t k = 0; k < program->initializer_reference_count; k += 1)
         {
@@ -265,7 +265,6 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
             .sites = sites,
             .held = held,
             .released = released,
-            .scalar = scalar,
             .body_count = count,
         };
     }
@@ -325,41 +324,36 @@ static uint32_t check_tier1_inline_callee(const CheckTier1Inline* inlining, cons
     return candidate != 0 && candidate - 1 != self && inlining->ready[candidate - 1] != 0 ? candidate : 0;
 }
 
-// The candidates whose address a body's code takes (a BUSTER_TYPED_GLOBAL_ADDRESS entry of its typed stream, whose value
-// is the symbol), marked in `addressed` (cleared, a byte a body): 64 kinds a vector by a compare, then each match's
-// value; the scalar path, its twin, reads every entry.
-static void check_tier1_inline_addressed(const CheckTier1Inline* inlining, bool scalar, uint8_t* addressed)
+// One body's typed entries (`count` of `kinds` and `values`) that take an address (BUSTER_TYPED_GLOBAL_ADDRESS, whose value
+// is the symbol), each marking the candidate its symbol is in `addressed` (`candidates` of `symbol_count` symbols), or the
+// byte past the `body_count` bodies where it names none: 64 kinds a vector by a compare, then each match's value.
+static void check_tier1_inline_addressed_entries(const uint8_t* kinds, const uint64_t* values, uint32_t count, const uint32_t* candidates, uint32_t symbol_count, uint32_t body_count,
+                                                 uint8_t* addressed)
 {
-    (void)scalar;
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const uint32_t n = count - first < 64 ? count - first : 64;
+        const __mmask64 mask = n == 64 ? UINT64_MAX : (UINT64_C(1) << n) - 1;
+        const __m512i loaded = _mm512_maskz_loadu_epi8(mask, kinds + first);
+        for (__mmask64 hits = _mm512_mask_cmpeq_epi8_mask(mask, loaded, _mm512_set1_epi8(BUSTER_TYPED_GLOBAL_ADDRESS)); hits != 0; hits &= hits - 1)
+        {
+            const uint64_t symbol = values[first + (uint32_t)__builtin_ctzll(hits)];
+            const uint32_t candidate = symbol != 0 && symbol < symbol_count ? candidates[symbol] : 0;
+            addressed[candidate != 0 ? candidate - 1 : body_count] = 1;
+        }
+    }
+}
+
+// The candidates whose address a body's code takes, marked in `addressed` (cleared, a byte a body), by each ready body's
+// entries (check_tier1_inline_addressed_entries).
+static void check_tier1_inline_addressed(const CheckTier1Inline* inlining, uint8_t* addressed)
+{
     const Tier0Function* functions = inlining->lowered->functions;
     for (uint32_t b = 0; b < inlining->body_count; b += 1)
     {
         const Tier0Function* function = &functions[b];
         const uint32_t count = inlining->ready[b] != 0 ? function->count : 0;
-        if (BUSTER_SCALAR_PATH(scalar))
-        {
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint64_t symbol = function->kinds[i] == BUSTER_TYPED_GLOBAL_ADDRESS ? function->values[i] : 0;
-                const uint32_t candidate = symbol != 0 && symbol < inlining->symbol_count ? inlining->candidates[symbol] : 0;
-                addressed[candidate != 0 ? candidate - 1 : inlining->body_count] = 1;
-            }
-        }
-        else
-        {
-            for (uint32_t first = 0; first < count; first += 64)
-            {
-                const uint32_t n = count - first < 64 ? count - first : 64;
-                const __mmask64 mask = n == 64 ? UINT64_MAX : (UINT64_C(1) << n) - 1;
-                const __m512i kinds = _mm512_maskz_loadu_epi8(mask, function->kinds + first);
-                for (__mmask64 hits = _mm512_mask_cmpeq_epi8_mask(mask, kinds, _mm512_set1_epi8(BUSTER_TYPED_GLOBAL_ADDRESS)); hits != 0; hits &= hits - 1)
-                {
-                    const uint64_t symbol = function->values[first + (uint32_t)__builtin_ctzll(hits)];
-                    const uint32_t candidate = symbol != 0 && symbol < inlining->symbol_count ? inlining->candidates[symbol] : 0;
-                    addressed[candidate != 0 ? candidate - 1 : inlining->body_count] = 1;
-                }
-            }
-        }
+        check_tier1_inline_addressed_entries(function->kinds, function->values, count, inlining->candidates, inlining->symbol_count, inlining->body_count, addressed);
     }
 }
 
@@ -487,7 +481,7 @@ static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inl
         if (addressed != 0)
         {
             memset(addressed, 0, (uint64_t)count + 1);
-            check_tier1_inline_addressed(inlining, inlining->scalar, addressed);
+            check_tier1_inline_addressed(inlining, addressed);
         }
         for (uint32_t b = 0; b < count; b += 1)
         {
@@ -666,7 +660,6 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         // The growth bounds keep a pathological unit's; an always_inline callee's size is no reason to keep its call.
         IrInlineOptions options = ir_inline_options();
         options.maximum_function_growth = BUSTER_IR_INLINE_MAX_ITEMS / 4;
-        options.scalar = scalar;
         // Whatever its control flow (#2541): its blocks spliced at the call, as clang expands an always_inline function.
         options.control_flow = true;
         // The lowering and the summaries are verified, and the expansion is by SROA below where it runs, else by
@@ -704,7 +697,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     // source's or an expanded callee's (*vectors): a COPY's 16-byte pieces (#2693, ir_typed_copy_pointers) are vectors in
     // the IR but give SROA nothing of theirs to split, and on sqlite3.c they made it split sqlite3VdbeExec (+141 M
     // instructions).
-    if (aggregates || (*vectors && ir_function_has_vectors_path(&current, !scalar)))
+    if (aggregates || (*vectors && ir_function_has_vectors(&current)))
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
@@ -756,8 +749,8 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
         // for check_tier1_passes' split (#1624), else a summary of a function with one is refused and its calls stay calls
         // (the compiler's own scalar-host build, whose AVX-512 types are wider than x86-64's: #2541). Under -g with its
         // source identities, which its callers' expansions carry as an instance's (#2541 step 3).
-        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar) :
-                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered, scalar);
+        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
+                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
     }
     IrFunction expanded = lowered;
     uint32_t inlined = 0;

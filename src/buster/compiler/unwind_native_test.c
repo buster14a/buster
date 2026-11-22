@@ -45,12 +45,9 @@ static bool unwind_native_compile(const Tier0Function* function, Arena* arena, U
         // The frame Tier 0 published (unwind_tier0_frame, the C driver's reader); without a frame pointer, the
         // analyzer's descriptor too, which must be the same, and with one, which the analyzer doesn't take, its refusal.
         valid &= unwind_tier0_frame(&native->code, native->offsets, native->size, &native->unwind) == UNWIND_OK;
-        UnwindFunction analyzed[2] = { 0 };
-        const UnwindError vector = unwind_tier0(&native->code, native->offsets, native->size, &analyzed[0]);
-        const UnwindError scalar = unwind_tier0_scalar(&native->code, native->offsets, native->size, &analyzed[1]);
-        valid &= native->code.frame_pointer ? vector == UNWIND_ERROR_UNSUPPORTED && scalar == UNWIND_ERROR_UNSUPPORTED :
-                                              vector == UNWIND_OK && scalar == UNWIND_OK && memcmp(&analyzed[0], &native->unwind, sizeof(analyzed[0])) == 0 &&
-                                                  memcmp(&analyzed[1], &native->unwind, sizeof(analyzed[1])) == 0;
+        UnwindFunction analyzed = { 0 };
+        const UnwindError proven = unwind_tier0(&native->code, native->offsets, native->size, &analyzed);
+        valid &= native->code.frame_pointer ? proven == UNWIND_ERROR_UNSUPPORTED : proven == UNWIND_OK && memcmp(&analyzed, &native->unwind, sizeof(analyzed)) == 0;
     }
     return valid;
 }

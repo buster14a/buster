@@ -115,7 +115,8 @@ static bool pp_test_history_case(const PPHistoryCase* test, const char* director
             fclose(stream);
         }
     }
-    result = result && pp_same_streams(&runs[0], &runs[1], test->name) && diagnostics[0] != 0 && diagnostics[1] != 0 && strcmp(diagnostics[0], diagnostics[1]) == 0;
+    result = result && pp_same_streams(&runs[0], &runs[1], test->name) && diagnostics[0] != 0 && diagnostics[1] != 0 && strcmp(diagnostics[0], diagnostics[1]) == 0 &&
+             pp_kernel_digest_check(&runs[0], "history", test->name);
     char* oracle = result && with_clang ? pp_test_clang_diagnostics(path, directory, test->parser) : 0;
     if (result && with_clang)
     {
@@ -147,19 +148,18 @@ static bool pp_test_history_runs(void)
     uint8_t* mapping = mmap(0, 3 * page, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     bool result = mapping != MAP_FAILED && mprotect(mapping + page, page, PROT_READ | PROT_WRITE) == 0;
     PPHistoryRun vector_runs[1025];
-    PPHistoryRun scalar_runs[1025];
+    PPHistoryRun whole_runs[1025];
     static Preprocessor vector;
-    static Preprocessor scalar;
+    static Preprocessor whole;
     vector = (Preprocessor)
     {
-        .vectorized = true,
         .history_runs = vector_runs,
         .history_run_capacity = BUSTER_ARRAY_LENGTH(vector_runs),
     };
-    scalar = (Preprocessor)
+    whole = (Preprocessor)
     {
-        .history_runs = scalar_runs,
-        .history_run_capacity = BUSTER_ARRAY_LENGTH(scalar_runs),
+        .history_runs = whole_runs,
+        .history_run_capacity = BUSTER_ARRAY_LENGTH(whole_runs),
     };
     for (uint32_t length = 0; result && length <= 200; length += 1)
     {
@@ -174,15 +174,15 @@ static bool pp_test_history_runs(void)
             .count = length,
         };
         vector.history_run_count = 0;
-        scalar.history_run_count = 0;
+        whole.history_run_count = 0;
         vector.output.count = length;
-        scalar.output.count = length;
+        whole.output.count = length;
         // Splitting a copy at any lane boundary must still produce maximal runs.
         const uint32_t middle = length / 2;
         pp_history_copy(&vector, &vector.output, 0, &source, 0, middle);
         pp_history_copy(&vector, &vector.output, middle, &source, middle, length);
-        pp_history_copy(&scalar, &scalar.output, 0, &source, 0, length);
-        result = vector.history_run_count == scalar.history_run_count && memcmp(vector_runs, scalar_runs, vector.history_run_count * sizeof(PPHistoryRun)) == 0;
+        pp_history_copy(&whole, &whole.output, 0, &source, 0, length);
+        result = vector.history_run_count == whole.history_run_count && memcmp(vector_runs, whole_runs, vector.history_run_count * sizeof(PPHistoryRun)) == 0;
         uint32_t positions[256];
         uint32_t answers[256];
         uint32_t twin[256];
@@ -190,8 +190,8 @@ static bool pp_test_history_runs(void)
         {
             positions[i] = i == length + 1 ? UINT32_MAX : i;
         }
-        pp_history_lookup(&vector, positions, answers, length + 2, false);
-        pp_history_lookup(&scalar, positions, twin, length + 2, true);
+        pp_history_lookup(&vector, positions, answers, length + 2);
+        pp_history_lookup(&whole, positions, twin, length + 2);
         for (uint32_t i = 0; i < length + 2; i += 1)
         {
             result = result && answers[i] == twin[i] && answers[i] == (i < length ? origins[i] : 0);
@@ -205,12 +205,12 @@ static bool pp_test_history_runs(void)
     {
         munmap(mapping, 3 * page);
     }
-    printf("history runs: %s (201 lengths, split copies, scalar/vector queries, guard page)\n", result ? "pass" : "FAIL");
+    printf("history runs: %s (201 lengths, split and whole copies and their queries, guard page)\n", result ? "pass" : "FAIL");
     return result;
 }
 
-// Temporary origins must copy individually in the scalar reference, including overlaps in either direction. Every
-// copied origin is distinct, and untouched cells are checked too, for empty copies and lengths around 16 and 64.
+// Temporary origins must copy, including overlaps in either direction. Every copied origin is distinct, and untouched
+// cells are checked too, for empty copies and lengths around 16 and 64.
 static bool pp_test_history_copies(void)
 {
     uint32_t source_origins[96];
@@ -261,7 +261,7 @@ static bool pp_test_history_copies(void)
             }
         }
     }
-    printf("history copies: %s (66 lengths, distinct buffers and same-buffer overlaps, scalar/vector)\n", result ? "pass" : "FAIL");
+    printf("history copies: %s (66 lengths, distinct buffers and same-buffer overlaps)\n", result ? "pass" : "FAIL");
     return result;
 }
 

@@ -338,6 +338,19 @@ static const char* const parse_predeclared_typedefs[] =
 #define BUSTER_PARSE_TOKEN_PADDING 128
 // The second colon split from one preprocessing `::` token, distinct from adjacent expanded `:` tokens.
 #define BUSTER_PARSE_COLONCOLON_SECOND 0x10u
+// On an identifier, a diagnostic-only reparse retains a previously diagnosed unknown type as a specifier, even when
+// removing its invalid declarator tail changes the following token. On a semicolon, the same private bit marks a
+// discarded declarator after an attribute prefix; no user null declaration has it. Input conversion clears the
+// preprocessor's printing flag before either recovery uses it.
+#define BUSTER_PARSE_RECOVERED_TYPE 0x40u
+#define BUSTER_PARSE_DROPPED_DECLARATOR BUSTER_PARSE_RECOVERED_TYPE
+_Static_assert(BUSTER_PARSE_RECOVERED_TYPE == BUSTER_PP_NAME_LINE, "private parser flag cleared during preprocessing-token conversion");
+// Private recovery views mark an inserted suppress argument ')' when clang dropped the attribute. Its original
+// arguments still produce diagnostics; the repaired closer must not make the attribute applicable. The parser
+// does not need the preprocessor printer's NAME_SPACE/NAME_LINE flags, so conversion clears those two bits first.
+#define BUSTER_PARSE_DROPPED_ATTRIBUTE 0x20u
+#define BUSTER_PARSE_PP_FLAGS ((uint8_t)~(BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE))
+_Static_assert(BUSTER_PARSE_DROPPED_ATTRIBUTE == BUSTER_PP_NAME_SPACE, "private parser flag cleared during preprocessing-token conversion");
 // A `#pragma pack` comes just before the token (parse_mark_pragma_packs, #1127): clang reads it among a declaration's
 // specifiers, after a tag's body too, where it takes it for what may follow a type. The preprocessor's output tokens
 // never have this bit, which is a context's pending flag alone (BUSTER_PP_JOIN_LINE), so the parser's tokens take it.
@@ -358,6 +371,8 @@ struct ParseTokens
     // Each token's index in the preprocessor's output: its location and spelling are there. Both halves of a split
     // `::` have the `::`'s.
     uint32_t* sources;
+    // A contiguous PP stream is its own source map. The writable column remains reserved for a remapped stream.
+    bool identity_sources;
     // The output's flags (BUSTER_PP_START_OF_LINE, BUSTER_PP_SPACE): clang's recovery reads line breaks in places.
     uint8_t* flags;
     uint32_t count;
@@ -367,6 +382,61 @@ struct ParseTokens
     uint32_t* pragma_positions;
     uint32_t pragma_count;
 };
+
+// A grammar token's PP position, including the parser's zero sentinels before and after the unit.
+BUSTER_INLINE uint32_t parse_source_index(const ParseTokens* tokens, int64_t token)
+{
+    const uint32_t identity = (uint64_t)token < tokens->count ? (uint32_t)token : 0;
+    return tokens->identity_sources ? identity : tokens->sources[token];
+}
+
+BUSTER_INLINE __m512i parse_source_gather(const ParseTokens* tokens, __m512i indices, __mmask16 lanes)
+{
+    const __mmask16 live = _mm512_mask_cmplt_epu32_mask(lanes, indices, _mm512_set1_epi32((int32_t)tokens->count));
+    return tokens->identity_sources ? _mm512_maskz_mov_epi32(live, indices) : _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, indices, tokens->sources, 4);
+}
+
+BUSTER_INLINE __m512i parse_source_vector(const ParseTokens* tokens, uint32_t at, __mmask16 lanes)
+{
+    __m512i sources;
+    if (tokens->identity_sources)
+    {
+        const __m512i indices = _mm512_add_epi32(_mm512_set1_epi32((int32_t)at), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+        const __mmask16 live = _mm512_mask_cmplt_epu32_mask(lanes, indices, _mm512_set1_epi32((int32_t)tokens->count));
+        sources = _mm512_maskz_mov_epi32(live, indices);
+    }
+    else
+    {
+        sources = _mm512_maskz_loadu_epi32(lanes, tokens->sources + at);
+    }
+    return sources;
+}
+
+// A reduced or repaired view owns an explicit PP position for each live token it copies.
+static __attribute__((unused)) void parse_copy_sources(uint32_t* to, const ParseTokens* tokens, uint32_t at, uint32_t length)
+{
+    if (tokens->identity_sources)
+    {
+        for (uint32_t i = 0; i < length; i += 1)
+        {
+            to[i] = at + i;
+        }
+    }
+    else
+    {
+        memcpy(to, tokens->sources + at, (size_t)length * sizeof(*to));
+    }
+}
+
+static __attribute__((unused)) bool parse_sources_equal(const ParseTokens* a, const ParseTokens* b, uint32_t count)
+{
+    bool equal = true;
+    for (uint32_t i = 0; i < count && equal; i += 1)
+    {
+        equal = parse_source_index(a, i) == parse_source_index(b, i);
+    }
+    return equal;
+}
 
 // Whether the '#' at `hash` in the output, which starts a line, begins a pragma, and where the pragma's
 // BUSTER_PP_KIND_PRAGMA_END is: the preprocessor writes a pragma as '#' starting a line, the pragma's tokens (none of
@@ -777,15 +847,19 @@ struct ParseDiagnostic
     // The token where the parser knew it, where that is after `token` (a counted_by family's second error, at its
     // argument's first token, known at the type name the first is at, #1842), or 0 for `token` itself.
     uint32_t publication;
-    // A missing `;` after a declaration's declarator before what clang takes for a declaration specifier (#147): clang's
-    // ParseDeclGroup goes on as if the `;` were there, and reads the specifier as the next declaration's first.
+    // A delimiter error with a proven diagnostic-only continuation. Ordinarily this inserts a missing declaration
+    // semicolon; an attribute's missing ')' or ']' instead retains its already-read arguments (#2332).
     bool resumed;
     // A parameter's missing or unknown type. A diagnostic-only view may recover it as int after proving the whole
     // enclosing declaration structurally complete, while preserving the original tokens and error.
     bool parameter_type;
-    // An attributed block declaration with no type. `argument` is its first GNU attribute; a diagnostic-only view
-    // keeps the declarator with implicit int, as Sema does, while the original missing-type error still rejects it.
+    // An attributed block declaration with no type. `argument` is its complete leading attribute prefix; a private
+    // view uses int to retain its expression checks. C23 keeps an invalid binding, and the original error rejects it.
     bool declaration_type;
+    // A misplaced C23 list after a block declaration's GNU prefix. Its arguments and following declaration remain
+    // structurally complete; the checker drops that list's attributes after reading its argument diagnostics.
+    // Also marks an unknown type after a block's attribute prefix, diagnosed before those attributes' type checks.
+    bool attribute_prefix;
     // A balanced malformed type-name tail is removed without inserting a declaration terminator.
     bool resume_delete;
     // A rejected call retains its callee, parentheses and arguments before/after the unread one in the diagnostic
@@ -804,6 +878,17 @@ struct ParseDiagnostic
     // A later declarator of an unknown type is never declared by clang. Its failed initializer discards the list
     // from its first comma, before the diagnostic's token. Zero keeps the ordinary [token, resume_end) range.
     uint32_t resume_begin;
+    // A suppress argument's diagnostic can precede the missing delimiter repaired at this token. Zero uses token.
+    uint32_t resume_at;
+    // A missing C23 attribute-list end needs one or two brackets. Zero keeps the ordinary single-token insertion.
+    uint8_t resume_closers;
+    // A C23 list that consumes the rest of a block still needs a statement, or a declaration's semicolon, at its
+    // original '}'. This is that ParseMessage, or zero. The private view supplies ';' and retains the error separately.
+    uint8_t resume_follow;
+    // The retained attribute reader republishes this diagnostic (a missing string or invalid escape), or a malformed
+    // GNU suppress leaves a declarator error before an unread C23 list. Argument names the owning suppress token;
+    // the driver's resumed stream omits the scaffold only after the reader reports its corresponding error.
+    bool resume_attribute;
     // A case's or default's missing `:` before a `;`, which clang's recovery reads as the label's empty statement
     // (check_prefix_resume puts a `:` before the `;` and parses the view again).
     bool resume_colon;
@@ -1238,13 +1323,21 @@ struct ParseScalar
     // it read as an expression's, at the argument's first token (BUSTER_PARSE_NONE if none), and its message.
     uint32_t error_follow_token;
     uint8_t error_follow_message;
+    // Before it, where the type name's argument goes on (`counted_by(T n)`): clang's "expected ')'" at that token, its note
+    // at the group's `(`, as ParseBoundsAttribute's (#1842); BUSTER_PARSE_NONE for none, and the `(`.
+    uint32_t error_follow_paren;
+    uint32_t error_follow_open;
     uint8_t error_message;
     uint8_t error_place;
-    // Whether the error is a missing `;` that clang's recovery reads past (ParseDiagnostic.resumed).
+    // Whether the error has a proven diagnostic-only continuation (ParseDiagnostic.resumed).
     bool error_resumed;
     bool error_resume_delete;
     uint32_t error_resume_end;
     uint32_t error_resume_begin;
+    uint32_t error_resume_at;
+    uint8_t error_resume_closers;
+    uint8_t error_resume_follow;
+    bool error_resume_attribute;
     // Whether the error is a case's or default's missing `:` before a `;` (ParseDiagnostic.resume_colon).
     bool error_resume_colon;
     // Whether the error is an expression statement's missing `;` after its first name (ParseDiagnostic.probe).
@@ -1405,6 +1498,9 @@ struct ParseBracketBlock
     uint8_t opener_lanes[64];
     int8_t relative_depths[64];
     uint64_t open;
+    // Absolute depth at lane zero. A scalar block clamps a closer at zero; the bit marks that closer.
+    uint32_t base_depth;
+    uint64_t clamps;
 } __attribute__((aligned(64)));
 
 // What K2's rules read of each lane's kind and its neighbors' kinds, the same in every round, for a block
@@ -1421,14 +1517,17 @@ struct ParseRoleStatics
 } __attribute__((aligned(64)));
 
 // The working arrays of the kernels, by token, and what they found.
+typedef struct ParseBlockWork ParseBlockWork;
 typedef struct ParseKernels ParseKernels;
 struct ParseKernels
 {
     uint8_t* vkinds;
     // The depth before each token of ( [ { (K1), and each token's node depth in every group, ? : and case : included,
     // where a closer is outside its group (K1's second part).
-    uint32_t* depths;
     uint32_t* node_depths;
+    // The precedence keys encode each live lane's relative depth in their upper three bits.
+    const ParseBlockWork* depth_work;
+    bool deep_node_depths;
     uint32_t* enclosing;
     // K1's view of each block of 64 tokens, and what K2's rules read of each block's kinds.
     ParseBracketBlock* bracket_blocks;
@@ -1495,7 +1594,7 @@ struct ParseStatementStack
 // What the vector K5 reads of each token's surroundings, a bit per token for 64 tokens: whether its statement context is
 // a block (OPEN_BLOCK or OPEN_BODY), as parse_statement_event reads it (the group around the token, or for a closer of
 // ( [ { the group around its opener); and whether it is a closer whose opener follows `if`, or `while`. The vector K2
-// writes them, and parse_statement_contexts checks them.
+// writes them.
 typedef struct ParseStatementContext ParseStatementContext;
 struct ParseStatementContext
 {
@@ -2289,7 +2388,6 @@ struct ParseFound8
 
 // A block's in-block work for both passes, which depends on no other block, so that every block's runs first, many
 // blocks in flight at once, and the passes are left with the window work, whose chain from block to block is short.
-typedef struct ParseBlockWork ParseBlockWork;
 struct ParseBlockWork
 {
     // The keys relative to the block's lowest node depth * 32 (dead lanes 0xFF), and the searches' thresholds.
@@ -2693,6 +2791,7 @@ typedef enum ParseRecoveredType
 {
     PARSE_RECOVERED_TYPE_NONE,
     PARSE_RECOVERED_TYPE_UNKNOWN,
+    // A missing type after attributes: implicit int before C23, an invalid declaration's placeholder in C23.
     PARSE_RECOVERED_TYPE_IMPLICIT_INT,
 } ParseRecoveredType;
 
@@ -2791,7 +2890,7 @@ static __attribute__((unused)) const uint8_t* parse_embed_bytes(const Parser* pa
     *length = 0;
     if (pp != NULL && pp->embed_count != 0 && token < parser->tokens.count && parser->tokens.sources != NULL)
     {
-        const uint32_t source = parser->tokens.sources[token];
+        const uint32_t source = parse_source_index(&parser->tokens, token);
         if (source < pp->output.count && pp->output.kinds[source] == BUSTER_PP_KIND_EMBED && pp->output.values[source] < pp->embed_count)
         {
             const PPEmbed* embed = pp->embeds + pp->output.values[source];
@@ -2839,7 +2938,7 @@ static uint32_t parse_end_location(const Preprocessor* pp)
 // The location just after parser token `t`'s spelling.
 static uint32_t parse_token_end(const Parser* parser, const Preprocessor* pp, uint32_t t)
 {
-    const uint32_t s = parser->tokens.sources[t];
+    const uint32_t s = parse_source_index(&parser->tokens, t);
     const uint8_t kind = pp->output.kinds[s];
     const uint32_t location = pp->output.locations[s];
     uint32_t result = pp->output.values[s];
@@ -2855,7 +2954,7 @@ static uint32_t parse_token_end(const Parser* parser, const Preprocessor* pp, ui
     else if (kind == C_TOKEN_COLONCOLON)
     {
         // The first half of a split `::` ends at the second.
-        result = location + 1 + (t + 1 < parser->tokens.count && parser->tokens.sources[t + 1] == s ? 0 : 1);
+        result = location + 1 + (t + 1 < parser->tokens.count && parse_source_index(&parser->tokens, t + 1) == s ? 0 : 1);
     }
     return result;
 }
@@ -2926,7 +3025,7 @@ static uint32_t parse_expansion_context(const Preprocessor* pp, uint32_t source)
 
 static uint32_t parse_primary_end(const Parser* parser, const Preprocessor* pp, uint32_t token)
 {
-    const uint32_t source = parser->tokens.sources[token];
+    const uint32_t source = parse_source_index(&parser->tokens, token);
     uint32_t result = parse_token_end(parser, pp, token);
     uint32_t origin = pp_history_at(pp, source);
     uint32_t location = BUSTER_PP_NONE;
@@ -2969,13 +3068,13 @@ static uint32_t parse_diagnostic_location(const Parser* parser, const Preprocess
     uint32_t result;
     if (diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS && t > 0 && t - 1 < parser->tokens.count)
     {
-        const uint32_t previous = parse_expansion_context(pp, parser->tokens.sources[t - 1]);
-        const bool inside = previous != 0 && t < parser->tokens.count && previous == parse_expansion_context(pp, parser->tokens.sources[t]);
-        result = inside ? parse_primary_location(pp, parser->tokens.sources[t]) : parse_primary_end(parser, pp, t - 1);
+        const uint32_t previous = parse_expansion_context(pp, parse_source_index(&parser->tokens, t - 1));
+        const bool inside = previous != 0 && t < parser->tokens.count && previous == parse_expansion_context(pp, parse_source_index(&parser->tokens, t));
+        result = inside ? parse_primary_location(pp, parse_source_index(&parser->tokens, t)) : parse_primary_end(parser, pp, t - 1);
     }
     else if (t < parser->tokens.count)
     {
-        result = parse_primary_location(pp, parser->tokens.sources[t]);
+        result = parse_primary_location(pp, parse_source_index(&parser->tokens, t));
     }
     else
     {
@@ -2997,7 +3096,7 @@ static void parse_diagnostic_message(const Parser* parser, const Preprocessor* p
     else if (diagnostic->argument != BUSTER_PARSE_NONE && diagnostic->argument < parser->tokens.count)
     {
         const uint32_t a = diagnostic->argument;
-        const uint32_t start = pp->output.locations[parser->tokens.sources[a]];
+        const uint32_t start = pp->output.locations[parse_source_index(&parser->tokens, a)];
         const uint32_t end = parse_token_end(parser, pp, a);
         const uint8_t* bytes = pp_location_bytes(pp, start);
         const uint32_t length = bytes != 0 && end > start ? (end - start < sizeof(spelling) - 1 ? end - start : (uint32_t)sizeof(spelling) - 1) : 0;

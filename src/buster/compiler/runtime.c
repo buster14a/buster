@@ -37,6 +37,9 @@
 // crtbeginS.o, crtendS.o and crtn.o, with libgcc.a, libgcc_s.so.1 and libc.so's libc.so.6, libc_nonshared.a and
 // loader. The start object's unit and piece are there, empty, so that each object keeps its unit (RuntimeObject), and
 // nothing refers to main.
+// And for `cc -no-pie main.c -o main` (RUNTIME_KIND_NO_PIE, #1503), a dynamic PIE's libraries with the static
+// executable's position-dependent crt objects but crtbeginT.o: crt1.o, crti.o, crtbegin.o, crtend.o and crtn.o, as
+// clang's and GCC's drivers name them for a dynamically linked executable that isn't a PIE.
 // Each path probed, found or absent, is recorded with what identifies a found file (st_dev, st_ino, st_size, st_mtim
 // and st_ctim), so that the snapshot can tell with one stat per path whether it still describes the system
 // (runtime_probes_current). libgcc_s's probes are deferred until binding depends on it (runtime_deferred_probes_current).
@@ -119,6 +122,9 @@ typedef enum RuntimeKind
     RUNTIME_KIND_STATIC_PIE,
     // A shared library: crti.o, crtbeginS.o, crtendS.o and crtn.o, without a start object; a dynamic PIE's libraries.
     RUNTIME_KIND_SHARED,
+    // A position-dependent dynamic executable (-no-pie): crt1.o, crti.o, crtbegin.o, crtend.o and crtn.o; a dynamic PIE's
+    // libraries.
+    RUNTIME_KIND_NO_PIE,
     RUNTIME_KINDS,
 } RuntimeKind;
 
@@ -379,6 +385,7 @@ static __attribute__((unused)) void runtime_release(Runtime* runtime);
 // Whether a runtime of `kind` is libc.a's, with archives and without a shared library: a static executable's or a static
 // PIE's.
 static __attribute__((unused)) bool runtime_kind_is_static(RuntimeKind kind);
+static __attribute__((unused)) bool runtime_kind_is_dynamic_executable(RuntimeKind kind);
 
 // The shared libraries a link names with -l, which it binds after the program and before the C runtime's libraries,
 // where GCC's driver puts them on the link line (bind.c). -l NAME is lib<NAME>.so, or else lib<NAME>.a, in the first of
@@ -732,11 +739,20 @@ static bool runtime_version_greater(const char* a, const char* b)
 // The longest version directory's name GCC's search considers.
 #define BUSTER_RUNTIME_VERSION_BYTES 256
 
+// Whether a runtime of `kind` begins with GCC's crtbeginS.o, the file the search of GCC's installation chooses it by: a
+// position-independent image's (a dynamic PIE's, a static PIE's or a shared library's). The static executable's
+// crtbeginT.o and the position-dependent dynamic executable's crtbegin.o are found beside it, as the end objects are.
+static bool runtime_kind_begins_shared(RuntimeKind kind)
+{
+    return kind == RUNTIME_KIND_DYNAMIC || kind == RUNTIME_KIND_STATIC_PIE || kind == RUNTIME_KIND_SHARED;
+}
+
 // Finds GCC's installation under `bases`: for the first base and triple whose directory exists, the highest version
 // that has crtbeginS.o. Each version's crtbeginS.o is probed, found or not, so that the probes show one installed into a
 // version's existing directory, and in the order of the versions' names, highest first, so that they don't depend on
-// the order readdir gives them in. The chosen file's path becomes the begin object's path: every kind but -static
-// uses that very crtbeginS.o, so runtime_search must not probe it a second time and charge every snapshot load for it.
+// the order readdir gives them in. The chosen file's path becomes the begin object's path: every position-independent
+// kind uses that very crtbeginS.o (runtime_kind_begins_shared), so runtime_search must not probe it a second time and
+// charge every snapshot load for it.
 static bool runtime_find_gcc(Runtime* runtime, const char* const* bases, uint32_t base_count)
 {
     char path[BUSTER_RUNTIME_PATH_BYTES];
@@ -795,7 +811,7 @@ static bool runtime_find_gcc(Runtime* runtime, const char* const* bases, uint32_
                 {
                     snprintf(best, sizeof(best), "%s/%s", path, name);
                     snprintf(best_triple, sizeof(best_triple), "%s", path);
-                    if (runtime->kind != RUNTIME_KIND_STATIC)
+                    if (runtime_kind_begins_shared(runtime->kind))
                     {
                         runtime->object_paths[RUNTIME_OBJECT_BEGIN] = runtime_copy_path(runtime, crt);
                     }
@@ -930,6 +946,13 @@ static const char* const runtime_object_names[RUNTIME_KINDS][RUNTIME_OBJECTS] = 
         [RUNTIME_OBJECT_END] = "crtendS.o",
         [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
     },
+    [RUNTIME_KIND_NO_PIE] = {
+        [RUNTIME_OBJECT_START] = "crt1.o",
+        [RUNTIME_OBJECT_INIT_PROLOGUE] = "crti.o",
+        [RUNTIME_OBJECT_BEGIN] = "crtbegin.o",
+        [RUNTIME_OBJECT_END] = "crtend.o",
+        [RUNTIME_OBJECT_INIT_EPILOGUE] = "crtn.o",
+    },
 };
 
 // libgcc_s.so.1, which GCC's driver names as needed after libgcc.a: in GCC's installation, as -lgcc_s finds GCC's
@@ -966,7 +989,7 @@ static RuntimeError runtime_search(Runtime* runtime)
     {
         const bool gcc = i == RUNTIME_OBJECT_BEGIN || i == RUNTIME_OBJECT_END;
         const char* name = runtime_object_names[runtime->kind][i];
-        const bool selected_begin = i == RUNTIME_OBJECT_BEGIN && runtime->kind != RUNTIME_KIND_STATIC;
+        const bool selected_begin = i == RUNTIME_OBJECT_BEGIN && runtime_kind_begins_shared(runtime->kind);
         if (!selected_begin)
         {
             runtime->object_paths[i] = name != 0 ? runtime_find_file(runtime, name, gcc) : (String8){ 0 };
@@ -1149,9 +1172,11 @@ static String8 runtime_section(String8 bytes, const char* name)
 //     others, and libc.a's weak references to the bounds bind to nothing, as GNU ld and lld leave them.
 #define BUSTER_RUNTIME_KIND_BIT(kind) (1u << (kind))
 #define BUSTER_RUNTIME_EVERY_KIND ((1u << RUNTIME_KINDS) - 1)
-#define BUSTER_RUNTIME_DYNAMIC_SECTION_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_SHARED))
+#define BUSTER_RUNTIME_DYNAMIC_SECTION_KINDS                                                                                                              \
+    (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_SHARED) |                \
+     BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_NO_PIE))
 #define BUSTER_RUNTIME_STATIC_KINDS (BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_STATIC_PIE))
-#define BUSTER_RUNTIME_EXECUTABLE_KINDS (BUSTER_RUNTIME_STATIC_KINDS | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC))
+#define BUSTER_RUNTIME_EXECUTABLE_KINDS (BUSTER_RUNTIME_STATIC_KINDS | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_DYNAMIC) | BUSTER_RUNTIME_KIND_BIT(RUNTIME_KIND_NO_PIE))
 
 typedef struct RuntimeLinkerName RuntimeLinkerName;
 struct RuntimeLinkerName
@@ -1201,6 +1226,13 @@ static bool runtime_linker_name(RuntimeKind kind, const uint8_t* bytes, uint32_t
 static bool runtime_kind_is_static(RuntimeKind kind)
 {
     return (BUSTER_RUNTIME_STATIC_KINDS & BUSTER_RUNTIME_KIND_BIT(kind)) != 0;
+}
+
+// Whether a runtime of `kind` is a dynamically linked executable's, with the program interpreter: a dynamic PIE's or a
+// position-dependent one's (-no-pie).
+static bool runtime_kind_is_dynamic_executable(RuntimeKind kind)
+{
+    return kind == RUNTIME_KIND_DYNAMIC || kind == RUNTIME_KIND_NO_PIE;
 }
 
 // The runtime's first symbol that defines the name (a global or weak definition in an atom), by the definitions' index:

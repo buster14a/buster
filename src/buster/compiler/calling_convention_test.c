@@ -18,24 +18,28 @@
 //     (abi_test_fixtures says which; abi_test_build_atomics the LARGER, GROWN and refused _Atomic types and what holds
 //     them; abi_test_build_units structs' bit-fields in clang's access units, each with its LLVM type as the module
 //     keeps it, abi_test_llvm; abi_test_build_split_vectors the vectors LLVM breaks up or packs that aren't _Atomic,
-//     and records of them), at each target vector width, by the vector path and by the twin; calls whose locations
+//     and records of them), at each target vector width, by the vector path and by its fallback; calls whose locations
 //     clang and LLVM give (an UNCOUNTED argument's shift, the LARGER copies' slots, a SMALLER one's, a DEMOTED result
 //     and two that access units decide among them); the levels across calls (abi_test_ordering); the walk without
-//     scratch memory for its stack (abi_test_short_scratch); the walk over records that 2^64 paths lead to, under an
-//     alarm (abi_test_shared_records); and plain char's extension, and an enum's of a fixed underlying char, with each
-//     signedness of char (abi_test_char_signedness).
+//     scratch memory for its stack (abi_test_short_scratch); a chain of records against the table's order, by the
+//     levels and by the scan they fall back to (abi_test_reversed_chain); the walk over records that 2^64 paths lead
+//     to, under an alarm (abi_test_shared_records); and plain char's extension, and an enum's of a fixed underlying
+//     char, with each signedness of char (abi_test_char_signedness).
 //   - Worlds: random worlds of types (abi_test_world_build: scalars, vectors, complex types, _BitInts, _Atomic and
 //     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with
 //     bit-fields, arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the
-//     vector path in one table and by the twin in another, which must end up identical, and each type at each offset it
-//     can be at against the oracle: clang's classify transcribed as clang has it, its recursion over members as a stack
-//     of frames, from the type table alone (no rows). Then the twin classifies every type again at once, which must
-//     leave its table as it was: the paths share the levels, and in the rootless world (AbiTestWorld.rootless), whose
-//     levels only the waits order, this shows a type the levels took before what it reads.
+//     vector path in one table and by its fallback, the scalar classification, in another (abi_test_world_table), each
+//     alone: every classifiable type classified, each type at each offset it can be at against the oracle (clang's
+//     classify transcribed as clang has it, its recursion over members as a stack of frames, from the type table alone,
+//     no rows), and seed 1's tables against digests frozen from main, where the vector path and its twin agreed. Then
+//     each table is classified again, every type at once, which must leave it as it was (abi_test_world_again): in the
+//     rootless world (AbiTestWorld.rootless), whose levels only the waits order, this shows a type the levels took
+//     before what it reads.
 //   - Assignment: random calls over a world's types, named and variadic, with results in memory and in registers,
-//     assigned by the vector path and by the twin, which must agree on every location and total; calls around the
-//     vector path's most arguments (abi_test_long_calls); and the vector path with its argument and location columns
-//     ending at a PROT_NONE page.
+//     assigned by the vector path and by its fallback, the per-call assignment (abi_test_check_assignment), each alone:
+//     seed 1's against frozen digests, every call within the registers there are and its stack arguments in order, and
+//     a call assigned again alone as in its batch; calls around the vector path's most arguments
+//     (abi_test_long_calls); and the vector path with its argument and location columns ending at a PROT_NONE page.
 //   - With --cross-check, against clang and GCC (abi_test_cross_check): for each compiler and target vector width (16,
 //     32 and 64 bytes, the C built with -march=x86-64, x86-64-v3 and x86-64-v4), a world and --signatures signatures
 //     (400) over its passable types, random but for clang's first few, which pass runs of bit-fields where its count of
@@ -114,6 +118,144 @@ static bool abi_test_expect(AbiTestTally* tally, bool condition, const char* che
 static void abi_test_report(const char* check, AbiTestTally tally)
 {
     printf("%-34s %10" PRIu64 " checks, %" PRIu64 " failed\n", check, tally.checks, tally.failures);
+}
+
+// FNV-1a over bytes, continuing from hash.
+static uint64_t abi_test_hash(uint64_t hash, const void* data, uint64_t bytes)
+{
+    const uint8_t* byte = data;
+    for (uint64_t i = 0; i < bytes; i += 1)
+    {
+        hash = (hash ^ byte[i]) * UINT64_C(0x100000001b3);
+    }
+    return hash;
+}
+
+// The classification of the types below `count`, field by field: every type's pass bits, and a classified type's row,
+// stack bytes, alignment, storage, layout and result.
+static uint64_t abi_test_table_digest(const AbiTable* abi, uint32_t count)
+{
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    for (uint32_t index = 1; index < count; index += 1)
+    {
+        hash = abi_test_hash(hash, &abi->pass[index], sizeof(abi->pass[index]));
+        if ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0)
+        {
+            const AbiReturn result = abi->results[index];
+            hash = abi_test_hash(hash, abi->rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES);
+            hash = abi_test_hash(hash, &abi->stack_bytes[index], sizeof(abi->stack_bytes[index]));
+            hash = abi_test_hash(hash, &abi->alignment_log2[index], sizeof(abi->alignment_log2[index]));
+            hash = abi_test_hash(hash, &abi->storage[index], sizeof(abi->storage[index]));
+            hash = abi_test_hash(hash, &abi->layout[index], sizeof(abi->layout[index]));
+            hash = abi_test_hash(hash, &result.kind, sizeof(result.kind));
+            hash = abi_test_hash(hash, &result.flags, sizeof(result.flags));
+            hash = abi_test_hash(hash, &result.part_bytes, sizeof(result.part_bytes));
+            hash = abi_test_hash(hash, result.registers, sizeof(result.registers));
+        }
+    }
+    return hash;
+}
+
+// The fallbacks the vector paths keep until they are vectorized (#2924), checked as the vector paths are and never
+// against them: abi_assign with every scratch arena of the thread exhausted takes the per-call assignment; the scalar
+// classification, which abi_classify takes when its fold has no room (and which needs scratch of its own, for
+// abi_wide_alignment's walk), is driven here as abi_classify_all's scan drives it.
+typedef struct AbiTestStarved AbiTestStarved;
+struct AbiTestStarved
+{
+    Arena saved[BUSTER_SCRATCH_ARENA_COUNT];
+};
+
+static AbiTestStarved abi_test_starve(void)
+{
+    AbiTestStarved result;
+    for (uint32_t i = 0; i < BUSTER_SCRATCH_ARENA_COUNT; i += 1)
+    {
+        result.saved[i] = thread_context.scratch[i];
+        thread_context.scratch[i] = arena_reserve(4096);
+        thread_context.scratch[i].capacity = thread_context.scratch[i].length;
+    }
+    return result;
+}
+
+static void abi_test_feed(AbiTestStarved starved)
+{
+    for (uint32_t i = 0; i < BUSTER_SCRATCH_ARENA_COUNT; i += 1)
+    {
+        arena_release(&thread_context.scratch[i]);
+        thread_context.scratch[i] = starved.saved[i];
+    }
+}
+
+// Every classifiable type below the table's rows by the scalar classification, a batch at a time of the types whose
+// dependencies are classified, as abi_classify_all's scan takes them. Returns the types classified.
+static uint32_t abi_test_classify_all_fallback(AbiTable* abi, const TypeTable* table)
+{
+    const uint32_t count = table->types.count < abi->capacity ? table->types.count : abi->capacity;
+    TypeId* ready = malloc(sizeof(TypeId) * (count + 1));
+    bool all = abi->larger != 0;
+    for (uint32_t index = 1; index < count; index += 1)
+    {
+        all = all || ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_is_larger_root(table, index));
+    }
+    uint32_t classified = 0;
+    bool progress = ready != 0;
+    while (progress)
+    {
+        uint32_t ready_count = 0;
+        for (uint32_t index = 1; index < count; index += 1)
+        {
+            if ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_dependencies_classified(abi, table, index, all))
+            {
+                ready[ready_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+                ready_count += 1;
+            }
+        }
+        abi_classify_scalar(abi, table, ready, ready_count);
+        classified += ready_count;
+        progress = ready_count != 0;
+    }
+    free(ready);
+    return classified;
+}
+
+static void abi_test_classify_fallback(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
+{
+    abi_classify_scalar(abi, table, types, count);
+}
+
+static void abi_test_assign_starved(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
+{
+    const AbiTestStarved starved = abi_test_starve();
+    abi_assign(abi, signatures, locations, calls);
+    abi_test_feed(starved);
+}
+
+// An assignment's calls and locations, field by field.
+static uint64_t abi_test_assignment_digest(const AbiCall* calls, uint32_t call_count, const AbiLocation* locations, uint64_t location_count)
+{
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    for (uint32_t c = 0; c < call_count; c += 1)
+    {
+        const AbiCall call = calls[c];
+        hash = abi_test_hash(hash, &call.stack_bytes, sizeof(call.stack_bytes));
+        hash = abi_test_hash(hash, &call.stack_alignment_log2, sizeof(call.stack_alignment_log2));
+        hash = abi_test_hash(hash, &call.integer_registers, sizeof(call.integer_registers));
+        hash = abi_test_hash(hash, &call.vector_registers, sizeof(call.vector_registers));
+        hash = abi_test_hash(hash, &call.result.kind, sizeof(call.result.kind));
+        hash = abi_test_hash(hash, &call.result.flags, sizeof(call.result.flags));
+        hash = abi_test_hash(hash, &call.result.part_bytes, sizeof(call.result.part_bytes));
+        hash = abi_test_hash(hash, call.result.registers, sizeof(call.result.registers));
+    }
+    for (uint64_t l = 0; l < location_count; l += 1)
+    {
+        const AbiLocation location = locations[l];
+        hash = abi_test_hash(hash, &location.stack_offset, sizeof(location.stack_offset));
+        hash = abi_test_hash(hash, location.registers, sizeof(location.registers));
+        hash = abi_test_hash(hash, &location.kind, sizeof(location.kind));
+        hash = abi_test_hash(hash, &location.flags, sizeof(location.flags));
+    }
+    return hash;
 }
 
 // A type table with room for `types` types, and a calling convention table over it, for `vector_bytes`.
@@ -2370,7 +2512,7 @@ static void abi_test_ordering(AbiTestTally* tally)
                 }
                 else
                 {
-                    abi_classify_all_scalar(&tables.abi, table);
+                    abi_test_classify_all_fallback(&tables.abi, table);
                 }
                 const uint32_t refused = BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED;
                 const uint32_t large_pass = tables.abi.pass[large >> BUSTER_TYPE_INDEX_SHIFT];
@@ -2381,7 +2523,7 @@ static void abi_test_ordering(AbiTestTally* tally)
                 const uint32_t zero_pass = tables.abi.pass[atomic_zero >> BUSTER_TYPE_INDEX_SHIFT];
                 const uint32_t zero_bytes = tables.abi.stack_bytes[atomic_zero >> BUSTER_TYPE_INDEX_SHIFT];
                 char detail[160];
-                snprintf(detail, sizeof(detail), "ordering, call %u (%s): pass %08x, %08x, %08x, %08x, stack %u, %u, %u", call, path == 0 ? "vector" : "scalar",
+                snprintf(detail, sizeof(detail), "ordering, call %u (%s): pass %08x, %08x, %08x, %08x, stack %u, %u, %u", call, path == 0 ? "vector" : "fallback",
                          large_pass, open_pass, wide_pass, zero_pass, open_bytes, wide_bytes, zero_bytes);
                 const bool large_right = large == 0 || (large_pass & refused) == refused;
                 const bool open_right = atomic_open == 0 || ((open_pass & refused) == BUSTER_ABI_PASS_LARGER && open_bytes == 16);
@@ -2433,7 +2575,7 @@ static void abi_test_short_scratch(AbiTestTally* tally)
                 }
                 else
                 {
-                    abi_classify_all_scalar(&tables.abi, table);
+                    abi_test_classify_all_fallback(&tables.abi, table);
                 }
                 arena_release(&thread_context.scratch[0]);
                 thread_context.scratch[0] = saved;
@@ -2450,12 +2592,100 @@ static void abi_test_short_scratch(AbiTestTally* tally)
                 refused = refused || unsupported;
                 char detail[160];
                 snprintf(detail, sizeof(detail), "short scratch, %" PRIu64 " bytes (%s): every type classified %d, pass %08x, stack %u", room,
-                         path == 0 ? "vector" : "scalar", every, pass, bytes);
+                         path == 0 ? "vector" : "fallback", every, pass, bytes);
                 abi_test_expect(tally, started && every && (exact || unsupported), "fixtures", detail);
                 abi_test_tables_close(&tables);
             }
         }
-        abi_test_expect(tally, walked && refused, "fixtures", path == 0 ? "short scratch (vector): no room gave both" : "short scratch (scalar): no room gave both");
+        abi_test_expect(tally, walked && refused, "fixtures", path == 0 ? "short scratch (vector): no room gave both" : "short scratch (fallback): no room gave both");
+    }
+}
+
+// The records of abi_test_reversed_chain: more than the scan classifies in a pass of its own, 64 being the most a
+// mutant that stops it there leaves classified.
+#define BUSTER_ABI_TEST_REVERSED_LINKS 80
+
+// A chain of records against the table's order: tags R0 to R79 made first, then completed from the last, R79 {int} and
+// Ri {Ri+1}, so that each needs the one after it, whose index is larger. abi_classify_all's levels order them, and its
+// scan, which it falls back to when scratch can't hold its columns (here 64 bytes), takes a pass over the table per
+// link; then the scan as the test drives it. By each route every type must be classified, and every link be INTEGER,
+// NO_CLASS, in a register, 4 bytes as {int} is.
+static void abi_test_reversed_chain(AbiTestTally* tally)
+{
+    for (uint32_t route = 0; route < 3; route += 1)
+    {
+        AbiTestTables tables;
+        if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+        {
+            TypeTable* table = &tables.types.table;
+            AbiTestBuilder builder = {
+                .table = table,
+                .expectations = 0,
+                .count = 0,
+                .next_name = 31000,
+                .vector_bytes = 16,
+            };
+            const bool started = abi_test_tables_start(&tables, 16);
+            TypeId links[BUSTER_ABI_TEST_REVERSED_LINKS];
+            bool made = true;
+            for (uint32_t i = 0; i < BUSTER_ABI_TEST_REVERSED_LINKS; i += 1)
+            {
+                builder.next_name += 1;
+                links[i] = type_tag(table, BUSTER_TYPE_KIND_STRUCT, builder.next_name);
+                made = made && links[i] != 0;
+            }
+            const TypeRecordAttributes attributes = {
+                .packed = false,
+                .pack_log2 = 0,
+                .alignment_log2 = 0,
+            };
+            for (uint32_t i = BUSTER_ABI_TEST_REVERSED_LINKS; made && i > 0; i -= 1)
+            {
+                const TypeId member_type = i == BUSTER_ABI_TEST_REVERSED_LINKS ? BUSTER_TYPE_INT : links[i];
+                const TypeMember member = abi_test_member(&builder, member_type);
+                made = type_complete_record(table, links[i - 1], &member, 1, attributes);
+            }
+            if (route == 0)
+            {
+                abi_classify_all(&tables.abi, table);
+            }
+            else if (route == 1)
+            {
+                const Arena saved = thread_context.scratch[0];
+                thread_context.scratch[0] = arena_reserve(64);
+                abi_classify_all(&tables.abi, table);
+                arena_release(&thread_context.scratch[0]);
+                thread_context.scratch[0] = saved;
+            }
+            else
+            {
+                abi_test_classify_all_fallback(&tables.abi, table);
+            }
+            bool every = true;
+            for (uint32_t index = 1; index < table->types.count; index += 1)
+            {
+                every = every && abi_classifiable(table, index) == ((tables.abi.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0);
+            }
+            uint32_t wrong = 0;
+            for (uint32_t i = 0; made && i < BUSTER_ABI_TEST_REVERSED_LINKS; i += 1)
+            {
+                const uint32_t index = links[i] >> BUSTER_TYPE_INDEX_SHIFT;
+                const bool right = tables.abi.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES] == BUSTER_ABI_TEST_INTEGER_ONLY &&
+                                   (tables.abi.pass[index] & (BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_MEMORY)) == BUSTER_ABI_PASS_LOW_INTEGER &&
+                                   table->types.size[index] == 4;
+                wrong += right ? 0 : 1;
+            }
+            const char* names[3] = {
+                "abi_classify_all",
+                "abi_classify_all's scan, 64 bytes of scratch",
+                "the test's scan",
+            };
+            char detail[160];
+            snprintf(detail, sizeof(detail), "a chain of %u records against the table's order, by %s: every type classified %d, %u links wrong",
+                     BUSTER_ABI_TEST_REVERSED_LINKS, names[route], every, wrong);
+            abi_test_expect(tally, started && made && every && wrong == 0, "fixtures", detail);
+            abi_test_tables_close(&tables);
+        }
     }
 }
 
@@ -2513,7 +2743,7 @@ static void abi_test_shared_records(AbiTestTally* tally)
             }
             else
             {
-                abi_classify_all_scalar(&tables.abi, table);
+                abi_test_classify_all_fallback(&tables.abi, table);
             }
             alarm(0);
             bool every = true;
@@ -2525,7 +2755,7 @@ static void abi_test_shared_records(AbiTestTally* tally)
             const uint32_t bytes = tables.abi.stack_bytes[atomic >> BUSTER_TYPE_INDEX_SHIFT];
             const bool larger = (pass & (BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED)) == BUSTER_ABI_PASS_LARGER && bytes == 16;
             char detail[160];
-            snprintf(detail, sizeof(detail), "shared records (%s): every type classified %d, pass %08x, stack %u", path == 0 ? "vector" : "scalar", every, pass,
+            snprintf(detail, sizeof(detail), "shared records (%s): every type classified %d, pass %08x, stack %u", path == 0 ? "vector" : "fallback", every, pass,
                      bytes);
             abi_test_expect(tally, started && every && larger, "fixtures", detail);
             abi_test_tables_close(&tables);
@@ -2666,7 +2896,7 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     }
     else
     {
-        abi_classify_all_scalar(&tables->abi, table);
+        abi_test_classify_all_fallback(&tables->abi, table);
     }
     const uint8_t none = BUSTER_ABI_REGISTER_NONE;
     const TypeId L = BUSTER_TYPE_LONG;
@@ -3385,13 +3615,13 @@ static void abi_test_calls(AbiTestTally* tally, AbiTestTables* tables, uint32_t 
     }
     else
     {
-        abi_assign_scalar(&tables->abi, signatures, locations, calls);
+        abi_test_assign_starved(&tables->abi, signatures, locations, calls);
     }
     char detail[160];
     const uint32_t checked = BUSTER_ARRAY_LENGTH(arguments);
     for (uint32_t i = 0; i < checked; i += 1)
     {
-        snprintf(detail, sizeof(detail), "argument %u (%s, %u bytes): kind %u, registers %02x %02x, flags %u, offset %u", i, vector ? "vector" : "scalar", vector_bytes,
+        snprintf(detail, sizeof(detail), "argument %u (%s, %u bytes): kind %u, registers %02x %02x, flags %u, offset %u", i, vector ? "vector" : "fallback", vector_bytes,
                  locations[i].kind, locations[i].registers[0], locations[i].registers[1], locations[i].flags, locations[i].stack_offset);
         abi_test_expect(tally, abi_test_same_location(locations[i], expected[i]), "fixtures", detail);
     }
@@ -3521,7 +3751,7 @@ static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* 
     }
     else
     {
-        abi_classify_all_scalar(&tables->abi, table);
+        abi_test_classify_all_fallback(&tables->abi, table);
     }
     for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements); e += 1)
     {
@@ -3560,7 +3790,7 @@ static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* 
             }
             else
             {
-                abi_assign_scalar(&tables->abi, signatures, locations, calls);
+                abi_test_assign_starved(&tables->abi, signatures, locations, calls);
             }
             const uint32_t index = atomics[e][n] >> BUSTER_TYPE_INDEX_SHIFT;
             const uint32_t pass = tables->abi.pass[index];
@@ -3575,7 +3805,7 @@ static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* 
             char detail[256];
             snprintf(detail, sizeof(detail),
                      "atomic vector overflow: element %u, length %u, %u-byte vectors, %s: slot %u, alignment %u; offsets %u/%u/%u; call %u bytes, alignment %u, registers %u/%u",
-                     e, lengths[e][n], vector_bytes, vector ? "vector" : "scalar", tables->abi.stack_bytes[index],
+                     e, lengths[e][n], vector_bytes, vector ? "vector" : "fallback", tables->abi.stack_bytes[index],
                      (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT, locations[14].stack_offset, locations[15].stack_offset,
                      locations[16].stack_offset, calls[0].stack_bytes, calls[0].stack_alignment_log2, calls[0].integer_registers, calls[0].vector_registers);
             abi_test_expect(tally, supported && slots && totals, "fixtures", detail);
@@ -3700,12 +3930,14 @@ static bool abi_test_builtin_rows(void)
                             if (view.types.count > BUSTER_TYPE_BUILTIN_COUNT)
                             {
                                 const uint32_t classified = abi_classify_all(&got, &view);
-                                abi_classify_scalar(&oracle, &view, &pointer, 1);
+                                // A pointer is passed and returned as an unsigned long is: its columns are the builtin's,
+                                // which abi_test_builtin_recompute computed.
                                 const uint32_t index = pointer >> BUSTER_TYPE_INDEX_SHIFT;
-                                const bool same = memcmp(got.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, oracle.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES) == 0 &&
-                                                  got.pass[index] == oracle.pass[index] && got.stack_bytes[index] == oracle.stack_bytes[index] &&
-                                                  got.alignment_log2[index] == oracle.alignment_log2[index] && got.storage[index] == oracle.storage[index] &&
-                                                  got.layout[index] == oracle.layout[index] && memcmp(&got.results[index], &oracle.results[index], sizeof(AbiReturn)) == 0;
+                                const uint32_t integer = BUSTER_TYPE_ULONG >> BUSTER_TYPE_INDEX_SHIFT;
+                                const bool same = memcmp(got.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, oracle.rows + (uint64_t)integer * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES) == 0 &&
+                                                  got.pass[index] == oracle.pass[integer] && got.stack_bytes[index] == oracle.stack_bytes[integer] &&
+                                                  got.alignment_log2[index] == oracle.alignment_log2[integer] && got.storage[index] == oracle.storage[integer] &&
+                                                  got.layout[index] == oracle.layout[integer] && memcmp(&got.results[index], &oracle.results[integer], sizeof(AbiReturn)) == 0;
                                 abi_test_expect(&tally, classified == 1 && same && abi_classify_all(&got, &view) == 0, "builtins", "the first derived row still uses the dependency scheduler exactly once");
                             }
                         }
@@ -3786,7 +4018,7 @@ static void abi_test_char_signedness(AbiTestTally* tally)
                 }
                 else if (started)
                 {
-                    abi_classify_all_scalar(&tables.abi, table);
+                    abi_test_classify_all_fallback(&tables.abi, table);
                 }
                 const uint32_t counts[] = {
                     BUSTER_ARRAY_LENGTH(types),
@@ -3813,7 +4045,7 @@ static void abi_test_char_signedness(AbiTestTally* tally)
                 }
                 else if (started)
                 {
-                    abi_assign_scalar(&tables.abi, signatures, locations, calls);
+                    abi_test_assign_starved(&tables.abi, signatures, locations, calls);
                 }
                 for (uint32_t i = 0; started && i < BUSTER_ARRAY_LENGTH(types); i += 1)
                 {
@@ -3828,7 +4060,7 @@ static void abi_test_char_signedness(AbiTestTally* tally)
                                       (locations[i].flags & extension) == flag;
                     char detail[192];
                     snprintf(detail, sizeof(detail), "%s with %s char (%s): pass %08x, result flags %02x, location kind %u flags %02x", names[i],
-                             unsigned_char != 0 ? "unsigned" : "signed", path == 0 ? "vector" : "scalar", pass, tables.abi.results[index].flags,
+                             unsigned_char != 0 ? "unsigned" : "signed", path == 0 ? "vector" : "fallback", pass, tables.abi.results[index].flags,
                              locations[i].kind, locations[i].flags);
                     abi_test_expect(tally, same, "fixtures", detail);
                 }
@@ -3847,8 +4079,8 @@ static void abi_test_char_signedness(AbiTestTally* tally)
 
 // Deep graphs in both type-ID orders, with completion and classification split across calls. The unions' first
 // dependency finishes before their second, and shared/duplicate members exercise resuming and relinking waiters.
-// Every record still has the independent ABI of one int; neither twin agreement nor a repeated schedule proves that.
-static bool abi_test_dependency_graph(uint32_t count, bool reverse, bool scalar)
+// Every record still has the independent ABI of one int; neither the routes' agreement nor a repeated schedule proves that.
+static bool abi_test_dependency_graph(uint32_t count, bool reverse, bool fallback)
 {
     AbiTestTables tables;
     TypeId* records = malloc(((uint64_t)count + 1) * sizeof(TypeId));
@@ -3880,7 +4112,7 @@ static bool abi_test_dependency_graph(uint32_t count, bool reverse, bool scalar)
             struct timespec before = { 0 };
             struct timespec after = { 0 };
             valid = valid && (!deep || clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &before) == 0);
-            const uint32_t classified = valid ? (scalar ? abi_classify_all_scalar(&tables.abi, table) : abi_classify_all(&tables.abi, table)) : 0;
+            const uint32_t classified = valid ? (fallback ? abi_test_classify_all_fallback(&tables.abi, table) : abi_classify_all(&tables.abi, table)) : 0;
             if (deep)
             {
                 valid = clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &after) == 0 && valid;
@@ -3895,7 +4127,7 @@ static bool abi_test_dependency_graph(uint32_t count, bool reverse, bool scalar)
             }
             valid = valid && classified == end - completed;
             completed = end;
-            valid = valid && (scalar ? abi_classify_all_scalar(&tables.abi, table) : abi_classify_all(&tables.abi, table)) == 0;
+            valid = valid && (fallback ? abi_test_classify_all_fallback(&tables.abi, table) : abi_classify_all(&tables.abi, table)) == 0;
             for (uint32_t i = 0; valid && i < count; i += 1)
             {
                 const uint32_t index = records[i] >> BUSTER_TYPE_INDEX_SHIFT;
@@ -3923,7 +4155,7 @@ static bool abi_test_dependency_graph(uint32_t count, bool reverse, bool scalar)
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_TYPES
 // Wide records used to share one frontier without waiting for their members when no LARGER type existed. Both ID
 // orders must still have the independent memory ABI after scheduling the full dependency chain (#629 review).
-static bool abi_test_wide_dependencies(bool reverse, bool scalar)
+static bool abi_test_wide_dependencies(bool reverse, bool fallback)
 {
     const uint32_t count = 4096;
     AbiTestTables tables;
@@ -3946,7 +4178,7 @@ static bool abi_test_wide_dependencies(bool reverse, bool scalar)
             previous = records[i];
         }
         valid = valid && abi_test_tables_start(&tables, 16);
-        const uint32_t classified = valid ? (scalar ? abi_classify_all_scalar(&tables.abi, table) : abi_classify_all(&tables.abi, table)) : 0;
+        const uint32_t classified = valid ? (fallback ? abi_test_classify_all_fallback(&tables.abi, table) : abi_classify_all(&tables.abi, table)) : 0;
         valid = valid && classified == count + 1;
         for (uint32_t i = 0; valid && i < count; i += 1)
         {
@@ -3984,14 +4216,16 @@ static bool abi_test_dependencies(void)
     }
     // A five-CPU-second classification budget excludes construction, verification and time descheduled on a busy
     // runner. These cases complete the full chain before classification; smaller cases above check incremental
-    // completion. A separate generous wall watchdog bounds a hung child, as the shared-record fixtures do.
+    // completion. A separate generous wall watchdog bounds a hung child, as the shared-record fixtures do. The budget is
+    // the scheduler's (linear in types and members), so the chain takes the vector route alone, in both ID orders: the
+    // fallback's scan, like abi_classify_all's own when its columns don't fit, has no linear bound.
     for (uint32_t mode = 0; mode < 2; mode += 1)
     {
         const pid_t child = fork();
         if (child == 0)
         {
             alarm(60);
-            _exit(abi_test_dependency_graph(131072, mode != 0, mode != 0) ? 0 : 1);
+            _exit(abi_test_dependency_graph(131072, mode != 0, false) ? 0 : 1);
         }
         int status = 0;
         pid_t waited;
@@ -4045,7 +4279,7 @@ static bool abi_test_fixtures(void)
                 }
                 else
                 {
-                    abi_classify_all_scalar(&tables.abi, &tables.types.table);
+                    abi_test_classify_all_fallback(&tables.abi, &tables.types.table);
                 }
                 for (uint32_t i = 0; i < builder.count; i += 1)
                 {
@@ -4066,7 +4300,7 @@ static bool abi_test_fixtures(void)
                                       (!e.llvm || (storage == e.storage && leaves == e.leaves));
                     snprintf(detail, sizeof(detail),
                              "%s (%u bytes, %s): classes %02x/%02x, pass %08x, stack %u, result %u (%02x %02x %02x, flags %02x, part %u), storage %02x, leaves %08x",
-                             e.name, widths[w], path == 0 ? "vector" : "scalar", abi_classes(&tables.abi, e.type, true), abi_classes(&tables.abi, e.type, false), pass,
+                             e.name, widths[w], path == 0 ? "vector" : "fallback", abi_classes(&tables.abi, e.type, true), abi_classes(&tables.abi, e.type, false), pass,
                              classified ? tables.abi.stack_bytes[index] : 0, result.kind, result.registers[0], result.registers[1], result.registers[2], result.flags,
                              result.part_bytes, storage, leaves);
                     abi_test_expect(&tally, same, "fixtures", detail);
@@ -4079,6 +4313,7 @@ static bool abi_test_fixtures(void)
     }
     abi_test_ordering(&tally);
     abi_test_short_scratch(&tally);
+    abi_test_reversed_chain(&tally);
     abi_test_shared_records(&tally);
     abi_test_char_signedness(&tally);
     abi_test_report("fixtures", tally);
@@ -4832,8 +5067,115 @@ static void abi_test_dump(const TypeTable* table, const AbiTable* abi, uint32_t 
     }
 }
 
-// Every classifiable type, by the vector path and by the twin, at each vector width: identical tables, and every type at
-// every offset it can be at the oracle's classes. Three clang worlds, at 16, 32 and 64 bytes, a GCC one at 16, and a
+// Seed 1's worlds at the default count, round by round: each table's digest (abi_test_table_digest) as classified,
+// frozen from main at bd197b2a6, where abi_classify_all and its twin gave the same tables and the oracle passed.
+static const uint64_t abi_test_world_digests[5] = {
+    UINT64_C(0x0b6c32320d8e65d4),
+    UINT64_C(0x128c895a97942873),
+    UINT64_C(0xa9f116f420919e98),
+    UINT64_C(0xb16a8fe94d267ada),
+    UINT64_C(0x4fdc9c850ff46f1c),
+};
+
+// A world's table by one route, alone: every classifiable type classified and no other, every offset's classes and
+// the unnamed ones against the oracle, and the seed 1 table's digest against the frozen one. Returns the offsets
+// compared.
+static uint64_t abi_test_world_table(AbiTestTally* tally, AbiTestWorld* world, const AbiTable* abi, uint32_t width, AbiTestFrame* frames, const uint64_t* frozen, const char* route)
+{
+    const TypeTable* table = &world->types.test.table;
+    char detail[256];
+    uint64_t compared = 0;
+    if (frozen != 0)
+    {
+        const uint64_t digest = abi_test_table_digest(abi, table->types.count);
+        snprintf(detail, sizeof(detail), "%s: the table's digest %016" PRIx64 ", frozen %016" PRIx64, route, digest, *frozen);
+        abi_test_expect(tally, digest == *frozen, "worlds", detail);
+    }
+    for (uint32_t index = 1; index < table->types.count; index += 1)
+    {
+        const bool classified = (abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
+        snprintf(detail, sizeof(detail), "%s: type %u (kind %u) classified %u, classifiable %u", route, index, table->types.kind[index], classified,
+                 abi_classifiable(table, index));
+        abi_test_expect(tally, classified == abi_classifiable(table, index), "worlds", detail);
+        const uint64_t size = table->types.size[abi_resolved_index(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT)];
+        for (uint32_t offset = 0; classified && offset < BUSTER_ABI_ROW_BYTES; offset += 1)
+        {
+            if (offset == 0 || offset + size <= BUSTER_ABI_ROW_BYTES)
+            {
+                const AbiClasses expected = abi_test_classify(table, width, true, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, (uint64_t)offset * 8, frames);
+                const AbiClasses got = abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES + offset];
+                if (got != expected)
+                {
+                    const uint64_t length = world->types.arena.length;
+                    const String8 printed = type_print(table, &world->types.arena, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, (String8){ 0 }, &world->types.names, 0);
+                    snprintf(detail, sizeof(detail), "%s: %.*s (type %u, %" PRIu64 " bytes) at %u, %u-byte vectors: %02x, the oracle %02x", route, (int)printed.length,
+                             printed.pointer, index, size, offset, width, got, expected);
+                    if (tally->failures < BUSTER_ABI_TEST_REPORTED && (table->types.kind[index] == BUSTER_TYPE_KIND_STRUCT || table->types.kind[index] == BUSTER_TYPE_KIND_UNION))
+                    {
+                        TypeTestText text = {
+                            .arena = &world->text_arena,
+                            .valid = true,
+                        };
+                        type_test_write_tag(&world->types, &text, table->types.index[index]);
+                        fprintf(stderr, "%.*s", (int)text.length, text.bytes);
+                        arena_pop_to(&world->text_arena, 0);
+                        abi_test_dump(table, abi, index);
+                    }
+                    arena_pop_to(&world->types.arena, length);
+                }
+                abi_test_expect(tally, got == expected, "worlds", detail);
+                compared += 1;
+            }
+        }
+        if (classified)
+        {
+            // A variadic argument of more than 16 bytes that is SSE, SSEUP without a vector deciding it (a union of
+            // a __float128 and a long array) clang classifies so, but its call puts it on the stack and its va_arg
+            // reads it from the save area: the module passes it in memory, as GCC does.
+            AbiClasses unnamed = abi_test_classify(table, width, false, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, 0, frames);
+            unnamed = unnamed == BUSTER_ABI_TEST_VECTOR && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_IN_MEMORY : unnamed;
+            snprintf(detail, sizeof(detail), "%s: type %u unnamed: %02x, the oracle %02x", route, index, abi_classes(abi, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, false),
+                     unnamed);
+            abi_test_expect(tally, abi_classes(abi, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, false) == unnamed, "worlds", detail);
+        }
+    }
+    return compared;
+}
+
+// A table classified again, every type at once with all it reads classified, must not change: the levels take a type
+// only when what it reads is classified (a zero-length array of a large record waits for every type
+// abi_wide_alignment reads). Only the rootless world shows a missing wait: in the others every record waits for its
+// members anyway. For the fallback's table, the classification again is the fallback's too.
+static void abi_test_world_again(AbiTestTally* tally, AbiTable* abi, const TypeTable* table, bool fallback, const char* route)
+{
+    const uint64_t before = abi_test_table_digest(abi, table->types.count);
+    TypeId* again = malloc(sizeof(TypeId) * table->types.count);
+    uint32_t again_count = 0;
+    for (uint32_t index = 1; again != 0 && index < table->types.count; index += 1)
+    {
+        again[again_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+        again_count += (abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0 ? 1 : 0;
+    }
+    abi_test_expect(tally, again != 0, "worlds", "no memory to classify again");
+    if (again != 0)
+    {
+        if (fallback)
+        {
+            abi_test_classify_fallback(abi, table, again, again_count);
+        }
+        else
+        {
+            abi_classify(abi, table, again, again_count);
+        }
+        char detail[160];
+        snprintf(detail, sizeof(detail), "%s: the table changed when classified again", route);
+        abi_test_expect(tally, abi_test_table_digest(abi, table->types.count) == before, "worlds", detail);
+    }
+    free(again);
+}
+
+// Every classifiable type, by the vector path and by its fallback, at each vector width, each table checked alone
+// (abi_test_world_table, abi_test_world_again). Three clang worlds, at 16, 32 and 64 bytes, a GCC one at 16, and a
 // rootless clang one at 32 (AbiTestWorld.rootless), whose levels only the waits keep right.
 static bool abi_test_worlds(uint64_t seed, uint32_t count)
 {
@@ -4853,15 +5195,22 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
             const TypeTable* table = &world.types.test.table;
             const uint32_t width = 16u << (round % 3);
             Arena vector_arena = arena_reserve(abi_capacity_bytes(table->types.capacity));
-            Arena scalar_arena = arena_reserve(abi_capacity_bytes(table->types.capacity));
+            Arena fallback_arena = arena_reserve(abi_capacity_bytes(table->types.capacity));
             AbiTable vector;
-            AbiTable scalar;
-            const bool made = abi_initialize(&vector, &vector_arena, table, width) && abi_initialize(&scalar, &scalar_arena, table, width);
+            AbiTable fallback;
+            const bool made = abi_initialize(&vector, &vector_arena, table, width) && abi_initialize(&fallback, &fallback_arena, table, width);
             if (abi_test_expect(&tally, made, "worlds", "the tables can't be made"))
             {
+                // The builtin types are classified when the tables are made; the routes classify the rest.
+                uint32_t classifiable = 0;
+                for (uint32_t index = 1; index < table->types.count; index += 1)
+                {
+                    classifiable += abi_classifiable(table, index) && (vector.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 ? 1 : 0;
+                }
                 const uint32_t vector_count = abi_classify_all(&vector, table);
-                const uint32_t scalar_count = abi_classify_all_scalar(&scalar, table);
-                abi_test_expect(&tally, vector_count == scalar_count && vector_count != 0, "worlds", "the paths classified different counts");
+                const uint32_t fallback_count = abi_test_classify_all_fallback(&fallback, table);
+                snprintf(detail, sizeof(detail), "the routes classified %u (vector) and %u (fallback) of %u classifiable types", vector_count, fallback_count, classifiable);
+                abi_test_expect(&tally, vector_count == classifiable && fallback_count == classifiable && classifiable != 0, "worlds", detail);
                 // A table of the world's types alone (#442's lowering, which makes none) classifies them as the whole one does,
                 // and one with fewer rows than the types, or more than the room, is refused with its arena as it was.
                 Arena counted_arena = arena_reserve(abi_capacity_bytes(table->types.count));
@@ -4884,95 +5233,11 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                     snprintf(detail, sizeof(detail), "type %u: the table of the types alone differs from the whole table's", index);
                     abi_test_expect(&tally, vector.pass[index] == counted.pass[index] && (!classified || same), "worlds", detail);
                 }
-                for (uint32_t index = 1; index < table->types.count; index += 1)
-                {
-                    const bool classified = (vector.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0;
-                    const bool same = memcmp(vector.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, scalar.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES,
-                                             BUSTER_ABI_ROW_BYTES) == 0 &&
-                                      vector.pass[index] == scalar.pass[index] && vector.stack_bytes[index] == scalar.stack_bytes[index] &&
-                                      vector.alignment_log2[index] == scalar.alignment_log2[index] && vector.storage[index] == scalar.storage[index] &&
-                                      vector.layout[index] == scalar.layout[index] && memcmp(&vector.results[index], &scalar.results[index], sizeof(AbiReturn)) == 0;
-                    snprintf(detail, sizeof(detail),
-                             "type %u (kind %u): the vector path and the twin differ: pass %08x/%08x, stack %u/%u, alignment %u/%u, storage %02x/%02x, layout %012" PRIx64
-                             "/%012" PRIx64 ", row[0] %02x/%02x",
-                             index, table->types.kind[index], vector.pass[index], scalar.pass[index], vector.stack_bytes[index], scalar.stack_bytes[index],
-                             vector.alignment_log2[index], scalar.alignment_log2[index], vector.storage[index], scalar.storage[index], vector.layout[index],
-                             scalar.layout[index], vector.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES], scalar.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES]);
-                    if (classified && !same && tally.failures < BUSTER_ABI_TEST_REPORTED)
-                    {
-                        abi_test_dump(table, &vector, index);
-                        abi_test_dump(table, &scalar, index);
-                    }
-                    abi_test_expect(&tally, !classified || same, "worlds", detail);
-                    abi_test_expect(&tally, classified == abi_classifiable(table, index), "worlds", "a classifiable type left out, or the reverse");
-                    const uint64_t size = table->types.size[abi_resolved_index(table, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT)];
-                    for (uint32_t offset = 0; classified && offset < BUSTER_ABI_ROW_BYTES; offset += 1)
-                    {
-                        if (offset == 0 || offset + size <= BUSTER_ABI_ROW_BYTES)
-                        {
-                            const AbiClasses expected = abi_test_classify(table, width, true, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, (uint64_t)offset * 8, frames);
-                            const AbiClasses got = vector.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES + offset];
-                            if (got != expected)
-                            {
-                                const uint64_t length = world.types.arena.length;
-                                const String8 printed = type_print(table, &world.types.arena, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, (String8){ 0 }, &world.types.names, 0);
-                                snprintf(detail, sizeof(detail), "%.*s (type %u, %" PRIu64 " bytes) at %u, %u-byte vectors: %02x, the oracle %02x", (int)printed.length,
-                                         printed.pointer, index, size, offset, width, got, expected);
-                                if (tally.failures < BUSTER_ABI_TEST_REPORTED && (table->types.kind[index] == BUSTER_TYPE_KIND_STRUCT || table->types.kind[index] == BUSTER_TYPE_KIND_UNION))
-                                {
-                                    TypeTestText text = {
-                                        .arena = &world.text_arena,
-                                        .valid = true,
-                                    };
-                                    type_test_write_tag(&world.types, &text, table->types.index[index]);
-                                    fprintf(stderr, "%.*s", (int)text.length, text.bytes);
-                                    arena_pop_to(&world.text_arena, 0);
-                                    abi_test_dump(table, &vector, index);
-                                }
-                                arena_pop_to(&world.types.arena, length);
-                            }
-                            abi_test_expect(&tally, got == expected, "worlds", detail);
-                            compared += 1;
-                        }
-                    }
-                    if (classified)
-                    {
-                        // A variadic argument of more than 16 bytes that is SSE, SSEUP without a vector deciding it (a union of
-                        // a __float128 and a long array) clang classifies so, but its call puts it on the stack and its va_arg
-                        // reads it from the save area: the module passes it in memory, as GCC does.
-                        AbiClasses unnamed = abi_test_classify(table, width, false, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, 0, frames);
-                        unnamed = unnamed == BUSTER_ABI_TEST_VECTOR && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_IN_MEMORY : unnamed;
-                        snprintf(detail, sizeof(detail), "type %u unnamed: %02x, the oracle %02x", index, abi_classes(&vector, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, false),
-                                 unnamed);
-                        abi_test_expect(&tally, abi_classes(&vector, (TypeId)index << BUSTER_TYPE_INDEX_SHIFT, false) == unnamed, "worlds", detail);
-                    }
-                }
-                // The twin's table classified again, every type at once with all it reads classified, must not change: the
-                // levels take a type only when what it reads is classified (a zero-length array of a large record waits
-                // for every type abi_wide_alignment reads), and the paths share them. Only the rootless world shows a
-                // missing wait: in the others every record waits for its members anyway.
-                TypeId* again = malloc(sizeof(TypeId) * table->types.count);
-                uint32_t again_count = 0;
-                for (uint32_t index = 1; again != 0 && index < table->types.count; index += 1)
-                {
-                    again[again_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-                    again_count += (scalar.pass[index] & BUSTER_ABI_PASS_CLASSIFIED) != 0 ? 1 : 0;
-                }
-                abi_classify_scalar(&scalar, table, again, again_count);
-                abi_test_expect(&tally, again != 0, "worlds", "no memory to classify again");
-                for (uint32_t index = 1; again != 0 && index < table->types.count; index += 1)
-                {
-                    const bool same = memcmp(vector.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES, scalar.rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES,
-                                             BUSTER_ABI_ROW_BYTES) == 0 &&
-                                      vector.pass[index] == scalar.pass[index] && vector.stack_bytes[index] == scalar.stack_bytes[index] &&
-                                      vector.alignment_log2[index] == scalar.alignment_log2[index] && vector.storage[index] == scalar.storage[index] &&
-                                      vector.layout[index] == scalar.layout[index] && memcmp(&vector.results[index], &scalar.results[index], sizeof(AbiReturn)) == 0;
-                    snprintf(detail, sizeof(detail), "type %u (kind %u) classified again: pass %08x/%08x, storage %02x/%02x, layout %012" PRIx64 "/%012" PRIx64,
-                             index, table->types.kind[index], vector.pass[index], scalar.pass[index], vector.storage[index], scalar.storage[index], vector.layout[index],
-                             scalar.layout[index]);
-                    abi_test_expect(&tally, same, "worlds", detail);
-                }
-                free(again);
+                const uint64_t* frozen = seed == 1 && count == BUSTER_ABI_TEST_DEFAULT_COUNT ? &abi_test_world_digests[round] : 0;
+                compared += abi_test_world_table(&tally, &world, &vector, width, frames, frozen, "vector");
+                compared += abi_test_world_table(&tally, &world, &fallback, width, frames, frozen, "fallback");
+                abi_test_world_again(&tally, &vector, table, false, "vector");
+                abi_test_world_again(&tally, &fallback, table, true, "fallback");
                 // Types made after the table of the types alone are past its rows: classifying again leaves them to a table
                 // with room for them, and touches nothing past its own rows, while the whole table classifies them.
                 const uint32_t before = table->types.count;
@@ -4983,14 +5248,14 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                 }
                 const uint64_t counted_length = counted_arena.length;
                 const bool skipped = counted_made && table->types.count > before && abi_classify_all(&counted, table) == 0 &&
-                                     abi_classify_all_scalar(&counted, table) == 0 && counted_arena.length == counted_length;
+                                     abi_test_classify_all_fallback(&counted, table) == 0 && counted_arena.length == counted_length;
                 abi_test_expect(&tally, skipped, "worlds", "the table of the types alone classified a type made after it");
                 abi_test_expect(&tally, abi_classify_all(&vector, table) == table->types.count - before, "worlds",
                                 "the whole table didn't classify the types made after the table of the types alone");
                 arena_release(&counted_arena);
             }
             arena_release(&vector_arena);
-            arena_release(&scalar_arena);
+            arena_release(&fallback_arena);
             abi_test_world_close(&world);
         }
     }
@@ -5077,7 +5342,7 @@ static bool abi_test_gcc_bit_fields(void)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Assignment: random calls over a world's types, by the vector path and by the twin.
+// Assignment: random calls over a world's types, by the vector path and by its fallback.
 
 // A type an argument or a result may have: not an array, a function or __fp16, not UNSUPPORTED, nor too large to pass.
 static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeId type)
@@ -5202,40 +5467,94 @@ static AbiSignatures abi_test_signatures(const AbiTestCalls* calls)
 }
 
 // Assigns `calls` by both paths and compares every location and call.
-static void abi_test_compare_assignment(AbiTestTally* tally, const AbiTable* abi, AbiSignatures signatures, uint64_t argument_count, AbiLocation* vector_locations,
-                                        AbiLocation* scalar_locations, AbiCall* vector_calls, AbiCall* scalar_calls, const char* what)
+// What holds of any assignment of `signatures`: each call's totals within the registers there are (6 general, 8
+// vector) and its stack bytes a multiple of 8; each argument's kind one there is, a register location's first part a
+// register, and the stack arguments in order, each at a multiple of 8 below the call's stack bytes and past the one
+// before.
+static void abi_test_assignment_invariants(AbiTestTally* tally, AbiSignatures signatures, const AbiLocation* locations, const AbiCall* calls, const char* what)
 {
     char detail[256];
-    memset(vector_locations, 0x5a, argument_count * sizeof(AbiLocation));
-    memset(scalar_locations, 0xa5, argument_count * sizeof(AbiLocation));
-    abi_assign(abi, signatures, vector_locations, vector_calls);
-    abi_assign_scalar(abi, signatures, scalar_locations, scalar_calls);
     uint64_t first = 0;
     for (uint32_t c = 0; c < signatures.count; c += 1)
     {
-        const bool same_call = memcmp(&vector_calls[c], &scalar_calls[c], sizeof(AbiCall)) == 0;
-        snprintf(detail, sizeof(detail), "%s: call %u's totals: stack %u/%u, alignment %u/%u, registers %u/%u and %u/%u", what, c, vector_calls[c].stack_bytes,
-                 scalar_calls[c].stack_bytes, vector_calls[c].stack_alignment_log2, scalar_calls[c].stack_alignment_log2, vector_calls[c].integer_registers,
-                 scalar_calls[c].integer_registers, vector_calls[c].vector_registers, scalar_calls[c].vector_registers);
-        abi_test_expect(tally, same_call, "assignment", detail);
+        const AbiCall call = calls[c];
+        snprintf(detail, sizeof(detail), "%s: call %u's totals: stack %u, registers %u and %u", what, c, call.stack_bytes, call.integer_registers, call.vector_registers);
+        abi_test_expect(tally, call.integer_registers <= 6 && call.vector_registers <= 8 && call.stack_bytes % 8 == 0, "assignment", detail);
+        uint64_t next = 0;
         for (uint32_t a = 0; a < signatures.counts[c]; a += 1)
         {
-            const AbiLocation v = vector_locations[first + a];
-            const AbiLocation s = scalar_locations[first + a];
-            snprintf(detail, sizeof(detail), "%s: call %u argument %u: kind %u/%u, registers %02x %02x/%02x %02x, flags %u/%u, offset %u/%u", what, c, a, v.kind, s.kind,
-                     v.registers[0], v.registers[1], s.registers[0], s.registers[1], v.flags, s.flags, v.stack_offset, s.stack_offset);
-            abi_test_expect(tally, memcmp(&v, &s, sizeof(AbiLocation)) == 0, "assignment", detail);
+            const AbiLocation location = locations[first + a];
+            const bool stack = location.kind == BUSTER_ABI_LOCATION_STACK || location.kind == BUSTER_ABI_LOCATION_SPLIT;
+            bool valid = location.kind <= BUSTER_ABI_LOCATION_SPLIT;
+            valid = valid && (location.kind != BUSTER_ABI_LOCATION_REGISTERS || location.registers[0] != BUSTER_ABI_REGISTER_NONE);
+            valid = valid && (!stack || (location.stack_offset % 8 == 0 && location.stack_offset >= next && location.stack_offset < call.stack_bytes));
+            next = stack ? (uint64_t)location.stack_offset + 8 : next;
+            snprintf(detail, sizeof(detail), "%s: call %u argument %u: kind %u, registers %02x %02x, offset %u (the stack of %u bytes)", what, c, a, location.kind,
+                     location.registers[0], location.registers[1], location.stack_offset, call.stack_bytes);
+            abi_test_expect(tally, valid, "assignment", detail);
         }
         first += signatures.counts[c];
     }
 }
 
+// An assignment of `signatures` by each route, alone: the vector path, and the same entry starved (abi_test_starve),
+// which takes the fallbacks. Each must match `frozen` when given (abi_test_assignment_digest, of seed 1's calls) and
+// hold the invariants; and a call of the vector path's, assigned again alone, must take the same locations, as no call
+// depends on the others in its batch (every `stride`-th call, for the long batches' cost).
+static void abi_test_check_assignment(AbiTestTally* tally, const AbiTable* abi, AbiSignatures signatures, uint64_t argument_count, AbiLocation* vector_locations,
+                                      AbiLocation* starved_locations, AbiCall* vector_calls, AbiCall* starved_calls, const uint64_t* frozen, uint32_t stride, const char* what)
+{
+    char detail[256];
+    memset(vector_locations, 0x5a, argument_count * sizeof(AbiLocation));
+    memset(starved_locations, 0xa5, argument_count * sizeof(AbiLocation));
+    abi_assign(abi, signatures, vector_locations, vector_calls);
+    abi_test_assign_starved(abi, signatures, starved_locations, starved_calls);
+    if (frozen != 0)
+    {
+        const uint64_t vector_digest = abi_test_assignment_digest(vector_calls, signatures.count, vector_locations, argument_count);
+        const uint64_t starved_digest = abi_test_assignment_digest(starved_calls, signatures.count, starved_locations, argument_count);
+        snprintf(detail, sizeof(detail), "%s: the digests %016" PRIx64 " (vector) and %016" PRIx64 " (starved), frozen %016" PRIx64, what, vector_digest, starved_digest,
+                 *frozen);
+        abi_test_expect(tally, vector_digest == *frozen && starved_digest == *frozen, "assignment", detail);
+    }
+    abi_test_assignment_invariants(tally, signatures, vector_locations, vector_calls, what);
+    abi_test_assignment_invariants(tally, signatures, starved_locations, starved_calls, what);
+    uint64_t first = 0;
+    for (uint32_t c = 0; c < signatures.count; c += 1)
+    {
+        const uint32_t n = signatures.counts[c];
+        if (c % stride == 0)
+        {
+            AbiLocation* alone = malloc(sizeof(AbiLocation) * (n + 1));
+            if (abi_test_expect(tally, alone != 0, "assignment", "no memory to assign a call alone"))
+            {
+                const AbiSignatures one = {
+                    .results = signatures.results + c,
+                    .counts = signatures.counts + c,
+                    .named = signatures.named + c,
+                    .variadic = signatures.variadic + c,
+                    .count = 1,
+                    .arguments = signatures.arguments + first,
+                };
+                AbiCall call;
+                abi_assign(abi, one, alone, &call);
+                snprintf(detail, sizeof(detail), "%s: call %u assigned alone differs from its batch's", what, c);
+                abi_test_expect(tally, memcmp(alone, vector_locations + first, n * sizeof(AbiLocation)) == 0 && memcmp(&call, &vector_calls[c], sizeof(AbiCall)) == 0,
+                                "assignment", detail);
+            }
+            free(alone);
+        }
+        first += n;
+    }
+}
+
 // Calls longer than the vector path's 16-bit register sums count (BUSTER_ABI_COUNTED_ARGUMENTS), which it leaves to
-// the twin, and as long as they hold: 65,542 longs, whose general registers' sum would carry into the vector ones' and
-// give the last six rdi to r9 again; 32,767 __int128s after a hidden pointer (the most a sum holds: 65,535 registers)
-// and 32,768 without one; the same counts of _Complex double, for the vector registers' sum; then a short call. Both
-// paths must agree, and the longs' call must have its stack: 65,536 slots, no vector register.
-static void abi_test_long_calls(AbiTestTally* tally, const AbiTable* abi, const TypeId* passable, uint32_t passable_count)
+// the per-call assignment, and as long as they hold: 65,542 longs, whose general registers' sum would carry into the
+// vector ones' and give the last six rdi to r9 again; 32,767 __int128s after a hidden pointer (the most a sum holds:
+// 65,535 registers) and 32,768 without one; the same counts of _Complex double, for the vector registers' sum; then a
+// short call. Each route must match seed 1's frozen digest, and the longs' call must have its stack: 65,536 slots, no
+// vector register.
+static void abi_test_long_calls(AbiTestTally* tally, const AbiTable* abi, const TypeId* passable, uint32_t passable_count, const uint64_t* frozen)
 {
     TypeId hidden = BUSTER_TYPE_VOID;
     for (uint32_t i = 0; i < passable_count && hidden == BUSTER_TYPE_VOID; i += 2)
@@ -5297,7 +5616,7 @@ static void abi_test_long_calls(AbiTestTally* tally, const AbiTable* abi, const 
         };
         AbiCall vector_calls[6];
         AbiCall scalar_calls[6];
-        abi_test_compare_assignment(tally, abi, signatures, total, vector_locations, scalar_locations, vector_calls, scalar_calls, "long calls");
+        abi_test_check_assignment(tally, abi, signatures, total, vector_locations, scalar_locations, vector_calls, scalar_calls, frozen, 1, "long calls");
         abi_test_expect(tally, vector_calls[0].stack_bytes == (65542 - 6) * 8 && vector_calls[0].vector_registers == 0 && vector_calls[0].integer_registers == 6 &&
                                    vector_locations[65536].kind == BUSTER_ABI_LOCATION_STACK && vector_locations[65536].stack_offset == (65536 - 6) * 8,
                         "assignment", "the long call of longs");
@@ -5306,6 +5625,15 @@ static void abi_test_long_calls(AbiTestTally* tally, const AbiTable* abi, const 
     free(vector_locations);
     free(scalar_locations);
 }
+
+// Seed 1's assignments at the default count: the random calls' digest round by round, and the long calls' (round 0's
+// world), frozen from main at bd197b2a6, where abi_assign and its twin gave the same locations and calls.
+static const uint64_t abi_test_assignment_digests[3] = {
+    UINT64_C(0x274f4baff1663438),
+    UINT64_C(0x7b091529f84ea7bd),
+    UINT64_C(0x83d79dbd7202d889),
+};
+static const uint64_t abi_test_long_call_digest = UINT64_C(0x3e8a796a7fbd0515);
 
 static bool abi_test_assignment(uint64_t seed, uint32_t count)
 {
@@ -5352,12 +5680,13 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
                     }
                 }
                 abi_test_random_calls(&calls, passable, passable_count, count, capacity, &random);
-                abi_test_compare_assignment(&tally, &abi, abi_test_signatures(&calls), calls.argument_count, vector_locations, scalar_locations, vector_calls, scalar_calls,
-                                            "random calls");
+                const bool seed_one = seed == 1 && count == BUSTER_ABI_TEST_DEFAULT_COUNT;
+                abi_test_check_assignment(&tally, &abi, abi_test_signatures(&calls), calls.argument_count, vector_locations, scalar_locations, vector_calls, scalar_calls,
+                                          seed_one ? &abi_test_assignment_digests[round] : 0, 7, "random calls");
                 arguments += calls.argument_count;
                 if (round == 0)
                 {
-                    abi_test_long_calls(&tally, &abi, passable, passable_count);
+                    abi_test_long_calls(&tally, &abi, passable, passable_count, seed_one ? &abi_test_long_call_digest : 0);
                 }
                 // Every prefix of the arguments ending at a PROT_NONE page: one call of them, then the locations too.
                 const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -5383,9 +5712,17 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
                         };
                         AbiCall edge_call;
                         abi_assign(&abi, one, edge_locations, &edge_call);
-                        abi_assign_scalar(&abi, one, scalar_locations, scalar_calls);
-                        abi_test_expect(&tally, memcmp(edge_locations, scalar_locations, n * sizeof(AbiLocation)) == 0 && memcmp(&edge_call, scalar_calls, sizeof(AbiCall)) == 0,
-                                        "assignment", "a call ending at a page edge");
+                        const AbiSignatures inside = {
+                            .results = &result,
+                            .counts = &n,
+                            .named = &named,
+                            .variadic = &variadic,
+                            .count = 1,
+                            .arguments = calls.arguments,
+                        };
+                        abi_assign(&abi, inside, vector_locations, vector_calls);
+                        abi_test_expect(&tally, memcmp(edge_locations, vector_locations, n * sizeof(AbiLocation)) == 0 && memcmp(&edge_call, vector_calls, sizeof(AbiCall)) == 0,
+                                        "assignment", "a call ending at a page edge differs from the same call away from it");
                     }
                     munmap(guarded, 4 * page);
                 }
@@ -5404,7 +5741,7 @@ static bool abi_test_assignment(uint64_t seed, uint32_t count)
     free(scalar_locations);
     free(vector_calls);
     free(scalar_calls);
-    printf("%-34s %10" PRIu64 " arguments assigned by both paths\n", "assignment", arguments);
+    printf("%-34s %10" PRIu64 " arguments assigned by each route\n", "assignment", arguments);
     abi_test_report("assignment", tally);
     return tally.failures == 0;
 }
@@ -7178,15 +7515,12 @@ struct AbiTestSseFixture
     const char* directory;
     const char* callee[2];
     const char* targets[3];
-    // Whether Tier 1 builds strictly, every function its own; else it leaves the records it doesn't take to Tier 0
-    // (#2798).
-    bool strict;
 };
 
 // #2113's original fixture: 17--23-byte records carry 16-byte register payloads at v3 and v4, and are MEMORY at x86-64,
 // every function Tier 1's. And the larger records' (wide-sse.c): <size / 8 x double> in a ymm or zmm register, on the
 // stack in its register's width in a variadic call and where LLVM has no vector register left, and byval or va_arg
-// copies of every byte, which Tier 1 leaves to Tier 0.
+// copies of every byte, every function Tier 1's too since #2798.
 static const AbiTestSseFixture abi_test_sse_fixtures[] = {
     {
         .name = "short SSE cross-check",
@@ -7194,7 +7528,6 @@ static const AbiTestSseFixture abi_test_sse_fixtures[] = {
         .directory = "buster-abi-short-sse",
         .callee = { "-DBUSTER_SHORT_SSE_CALLEE=0", "-DBUSTER_SHORT_SSE_CALLEE=1" },
         .targets = { "-DBUSTER_SHORT_SSE_REGISTERS=0", "-DBUSTER_SHORT_SSE_REGISTERS=1", "-DBUSTER_SHORT_SSE_REGISTERS=1" },
-        .strict = true,
     },
     {
         .name = "wide SSE cross-check",
@@ -7202,13 +7535,12 @@ static const AbiTestSseFixture abi_test_sse_fixtures[] = {
         .directory = "buster-abi-wide-sse",
         .callee = { "-DBUSTER_WIDE_SSE_CALLEE=0", "-DBUSTER_WIDE_SSE_CALLEE=1" },
         .targets = { "-DBUSTER_WIDE_SSE_VECTOR_BYTES=16", "-DBUSTER_WIDE_SSE_VECTOR_BYTES=32", "-DBUSTER_WIDE_SSE_VECTOR_BYTES=64" },
-        .strict = false,
     },
 };
 
 // A fixture crosses in both directions: the other compiler owns either main or its callees, at x86-64, x86-64-v3 and
-// x86-64-v4. Both tiers and the vector/scalar paths must pass; with a strict fixture, Tier 1 builds strictly, so that a
-// refusal can't silently fall back.
+// x86-64-v4. Both tiers and the vector/scalar paths must pass; Tier 1 builds strictly, every function its own (#2798), so
+// that a refusal can't silently fall back to Tier 0.
 static bool abi_test_sse_fixture(const char* clang, const char* buster, bool keep, const AbiTestSseFixture* fixture)
 {
     AbiTestTally tally = { 0 };
@@ -7306,7 +7638,7 @@ static bool abi_test_sse_fixture(const char* clang, const char* buster, bool kee
                 if (tier1)
                 {
                     build[count++] = "--tier1";
-                    build[count++] = fixture->strict ? "--tier1-strict" : "--tier1-report";
+                    build[count++] = "--tier1-strict";
                 }
                 build[count++] = "-std=gnu23";
                 build[count++] = march;

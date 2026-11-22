@@ -18,11 +18,14 @@ requirements. [Command index](README.md).
 - `src/buster/compiler/c_parser_impl.c` turns the preprocessor's token
   stream into a tree, a parent, a role and a node depth for every token,
   and for a unit without errors its postorder and the tree's columns. The
-  vector path uses kernels in AVX-512, each with an exact scalar
-  twin, and a pass of checks that flags what C's grammar doesn't allow, whose
-  top-level declarations go to the scalar parser; the scalar parser alone
-  (`--scalar`) builds the same tree and gives the diagnostics, at clang's
-  places with clang's messages. It also holds the driver. `docs/c-parser.md`
+  vector path uses kernels in AVX-512 and a pass of checks that flags what C's
+  grammar doesn't allow, whose top-level declarations go to the scalar parser;
+  a unit with an error goes to the scalar parser whole, which gives the
+  diagnostics, at clang's places with clang's messages. The kernels' scalar
+  twins are gone (#2924); what stays scalar is the vector path's fallbacks:
+  K2's per-block loop for a block its rounds don't settle, K4 for nesting
+  deeper than its 16-bit keys, K5 for a unit only its stack decides, and K6
+  for a block its vector kernel can't take. It also holds the driver. `docs/c-parser.md`
   explains the design and its 9700X measurements. `c_parser_test.c` holds its
   tests (`main.c` includes it; `./build/compiler test-parser` runs them) and
   `c_parser_benchmark.c` provides `benchmark-parser`. Salter's operator
@@ -44,26 +47,41 @@ checks the parser interface and implementation; `--clang` needs
 clang 23 on `PATH`, or the one PATH names. `--clang-server PATH` sends that
 clang's `-fsyntax-only` runs (`parse_test_clang`, a file each through the oracle
 cache's runs) to `tools/clang-server`, and `--differential` also runs each as
-before and fails on a difference ([Served runs](oracle-cache.md#served-runs)). Each unit goes through both paths,
-the vector path with its fallback and the scalar parser alone, which must read
-the same tokens and give the same outcome, and on a unit without errors the same
-tree: the same parent, node depth and role on every token (a declarator's
-parameter list's parentheses included, a function's on both paths, #1968). The tree must keep
-its invariants (every parent another token or the root, at no greater depth;
-every opener's parent its closer, after it; no cycle), and its postorder and
-subtree sizes must be a depth-first walk's, whose in-order walk gives the tokens
-back in order, and so must both paths' tree's columns and their twin's
-(`parse_tree_links`): each token's position, subtree end, first child and next
-sibling, and the sentinels. Then each kernel against its scalar twin, from the twins'
-outputs before it: K1 (depths, enclosing openers and each block's view), K3's
-classification, K2 (roles, flags, typed states and statement contexts, also
-from random roles and with every block in the twin's loop), K1's second part,
-K4 (with the stack's top in registers and with windows of 1, 3 and 8 lanes),
-K5, and K6 (flags and classes, also with every second and every third block
-left to the twin); and the twins together with the fallback, whose tree must be
-the scalar parser's. Those checks put every array in an arena followed by 4 GB
-and its own size of address space that may not be touched, so that a load past
-an array, or through a 32-bit index that wrapped below 0, faults.
+before and fails on a difference ([Served runs](oracle-cache.md#served-runs)). Each unit is parsed in full and
+tree-only, which must give the same tokens, outcome and tree. On a unit without
+errors the tree must keep its invariants (every parent another token or the
+root, at no greater depth; every opener's parent its closer, after it; no
+cycle), and its postorder and subtree sizes must be a depth-first walk's, whose
+in-order walk gives the tokens back in order, and so must the tree's columns
+and those `parse_tree_links` derives: each token's position, subtree end, first
+child and next sibling, and the sentinels. Then the kernels' own checks, as
+`parse_vector` runs them, each from the kernels' outputs before it, on a unit
+whose brackets balance (the vector path keeps nothing of the kernels on another,
+#528): K2 from random roles and with every block in its per-block loop must end
+at the roles, flags, typed states and statement contexts its kinds' guesses
+gave; K4 with windows of 1, 3 and 8 lanes and by its token-at-a-time fallback
+must give the parents of the stack's top in registers; K5 in AVX-512 must give
+`parse_statements`' verdict and parents; and K6 with every second and every
+third block through its block fallback must give the flags and classes of every
+block in AVX-512. Those checks put every array in an arena followed by 4 GB and
+its own size of address space that may not be touched, so that a load past an
+array, or through a 32-bit index that wrapped below 0, faults.
+
+Each generated batch (the streams at the default seed and count, the snippets
+at every alignment without a file, and the deep nesting) also sums its units'
+digests: the vector path's tokens, outcome, tree and postorder
+(`parse_test_unit_digest`), and what `parse_vector` leaves on the unit
+(`parse_test_vector_digest`): the kernels' verdicts and counts, and on a unit
+they keep, every array a later stage reads, from K1's depths to K6's classes and
+groups, after the fallback. The sum must be the batch's in
+`tests/parser-kernels/digests.tsv`, keyed by the batch and its language,
+recorded where the vector path and its kernels agreed with the scalar parser and
+their twins, before #2924 deleted the twins. `BUSTER_PARSE_RECORD_DIGESTS=FILE` writes the lines
+instead; the preprocessor's digests (`tests/preprocessor-kernels`) share the
+table's code (`test_digest_matches`). Each batch prints what reached the
+fallbacks the vector path keeps: the scalar parser's top-level declarations,
+K4's units past its depth, K5's units and K6's blocks left to their scalar
+code.
 
 The generated inputs, the files and the mutations take that check unit after
 unit (`parse_test_check_unit`), with state kept from one unit to the next
@@ -71,8 +89,7 @@ unit (`parse_test_check_unit`), with state kept from one unit to the next
 
 - **Intern table:** one, reset to its predefined names before each unit
   (`intern_reset`), so that each name gets a fresh table's id.
-- **Parsers:** the vector path's and the scalar parser's, full and tree-only,
-  each parsing unit after unit in the scratch the units before left, as a
+- **Parsers:** one, full and tree-only, each parsing unit after unit in the scratch the units before left, as a
   lane's parsers do. Until each parse wrote its group stacks' entries below
   depth 0, the vector path read some that an earlier unit left there, so each
   scratch was zeroed before a unit (#2087, `parse_test_units_clear`, which the
@@ -120,19 +137,17 @@ has those runs and the hosted runners' (#2078). On:
   `;`, at every block alignment (34,624 units), and nine kinds of nesting 100,000 levels deep
   (commas in nested ternaries among them) and a run of 100,000 attributes, which
   mustn't grow the native stack, nor make a token cost more for what is open
-  around it;
+  around it; and each again 1,000 levels deep, within the vector K4's depth,
+  whose blocks must reach its 16-bit lanes;
 - a borrowed scratch (`ParseOptions.scratch`, #528), without files: units in
-  turn on one parser for each path, whose arena holds the caller's data below
+  turn on one parser, whose arena holds the caller's data below
   its length and dirty pages above it (each parse's temporaries, and a pattern
   before each parse): the fixtures' sources, valid code of which the vector
   path sends some declarations to the scalar parser, an error, an unclosed
   brace, an empty unit and 64 random streams. Each must parse as on a fresh
   parser, tokens, tree, postorder, diagnostics and statistics alike, and leave the arena's
-  length and the caller's data as they were. A scalar host's default is checked
-  against an explicitly scalar fresh parser and must leave the vector
-  workspaces unused and the fallback statistics zero (#1369). Vector hosts
-  must still exercise a valid unit through the fallback. Direct kernel tests
-  retain the twins and their whole-unit retry on every host;
+  length and the caller's data as they were. A valid unit must go through the
+  fallback;
 - a reused scratch (#2086), without files: one parser with a scratch of its
   own, which nothing clears or dirties between units, parses two random streams
   (seed 1, streams 20 and 1485) and then the first 256 of the `--streams`
@@ -182,13 +197,14 @@ has those runs and the hosted runners' (#2078). On:
   a token deleted, duplicated or swapped with the next. With `--clang`, a copy
   clang accepts must parse, and one whose first error is a parse issue must fail
   with the same first error, at its line and column with its message (#1127;
-  `--reports N` prints that many of the mismatches); without, both paths must
-  agree as on any file.
+  `--reports N` prints that many of the mismatches); without, each copy takes
+  the unit's checks, as any file.
 
 `--explain` tallies instead why the checks sent valid code to the scalar parser,
-by signature, with an example of each, and `--print-tree FILE [FIRST LAST]`
-prints each token's role, node depth and parent by both paths, with the
-differences marked. `--seed N` changes the random inputs and the mutations,
+by signature, with an example of each (the vector kernels up to K5, then K6 by
+its block fallback, which records each token's mode and failed checks), and
+`--print-tree FILE [FIRST LAST]` prints each token's role, node depth and
+parent. `--seed N` changes the random inputs and the mutations,
 `--reports N` how many differences are printed (200), and `--keep` keeps the
 files in the directory the command makes under `$TMPDIR` (or `/tmp`). On the
 9700X, `sqlite3.c`, the 733 files of the libc corpus that clang accepts and the
@@ -202,13 +218,12 @@ the build has compiled each with clang, with `-Wall -Werror`, so clang accepts t
 `./build/compiler benchmark-parser [--passes N] [--only NAME|stages] [--repeat N]
 [--counters pipeline|branches|memory|stalls] [options] file...` preprocesses
 each file with -E's options and turns its tokens into the parser's outside the
-timing, checks that the vector path gives the scalar parser's outcome and tree,
-and times `--passes` interleaved passes (21) after a warm-up: the whole paths
-over every file (the input's conversion and its twin, the scalar parser, the
-twins together and the vector path), then each stage per file on shared arrays,
-after the stages before it (each kernel and its twin, K4's three loops, the
-fallback, the tree's columns with and without the subtree sizes, their twin from
-that postorder, and the postorder by a walk). It reports
+timing, checks that the handoff gives the drivers' tokens, and times
+`--passes` interleaved passes (21) after a warm-up: the whole paths over every
+file (the input's conversion, the keyword pass with it, and the vector path),
+then each stage per file on shared arrays, after the stages before it (each
+kernel, K4's three loops, the fallback, the tree's columns with and without the
+subtree sizes, their links from that postorder, and the postorder by a walk). It reports
 medians per token of time, cycles (with the fastest and slowest pass) and
 instructions, the events of the `--counters` set, and the share of top-level
 declarations and tokens the fallback took. `--only` times one path or stage

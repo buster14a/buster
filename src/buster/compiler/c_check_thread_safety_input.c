@@ -247,12 +247,11 @@ static bool check_input_thread_capability(CheckInputReader* reader, TypeId type,
     const bool tagged = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
     marked |= tagged && !type_is_complete(reader->types, record);
     const CheckSparseWide attributes = reader->output->attributes;
-    const bool scalar = parser->options.scalar;
     const uint32_t end = before < parser->tokens.count ? before : parser->tokens.count;
-    for (uint32_t first = tagged && !marked ? check_input_attributed_next(attributes, 0, end, scalar) : end;
-         !marked && first < end; first = check_input_attributed_next(attributes, first + 16, end, scalar))
+    for (uint32_t first = tagged && !marked ? check_input_attributed_next(attributes, 0, end) : end;
+         !marked && first < end; first = check_input_attributed_next(attributes, first + 16, end))
     {
-        for (uint32_t selected = check_input_attributed_group(attributes, first, end, scalar); !marked && selected != 0; selected &= selected - 1)
+        for (uint32_t selected = check_input_attributed_group(attributes, first, end); !marked && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
             marked = type_unqualified(reader->tag_types[token]) == type_unqualified(record) &&

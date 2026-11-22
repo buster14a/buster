@@ -107,6 +107,10 @@ static int floors_input_select(FloorsInput* input, const char* requested, FILE* 
                 {
                     byte = fgetc(maps);
                 }
+                if (byte == EOF)
+                {
+                    break;
+                }
                 continue;
             }
             const char* name = strchr(line, '/');

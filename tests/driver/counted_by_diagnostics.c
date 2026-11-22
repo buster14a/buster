@@ -133,4 +133,40 @@ struct AudibleCount
     int *elements __attribute__((counted_by(_Alignof(count))));
 };
 
+#elif COUNTED_CASE == 7
+
+struct FirstCountArguments
+{
+    int count;
+    int *literal __attribute__((counted_by(8, 1)));
+    int *undeclared __attribute__((counted_by(missing_count, 1)));
+    void *sum __attribute__((sized_by(count + 1, 2)));
+    int *kept __attribute__((counted_by(count, 1)));
+};
+
+int first_kept(struct FirstCountArguments *value)
+{
+    _Static_assert(__builtin_types_compatible_p(__typeof__(__builtin_counted_by_ref(value->kept)), int *), "the first argument stays the count");
+    return *__builtin_counted_by_ref(value->kept);
+}
+
+int first_later = unresolved_first;
+
+#elif COUNTED_CASE == 8
+
+typedef int CountType;
+struct TypeThenOperand
+{
+    int count;
+    int *elements __attribute__((counted_by(CountType count)));
+};
+
+#elif COUNTED_CASE == 9
+
+struct OperandThenOperand
+{
+    int count;
+    int *elements __attribute__((counted_by(count count)));
+};
+
 #endif

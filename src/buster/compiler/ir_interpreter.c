@@ -158,6 +158,103 @@ static IrInterpreterAddress ir_interpreter_symbol_address(const IrInterpreterPro
     return result;
 }
 
+// log2 of the entries of a run's symbols (IrInterpreterSymbol).
+#define BUSTER_IR_INTERPRETER_SYMBOLS_LOG2 8u
+
+// What a symbol names in a run's program, which doesn't change while it runs: its address and whether it has one
+// (ir_interpreter_symbol_address's), and the function or native a direct call of it reaches (UINT32_MAX and 0 for
+// none). A run keeps the symbols its steps named, each at its entry (ir_interpreter_symbol), so that a symbol's
+// address or a call's target is the program's search once a run, rather than at every step that names it: a C
+// program's lowered IR takes a global's address at each access, and the searches go through every function, native,
+// label and binding (#2758).
+typedef struct IrInterpreterSymbol IrInterpreterSymbol;
+struct IrInterpreterSymbol
+{
+    // The symbol plus 1, 0 for an entry no symbol has filled.
+    uint64_t key;
+    uint64_t address;
+    const InterpreterNativeBinding* native;
+    uint32_t function;
+    bool found;
+};
+
+// The index of `symbol`'s entry in a run's symbols: its multiplicative hash's top bits, so that a program's consecutive
+// symbols spread across the entries.
+static uint32_t ir_interpreter_symbol_entry(SymbolId symbol)
+{
+    return (uint32_t)(symbol * UINT32_C(0x9e3779b9)) >> (32 - BUSTER_IR_INTERPRETER_SYMBOLS_LOG2);
+}
+
+// `symbol`'s entry in `symbols` (1 << BUSTER_IR_INTERPRETER_SYMBOLS_LOG2 of them, zeroed at the run's start), filled
+// from the program where another symbol, or none, holds it.
+static const IrInterpreterSymbol* ir_interpreter_symbol(const IrInterpreterProgram* program, IrInterpreterSymbol* symbols, SymbolId symbol)
+{
+    IrInterpreterSymbol* entry = &symbols[ir_interpreter_symbol_entry(symbol)];
+    const uint64_t key = (uint64_t)symbol + 1;
+    if (entry->key != key)
+    {
+        const uint32_t function = ir_interpreter_find_function(program, symbol, 0, false);
+        const IrInterpreterAddress address = ir_interpreter_symbol_address(program, symbol);
+        entry->key = key;
+        entry->address = address.address;
+        entry->native = function == UINT32_MAX ? ir_interpreter_find_native(program, symbol, 0, false) : 0;
+        entry->function = function;
+        entry->found = address.found;
+    }
+    return entry;
+}
+
+// A function's immutable frame requirements, found at its first verification in a run and reused on recursive calls.
+typedef struct IrInterpreterLayout IrInterpreterLayout;
+struct IrInterpreterLayout
+{
+    uint32_t max_phis;
+    bool verified;
+    bool simd;
+};
+
+// In verified IR every phi belongs to a non-entry block's prefix, and every block ends in a terminator. Only a
+// block with a phi at the current maximum can raise it. Find its first non-phi in the remaining sorted range.
+static uint32_t ir_interpreter_max_phis(const IrFunction* function)
+{
+    uint32_t max_phis = 0;
+    for (uint32_t b = 1; b < function->block_count; b += 1)
+    {
+        const uint32_t begin = function->block_offsets[b];
+        uint32_t end = function->block_offsets[b + 1] - 1;
+        if (max_phis < end - begin && function->op[begin + max_phis] == IR_PHI)
+        {
+            uint32_t first = begin + max_phis + 1;
+            while (first < end)
+            {
+                const uint32_t mid = first + (end - first) / 2;
+                if (function->op[mid] == IR_PHI)
+                {
+                    first = mid + 1;
+                }
+                else
+                {
+                    end = mid;
+                }
+            }
+            max_phis = first - begin;
+        }
+    }
+    return max_phis;
+}
+
+static IrCheck ir_interpreter_verified(const IrFunction* function, IrInterpreterLayout* layout, Arena* arena)
+{
+    const IrCheck verified = layout->verified ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(function, arena);
+    if (!layout->verified && verified.error == IR_OK)
+    {
+        layout->max_phis = ir_interpreter_max_phis(function);
+        layout->simd = ir_function_has_simd(function);
+        layout->verified = true;
+    }
+    return verified;
+}
+
 // A variadic definition's incoming arguments (#148), named and unnamed, as its call passes them: each one's value (an
 // aggregate's the address of its bytes, its place's size nonzero), IR type and place, the bytes of the call's argument
 // area and its alignment, rsp's at the call (2^stack_alignment_log2, which a va_arg of an argument aligned past 16 rounds
@@ -253,9 +350,7 @@ static InterpreterStatus ir_interpreter_anchors(const IrInterpreterIncoming* inc
     return status;
 }
 
-// `checked` marks the program's functions verified so far in this execution: a function's IR doesn't change while it
-// runs, so each is verified once, at its first frame, rather than at every call (#134 runs C programs' recursions).
-static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const IrInterpreterProgram* program, uint32_t function_index, const InterpreterValue* arguments, uint32_t count, const IrInterpreterIncoming* incoming, uint32_t destination, uint32_t owner, const InterpreterOptions* options, uint64_t active_values, uint64_t active_locals, InterpreterRuntime* runtime, uint8_t* checked, Arena* arena)
+static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const IrInterpreterProgram* program, uint32_t function_index, const InterpreterValue* arguments, uint32_t count, const IrInterpreterIncoming* incoming, uint32_t destination, uint32_t owner, const InterpreterOptions* options, uint64_t active_values, uint64_t active_locals, InterpreterRuntime* runtime, IrInterpreterLayout* layout, Arena* arena)
 {
     const IrFunction* function = program->functions[function_index].function;
     const uint64_t mark = arena->length;
@@ -263,10 +358,9 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     IrCheck verified = { .error = IR_ERROR_STRUCTURE };
     if (function != 0)
     {
-        verified = checked[function_index] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(function, arena, false);
-        checked[function_index] = verified.error == IR_OK;
+        verified = ir_interpreter_verified(function, layout, arena);
     }
-    const bool simd = verified.error == IR_OK && ir_function_has_simd(function);
+    const bool simd = verified.error == IR_OK && layout->simd;
     if (verified.error == IR_ERROR_MEMORY)
     {
         status = INTERPRETER_RESOURCE;
@@ -292,25 +386,35 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
     }
     if (status == INTERPRETER_OK)
     {
-        *frame = (IrInterpreterFrame){
-            .function = function,
-            .arena_mark = mark,
-            .destination = destination,
-            .function_index = function_index,
-            .value_charge = function->instruction_count + count,
-        };
-        frame->values = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, (uint64_t)function->instruction_count + 1);
-        frame->defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)function->instruction_count + 1);
+        // Field by field: a compound literal of the frame was a memset and a copy, calls into a sanitizer's runtime at
+        // every call (#2758).
+        frame->function = function;
+        frame->vector_indices = 0;
+        frame->vector_values = 0;
+        frame->vector_phis = 0;
+        frame->arena_mark = mark;
+        frame->instruction = 0;
+        frame->block = 0;
+        frame->destination = destination;
+        frame->function_index = function_index;
+        frame->value_charge = function->instruction_count + count;
+        frame->dynamic.allocation = 0;
+        frame->dynamic.saved = 0;
+        frame->dynamic.position = 0;
+        // The tail of each frame-owned column holds one block's snapshots, separate from every live instruction.
+        const uint64_t values = (uint64_t)function->instruction_count + 1;
+        frame->values = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, values + layout->max_phis);
+        frame->defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, values + layout->max_phis);
         frame->arguments = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, (uint64_t)count + 1);
         frame->slots = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)function->slot_count + 1);
-        frame->phi_values = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterValue, (uint64_t)function->instruction_count + 1);
-        frame->phi_defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)function->instruction_count + 1);
-        if (frame->values == 0 || frame->defined == 0 || frame->arguments == 0 || frame->slots == 0 || frame->phi_values == 0 || frame->phi_defined == 0)
+        if (frame->values == 0 || frame->defined == 0 || frame->arguments == 0 || frame->slots == 0)
         {
             status = INTERPRETER_RESOURCE;
         }
         else
         {
+            frame->phi_values = frame->values + values;
+            frame->phi_defined = frame->defined + values;
             // The values and their defined bytes start as the arena left them: the verifier proved every reachable use
             // dominated by its definition, so a frame reads only the values it wrote, and ir_interpret reads an
             // instruction's a and b only where ir_value_mask says they are values. Clearing them cost every call
@@ -324,9 +428,14 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         {
             status = ir_interpreter_simd_storage(frame, arena);
         }
-        InterpreterNativeArea anchors = {
-            0
-        };
+        // A variadic definition's register save area and overflow area among its slots, for its anchors past the loop: in
+        // locals of their own, as the anchors' record, whose address ir_interpreter_anchors takes, would be poisoned at
+        // every call where it was declared (#2758).
+        uint8_t* save_bytes = 0;
+        uint8_t* save_defined = 0;
+        uint8_t* overflow_bytes = 0;
+        uint8_t* overflow_defined = 0;
+        uint64_t overflow_capacity = 0;
         // The slots' bytes and their defined bytes, each pushed after the one before, cleared at once past the loop:
         // one memset a frame rather than two a slot (#2758).
         uint8_t* const slots_begin = (uint8_t*)arena->base + arena->length;
@@ -356,14 +465,14 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
                 }
                 if (save)
                 {
-                    anchors.registers = bytes;
-                    anchors.registers_defined = defined;
+                    save_bytes = bytes;
+                    save_defined = defined;
                 }
                 if (overflow)
                 {
-                    anchors.stack = bytes;
-                    anchors.stack_defined = defined;
-                    anchors.stack_capacity = size;
+                    overflow_bytes = bytes;
+                    overflow_defined = defined;
+                    overflow_capacity = size;
                 }
             }
         }
@@ -373,6 +482,13 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         }
         if (status == INTERPRETER_OK && incoming != 0)
         {
+            InterpreterNativeArea anchors = {
+                .registers = save_bytes,
+                .registers_defined = save_defined,
+                .stack = overflow_bytes,
+                .stack_defined = overflow_defined,
+                .stack_capacity = overflow_capacity,
+            };
             // Anchors the function doesn't have take nothing: their bytes go to scratch the frame releases.
             uint8_t* scratch = arena_push(arena, (uint64_t)BUSTER_ABI_SAVE_AREA_BYTES * 2 + incoming->stack_bytes * 2, 16);
             status = scratch == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
@@ -406,8 +522,8 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
 // readers add: the others' sizes, places and extension flags), the chain's value into *chain for a native callee's r10
 // (an interpreted one can't read r10), and an undefined chain INTERPRETER_UNDEFINED where `check_undefined` asks, as an
 // argument's is. Any other call is returned as it is, *skipped 0.
-static IrCall ir_interpreter_unchained(const IrFunction* function, IrCall call, const InterpreterValue* values, const uint8_t* defined, bool check_undefined,
-                                       uint64_t* chain, uint32_t* skipped, InterpreterStatus* status)
+static inline __attribute__((always_inline)) IrCall ir_interpreter_unchained(const IrFunction* function, IrCall call, const InterpreterValue* values, const uint8_t* defined, bool check_undefined,
+                                                                             uint64_t* chain, uint32_t* skipped, InterpreterStatus* status)
 {
     const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
     const AbiLocation first = records != 0 && call.argument_count != 0 ? function->passed[records->passed].location : (AbiLocation){ 0 };
@@ -545,7 +661,7 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
     return status;
 }
 
-static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, uint32_t block, uint32_t predecessor, const InterpreterOptions* options, uint64_t* steps)
+static inline __attribute__((always_inline)) InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, uint32_t block, uint32_t predecessor, uint64_t max_steps, uint64_t* steps)
 {
     const IrFunction* function = frame->function;
     const uint32_t begin = function->block_offsets[block];
@@ -555,7 +671,7 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
     InterpreterStatus status = INTERPRETER_OK;
     while (phi_end < end && function->op[phi_end] == IR_PHI && status == INTERPRETER_OK)
     {
-        if (*steps == options->max_steps)
+        if (*steps == max_steps)
         {
             status = INTERPRETER_STEP_LIMIT;
         }
@@ -584,13 +700,13 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
             {
                 // A value's two words, each by itself: a sanitizer's build makes a copy of the whole 16-byte value,
                 // memory to memory, a call into its runtime at every phi (#2758).
-                frame->phi_values[phi_end].low = frame->values[source].low;
-                frame->phi_values[phi_end].high = frame->values[source].high;
+                frame->phi_values[phi_end - begin].low = frame->values[source].low;
+                frame->phi_values[phi_end - begin].high = frame->values[source].high;
                 if (ir_vector_type(function->type[phi_end]))
                 {
                     frame->vector_phis[vector_phi++] = frame->vector_values[frame->vector_indices[source]];
                 }
-                frame->phi_defined[phi_end] = frame->defined[source];
+                frame->phi_defined[phi_end - begin] = frame->defined[source];
             }
             phi_end += 1;
         }
@@ -600,13 +716,13 @@ static InterpreterStatus ir_interpreter_enter_block(IrInterpreterFrame* frame, u
         vector_phi = 0;
         for (uint32_t p = begin; p < phi_end; p += 1)
         {
-            frame->values[p].low = frame->phi_values[p].low;
-            frame->values[p].high = frame->phi_values[p].high;
+            frame->values[p].low = frame->phi_values[p - begin].low;
+            frame->values[p].high = frame->phi_values[p - begin].high;
             if (ir_vector_type(function->type[p]))
             {
                 frame->vector_values[frame->vector_indices[p]] = frame->vector_phis[vector_phi++];
             }
-            frame->defined[p] = frame->phi_defined[p];
+            frame->defined[p] = frame->phi_defined[p - begin];
         }
         frame->block = block;
         frame->instruction = phi_end;
@@ -674,13 +790,19 @@ static unsigned __int128 ir_interpreter_intrinsic(uint32_t operation, uint32_t b
     return result;
 }
 
-// A scalar operation's value, returned rather than written through a pointer so that ir_interpret's value stays out of
-// memory (#2758, interpreter_load_value), and its status in *status_out.
-static InterpreterValue ir_interpreter_operation(const IrFunction* function, uint32_t instruction, InterpreterValue av, InterpreterValue bv, InterpreterStatus* status_out)
+// The type of an operation's operand a, where a is a value (IR_VOID where it isn't).
+static uint8_t ir_interpreter_operand_type(const IrFunction* function, uint32_t a)
 {
-    const uint8_t op = function->op[instruction];
-    const uint8_t type = function->type[instruction];
-    const uint8_t at = function->a[instruction] < function->instruction_count ? function->type[function->a[instruction]] : IR_VOID;
+    return a < function->instruction_count ? function->type[a] : IR_VOID;
+}
+
+// A scalar operation's value, returned rather than written through a pointer so that ir_interpret's value stays out of
+// memory (#2758, interpreter_load_value), and its status in *status_out: the operation `op` of type `type`, operands a
+// and c and their values av and bv, as ir_interpret's step has loaded them. Inlined into the step, whose status it
+// writes, so that the status stays out of memory too; the operand's type is looked up only where the case needs it.
+static inline __attribute__((always_inline)) InterpreterValue ir_interpreter_operation(const IrFunction* function, uint8_t op, uint8_t type, uint32_t operand, uint32_t selector, InterpreterValue av,
+                                                                                     InterpreterValue bv, InterpreterStatus* status_out)
+{
     const uint32_t bits = ir_type_bits[type];
     const unsigned __int128 left = interpreter_value_integer(av);
     const unsigned __int128 right = interpreter_value_integer(bv);
@@ -699,12 +821,12 @@ static InterpreterValue ir_interpreter_operation(const IrFunction* function, uin
         result = left;
         break;
     case IR_SEXT:
-        result = (unsigned __int128)interpreter_value_signed(av, at);
+        result = (unsigned __int128)interpreter_value_signed(av, ir_interpreter_operand_type(function, operand));
         break;
     case IR_ADD: result = left + right; break;
     case IR_SUB: result = left - right; break;
     case IR_MUL: result = left * right; break;
-    case IR_INTRINSIC: result = ir_interpreter_intrinsic(function->c[instruction], bits, (uint64_t)left, (uint64_t)right); break;
+    case IR_INTRINSIC: result = ir_interpreter_intrinsic(selector, bits, (uint64_t)left, (uint64_t)right); break;
     case IR_AND: result = left & right; break;
     case IR_OR: result = left | right; break;
     case IR_XOR: result = left ^ right; break;
@@ -759,16 +881,16 @@ static InterpreterValue ir_interpreter_operation(const IrFunction* function, uin
         break;
     case IR_ICMP:
     {
-        const __int128 signed_left = interpreter_value_signed(av, at);
-        const __int128 signed_right = interpreter_value_signed(bv, at);
-        switch (function->c[instruction])
+        // The operands' signed values only for the signed predicates, which alone read them.
+        const uint8_t at = ir_interpreter_operand_type(function, operand);
+        switch (selector)
         {
         case IR_EQ: result = left == right; break;
         case IR_NE: result = left != right; break;
-        case IR_LT: result = signed_left < signed_right; break;
-        case IR_LE: result = signed_left <= signed_right; break;
-        case IR_GT: result = signed_left > signed_right; break;
-        case IR_GE: result = signed_left >= signed_right; break;
+        case IR_LT: result = interpreter_value_signed(av, at) < interpreter_value_signed(bv, at); break;
+        case IR_LE: result = interpreter_value_signed(av, at) <= interpreter_value_signed(bv, at); break;
+        case IR_GT: result = interpreter_value_signed(av, at) > interpreter_value_signed(bv, at); break;
+        case IR_GE: result = interpreter_value_signed(av, at) >= interpreter_value_signed(bv, at); break;
         case IR_ULT: result = left < right; break;
         case IR_ULE: result = left <= right; break;
         case IR_UGT: result = left > right; break;
@@ -832,9 +954,10 @@ static InterpreterValue ir_interpreter_operation(const IrFunction* function, uin
     }
     case IR_FCMP:
     {
+        const uint8_t at = ir_interpreter_operand_type(function, operand);
         const long double a = interpreter_value_float(av, at);
         const long double b = interpreter_value_float(bv, at);
-        switch (function->c[instruction])
+        switch (selector)
         {
         case IR_EQ: result = a == b; break;
         case IR_NE: result = a != b; break;
@@ -848,14 +971,14 @@ static InterpreterValue ir_interpreter_operation(const IrFunction* function, uin
     }
     case IR_FTRUNC:
     case IR_FEXT:
-        value = interpreter_value_float_value(interpreter_value_float(av, at), type);
+        value = interpreter_value_float_value(interpreter_value_float(av, ir_interpreter_operand_type(function, operand)), type);
         raw_result = false;
         break;
     case IR_SITOFP:
     case IR_UITOFP:
     {
         // Cast directly to the destination precision: routing i128 through x87 first can double-round.
-        const __int128 signed_value = interpreter_value_signed(av, at);
+        const __int128 signed_value = interpreter_value_signed(av, ir_interpreter_operand_type(function, operand));
         long double number = 0;
         if (type == IR_F32)
         {
@@ -876,7 +999,11 @@ static InterpreterValue ir_interpreter_operation(const IrFunction* function, uin
     case IR_FPTOSI:
     case IR_FPTOUI:
     {
-        status = interpreter_value_float_integer(av, at, type, op == IR_FPTOSI, &result);
+        // Through a local of the case's own: result's address taken would keep it in memory, poisoned at each step the
+        // operation is inlined into (#2758).
+        unsigned __int128 converted = 0;
+        status = interpreter_value_float_integer(av, ir_interpreter_operand_type(function, operand), type, op == IR_FPTOSI, &converted);
+        result = converted;
         break;
     }
     default:
@@ -891,6 +1018,71 @@ static InterpreterValue ir_interpreter_operation(const IrFunction* function, uin
     return value;
 }
 
+// Whether instruction i reads an undefined value, which only a run with check_undefined asks (#2758: a run without it,
+// as test-ssa-source's forms are, works none of this out at its steps). `value_operands` is its ir_value_mask, and av and
+// bv its a and b where that has them. The operand table describes value operands, not metadata. Select and phi consume
+// only their chosen incoming value; dead undef alternatives remain legal. COPY can carry undef until a semantic use.
+static bool ir_interpreter_reads_undefined(const IrInterpreterFrame* frame, uint32_t i, uint32_t value_operands, InterpreterValue av, InterpreterValue bv)
+{
+    const IrFunction* function = frame->function;
+    const uint8_t op = function->op[i];
+    const uint8_t type = function->type[i];
+    const uint32_t a = function->a[i];
+    const uint32_t b = function->b[i];
+    const uint32_t c = function->c[i];
+    uint8_t operands = (uint8_t)value_operands;
+    if (op == IR_RET && a != BUSTER_IR_NONE)
+    {
+        operands = 1;
+    }
+    else if (op == IR_SELECT)
+    {
+        operands = 1;
+    }
+    else if (op == IR_VSELECT)
+    {
+        // High mask bits outside the vector's lanes do not select a lane. An entirely inactive input may
+        // remain undefined, just as the unchosen input of scalar select may remain undefined.
+        const uint32_t count = ir_lane_count(type, function->flags[i]);
+        const uint64_t lanes = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        operands = 1 | ((av.low & lanes) != 0 ? 2 : 0) | ((av.low & lanes) != lanes ? 4 : 0);
+    }
+    else if (op == IR_COPY || op == IR_BITCAST)
+    {
+        operands = 0;
+    }
+    else if (op == IR_ATOMIC_RMW && c != BUSTER_IR_NONE)
+    {
+        // A compare-exchange's desired value (#1059), which it uses whether or not it stores it.
+        operands = 7;
+    }
+    else if (op == IR_MASKED_LOAD)
+    {
+        // A masked load's passthrough (#1840) is read only where some lane's bit is clear, as a vselect's.
+        const uint32_t count = ir_lane_count(type, function->flags[i]);
+        const uint64_t lanes = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        operands = 3 | ((bv.low & lanes) != lanes ? 4 : 0);
+    }
+    else if (ir_ternary_instruction(function, i))
+    {
+        // A ternary intrinsic's third operand (#1840), from the extra array.
+        operands = 7;
+    }
+    bool undefined = false;
+    for (uint32_t p = 0; !undefined && p < 3; p += 1)
+    {
+        const uint32_t id = p == 0 ? a : p == 1 ? b : ir_value_third(function, i) != BUSTER_IR_NONE ? ir_value_third(function, i) : c;
+        undefined = (operands & (1u << p)) != 0 && frame->defined[id] == 0;
+    }
+    undefined = undefined || (op == IR_ADDRESS && b != BUSTER_IR_NONE && frame->defined[b] == 0);
+    // A scatter's stored vector and mask (#1840), its extra values.
+    for (uint32_t k = 0; op == IR_SCATTER && !undefined && k < 2; k += 1)
+    {
+        undefined = frame->defined[ir_extra_value(function, i, k)] == 0;
+    }
+    return undefined;
+}
+
 static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterpreterProgram* program, SymbolId entry, const InterpreterValue* arguments, uint32_t argument_count, const InterpreterOptions* requested_options, Arena* arena)
 {
     InterpreterResult result = {
@@ -902,7 +1094,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
     const InterpreterOptions* options = requested_options == 0 ? &defaults : requested_options;
     const uint64_t mark = arena->length;
     IrInterpreterFrame* frames = 0;
-    uint8_t* checked = 0;
+    IrInterpreterLayout* layouts = 0;
+    IrInterpreterSymbol* symbols = 0;
     InterpreterRuntime runtime = {
         .memory_capacity = options->max_memories,
         .check_memory = options->check_memory,
@@ -915,11 +1108,18 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
     {
         frames = BUSTER_ARENA_PUSH_ARRAY(arena, IrInterpreterFrame, options->max_frames);
         runtime.memories = BUSTER_ARENA_PUSH_ARRAY(arena, InterpreterMemory, options->max_memories);
-        checked = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)program->function_count + 1);
-        result.status = options->max_frames == 0 || options->max_frames == UINT32_MAX ? INTERPRETER_FRAME_LIMIT : frames == 0 || runtime.memories == 0 || checked == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
-        if (checked != 0)
+        layouts = BUSTER_ARENA_PUSH_ARRAY(arena, IrInterpreterLayout, program->function_count);
+        symbols = BUSTER_ARENA_PUSH_ARRAY(arena, IrInterpreterSymbol, UINT64_C(1) << BUSTER_IR_INTERPRETER_SYMBOLS_LOG2);
+        result.status = options->max_frames == 0 || options->max_frames == UINT32_MAX ? INTERPRETER_FRAME_LIMIT
+                        : frames == 0 || runtime.memories == 0 || layouts == 0 || symbols == 0 ? INTERPRETER_RESOURCE
+                                                                                                : INTERPRETER_OK;
+        if (layouts != 0)
         {
-            memset(checked, 0, (uint64_t)program->function_count + 1);
+            memset(layouts, 0, (uint64_t)program->function_count * sizeof(*layouts));
+        }
+        if (symbols != 0)
+        {
+            memset(symbols, 0, sizeof(IrInterpreterSymbol) << BUSTER_IR_INTERPRETER_SYMBOLS_LOG2);
         }
     }
     for (uint32_t b = 0; result.status == INTERPRETER_OK && b < program->binding_count; b += 1)
@@ -944,7 +1144,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
             // An entry has no call whose records would place its aggregates (#131).
             const IrFunction* function = program->functions[first].function;
             result.status = function != 0 && function->parameter_passed != 0 ? INTERPRETER_INVALID
-                                                                             : ir_interpreter_frame(&frames[0], program, first, arguments, argument_count, 0, BUSTER_IR_NONE, 1, options, 0, 0, &runtime, checked, arena);
+                                                                             : ir_interpreter_frame(&frames[0], program, first, arguments, argument_count, 0, BUSTER_IR_NONE, 1, options, 0, 0, &runtime, &layouts[first], arena);
             if (result.status == INTERPRETER_OK)
             {
                 depth = 1;
@@ -957,12 +1157,56 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
     // frames that read them: declared for the whole run, as a sanitizer's build poisons and clears at every step a local
     // of a step's own that it keeps in memory, as it keeps part of this one (#2758).
     IrSimdValue wide_value = { 0 };
-    while (result.status == INTERPRETER_OK && depth != 0)
+    // The run's status and steps, and the options its steps read, in locals whose addresses no function takes, so that
+    // the step loop keeps them in registers rather than in memory, where a sanitizer's build instruments each access
+    // (#2758): the helpers that write them are inlined (ir_interpreter_operation, ir_interpreter_enter_block,
+    // ir_interpreter_unchained).
+    InterpreterStatus status = result.status;
+    uint64_t steps = 0;
+    const uint64_t max_steps = options->max_steps;
+    const bool check_memory = options->check_memory;
+    const bool check_undefined = options->check_undefined;
+    // A call's incoming arguments for a variadic callee's frame (ir_interpreter_arguments fills it for one), whose address
+    // its helpers take: declared for the whole run, as wide_value is.
+    IrInterpreterIncoming incoming = { 0 };
+    // The current frame and what its steps read of it (its next instruction, its function's columns, its values and their
+    // defined bytes), in locals kept between steps and loaded again only when the frame changes, at a call or a return
+    // (frame_depth, the depth they were loaded at), rather than loaded from memory at every step, where a sanitizer's
+    // build instruments each load (#2758). A call stores its frame's next instruction back before its callee's frame,
+    // and a block's entry, which sets it (ir_interpreter_enter_block), is read back.
+    uint32_t frame_depth = 0;
+    IrInterpreterFrame* frame = 0;
+    const IrFunction* function = 0;
+    uint32_t next = 0;
+    uint32_t function_index = 0;
+    const uint8_t* ops = 0;
+    const uint8_t* types = 0;
+    const uint32_t* as = 0;
+    const uint32_t* bs = 0;
+    const uint32_t* cs = 0;
+    InterpreterValue* values = 0;
+    uint8_t* defined_values = 0;
+    bool vectors = false;
+    while (status == INTERPRETER_OK && depth != 0)
     {
-        IrInterpreterFrame* frame = &frames[depth - 1];
-        const IrFunction* function = frame->function;
-        const uint32_t i = frame->instruction;
-        result.function = frame->function_index;
+        if (frame_depth != depth)
+        {
+            frame_depth = depth;
+            frame = &frames[depth - 1];
+            function = frame->function;
+            next = frame->instruction;
+            function_index = frame->function_index;
+            ops = function->op;
+            types = function->type;
+            as = function->a;
+            bs = function->b;
+            cs = function->c;
+            values = frame->values;
+            defined_values = frame->defined;
+            vectors = frame->vector_values != 0;
+        }
+        const uint32_t i = next;
+        result.function = function_index;
         result.entry = i;
         if (function->instruction_count == 0)
         {
@@ -980,93 +1224,43 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 frames[depth - 1].defined[destination] = 1;
             }
         }
-        else if (result.steps == options->max_steps)
+        else if (steps == max_steps)
         {
-            result.status = INTERPRETER_STEP_LIMIT;
+            status = INTERPRETER_STEP_LIMIT;
         }
         else if (i >= function->instruction_count)
         {
-            result.status = INTERPRETER_INVALID;
+            status = INTERPRETER_INVALID;
         }
         else
         {
-            result.steps += 1;
-            frame->instruction += 1;
-            const uint8_t op = function->op[i];
-            const uint8_t type = function->type[i];
-            const uint32_t a = function->a[i];
-            const uint32_t b = function->b[i];
-            const uint32_t c = function->c[i];
+            steps += 1;
+            next = i + 1;
+            const uint8_t op = ops[i];
+            const uint8_t type = types[i];
+            const uint32_t a = as[i];
+            const uint32_t b = bs[i];
+            const uint32_t c = cs[i];
             // Its a and b where the operand table has them as values, 0 where they are metadata (a constant's index, a
             // call's symbol): a frame's values the frame hasn't written are the arena's leftovers (ir_interpreter_frame).
-            const uint32_t value_operands = ir_value_mask(function, i);
-            const InterpreterValue av = (value_operands & 1) != 0 ? frame->values[a] : (InterpreterValue){ 0 };
-            const InterpreterValue bv = (value_operands & 2) != 0 ? frame->values[b] : (InterpreterValue){ 0 };
+            // The mask is ir_value_mask's, from the operands just loaded and without its branch (an operation without
+            // optional operands has 0 for them).
+            const uint32_t present = (uint32_t)(a != BUSTER_IR_NONE) | (uint32_t)(b != BUSTER_IR_NONE) << 1 | (uint32_t)(c != BUSTER_IR_NONE) << 2;
+            const uint32_t value_operands = (uint32_t)ir_operand_table[op] | ((uint32_t)ir_optional_table[op] & present);
+            const InterpreterValue av = (value_operands & 1) != 0 ? values[a] : (InterpreterValue){ 0 };
+            const InterpreterValue bv = (value_operands & 2) != 0 ? values[b] : (InterpreterValue){ 0 };
             InterpreterValue value = { 0 };
-            if (frame->vector_values != 0)
+            if (vectors)
             {
                 wide_value = (IrSimdValue){ 0 };
             }
             bool store_value = type != IR_VOID;
             bool defined = true;
-            // The operand table describes value operands, not metadata. Select and phi consume only their chosen
-            // incoming value; dead undef alternatives remain legal. COPY can carry undef until a semantic use.
-            uint8_t operands = (uint8_t)value_operands;
-            if (op == IR_RET && a != BUSTER_IR_NONE)
+            if (check_undefined && ir_interpreter_reads_undefined(frame, i, value_operands, av, bv))
             {
-                operands = 1;
+                status = INTERPRETER_UNDEFINED;
             }
-            else if (op == IR_SELECT)
-            {
-                operands = 1;
-            }
-            else if (op == IR_VSELECT)
-            {
-                // High mask bits outside the vector's lanes do not select a lane. An entirely inactive input may
-                // remain undefined, just as the unchosen input of scalar select may remain undefined.
-                const uint32_t count = ir_lane_count(type, function->flags[i]);
-                const uint64_t lanes = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-                operands = 1 | ((av.low & lanes) != 0 ? 2 : 0) | ((av.low & lanes) != lanes ? 4 : 0);
-            }
-            else if (op == IR_COPY || op == IR_BITCAST)
-            {
-                operands = 0;
-            }
-            else if (op == IR_ATOMIC_RMW && c != BUSTER_IR_NONE)
-            {
-                // A compare-exchange's desired value (#1059), which it uses whether or not it stores it.
-                operands = 7;
-            }
-            else if (op == IR_MASKED_LOAD)
-            {
-                // A masked load's passthrough (#1840) is read only where some lane's bit is clear, as a vselect's.
-                const uint32_t count = ir_lane_count(type, function->flags[i]);
-                const uint64_t lanes = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-                operands = 3 | ((bv.low & lanes) != lanes ? 4 : 0);
-            }
-            else if (ir_ternary_instruction(function, i))
-            {
-                // A ternary intrinsic's third operand (#1840), from the extra array.
-                operands = 7;
-            }
-            for (uint32_t p = 0; result.status == INTERPRETER_OK && p < 3; p += 1)
-            {
-                const uint32_t id = p == 0 ? a : p == 1 ? b : ir_value_third(function, i) != BUSTER_IR_NONE ? ir_value_third(function, i) : c;
-                if ((operands & (1u << p)) != 0 && frame->defined[id] == 0 && options->check_undefined)
-                {
-                    result.status = INTERPRETER_UNDEFINED;
-                }
-            }
-            if (op == IR_ADDRESS && b != BUSTER_IR_NONE && frame->defined[b] == 0 && options->check_undefined)
-            {
-                result.status = INTERPRETER_UNDEFINED;
-            }
-            // A scatter's stored vector and mask (#1840), its extra values.
-            for (uint32_t k = 0; op == IR_SCATTER && result.status == INTERPRETER_OK && k < 2; k += 1)
-            {
-                result.status = frame->defined[ir_extra_value(function, i, k)] == 0 && options->check_undefined ? INTERPRETER_UNDEFINED : result.status;
-            }
-            if (result.status == INTERPRETER_OK)
+            if (status == INTERPRETER_OK)
             {
                 switch (op)
                 {
@@ -1110,9 +1304,19 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 }
                 case IR_FMA:
                 {
-                    // A fused multiply-add (#1840): one rounding, the first NaN of a, b and c (ir_fma_bits).
-                    const uint64_t third = c < function->instruction_count ? frame->values[c].low : 0;
-                    value.low = ir_fma_bits(type, av.low, bv.low, third);
+                    // A vector's lanes (#2806) are the model's; a scalar is one rounding, the first NaN of a, b and c.
+                    if (ir_vector_type(type))
+                    {
+                        IrSimdValue lanes = { 0 };
+                        status = ir_interpreter_simd_operation(frame, i, &lanes);
+                        wide_value = lanes;
+                        value.low = lanes.words[0];
+                    }
+                    else
+                    {
+                        const uint64_t third = c < function->instruction_count ? frame->values[c].low : 0;
+                        value.low = ir_fma_bits(type, av.low, bv.low, third);
+                    }
                     break;
                 }
                 case IR_STACK_ADDR:
@@ -1136,12 +1340,12 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     // bytes, before a store's marks them written.
                     const uint32_t bytes = (ir_type_bits[type] + 7) / 8;
                     const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
-                    result.status = options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, av.low, bytes, false);
-                    if (result.status == INTERPRETER_OK)
+                    status = check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : interpreter_memory_access(&runtime, av.low, bytes, false);
+                    if (status == INTERPRETER_OK)
                     {
-                        result.status = interpreter_memory_access(&runtime, av.low, bytes, true);
+                        status = interpreter_memory_access(&runtime, av.low, bytes, true);
                     }
-                    if (result.status == INTERPRETER_OK)
+                    if (status == INTERPRETER_OK)
                     {
                         uint64_t old = 0;
                         volatile uint8_t* object = (volatile uint8_t*)(uintptr_t)av.low;
@@ -1166,7 +1370,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 {
                     // The address in a local of the case's own, as value's address isn't taken (interpreter_load_value).
                     uint64_t address = 0;
-                    result.status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &address);
+                    status = interpreter_stack_allocate(&frame->dynamic, av.low, depth, &runtime, arena, &address);
                     value.low = address;
                     break;
                 }
@@ -1174,18 +1378,18 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 {
                     // A frame address (#1847) is a machine frame's, which the interpreter's frames don't have.
                     uint64_t handle = 0;
-                    result.status = function->flags[i] == BUSTER_IR_STACK_SAVE_FRAME ? INTERPRETER_UNSUPPORTED : interpreter_stack_save(&frame->dynamic, &runtime, arena, &handle);
+                    status = function->flags[i] == BUSTER_IR_STACK_SAVE_FRAME ? INTERPRETER_UNSUPPORTED : interpreter_stack_save(&frame->dynamic, &runtime, arena, &handle);
                     value.low = handle;
                     break;
                 }
                 case IR_STACK_RESTORE:
-                    result.status = interpreter_stack_restore(&frame->dynamic, av.low, &runtime, arena);
+                    status = interpreter_stack_restore(&frame->dynamic, av.low, &runtime, arena);
                     break;
                 case IR_SYMBOL_ADDR:
                 {
-                    const IrInterpreterAddress symbol = ir_interpreter_symbol_address(program, a);
-                    value.low = symbol.address;
-                    result.status = symbol.found ? result.status : INTERPRETER_SYMBOL;
+                    const IrInterpreterSymbol* symbol = ir_interpreter_symbol(program, symbols, a);
+                    value.low = symbol->address;
+                    status = symbol->found ? status : INTERPRETER_SYMBOL;
                     break;
                 }
                 case IR_ADDRESS:
@@ -1199,13 +1403,13 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     const bool observable = (function->flags[i] & BUSTER_IR_OBSERVABLE) != 0;
                     // An access in a segment (#1447, BUSTER_IR_SEGMENT) is an offset from its base, which the interpreter
                     // doesn't model.
-                    result.status = (function->flags[i] & BUSTER_IR_SEGMENT) != 0 ? INTERPRETER_UNSUPPORTED : interpreter_memory_access(&runtime, av.low, bytes, op == IR_STORE);
+                    status = (function->flags[i] & BUSTER_IR_SEGMENT) != 0 ? INTERPRETER_UNSUPPORTED : interpreter_memory_access(&runtime, av.low, bytes, op == IR_STORE);
                     const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
-                    if (result.status == INTERPRETER_OK && options->check_memory && (av.low & alignment_mask) != 0)
+                    if (status == INTERPRETER_OK && check_memory && (av.low & alignment_mask) != 0)
                     {
-                        result.status = INTERPRETER_MEMORY;
+                        status = INTERPRETER_MEMORY;
                     }
-                    if (result.status == INTERPRETER_OK && ir_vector_type(memory_type))
+                    if (status == INTERPRETER_OK && ir_vector_type(memory_type))
                     {
                         // A vector's bytes, through lanes of the access's own, past them 0 (a scalar's go by value,
                         // interpreter_load_value's reason); a volatile one's a byte at a time.
@@ -1224,11 +1428,11 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         }
                         wide_value = op == IR_LOAD ? lanes : wide_value;
                     }
-                    else if (result.status == INTERPRETER_OK && op == IR_LOAD)
+                    else if (status == INTERPRETER_OK && op == IR_LOAD)
                     {
                         value = interpreter_value_from_integer(interpreter_value_integer(interpreter_load_value(av.low, bytes, observable)), type);
                     }
-                    else if (result.status == INTERPRETER_OK)
+                    else if (status == INTERPRETER_OK)
                     {
                         interpreter_store_value(av.low, bv, bytes, observable);
                     }
@@ -1249,19 +1453,19 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     const uint64_t bits = frame->values[mask].low;
                     const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
                     IrSimdValue lanes = ir_interpreter_simd_value(frame, vector);
-                    result.status = count == 0 ? INTERPRETER_INVALID : options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : INTERPRETER_OK;
-                    for (uint32_t lane = 0; result.status == INTERPRETER_OK && lane < count; lane += 1)
+                    status = count == 0 ? INTERPRETER_INVALID : check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : INTERPRETER_OK;
+                    for (uint32_t lane = 0; status == INTERPRETER_OK && lane < count; lane += 1)
                     {
                         if ((bits >> lane & 1) != 0)
                         {
                             const uint64_t address = av.low + (uint64_t)lane * size;
                             uint8_t* bytes = (uint8_t*)lanes.words + (uint64_t)lane * size;
-                            result.status = interpreter_memory_access(&runtime, address, size, store);
-                            if (result.status == INTERPRETER_OK && store)
+                            status = interpreter_memory_access(&runtime, address, size, store);
+                            if (status == INTERPRETER_OK && store)
                             {
                                 memcpy((void*)(uintptr_t)address, bytes, size);
                             }
-                            else if (result.status == INTERPRETER_OK)
+                            else if (status == INTERPRETER_OK)
                             {
                                 memcpy(bytes, (const void*)(uintptr_t)address, size);
                             }
@@ -1282,13 +1486,13 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     const uint64_t alignment_mask = (1ull << function->alignment_log2[i]) - 1;
                     const IrSimdValue lanes = ir_interpreter_simd_value(frame, b);
                     uint64_t address = av.low;
-                    result.status = count == 0 ? INTERPRETER_INVALID : options->check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : INTERPRETER_OK;
-                    for (uint32_t lane = 0; result.status == INTERPRETER_OK && lane < count; lane += 1)
+                    status = count == 0 ? INTERPRETER_INVALID : check_memory && (av.low & alignment_mask) != 0 ? INTERPRETER_MEMORY : INTERPRETER_OK;
+                    for (uint32_t lane = 0; status == INTERPRETER_OK && lane < count; lane += 1)
                     {
                         if ((bits >> lane & 1) != 0)
                         {
-                            result.status = interpreter_memory_access(&runtime, address, size, true);
-                            if (result.status == INTERPRETER_OK)
+                            status = interpreter_memory_access(&runtime, address, size, true);
+                            if (status == INTERPRETER_OK)
                             {
                                 memcpy((void*)(uintptr_t)address, (const uint8_t*)lanes.words + (uint64_t)lane * size, size);
                             }
@@ -1307,8 +1511,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     const uint64_t bits = frame->values[c].low;
                     const IrSimdValue indices = ir_interpreter_simd_value(frame, b);
                     IrSimdValue lanes = { 0 };
-                    result.status = count == 0 || (index_size != 4 && index_size != 8) ? INTERPRETER_INVALID : INTERPRETER_OK;
-                    for (uint32_t lane = 0; result.status == INTERPRETER_OK && lane < count; lane += 1)
+                    status = count == 0 || (index_size != 4 && index_size != 8) ? INTERPRETER_INVALID : INTERPRETER_OK;
+                    for (uint32_t lane = 0; status == INTERPRETER_OK && lane < count; lane += 1)
                     {
                         if ((bits >> lane & 1) != 0)
                         {
@@ -1324,8 +1528,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                                 memcpy(&index, (const uint8_t*)indices.words + (uint64_t)lane * 8, 8);
                             }
                             const uint64_t address = av.low + ((uint64_t)index << function->alignment_log2[i]);
-                            result.status = interpreter_memory_access(&runtime, address, size, false);
-                            if (result.status == INTERPRETER_OK)
+                            status = interpreter_memory_access(&runtime, address, size, false);
+                            if (status == INTERPRETER_OK)
                             {
                                 memcpy((uint8_t*)lanes.words + (uint64_t)lane * size, (const void*)(uintptr_t)address, size);
                             }
@@ -1347,8 +1551,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     const uint64_t bits = frame->values[ir_extra_value(function, i, 1)].low;
                     const IrSimdValue indices = ir_interpreter_simd_value(frame, b);
                     const IrSimdValue lanes = ir_interpreter_simd_value(frame, stored);
-                    result.status = count == 0 || (index_size != 4 && index_size != 8) ? INTERPRETER_INVALID : INTERPRETER_OK;
-                    for (uint32_t lane = 0; result.status == INTERPRETER_OK && lane < count; lane += 1)
+                    status = count == 0 || (index_size != 4 && index_size != 8) ? INTERPRETER_INVALID : INTERPRETER_OK;
+                    for (uint32_t lane = 0; status == INTERPRETER_OK && lane < count; lane += 1)
                     {
                         if ((bits >> lane & 1) != 0)
                         {
@@ -1364,8 +1568,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                                 memcpy(&index, (const uint8_t*)indices.words + (uint64_t)lane * 8, 8);
                             }
                             const uint64_t address = av.low + ((uint64_t)index << function->alignment_log2[i]);
-                            result.status = interpreter_memory_access(&runtime, address, size, true);
-                            if (result.status == INTERPRETER_OK)
+                            status = interpreter_memory_access(&runtime, address, size, true);
+                            if (status == INTERPRETER_OK)
                             {
                                 memcpy((void*)(uintptr_t)address, (const uint8_t*)lanes.words + (uint64_t)lane * size, size);
                             }
@@ -1376,12 +1580,17 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 case IR_CALL:
                 case IR_CALL_INDIRECT:
                 {
+                    // The caller resumes at its next instruction when its callee returns: stored back before any frame of
+                    // the callee's.
+                    frame->instruction = next;
                     // A static chain (#148, ir_interpreter_unchained): the call without it, its value for a native callee's r10.
                     uint64_t chain = 0;
                     uint32_t skipped = 0;
-                    const IrCall call = ir_interpreter_unchained(function, function->calls[b], frame->values, frame->defined, options->check_undefined, &chain, &skipped, &result.status);
-                    const uint32_t callee = ir_interpreter_find_function(program, a, av.low, op == IR_CALL_INDIRECT);
-                    const InterpreterNativeBinding* native = callee == UINT32_MAX ? ir_interpreter_find_native(program, a, av.low, op == IR_CALL_INDIRECT) : 0;
+                    const IrCall call = ir_interpreter_unchained(function, function->calls[b], frame->values, frame->defined, check_undefined, &chain, &skipped, &status);
+                    // A direct call's target the run's symbols keep (ir_interpreter_symbol); an indirect one's by its address.
+                    const IrInterpreterSymbol* named = op == IR_CALL ? ir_interpreter_symbol(program, symbols, a) : 0;
+                    const uint32_t callee = named != 0 ? named->function : ir_interpreter_find_function(program, a, av.low, true);
+                    const InterpreterNativeBinding* native = callee != UINT32_MAX ? 0 : named != 0 ? named->native : ir_interpreter_find_native(program, a, av.low, true);
                     // A call with ABI records (#131): an aggregate result's destination is c.
                     const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
                     const uint32_t result_size = records != 0 ? records->result_size : 0;
@@ -1393,57 +1602,53 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     uint16_t* types = BUSTER_ARENA_PUSH_ARRAY(arena, uint16_t, (uint64_t)call.argument_count + 1);
                     if (passed == 0 || parameters == 0 || types == 0)
                     {
-                        result.status = INTERPRETER_RESOURCE;
+                        status = INTERPRETER_RESOURCE;
                     }
-                    else if (result_size != 0 && frame->defined[c] == 0 && options->check_undefined)
+                    else if (result_size != 0 && frame->defined[c] == 0 && check_undefined)
                     {
-                        result.status = INTERPRETER_UNDEFINED;
+                        status = INTERPRETER_UNDEFINED;
                     }
-                    for (uint32_t p = 0; result.status == INTERPRETER_OK && p < call.argument_count; p += 1)
+                    for (uint32_t p = 0; status == INTERPRETER_OK && p < call.argument_count; p += 1)
                     {
                         const uint32_t id = function->extra[call.argument_first + p];
                         // Its two words, each by itself (ir_interpreter_enter_block's reason).
                         passed[p].low = frame->values[id].low;
                         passed[p].high = frame->values[id].high;
                         types[p] = function->type[id];
-                        if (frame->defined[id] == 0 && options->check_undefined)
+                        if (frame->defined[id] == 0 && check_undefined)
                         {
-                            result.status = INTERPRETER_UNDEFINED;
+                            status = INTERPRETER_UNDEFINED;
                         }
                     }
-                    if (result.status == INTERPRETER_OK && callee != UINT32_MAX)
+                    if (status == INTERPRETER_OK && callee != UINT32_MAX)
                     {
                         const IrFunction* target = program->functions[callee].function;
                         IrCheck target_check = { .error = IR_ERROR_STRUCTURE };
-                        IrInterpreterIncoming incoming = {
-                            0
-                        };
                         if (target != 0)
                         {
-                            target_check = checked[callee] != 0 ? ir_check(IR_OK, BUSTER_IR_NONE, 0) : ir_verify_complete(target, arena, false);
-                            checked[callee] = target_check.error == IR_OK;
+                            target_check = ir_interpreter_verified(target, &layouts[callee], arena);
                         }
                         if (target_check.error == IR_ERROR_MEMORY)
                         {
-                            result.status = INTERPRETER_RESOURCE;
+                            status = INTERPRETER_RESOURCE;
                         }
                         else if (target_check.error != IR_OK)
                         {
-                            result.status = INTERPRETER_INVALID;
+                            status = INTERPRETER_INVALID;
                         }
-                        if (result.status == INTERPRETER_OK && depth == options->max_frames)
+                        if (status == INTERPRETER_OK && depth == options->max_frames)
                         {
-                            result.status = INTERPRETER_FRAME_LIMIT;
+                            status = INTERPRETER_FRAME_LIMIT;
                         }
-                        if (result.status == INTERPRETER_OK)
+                        if (status == INTERPRETER_OK)
                         {
-                            result.status = ir_interpreter_arguments(function, call, skipped, target, passed, types, destination, depth + 1, &runtime, arena, parameters, &incoming);
+                            status = ir_interpreter_arguments(function, call, skipped, target, passed, types, destination, depth + 1, &runtime, arena, parameters, &incoming);
                         }
-                        if (result.status == INTERPRETER_OK)
+                        if (status == INTERPRETER_OK)
                         {
-                            result.status = ir_interpreter_frame(&frames[depth], program, callee, parameters, target->parameter_count, target->variadic ? &incoming : 0, i, depth + 1, options,
-                                                                 active_values, active_locals, &runtime, checked, arena);
-                            if (result.status == INTERPRETER_OK)
+                            status = ir_interpreter_frame(&frames[depth], program, callee, parameters, target->parameter_count, target->variadic ? &incoming : 0, i, depth + 1, options,
+                                                                 active_values, active_locals, &runtime, &layouts[callee], arena);
+                            if (status == INTERPRETER_OK)
                             {
                                 // The new frame owns its copied arguments and the staging storage preceding them.
                                 frames[depth].arena_mark = call_mark;
@@ -1455,7 +1660,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             }
                         }
                     }
-                    else if (result.status == INTERPRETER_OK && native != 0)
+                    else if (status == INTERPRETER_OK && native != 0)
                     {
                         // The typed stream's pointers are I64s, and so are those of the IR lowered from it (#134 runs C
                         // programs' IR): a flagged native's pointer operands and result are taken as pointers, as the
@@ -1496,12 +1701,12 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         value = returned;
                         if (!invoked)
                         {
-                            result.status = INTERPRETER_NATIVE;
+                            status = INTERPRETER_NATIVE;
                         }
                     }
-                    else if (result.status == INTERPRETER_OK)
+                    else if (status == INTERPRETER_OK)
                     {
-                        result.status = INTERPRETER_SYMBOL;
+                        status = INTERPRETER_SYMBOL;
                     }
                     if (!pushed_frame)
                     {
@@ -1534,7 +1739,8 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                             }
                         }
                     }
-                    result.status = ir_interpreter_enter_block(frame, target, frame->block, options, &result.steps);
+                    status = ir_interpreter_enter_block(frame, target, frame->block, max_steps, &steps);
+                    next = frame->instruction;
                     break;
                 }
                 case IR_RET:
@@ -1550,7 +1756,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                         // An aggregate returned in registers (#131): its bytes, at most the call's room, from the address
                         // it returns to the call's destination, while the callee's memory still holds them.
                         const uint64_t into = caller->values[caller->function->c[destination]].low;
-                        result.status = ir_interpreter_copy(&runtime, into, value.low, function->result_size < room ? function->result_size : room);
+                        status = ir_interpreter_copy(&runtime, into, value.low, function->result_size < room ? function->result_size : room);
                     }
                     active_values -= frame->value_charge;
                     active_locals -= function->slot_count;
@@ -1570,7 +1776,7 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     break;
                 }
                 case IR_UNREACHABLE:
-                    result.status = INTERPRETER_UNDEFINED;
+                    status = INTERPRETER_UNDEFINED;
                     break;
                 case IR_BR_INDIRECT:
                 {
@@ -1583,8 +1789,9 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     {
                         listed = function->extra[b + k] == label;
                     }
-                    result.status = function->labels != 0 && av.high == 0 && offset % sizeof(uint32_t) == 0 && label < function->label_count && listed ?
-                                        ir_interpreter_enter_block(frame, function->labels[label], frame->block, options, &result.steps) : INTERPRETER_UNDEFINED;
+                    status = function->labels != 0 && av.high == 0 && offset % sizeof(uint32_t) == 0 && label < function->label_count && listed ?
+                                        ir_interpreter_enter_block(frame, function->labels[label], frame->block, max_steps, &steps) : INTERPRETER_UNDEFINED;
+                    next = frame->instruction;
                     break;
                 }
                 default:
@@ -1596,18 +1803,18 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                     {
                         // Through lanes of the operation's own, as wide_value's address isn't taken (interpreter_load_value).
                         IrSimdValue lanes = { 0 };
-                        result.status = ir_interpreter_simd_operation(frame, i, &lanes);
+                        status = ir_interpreter_simd_operation(frame, i, &lanes);
                         wide_value = lanes;
                         value.low = lanes.words[0];
                     }
                     else
                     {
-                        value = ir_interpreter_operation(function, i, av, bv, &result.status);
+                        value = ir_interpreter_operation(function, op, type, a, c, av, bv, &status);
                     }
                     break;
                 }
             }
-            if (result.status == INTERPRETER_OK && store_value)
+            if (status == INTERPRETER_OK && store_value)
             {
                 if (ir_vector_type(type))
                 {
@@ -1615,12 +1822,14 @@ static __attribute__((unused)) InterpreterResult ir_interpret(const IrInterprete
                 }
                 else
                 {
-                    frame->values[i] = interpreter_value_from_integer(interpreter_value_integer(value), type);
+                    values[i] = interpreter_value_from_integer(interpreter_value_integer(value), type);
                 }
-                frame->defined[i] = defined;
+                defined_values[i] = defined;
             }
         }
     }
+    result.status = status;
+    result.steps = steps;
     interpreter_native_release(&runtime);
     arena_pop_to(arena, mark);
     return result;

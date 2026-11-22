@@ -28,6 +28,9 @@ static bool check_request_known_option(const char* spelling, COptionMatch spelle
         C_OPTION_FNO_TRIGRAPHS,
         C_OPTION_FCARET_DIAGNOSTICS,
         C_OPTION_FNO_CARET_DIAGNOSTICS,
+        // The caret display's own (#2376): line numbers' gutter, and the lines its width allows for.
+        C_OPTION_FDIAGNOSTICS_SHOW_LINE_NUMBERS,
+        C_OPTION_FNO_DIAGNOSTICS_SHOW_LINE_NUMBERS,
         C_OPTION_FERROR_LIMIT,
         C_OPTION_FSIGNED_CHAR,
         C_OPTION_FNO_UNSIGNED_CHAR,
@@ -82,6 +85,7 @@ static bool check_request_known_option(const char* spelling, COptionMatch spelle
     // accepting a validated target feature does not admit the preprocessor's macro-neutral machine options.
     static const uint16_t values[] = {
         C_OPTION_FERROR_LIMIT_EQ,
+        C_OPTION_FCARET_DIAGNOSTICS_MAX_LINES_EQ,
         C_OPTION_FGNUC_VERSION_EQ,
         C_OPTION_FEXEC_CHARSET_EQ,
         C_OPTION_FINPUT_CHARSET_EQ,

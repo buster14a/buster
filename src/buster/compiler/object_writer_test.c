@@ -2215,6 +2215,74 @@ static bool object_test_overflow_link(Link* link, Arena* arena)
     return result;
 }
 
+// The hand link's first TEXT atom (entry, symbol 2) is in a COMDAT. Unit 2 has atoms but no member, and its explicit
+// .text descriptor is its class's own. Counting its sections needs only its prepared atom order.
+static void object_test_default_classes(ObjectTestTally* tally, const Link* hand, ObjectUnits* units, ObjectSymbols* symbols, Arena* arena)
+{
+    const uint32_t count = hand->atoms.count;
+    ObjectAtomSection* table = BUSTER_ARENA_PUSH_ARRAY(arena, ObjectAtomSection, count);
+    uint32_t* members = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
+    ObjectSection* sections = BUSTER_ARENA_PUSH_ARRAY(arena, ObjectSection, count);
+    const bool room = table != 0 && members != 0 && sections != 0;
+    object_test_expect(tally, room, "room for default-class controls", 0);
+    if (room)
+    {
+        memset(table, 0, count * sizeof(*table));
+        memset(members, 0, count * sizeof(*members));
+        members[1] = 1;
+        for (AtomId atom = 1; atom < count; atom += 1)
+        {
+            if (hand->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT)
+            {
+                table[atom] = (ObjectAtomSection){
+                    .name = BUSTER_S8(".text"),
+                    .type = SHT_PROGBITS,
+                    .flags = SHF_ALLOC | SHF_EXECINSTR,
+                };
+            }
+        }
+        const LinkGroup groups[] = {
+            { 0 },
+            {
+                .name = hand->symbols.name[2],
+                .signature = 2,
+                .flags = BUSTER_LINK_GROUP_COMDAT,
+            },
+        };
+        Link link = *hand;
+        link.groups = (LinkGroups){
+            .data = groups,
+            .atom_groups = members,
+            .count = BUSTER_ARRAY_LENGTH(groups),
+            .atom_count = count,
+        };
+        object_test_expect(tally, link_check(&link) == LINK_ERROR_NONE, "valid hand-built COMDAT", 0);
+        for (uint32_t separate = 0; separate <= 1; separate += 1)
+        {
+            const ObjectOptions implicit = { .function_sections = separate != 0 };
+            const ObjectOptions described = {
+                .function_sections = separate != 0,
+                .atom_sections = table,
+                .atom_section_count = count,
+            };
+            ObjectBuilder builder = {
+                .link = &link,
+                .units = units,
+                .unit = 2,
+                .options = described,
+                .sections = sections,
+            };
+            Arena empty = { 0 };
+            object_test_expect(tally, object_count_sections(&builder, &empty) && builder.atoms == units->atoms + units->atom_begin[2 * BUSTER_LINK_CLASS_COUNT],
+                               "ordinary classes use their prepared order without scratch", separate);
+            const Object first = object_build(&link, units, symbols, 0, implicit, BUSTER_S8("group.c"), arena);
+            const Object second = object_build(&link, units, symbols, 0, described, BUSTER_S8("group.c"), arena);
+            object_test_expect(tally, first.error == OBJECT_ERROR_NONE && second.error == OBJECT_ERROR_NONE && first.size == second.size &&
+                               memcmp(first.bytes, second.bytes, first.size) == 0, "a group member with an implicit or explicit default section", separate);
+        }
+    }
+}
+
 static bool object_test_objects(uint64_t seed, Arena* arena)
 {
     ObjectTestTally tally = {
@@ -2302,6 +2370,10 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
     const bool prepared = made && object_prepare(&units, &hand, BUSTER_OBJECT_TEST_HAND_UNITS, arena) && object_map_symbols(&symbols, &hand, arena);
     object_test_expect(&tally, !made || (prepared && units.count == BUSTER_OBJECT_TEST_HAND_UNITS), "object_prepare on the link made by hand", 0);
     const ObjectAtomSection* hand_named = prepared ? object_test_named_descriptors(&hand, arena) : 0;
+    if (prepared)
+    {
+        object_test_default_classes(&tally, &hand, &units, &symbols, arena);
+    }
     // Invalid names must reject before the grouping hashes or compares them. A huge count has only one byte behind
     // it, so checking the declared limit after a name read would cross the slice (the null cases also reach .text's
     // default-descriptor comparison or the custom-name hash). Empty names remain the documented absent descriptor.
@@ -2319,7 +2391,14 @@ static bool object_test_objects(uint64_t seed, Arena* arena)
         for (uint32_t i = 0; bad != 0 && i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
         {
             memset(bad, 0, (uint64_t)hand.atoms.count * sizeof(ObjectAtomSection));
-            bad[1] = (ObjectAtomSection){ .name = invalid[i], .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_EXECINSTR };
+            // The last two invalid names follow an already custom TEXT atom: the rest of its class still validates.
+            bad[1] = (ObjectAtomSection){
+                .name = BUSTER_S8(".text.custom"),
+                .type = SHT_PROGBITS,
+                .flags = SHF_ALLOC | SHF_EXECINSTR,
+            };
+            bad[2] = bad[1];
+            bad[i < 2 ? 1 : 2].name = invalid[i];
             const ObjectOptions object_options = { .atom_sections = bad, .atom_section_count = hand.atoms.count };
             const uint64_t before = arena->length;
             const Object rejected = object_build(&hand, &units, &symbols, 0, object_options, BUSTER_S8("invalid.c"), arena);
