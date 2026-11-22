@@ -708,6 +708,10 @@ suite also checks current glibc's Clang fortify wrappers at `_FORTIFY_SOURCE=2/3
 including ordinary function addresses and scalar/vector, eager/lazy headers.
 The object-size attributes currently use conservative unknown bounds, without
 Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#current-glibcs-clang-wrappers-1361)).
+Its real-header overflows (a local array, an element's offset, a static array, a
+structure, `bzero`, `read`) must abort at `--tier1` too, as clang's build does where
+glibc's version lets it, since the lowering expands the wrappers with their
+callers' bounds ([the wrappers' bounds](../c-builtins-fortify.md#the-wrappers-bounds-2983), #2983).
 
 ## Runtime fixtures
 

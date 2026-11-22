@@ -442,6 +442,9 @@ typedef enum CheckLowerTaskKind
     CHECK_LOWER_ATOMIC,
     // A contracted product's wrappers and operands: `node` the wrapper, `type` the product, `value` its negation.
     CHECK_LOWER_CONTRACT,
+    // A wrapper's expansion (#2983, check_lower_wrapper_call): `node` its frame, whose parameters' temporaries its
+    // expression reads from here (`address` false) or no longer (`address` true).
+    CHECK_LOWER_WRAPPER,
     // Expression `node`'s operation on complex values (check_lower_complex_emit), its operands in the temporaries `value`
     // holds (the first's in its low 32 bits), or with `address` its compound assignment's (check_lower_complex_update_emit),
     // the value's and the destination's address's.
@@ -695,6 +698,24 @@ struct CheckLowerOwners
     bool overflow;
 };
 
+// How deep wrappers' expansions nest (#2983, check_lower_wrapper_call): a wrapper's call in another's expression, or in
+// its own arguments. A call past it stays a call.
+#define BUSTER_CHECK_LOWER_WRAPPER_DEPTH 4u
+
+// A wrapper's expansion in progress (#2983, check_lower_wrapper_call): its CheckProgram.wrappers index; its parameters'
+// temporaries, which its expression reads (CheckLowerWriter.local_map, from when its arguments are bound until it ends),
+// and their objects' locals before; and each argument's object size by __builtin_object_size's mode
+// (check_lower_wrapper_size), which its expression's queries of the parameter answer.
+typedef struct CheckLowerWrapperFrame CheckLowerWrapperFrame;
+struct CheckLowerWrapperFrame
+{
+    uint64_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS][4];
+    uint32_t temporaries[BUSTER_CHECK_WRAPPER_PARAMETERS];
+    uint32_t saved[BUSTER_CHECK_WRAPPER_PARAMETERS];
+    uint32_t wrapper;
+    bool bound;
+};
+
 typedef struct CheckLowerWriter CheckLowerWriter;
 struct CheckLowerWriter
 {
@@ -778,6 +799,9 @@ struct CheckLowerWriter
     // __builtin_call_with_static_chain's node while its call lowers (#148): check_lower_call_body passes its chain, the
     // builtin's second argument, as the call's argument 0 in r10 (check_lower_chain_location).
     uint32_t chain;
+    // The wrappers' expansions in progress (#2983, check_lower_wrapper_call), `wrapper_depth` of them, innermost last.
+    CheckLowerWrapperFrame wrapper_frames[BUSTER_CHECK_LOWER_WRAPPER_DEPTH];
+    uint32_t wrapper_depth;
     CBuiltinLowerCall* builtins;
     CheckLowerBuiltinOperands* builtin_operands;
     CBuiltinLowerScratch builtin_scratch;
@@ -7446,12 +7470,237 @@ static void check_lower_call_to(CheckLowerWriter* writer, uint32_t node, CheckLo
 
 static void check_lower_library_computed(CheckLowerWriter* writer, uint32_t node, uint32_t row);
 
+// The wrapper (#2983, CheckProgram.wrappers' index) whose expansion call `node` takes in place of its call, or none: a
+// direct call of a wrapper's object with an argument for each parameter, not a musttail return's, a static chain's or
+// one inside the same wrapper's expansion (its own call within its expression), and within the expansions' depth.
+static uint32_t check_lower_wrapper_of(const CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t callee = graph->operand0[node];
+    CheckValue value = callee < stream->count ? check_stream_value(stream, callee) : (CheckValue){ 0 };
+    const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
+    if (overload != BUSTER_CHECK_NONE)
+    {
+        const CheckOverloadResult* selected = &stream->overloads[overload].selected;
+        value = (CheckValue){ .category = CHECK_FUNCTION, .constant_kind = CHECK_CONSTANT_ADDRESS, .object = selected->object };
+    }
+    const bool direct = value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 && value.offset == 0 &&
+                        (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+    uint32_t low = 0;
+    uint32_t high = direct ? program->wrapper_count : 0;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = program->wrappers[middle].object < value.object ? middle + 1 : low;
+        high = program->wrappers[middle].object < value.object ? high : middle;
+    }
+    bool valid = direct && low < program->wrapper_count && program->wrappers[low].object == value.object &&
+                 graph->argument_counts[node] == program->wrappers[low].parameter_count && node != writer->tail && writer->chain == BUSTER_CHECK_NONE &&
+                 writer->wrapper_depth < BUSTER_CHECK_LOWER_WRAPPER_DEPTH;
+    for (uint32_t d = 0; valid && d < writer->wrapper_depth; d += 1)
+    {
+        valid = !writer->wrapper_frames[d].bound || writer->wrapper_frames[d].wrapper != low;
+    }
+    return valid ? low : BUSTER_CHECK_NONE;
+}
+
+// Whether `node`'s value, a pointer or an array that decays to one, points into a named object or a string literal at a
+// constant byte offset from its start (#2983): its object in *object and the offset in *offset. The checker's value says
+// so for an array (`buf`, `s.name`) and for a static object's address constant; for an automatic object's address it
+// keeps no constant, so `&x`, `&a[i]` and `p + i` (or `p - i`) of a constant i and a cast of a pointer are taken apart
+// here, at most `depth` operators down.
+static bool check_lower_wrapper_address(const CheckLowerWriter* writer, uint32_t node, uint32_t depth, uint32_t* object, int64_t* offset)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const CheckValue value = node < stream->count ? check_stream_value(stream, node) : (CheckValue){ 0 };
+    const uint8_t kind = value.type != 0 ? check_action_kind(types, value.type) : 0;
+    const bool designated = value.object != 0 && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.fault == CHECK_FAULT_NONE &&
+                            ((value.category == CHECK_LVALUE && type_kind_is_array(kind)) || value.category == CHECK_RVALUE);
+    const CheckOp op = node < stream->count ? graph->ops[node] : CHECK_OP_COUNT;
+    bool found = designated;
+    if (designated)
+    {
+        *object = value.object;
+        *offset = value.offset;
+    }
+    else if (depth != 0 && (op == CHECK_OP_ADDRESS || op == CHECK_OP_CAST || op == CHECK_OP_CONVERT) && graph->operand0[node] < stream->count)
+    {
+        // `&x`, an lvalue's address that its value designates, or a pointer's or an array's conversion to a pointer.
+        const uint32_t operand = graph->operand0[node];
+        const CheckValue lvalue = check_stream_value(stream, operand);
+        const uint8_t from = lvalue.type != 0 ? check_action_kind(types, lvalue.type) : 0;
+        const bool designator = op == CHECK_OP_ADDRESS && lvalue.category == CHECK_LVALUE && lvalue.object != 0 && lvalue.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                                lvalue.fault == CHECK_FAULT_NONE;
+        if (designator)
+        {
+            *object = lvalue.object;
+            *offset = lvalue.offset;
+            found = true;
+        }
+        else if (op == CHECK_OP_ADDRESS ? graph->ops[operand] == CHECK_OP_SUBSCRIPT : kind == BUSTER_TYPE_KIND_POINTER && (from == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(from)))
+        {
+            found = check_lower_wrapper_address(writer, operand, depth - 1, object, offset);
+        }
+    }
+    else if (depth != 0 && (op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_SUBSCRIPT) && graph->operand0[node] < stream->count &&
+             graph->operand1[node] < stream->count)
+    {
+        // A pointer and an integer constant, in either order for `+` and `[]`: the pointer's place moved by the constant's
+        // elements (the pointer's, or an array's that decays).
+        const uint32_t a = graph->operand0[node];
+        const uint32_t b = graph->operand1[node];
+        const TypeId a_type = check_stream_type(stream, a);
+        const bool a_pointer = a_type != 0 && (check_action_kind(types, a_type) == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(check_action_kind(types, a_type)));
+        const uint32_t pointer = a_pointer || op == CHECK_OP_SUBTRACT ? a : b;
+        const uint32_t index = a_pointer || op == CHECK_OP_SUBTRACT ? b : a;
+        const CheckValue count = check_stream_value(stream, index);
+        const TypeId pointer_type = type_strip_aligned(types, check_stream_type(stream, pointer));
+        const TypeId element = pointer_type != 0 ? type_element(types, pointer_type) : 0;
+        const bool constant = count.constant_kind == CHECK_CONSTANT_INTEGER && count.fault == CHECK_FAULT_NONE && element != 0 && type_is_complete(types, element) &&
+                              (type_inherited_flags(types, element) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0 && type_size(types, element) <= UINT32_MAX;
+        const int64_t elements = (int64_t)count.integer;
+        int64_t base = 0;
+        if (constant && elements > -(INT64_C(1) << 31) && elements < (INT64_C(1) << 31) && check_lower_wrapper_address(writer, pointer, depth - 1, object, &base))
+        {
+            const int64_t moved = elements * (int64_t)type_size(types, element);
+            *offset = op == CHECK_OP_SUBTRACT ? base - moved : base + moved;
+            found = true;
+        }
+    }
+    return found;
+}
+
+// __builtin_object_size's answer in mode `mode` (__builtin_dynamic_object_size's too) for `argument`, a call's, which a
+// wrapper's query of the parameter it binds reads (#2983), as clang's code answers the query once it has inlined the
+// wrapper: where the argument points into a named object of a complete, fixed type (as the checker's own bound of a
+// named object, check_input_builtin_evidence) or a string literal (check_lower_wrapper_address), the bytes from there to
+// its end, 0 past it. Its modes 1 and 3 are 0's and 2's: clang's code generation leaves the query to LLVM's objectsize,
+// which knows objects, not subobjects, so through a wrapper `s.a`'s bound is `s`'s. Anything else is unknown: (size_t)-1
+// for modes 0 and 1, 0 for 2 and 3, as the checker's unknown answers are.
+static uint64_t check_lower_wrapper_size(const CheckLowerWriter* writer, uint32_t argument, uint32_t mode)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const TypeTable* types = program->types;
+    uint32_t object = 0;
+    int64_t offset = 0;
+    const bool address = check_lower_wrapper_address(writer, argument, 8, &object, &offset) && object - 1 < input->token_count && offset >= 0;
+    const uint32_t string = address && check_sparse_present(input->string_ids) ? check_sparse_get(input->string_ids, object - 1) : BUSTER_CHECK_NONE;
+    const uint32_t declared = address && object < program->object_count && program->object_declarations != NULL ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = declared != BUSTER_CHECK_NONE ? declared : object - 1;
+    const TypeId type = address && string >= input->string_count && declaration < input->token_count ? input->declared_types[declaration] : 0;
+    const bool named = type != 0 && check_action_kind(types, type) != BUSTER_TYPE_KIND_FUNCTION && type_is_complete(types, type) &&
+                       (type_inherited_flags(types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
+    const bool known = string < input->string_count || named;
+    const uint64_t size = string < input->string_count ? input->strings[string].byte_count : named ? type_size(types, type) : 0;
+    return !known ? (mode < 2 ? UINT64_MAX : 0) : (uint64_t)offset <= size ? size - (uint64_t)offset : 0;
+}
+
+// The answer of query `node` (__builtin_object_size or __builtin_dynamic_object_size) where its operand is a parameter of
+// a wrapper whose expansion has bound its arguments (#2983, CheckLowerWrapperFrame): the parameter's argument's object
+// size in the query's mode, in *size; false for any other query.
+static bool check_lower_wrapper_query(const CheckLowerWriter* writer, uint32_t node, uint32_t mode, uint64_t* size)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CBuiltinId id = (CBuiltinId)graph->members[node];
+    const bool sized = (id == CBUILTIN_OBJECT_SIZE || id == CBUILTIN_DYNAMIC_OBJECT_SIZE) && graph->argument_counts[node] == 2 && mode < 4;
+    const uint32_t operand = sized ? graph->argument_nodes[graph->argument_offsets[node]] : BUSTER_CHECK_NONE;
+    const CheckValue value = operand < program->stream->count && graph->ops[operand] == CHECK_OP_VALUE ? check_stream_value(program->stream, operand) : (CheckValue){ 0 };
+    bool found = false;
+    for (uint32_t d = writer->wrapper_depth; value.category == CHECK_LVALUE && value.object != 0 && !found && d-- > 0;)
+    {
+        const CheckLowerWrapperFrame* frame = writer->wrapper_frames + d;
+        const CheckProgramWrapper* wrapper = program->wrappers + frame->wrapper;
+        for (uint32_t p = 0; frame->bound && !found && p < wrapper->parameter_count; p += 1)
+        {
+            found = program->wrapper_parameters[wrapper->parameter_first + p] == value.object;
+            *size = found ? frame->sizes[p][mode] : *size;
+        }
+    }
+    return found;
+}
+
+// Call `node` of wrapper `index` (#2983, check_lower_wrapper_of) expanded in place, as clang's AlwaysInliner expands it:
+// its arguments, each converted to its parameter's type, into temporaries in their order; then, with the parameters'
+// objects at those temporaries (the WRAPPER tasks' frame), the wrapper's expression, converted to the call's type, which
+// a void wrapper's is. Each argument's object sizes are taken now, for the expression's queries of its parameter. The
+// tasks run in reverse.
+static void check_lower_wrapper_call(CheckLowerWriter* writer, uint32_t node, uint32_t index)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const CheckProgramWrapper* wrapper = program->wrappers + index;
+    const uint32_t first = graph->argument_offsets[node];
+    const uint32_t depth = writer->wrapper_depth;
+    CheckLowerWrapperFrame* frame = writer->wrapper_frames + depth;
+    writer->wrapper_depth += 1;
+    frame->wrapper = index;
+    frame->bound = false;
+    check_lower_source(writer, graph->tokens[graph->operand0[node]]);
+    for (uint32_t p = 0; p < wrapper->parameter_count; p += 1)
+    {
+        frame->temporaries[p] = check_lower_temporary(writer, check_lower_class(writer, stream->argument_conversions[first + p].type));
+        for (uint32_t mode = 0; mode < 4; mode += 1)
+        {
+            frame->sizes[p][mode] = check_lower_wrapper_size(writer, graph->argument_nodes[first + p], mode);
+        }
+    }
+    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth, .address = true });
+    check_lower_expression(writer, wrapper->node, false, check_stream_type(stream, node));
+    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth });
+    for (uint32_t p = wrapper->parameter_count; p-- > 0;)
+    {
+        const TypeId type = stream->argument_conversions[first + p].type;
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, type), frame->temporaries[p]);
+        check_lower_operand(writer, node, p + 3, false, type);
+    }
+}
+
+// A WRAPPER task (#2983): frame `depth`'s parameters' objects at its temporaries from here (`end` false: its arguments
+// are bound), or at their locals before again, the frame done (`end` true).
+static __attribute__((noinline)) void check_lower_wrapper_task(CheckLowerWriter* writer, uint32_t depth, bool end)
+{
+    const CheckProgram* program = writer->program;
+    CheckLowerWrapperFrame* frame = depth < writer->wrapper_depth ? writer->wrapper_frames + depth : NULL;
+    if (frame == NULL || (end && depth + 1 != writer->wrapper_depth) || frame->bound != end)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else
+    {
+        const CheckProgramWrapper* wrapper = program->wrappers + frame->wrapper;
+        for (uint32_t p = 0; p < wrapper->parameter_count; p += 1)
+        {
+            const uint32_t object = program->wrapper_parameters[wrapper->parameter_first + p];
+            if (object != 0 && object < program->object_count)
+            {
+                frame->saved[p] = end ? frame->saved[p] : writer->local_map[object];
+                writer->local_map[object] = end ? frame->saved[p] : frame->temporaries[p];
+            }
+        }
+        frame->bound = !end;
+        writer->wrapper_depth -= end ? 1 : 0;
+    }
+}
+
 // A call, or the instructions that compute check_program_call_computed's plain library builtin in its place (#967,
-// #1373).
+// #1373), or a wrapper's expansion (#2983, check_lower_wrapper_call), which glibc's fortified functions are.
 static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 {
-    const uint32_t computed = check_program_call_computed(writer->program, node);
-    if (computed != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
+    const uint32_t wrapper = writer->program->wrapper_count != 0 ? check_lower_wrapper_of(writer, node) : BUSTER_CHECK_NONE;
+    const uint32_t computed = wrapper == BUSTER_CHECK_NONE ? check_program_call_computed(writer->program, node) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    if (wrapper != BUSTER_CHECK_NONE)
+    {
+        check_lower_wrapper_call(writer, node, wrapper);
+    }
+    else if (computed != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
     {
         check_lower_library_computed(writer, node, computed);
     }
@@ -16026,9 +16275,16 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_BUILTIN_QUERY)
     {
         const uint32_t selected = check_program_builtin_index(stream->queries, stream->query_count, sizeof(CheckBuiltinQueryEffect), node);
+        uint64_t size = 0;
         if (selected == BUSTER_CHECK_NONE)
         {
             check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+        else if (writer->wrapper_depth != 0 && check_lower_wrapper_query(writer, node, stream->queries[selected].mode, &size))
+        {
+            // A wrapper's query of its own parameter, in its expansion: its argument's object size (#2983), as clang's code
+            // answers it once the wrapper is inlined.
+            check_lower_instruction(writer, BUSTER_TYPED_CONST, check_lower_class(writer, check_stream_type(stream, node)), size);
         }
         else if (graph->members[node] == CBUILTIN_DYNAMIC_OBJECT_SIZE && check_lower_counted_size(writer, node, stream->queries + selected))
         {
@@ -16774,6 +17030,10 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         else if (kind == CHECK_LOWER_CONTRACT)
         {
             check_lower_contract_product(writer, node, type, (value >> 32) != 0);
+        }
+        else if (kind == CHECK_LOWER_WRAPPER)
+        {
+            check_lower_wrapper_task(writer, node, (flags & 1) != 0);
         }
         else if (kind >= CHECK_LOWER_COMPLEX)
         {
@@ -20513,6 +20773,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->tails = false;
         writer->tail = BUSTER_CHECK_NONE;
         writer->chain = BUSTER_CHECK_NONE;
+        writer->wrapper_depth = 0;
         writer->track = body.count != body.entry_count || shared->terminal;
         writer->body = program->bodies + b;
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.

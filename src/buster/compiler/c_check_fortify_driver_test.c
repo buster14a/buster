@@ -332,9 +332,34 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         const char* source;
         int result;
         bool system_link;
+        // Clang's result differs by glibc's version: glibc 2.39's `__glibc_fortify` wrappers (read, pread, getcwd) reach
+        // the plain call in clang's build, and 2.40's Clang overloads check them, as GCC's builds and buster's do (#2983).
+        bool clang_by_version;
     } header_cases[] =
     {
         { "fortified system headers", headers, 0 },
+        // The wrappers' bounds are their callers' objects (#2983): an overflow aborts, as clang's build does.
+        { "fortified memset past a local array", "#include <string.h>\nstatic volatile unsigned long n=32;int main(void){char b[8];memset(b,'x',n);return b[0];}\n",
+          128 + SIGABRT },
+        { "fortified memcpy past an element's offset",
+          "#include <string.h>\nstatic volatile unsigned long n=5;int main(void){char b[8]={0};memcpy(&b[4],\"abcdefgh\",n);return b[0];}\n", 128 + SIGABRT },
+        { "fortified strcpy past a static array", "#include <string.h>\nstatic char g[5];static const char*volatile s=\"hello world\";"
+          "int main(void){strcpy(g,s);return g[0];}\n", 128 + SIGABRT },
+        { "fortified strcpy past a structure", "#include <string.h>\nstruct S{char a[4];int b;};static const char*volatile s=\"abcdefghi\";"
+          "int main(void){struct S t;strcpy(t.a,s);return t.a[0];}\n", 128 + SIGABRT },
+        { "fortified bzero past a local array", "#define _GNU_SOURCE 1\n#include <strings.h>\nstatic volatile unsigned long n=9;"
+          "int main(void){char b[8];bzero(b,n);return b[0];}\n", 128 + SIGABRT },
+        // Within their objects: a member's copy that stays in its structure (its bound the structure's, as clang's), the
+        // arguments' effects once each and in order, a wrapper's call in another's argument, in an arm not taken, a void one.
+        { "fortified calls within their objects",
+          "#define _GNU_SOURCE 1\n#include <string.h>\n#include <strings.h>\n#include <unistd.h>\n#include <fcntl.h>\n"
+          "struct S{char a[4];int b;};static volatile unsigned long n=8;static const char*volatile s=\"abcdefg\";\n"
+          "int main(int argc,char**argv){char b[2][8],d[8];struct S t;int i=0;memset(b[i++],1,n);memset(b[i++],2,n);"
+          "if(i!=2||b[0][7]!=1||b[1][0]!=2)return 1;if(memcpy(d,memcpy(b[0],b[1],n),n)!=d||d[7]!=2)return 2;"
+          "strcpy(t.a,s);if(strcmp(t.a,\"abcdefg\"))return 3;char*r=argc>5?memset(d,0,64):d;if(r!=d)return 4;"
+          "bzero(d,n);if(d[7])return 5;int fd=open(\"/dev/zero\",O_RDONLY);if(fd<0||read(fd,d,n)!=8||close(fd))return 6;return 0;}\n", 0 },
+        { "fortified read past a local array", "#include <unistd.h>\n#include <fcntl.h>\nstatic volatile unsigned long n=16;"
+          "int main(void){char b[8];int fd=open(\"/dev/zero\",O_RDONLY);return read(fd,b,n)!=16;}\n", 128 + SIGABRT, false, true },
         { "fortified header keeps printf security flag", "#include <stdio.h>\nint main(void){char b[32],f[]=\"x%n\";int n=0;snprintf(b,sizeof b,f,&n);return 0;}\n", 128 + SIGABRT },
         // mbstowcs has two distinct extern declarations redirected to the same libc symbol. Validate its object
         // and ABI with Clang's linker independently of the direct binder's existing duplicate-name restriction.
@@ -346,12 +371,13 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
         check_test_expect(test, written, "fortified system-header reproducer written");
         for (uint32_t level = 2; written && level <= 3; level += 1)
         {
-            for (uint32_t path = 0; path < 5; path += 1)
+            // Clang; buster with lazy and with eager system headers, each with and without --scalar; and buster --tier1.
+            for (uint32_t path = header_cases[c].clang_by_version ? 1 : 0; path < 6; path += 1)
             {
                 char* text = NULL;
                 char* arguments[] = { (char*)(path == 0 ? clang : executable), "-O2", level == 2 ? "-D_FORTIFY_SOURCE=2" : "-D_FORTIFY_SOURCE=3",
                                       source, "-o", header_cases[c].system_link ? object : binary, path == 0 ? "-Wno-unused-parameter" : path >= 3 ? "-fno-lazy-system-headers" : "-flazy-system-headers",
-                                      path == 1 || path == 3 ? "--scalar" : "-Wno-unused-parameter", header_cases[c].system_link ? "-c" : NULL, NULL };
+                                      path == 1 || path == 3 ? "--scalar" : path == 5 ? "--tier1" : "-Wno-unused-parameter", header_cases[c].system_link ? "-c" : NULL, NULL };
                 unlink(binary);
                 unlink(object);
                 const int compiled = check_test_driver_spawn(arguments, &text);

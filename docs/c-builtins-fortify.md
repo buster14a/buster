@@ -63,11 +63,11 @@ padding or mutable aliases; allocation failure follows the normal resource
 error path. Only annotated signatures allocate this payload, and no subsequent
 consumer rescans the parameter tokens to reconstruct it.
 
-This is the issue's conservative, unchecked compatibility path. Within a
-wrapper, queries of its pointer parameters use the existing unknown-size
-answers: `(size_t)-1` for modes 0/1 and zero for modes 2/3. Ordinary certified
-local-object bounds remain available. No caller's bound or dynamic allocation
-extent is propagated into the callee. This does not implement Clang's hidden
+Within a wrapper's own body, queries of its pointer parameters use the
+existing unknown-size answers: `(size_t)-1` for modes 0/1 and zero for modes
+2/3. A call that the lowering expands takes its caller's bound instead ("The
+wrappers' bounds", below). No dynamic allocation extent is propagated into the
+callee. This does not implement Clang's hidden
 size arguments or permit mixing size-annotated entry points with Clang-built
 callers/callees. Overloadable compatibility symbols carry a
 `.__buster_object_size` suffix to distinguish their ordinary ABI from Clang's.
@@ -97,6 +97,85 @@ checks writable-format `%n` rejection through the real stdio headers. The
 `mbstowcs` case validates object emission and execution through Clang's linker:
 the direct executable binder separately rejects two external asm-label
 declarations naming the same libc symbol, including without fortification.
+
+## The wrappers' bounds (#2983)
+
+glibc's fortified functions are `__fortify_function` wrappers: `extern inline`,
+`always_inline` and `gnu_inline` definitions whose body asks for the object
+size of its own parameter (`__builtin___memset_chk (__dest, __ch, __len,
+__glibc_objsize0 (__dest))`). Clang's AlwaysInliner expands every call of such
+a body, and its code answers the query after the expansion, where the
+parameter is the caller's argument: `buf`'s 8 bytes. Before #2983, buster called
+the external function instead (an inline-only definition makes no code of its
+own) and never asked; inside the body the query answers `(size_t)-1` anyway, so
+every `__*_chk` call became the plain one, and `-O2 -D_FORTIFY_SOURCE=2/3`
+builds had none of glibc's checks.
+
+The lowering now expands a direct call of such a wrapper in its caller
+(`check_lower_wrapper_call`, `c_check_program_lower.c`), as clang does:
+
+- **Which wrappers.** The selection lists them (`check_program_select_wrappers`,
+  `c_check_program_select.c`, CheckProgram.wrappers): an `always_inline`
+  function, not `noinline`, whose only definition is inline only (or one of
+  `pass_object_size`'s private wrappers, above), with a prototype, not
+  variadic, of at most eight integer or pointer parameters and an integer,
+  pointer or void result, whose body is one statement, `return E;` or, in a
+  void function, `E;`. E reads its parameters and never assigns them or takes
+  their addresses, and refers to nothing but its parameters, constants and
+  objects of external linkage, which the caller's code reaches by their
+  symbols, through C's operators that read, convert, select and call. Of the
+  builtins it may use only the object-size and constant queries and glibc's
+  fortified calls (`__builtin___memcpy_chk` and its kin): the lowering plans
+  the others' helpers for the selected bodies' nodes alone. Each object a
+  listed wrapper refers to is needed wherever the wrapper's object is
+  (`check_program_wrapper_needed`).
+- **The expansion.** The arguments, each converted to its parameter's type,
+  go into temporaries in their order; the parameters' objects then read those
+  temporaries (a WRAPPER task binds and unbinds them), and E is lowered in the
+  caller's body, converted to the call's type. A call in the wrapper's own
+  expression stays a call, and so does one more than four expansions deep, a
+  musttail return's and a static chain's. Every other reference to the function
+  (its address, a runtime call of the same name, a call the rules above don't
+  take) still reaches the external symbol, as clang's references reach the
+  external definition of an `available_externally` body.
+- **The bound.** A query of a parameter in E (`__builtin_object_size` or
+  `__builtin_dynamic_object_size`) answers its argument's object size
+  (`check_lower_wrapper_size`): where the argument points into a named object
+  of a complete, fixed type, or a string literal, at a constant offset (an
+  array, `&x`, `&a[i]`, `p + i` with a constant `i`, a pointer's cast), the
+  bytes from there to the object's end; otherwise the unknown answers. Modes 1
+  and 3 answer as 0 and 2 do: clang's code generation leaves such a query to
+  LLVM's objectsize, which knows objects and not subobjects, so through a
+  wrapper `strcpy (s.a, ...)` is bounded by `s`, not by `s.a` (GCC's build
+  bounds it by `s.a`). The fortified call then keeps its check where the bound
+  is known and the length isn't proven within it (`check_lower_fortify`), as
+  clang's code does.
+
+The two tiers both lower from the expanded typed stream, so `-c`, `--tier1`,
+`-S`, `-g` and an executable all take the checks.
+
+What stays unchecked:
+
+- **Wrappers of more than one statement.** Of the 71 `__fortify_function`
+  definitions that glibc 2.39's `<stdio.h>`, `<string.h>`, `<strings.h>`,
+  `<stdlib.h>`, `<unistd.h>`, `<wchar.h>`, `<poll.h>`, `<fcntl.h>`,
+  `<sys/socket.h>`, `<sys/select.h>`, `<syslog.h>` and `<signal.h>` make with
+  `_GNU_SOURCE` at `-O2 -D_FORTIFY_SOURCE=2`, 22 declare a local or test before
+  their return: `fgets`, `fgets_unlocked`, `fread`, `fread_unlocked`, `fgetws`,
+  `fgetws_unlocked`, `recv`, `recvfrom`, `realpath`, `getwd`, `mbstowcs`,
+  `wctomb`, `wcrtomb`, `strlcpy`, `strlcat`, `wcscpy`, `wcpcpy`, `wcscat`,
+  `wcsncat`, `wcslcpy`, `wcslcat` and `vswprintf`. Their calls still reach the
+  external function.
+- **Allocations.** A pointer from `malloc (8)` has no named object; clang's
+  optimizer bounds it by the allocation (`alloc_size`), and buster's answer is
+  unknown.
+
+Clang 23's build itself leaves glibc 2.39's `read`, `pread` and `getcwd`
+unchecked, whose bodies (`__glibc_fortify`) test `__builtin_constant_p` of the
+bound: for an overflowing `read (fd, buf, 16)` into `char buf[8]` its code
+calls the plain `read`. glibc's intent, which
+GCC's build follows and glibc 2.40's Clang overloads restore, is
+`__read_chk`'s abort, and so is buster's.
 
 ## Validation
 
