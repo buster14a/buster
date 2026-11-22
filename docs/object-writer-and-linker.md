@@ -4264,8 +4264,9 @@ The pass does not modify the input or its borrowed bytes. Map entry zero
 and every discarded entry are zero; retained IDs follow original order.
 
 Root classification, frontier seeding and map emission have scalar and
-AVX-512 paths. Two atom queues and mark-before-append bound the irregular
-walk to one visit per atom. Target lookup and live-bit updates remain
+AVX-512 paths. The walk uses the output atom map as a queue until map
+emission. Marking before each append bounds the queue to one slot per live
+atom. Target lookup and live-bit updates remain
 scalar. This is a single-lane closure, not the planned per-lane frontier
 exchange; representative scaling and complete-link measurements remain
 separate acceptance work.
