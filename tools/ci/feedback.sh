@@ -22,10 +22,8 @@ smoke()
         "$compiler" parse -fsyntax-only tests/ci/feedback/driver.c
         printf 'feedback-case: checking\n'
         "$compiler" -fsyntax-only -Wall -Werror tests/ci/feedback/driver.c
-        printf 'feedback-case: object generation, selected and scalar host paths\n'
+        printf 'feedback-case: object generation\n'
         "$compiler" --lanes 1 --verify -c -march=x86-64 tests/ci/feedback/driver.c -o "$work/driver.o"
-        "$compiler" --lanes 1 --verify --scalar -c -march=x86-64 tests/ci/feedback/driver.c -o "$work/scalar.o"
-        cmp "$work/driver.o" "$work/scalar.o"
         "$compiler" --lanes 1 --verify -c -march=x86-64 tests/ci/feedback/helper.c -o "$work/helper.o"
         printf 'feedback-case: linking and execution\n'
         clang -no-pie "$work/driver.o" "$work/helper.o" -o "$work/program"
@@ -57,6 +55,26 @@ consume_environment()
     : > "$GITHUB_PATH"
 }
 
+# The vector draws' probe (tools/ci/vector-probe.c; #2924): whether this CPU and its OS enable every feature the
+# compiler's AVX-512 host needs. A drawn item's probe ran before its checkout (BUSTER_VECTOR_PROBE, which the draw
+# builds); without one it is built here with the explicit vector target's flags. Writes its FEATURE<TAB>yes|no lines and
+# its status to FILE, and returns that status: 0 when the CPU qualifies.
+probe()
+{
+    local file=$1 executable=${BUSTER_VECTOR_PROBE:-} built='' status=0 flags=()
+    if [ -z "$executable" ]; then
+        mapfile -d '' -t flags < <(BUSTER_HOST_ARCH=vector ./build.sh print-host-flags)
+        [ "${#flags[@]}" -gt 0 ]
+        built=$(mktemp "${TMPDIR:-/tmp}/feedback-probe.XXXXXX")
+        executable=$built
+        cc -std=c17 -O2 -Wall -Wextra -Werror "${flags[@]}" tools/ci/vector-probe.c -o "$executable"
+    fi
+    "$executable" > "$file" 2>&1 || status=$?
+    printf 'status\t%s\n' "$status" >> "$file"
+    if [ -n "$built" ]; then rm -f -- "$built"; fi
+    return "$status"
+}
+
 replay()
 {
     local record=$1 current expected
@@ -76,6 +94,15 @@ replay()
     export RUNNER_TEMP GITHUB_ENV="$RUNNER_TEMP/environment" GITHUB_PATH="$RUNNER_TEMP/path" GITHUB_OUTPUT="$RUNNER_TEMP/output"
     : > "$GITHUB_ENV"
     : > "$GITHUB_PATH"
+    # Every hosted job that builds or runs the compiler drew a CPU whose probe qualified (#2924): so must this one. A
+    # native build is its CPU's alone, so its replay needs the recorded CPU model too; the vector target runs on any
+    # qualifying CPU.
+    probe "$RUNNER_TEMP/probe.txt" || { cat "$RUNNER_TEMP/probe.txt" >&2; echo 'feedback: this CPU lacks a feature the compiler'"'"'s AVX-512 host needs' >&2; return 1; }
+    if [ "${BUSTER_HOST_ARCH:-native}" = native ]; then
+        LC_ALL=C lscpu | grep '^Model name:' > "$RUNNER_TEMP/cpu-model"
+        grep '^Model name:' "$record/cpu.txt" > "$RUNNER_TEMP/recorded-cpu-model"
+        cmp "$RUNNER_TEMP/cpu-model" "$RUNNER_TEMP/recorded-cpu-model" || { echo 'feedback: native replay needs the recorded CPU model' >&2; return 1; }
+    fi
     export BUSTER_HOSTED_RELEASES="$RUNNER_TEMP/releases" BUSTER_HOSTED_OFFLINE="$RUNNER_TEMP/offline"
     bash tools/ci/hosted-release.sh prepare "$BUSTER_HOSTED_RELEASES"
     # Prefer the original apt closure and frozen-input mirrors to resolving packages again. Its name is the
@@ -100,12 +127,10 @@ replay()
             { echo 'feedback: apt inputs differ; use the recorded runner image and apt manifest' >&2; return 1; }
     fi
     export BUSTER_CI_CACHE="$BUSTER_HOSTED_OFFLINE/ci" BUSTER_CI_OFFLINE=1
+    # The drawn item's steps, in its order (.github/workflows/hosted-correctness.yml).
     bash tools/ci/setup-hosted.sh
     consume_environment
-    if [ "$BUSTER_SANITIZER" = none ]; then
-        bash tools/ci/setup-baseline-runtime.sh
-        consume_environment
-    else
+    if [ "$BUSTER_SANITIZER" != none ]; then
         bash tools/ci/sanitizers.sh configure "$RUNNER_TEMP/sanitizer-reports"
         consume_environment
         bash tools/ci/sanitizers.sh probe "$RUNNER_TEMP/sanitizer-probes"
@@ -115,19 +140,14 @@ replay()
     if [ -f "$record/command.sh" ]; then
         bash tools/ci/fetch-corpus.sh "$RUNNER_TEMP/corpus"
         export BUSTER_CORPUS="$RUNNER_TEMP/corpus"
+        local flags=()
+        mapfile -d '' -t flags < <(./build.sh print-host-flags)
+        [ "${#flags[@]}" -gt 0 ]
+        mkdir -p build
+        clang -dM -E "${flags[@]}" -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
         bash tools/ci/fetch-c-testsuite.sh build/c-testsuite
         bash tools/ci/fetch-sqlite.sh build/sqlite
         consume_environment
-        local flags=()
-        mapfile -d '' -t flags < <(./build.sh print-host-flags)
-        clang "${flags[@]}" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null |
-            grep '^#define BUSTER_HOST_VECTOR ' > "$RUNNER_TEMP/host-path"
-        cmp "$record/host-path" "$RUNNER_TEMP/host-path" || { echo 'feedback: this CPU selected another host path' >&2; return 1; }
-        if [ "${BUSTER_HOST_ARCH:-native}" = native ]; then
-            LC_ALL=C lscpu | grep '^Model name:' > "$RUNNER_TEMP/cpu-model"
-            grep '^Model name:' "$record/cpu.txt" > "$RUNNER_TEMP/recorded-cpu-model"
-            cmp "$RUNNER_TEMP/cpu-model" "$RUNNER_TEMP/recorded-cpu-model" || { echo 'feedback: native replay needs the recorded CPU model' >&2; return 1; }
-        fi
         export BUSTER_FEEDBACK_WORK="$RUNNER_TEMP"
         # command.sh resolves the freshly built compiler and its recorded inventory/runner options.
         bash "$record/command.sh" "$record"
@@ -151,12 +171,15 @@ record()
         local exit_status=$?
         printf 'result\t%s\nexit\t%s\nphase\t%s\nfinished\t%s\n' "$feedback_result" "$exit_status" "$feedback_phase" "$(date -u +%FT%TZ)" > "$feedback_directory/result.tsv"
         if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
-            printf '\n### Hosted feedback: %s (%s; not qualification)\n\nRevision: `%s`. Profile: `%s`. Result: **%s**.\n\nDownload this job\x27s `feedback-*` artifact and run `bash reproduce.sh` from a clean checkout of that revision on Ubuntu 26.04. The artifact contains the exact inventory, runner arguments, CPU/path, fixed cases/seeds, tool pins and logs.\n' \
-                "$feedback_kind" "$feedback_phase" "$(cat "$feedback_directory/revision" 2>/dev/null || echo unknown)" "$feedback_profile" "$feedback_result" >> "$GITHUB_STEP_SUMMARY"
+            local note=''
+            if [ "$feedback_profile" != full ]; then note='; not qualification'; fi
+            printf '\n### Hosted feedback: %s (%s%s)\n\nRevision: `%s`. Profile: `%s`. Result: **%s**.\n\nDownload this job\x27s `feedback-*` artifact and run `bash reproduce.sh` from a clean checkout of that revision on Ubuntu 26.04. The artifact contains the exact inventory, runner arguments, CPU and its probe, fixed cases/seeds, tool pins and logs.\n' \
+                "$feedback_kind" "$feedback_phase" "$note" "$(cat "$feedback_directory/revision" 2>/dev/null || echo unknown)" "$feedback_profile" "$feedback_result" >> "$GITHUB_STEP_SUMMARY"
         fi
-        if [ "$feedback_result" = passed ]; then
+        # A passing build or full suite needs no annotation: its step passed. An early or partial pass says what it isn't.
+        if [ "$feedback_result" = passed ] && [ "$feedback_profile" != full ]; then
             printf '::notice title=Early hosted feedback (not qualification)::%s %s passed; full required coverage remains independent.\n' "$feedback_kind" "$feedback_profile"
-        else
+        elif [ "$feedback_result" != passed ]; then
             printf '::error title=Hosted feedback %s::%s: %s (exit %s). Exact reproduction and logs: feedback artifact.\n' "$feedback_result" "$feedback_kind" "$feedback_profile" "$exit_status"
         fi
     }
@@ -181,8 +204,8 @@ record()
     mapfile -d '' -t flags < <(./build.sh print-host-flags)
     [ "${#flags[@]}" -gt 0 ]
     printf '%q ' "${flags[@]}" > "$directory/host-flags.txt"
-    clang "${flags[@]}" -Isrc -dM -E -include src/buster/compiler/host_isa.h -x c /dev/null |
-        grep '^#define BUSTER_HOST_VECTOR ' > "$directory/host-path"
+    # The CPU's AVX-512 features as the draw's probe saw them; its replay requires a CPU that qualifies the same way.
+    probe "$directory/probe.txt" || true
     : > "$directory/environment.sh"
     for name in BUSTER_HOST_ARCH BUSTER_SANITIZER BUSTER_SANITIZER_OPTIMIZATION BUSTER_LINKER BUSTER_DEBUG_INFO BUSTER_ORACLE_CACHE BUSTER_DRIVER_DIFFERENTIAL ImageOS ImageVersion; do
         if [[ -v $name ]]; then
@@ -197,7 +220,7 @@ set -euo pipefail
 record=$(cd -- "$(dirname -- "$0")" && pwd)
 exec bash tools/ci/feedback.sh replay "$record"
 REPRODUCE
-    printf 'Run from the recorded clean checkout on Ubuntu 26.04: bash /path/to/artifact/reproduce.sh\nThe replay acquires the revision\x27s pinned tools and fixtures and rebuilds once. CPU model is in cpu.txt; host-path must match.\nCase/seed: smoke uses tests/ci/feedback (fixed corpus, no random seed). Other headings retain their literal seed options/defaults in selected.tests; the failing case and any generated seed are in output.log.\n' > "$directory/README.txt"
+    printf 'Run from the recorded clean checkout on Ubuntu 26.04: bash /path/to/artifact/reproduce.sh\nThe replay acquires the revision\x27s pinned tools and fixtures and rebuilds once. CPU model is in cpu.txt; the replay\x27s CPU must pass the vector probe (probe.txt), and a native replay needs the same model.\nCase/seed: smoke uses tests/ci/feedback (fixed corpus, no random seed). Other headings retain their literal seed options/defaults in selected.tests; the failing case and any generated seed are in output.log.\n' > "$directory/README.txt"
     local status=0
     if [ "$kind" = build ]; then
         feedback_phase=build

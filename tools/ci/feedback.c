@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Conservative, advisory selection for hosted reproductions (#1427). This never selects qualification coverage.
-// Administrative text, outside compiler hot paths. Unknown paths expand to all groups; unreadable plans fail.
+// Conservative, advisory selection of the correctness inventory's headings (#1427): the early step's driver corpus in
+// every drawn item (smoke), the `changes` job's affected-test report and local reproductions (feedback.sh). Only the
+// full profile is ever qualification coverage. Administrative text, outside compiler hot paths. Unknown paths expand to
+// all groups; unreadable plans fail.
 #include <fnmatch.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -213,10 +215,32 @@ static bool feedback_inventory(char* text, const char* profile, unsigned int gro
                 found |= mandatory;
                 const unsigned int owner = feedback_heading(title);
                 const bool smoke = strcmp(profile, "smoke") == 0;
-                keep = mandatory != 0 || (!smoke && (owner == 0 || (owner & groups) != 0));
-                fprintf(report, "| %s | %s | %s |\n", title, keep ? "run" : "skip",
-                    mandatory != 0 ? "always-run corpus/regression" : owner == 0 ? "shared or unclassified heading: always run" :
-                    keep ? "selected dependency group" : smoke ? "outside smoke; full qualification retained" : "no selected dependency group; full qualification retained");
+                // The early step, every drawn item's first result, runs the driver corpus alone (feedback_always[0]): the
+                // regressions the other profiles always run are in each item's own deal, and run there once.
+                const bool corpus = (mandatory & 1u) != 0;
+                keep = smoke ? corpus : mandatory != 0 || owner == 0 || (owner & groups) != 0;
+                const char* reason = "selected dependency group";
+                if (corpus)
+                {
+                    reason = "always-run driver corpus";
+                }
+                else if (smoke)
+                {
+                    reason = "outside the early driver corpus; full qualification retained";
+                }
+                else if (mandatory != 0)
+                {
+                    reason = "always-run regression";
+                }
+                else if (owner == 0)
+                {
+                    reason = "shared or unclassified heading: always run";
+                }
+                else if (!keep)
+                {
+                    reason = "no selected dependency group; full qualification retained";
+                }
+                fprintf(report, "| %s | %s | %s |\n", title, keep ? "run" : "skip", reason);
                 selected += keep;
                 count += 1;
             }

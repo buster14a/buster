@@ -190,9 +190,15 @@ jobs:
                   --base-workflow "$RUNNER_TEMP/base.yml" --workflow "$workflow" --output "$GITHUB_OUTPUT"
           fi
 
+      # The change's affected-test groups (tools/ci/feedback.c, #1427), in the job's summary: advisory, for a local
+      # reproduction (docs/commands/ci.md, "Early hosted feedback and reproductions"). It selects nothing here, every row
+      # still runs the whole inventory, and it never fails the job. Runs without a change list (a push) have none.
       - name: Publish conservative affected-test groups (advisory)
+        continue-on-error: true
         shell: bash
         run: |
+          set -euo pipefail
+          test -f "$RUNNER_TEMP/files" || exit 0
           cc -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tools/ci/feedback.c -o "$RUNNER_TEMP/feedback"
           "$RUNNER_TEMP/feedback" --profile affected --files "$RUNNER_TEMP/files" \
             --inventory tools/ci/correctness.tests --report "$RUNNER_TEMP/feedback-plan.md" > "$RUNNER_TEMP/feedback-affected.tests"
@@ -424,7 +430,6 @@ jobs:
       sanitizer: ${{ matrix.sanitizer }}
       optimization: ${{ matrix.optimization }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
-      feedback-profile: full
       performance: ${{ needs.changes.outputs.performance }}
 
   # The fuzz campaigns: libFuzzer with ASan, UBSan and leaks, each of the frontend, the ELF import's override and the

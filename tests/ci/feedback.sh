@@ -22,8 +22,10 @@ sed -n '/^== /p' "$work/selected.tests" > "$work/headings"
 cmp "$work/all-headings" "$work/headings" || fail 'full selection lost a heading'
 pass
 plan smoke
-test "$(grep -c '^== ' "$work/selected.tests")" = 4 || fail 'smoke must have four always-run headings'
+# The early step runs in every plain drawn item: the driver corpus alone, whose regressions run in the item's own deal.
+test "$(grep -c '^== ' "$work/selected.tests")" = 1 || fail 'the early profile must be the driver corpus alone'
 grep -q '^bash tools/ci/feedback.sh smoke$' "$work/selected.tests" || fail 'no driver corpus'
+grep -Fq '| Test the C lexer | skip | outside the early driver corpus; full qualification retained |' "$work/plan.md" || fail 'early skip has no reason'
 pass
 for path in src/buster/base.h src/buster/compiler/unknown_new_module.c build.sh CMakeLists.txt cmake/new.cmake .github/workflows/9700x.yml tools/ci/feedback.c tools/ci/correctness.tests AGENTS.md docs/commands/ci.md docs/hosted-toolchain.md tests/checker/shared.h; do
     printf '%s\n' "$path" > "$work/files"
@@ -56,6 +58,7 @@ pass
 for profile in frontend checker object link diagnostics; do
     plan "$profile"
     grep -Fq '== Test the early driver feedback corpus' "$work/selected.tests" || fail "$profile lacks smoke"
+    grep -Fq '== Test the C lexer' "$work/selected.tests" || fail "$profile lacks an always-run regression"
     pass
 done
 for bad in ../escape /absolute $'new\tfile' $'new\rfile'; do
@@ -99,10 +102,15 @@ case "$FIXTURE_RESULT" in
 esac
 COMPILER
 chmod +x "$work/compiler"
+# The draw's probe (BUSTER_VECTOR_PROBE): a qualifying CPU's answers, or a refusing one's.
+printf '#!/usr/bin/env bash\nprintf "x86-64-v4\\tyes\\navx512f\\tyes\\n"\n' > "$work/probe"
+printf '#!/usr/bin/env bash\nprintf "x86-64-v4\\tyes\\navx512f\\tno\\n"\nexit 1\n' > "$work/probe-refused"
+chmod +x "$work/probe" "$work/probe-refused"
+export BUSTER_VECTOR_PROBE="$work/probe"
 for state in passed product incomplete skip no-summary timeout start-error; do
     status=0
     FIXTURE_RESULT=$state BUSTER_HOSTED_OFFLINE= BUSTER_FEEDBACK_HOSTED_TOOLS= BUSTER_PRODUCT= \
-        BUSTER_HOST_ARCH=x86-64 BUSTER_SANITIZER=none BUSTER_SANITIZER_OPTIMIZATION=3 \
+        BUSTER_HOST_ARCH=vector BUSTER_SANITIZER=none BUSTER_SANITIZER_OPTIMIZATION=3 \
         BUSTER_COMPILER="$work/compiler" bash tools/ci/feedback.sh run "$work/$state" smoke --jobs 1 --timeout 120 > "$work/record.log" 2>&1 || status=$?
     case "$state" in
         passed) test "$status" = 0; expected=passed ;;
@@ -113,24 +121,28 @@ for state in passed product incomplete skip no-summary timeout start-error; do
     grep -Fq $'result\t'"$expected" "$work/$state/result.tsv" || { cat "$work/record.log"; fail "$state misclassified"; }
     bash -n "$work/$state/reproduce.sh" "$work/$state/command.sh" "$work/$state/environment.sh"
     grep -Fq -- '--timeout 120' "$work/$state/command.sh" || fail 'timeout missing from exact command'
-    test -s "$work/$state/cpu.txt" && test -s "$work/$state/host-path" && test -s "$work/$state/output.log"
+    test -s "$work/$state/cpu.txt" && test -s "$work/$state/output.log"
+    grep -qx $'status\t0' "$work/$state/probe.txt" || fail "the record lacks the probe's answers"
     pass
 done
 status=0
-BUSTER_HOSTED_OFFLINE= BUSTER_FEEDBACK_HOSTED_TOOLS= BUSTER_PRODUCT= BUSTER_COMPILER=/missing/compiler BUSTER_HOST_ARCH=x86-64 \
+BUSTER_HOSTED_OFFLINE= BUSTER_FEEDBACK_HOSTED_TOOLS= BUSTER_PRODUCT= BUSTER_COMPILER=/missing/compiler BUSTER_HOST_ARCH=vector \
     bash tools/ci/feedback.sh run "$work/infra" smoke --jobs 1 > /dev/null 2>&1 || status=$?
 test "$status" != 0 && grep -Fq $'result\tinfrastructure-failure' "$work/infra/result.tsv" || fail 'missing executable not infrastructure'
 pass
-# Workflow boundaries: full remains the qualifying caller's explicit profile, and partial feedback has its own name,
-# hosted preparation and run-id group. The qualification/cancellation policies have their own mutation fixtures.
-grep -Fq '      feedback-profile: full' .github/workflows/9700x.yml || fail 'qualification not full'
-grep -Fq 'if [ "$GITHUB_EVENT_NAME" != workflow_dispatch ] && [ "$FEEDBACK_PROFILE" != full ]; then' .github/workflows/hosted-correctness.yml || fail 'partial profile allowed on qualification event'
-grep -Fq "        default: full" .github/workflows/hosted-correctness.yml || fail 'row default weakened'
-grep -Fq '      - name: Early hosted feedback (not qualification)' .github/workflows/hosted-correctness.yml || fail 'no early result'
-grep -Fq '  group: hosted-reproduction-${{ github.run_id }}' .github/workflows/reproduce.yml || fail 'reproductions cancel each other'
+# Workflow boundaries: each drawn item's suite is the full inventory, and the early result comes before it, in every plain
+# item; the affected plan is advisory. The qualification/cancellation policies have their own mutation fixtures.
+row=.github/workflows/hosted-correctness.yml
+grep -Fq '          bash tools/ci/feedback.sh run "$RUNNER_TEMP/feedback-suite" full --jobs "$(nproc)" --timeout "$timeout" "${fail_fast[@]}" \' "$row" || fail 'the suite is not the full inventory'
+early=$(grep -n '^      - name: Early hosted feedback (not qualification)$' "$row" | cut -d: -f1)
+suite=$(grep -n '^      - name: Run correctness tests within the hosted CPU budget$' "$row" | cut -d: -f1)
+[ -n "$early" ] && [ -n "$suite" ] && [ "$early" -lt "$suite" ] || fail 'no early result before the suite'
+sed -n "$((early + 1))p" "$row" | grep -Fq "if: env.BUSTER_SHARD != '' && env.BUSTER_SANITIZER == 'none' && " || fail "the early result is not every plain item's"
+if grep -Eq 'feedback-profile|reproduce\.yml' .github/workflows/*.yml; then fail 'a partial profile reaches a hosted row'; fi
+grep -A1 -F '      - name: Publish conservative affected-test groups (advisory)' .github/workflows/9700x.yml | grep -Fq 'continue-on-error: true' || fail 'the advisory plan can fail the selector'
 pass
 # Execute the emitted replay command from a clean checkout with offline stand-ins at the acquisition boundary.
-# This checks environment handoffs, rebuilding, pinned fixture setup, exact arguments and host-path verification.
+# This checks environment handoffs, rebuilding, pinned fixture setup, exact arguments and the CPU's verification.
 checkout="$work/replay-checkout"
 mkdir -p "$checkout/tools/ci" "$checkout/src/buster/compiler"
 cp tools/ci/feedback.sh "$checkout/tools/ci/"
@@ -142,8 +154,7 @@ set -euo pipefail
 printf -- '-march=x86-64\0'
 BUILD
 chmod +x "$checkout/build.sh"
-echo '#define BUSTER_HOST_VECTOR 0' > "$checkout/src/buster/compiler/host_isa.h"
-for script in hosted-release hosted-offline setup-hosted setup-baseline-runtime fetch-corpus fetch-c-testsuite fetch-sqlite; do
+for script in hosted-release hosted-offline setup-hosted fetch-corpus fetch-c-testsuite fetch-sqlite; do
     printf '#!/usr/bin/env bash\nset -euo pipefail\nprintf "%%s\\n" "%s $*" >> "$FEEDBACK_REPLAY_TRACE"\n' "$script" > "$checkout/tools/ci/$script.sh"
 done
 cat > "$checkout/tools/ci/hosted-product.sh" <<'BUILD'
@@ -185,10 +196,15 @@ git -C "$checkout" rev-parse HEAD > "$work/passed/revision"
     if FIXTURE_DOWNLOAD=fail bash "$work/passed/reproduce.sh" > "$work/replay-missing.log" 2>&1; then fail 'replay accepted changed apt inputs after an expired handoff'; fi
     grep -Fq 'apt inputs differ' "$work/replay-missing.log"
     rm "$work/passed/apt-manifest"
-    cp "$work/passed/host-path" "$work/host-path"
-    echo '#define BUSTER_HOST_VECTOR 1' > "$work/passed/host-path"
-    if bash "$work/passed/reproduce.sh" > /dev/null 2>&1; then fail 'replay accepted a different host path'; fi
-    cp "$work/host-path" "$work/passed/host-path"
+    test -s build/predefines.h || fail 'replay wrote no predefines'
+    if BUSTER_VECTOR_PROBE="$work/probe-refused" bash "$work/passed/reproduce.sh" > "$work/replay-refused.log" 2>&1; then fail 'replay accepted a CPU the probe refuses'; fi
+    grep -Fq 'lacks a feature' "$work/replay-refused.log"
+    cp "$work/passed/environment.sh" "$work/environment.sh"
+    sed -i 's/^export BUSTER_HOST_ARCH=vector$/export BUSTER_HOST_ARCH=native/' "$work/passed/environment.sh"
+    sed -i 's/^Model name:.*/Model name: Some other CPU/' "$work/passed/cpu.txt"
+    if bash "$work/passed/reproduce.sh" > "$work/replay-native.log" 2>&1; then fail 'native replay accepted another CPU model'; fi
+    grep -Fq 'recorded CPU model' "$work/replay-native.log"
+    cp "$work/environment.sh" "$work/passed/environment.sh"
     echo 0000000000000000000000000000000000000000 > "$work/passed/revision"
     if bash "$work/passed/reproduce.sh" > /dev/null 2>&1; then fail 'replay accepted a different revision'; fi
 )
@@ -197,7 +213,7 @@ if [ "${1:-}" = --compiler ]; then
     real=$(realpath "${2:?real compiler}")
     # A partial reproduction keeps the full row's memory/cost table. Unselected costs are ignored, no test is lost.
     printf '== Test the link representation [8 CPUs]\ntrue\n== Test deterministic diagnostic ordering\ntrue\n' > "$work/partial.tests"
-    "$real" parallel --jobs 1 --shard 1/1 --costs tools/ci/costs/x86-64-memory-O3.costs < "$work/partial.tests" > "$work/partial.log"
+    "$real" parallel --jobs 1 --shard 1/1 --costs tools/ci/costs/vector-memory-O3.costs < "$work/partial.tests" > "$work/partial.log"
     grep -q '2 passed, 0 failed, 0 skipped, 0 not started' "$work/partial.log" || fail 'partial profile lost a heading under full-row costs'
     pass
     BUSTER_COMPILER="$real" bash tools/ci/feedback.sh smoke > "$work/real.log" 2>&1
