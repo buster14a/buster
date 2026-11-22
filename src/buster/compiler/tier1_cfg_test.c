@@ -465,14 +465,19 @@ static uint32_t tier1_cfg_test_tie_operand(const Tier1CfgInput* input, const Tie
     return operand;
 }
 
-// Whether interval i takes a call's argument registers to avoid: a general one, with no alternate, hinted by nothing or by
-// a tie alone.
+// Whether interval i takes a call's argument registers to avoid: a general one of a value that isn't a phi, with no
+// alternate, hinted by nothing or by a tie alone.
 static bool tier1_cfg_test_argument_open(const Tier1CfgInput* input, const Tier1AllocationInput* intervals, uint32_t i)
 {
     const bool unnamed = intervals->hint_intervals == 0 || intervals->hint_intervals[i] == BUSTER_TIER1_CFG_NONE;
     const bool unhinted = intervals->hint_values[i] == BUSTER_TIER1_CFG_NONE && unnamed;
     const bool alone = intervals->alternate_intervals == 0 || intervals->alternate_intervals[i] == BUSTER_TIER1_CFG_NONE;
-    return intervals->classes[i] == BUSTER_TIER1_ALLOCATE_GPR && alone && (unhinted || tier1_cfg_test_tie_operand(input, intervals, i) != BUSTER_TIER1_CFG_NONE);
+    bool phi = false;
+    for (uint32_t k = 0; k < input->phi_count; k += 1)
+    {
+        phi |= input->phi_values[k] == intervals->values[i];
+    }
+    return intervals->classes[i] == BUSTER_TIER1_ALLOCATE_GPR && alone && !phi && (unhinted || tier1_cfg_test_tie_operand(input, intervals, i) != BUSTER_TIER1_CFG_NONE);
 }
 
 // The registers interval i avoids for a call (#2823), and in *hint its register hint, recomputed by brute force. An
@@ -480,7 +485,8 @@ static bool tier1_cfg_test_argument_open(const Tier1CfgInput* input, const Tier1
 // tier1_cfg_test_argument_open takes it, avoids every other general register any value's use reads at the position
 // before its end. One with none, where it is open, takes both from the interval its tie names it to
 // (tier1_cfg_test_tie_operand, searched forward), or that interval's, through open intervals with no end register, up to
-// the first with one; the rest have neither.
+// the first with one; the rest have neither. Either way only where the chain, followed back from i through open intervals
+// with no end register, starts at an interval no tie hints.
 static uint32_t tier1_cfg_test_argument_avoided(const Tier1CfgInput* input, const Tier1AllocationInput* intervals, uint32_t i, uint8_t* hint)
 {
     *hint = tier1_cfg_test_end_register(input, intervals, i);
@@ -498,9 +504,19 @@ static uint32_t tier1_cfg_test_argument_avoided(const Tier1CfgInput* input, cons
         source = open ? successor : source;
         walking = open && tier1_cfg_test_end_register(input, intervals, successor) == UINT8_MAX;
     }
+    // The chain's root, back from i through open intervals with no end register: it must be no tie's result.
+    uint32_t root = i;
+    bool back = open;
+    for (uint32_t steps = 0; back && steps < intervals->count; steps += 1)
+    {
+        const uint32_t operand = tier1_cfg_test_tie_operand(input, intervals, root);
+        back = operand != BUSTER_TIER1_CFG_NONE && tier1_cfg_test_end_register(input, intervals, operand) == UINT8_MAX && tier1_cfg_test_argument_open(input, intervals, operand);
+        root = back ? operand : root;
+    }
+    const bool rooted = tier1_cfg_test_tie_operand(input, intervals, root) == BUSTER_TIER1_CFG_NONE;
     const uint8_t reg = tier1_cfg_test_end_register(input, intervals, source);
     uint32_t avoided = 0;
-    if (open && reg < 32)
+    if (open && rooted && reg < 32)
     {
         const uint32_t position = intervals->ends[source] - 1;
         for (uint32_t v = 0; v < input->value_count; v += 1)
