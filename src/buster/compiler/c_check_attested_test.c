@@ -86,6 +86,73 @@ static const char* const check_attested_test_system_units[] =
     "#include <s.h>\nint c(void) { return 3; }\n",
 };
 
+// The headers' declarations that cross the lists' blocks of 64 tokens (check_attested_list_run) with each lane of a
+// block in turn, after fixed header `fixed`, each line ending in `marks`: a struct whose member's array bound opens a
+// `sizeof` group after 0 to 63 unary pluses (in some declaration the group opens in a block's last lane, and the
+// name inside it is the next block's first), a bound inside 70 parentheses (a block's levels span all its tokens), an
+// enum whose enumerators and their values cross blocks, and prototypes whose asm labels follow 0 to 63 pluses. Each
+// must be listed: a reading's name its list doesn't hold fails the command. Null where it can't be made.
+static char* check_attested_test_blocks(const char* fixed, const char* marks)
+{
+    const size_t capacity = 65536;
+    char* text = malloc(capacity);
+    size_t length = 0;
+    bool fits = text != NULL;
+    if (fits)
+    {
+        length = (size_t)snprintf(text, capacity, "%sextern int attested_bound[4]; %s\n", fixed, marks);
+    }
+    for (uint32_t s = 0; fits && s < 64; s += 1)
+    {
+        length += (size_t)snprintf(text + length, capacity - length, "struct attested_block%u { char m; char tail[", s);
+        for (uint32_t k = 0; k < s && length + 2 < capacity; k += 1)
+        {
+            length += (size_t)snprintf(text + length, capacity - length, "+ ");
+        }
+        length += (size_t)snprintf(text + length, capacity - length, "(sizeof(attested_bound) / sizeof(attested_bound[0]))]; }; %s\n", marks);
+        fits = length + 1024 < capacity;
+    }
+    if (fits)
+    {
+        length += (size_t)snprintf(text + length, capacity - length, "extern char attested_deep[");
+        for (uint32_t k = 0; k < 70; k += 1)
+        {
+            text[length + k] = '(';
+        }
+        length += 70;
+        length += (size_t)snprintf(text + length, capacity - length, "sizeof(attested_bound)");
+        for (uint32_t k = 0; k < 70; k += 1)
+        {
+            text[length + k] = ')';
+        }
+        length += 70;
+        length += (size_t)snprintf(text + length, capacity - length, "]; %s\nenum attested_many { AM0", marks);
+        for (uint32_t k = 1; k < 48; k += 1)
+        {
+            length += (k & 1) != 0 ? (size_t)snprintf(text + length, capacity - length, ", AM%u = AM%u + 1", k, k - 1) :
+                                     (size_t)snprintf(text + length, capacity - length, ", AM%u", k);
+        }
+        length += (size_t)snprintf(text + length, capacity - length, " }; %s\n", marks);
+        fits = length + 1024 < capacity;
+    }
+    for (uint32_t s = 0; fits && s < 64; s += 1)
+    {
+        length += (size_t)snprintf(text + length, capacity - length, "int attested_label%u(char [", s);
+        for (uint32_t k = 0; k < s && length + 2 < capacity; k += 1)
+        {
+            length += (size_t)snprintf(text + length, capacity - length, "+ ");
+        }
+        length += (size_t)snprintf(text + length, capacity - length, "1]) __asm__(\"attested_symbol%u\"); %s\n", s, marks);
+        fits = length + 1024 < capacity;
+    }
+    if (!fits)
+    {
+        free(text);
+        text = NULL;
+    }
+    return text;
+}
+
 // The outcome named `name` of `length` bytes, or CHECK_ATTESTED_OUTCOMES.
 static uint32_t check_attested_test_outcome(const char* name, uint32_t length)
 {
@@ -420,7 +487,9 @@ static __attribute__((noinline)) void check_test_attested_compile(CheckTest* tes
 {
     char header[640];
     snprintf(header, sizeof(header), "%s/p.h", directory);
-    const bool written = parse_test_write(header, check_attested_test_compile_header, strlen(check_attested_test_compile_header));
+    char* const text = check_attested_test_blocks(check_attested_test_compile_header, "");
+    const bool written = text != NULL && parse_test_write(header, text, strlen(text));
+    free(text);
     const uint32_t units = BUSTER_ARRAY_LENGTH(check_attested_test_compile_units);
     // Every unit by -c, on one lane: the last two fail the command.
     {
@@ -556,7 +625,9 @@ static __attribute__((noinline)) void check_test_attested_memo(CheckTest* test, 
 {
     char header[640];
     snprintf(header, sizeof(header), "%s/p.h", directory);
-    const bool written = parse_test_write(header, check_attested_test_compile_header, strlen(check_attested_test_compile_header));
+    char* const text = check_attested_test_blocks(check_attested_test_compile_header, "");
+    const bool written = text != NULL && parse_test_write(header, text, strlen(text));
+    free(text);
     const uint32_t units = BUSTER_ARRAY_LENGTH(check_attested_test_compile_units) - 2;
     char memo[700];
     snprintf(memo, sizeof(memo), "%s/memo", directory);
@@ -578,11 +649,14 @@ static __attribute__((noinline)) void check_test_attested_memo(CheckTest* test, 
     uint64_t skipped_cold = 0;
     uint64_t skipped_warm = 0;
     uint64_t views = 0;
+    // (A command of one source file lists its unit in one run, CheckAttested.alone: no reading's name may be unlisted.)
+    uint64_t unlisted = 0;
     for (uint32_t u = 0; u < units; u += 1)
     {
         off = off && check_attested_test_unit_range(directory, "off", "off", plain, BUSTER_ARRAY_LENGTH(plain), u, 1, 0);
         cold = cold && check_attested_test_unit_range(directory, "cold", "on", kept, BUSTER_ARRAY_LENGTH(kept), u, 1, 0);
         skipped_cold += check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED];
+        unlisted += check_units_attested_last[CHECK_ATTESTED_SUMMARY_UNLISTED];
     }
     uint64_t bytes = 0;
     const uint32_t files = check_attested_test_memos(memo, false, &bytes);
@@ -591,12 +665,13 @@ static __attribute__((noinline)) void check_test_attested_memo(CheckTest* test, 
         warm = warm && check_attested_test_unit_range(directory, "warm", "on", kept, BUSTER_ARRAY_LENGTH(kept), u, 1, 0);
         skipped_warm += check_units_attested_last[CHECK_ATTESTED_SUMMARY_SKIPPED];
         views += check_units_attested_last[CHECK_ATTESTED_SUMMARY_VIEWS];
+        unlisted += check_units_attested_last[CHECK_ATTESTED_SUMMARY_UNLISTED];
     }
     check_test_expect(test, off && cold && warm && check_attested_test_compiled_same(directory, "cold", "off", units, true) &&
                                 check_attested_test_compiled_same(directory, "warm", "off", units, true),
                       "--attested-memo: each unit's object and diagnostics by its own command, with the memo cold and warm, are --attested=off's");
     check_test_expect(test, files == 1 && bytes > BUSTER_ATTESTED_MEMO_HEADER && (bytes - BUSTER_ATTESTED_MEMO_HEADER) % sizeof(CheckAttestedHash) == 0 &&
-                                skipped_cold != 0 && skipped_warm > skipped_cold && views == units,
+                                skipped_cold != 0 && skipped_warm > skipped_cold && views == units && unlisted == 0,
                       "--attested-memo: one file, whole records; a command of one source file skips what earlier commands learned, every one of them warm");
     // The two units with errors, each by a command of its own with the memo warm: each skips, fails, and is read again
     // whole, its diagnostics the second reading's alone, --attested=off's (a stream of the command's own, into which the
@@ -1296,7 +1371,9 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
     snprintf(header, sizeof(header), "%s/h.h", directory);
     char late[640];
     snprintf(late, sizeof(late), "%s/late.h", directory);
-    bool written = ready && parse_test_write(header, check_attested_test_header, strlen(check_attested_test_header)) &&
+    // The main header, with the declarations across the lists' blocks, each learned in unit 1.
+    char* const main_header = check_attested_test_blocks(check_attested_test_header, "// 1:learned");
+    bool written = ready && main_header != NULL && parse_test_write(header, main_header, strlen(main_header)) &&
                    parse_test_write(late, check_attested_test_late_header, strlen(check_attested_test_late_header));
     CheckAttestedRecord* records = calloc(1024, sizeof(CheckAttestedRecord));
     // The main fixture, by -c: unit 3's error fails the command.
@@ -1307,7 +1384,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
                                                                                   "#include \"late.h\"\n", 4, options, BUSTER_ARRAY_LENGTH(options), 1);
         check_test_expect(test, ran && census.units_observed == 4 && census.units_failed == 1,
                           "measure-attested runs a command's units on one lane, its census beside them, with no unlisted name and no contradiction");
-        check_test_expect(test, ran && check_attested_test_lines(&census, "h.h", check_attested_test_header, 0xf) &&
+        check_test_expect(test, ran && check_attested_test_lines(&census, "h.h", main_header, 0xf) &&
                                     check_attested_test_lines(&census, "late.h", check_attested_test_late_header, 0xf),
                           "measure-attested: each declaration's outcome by unit (learned, skipped, reached, impure, a root, a diagnostic, an error's unit)");
         check_test_expect(test, ran && census.memo_count != 0 && census.outcome_declarations[CHECK_ATTESTED_SKIPPED] != 0 && census.pass_tokens != 0,
@@ -1325,7 +1402,7 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
         {
             records[r].unit += records[r].unit == 2 ? 1u : 0u;
         }
-        check_test_expect(test, ran && check_attested_test_lines(&census, "h.h", check_attested_test_header, 0xb) &&
+        check_test_expect(test, ran && check_attested_test_lines(&census, "h.h", main_header, 0xb) &&
                                     check_attested_test_lines(&census, "late.h", check_attested_test_late_header, 0xb),
                           "measure-attested: -fsyntax-only's outcomes are -c's");
     }
@@ -1335,12 +1412,13 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
         const char* options[] = { "-nostdinc", "-std=gnu17", "--scalar", "-c" };
         const bool ran = written && records != NULL && check_attested_test_command(&census, directory, "#include \"h.h\"\n", check_attested_test_units,
                                                                                   "#include \"late.h\"\n", 4, options, BUSTER_ARRAY_LENGTH(options), 1);
-        check_test_expect(test, ran && check_attested_test_lines(&census, "h.h", check_attested_test_header, 0xf) &&
+        check_test_expect(test, ran && check_attested_test_lines(&census, "h.h", main_header, 0xf) &&
                                     check_attested_test_lines(&census, "late.h", check_attested_test_late_header, 0xf),
                           "measure-attested: --scalar's outcomes are the vector path's");
     }
     unlink(header);
     unlink(late);
+    free(main_header);
     // A typedef another unit declares otherwise, and a declaration after #pragma pack.
     snprintf(header, sizeof(header), "%s/q.h", directory);
     written = ready && parse_test_write(header, check_attested_test_otherwise_header, strlen(check_attested_test_otherwise_header));

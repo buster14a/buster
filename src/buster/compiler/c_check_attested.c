@@ -353,9 +353,6 @@ struct CheckAttested
     uint8_t* id_facts;
     uint32_t* builtin_targets;
     uint32_t ids_known;
-    // The lists' parts of each parser kind and role (check_attested_actions).
-    uint8_t kind_actions[256];
-    uint8_t role_actions[256];
     // The lists' cache (CheckAttestedListSlot): its table, in `list_arena`, each size after the last, and its pool; and how
     // many of the lane's declarations it gave a list and made one for.
     Arena list_arena;
@@ -754,82 +751,25 @@ static uint32_t check_attested_builtin_target(CheckAttested* census, const Inter
 // ---------------------------------------------------------------------------------------------------------------------
 // The lists: the declarations' ranges and each identifier's class.
 
-// Whether `role` opens a group, or closes one.
-static bool check_attested_opens(uint8_t role)
-{
-    return role >= PARSE_ROLE_OPEN_GROUP && role <= PARSE_ROLE_OPEN_CASE;
-}
+// A level's bits in the lists (a level is a group's inside, by its depth in the parser's tree; the declaration's own
+// is depth 0): its base class, the class of a name (no tag's, specifier's or member's) at it outside an expression, and
+// whether an asm or attribute group is open around it, whose strings name symbols (asm labels, alias targets). The
+// base is a declarator's at the declaration's own level; a parenthesized declarator's group's, its parent's class at
+// its opening; a parameter list's and a struct body's none (a name of their own scope's); an enum body's, its
+// enumerators' (the first name of each declares it, the rest look up); and any other group's (an array's bound, an
+// initializer, an attribute's operands, typeof's, a static assertion's), a lookup.
+#define BUSTER_ATTESTED_LEVEL_DECLARES 0x01u
+#define BUSTER_ATTESTED_LEVEL_LOOKS_UP 0x02u
+#define BUSTER_ATTESTED_LEVEL_ENUM 0x04u
+#define BUSTER_ATTESTED_LEVEL_SYMBOLS 0x08u
 
-static bool check_attested_closes(uint8_t role)
-{
-    return role >= PARSE_ROLE_CLOSE_GROUP && role <= PARSE_ROLE_CLOSE_CASE;
-}
-
-// Whether opener `role` is an asm group's or an attribute's, whose strings name symbols (asm labels, alias targets).
-static bool check_attested_symbol_group(uint8_t role)
-{
-    return role == PARSE_ROLE_OPEN_ASM || (role >= PARSE_ROLE_OPEN_ATTRIBUTE && role <= PARSE_ROLE_OPEN_ATTRIBUTE_LIST);
-}
-
-// A level's flags in the lists' stack: an `=` or a bit-field's `:` read since its last comma (what follows is an
-// expression), and an enumerator's name next (an enum's body, after its `{` or a comma).
+// A level's flags in the lists: an `=` or a bit-field's `:` read since its last comma (what follows is an expression),
+// and an enumerator's name next (after its opening or a comma; an enum body's only counts).
 #define BUSTER_ATTESTED_LEVEL_EXPRESSION 0x01u
 #define BUSTER_ATTESTED_LEVEL_ENUMERATOR 0x02u
 
-// A level's base class, the class of a name (no tag's, specifier's or member's) at it outside an expression: a
-// declarator's at the declaration's own level; a parenthesized declarator's group's, its parent's at its opening; a
-// parameter list's and a struct body's none (a name of their own scope's); an enum body's, its enumerators' (the first
-// name of each declares it, the rest look up); and any other group's (an array's bound, an initializer, an attribute's
-// operands, typeof's, a static assertion's), a lookup.
-#define BUSTER_ATTESTED_BASE_ENUM 0x80u
-
-// The tokens' parts in the lists' pass, from their kinds and roles (CheckAttested.kind_actions and role_actions): an
-// identifier, a string, an asm keyword, a comma, a `;`; an opener, a closer, an `=` or a bit-field's `:`, an asm or
-// attribute group's opener. A token with none takes no step but the root's test.
-#define BUSTER_ATTESTED_ACT_IDENTIFIER 0x01u
-#define BUSTER_ATTESTED_ACT_STRING 0x02u
-#define BUSTER_ATTESTED_ACT_ASM 0x04u
-#define BUSTER_ATTESTED_ACT_COMMA 0x08u
-#define BUSTER_ATTESTED_ACT_SEMI 0x10u
-#define BUSTER_ATTESTED_ACT_OPEN 0x20u
-#define BUSTER_ATTESTED_ACT_CLOSE 0x40u
-#define BUSTER_ATTESTED_ACT_EXPRESSION 0x80u
-
-// The kinds' and roles' parts, made once a census.
-static void check_attested_actions(uint8_t* kind_actions, uint8_t* role_actions)
-{
-    memset(kind_actions, 0, 256);
-    memset(role_actions, 0, 256);
-    kind_actions[PARSE_KIND_IDENTIFIER] = BUSTER_ATTESTED_ACT_IDENTIFIER;
-    kind_actions[PARSE_KIND_STRING] = BUSTER_ATTESTED_ACT_STRING;
-    kind_actions[PARSE_KIND_ASM] = BUSTER_ATTESTED_ACT_ASM;
-    kind_actions[PARSE_KIND_COMMA] = BUSTER_ATTESTED_ACT_COMMA;
-    kind_actions[PARSE_KIND_SEMI] = BUSTER_ATTESTED_ACT_SEMI;
-    for (uint32_t role = 0; role < PARSE_ROLE_COUNT; role += 1)
-    {
-        role_actions[role] = check_attested_opens((uint8_t)role) ? BUSTER_ATTESTED_ACT_OPEN :
-                             check_attested_closes((uint8_t)role) ? BUSTER_ATTESTED_ACT_CLOSE :
-                             role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_BITFIELD ? BUSTER_ATTESTED_ACT_EXPRESSION : 0;
-    }
-}
-
-// The class of a name at a level of base `base` and flags `flags`.
-static uint8_t check_attested_level_class(uint8_t base, uint8_t flags)
-{
-    const uint8_t enumerator = (flags & BUSTER_ATTESTED_LEVEL_ENUMERATOR) != 0 ? BUSTER_ATTESTED_DECLARES : BUSTER_ATTESTED_LOOKS_UP;
-    return (flags & BUSTER_ATTESTED_LEVEL_EXPRESSION) != 0 ? BUSTER_ATTESTED_LOOKS_UP : base == BUSTER_ATTESTED_BASE_ENUM ? enumerator : base;
-}
-
-// The base class of a level opened by `role` inside a level whose names have class `outer`.
-static uint8_t check_attested_opened_base(uint8_t role, uint8_t outer)
-{
-    return role == PARSE_ROLE_OPEN_GROUP ? outer :
-           role == PARSE_ROLE_OPEN_FUNCTION || role == PARSE_ROLE_OPEN_STRUCT ? 0 :
-           role == PARSE_ROLE_OPEN_ENUM ? BUSTER_ATTESTED_BASE_ENUM : BUSTER_ATTESTED_LOOKS_UP;
-}
-
-// The lists' state as one pass in source order goes: the open groups' stack (each level's opener, flags and base
-// class), and where the unit's arrays are.
+// The lists' state as they go in source order: where the unit's arrays are, what each level holds past a block of
+// check_attested_list_run, and the declaration being listed.
 typedef struct CheckAttestedListing CheckAttestedListing;
 struct CheckAttestedListing
 {
@@ -837,11 +777,9 @@ struct CheckAttestedListing
     const uint8_t* roles;
     const uint32_t* names;
     const uint32_t* parents;
-    // A function definition's body's closing, set at its opening: the lists' callers hand its inside to
-    // check_attested_list_body and go on at it; BUSTER_ATTESTED_NONE outside one.
-    uint32_t body_end;
-    uint32_t* firsts;
-    uint32_t* lasts;
+    const uint32_t* depths;
+    const uint32_t* firsts;
+    const uint32_t* lasts;
     uint8_t* flags;
     uint32_t* name_starts;
     uint32_t* name_entries;
@@ -850,119 +788,29 @@ struct CheckAttestedListing
     uint32_t declared_count;
     uint32_t* string_tokens;
     uint32_t* string_declarations;
-    uint8_t* stack_roles;
-    uint8_t* stack_flags;
-    uint8_t* stack_bases;
+    // By depth, each level's flags (BUSTER_ATTESTED_LEVEL_EXPRESSION, _ENUMERATOR) and bits (BUSTER_ATTESTED_LEVEL_*)
+    // as the last block left them.
+    uint8_t* level_flags;
+    uint8_t* level_bases;
     // The bodies' marks by key (CheckAttested.body_marks) and the last body's number in the lane.
     uint64_t* body_marks;
     uint64_t body_stamp;
     uint32_t declaration;
     uint32_t names_count;
     uint32_t strings;
-    uint32_t depth;
-    // The asm and attribute groups open around the token, whose strings name symbols.
-    uint32_t symbol_groups;
-    uint32_t first;
+    // The declaration's flags (BUSTER_ATTESTED_STRINGS, _ASM) from its tokens before the block.
     uint8_t declaration_flags;
     bool any_definition;
 };
-
-// Token `t`, of role `role` and parts `action` (BUSTER_ATTESTED_ACT_*), into the lists, and the declaration it ends where
-// it is a root (`root`). Both paths call it for every token with a part or a root, the scalar one for every token.
-static inline __attribute__((always_inline)) void check_attested_list_token(CheckAttestedListing* listing, uint32_t t, uint8_t role, uint8_t action, bool root)
-{
-    uint8_t* const stack_flags = listing->stack_flags;
-    uint8_t* const stack_bases = listing->stack_bases;
-    uint32_t depth = listing->depth;
-    if (action != 0)
-    {
-        const uint8_t level_flags = stack_flags[depth];
-        if ((action & BUSTER_ATTESTED_ACT_IDENTIFIER) != 0)
-        {
-            const uint32_t id = listing->names[t] < BUSTER_ATTESTED_MAX_IDS ? listing->names[t] : 0;
-            const bool tag = role == PARSE_ROLE_TAG || role == PARSE_ROLE_LEAF_RIGHT;
-            const uint8_t operand = check_attested_level_class(stack_bases[depth], level_flags);
-            const uint8_t name_class = tag ? BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP | BUSTER_ATTESTED_TAG :
-                                       role == PARSE_ROLE_SPECIFIER ? BUSTER_ATTESTED_LOOKS_UP :
-                                       role == PARSE_ROLE_MEMBER ? 0 : operand;
-            stack_flags[depth] = level_flags & ~BUSTER_ATTESTED_LEVEL_ENUMERATOR;
-            listing->name_entries[listing->names_count] = (id * 2 + (tag ? 1u : 0u)) | (uint32_t)name_class << BUSTER_ATTESTED_CLASS_SHIFT;
-            listing->names_count += 1;
-            listing->declared_keys[listing->declared_count] = id * 2 + (tag ? 1u : 0u);
-            listing->declared_count += (name_class & BUSTER_ATTESTED_DECLARES) != 0 ? 1u : 0u;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_STRING) != 0 && listing->symbol_groups != 0)
-        {
-            listing->string_tokens[listing->strings] = t;
-            listing->string_declarations[listing->strings] = listing->declaration;
-            listing->strings += 1;
-            listing->declaration_flags |= BUSTER_ATTESTED_STRINGS;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_ASM) != 0 && depth == 0 &&
-                 (t == listing->first || (t == listing->first + 1 && listing->kinds[listing->first] == PARSE_KIND_EXTENSION)))
-        {
-            listing->declaration_flags |= BUSTER_ATTESTED_ASM;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_COMMA) != 0)
-        {
-            stack_flags[depth] = stack_bases[depth] == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_SEMI) != 0)
-        {
-            // A struct body's member declaration ends: its bit-field's width with it.
-            stack_flags[depth] = 0;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_EXPRESSION) != 0)
-        {
-            stack_flags[depth] = level_flags | BUSTER_ATTESTED_LEVEL_EXPRESSION;
-        }
-        if ((action & BUSTER_ATTESTED_ACT_OPEN) != 0)
-        {
-            const uint8_t base = check_attested_opened_base(role, check_attested_level_class(stack_bases[depth], stack_flags[depth]));
-            depth += 1;
-            listing->stack_roles[depth] = role;
-            stack_bases[depth] = base;
-            stack_flags[depth] = base == BUSTER_ATTESTED_BASE_ENUM ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0;
-            listing->symbol_groups += check_attested_symbol_group(role) ? 1u : 0u;
-            listing->declaration_flags |= role == PARSE_ROLE_OPEN_BODY ? BUSTER_ATTESTED_DEFINITION : 0;
-            // A function definition's body: its inside is check_attested_list_body's, up to its closing.
-            listing->body_end = role == PARSE_ROLE_OPEN_BODY && depth == 1 ? listing->parents[t] : BUSTER_ATTESTED_NONE;
-        }
-        else if ((action & BUSTER_ATTESTED_ACT_CLOSE) != 0 && depth != 0)
-        {
-            listing->symbol_groups -= check_attested_symbol_group(listing->stack_roles[depth]) && listing->symbol_groups != 0 ? 1u : 0u;
-            depth -= 1;
-        }
-    }
-    if (root)
-    {
-        const uint32_t declaration = listing->declaration;
-        const bool definition = (listing->declaration_flags & BUSTER_ATTESTED_DEFINITION) != 0 || role == PARSE_ROLE_CLOSE_BODY;
-        listing->firsts[declaration] = listing->first;
-        listing->lasts[declaration] = t;
-        listing->flags[declaration] = listing->declaration_flags | (definition ? BUSTER_ATTESTED_DEFINITION : 0);
-        listing->any_definition |= definition;
-        listing->declaration = declaration + 1;
-        listing->name_starts[declaration + 1] = listing->names_count;
-        listing->declared_starts[declaration + 1] = listing->declared_count;
-        listing->declaration_flags = 0;
-        listing->first = t + 1;
-        depth = 0;
-        listing->symbol_groups = 0;
-        stack_flags[0] = 0;
-    }
-    listing->depth = depth;
-}
 
 // A function definition's body's inside, tokens [begin, end) of declaration `listing->declaration`: each identifier
 // looks its name up, and declares it at file scope where the body can: a callee (an implicit function's declaration) and,
 // in a body with an `extern` declaration, every name (a block's extern declaration's, without telling which). Any other
 // name a body names has an earlier declaration, which the reach's earlier edge reaches and whose later edge reaches the
 // later ones; the binding events check the lists of definitions as of every declaration. A body with an asm statement
-// gives its every string as one that may name symbols. No stack: a body's inside makes no file-scope structure. The
-// vector path 64 tokens at a time (the identifiers' entries compressed into the list, a callee by its next token's
-// role); the scalar path, its twin, a token at a time.
-static void check_attested_list_body(CheckAttestedListing* listing, uint32_t begin, uint32_t end, bool scalar)
+// gives its every string as one that may name symbols. No stack: a body's inside makes no file-scope structure. 64
+// tokens at a time (the identifiers' entries compressed into the list, a callee by its next token's role).
+static void check_attested_list_body(CheckAttestedListing* listing, uint32_t begin, uint32_t end)
 {
     const uint8_t* const kinds = listing->kinds;
     const uint8_t* const roles = listing->roles;
@@ -970,7 +818,7 @@ static void check_attested_list_body(CheckAttestedListing* listing, uint32_t beg
     bool externs = false;
     bool asms = false;
     uint32_t u = begin;
-    for (; !BUSTER_SCALAR_PATH(scalar) && u < end; u += 64)
+    for (; u < end; u += 64)
     {
         const __mmask64 lanes = end - u < 64 ? _bzhi_u64(UINT64_MAX, end - u) : UINT64_MAX;
         const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + u);
@@ -982,17 +830,11 @@ static void check_attested_list_body(CheckAttestedListing* listing, uint32_t beg
             storage &= storage - 1;
         }
     }
-    for (; u < end; u += 1)
-    {
-        asms |= kinds[u] == PARSE_KIND_ASM;
-        externs |= kinds[u] == PARSE_KIND_STORAGE && names[u] == C_NAME_EXTERN;
-    }
     const uint32_t declares = externs ? BUSTER_ATTESTED_DECLARES << BUSTER_ATTESTED_CLASS_SHIFT : 0;
     uint32_t count = listing->names_count;
     uint32_t declared = listing->declared_count;
     uint32_t strings = listing->strings;
-    u = begin;
-    for (; !BUSTER_SCALAR_PATH(scalar) && u < end; u += 64)
+    for (u = begin; u < end; u += 64)
     {
         const __mmask64 lanes = end - u < 64 ? _bzhi_u64(UINT64_MAX, end - u) : UINT64_MAX;
         const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + u);
@@ -1028,24 +870,6 @@ static void check_attested_list_body(CheckAttestedListing* listing, uint32_t beg
             texts &= texts - 1;
         }
     }
-    for (; u < end; u += 1)
-    {
-        const bool identifier = kinds[u] == PARSE_KIND_IDENTIFIER;
-        const bool tag = roles[u] == PARSE_ROLE_TAG || roles[u] == PARSE_ROLE_LEAF_RIGHT;
-        const bool callee = roles[u + 1] == PARSE_ROLE_OPEN_CALL || roles[u + 1] == PARSE_ROLE_OPEN_FUNCTION;
-        listing->name_entries[count] = (names[u] * 2 + (tag ? 1u : 0u)) | BUSTER_ATTESTED_LOOKS_UP << BUSTER_ATTESTED_CLASS_SHIFT | declares |
-                                       (tag ? BUSTER_ATTESTED_TAG << BUSTER_ATTESTED_CLASS_SHIFT : 0) |
-                                       (callee ? BUSTER_ATTESTED_DECLARES << BUSTER_ATTESTED_CLASS_SHIFT : 0);
-        count += identifier ? 1u : 0u;
-        listing->declared_keys[declared] = names[u] * 2 + (tag ? 1u : 0u);
-        declared += identifier && (callee || externs) ? 1u : 0u;
-        if (asms && kinds[u] == PARSE_KIND_STRING)
-        {
-            listing->string_tokens[strings] = u;
-            listing->string_declarations[strings] = listing->declaration;
-            strings += 1;
-        }
-    }
     listing->declaration_flags |= strings != listing->strings ? BUSTER_ATTESTED_STRINGS : 0;
     // The body's entries each once by key and class (the first, in order): a name a body spells again is the same lookup
     // and the same declaration, and the reach and the events' test then take each once. A key's mark is the body's number
@@ -1070,82 +894,252 @@ static void check_attested_list_body(CheckAttestedListing* listing, uint32_t beg
     listing->strings = strings;
 }
 
-// The lists of `parser`'s unit into the census's unit arrays, a token at a time: whether there was room. One pass in
-// source order, with a stack of the open groups: the scalar path's, and the twin of check_attested_lists_cached, the
-// vector path's.
-static bool check_attested_lists_walk(CheckAttested* census, const Parser* parser)
+// A latch over 64 lanes: the lanes whose last event at or before them is a set (lanes `set`; a reset is any lane of
+// `reset`, never one of both), with `in` (0 or 1) the state before lane 0. A set's lane carries into the eventless
+// lanes after it: adding the sets moved one lane up to the eventless lanes, each set's carry runs through them and stops
+// at the next event, and the sum's carries are the lanes it reached. No loop and no branch.
+static inline uint64_t check_attested_latch(uint64_t set, uint64_t reset, uint64_t in)
 {
-    const uint32_t count = parser->tokens.count;
-    const uint8_t* const kinds = parser->tokens.kinds;
-    const uint8_t* const roles = parser->tree.roles;
-    const uint32_t* const parents = parser->tree.parents;
-    const uint8_t* const kind_actions = census->kind_actions;
-    const uint8_t* const role_actions = census->role_actions;
-    const uint64_t mark = census->unit_arena.length;
-    CheckAttestedListing listing = {
-        .kinds = kinds,
-        .roles = roles,
-        .names = parser->tokens.names,
-        .parents = parents,
-        .body_end = BUSTER_ATTESTED_NONE,
-        .firsts = census->firsts,
-        .lasts = census->lasts,
-        .flags = census->flags,
-        .name_starts = census->name_starts,
-        .name_entries = census->name_entries,
-        .declared_starts = census->declared_starts,
-        .declared_keys = census->declared_keys,
-        .string_tokens = census->string_tokens,
-        .string_declarations = census->string_declarations,
-        .stack_roles = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
-        .stack_flags = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
-        .stack_bases = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
-        .body_marks = census->body_marks,
-        .body_stamp = census->body_stamp,
-    };
-    const bool valid = listing.stack_roles != NULL && listing.stack_flags != NULL && listing.stack_bases != NULL;
-    if (valid)
+    const uint64_t quiet = ~(set | reset);
+    const unsigned __int128 seeds = (unsigned __int128)set << 1 | in;
+    const unsigned __int128 sum = (unsigned __int128)quiet + seeds;
+    const unsigned __int128 carries = sum ^ quiet ^ seeds;
+    return set | (uint64_t)(carries >> 1);
+}
+
+// A level's flags and bits (BUSTER_ATTESTED_LEVEL_*) from the low bits of their latches.
+static inline uint8_t check_attested_level_flags(uint64_t expression, uint64_t enumerator)
+{
+    return (uint8_t)((expression & 1) != 0 ? BUSTER_ATTESTED_LEVEL_EXPRESSION : 0) | (uint8_t)((enumerator & 1) != 0 ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0);
+}
+
+static inline uint8_t check_attested_level_bits(uint64_t declares, uint64_t looks, uint64_t enumerated, uint64_t symbols)
+{
+    return (uint8_t)((declares & 1) != 0 ? BUSTER_ATTESTED_LEVEL_DECLARES : 0) | (uint8_t)((looks & 1) != 0 ? BUSTER_ATTESTED_LEVEL_LOOKS_UP : 0) |
+           (uint8_t)((enumerated & 1) != 0 ? BUSTER_ATTESTED_LEVEL_ENUM : 0) | (uint8_t)((symbols & 1) != 0 ? BUSTER_ATTESTED_LEVEL_SYMBOLS : 0);
+}
+
+// A byte's lanes equal to `value`, among `lanes`.
+static inline uint64_t check_attested_lanes_equal(__mmask64 lanes, __m512i bytes, uint8_t value)
+{
+    return _mm512_mask_cmpeq_epi8_mask(lanes, bytes, _mm512_set1_epi8((char)value));
+}
+
+// A byte's lanes in [low, high], among `lanes`.
+static inline uint64_t check_attested_lanes_within(__mmask64 lanes, __m512i bytes, uint8_t low, uint8_t high)
+{
+    return _mm512_mask_cmple_epu8_mask(lanes, _mm512_sub_epi8(bytes, _mm512_set1_epi8((char)low)), _mm512_set1_epi8((char)(high - low)));
+}
+
+// The lists of declarations [d, end_declaration), whole and in a row: each token's part as the declarations' grammar
+// gives it, 64 tokens at a time, the nesting levels' state as masks. A token's level is its depth in the parser's
+// tree (a group's opener and closer at the depth outside it); a level's state (an `=` or a bit-field's `:` since its
+// last comma, an enumerator's name next) is a latch whose events are the level's tokens and, as a reset, any token
+// below it (its opener); its base class and whether it is inside an asm or attribute group are latches whose events are
+// the tokens below it, each with the bits its opener gave the level (each opener's from its own level's class, a level
+// at a time from the lowest). The identifiers' entries are compressed into the list, as a body's are. A function
+// definition's body ends the block at its opening, check_attested_list_body lists its inside, and the next block starts
+// at its closing. What a level holds past a block (its flags and bits) is kept by its depth; a level that opens in a
+// block starts from its opener, and the declaration's own level from each root.
+static void check_attested_list_run(CheckAttestedListing* listing, uint32_t d, uint32_t end_declaration)
+{
+    const uint8_t* const kinds = listing->kinds;
+    const uint8_t* const roles = listing->roles;
+    const uint32_t* const names = listing->names;
+    const uint32_t* const depths = listing->depths;
+    const uint32_t* const lasts = listing->lasts;
+    uint8_t* const level_flags = listing->level_flags;
+    uint8_t* const level_bases = listing->level_bases;
+    const uint32_t end = lasts[end_declaration - 1] + 1;
+    uint32_t t = listing->firsts[d];
+    // Whether the block's first token starts a declaration, and whether the token before it started one with
+    // __extension__ (an asm declaration's keyword may follow it).
+    bool starts = true;
+    bool extended = false;
+    level_flags[0] = 0;
+    level_bases[0] = BUSTER_ATTESTED_LEVEL_DECLARES;
+    listing->declaration_flags = 0;
+    while (t < end)
     {
-        listing.stack_roles[0] = PARSE_ROLE_NONE;
-        listing.stack_flags[0] = 0;
-        listing.stack_bases[0] = BUSTER_ATTESTED_DECLARES;
-        census->name_starts[0] = 0;
-        census->declared_starts[0] = 0;
-    }
-    uint32_t t = 0;
-    while (valid && t < count)
-    {
-        check_attested_list_token(&listing, t, roles[t], kind_actions[kinds[t]] | role_actions[roles[t]], parents[t] == BUSTER_PARSE_ROOT);
-        t += 1;
-        if (listing.body_end != BUSTER_ATTESTED_NONE)
+        __mmask64 lanes = end - t < 64 ? _bzhi_u64(UINT64_MAX, end - t) : UINT64_MAX;
+        const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + t);
+        const __m512i role = _mm512_maskz_loadu_epi8(lanes, roles + t);
+        // The levels, from the block's lowest (consecutive tokens' depths differ by one at most: 64 bytes hold them).
+        __m512i depth[4];
+        uint32_t low = UINT32_MAX;
+        uint32_t high = 0;
+        for (uint32_t g = 0; g < 4; g += 1)
         {
-            check_attested_list_body(&listing, t, listing.body_end, true);
-            t = listing.body_end;
-            listing.body_end = BUSTER_ATTESTED_NONE;
+            const __mmask16 group = (__mmask16)(lanes >> (16 * g));
+            depth[g] = _mm512_maskz_loadu_epi32(group, depths + t + 16 * g);
+            const uint32_t least = _mm512_mask_reduce_min_epu32(group, depth[g]);
+            const uint32_t most = _mm512_mask_reduce_max_epu32(group, depth[g]);
+            low = least < low ? least : low;
+            high = most > high ? most : high;
+        }
+        __m128i quarters[4];
+        for (uint32_t g = 0; g < 4; g += 1)
+        {
+            quarters[g] = _mm512_cvtepi32_epi8(_mm512_maskz_sub_epi32((__mmask16)(lanes >> (16 * g)), depth[g], _mm512_set1_epi32((int32_t)low)));
+        }
+        const __m512i level = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set_m128i(quarters[1], quarters[0])), _mm256_set_m128i(quarters[3], quarters[2]), 1);
+        const uint64_t file_level = low == 0 ? check_attested_lanes_equal(lanes, level, 0) : 0;
+        // A function definition's body ends the block at its opening.
+        const uint64_t bodies = file_level & check_attested_lanes_equal(lanes, role, PARSE_ROLE_OPEN_BODY);
+        const uint32_t length = bodies != 0 ? (uint32_t)_tzcnt_u64(bodies) + 1 : (uint32_t)_mm_popcnt_u64(lanes);
+        lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
+        const uint32_t top = high - low;
+        const uint64_t identifiers = check_attested_lanes_equal(lanes, kind, PARSE_KIND_IDENTIFIER);
+        const uint64_t texts = check_attested_lanes_equal(lanes, kind, PARSE_KIND_STRING);
+        const uint64_t asms = check_attested_lanes_equal(lanes, kind, PARSE_KIND_ASM) & file_level;
+        const uint64_t commas = check_attested_lanes_equal(lanes, kind, PARSE_KIND_COMMA);
+        const uint64_t semis = check_attested_lanes_equal(lanes, kind, PARSE_KIND_SEMI);
+        const uint64_t extensions = check_attested_lanes_equal(lanes, kind, PARSE_KIND_EXTENSION);
+        const uint64_t opens = check_attested_lanes_within(lanes, role, PARSE_ROLE_OPEN_GROUP, PARSE_ROLE_OPEN_CASE);
+        const uint64_t expressions = check_attested_lanes_equal(lanes, role, PARSE_ROLE_ASSIGN) | check_attested_lanes_equal(lanes, role, PARSE_ROLE_BITFIELD);
+        const uint64_t tagged = identifiers & (check_attested_lanes_equal(lanes, role, PARSE_ROLE_TAG) | check_attested_lanes_equal(lanes, role, PARSE_ROLE_LEAF_RIGHT));
+        const uint64_t specifiers = identifiers & check_attested_lanes_equal(lanes, role, PARSE_ROLE_SPECIFIER);
+        const uint64_t members = identifiers & check_attested_lanes_equal(lanes, role, PARSE_ROLE_MEMBER);
+        const uint64_t groups = check_attested_lanes_equal(lanes, role, PARSE_ROLE_OPEN_GROUP);
+        const uint64_t plain = check_attested_lanes_equal(lanes, role, PARSE_ROLE_OPEN_FUNCTION) | check_attested_lanes_equal(lanes, role, PARSE_ROLE_OPEN_STRUCT);
+        const uint64_t enums = check_attested_lanes_equal(lanes, role, PARSE_ROLE_OPEN_ENUM);
+        const uint64_t symbols = check_attested_lanes_equal(lanes, role, PARSE_ROLE_OPEN_ASM) |
+                                 check_attested_lanes_within(lanes, role, PARSE_ROLE_OPEN_ATTRIBUTE, PARSE_ROLE_OPEN_ATTRIBUTE_LIST);
+        // The roots in the block: the declarations' last tokens.
+        uint64_t roots = 0;
+        for (uint32_t e = d; e < end_declaration && lasts[e] < t + length; e += 1)
+        {
+            roots |= UINT64_C(1) << (lasts[e] - t);
+        }
+        // Each level, from the lowest: its tokens' state, its names' classes and its openers' bits for the level each
+        // opens (the bits of the level each token is in come from the last token below it, its opener).
+        uint64_t open_declares = 0;
+        uint64_t open_looks = 0;
+        uint64_t open_enums = 0;
+        uint64_t open_symbols = 0;
+        uint64_t declares = 0;
+        uint64_t looks = 0;
+        uint64_t inside = 0;
+        const uint32_t last = length - 1;
+        for (uint32_t r = 0; r <= top; r += 1)
+        {
+            const uint32_t at_depth = low + r;
+            const uint64_t at = check_attested_lanes_equal(lanes, level, (uint8_t)r);
+            const uint64_t below = _mm512_mask_cmplt_epu8_mask(lanes, level, _mm512_set1_epi8((char)r));
+            const uint64_t resets = at_depth == 0 ? roots : 0;
+            const uint8_t held = level_flags[at_depth];
+            const uint8_t bits = level_bases[at_depth];
+            const uint64_t held_expression = (held & BUSTER_ATTESTED_LEVEL_EXPRESSION) != 0;
+            const uint64_t held_enumerator = (held & BUSTER_ATTESTED_LEVEL_ENUMERATOR) != 0;
+            const uint64_t expression = check_attested_latch(expressions & at, ((commas | semis) & at) | below | resets, held_expression);
+            const uint64_t enumerator = check_attested_latch((commas & at) | below, ((identifiers | semis) & at) | resets, held_enumerator);
+            const uint64_t base_declares = check_attested_latch(below & open_declares, below & ~open_declares, (bits & BUSTER_ATTESTED_LEVEL_DECLARES) != 0);
+            const uint64_t base_looks = check_attested_latch(below & open_looks, below & ~open_looks, (bits & BUSTER_ATTESTED_LEVEL_LOOKS_UP) != 0);
+            const uint64_t base_enum = check_attested_latch(below & open_enums, below & ~open_enums, (bits & BUSTER_ATTESTED_LEVEL_ENUM) != 0);
+            const uint64_t base_symbols = check_attested_latch(below & open_symbols, below & ~open_symbols, (bits & BUSTER_ATTESTED_LEVEL_SYMBOLS) != 0);
+            // The state before each token: an `=` read, an enumerator's name next.
+            const uint64_t x = expression << 1 | held_expression;
+            const uint64_t p = enumerator << 1 | held_enumerator;
+            const uint64_t class_declares = ~x & ((base_enum & p) | (~base_enum & base_declares));
+            const uint64_t class_looks = x | (base_enum & ~p) | (~base_enum & base_looks);
+            declares |= at & class_declares;
+            looks |= at & class_looks;
+            inside |= at & base_symbols;
+            const uint64_t openers = opens & at;
+            open_declares |= openers & groups & class_declares;
+            open_looks |= openers & ((groups & class_looks) | ~(groups | plain | enums));
+            open_enums |= openers & enums;
+            open_symbols |= openers & (base_symbols | symbols);
+            level_flags[at_depth] = check_attested_level_flags(expression >> last, enumerator >> last);
+            level_bases[at_depth] = check_attested_level_bits(base_declares >> last, base_looks >> last, base_enum >> last, base_symbols >> last);
+        }
+        if ((opens >> last & 1) != 0)
+        {
+            // The block's last token opens a level no token of the block is in: its state as its opener leaves it, which
+            // the next block's latches start from (after the loop, which reads each level's state before it writes it).
+            const uint32_t opened = depths[t + last] + 1;
+            level_flags[opened] = BUSTER_ATTESTED_LEVEL_ENUMERATOR;
+            level_bases[opened] = check_attested_level_bits(open_declares >> last, open_looks >> last, open_enums >> last, open_symbols >> last);
+        }
+        // The names' entries (a tag's declares and looks up, a specifier's looks up, a member's neither) and the
+        // declared ones' keys.
+        const uint64_t declaring = tagged | (identifiers & declares & ~(specifiers | members));
+        const uint64_t looking = tagged | specifiers | (identifiers & looks & ~members);
+        const uint32_t names_from = listing->names_count;
+        const uint32_t declared_from = listing->declared_count;
+        for (uint32_t g = 0; g < 4; g += 1)
+        {
+            const __mmask16 group = (__mmask16)(identifiers >> (16 * g));
+            const __mmask16 tag = (__mmask16)(tagged >> (16 * g));
+            __m512i ids = _mm512_maskz_loadu_epi32(group, names + t + 16 * g);
+            ids = _mm512_mask_mov_epi32(ids, _mm512_cmpge_epu32_mask(ids, _mm512_set1_epi32((int32_t)BUSTER_ATTESTED_MAX_IDS)), _mm512_setzero_si512());
+            const __m512i keys = _mm512_add_epi32(_mm512_slli_epi32(ids, 1), _mm512_maskz_set1_epi32(tag, 1));
+            __m512i entries = _mm512_or_si512(keys, _mm512_maskz_set1_epi32((__mmask16)(declaring >> (16 * g)), (int32_t)(BUSTER_ATTESTED_DECLARES << BUSTER_ATTESTED_CLASS_SHIFT)));
+            entries = _mm512_or_si512(entries, _mm512_maskz_set1_epi32((__mmask16)(looking >> (16 * g)), (int32_t)(BUSTER_ATTESTED_LOOKS_UP << BUSTER_ATTESTED_CLASS_SHIFT)));
+            entries = _mm512_or_si512(entries, _mm512_maskz_set1_epi32(tag, (int32_t)(BUSTER_ATTESTED_TAG << BUSTER_ATTESTED_CLASS_SHIFT)));
+            _mm512_mask_compressstoreu_epi32(listing->name_entries + listing->names_count, group, entries);
+            listing->names_count += (uint32_t)__builtin_popcount(group);
+            const __mmask16 declared = (__mmask16)(declaring >> (16 * g));
+            _mm512_mask_compressstoreu_epi32(listing->declared_keys + listing->declared_count, declared, keys);
+            listing->declared_count += (uint32_t)__builtin_popcount(declared);
+        }
+        // The strings inside an asm or attribute group, each with its declaration; an asm declaration's keyword, its
+        // declaration's first token or the one after its __extension__.
+        const uint64_t firsts = (roots << 1 | (starts ? 1u : 0u)) & lanes;
+        const uint64_t keywords = asms & (firsts | (firsts & extensions) << 1 | (extended ? 1u : 0u));
+        uint64_t symbol_texts = texts & inside;
+        const uint64_t named = symbol_texts;
+        while (symbol_texts != 0)
+        {
+            const uint32_t k = (uint32_t)_tzcnt_u64(symbol_texts);
+            listing->string_tokens[listing->strings] = t + k;
+            listing->string_declarations[listing->strings] = d + (uint32_t)_mm_popcnt_u64(roots & _bzhi_u64(UINT64_MAX, k));
+            listing->strings += 1;
+            symbol_texts &= symbol_texts - 1;
+        }
+        // The declarations the block ends.
+        uint64_t ended = roots;
+        uint64_t from = UINT64_MAX;
+        while (ended != 0)
+        {
+            const uint32_t k = (uint32_t)_tzcnt_u64(ended);
+            const uint64_t through = k == 63 ? UINT64_MAX : (UINT64_C(2) << k) - 1;
+            const uint64_t own = from & through;
+            uint8_t ended_flags = listing->flags[d] | listing->declaration_flags;
+            ended_flags |= (named & own) != 0 ? BUSTER_ATTESTED_STRINGS : 0;
+            ended_flags |= (keywords & own) != 0 ? BUSTER_ATTESTED_ASM : 0;
+            listing->flags[d] = ended_flags;
+            listing->any_definition |= listing->parents[t + k] == BUSTER_PARSE_ROOT && (ended_flags & BUSTER_ATTESTED_DEFINITION) != 0;
+            listing->name_starts[d + 1] = names_from + (uint32_t)_mm_popcnt_u64(identifiers & through);
+            listing->declared_starts[d + 1] = declared_from + (uint32_t)_mm_popcnt_u64(declaring & through);
+            listing->declaration_flags = 0;
+            d += 1;
+            from = k == 63 ? 0 : UINT64_MAX << (k + 1);
+            ended &= ended - 1;
+        }
+        listing->declaration_flags |= (named & from) != 0 ? BUSTER_ATTESTED_STRINGS : 0;
+        listing->declaration_flags |= (keywords & from) != 0 ? BUSTER_ATTESTED_ASM : 0;
+        starts = (roots >> last & 1) != 0;
+        extended = (firsts & extensions) >> last & 1;
+        t += length;
+        if (bodies != 0 && d < end_declaration)
+        {
+            const uint32_t body_end = listing->parents[t - 1];
+            listing->declaration = d;
+            check_attested_list_body(listing, t, body_end);
+            t = body_end;
+            starts = false;
+            extended = false;
         }
     }
-    uint32_t declaration = listing.declaration;
-    if (valid && listing.first < count)
+    // (A valid parse leaves none: the declarations the blocks didn't end.)
+    for (; d < end_declaration; d += 1)
     {
-        // Tokens after the last declaration's root, which a valid parse doesn't leave: one declaration more.
-        census->firsts[declaration] = listing.first;
-        census->lasts[declaration] = count - 1;
-        census->flags[declaration] = listing.declaration_flags;
-        declaration += 1;
-        census->name_starts[declaration] = listing.names_count;
-        census->declared_starts[declaration] = listing.declared_count;
+        listing->flags[d] |= listing->declaration_flags;
+        listing->name_starts[d + 1] = listing->names_count;
+        listing->declared_starts[d + 1] = listing->declared_count;
+        listing->declaration_flags = 0;
     }
-    // The own hashes' sentinel: no declaration ends past the last.
-    census->lasts[declaration] = UINT32_MAX;
-    census->declaration_count = declaration;
-    census->name_count = listing.names_count;
-    census->string_count = listing.strings;
-    census->any_definition = listing.any_definition;
-    census->body_stamp = listing.body_stamp;
-    // (The walk keeps nothing in the lists' cache.)
-    memset(census->list_blocks, 0xff, (uint64_t)declaration * sizeof(uint32_t));
-    arena_pop_to(&census->unit_arena, mark);
-    return valid;
 }
 
 // The pragmas' places, hashes and spelled names. A pragma whose parser position is a declaration's first token (or the
@@ -1462,10 +1456,11 @@ static __attribute__((noinline)) void check_attested_hashes(CheckAttested* censu
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The lists on the vector path: the declarations' bounds, their own hashes, then each one's list from the lane's cache
-// (CheckAttestedListSlot), or, where it holds none, made a token at a time as check_attested_lists_walk makes it, and kept.
+// (CheckAttestedListSlot), or, where it holds none, made by check_attested_list_run, as check_attested_lists_walk makes
+// every one, and kept.
 // A unit's header declarations are the last units' (musl's command finds 95% of its declarations' lists there), and a
 // declaration's list is made from its tokens' kinds, roles and names alone, which its own hash covers at their places:
-// a hit copies a few entries where the walk stepped through every token with a part.
+// a hit copies a few entries where a run reads every token.
 
 // The declarations' bounds (each root ends one) and which are function definitions (a body's `{` in it, or a root that
 // closes a body, as the walk tells them), 64 tokens at a time: the own hashes pass the definitions by, and the lists
@@ -1609,23 +1604,17 @@ static void check_attested_list_keep(CheckAttested* census, uint64_t low, uint64
     }
 }
 
-// The lists of `parser`'s unit on the vector path, with the own hashes (check_attested_hashes, which they are keyed by and
-// which the scalar path makes after its lists): whether there was room. check_attested_lists_walk is its twin.
-static bool check_attested_lists_cached(CheckAttested* census, const Parser* parser)
+// The lists' state over `parser`'s unit and the census's unit arrays, with each level's state in the unit arena (its
+// caller pops it): whether there was room.
+static bool check_attested_listing(CheckAttested* census, const Parser* parser, CheckAttestedListing* listing)
 {
     const uint32_t count = parser->tokens.count;
-    const uint8_t* const kinds = parser->tokens.kinds;
-    const uint8_t* const roles = parser->tree.roles;
-    const uint32_t* const parents = parser->tree.parents;
-    const uint8_t* const kind_actions = census->kind_actions;
-    const uint8_t* const role_actions = census->role_actions;
-    const uint64_t mark = census->unit_arena.length;
-    CheckAttestedListing listing = {
-        .kinds = kinds,
-        .roles = roles,
+    *listing = (CheckAttestedListing){
+        .kinds = parser->tokens.kinds,
+        .roles = parser->tree.roles,
         .names = parser->tokens.names,
-        .parents = parents,
-        .body_end = BUSTER_ATTESTED_NONE,
+        .parents = parser->tree.parents,
+        .depths = parser->tree.depths,
         .firsts = census->firsts,
         .lasts = census->lasts,
         .flags = census->flags,
@@ -1635,24 +1624,71 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
         .declared_keys = census->declared_keys,
         .string_tokens = census->string_tokens,
         .string_declarations = census->string_declarations,
-        .stack_roles = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
-        .stack_flags = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
-        .stack_bases = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
+        .level_flags = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
+        .level_bases = arena_push_array(&census->unit_arena, (uint64_t)count + 2, sizeof(uint8_t), 64),
         .body_marks = census->body_marks,
         .body_stamp = census->body_stamp,
     };
-    const bool valid = listing.stack_roles != NULL && listing.stack_flags != NULL && listing.stack_bases != NULL;
+    const bool valid = listing->level_flags != NULL && listing->level_bases != NULL;
     if (valid)
     {
-        listing.stack_roles[0] = PARSE_ROLE_NONE;
-        listing.stack_bases[0] = BUSTER_ATTESTED_DECLARES;
         census->name_starts[0] = 0;
         census->declared_starts[0] = 0;
         check_attested_bounds(census, parser);
+    }
+    return valid;
+}
+
+// The listing's counts into the census, once its lists are made.
+static void check_attested_listed(CheckAttested* census, const CheckAttestedListing* listing)
+{
+    census->name_count = listing->names_count;
+    census->string_count = listing->strings;
+    census->any_definition = listing->any_definition;
+    census->body_stamp = listing->body_stamp;
+}
+
+// The lists of `parser`'s unit into the census's unit arrays, every declaration's made, in one run of
+// check_attested_list_run, the cache neither read nor kept: whether there was room. The scalar path's (its own hashes
+// after them), and check_attested_lists_cached's twin.
+static bool check_attested_lists_walk(CheckAttested* census, const Parser* parser)
+{
+    const uint64_t mark = census->unit_arena.length;
+    CheckAttestedListing listing;
+    const bool valid = check_attested_listing(census, parser, &listing);
+    const uint32_t declarations = valid ? census->declaration_count : 0;
+    if (declarations != 0)
+    {
+        check_attested_list_run(&listing, 0, declarations);
+    }
+    check_attested_listed(census, &listing);
+    memset(census->list_blocks, 0xff, (uint64_t)declarations * sizeof(uint32_t));
+    arena_pop_to(&census->unit_arena, mark);
+    return valid;
+}
+
+// The lists of `parser`'s unit on the vector path, with the own hashes (check_attested_hashes, which they are keyed by and
+// which the scalar path makes after its lists): whether there was room. A command of one source file keeps no cache
+// (CheckAttested.alone): its unit's lists are one run of check_attested_list_run. A lane's take each declaration's from
+// its cache by its own hash, or make it (a run of one) and keep it. check_attested_lists_walk is its twin.
+static bool check_attested_lists_cached(CheckAttested* census, const Parser* parser)
+{
+    const uint32_t* const parents = parser->tree.parents;
+    const uint64_t mark = census->unit_arena.length;
+    CheckAttestedListing listing;
+    const bool valid = check_attested_listing(census, parser, &listing);
+    if (valid)
+    {
         check_attested_hashes(census, parser, false);
     }
     const uint32_t declarations = valid ? census->declaration_count : 0;
-    for (uint32_t d = 0; d < declarations; d += 1)
+    if (census->alone && declarations != 0)
+    {
+        check_attested_list_run(&listing, 0, declarations);
+        memset(census->list_blocks, 0xff, (uint64_t)declarations * sizeof(uint32_t));
+        census->list_misses += declarations;
+    }
+    for (uint32_t d = 0; !census->alone && d < declarations; d += 1)
     {
         const uint32_t first = census->firsts[d];
         const uint32_t last = census->lasts[d];
@@ -1665,12 +1701,8 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
         // The table is the lane's, out of the first two caches by the next unit: a slot a few declarations on is fetched
         // while this one's list is copied.
         const uint32_t ahead = d + BUSTER_ATTESTED_LIST_AHEAD < declarations ? d + BUSTER_ATTESTED_LIST_AHEAD : d;
-        // (A command of one source file's state keeps no cache: each list made, CheckAttested.alone.)
-        if (!census->alone)
-        {
-            __builtin_prefetch(census->list_slots + ((census->owns[ahead].low | 1) & census->list_mask));
-        }
-        CheckAttestedListSlot* slot = kept && !census->alone ? check_attested_list_slot(census, low, high, length) : NULL;
+        __builtin_prefetch(census->list_slots + ((census->owns[ahead].low | 1) & census->list_mask));
+        CheckAttestedListSlot* slot = kept ? check_attested_list_slot(census, low, high, length) : NULL;
         census->list_blocks[d] = BUSTER_ATTESTED_NONE;
         if (slot != NULL && slot->low != 0)
         {
@@ -1694,31 +1726,7 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
         else
         {
             const uint32_t strings_from = listing.strings;
-            listing.declaration = d;
-            listing.first = first;
-            listing.depth = 0;
-            listing.symbol_groups = 0;
-            listing.declaration_flags = 0;
-            listing.stack_flags[0] = 0;
-            uint32_t t = first;
-            while (t <= last)
-            {
-                check_attested_list_token(&listing, t, roles[t], kind_actions[kinds[t]] | role_actions[roles[t]], parents[t] == BUSTER_PARSE_ROOT);
-                t += 1;
-                if (listing.body_end != BUSTER_ATTESTED_NONE)
-                {
-                    check_attested_list_body(&listing, t, listing.body_end, false);
-                    t = listing.body_end;
-                    listing.body_end = BUSTER_ATTESTED_NONE;
-                }
-            }
-            if (!rooted)
-            {
-                // The tokens after the last root (check_attested_bounds), as the walk ends.
-                census->flags[d] = listing.declaration_flags;
-                census->name_starts[d + 1] = listing.names_count;
-                census->declared_starts[d + 1] = listing.declared_count;
-            }
+            check_attested_list_run(&listing, d, d + 1);
             census->list_misses += 1;
             if (slot != NULL)
             {
@@ -1726,10 +1734,7 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
             }
         }
     }
-    census->name_count = listing.names_count;
-    census->string_count = listing.strings;
-    census->any_definition = listing.any_definition;
-    census->body_stamp = listing.body_stamp;
+    check_attested_listed(census, &listing);
     arena_pop_to(&census->unit_arena, mark);
     return valid;
 }
@@ -3971,7 +3976,6 @@ static bool check_attested_open(CheckAttested* census)
         census->tree_pool_arena = check_attested_reserve(census, (uint64_t)BUSTER_ATTESTED_TREE_POOL * sizeof(uint16_t) + 4096);
         census->tree_pool = arena_push_array(&census->tree_pool_arena, BUSTER_ATTESTED_TREE_POOL, sizeof(uint16_t), 64);
     }
-    check_attested_actions(census->kind_actions, census->role_actions);
     return census->memo != NULL && (!census->alone || census->memo_index != NULL) && census->keys != NULL && census->list_marks != NULL &&
            census->body_marks != NULL && census->runtime_lengths != NULL &&
            census->id_words != NULL &&
