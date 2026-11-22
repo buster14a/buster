@@ -161,6 +161,12 @@ lld make of them, where the corpus test below compares it:
 - **Exports:** a definition that a needed library refers to, or a name that
   a library defines and the executable interposes, is exported once at its
   version, in canonical name order.
+- **Thread-locals' general- and local-dynamic accesses** (`-fPIC`'s objects',
+  #2101) relax as GNU ld and lld relax them in an executable: the conversion
+  names the link's `__tls_get_addr` (`ExecutableDynamic.tls_get_addr`), as
+  `dynamic.c` does for the direct path, and the writer rewrites each access to
+  local-exec for the executable's own thread-local, or to initial-exec through
+  its GOT slot for a library's, consuming its call.
 - **A library's own references** require nothing of the output: the loader
   binds them among the libraries, and a name that only libraries refer to gets
   no symbol, as lld leaves it under its default `--allow-shlib-undefined` for

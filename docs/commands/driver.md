@@ -536,7 +536,12 @@ the options say so, and otherwise naming the source and the symbol:
 
 The unwind tables are the `.eh_frame` section's bytes with their symbolic
 relocations (`.long function-.`), as `-c`'s object has them, not CFI
-directives, which are stage 4's. `-save-temps` is still an unknown argument.
+directives, which are stage 4's. With `-fPIC` (#2101) an FDE of a global
+function names a local label the sink puts at it (`.long .Lbuster.lN-.`), as
+`-c`'s object names its section's symbol, so that GNU as's object links into a
+shared library. A position-independent unit that reaches a thread-local is
+refused by name: its accessors are code without instruction records, and the
+sink doesn't print thread-local storage yet. `-save-temps` is still an unknown argument.
 
 The acceptance (`test-assembly-output --c-testsuite DIRECTORY --subset FILE`,
 the inventory's row): each program of `tests/c-testsuite/subset.txt`, at Tier 0

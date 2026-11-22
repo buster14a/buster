@@ -278,6 +278,20 @@ static bool check_program_object_size_inline(const CheckInput* input, uint32_t d
            (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
 }
 
+// Whether another module may preempt `object`'s symbol (#2101): a declaration of external linkage and default
+// visibility, which a shared library's symbol is unless the unit's attributes or pragmas say otherwise, but a private
+// size wrapper (check_program_object_size_inline), whose symbol is the unit's own; a literal is never one. Clang's
+// -fPIC reaches such a symbol through its GOT and calls it through its PLT, wherever its definition is.
+static bool check_program_preemptible(const CheckProgram* program, uint32_t object)
+{
+    const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const CheckInput* input = program->input;
+    const bool named = declaration != BUSTER_CHECK_NONE && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
+    // object_visibility: 0 for none given, else the visibility (BUSTER_LINK_SYMBOL_DEFAULT's 0 to PROTECTED's 3) plus 1.
+    const bool visible = input->object_visibility == NULL || input->object_visibility[object] <= 1;
+    return named && visible && check_input_linkage(input->declaration_bits, declaration) == 2 && !check_program_object_size_inline(input, declaration);
+}
+
 // Whether clang emits `body`'s function where the unit defines it (CheckProgram.body_eager), as CodeGenModule::EmitGlobal
 // decides when the parser hands over the definition: by the declarations that exist then, those of the function up to
 // and including the definition (a run of check_data_prepare's keys, in object and token order), not the unit's final

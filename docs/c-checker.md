@@ -2463,6 +2463,62 @@ a shared library's and the direct path makes no copy relocations, and a
 thread-local by local-exec where the unit defines it and by initial-exec where
 it doesn't.
 
+### Position-independent code
+
+`-fPIC` and `-fpic` make clang's `-fPIC` code where the code may go into a
+shared library (#2101): `-c`'s, `-S`'s, `-shared`'s and the source clients'
+(`CheckProgramOptions.pic`, which `check_request_program_options` keeps only
+with one of the two options last among the eight PIC and PIE ones; a link's
+executable takes `-fPIE`'s code, byte for byte). Both tiers take it from the
+lowering and the access column alone:
+
+- **Preemptible symbols.** A declaration of external linkage and default
+  visibility (`check_program_preemptible`: no visibility attribute or pragma
+  other than default, and no private size wrapper's) may be another module's
+  in a shared library, wherever the unit defines it. The access column reaches
+  it through its GOT slot (`check_program_object_access`), its data and its
+  function's address alike, and its calls stay `PLT32` against the symbol.
+  Hidden, protected and internal symbols, and literals, stay direct. The
+  `cpu_dispatch` and `target` resolvers return a preemptible version's address
+  from its slot too (`check_program_resolver_local`). Tier 1 may still expand a
+  call of the unit's own default-visibility function, as clang's `-O1` and
+  `-O2 -fPIC` do without `-fsemantic-interposition`.
+- **Thread-locals.** A preemptible one is general-dynamic, the unit's own
+  local-dynamic (`check_lower_tls_models`, `CheckLowerShared.tls_models`). The
+  lowering writes each access of one as a call of its accessor, which returns
+  its address, and the access through that address (`check_lower_tls`, at
+  `check_lower_append`, the entries' one way in): `GLOBAL` becomes the call and
+  a `LOAD`, `GLOBAL_ADDRESS` the call, and `STORE_GLOBAL` and `SET_GLOBAL` keep
+  their value in a temporary while the call runs, then `STORE` or `SET`. Tier
+  0's kinds (64, full) and Tier 1 take nothing new: calls. The node templates
+  and the batch path, which write `GLOBAL` themselves, aren't taken by a unit
+  with one. The accessor's call takes a provisional symbol (after the jump
+  tables', `CheckLowerShared.provisional_tls`), and marks `__tls_get_addr`
+  (`CHECK_LOWER_RUNTIME_TLS_GET_ADDR`) called.
+- **Accessors.** The emission gives each thread-local a live body reaches a
+  local function, `.Lbuster_tls_N` in symbol order
+  (`check_program_emit_tls_symbols`), retargets the bodies' references to it,
+  and writes its code (`check_program_emit_tls_atoms`), clang's sequence between
+  a `sub rsp, 8` and an `add rsp, 8; ret`, with its unwind entry: the 16 bytes
+  of `data16 lea rdi, [rip + x@tlsgd]; data16 data16 rex.W call
+  __tls_get_addr`, or the local-dynamic `lea rdi, [rip + x@tlsld]; call
+  __tls_get_addr; lea rax, [rax + x@dtpoff]`. Every linker relaxes them whole
+  in an executable (`executable_relax_tls`); the foreign link names the
+  dynamic executable's `__tls_get_addr` to its writer for that
+  (`foreign_link_dynamic_finish`), as `dynamic.c` does for the direct path.
+- **Unwind tables.** An FDE refers to its function through its section's
+  symbol (`ObjectOptions.local_unwind`, [the object writer](object-writer-and-linker.md)),
+  since GNU ld refuses a shared object's `PC32` to a preemptible symbol.
+- **`-shared`** links a shared library through the mixed path's foreign
+  resolver and writer ([the driver's guide](cc-driver.md)).
+
+`test-checker-driver --pic-only` (`c_check_pic_driver_test.c`) builds a library
+of each of these shapes by `-shared` at both tiers and by `-c` and `cc -shared`,
+and runs the same programs against each as against clang's: two threads, one
+that preempts the library's object, thread-local and function, and a `dlopen`
+harness; then executables of a program and the `-c` object, linked by the
+driver and by `cc`.
+
 What the lowering covers past scalars (#145's programs):
 
 - **Local objects.** Local arrays, structs and unions are Tier 0 frame objects

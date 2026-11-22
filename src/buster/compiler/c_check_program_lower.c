@@ -175,6 +175,9 @@ typedef enum CheckLowerRuntime
     CHECK_LOWER_RUNTIME_CPU_INDICATOR_INIT,
     CHECK_LOWER_RUNTIME_CPU_MODEL,
     CHECK_LOWER_RUNTIME_CPU_FEATURES2,
+    // The dynamic linker's thread-local address, which a thread-local's general- or local-dynamic access calls in
+    // position-independent code (#2101, check_lower_tls): the emission's accessors call it, not the bodies.
+    CHECK_LOWER_RUNTIME_TLS_GET_ADDR,
     CHECK_LOWER_RUNTIME_LIBRARY,
     CHECK_LOWER_RUNTIMES = CHECK_LOWER_RUNTIME_LIBRARY + CBUILTIN_LIBRARY_COUNT,
 } CheckLowerRuntime;
@@ -229,6 +232,7 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     BUSTER_CHECK_LOWER_LIBM(BUSTER_CHECK_LOWER_LIBM_NAME)
 #undef BUSTER_CHECK_LOWER_LIBM_NAME
     "fmaxl", "fminl", "ldexpl", "__powidf2", "__powisf2", "__powixf2", "__cpu_indicator_init", "__cpu_model", "__cpu_features2",
+    "__tls_get_addr",
 #define BUSTER_CBUILTIN_LIBRARY_CALL(id, name) name,
 #include "c_builtin_library_calls.inc"
 #undef BUSTER_CBUILTIN_LIBRARY_CALL
@@ -328,6 +332,11 @@ struct CheckLowerTable
 #define BUSTER_CHECK_LOWER_TYPE_VOLATILE_COPY 0x20u
 #define BUSTER_CHECK_LOWER_TYPE_ATOMIC 0x40u
 #define BUSTER_CHECK_LOWER_TYPE_KIND 0x80u
+
+// A thread-local's access model in position-independent code (#2101, CheckLowerShared.tls_models): general-dynamic for
+// one another module may preempt, local-dynamic for the unit's own.
+#define BUSTER_CHECK_LOWER_TLS_GENERAL 1u
+#define BUSTER_CHECK_LOWER_TLS_LOCAL 2u
 // KIND marks check_lower_kind_facts' entries alone, and no type's facts hold it (check_lower_classify_types drops it): a
 // _BitInt's facts, which the rules alone give (check_lower_type_facts), take its bit.
 #define BUSTER_CHECK_LOWER_TYPE_BIT_INT BUSTER_CHECK_LOWER_TYPE_KIND
@@ -943,6 +952,9 @@ struct CheckLowerWriter
     bool kept_address;
     bool scalar;
     bool track;
+    // Whether an entry's append goes out of line (check_lower_append_slow): `track`, or a unit with thread-locals of
+    // position-independent code (#2101, `tls_models`), so that every other append tests one byte, as it tested `track`.
+    bool append_slow;
     bool sources;
     // Whether the vector path tries #624's two- and three-node fragments (check_lower_batch_expression): only where its
     // caller asks, as its test does (c_check_program_batch_test.c). No compile does: on the 9700X, sqlite3.c's statements
@@ -979,6 +991,10 @@ struct CheckLowerWriter
     // `runtime_mask` their bits in words), which check_lower_finish numbers in source order's order (#151).
     const SymbolId* declared_runtimes;
     SymbolId provisional_runtimes;
+    // Position-independent code's thread-locals (#2101, CheckLowerShared.tls_models and provisional_tls): each symbol's
+    // access model, null for a unit that has none, and the first of their accessors' provisional symbols.
+    const uint8_t* tls_models;
+    SymbolId provisional_tls;
     uint64_t runtime_mask[(CHECK_LOWER_RUNTIMES + 63) / 64];
     uint32_t runtime_count;
     uint16_t* runtimes;
@@ -2545,9 +2561,18 @@ static uint32_t check_lower_vector_of(const CheckLowerWriter* writer, TypeId typ
     return vector ? check_lower_vector_bytes(writer->program->types, type) : 0;
 }
 
-// Appends an entry of a class the function takes: check_lower_emit's, and the entries of the half-precision classes'
-// (check_lower_half_entry), which check_lower_emit writes through it.
-static inline __attribute__((always_inline)) void check_lower_append(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
+static __attribute__((noinline)) void check_lower_tls(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value);
+
+// Whether an entry of `kind` and `value` names a thread-local of position-independent code (#2101,
+// CheckLowerWriter.tls_models): GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL or SET_GLOBAL of one, which check_lower_tls writes.
+static inline __attribute__((always_inline)) bool check_lower_tls_entry(const CheckLowerWriter* writer, uint8_t kind, uint64_t value)
+{
+    const bool global = kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
+    return global && value <= writer->program->symbol_count && writer->tls_models[value] != 0;
+}
+
+// Appends an entry as it is (check_lower_append's, and check_lower_tls's entries).
+static inline __attribute__((always_inline)) void check_lower_append_entry(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
 {
     const uint32_t count = writer->count;
     if (count >= writer->capacity || count >= BUSTER_TIER0_MAX_ENTRIES)
@@ -2557,6 +2582,48 @@ static inline __attribute__((always_inline)) void check_lower_append(CheckLowerW
     else if (writer->track)
     {
         check_lower_emit_tracked(writer, kind, class, value);
+    }
+    else if (writer->output->status == CHECK_PROGRAM_OK)
+    {
+        writer->kinds[count] = kind;
+        writer->classes[count] = class;
+        writer->values[count] = value;
+        writer->count = count + 1;
+    }
+}
+
+// An append of a writer that tracks its stacks or has thread-locals of position-independent code
+// (CheckLowerWriter.append_slow): a thread-local's entry is check_lower_tls's, and any other is written as it is.
+static __attribute__((noinline)) void check_lower_append_slow(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
+{
+    if (writer->tls_models != NULL && check_lower_tls_entry(writer, kind, value))
+    {
+        check_lower_tls(writer, kind, class, value);
+    }
+    else
+    {
+        check_lower_append_entry(writer, kind, class, value);
+    }
+}
+
+// Appends an entry of a class the function takes: check_lower_emit's, and the entries of the half-precision classes'
+// (check_lower_half_entry), which check_lower_emit writes through it. A writer that tracks its stacks appends through
+// check_lower_emit_tracked, and one with thread-locals of position-independent code through check_lower_append_slow;
+// every other append tests one byte for both (CheckLowerWriter.append_slow).
+static inline __attribute__((always_inline)) void check_lower_append(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
+{
+    const uint32_t count = writer->count;
+    if (count >= writer->capacity || count >= BUSTER_TIER0_MAX_ENTRIES)
+    {
+        check_lower_resource(writer, count >= BUSTER_TIER0_MAX_ENTRIES ? "Tier 0 per-function entry limit" : "lowering entry storage");
+    }
+    else if (writer->append_slow && writer->tls_models == NULL)
+    {
+        check_lower_emit_tracked(writer, kind, class, value);
+    }
+    else if (writer->append_slow)
+    {
+        check_lower_append_slow(writer, kind, class, value);
     }
     else if (writer->output->status == CHECK_PROGRAM_OK)
     {
@@ -8012,6 +8079,45 @@ static SymbolId check_lower_runtime(CheckLowerWriter* writer, CheckLowerRuntime 
         }
     }
     return symbol;
+}
+
+// A thread-local's access in position-independent code (#2101, check_lower_tls_entry): a call of its accessor, which
+// returns its address (the emission's code of the general- or local-dynamic sequence, check_program_emit_tls_atoms), and the
+// access through that address, in place of GLOBAL, GLOBAL_ADDRESS, STORE_GLOBAL or SET_GLOBAL of the symbol `value`:
+//
+//     GLOBAL x            CALL x's accessor, LOAD
+//     GLOBAL_ADDRESS x    CALL x's accessor
+//     STORE_GLOBAL x      SET_LOCAL t, CALL x's accessor, LOCAL t, STORE
+//     SET_GLOBAL x        SET_LOCAL t, CALL x's accessor, LOCAL t, SET
+//
+// A store's value waits in a temporary of its class while the call runs, as STORE and SET take the address under the
+// value. Every other entry of the lowering's is the same, so that a thread-local's accesses need nothing of the code
+// generators but calls. The accessor's call takes its provisional symbol (CheckLowerShared.provisional_tls), and the
+// part marks __tls_get_addr as called, which the accessors call (check_lower_finish numbers it).
+static __attribute__((noinline)) void check_lower_tls(CheckLowerWriter* writer, uint8_t kind, uint8_t class, uint64_t value)
+{
+    const bool store = kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
+    const uint32_t temporary = store ? check_lower_temporary(writer, class) : BUSTER_CHECK_NONE;
+    const uint32_t call = check_lower_native_call(writer, writer->provisional_tls + (SymbolId)value, BUSTER_TYPE_ULONG, NULL, 0);
+    (void)check_lower_runtime(writer, CHECK_LOWER_RUNTIME_TLS_GET_ADDR);
+    static const uint8_t accesses[4] = { BUSTER_TYPED_LOAD, BUSTER_TYPED_NONE, BUSTER_TYPED_STORE, BUSTER_TYPED_SET };
+    const uint8_t access = accesses[kind == BUSTER_TYPED_GLOBAL ? 0 : kind == BUSTER_TYPED_GLOBAL_ADDRESS ? 1 : kind == BUSTER_TYPED_STORE_GLOBAL ? 2 : 3];
+    if (writer->output->status == CHECK_PROGRAM_OK && store)
+    {
+        check_lower_append_entry(writer, BUSTER_TYPED_SET_LOCAL, class, temporary);
+    }
+    if (writer->output->status == CHECK_PROGRAM_OK)
+    {
+        check_lower_append_entry(writer, BUSTER_TYPED_CALL, BUSTER_TYPED_CLASS_U64, call);
+    }
+    if (writer->output->status == CHECK_PROGRAM_OK && store)
+    {
+        check_lower_append_entry(writer, BUSTER_TYPED_LOCAL, class, temporary);
+    }
+    if (writer->output->status == CHECK_PROGRAM_OK && access != BUSTER_TYPED_NONE)
+    {
+        check_lower_append_entry(writer, access, class, 0);
+    }
 }
 
 // A call of runtime function `runtime` (check_lower_runtime), of `count` arguments of `arguments`' types and a result of
@@ -19220,6 +19326,14 @@ struct CheckLowerShared
     SymbolId provisional_tables;
     // The room of the jump tables' labels' symbols: CheckProgramLowered.case_symbol_count, or a deferred lowering's bound.
     uint32_t case_symbol_room;
+    // Position-independent code's thread-locals (#2101, CheckProgram.pic): each program symbol's access model
+    // (BUSTER_CHECK_LOWER_TLS_*), null where the unit has no thread-local or isn't position-independent; and the first of
+    // their accessors' provisional symbols, after the jump tables': the accessor of symbol s is provisional_tls + s while
+    // the bodies compile (check_lower_tls), and the emission's after (check_program_emit_tls_symbols); and how many symbols are
+    // thread-locals.
+    uint8_t* tls_models;
+    SymbolId provisional_tls;
+    uint32_t tls_count;
     // A lowering that reads none of the controls' totals (#2536's step 2.2c.3, check_lower_prepare's `deferred`), as the
     // windows' will, which lower some bodies before the checker has written the rest: the rooms take the bounds the
     // checker's setup knows (CheckProgram.control_capacity, chain_stop_capacity), the calls' is fitted to each part's
@@ -19748,6 +19862,33 @@ static uint32_t check_lower_opening_owner(const CheckProgram* program, uint32_t 
     return body < program->body_count && program->bodies[body].opening == opening ? body : BUSTER_CHECK_NONE;
 }
 
+// Position-independent code's thread-locals (#2101, CheckProgram.pic): in `scratch`, each of the program's symbols'
+// access model, BUSTER_CHECK_LOWER_TLS_GENERAL for a thread-local another module may preempt
+// (check_program_preemptible), BUSTER_CHECK_LOWER_TLS_LOCAL for the unit's own and 0 for any other symbol, as clang's
+// -fPIC chooses general- and local-dynamic accesses; null where the code isn't position-independent or no symbol is a
+// thread-local, and `*count` the thread-locals. Returns false for a failed allocation.
+static bool check_lower_tls_models(const CheckProgram* program, Arena* scratch, uint8_t** models, uint32_t* count)
+{
+    const CheckInput* input = program->input;
+    uint32_t found = 0;
+    for (uint32_t s = 0; program->pic && s < program->symbol_count; s += 1)
+    {
+        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
+        found += declaration != BUSTER_CHECK_NONE && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
+    }
+    uint8_t* made = found != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : NULL;
+    for (uint32_t s = 0; made != NULL && s <= program->symbol_count; s += 1)
+    {
+        const uint32_t object = s != 0 ? program->symbol_objects[s - 1] : 0;
+        const uint32_t declaration = s != 0 ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+        const bool thread_local = declaration != BUSTER_CHECK_NONE && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
+        made[s] = !thread_local ? 0 : check_program_preemptible(program, object) ? BUSTER_CHECK_LOWER_TLS_GENERAL : BUSTER_CHECK_LOWER_TLS_LOCAL;
+    }
+    *models = made;
+    *count = made != NULL ? found : 0;
+    return found == 0 || made != NULL;
+}
+
 // What the lowering of every body shares (CheckLowerShared), its tables from `scratch`, and the program's lowering's
 // columns from `output`: its helpers, its label symbols' room, its functions and, with `sources`, their entries' tokens.
 // A `deferred` one reads none of the controls' totals (CheckLowerShared.deferred). Returns false with `lowered`'s failure
@@ -19773,6 +19914,12 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint32_t integer_builtin_count = node_counts.integer_builtins;
     const uint64_t lane_calls = node_counts.lane_calls;
     const uint64_t lane_arguments = node_counts.lane_arguments;
+    // Position-independent code's thread-locals (#2101): an access of one is a call of its accessor, and a store's value
+    // waits in a temporary while the call runs (check_lower_tls), a call and a local a node past the bounds below.
+    uint32_t tls_count = 0;
+    const bool tls_ready = program->status != CHECK_PROGRAM_OK || check_lower_tls_models(program, scratch, &shared->tls_models, &tls_count);
+    shared->tls_count = tls_count;
+    const uint64_t tls_room = tls_count != 0 ? nodes : 0;
     // Each varargs builtin is a recipe with up to four locals of its own besides its temporaries, and each body has up to
     // three more (the hidden pointer and the anchors) and an end's frame object. A program the checker refused may have
     // no stream, and is refused below without reading one.
@@ -19809,8 +19956,8 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint64_t recipe_pools = integer_builtin_count != 0 ? 1 : 0;
     const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 6 + ((uint64_t)builtin_count - integer_builtin_count + recipe_pools) * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
                                       varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements * 2 + (input != NULL ? input->kr_parameter_count : 0) +
-                                      limb_room.locals + node_counts.transport_locals + 1;
-    bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
+                                      limb_room.locals + node_counts.transport_locals + tls_room + 1;
+    bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && tls_ready && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
                  x87_capacity64 <= UINT32_MAX;
     lowered->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
     // Each lowered function's validation (tier0_validate) reads the effects tables (its X86 entries' forms, #760), which
@@ -19909,7 +20056,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // (check_lower_deferred_part).
     const uint64_t cleanup_calls = deferred ? 0 : check_lower_cleanup_calls(program, 0, program->control_count);
     const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls +
-                                    lane_calls + lowered->initializers.extra_calls + cleanup_calls + 1;
+                                    lane_calls + lowered->initializers.extra_calls + cleanup_calls + tls_room + 1;
     const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
                                                     (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + lane_arguments + lowered->initializers.extra_arguments + cleanup_calls + 1 : 0;
     const uint64_t pool_base = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
@@ -19943,6 +20090,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     valid = valid && (deferred ? check_lower_prepare_tables(shared, lowered, program, output, scratch) :
                                  check_lower_switch_tables(lowered, &shared->switch_trees, program, sparse_trees, output, scratch));
     valid = valid && (uint64_t)shared->provisional_tables + (deferred ? shared->deferred_tables->capacity : lowered->table_count) < UINT32_MAX;
+    // The thread-locals' accessors' provisional symbols, after the tables' (#2101): symbol s's is provisional_tls + s.
+    const uint64_t provisional_tls = valid ? (uint64_t)shared->provisional_tables + (deferred ? shared->deferred_tables->capacity : lowered->table_count) : 0;
+    valid = valid && (shared->tls_models == NULL || provisional_tls + program->symbol_count + 1 < UINT32_MAX);
+    shared->provisional_tls = valid && shared->tls_models != NULL ? (SymbolId)provisional_tls : 0;
     shared->case_symbol_room = deferred ? shared->case_symbol_room : lowered->case_symbol_count;
     const uint64_t label_room = valid ? (uint64_t)shared->label_symbol_capacity + shared->case_symbol_room : 0;
     lowered->label_symbols = valid && label_room != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, label_room) : 0;
@@ -20139,7 +20290,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // #1048's node templates are verified against the tasks (test-lowering-templates) but no compile takes them: on the
     // 9700X, the vector path's compile of sqlite3.c spent 8.9 ms in their scalar pass to save 3.1 ms of its statements
     // (docs/c-lowering.md's "Node templates over a body: the first path"), which a data-parallel pass must not.
-    shared->templates_allowed = valid && !sources && !shared->bit_ints && program->stream != NULL && program->stream->overload_address_count == 0;
+    // (#1048's templates write a global's entries themselves, which a thread-local's accessor doesn't take: #2101.)
+    shared->templates_allowed = valid && !sources && !shared->bit_ints && program->stream != NULL && program->stream->overload_address_count == 0 &&
+                                shared->tls_models == NULL;
     shared->templates = false;
     shared->template_check = false;
     return valid;
@@ -20227,6 +20380,9 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
         .initializer_declarations = shared->initializer_declarations,
         .declared_runtimes = shared->declared_runtimes,
         .provisional_runtimes = shared->provisional_runtimes,
+        .tls_models = shared->tls_models,
+        .provisional_tls = shared->provisional_tls,
+        .append_slow = shared->tls_models != NULL,
         .table_current = BUSTER_CHECK_NONE,
         .tables = shared->lowered->tables,
         .table_count = shared->lowered->table_count,
@@ -20517,6 +20673,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->tail = BUSTER_CHECK_NONE;
         writer->chain = BUSTER_CHECK_NONE;
         writer->track = body.count != body.entry_count || shared->terminal;
+        writer->append_slow = writer->track || writer->tls_models != NULL;
         writer->body = program->bodies + b;
         // The function's instruction set (CheckProgram.body_targets), and so the classes it takes.
         const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;

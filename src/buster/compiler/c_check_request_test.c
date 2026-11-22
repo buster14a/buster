@@ -4,12 +4,12 @@
 // #1057's tests: one request's configuration (c_check_request.c) and the shared source preparation
 // (c_check_source_prepare.c) against the C driver, in this process and in children that run the driver's command.
 //
-// - refusals: option lists of each code generation (hardening among them), instrumentation, PIC, layout and target
-//   family, in the orders where the last or the first decides, read by check_request_parse as a client reads them: the
+// - refusals: option lists of each code generation (hardening among them), instrumentation, layout and target family,
+//   with -fPIC and -fpic beside them, which every client takes (#2101), in the orders where the last or the first decides, read by check_request_parse as a client reads them: the
 //   refusal and its option, the arguments that go on to the preprocessor, an option's value or an input after -- never
 //   read as an option, and a refused or unreadable request (an arena without room, an option without its value after
 //   pp_parse_options filled the fields of the options before it) leaving its configuration all zero; then the driver on
-//   each list, by -c, by a link (which takes -fPIC and -fpic, #2101) and by -fsyntax-only, whose exit status and first
+//   each list, by -c, by a link and by -fsyntax-only, whose exit status and first
 //   line of errors must be check_request_describe's;
 // - the program's options: check_request_program_options takes the identifiers, the target and the predefines from
 //   the preprocessor and keeps the unit's own fields;
@@ -160,8 +160,8 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
           .passed = 1 },
         { .label = "-fcf-protection=none last", .options = { "-fcf-protection", "-fcf-protection=none", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED,
           .passed = 2 },
-        { .label = "-fPIC for an object", .options = { "-fPIC", 0 }, .emits = true, .error = CHECK_REQUEST_PIC, .option = "-fPIC", .passed = 1 },
-        { .label = "-fpic for an object", .options = { "-fpic", 0 }, .emits = true, .error = CHECK_REQUEST_PIC, .option = "-fpic", .passed = 1 },
+        { .label = "-fPIC for an object (#2101)", .options = { "-fPIC", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
+        { .label = "-fpic for an object (#2101)", .options = { "-fpic", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
         { .label = "-fPIC without code", .options = { "-fPIC", 0 }, .emits = false, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
         { .label = "-fPIC turned off again", .options = { "-fPIC", "-fno-pic", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 2 },
         { .label = "-fPIC for a link (#2101)", .options = { "-fPIC", 0 }, .emits = true, .links = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
@@ -184,7 +184,8 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
         { .label = "an invalid -fpack-struct= value", .options = { "-fpack-struct=08", 0 }, .emits = true, .error = CHECK_REQUEST_LAYOUT,
           .option = "-fpack-struct=08", .passed = 1 },
         { .label = "-fshort-wchar", .options = { "-fshort-wchar", 0 }, .emits = false, .error = CHECK_REQUEST_TARGET, .passed = 1 },
-        { .label = "PIC before a layout", .options = { "-fshort-enums", "-fPIC", 0 }, .emits = true, .error = CHECK_REQUEST_PIC, .option = "-fPIC", .passed = 2 },
+        { .label = "a layout beside PIC for an object", .options = { "-fshort-enums", "-fPIC", 0 }, .emits = true, .error = CHECK_REQUEST_LAYOUT,
+          .option = "-fshort-enums", .passed = 2 },
         { .label = "a layout before a target", .options = { "-fshort-wchar", "-fshort-enums", 0 }, .emits = true, .error = CHECK_REQUEST_LAYOUT,
           .option = "-fshort-enums", .passed = 2 },
         { .label = "an option's value isn't an option", .options = { "-I", "-pg", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 2 },
@@ -394,7 +395,6 @@ static void check_test_request_read(CheckTest* test, const char* file)
         { { CHECK_REQUEST_SANITIZER, NULL, "-fsanitize=address" }, "unsupported code generation option '-fsanitize=address' (sanitizer instrumentation is not implemented)" },
         { { CHECK_REQUEST_COVERAGE, NULL, "-fsanitize-coverage" }, "unsupported code generation option '-fsanitize-coverage' (coverage instrumentation is not implemented)" },
         { { CHECK_REQUEST_OPENMP, NULL, "-fopenmp=libgomp" }, "unsupported code generation option '-fopenmp=libgomp' (OpenMP code generation is not implemented)" },
-        { { CHECK_REQUEST_PIC, "-fPIC" }, "unsupported code generation option '-fPIC' (position-independent code for shared libraries is not implemented)" },
         { { CHECK_REQUEST_LAYOUT, "-fshort-enums" }, "unsupported option '-fshort-enums' (the checker does not implement its ABI layout)" },
         { { CHECK_REQUEST_TARGET, NULL }, "checker requires C, 32-bit wchar_t, x87 long double and source-precision floating evaluation" },
         { { CHECK_REQUEST_ACCEPTED, NULL }, "" },
@@ -641,10 +641,10 @@ static void check_test_request_parity(CheckTest* test, const char* directory)
         { .label = "an always_inline callee's target the caller lacks", .fixture = 5, .options = { "-nostdinc", 0 }, .outcome = 2 },
         { .label = "an always_inline callee's target the unit has", .fixture = 5, .options = { "-nostdinc", "-march=x86-64-v3", 0 } },
         { .label = "a layout the checker doesn't implement", .fixture = 0, .options = { "-nostdinc", "-fshort-enums", 0 }, .outcome = 3 },
-        // The source clients compile as -c does, whose object may go into another link: -fPIC and -fpic, which a link's
-        // executable takes, are refused for it (#2101).
-        { .label = "-fPIC, which -c refuses", .fixture = 0, .options = { "-nostdinc", "-fPIC", 0 }, .outcome = 3 },
-        { .label = "-fpic, which -c refuses", .fixture = 0, .options = { "-nostdinc", "-fpic", 0 }, .outcome = 3 },
+        // The source clients compile as -c does, whose object may go into a shared library: -fPIC's and -fpic's code
+        // (#2101, CheckProgramOptions.pic), which a link's executable doesn't take.
+        { .label = "-fPIC's code", .fixture = 0, .options = { "-nostdinc", "-fPIC", 0 } },
+        { .label = "-fpic's code", .fixture = 0, .options = { "-nostdinc", "-fpic", 0 } },
         { .label = "scalar code for the baseline, again last", .fixture = 0, .options = { "-nostdinc", 0 } },
     };
     char paths[FIXTURES][PATH_MAX];
