@@ -39,6 +39,33 @@ static bool foreign_strings_direct(uint8_t kind)
     return kind == BUSTER_LINK_FIXUP_ABS64 || kind == BUSTER_LINK_FIXUP_ABS32 || kind == BUSTER_LINK_FIXUP_ABS32S;
 }
 
+// Whether foreign_strings_apply refuses every pool of the selected atoms (#3044): a PC32 or CALL fixup targets one,
+// which it refuses whatever the pool's offsets. The fixups' kinds are compared 64 at a time; a hit's target atom is
+// read by two dependent loads, scalar, and the scan stops at the first hit that refuses. With it, clang -O2's
+// build_regression.o, which addresses its literals by PC32, took the merge-strings stage from 138 to 30 microseconds
+// on the 9700X, against main's 27 (docs/foreign-string-merging.md).
+static bool foreign_strings_refused(const Link* link, const uint32_t* atom_inputs)
+{
+    const __m512i kinds_mask = _mm512_set1_epi8(BUSTER_LINK_FIXUP_KIND);
+    const __m512i pc32 = _mm512_set1_epi8(BUSTER_LINK_FIXUP_PC32);
+    const __m512i call = _mm512_set1_epi8(BUSTER_LINK_FIXUP_CALL);
+    bool refused = false;
+    for (uint32_t at = 1; !refused && at < link->fixups.count; at += 64)
+    {
+        const uint32_t left = link->fixups.count - at;
+        const __mmask64 valid = left >= 64 ? ~0ull : (1ull << left) - 1;
+        const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, link->fixups.kind + at), kinds_mask);
+        uint64_t hits = _mm512_mask_cmpeq_epi8_mask(valid, kinds, pc32) | _mm512_mask_cmpeq_epi8_mask(valid, kinds, call);
+        while (hits != 0 && !refused)
+        {
+            const FixupId fixup = at + (uint32_t)__builtin_ctzll(hits);
+            refused = atom_inputs[link->symbols.atom[link->fixups.target[fixup]]] != 0;
+            hits &= hits - 1;
+        }
+    }
+    return refused;
+}
+
 static ForeignStringsError foreign_strings_apply(Link* link, const ForeignStrings* strings,
                                                  const uint32_t* atom_inputs, const uint8_t* section_symbols)
 {
@@ -250,7 +277,8 @@ static ForeignStringsError foreign_strings_select(const ForeignLink* converted, 
     return error;
 }
 
-static ForeignStringsError foreign_strings_plan(const ForeignLink* converted, const Foreign* foreign, uint32_t count, Arena* arena, ForeignStringsMerge* merged)
+static ForeignStringsError foreign_strings_plan(const ForeignLink* converted, const Foreign* foreign, uint32_t count, bool suffixes, Arena* arena,
+                                               ForeignStringsMerge* merged)
 {
     const Link* link = &converted->link;
     ForeignStringsError error = FOREIGN_STRINGS_ERROR_NONE;
@@ -346,7 +374,7 @@ static ForeignStringsError foreign_strings_plan(const ForeignLink* converted, co
     }
     if (error == FOREIGN_STRINGS_ERROR_NONE)
     {
-        error = foreign_strings_build_below(inputs, count, foreign->path, arena, &merged->strings, merged->input_bytes);
+        error = foreign_strings_build_below(inputs, count, foreign->path, arena, &merged->strings, merged->input_bytes, suffixes);
     }
     scratch_end(scratch);
     return error;
@@ -362,7 +390,10 @@ static ForeignStringsError foreign_strings_merge(ForeignLink* converted, const F
     ForeignStringsError error = foreign_strings_select(converted, foreign, arena, &merged.atom_inputs, &count);
     if (error == FOREIGN_STRINGS_ERROR_NONE && count != 0)
     {
-        error = foreign_strings_plan(converted, foreign, count, arena, &merged);
+        // A pool the consumer refuses whatever it holds is built by whole entries alone, the rule before #3044, whose
+        // result (a pool too large to use, or the same refusal) is the same.
+        const bool suffixes = !foreign_strings_refused(&converted->link, merged.atom_inputs);
+        error = foreign_strings_plan(converted, foreign, count, suffixes, arena, &merged);
     }
     else if (error == FOREIGN_STRINGS_ERROR_NONE && !foreign_strings_path_valid(foreign->path))
     {

@@ -753,6 +753,17 @@ and copy no function of musl's. No file of this tree holds musl's code.
 
 ## C semantic compatibility references
 
+The initialization-flow and integer-range diagnostic repairs for #1391 in
+`c_check_common_warnings.c`, their private helpers and original driver fixtures
+use the project default terms. They reuse this repository's checked expression
+graph, retained control entries and diagnostic policy. LLVM revision
+`7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaChecking.cpp`, `clang/lib/AST/Expr.cpp` and
+`clang/include/clang/AST/IgnoreExpr.h` supply integer-range diagnostic behavior
+and selected-expression wrapper rules;
+Clang runs externally as the fixture oracle. No upstream implementation,
+test fixture or corpus source is incorporated.
+
 The suppress attribute recovery and its original runtime fixtures (#2332)
 use Clang 23.1.4 externally as a diagnostic and acceptance oracle.
 `clang/lib/Parse/ParseDecl.cpp`, `clang/lib/Parse/ParseDeclCXX.cpp` and
@@ -761,6 +772,15 @@ use Clang 23.1.4 externally as a diagnostic and acceptance oracle.
 for argument parsing, delimiter recovery and discarded attribute lists.
 No LLVM implementation or test fixtures were copied. The new code and
 fixtures use the project default terms.
+
+The weak-pragma declaration, lookup and emission repairs for #2449 and their
+original `tests/checker/weak-alias*` runtime catalogues use the project default
+terms. LLVM revision `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s
+`clang/lib/Sema/SemaDeclAttr.cpp`, `clang/lib/Sema/SemaDecl.cpp`,
+`clang/lib/Parse/ParseAST.cpp` and `clang/lib/CodeGen/CodeGenModule.cpp`
+were consulted for declaration-clone, redeclaration, lookup and code-generation
+diagnostic behavior. Clang 23.1.4 runs externally as the diagnostic and ELF
+oracle; no upstream implementation or test fixture is incorporated.
 
 The TLS redeclaration diagnostics and for-initializer unused-warning scope fixes
 for #1784 are original project code and fixtures under the default terms.

@@ -1619,9 +1619,16 @@ struct NodeAloneExpected
     uint32_t walk;
     uint32_t statics;
     uint32_t lost;
+    // The tokens the walk's class actions left to its visit, in the bodies: the fixture's `sizeof`, `_Alignof` and the
+    // rest of the walk's own visits, which the count of taken roots with one is read against.
+    uint32_t declined;
+    // The bodies with a root the front lost that a scan of their tokens finds one in, before any of them is compacted:
+    // the `sizeof`'s, the `_Alignof`'s and the several characters'. The floating constant out of range and the table
+    // that overflows the front's stack are none of the scan's; the escape under a label is one it must leave.
+    uint32_t scanned;
 };
 
-static bool node_alone_test_fixture(const char* directory, char** options, uint32_t option_count, const NodeAloneExpected* expected)
+static bool node_alone_test_fixture(const char* directory, char** options, uint32_t option_count, bool split, const NodeAloneExpected* expected)
 {
     char path[512];
     snprintf(path, sizeof(path), "%s/alone.c", directory);
@@ -1673,28 +1680,37 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
     valid = valid && length + 1 < capacity && parse_test_write(path, text, length);
     NodeShadow shadow = {
         .front = (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER),
-        .reader = (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE),
+        .reader = (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | (split ? BUSTER_NODE_READER_SPLIT : 0)),
         .passes = 0,
         .repeat = 1,
     };
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
-    const bool same = valid && !node_shadow_differs(&shadow) && shadow.alone_differences == 0 && shadow.alone_walk_only == 0 && shadow.alone_own_only == 0 &&
+    // By sweep (`split`): the clock was read five times a root the machine swept, and the sweeps' ticks are within the run's.
+    const uint64_t swept = shadow.alone_step_ticks[0] + shadow.alone_step_ticks[1] + shadow.alone_step_ticks[2] + shadow.alone_step_ticks[3];
+    const bool timed = split ? shadow.alone_step_reads != 0 && shadow.alone_step_ticks[0] != 0 && shadow.alone_step_ticks[1] != 0 && shadow.alone_step_ticks[2] != 0 &&
+                               shadow.alone_step_ticks[3] != 0 && swept <= shadow.alone_sweep_ticks :
+                               shadow.alone_step_reads == 0 && swept == 0;
+    const bool same = valid && timed && !node_shadow_differs(&shadow) && shadow.alone_differences == 0 && shadow.alone_walk_only == 0 && shadow.alone_own_only == 0 &&
                       shadow.alone_events_after == 0 && shadow.alone_bodies_left == 0 && shadow.alone_bodies_unread == 0 && shadow.alone_taken_checked != 0 &&
                       shadow.alone_taken_declined == 0;
     bool counts = shadow.alone_bodies == expected->bodies && shadow.alone_compared == expected->roots && shadow.alone_whole_own == expected->own &&
-                  shadow.alone_whole_walk == expected->walk && shadow.alone_whole_walk_static == expected->statics && shadow.alone_resets == expected->lost;
+                  shadow.alone_whole_walk == expected->walk && shadow.alone_whole_walk_static == expected->statics && shadow.alone_resets == expected->lost &&
+                  shadow.alone_declined_tokens == expected->declined && shadow.alone_scan_tokens != 0;
     for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
     {
-        counts = counts && shadow.alone_verdicts[verdict] == expected->verdicts[verdict];
+        // The scan finds a lost root in the bodies it should, and in no body of another verdict.
+        counts = counts && shadow.alone_verdicts[verdict] == expected->verdicts[verdict] &&
+                 shadow.alone_verdict_scanned[verdict] == (verdict == BUSTER_NODE_ALONE_BODY_LEFT ? expected->scanned : 0);
     }
     if (!same || !counts)
     {
         fprintf(stderr, "test-checker: node-alone: %s, %s: %" PRIu64 " bodies read (%u expected), %" PRIu64 " left, %" PRIu64 " not read; %" PRIu64 " roots compared (%u), %" PRIu64
                 " differ, %" PRIu64 " the walk's nodes' alone, %" PRIu64 " its own alone, %" PRIu64 " taken before an event of the walk's; verdicts: whole %" PRIu64 " (%u), a root lost %"
                 PRIu64 " (%u), not run %" PRIu64 " (%u), T %" PRIu64 " (%u), the tests %" PRIu64 " (%u), C or X %" PRIu64 " (%u), no room %" PRIu64 " (%u); whole for it alone %" PRIu64
-                " (%u), for the walk's nodes' alone %" PRIu64 " (%u), with a block's static %" PRIu64 " (%u); waiting values lost %" PRIu64 " times (%u)\n",
+                " (%u), for the walk's nodes' alone %" PRIu64 " (%u), with a block's static %" PRIu64 " (%u); waiting values lost %" PRIu64 " times (%u); %" PRIu64
+                " tokens the walk's actions left (%u); the scan finds a lost root in %" PRIu64 " of the bodies with one (%u) and in %" PRIu64 " others (0)\n",
                 valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.alone_bodies, expected->bodies, shadow.alone_bodies_left, shadow.alone_bodies_unread,
                 shadow.alone_compared, expected->roots, shadow.alone_differences, shadow.alone_walk_only, shadow.alone_own_only, shadow.alone_events_after,
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_WHOLE], expected->verdicts[BUSTER_NODE_ALONE_BODY_WHOLE], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_LEFT],
@@ -1702,9 +1718,241 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_TYPE], expected->verdicts[BUSTER_NODE_ALONE_BODY_TYPE], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_TESTS],
                 expected->verdicts[BUSTER_NODE_ALONE_BODY_TESTS], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_SWEEP], expected->verdicts[BUSTER_NODE_ALONE_BODY_SWEEP],
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_ROOM], expected->verdicts[BUSTER_NODE_ALONE_BODY_ROOM], shadow.alone_whole_own, expected->own, shadow.alone_whole_walk,
-                expected->walk, shadow.alone_whole_walk_static, expected->statics, shadow.alone_resets, expected->lost);
+                expected->walk, shadow.alone_whole_walk_static, expected->statics, shadow.alone_resets, expected->lost, shadow.alone_declined_tokens, expected->declined,
+                shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_LEFT], expected->scanned,
+                shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_WHOLE] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_UNRUN] +
+                    shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_TYPE] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_TESTS] +
+                    shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_SWEEP] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_ROOM]);
     }
     free(text);
+    unlink(path);
+    return same && counts;
+}
+
+// A body's entries from its controls and its roots' tapes (c_check_node_census.c's node_bodies_begin; docs/node-machine.md,
+// "A body's entries from its controls and its tapes"): its fixture, read with `options`. Each lowered body the piece
+// attempts is made again from the program's controls and the machine's tapes, and must be the lowered function's entry
+// for entry.
+// - Attempted: an initialization, a branch and a return; a void body, whose implicit return ends it, and one that
+//   returns early; calls in two statements, whose rows are the body's; a loop whose condition is branches (`&&`), so
+//   that its branches go to the control's own label and the control writes none; a do statement, whose branch is taken
+//   where its condition holds, with a condition that is branches (`||`) and with one that is a value; a logical
+//   operator's and a conditional's values, whose tapes have labels of their own; two postfix updates through an
+//   address, whose temporaries are the body's locals after its declared ones; a for statement with a continue and a
+//   break, each a jump; a body that falls off its end; a goto; and main, whose implicit return is zero.
+// - Left out: a result of another class (long double) in a body whose every root the machine takes; a switch; and
+//   bodies with a root the machine does not take (a braced initializer, a bit-field; and, where -Wfor-loop-analysis is
+//   enabled, the for statement's, whose clauses the census's test refuses).
+// `expected`: the lowered bodies, those whose every root the machine takes, those attempted, and the others by reason.
+// With `before`, the same comparison made before the walk too (docs/node-machine.md, "The same comparison before the
+// walk"): the machine with no node of the walk's keeps each root's tape and what is beside it, the bodies' entries are
+// made again from those, each control finding its root by its token, and the controls themselves are made a second way
+// from the tokens and compared with the program's. Two bodies are there for it: one with an `if` whose condition is a
+// constant, which the program folds and both leave out (the kept tapes' for the constant, the twin for the range the
+// program dropped), and one with a block's static object, whose entries name a symbol the program numbers and which
+// the twin leaves out. And two for the references: a logical operator whose first operand is a constant, so that its
+// second, a call, is never evaluated; and a global's address cast to void: what the program's references of each body
+// are is compared with the objects its tapes name.
+typedef struct NodeBodiesExpected NodeBodiesExpected;
+struct NodeBodiesExpected
+{
+    uint32_t lowered;
+    uint32_t whole;
+    uint32_t attempted;
+    uint32_t reasons[NODE_BODIES_REASONS];
+    // Before the walk: the bodies the machine took whole there, those attempted from the kept tapes, the others by
+    // reason; and the controls' twin's bodies by its reason, the attempted ones first.
+    uint32_t kept_whole;
+    uint32_t kept_attempted;
+    uint32_t kept_reasons[NODE_BODIES_REASONS];
+    uint32_t twin_reasons[NODE_TWIN_REASONS];
+    // What the lowering's tasks write of a local beside the entries, by source: the attempted bodies' plain locals, and
+    // those whose address an entry takes. And a producer's two sets: the bodies it reads and sweeps, and those it takes.
+    uint32_t locals[2];
+    uint32_t addressed[2];
+    uint32_t swept;
+    uint32_t taken;
+};
+
+// A unit of 8,192 tokens and more, read as -c reads it (--statement-controls): the reader takes the statement controls'
+// path in it, where a statement's value has no node of the walk's for its discard, and the bodies' comparisons after the
+// pipeline and before the walk are exact there too, with every body attempted and taken.
+static bool node_bodies_test_controls(const char* directory, bool anywhere)
+{
+    enum { COPIES = 320 };
+    const uint32_t capacity = COPIES * 192 + 256;
+    char* text = malloc(capacity);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/bodies-controls.c", directory);
+    bool valid = text != NULL;
+    uint32_t length = 0;
+    if (valid)
+    {
+        length += (uint32_t)snprintf(text + length, capacity - length, "int g;\nint h(int);\n");
+        for (uint32_t copy = 0; copy < COPIES; copy += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, "static int f%u(int x) { g = x; if (x > %u) { x += h(x); } h(x); return x + %u; }\n", copy, copy, copy);
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, "int main(void)\n{\n    int n = 0;\n");
+        for (uint32_t copy = 0; copy < COPIES; copy += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, "    n += f%u(n);\n", copy);
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, "    return n;\n}\n");
+        valid = length < capacity && parse_test_write(path, text, length);
+    }
+    free(text);
+    NodeShadow shadow = {
+        .front = (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER),
+        .reader = (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE),
+        .bodies = true,
+        .statement_controls = anywhere,
+        .passes = 0,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, NULL, 0) && census.files == 1 && census.failures == 0;
+    const uint64_t bodies = COPIES + 1;
+    const bool same = valid && !node_shadow_differs(&shadow) && shadow.statement_controls_units == (anywhere ? 1 : 0) && shadow.statement_controls_without == 0 &&
+                      shadow.bodies_lowered[0] == bodies && shadow.bodies_attempted[0] == bodies && shadow.bodies_same[0] == bodies && shadow.bodies_attempted[1] == bodies &&
+                      shadow.bodies_same[1] == bodies && shadow.twin_same == bodies && shadow.twin_silent == bodies && shadow.bodies_references_same == bodies &&
+                      shadow.producer_swept == bodies && shadow.producer_taken == bodies;
+    if (!same)
+    {
+        fprintf(stderr, "test-checker: node-bodies read as -c reads a unit: valid %d, the path taken in %" PRIu64 " units and not in %" PRIu64 "; %" PRIu64 " bodies lowered (%" PRIu64
+                " expected), attempted %" PRIu64 " and %" PRIu64 ", the same %" PRIu64 " and %" PRIu64 ", the twin's %" PRIu64 ", silent %" PRIu64 ", references %" PRIu64
+                ", swept %" PRIu64 ", taken %" PRIu64 "\n",
+                valid, shadow.statement_controls_units, shadow.statement_controls_without, shadow.bodies_lowered[0], bodies, shadow.bodies_attempted[0], shadow.bodies_attempted[1],
+                shadow.bodies_same[0], shadow.bodies_same[1], shadow.twin_same, shadow.twin_silent, shadow.bodies_references_same, shadow.producer_swept, shadow.producer_taken);
+    }
+    return same;
+}
+
+static bool node_bodies_test_fixture(const char* directory, char** options, uint32_t option_count, bool before, const NodeBodiesExpected* expected)
+{
+    static const char text[] = "struct S { int a; unsigned b : 3; long c; };\nint g;\nint h(int);\n"
+                               "static int plain(int x, int y) { int t = x * 2; if (y > 3) { t += y; } return t + g; }\n"
+                               "static void nothing(int x) { g = x; }\n"
+                               "static void early(int x) { if (x) return; g = 1; }\n"
+                               "static int loops(struct S* s, int n) { long r = h(n) + h(n + 1); while (n > 0 && s->a != n) { r += s->c; n -= h(1); } return (int)r; }\n"
+                               "static int both(int a, int b) { if (a && b) { return 1; } else { return 2; } }\n"
+                               "static int either(int a, int b) { int r = 0; do { r += a; a -= 1; } while (a > 0 || b > r); return r; }\n"
+                               "static int twice(int n) { int i = 0; do { i += 2; } while (i < n); return i; }\n"
+                               "static int values(int a, int b) { int r = a && b; r += a || b; return r + (a ? b : 3); }\n"
+                               "static int post(int* p) { int v = (*p)++; return v + p[1]++; }\n"
+                               "static int counts(int n) { int s = 0; for (int i = 0; i < n; i++) { if (i == 3) continue; if (i == 7) break; s += h(i); } return s; }\n"
+                               "static int falls(int x) { if (x) { return 1; } g = 2; }\n"
+                               "static int jumps(int x) { if (x > 2) goto out; x += h(x); out: return x; }\n"
+                               "long double wide(int x) { for (;;) { g = x; } }\n"
+                               "static int chosen(int c) { switch (c) { case 1: return 2; default: return c + 3; } }\n"
+                               "static int braces(int i) { int v[3] = { 1, i, 3 }; return v[0] + v[2]; }\n"
+                               "static int field(struct S* s) { return s->b + 1; }\n"
+                               "static int folded(int x) { if (0) { g = x; } return x + 1; }\n"
+                               "static int counted(int x) { static int calls; calls += x; return calls; }\n"
+                               "static int folds(int x) { return 0 && h(x); }\n"
+                               "static void discards(int x) { (void)&g; g = h(x); }\n"
+                               "static int keeps(int x) { volatile int v = x; int w = v + 1; return w; }\n"
+                               "static int sized(int x) { return x + (int)sizeof(x); }\n"
+                               "static int floated(int x) { if (1.5) { x += 1; } return x; }\n"
+                               "static int after(int x) { if (x) { return 1; } return 2; g = 3; }\n"
+                               "static int leaves(int x) { if (x > 2) goto out; return x; out: return x + 1; }\n"
+                               "static int spun(int x) { while (1) { if (x) break; x += 1; } return x; }\n"
+                               "static int ends(int x) { if (x) { return 1; } else { return 2; } g = 4; }\n"
+                               "static int forever(int x) { for (;;) { if (x) break; x += 1; } return x; }\n"
+                               "int main(void)\n{\n    struct S s;\n    int n = 4;\n    s.a = 1;\n    s.c = 3;\n    nothing(n);\n    early(n);\n"
+                               "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s) + twice(n) +\n"
+                               "        values(n, 2) + folded(n) + counted(n) + folds(n) + keeps(n) + sized(n) + floated(n) + after(n) + leaves(n) + spun(n) + ends(n) + forever(n);\n    discards(n);\n}\n";
+    char path[512];
+    snprintf(path, sizeof(path), "%s/bodies.c", directory);
+    bool valid = parse_test_write(path, text, sizeof(text) - 1);
+    NodeShadow shadow = {
+        .front = before ? (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER) : 0,
+        .reader = before ? (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE) : 0,
+        .bodies = true,
+        .passes = 0,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const bool same = valid && !node_shadow_differs(&shadow) && shadow.bodies_different[0] == 0 && shadow.bodies_same[0] == shadow.bodies_attempted[0] && shadow.bodies_entries[0] != 0;
+    bool counts = shadow.bodies_lowered[0] == expected->lowered && shadow.bodies_whole[0] == expected->whole && shadow.bodies_attempted[0] == expected->attempted;
+    for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
+    {
+        counts = counts && shadow.bodies_reasons[0][reason] == expected->reasons[reason];
+    }
+    // Before the walk: the kept tapes' bodies and the twin's, each the program's or the lowered function's; none where
+    // the program dropped a range; and nothing of either without it.
+    bool kept = shadow.bodies_different[1] == 0 && shadow.bodies_same[1] == shadow.bodies_attempted[1] && shadow.bodies_dropped_attempted == 0 && shadow.twin_different == 0 &&
+                shadow.twin_same == shadow.twin_reasons[NODE_TWIN_ATTEMPTED];
+    // The return flow's silence by the twin's controls: proved for every body the twin attempts but the one that falls off
+    // its end, which the program's own return flow has a warning for, and for none it warns of.
+    kept = kept && (before ? shadow.bodies_whole[1] == expected->kept_whole && shadow.bodies_attempted[1] == expected->kept_attempted && shadow.bodies_dropped == 3 &&
+                             shadow.twin_controls != 0 && shadow.twin_loud == 1 && shadow.twin_unsound == 0 &&
+                             shadow.twin_silent + 1 == shadow.twin_reasons[NODE_TWIN_ATTEMPTED] :
+                             shadow.bodies_lowered[1] == 0 && shadow.twin_controls == 0 && shadow.twin_silent == 0);
+    for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; before && reason < NODE_BODIES_REASONS; reason += 1)
+    {
+        kept = kept && shadow.bodies_reasons[1][reason] == expected->kept_reasons[reason];
+    }
+    for (uint32_t reason = 0; before && reason < NODE_TWIN_REASONS; reason += 1)
+    {
+        kept = kept && shadow.twin_reasons[reason] == expected->twin_reasons[reason];
+    }
+    // The locals beside the entries, compared in every attempted body (a difference is one of the bodies'): their count
+    // says the comparison ran, a volatile local left to its declaration. The kept tapes' named objects are the program's
+    // references of each attempted body. And the producer's two sets.
+    const uint32_t sources = before ? 2 : 1;
+    bool beside = true;
+    for (uint32_t source = 0; source < sources; source += 1)
+    {
+        beside = beside && shadow.bodies_locals[source] == expected->locals[source] && shadow.bodies_locals_addressed[source] == expected->addressed[source];
+    }
+    beside = beside && (before ? shadow.bodies_references_same == expected->kept_attempted && shadow.bodies_references_more == 0 && shadow.bodies_references_fewer == 0 &&
+                                     shadow.producer_swept == expected->swept && shadow.producer_taken == expected->taken :
+                                 shadow.bodies_references_same == 0 && shadow.producer_swept == 0);
+    if (!beside)
+    {
+        fprintf(stderr, "test-checker: node-bodies beside the entries: plain locals %" PRIu64 " (%u) and %" PRIu64 " (%u), their address taken %" PRIu64 " (%u) and %" PRIu64
+                " (%u); references the same in %" PRIu64 ", more in %" PRIu64 ", fewer in %" PRIu64 "; a producer sweeps %" PRIu64 " (%u), takes %" PRIu64 " (%u)\n",
+                shadow.bodies_locals[0], expected->locals[0], shadow.bodies_locals[1], expected->locals[1], shadow.bodies_locals_addressed[0], expected->addressed[0],
+                shadow.bodies_locals_addressed[1], expected->addressed[1], shadow.bodies_references_same, shadow.bodies_references_more, shadow.bodies_references_fewer,
+                shadow.producer_swept, expected->swept, shadow.producer_taken, expected->taken);
+    }
+    kept = kept && beside;
+    if (!kept)
+    {
+        fprintf(stderr, "test-checker: node-bodies before the walk: whole there %" PRIu64 " (%u), attempted %" PRIu64 " (%u), the lowered function's %" PRIu64 ", differ %" PRIu64
+                ", where the program dropped a range %" PRIu64 " of %" PRIu64 "; left out:",
+                shadow.bodies_whole[1], expected->kept_whole, shadow.bodies_attempted[1], expected->kept_attempted, shadow.bodies_same[1], shadow.bodies_different[1],
+                shadow.bodies_dropped_attempted, shadow.bodies_dropped);
+        for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
+        {
+            fprintf(stderr, " %s %" PRIu64 " (%u)", node_bodies_reason_names[reason], shadow.bodies_reasons[1][reason], expected->kept_reasons[reason]);
+        }
+        fprintf(stderr, "; the controls' twin: the program's %" PRIu64 ", differ %" PRIu64 ", controls %" PRIu64 "; the return flow's silence proved for %" PRIu64
+                ", the program warns of %" PRIu64 " (1), of them proved silent %" PRIu64 ";",
+                shadow.twin_same, shadow.twin_different, shadow.twin_controls, shadow.twin_silent, shadow.twin_loud, shadow.twin_unsound);
+        for (uint32_t reason = 0; reason < NODE_TWIN_REASONS; reason += 1)
+        {
+            fprintf(stderr, " %s %" PRIu64 " (%u)", node_twin_reason_names[reason], shadow.twin_reasons[reason], expected->twin_reasons[reason]);
+        }
+        fprintf(stderr, "\n");
+    }
+    counts = counts && kept;
+    if (!same || !counts)
+    {
+        fprintf(stderr, "test-checker: node-bodies: %s, %s: %" PRIu64 " bodies lowered (%u expected), every root the machine's in %" PRIu64 " (%u), %" PRIu64 " attempted (%u), %" PRIu64
+                " the lowered function's, %" PRIu64 " differ, %" PRIu64 " entries; left out:",
+                valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.bodies_lowered[0], expected->lowered, shadow.bodies_whole[0], expected->whole,
+                shadow.bodies_attempted[0], expected->attempted, shadow.bodies_same[0], shadow.bodies_different[0], shadow.bodies_entries[0]);
+        for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
+        {
+            fprintf(stderr, " %s %" PRIu64 " (%u)", node_bodies_reason_names[reason], shadow.bodies_reasons[0][reason], expected->reasons[reason]);
+        }
+        fprintf(stderr, "\n");
+    }
     unlink(path);
     return same && counts;
 }
@@ -7374,11 +7622,59 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .own = 1,
         .statics = 1,
         .lost = 2,
+        .declined = 7,
+        .scanned = 3,
     };
-    check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), &alone_expected),
+    check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), false, &alone_expected),
                       "node-alone: the machine on the front's records alone, before the walk, makes every root's results the machine makes of the walk's nodes");
-    check_test_expect(test, ready && node_alone_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), &alone_expected),
+    check_test_expect(test, ready && node_alone_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), false, &alone_expected),
                       "node-alone: the same with the default warnings");
+    check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &alone_expected),
+                      "node-alone by sweep: the same results, and each sweep's ticks within the run's");
+    const NodeBodiesExpected bodies_quiet = {
+        .lowered = 29,
+        .whole = 27,
+        .attempted = 25,
+        .reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
+        .kept_whole = 27,
+        .kept_attempted = 18,
+        .kept_reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 2,
+                          [NODE_BODIES_REACH] = 4 },
+        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 20, [NODE_TWIN_UNWHOLE] = 2, [NODE_TWIN_DROPPED] = 3, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1,
+                          [NODE_TWIN_REACH] = 2 },
+        .locals = { 43, 36 },
+        .addressed = { 1, 1 },
+        .swept = 24,
+        .taken = 16,
+    };
+    const NodeBodiesExpected bodies_loud = {
+        .lowered = 29,
+        .whole = 26,
+        .attempted = 24,
+        .reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
+        .kept_whole = 26,
+        .kept_attempted = 17,
+        .kept_reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 2,
+                          [NODE_BODIES_REACH] = 4 },
+        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 19, [NODE_TWIN_UNWHOLE] = 3, [NODE_TWIN_DROPPED] = 3, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1,
+                          [NODE_TWIN_REACH] = 2 },
+        .locals = { 40, 33 },
+        .addressed = { 1, 1 },
+        .swept = 24,
+        .taken = 15,
+    };
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), false, &bodies_quiet),
+                      "node-bodies: a body's entries made from its controls and its roots' tapes are the lowered function's");
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), false, &bodies_loud),
+                      "node-bodies: the same with more warnings, one body fewer for a test's refusal");
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), true, &bodies_quiet),
+                      "node-bodies before the walk: the entries from the tapes kept there are the lowered function's, and the controls from the tokens the program's");
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &bodies_loud),
+                      "node-bodies before the walk: the same with more warnings");
+    check_test_expect(test, ready && node_bodies_test_controls(directory, true),
+                      "node-bodies read as -c reads a unit: the statement controls' path is taken, and both comparisons are exact there");
+    check_test_expect(test, ready && node_bodies_test_controls(directory, false),
+                      "node-bodies: the same unit without the path, as the shadow's pipeline reads it");
     // The flat front beside the lean one, its twin: on the shadow's fixture, at the chunks' ends, where the lean front's
     // stack is full, and past its own rings' reach.
     const uint8_t flat = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_FLAT;

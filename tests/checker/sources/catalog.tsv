@@ -434,3 +434,5 @@ quadratic-statement-expressions	quadratic-statement-expressions.c	-	statement ex
 quadratic-vla-bounds	quadratic-vla-bounds.c	-	a variable-length array of 100 bounds, a declaration of 100 such declarators, and arrays of several in nested blocks (#2995; the program tests run it and count its walks)
 jump-contexts	jump-contexts.c	-	break and continue in a deep else-if chain, nested bodies and GNU loop heads inside an outer loop (#3220)
 jump-contexts-invalid	jump-contexts-invalid.c	rejected	jumps past a loop, in its head or in a sibling statement (#3220)
+weak-alias-object-lazy	weak-alias-object-lazy.c	overload-none	a weak object alias leaves overload tables absent for deferred checking (#2449)
+weak-alias-function-overload	weak-alias-function-overload.c	overload-tables	weak function clone selection initializes overload tables inside constant queries (#2449)

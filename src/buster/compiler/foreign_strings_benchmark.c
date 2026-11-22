@@ -9,8 +9,14 @@
 // must agree within each merge state; merged and unmerged layouts may
 // differ. Retained arena bytes exclude mapped input files, generated inputs and transient scratch, not peak RSS.
 //
-// Usage: benchmark-foreign-strings [--counts LIST] [--runs N] [--order LIST] [--only duplicate|unique]
-// [--after-scalar MS] [--directory PATH] [--keep]. Order entries are nomerge-exact, merge-exact, nomerge-vector and merge-vector;
+// Usage: benchmark-foreign-strings [--counts LIST] [--runs N] [--order LIST] [--only duplicate|unique|suffix|lengths|repeats|tie]
+// [--after-scalar MS] [--directory PATH] [--keep]. Duplicate and unique literals all have one length, so the producer
+// sorts none of them for block heads (#3044). Suffix and lengths literals have 9 to 25 characters: every second suffix
+// literal is the end of the one before it, and no lengths literal ends another, so that shape pays the prefilter and
+// saves nothing. Repeats are the suffix literals, every pair a second time in the second half (in another unit from
+// 512 literals): duplicates in a multi-length group. Tie is the unique literals with the last one "qr", which every
+// other ends: one tie of every literal past the sort's first key bytes. Order entries are nomerge-exact, merge-exact,
+// nomerge-vector and merge-vector;
 // any nonempty subset without repetitions is valid. One warm-up precedes the measured samples of each variant.
 // --after-scalar (0..300 ms) conditions every sample with scalar integer work, outside the timed whole pipeline.
 // Fenced TSC ticks cover the same pipeline plus its wall-clock reads; they are elapsed reference ticks, not core cycles.
@@ -22,6 +28,27 @@
 #define BUSTER_FOREIGN_STRINGS_BENCHMARK_MAX_LITERALS (1u << 20)
 #define BUSTER_FOREIGN_STRINGS_BENCHMARK_FNV_OFFSET 14695981039346656037ull
 #define BUSTER_FOREIGN_STRINGS_BENCHMARK_FNV_PRIME 1099511628211ull
+
+// The literal shapes (#3044 added suffix, lengths, repeats and tie); unique and duplicate keep the numbers their output
+// files' names had.
+typedef enum ForeignStringsBenchmarkShape
+{
+    FOREIGN_STRINGS_BENCHMARK_UNIQUE,
+    FOREIGN_STRINGS_BENCHMARK_DUPLICATE,
+    FOREIGN_STRINGS_BENCHMARK_SUFFIX,
+    FOREIGN_STRINGS_BENCHMARK_LENGTHS,
+    FOREIGN_STRINGS_BENCHMARK_REPEATS,
+    FOREIGN_STRINGS_BENCHMARK_TIE,
+} ForeignStringsBenchmarkShape;
+
+static const char* const foreign_strings_benchmark_shapes[] = {
+    "unique",
+    "duplicate",
+    "suffix",
+    "lengths",
+    "repeats",
+    "tie",
+};
 
 typedef struct ForeignStringsBenchmarkVariant ForeignStringsBenchmarkVariant;
 struct ForeignStringsBenchmarkVariant
@@ -120,18 +147,84 @@ static const uint8_t foreign_strings_benchmark_code[] = {
     0x0f, 0x05,                                          // syscall: exit
 };
 
+// The same program for literals of several lengths (#3044): it hashes every literal's bytes up to and including its
+// terminator, since the bytes after a shared end depend on the pool's layout. Its count and FNV constants sit at the
+// same offsets as the fixed-length program's.
+static const uint8_t foreign_strings_benchmark_terminated_code[] = {
+    0x48, 0x8d, 0x35, 0, 0, 0, 0,                         // lea literal_addresses(%rip), %rsi
+    0xb9, 0, 0, 0, 0,                                    // mov literal_count, %ecx
+    0x48, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0,                  // movabs FNV offset, %rax
+    0x49, 0xb9, 0, 0, 0, 0, 0, 0, 0, 0,                  // movabs FNV prime, %r9
+    0x48, 0x8b, 0x3e,                                    // outer: mov (%rsi), %rdi
+    0x48, 0x83, 0xc6, 8,                                 // add $8, %rsi
+    0x0f, 0xb6, 0x17,                                    // inner: movzbl (%rdi), %edx
+    0x48, 0xff, 0xc7,                                    // inc %rdi
+    0x48, 0x31, 0xd0,                                    // xor %rdx, %rax
+    0x49, 0x0f, 0xaf, 0xc1,                              // imul %r9, %rax
+    0x85, 0xd2,                                          // test %edx, %edx
+    0x75, 0xef,                                          // jnz inner
+    0xff, 0xc9,                                          // dec %ecx
+    0x75, 0xe4,                                          // jnz outer
+    0x50,                                                // push %rax
+    0xb8, 1, 0, 0, 0,                                    // mov $1, %eax
+    0xbf, 1, 0, 0, 0,                                    // mov $1, %edi
+    0x48, 0x89, 0xe6,                                    // mov %rsp, %rsi
+    0xba, 8, 0, 0, 0,                                    // mov $8, %edx
+    0x0f, 0x05,                                          // syscall: write
+    0x31, 0xff,                                          // xor %edi, %edi
+    0xb8, 60, 0, 0, 0,                                   // mov $60, %eax
+    0x0f, 0x05,                                          // syscall: exit
+};
+
 typedef struct ForeignStringsBenchmarkInput ForeignStringsBenchmarkInput;
 struct ForeignStringsBenchmarkInput
 {
     ForeignCommand command;
     uint64_t expected;
     uint64_t input_bytes;
+    // The literals' bytes, terminators included.
+    uint64_t literal_bytes;
     uint32_t units;
 };
 
-static bool foreign_strings_benchmark_generate(const char* directory, uint32_t count, bool duplicate, Arena* arena,
+// Writes the shape's literal `index` with its terminator to `text` (room for BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES)
+// and returns its length without the terminator. Unique and duplicate literals have 31 characters, as every earlier
+// campaign's did. A suffix pair's first literal has 8 to 16 letters and the pair's number, its second 0 to 7 of the
+// same last letters and the same number, so it is the first's end; lengths literals have the same lengths, each with
+// its own number, so none ends another. Repeats literal `index` is suffix literal `index` less the even half of `count`
+// in the second half; tie's last of `count` literals is "qr", which ends every unique literal.
+static uint32_t foreign_strings_benchmark_literal(ForeignStringsBenchmarkShape shape, uint32_t index, uint32_t count, char* text)
+{
+    static const char letters[] = "abcdefghijklmnop";
+    const uint32_t half = (count / 2) & ~1u;
+    const uint32_t which = shape == FOREIGN_STRINGS_BENCHMARK_REPEATS && half != 0 && index >= half ? index - half : index;
+    const uint32_t pair = which / 2;
+    const uint32_t letter_count = which % 2 == 0 ? 8 + pair % 9 : pair % 8;
+    const uint32_t number = shape == FOREIGN_STRINGS_BENCHMARK_SUFFIX || shape == FOREIGN_STRINGS_BENCHMARK_REPEATS ? pair : which;
+    int length = 0;
+    if (shape == FOREIGN_STRINGS_BENCHMARK_TIE && count > 1 && index + 1 == count)
+    {
+        length = snprintf(text, BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES, "qr");
+    }
+    else if (shape == FOREIGN_STRINGS_BENCHMARK_UNIQUE || shape == FOREIGN_STRINGS_BENCHMARK_DUPLICATE || shape == FOREIGN_STRINGS_BENCHMARK_TIE)
+    {
+        const uint32_t value = shape == FOREIGN_STRINGS_BENCHMARK_DUPLICATE ? index % 8 : index;
+        length = snprintf(text, BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES, "lit-%08x-abcdefghijklmnopqr", value);
+    }
+    else
+    {
+        length = snprintf(text, BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES, "%.*s-%08x", (int)letter_count, letters + 16 - letter_count, number);
+    }
+    return length > 0 ? (uint32_t)length : 0;
+}
+
+static bool foreign_strings_benchmark_generate(const char* directory, uint32_t count, ForeignStringsBenchmarkShape shape, Arena* arena,
                                                ForeignStringsBenchmarkInput* output)
 {
+    // Fixed-length literals keep the program that hashes 32 bytes a literal; the others hash up to their terminators.
+    const bool fixed = shape == FOREIGN_STRINGS_BENCHMARK_UNIQUE || shape == FOREIGN_STRINGS_BENCHMARK_DUPLICATE;
+    const uint8_t* program = fixed ? foreign_strings_benchmark_code : foreign_strings_benchmark_terminated_code;
+    const uint32_t program_bytes = fixed ? sizeof(foreign_strings_benchmark_code) : sizeof(foreign_strings_benchmark_terminated_code);
     const uint32_t literal_units = (count + BUSTER_FOREIGN_STRINGS_BENCHMARK_UNIT_LITERALS - 1) / BUSTER_FOREIGN_STRINGS_BENCHMARK_UNIT_LITERALS;
     const uint32_t units = literal_units + 1;
     Arena source = arena_reserve(1ull << 32);
@@ -144,63 +237,72 @@ static bool foreign_strings_benchmark_generate(const char* directory, uint32_t c
         .fixups = count + 1,
     };
     bool valid = source.base != 0 && names.base != 0 && link_initialize(&link, &source, &names, capacity);
-    uint8_t* code = valid ? BUSTER_ARENA_PUSH_ARRAY(&source, uint8_t, sizeof(foreign_strings_benchmark_code)) : 0;
+    uint8_t* code = valid ? BUSTER_ARENA_PUSH_ARRAY(&source, uint8_t, program_bytes) : 0;
     uint8_t* table = valid ? BUSTER_ARENA_PUSH_ARRAY(&source, uint8_t, (uint64_t)count * sizeof(uint64_t)) : 0;
     valid = valid && code != 0 && table != 0;
     uint64_t expected = BUSTER_FOREIGN_STRINGS_BENCHMARK_FNV_OFFSET;
     AtomId pointers = 0;
     if (valid)
     {
-        memcpy(code, foreign_strings_benchmark_code, sizeof(foreign_strings_benchmark_code));
+        memcpy(code, program, program_bytes);
         memcpy(code + 8, &count, sizeof(count));
         const uint64_t offset = BUSTER_FOREIGN_STRINGS_BENCHMARK_FNV_OFFSET;
         const uint64_t prime = BUSTER_FOREIGN_STRINGS_BENCHMARK_FNV_PRIME;
         memcpy(code + 14, &offset, sizeof(offset));
         memcpy(code + 24, &prime, sizeof(prime));
         memset(table, 0, (uint64_t)count * sizeof(uint64_t));
-        const AtomId text = link_add_atom(&link, BUSTER_LINK_CLASS_TEXT, 4, sizeof(foreign_strings_benchmark_code), code, 0);
+        const AtomId text = link_add_atom(&link, BUSTER_LINK_CLASS_TEXT, 4, program_bytes, code, 0);
         pointers = link_add_atom(&link, BUSTER_LINK_CLASS_DATA, 3, (uint64_t)count * sizeof(uint64_t), table, 0);
         const NameId entry_name = link_add_name(&link, (const uint8_t*)"_start", 6);
         const NameId table_name = link_add_name(&link, (const uint8_t*)"literal_addresses", 17);
-        const SymbolId entry = link_add_symbol(&link, entry_name, text, 0, sizeof(foreign_strings_benchmark_code),
+        const SymbolId entry = link_add_symbol(&link, entry_name, text, 0, program_bytes,
                                               BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM);
         const SymbolId table_symbol = link_add_symbol(&link, table_name, pointers, 0, (uint64_t)count * sizeof(uint64_t),
                                                      BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_PROGRAM);
         valid = text != 0 && pointers != 0 && entry_name != 0 && table_name != 0 && entry != 0 && table_symbol != 0 &&
                 link_add_fixup(&link, text, 3, BUSTER_LINK_FIXUP_PC32, table_symbol, -4) != 0;
     }
+    uint64_t literal_bytes = 0;
     for (uint32_t unit = 0; valid && unit < literal_units; unit += 1)
     {
         const uint32_t first = unit * BUSTER_FOREIGN_STRINGS_BENCHMARK_UNIT_LITERALS;
         const uint32_t in_unit = count - first < BUSTER_FOREIGN_STRINGS_BENCHMARK_UNIT_LITERALS ? count - first : BUSTER_FOREIGN_STRINGS_BENCHMARK_UNIT_LITERALS;
-        const uint64_t size = (uint64_t)in_unit * BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES;
+        char text[BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES];
+        uint64_t size = 0;
+        for (uint32_t i = 0; i < in_unit; i += 1)
+        {
+            size += foreign_strings_benchmark_literal(shape, first + i, count, text) + 1;
+        }
         uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(&source, uint8_t, size);
         const AtomId strings = bytes != 0 ? link_add_atom(&link, BUSTER_LINK_CLASS_STRINGS, 0, size, bytes, unit + 1) : 0;
         valid = strings != 0;
+        uint32_t offset = 0;
         for (uint32_t i = 0; valid && i < in_unit; i += 1)
         {
             const uint32_t index = first + i;
-            const uint32_t value = duplicate ? index % 8 : index;
-            const uint32_t offset = i * BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES;
-            const int length = snprintf((char*)bytes + offset, BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES, "lit-%08x-abcdefghijklmnopqr", value);
+            const uint32_t length = foreign_strings_benchmark_literal(shape, index, count, text);
+            memcpy(bytes + offset, text, length + 1);
             char name[32];
             const int name_length = snprintf(name, sizeof(name), "literal_%08x", index);
             const NameId named = link_add_name(&link, (const uint8_t*)name, (uint32_t)name_length);
-            const SymbolId symbol = link_add_symbol(&link, named, strings, offset, BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES,
-                                                   BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT, BUSTER_LINK_SOURCE_PROGRAM);
-            valid = length == BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES - 1 && named != 0 && symbol != 0 &&
+            const SymbolId symbol = link_add_symbol(&link, named, strings, offset, length + 1, BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT,
+                                                   BUSTER_LINK_SOURCE_PROGRAM);
+            valid = length != 0 && (!fixed || length == BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES - 1) && named != 0 && symbol != 0 &&
                     link_add_fixup(&link, pointers, index * sizeof(uint64_t), BUSTER_LINK_FIXUP_ABS64, symbol, 0) != 0;
-            for (uint32_t b = 0; b < BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES; b += 1)
+            // Both programs hash the terminator: the fixed-length literals' 32nd byte is theirs.
+            for (uint32_t b = 0; b <= length; b += 1)
             {
                 expected = (expected ^ bytes[offset + b]) * BUSTER_FOREIGN_STRINGS_BENCHMARK_FNV_PRIME;
             }
+            offset += length + 1;
         }
+        literal_bytes += size;
     }
     valid = valid && link_check(&link) == LINK_ERROR_NONE;
     ForeignTestPath* paths = BUSTER_ARENA_PUSH_ARRAY(arena, ForeignTestPath, units);
     char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, units);
     char prefix[64];
-    snprintf(prefix, sizeof(prefix), "strings_%s_%u", duplicate ? "duplicate" : "unique", count);
+    snprintf(prefix, sizeof(prefix), "strings_%s_%u", foreign_strings_benchmark_shapes[shape], count);
     valid = valid && paths != 0 && arguments != 0 && foreign_test_write_program(&link, units, directory, prefix, paths, arena);
     uint64_t input_bytes = 0;
     for (uint32_t unit = 0; valid && unit < units; unit += 1)
@@ -218,6 +320,7 @@ static bool foreign_strings_benchmark_generate(const char* directory, uint32_t c
             .command = command,
             .expected = expected,
             .input_bytes = input_bytes,
+            .literal_bytes = literal_bytes,
             .units = units,
         };
     }
@@ -226,7 +329,7 @@ static bool foreign_strings_benchmark_generate(const char* directory, uint32_t c
     return valid;
 }
 
-static bool foreign_strings_benchmark_case(const char* directory, uint32_t count, bool duplicate, uint32_t runs, uint32_t after_scalar,
+static bool foreign_strings_benchmark_case(const char* directory, uint32_t count, ForeignStringsBenchmarkShape shape, uint32_t runs, uint32_t after_scalar,
                                            const uint32_t* order, uint32_t variants, Arena* arena)
 {
     const uint64_t saved = arena->length;
@@ -234,7 +337,12 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
         .check = "foreign string pipeline validation",
     };
     ForeignStringsBenchmarkInput input = { 0 };
-    bool valid = foreign_strings_benchmark_generate(directory, count, duplicate, arena, &input);
+    bool valid = foreign_strings_benchmark_generate(directory, count, shape, arena, &input);
+    const char* shape_name = foreign_strings_benchmark_shapes[shape];
+    // Duplicate literals repeat after eight; every second suffix and repeats literal is the end of the one before it, and
+    // tie's "qr" the end of its first literal.
+    const bool saves = shape == FOREIGN_STRINGS_BENCHMARK_DUPLICATE ? count > 8 :
+                       (shape == FOREIGN_STRINGS_BENCHMARK_SUFFIX || shape == FOREIGN_STRINGS_BENCHMARK_REPEATS || shape == FOREIGN_STRINGS_BENCHMARK_TIE) && count > 1;
     foreign_test_expect(&tally, valid, "generate frozen named-relocation string objects", 0);
     uint64_t* times = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, (uint64_t)6 * runs);
     uint64_t* ticks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, runs);
@@ -245,14 +353,14 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
         const ForeignStringsBenchmarkVariant* variant = &foreign_strings_benchmark_variants[order[v]];
         uint64_t retained = 0;
         uint64_t output_bytes = 0;
-        uint64_t literal_bytes = (uint64_t)count * BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES;
+        uint64_t literal_bytes = input.literal_bytes;
         bool applied = false;
         for (uint32_t run = 0; valid && run <= runs; run += 1)
         {
             const uint64_t iteration = arena->length;
             Arena names = { 0 };
             ForeignTestPath path;
-            snprintf(path, sizeof(path), "%s/strings_output_%u_%u_%u", directory, count, duplicate ? 1 : 0, order[v]);
+            snprintf(path, sizeof(path), "%s/strings_output_%u_%u_%u", directory, count, (uint32_t)shape, order[v]);
             const String8 destination = {
                 .pointer = path,
                 .length = strlen(path),
@@ -295,7 +403,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
                     retained += foreign.lane_states[lane].arena.length;
                 }
                 output_bytes = written.file_size;
-                literal_bytes = merged.applied ? merged.strings.size : (uint64_t)count * BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES;
+                literal_bytes = merged.applied ? merged.strings.size : input.literal_bytes;
                 applied = merged.applied;
             }
             arena_release(&names);
@@ -305,7 +413,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
             const uint64_t finished_ticks = foreign_strings_benchmark_ticks();
             char detail[256];
             snprintf(detail, sizeof(detail), "%s count %u %s iteration %u: resolve %u convert %u import %u merge %u write %u",
-                     duplicate ? "duplicate" : "unique", count, variant->name, run, resolve_error,
+                     shape_name, count, variant->name, run, resolve_error,
                      (unsigned)built.error, (unsigned)built.import.error, (unsigned)merge_error, (unsigned)written.error);
             foreign_test_expect(&tally, valid, "whole string pipeline succeeds", detail);
             const uint64_t validation = arena->length;
@@ -324,16 +432,16 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
                 const bool ran = executable_test_runs(path, (const uint8_t*)&input.expected, sizeof(input.expected));
                 foreign_test_expect(&tally, ran, "every literal address and byte matches independent checksum", detail);
                 const String8 bytes = foreign_test_read(arena, path);
-                const uint32_t state = variant->merge && duplicate && count > 8 ? 1 : 0;
+                const uint32_t state = variant->merge && saves ? 1 : 0;
                 const bool same = bytes.pointer != 0 && (reference[state].pointer == 0 ||
                                   (bytes.length == reference[state].length && memcmp(bytes.pointer, reference[state].pointer, bytes.length) == 0));
                 foreign_test_expect(&tally, same, "complete bytes agree within each merge state across paths and repeats", detail);
-                const bool expected_merge = variant->merge && duplicate && count > 8;
-                foreign_test_expect(&tally, applied == expected_merge, "duplicate pool applies and unique control remains unchanged", detail);
+                const bool expected_merge = variant->merge && saves;
+                foreign_test_expect(&tally, applied == expected_merge, "duplicate, suffix, repeats and tie pools apply and unique and lengths controls remain unchanged", detail);
                 valid = ran && same && applied == expected_merge;
             }
             arena_pop_to(arena, validation);
-            const uint32_t state = variant->merge && duplicate && count > 8 ? 1 : 0;
+            const uint32_t state = variant->merge && saves ? 1 : 0;
             if (valid && reference[state].pointer == 0)
             {
                 reference[state] = foreign_test_read(arena, path);
@@ -350,10 +458,10 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
             }
             qsort(ticks, runs, sizeof(*ticks), foreign_link_test_compare_time);
             printf("foreign-strings %s count %u units %u %s runs %u: resolve %.1f us convert %.1f us merge %.1f us write %.1f us cleanup %.1f us total %.1f us wall %llu ns TSCticks %llu after-scalar %u ms input %llu bytes output %llu bytes literal-input %llu bytes literal-output %llu bytes retained-arena %llu bytes applied %u\n",
-                   duplicate ? "duplicate" : "unique", count, input.units, variant->name, runs,
+                   shape_name, count, input.units, variant->name, runs,
                    medians[0], medians[1], medians[2], medians[3], medians[4], medians[5], (unsigned long long)times[5 * runs + runs / 2],
                    (unsigned long long)ticks[runs / 2], after_scalar, (unsigned long long)input.input_bytes,
-                   (unsigned long long)output_bytes, (unsigned long long)((uint64_t)count * BUSTER_FOREIGN_STRINGS_BENCHMARK_LITERAL_BYTES),
+                   (unsigned long long)output_bytes, (unsigned long long)input.literal_bytes,
                    (unsigned long long)literal_bytes, (unsigned long long)retained, applied ? 1 : 0);
         }
     }
@@ -426,7 +534,8 @@ static __attribute__((unused)) int run_foreign_strings_benchmark(int argc, char*
     uint32_t variants = 4;
     uint32_t runs = 11;
     uint32_t after_scalar = 0;
-    uint32_t cases = 3;
+    // A bit per shape, by its ForeignStringsBenchmarkShape number.
+    uint32_t cases = 63;
     bool keep = false;
     bool valid = true;
     const char* base = oracle_temporary_directory();
@@ -461,7 +570,11 @@ static __attribute__((unused)) int run_foreign_strings_benchmark(int argc, char*
         }
         else if (strcmp(argv[i], "--only") == 0 && value)
         {
-            cases = strcmp(argv[i + 1], "duplicate") == 0 ? 1 : strcmp(argv[i + 1], "unique") == 0 ? 2 : 0;
+            cases = 0;
+            for (uint32_t shape = 0; shape < BUSTER_ARRAY_LENGTH(foreign_strings_benchmark_shapes); shape += 1)
+            {
+                cases |= strcmp(argv[i + 1], foreign_strings_benchmark_shapes[shape]) == 0 ? 1u << shape : 0;
+            }
             valid = cases != 0;
             i += 1;
         }
@@ -486,7 +599,7 @@ static __attribute__((unused)) int run_foreign_strings_benchmark(int argc, char*
     bool passed = false;
     if (!valid)
     {
-        printf("usage: benchmark-foreign-strings [--counts LIST] [--runs N] [--order nomerge-exact,merge-exact,nomerge-vector,merge-vector] [--only duplicate|unique] [--after-scalar MS <= 300] [--directory PATH] [--keep]\n");
+        printf("usage: benchmark-foreign-strings [--counts LIST] [--runs N] [--order nomerge-exact,merge-exact,nomerge-vector,merge-vector] [--only duplicate|unique|suffix|lengths|repeats|tie] [--after-scalar MS <= 300] [--directory PATH] [--keep]\n");
     }
     else if (arena.base == 0 || mkdtemp(directory) == 0)
     {
@@ -497,11 +610,20 @@ static __attribute__((unused)) int run_foreign_strings_benchmark(int argc, char*
         passed = true;
         for (uint32_t p = 0; passed && p < count; p += 1)
         {
-            for (uint32_t c = 0; passed && c < 2; c += 1)
+            // Duplicate, then unique, as they ran before #3044 added the other shapes.
+            static const ForeignStringsBenchmarkShape shapes[] = {
+                FOREIGN_STRINGS_BENCHMARK_DUPLICATE,
+                FOREIGN_STRINGS_BENCHMARK_UNIQUE,
+                FOREIGN_STRINGS_BENCHMARK_SUFFIX,
+                FOREIGN_STRINGS_BENCHMARK_LENGTHS,
+                FOREIGN_STRINGS_BENCHMARK_REPEATS,
+                FOREIGN_STRINGS_BENCHMARK_TIE,
+            };
+            for (uint32_t c = 0; passed && c < BUSTER_ARRAY_LENGTH(shapes); c += 1)
             {
-                if ((cases & (1u << c)) != 0)
+                if ((cases & (1u << shapes[c])) != 0)
                 {
-                    passed = foreign_strings_benchmark_case(directory, counts[p], c == 0, runs, after_scalar, order, variants, &arena);
+                    passed = foreign_strings_benchmark_case(directory, counts[p], shapes[c], runs, after_scalar, order, variants, &arena);
                 }
             }
         }

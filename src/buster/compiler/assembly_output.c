@@ -93,6 +93,10 @@ struct AssemblyView
     uint32_t code_count;
     uint32_t section_count;
     uint32_t temporary_count;
+    // Position-independent code's (#2101, ObjectOptions.local_unwind): an unwind table's PC32 to a global or weak symbol
+    // the unit defines names a local label of the sink's at the symbol (`.Lbuster.l` and the symbol's number), as the
+    // object refers to it through its section's symbol.
+    bool local_unwind;
 };
 
 // The text, `length` bytes at `bytes` on the output arena, or why there is none; with the atom and symbol it stopped at
@@ -238,6 +242,8 @@ typedef struct AssemblyNames AssemblyNames;
 struct AssemblyNames
 {
     uint8_t* own;
+    // Each symbol's uses (assembly_print's `used`): 4 where an unwind table names its local label (AssemblyView.local_unwind).
+    const uint8_t* used;
     // Each form row's assembly_ambiguous answer, as the walk finds it: the printing's other per-unit table.
     uint8_t* widths;
 };
@@ -1163,6 +1169,12 @@ static void assembly_labels(AssemblyText* text, const Link* link, const Assembly
         assembly_attributes(text, link, names, symbol, true);
         assembly_name(text, link, names, symbol);
         assembly_append(text, ":\n");
+        if (names->used != 0 && (names->used[symbol] & 4) != 0)
+        {
+            assembly_append(text, BUSTER_ASSEMBLY_PREFIX "l");
+            assembly_unsigned(text, symbol);
+            assembly_append(text, ":\n");
+        }
         *cursor += 1;
     }
 }
@@ -1265,7 +1277,15 @@ static AssemblyError assembly_data(AssemblyText* text, const Link* link, const A
             else
             {
                 assembly_append(text, width == 8 ? "\t.quad " : "\t.long ");
-                assembly_name(text, link, names, target);
+                if (class == BUSTER_LINK_CLASS_EH_FRAME && kind == BUSTER_LINK_FIXUP_PC32 && names->used != 0 && (names->used[target] & 4) != 0)
+                {
+                    assembly_append(text, BUSTER_ASSEMBLY_PREFIX "l");
+                    assembly_unsigned(text, target);
+                }
+                else
+                {
+                    assembly_name(text, link, names, target);
+                }
                 assembly_append(text, size_kind ? "@SIZE" : "");
                 assembly_addend(text, addend);
                 assembly_append(text, description->pc_relative ? "-.\n" : "\n");
@@ -1501,7 +1521,13 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
         {
             for (uint32_t f = 0; link->atoms.unit[a] == unit && f < link->atoms.fixup_count[a]; f += 1)
             {
-                used[link->fixups.target[link->atoms.fixup_begin[a] + f]] |= 2;
+                const FixupId fixup = link->atoms.fixup_begin[a] + f;
+                const SymbolId target = link->fixups.target[fixup];
+                // An unwind table's PC32 to a global or weak symbol the unit defines, under AssemblyView.local_unwind.
+                const bool local = view->local_unwind && link->atoms.class[a] == BUSTER_LINK_CLASS_EH_FRAME &&
+                                   (link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND) == BUSTER_LINK_FIXUP_PC32 && (used[target] & 1) != 0 &&
+                                   (link->symbols.flags[target] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
+                used[target] |= (uint8_t)(local ? 6 : 2);
             }
         }
     }
@@ -1543,6 +1569,7 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
     if (result.error == ASSEMBLY_OK)
     {
         result.error = assembly_names(&names, view, used, scratch, &result);
+        names.used = used;
     }
     if (result.error == ASSEMBLY_OK)
     {

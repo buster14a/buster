@@ -140,6 +140,61 @@ static bool node_alone_write(struct NodeAlone* alone, const CheckInputReader* re
     return room;
 }
 
+// Whether the front would lose a root of the body whose opening brace is `opening`, by the body's tokens alone, before
+// any of it is compacted: a token the front leaves (a `sizeof` or `_Alignof`, by its kind; a token of the walk's own
+// visit, by its class; a character constant with an escape or of several characters, by its spelling) whose value
+// reaches a root's token. A value's consumer is its token's parent, so its way up is the parents that take values (the
+// walk acts at them, and not to drop them), to a statement's terminator, a condition, a return or an initialization;
+// a parent that takes none (a declarator's, a label's) ends it, and loses no root.
+// `read` gains the tokens it read to decide: all of the body's where it finds none, those up to the first it finds.
+static bool node_alone_scan(const CheckInputReader* reader, uint32_t opening, uint64_t* read)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t closing = parser->tree.parents[opening];
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint8_t* visits = reader->visits;
+    bool lost = false;
+    uint32_t token = opening + 1;
+    for (; !lost && token < closing && token < count; token += 1)
+    {
+        const uint8_t visit = visits[token];
+        const uint32_t code = (visit & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+        bool left = kinds[token] == PARSE_KIND_SIZEOF || ((visit & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && code == CHECK_INPUT_CODE_SCALAR);
+        if (!left && kinds[token] == PARSE_KIND_CHARACTER)
+        {
+            const uint8_t* bytes = NULL;
+            uint32_t length = 0;
+            if (check_input_spelling((CheckInputReader*)reader, token, &bytes, &length))
+            {
+                // More than one character between its quotes, or an escape.
+                uint32_t quote = 0;
+                while (quote < length && bytes[quote] != '\'')
+                {
+                    quote += 1;
+                }
+                left = length > quote + 3;
+                for (uint32_t i = quote; i < length; i += 1)
+                {
+                    left = left || bytes[i] == '\\';
+                }
+            }
+        }
+        // The token's own action may be a root's (the walk's visit of a statement): its value's way up starts at it.
+        for (uint32_t at = left ? token : count, steps = 0; at > opening && at < closing && steps < 1024 && !lost; steps += 1)
+        {
+            const uint8_t up = visits[at];
+            const uint32_t taker = (up & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+            const bool takes = at == token || ((up & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && taker != CHECK_INPUT_CODE_DROP);
+            lost = at != token && takes &&
+                   (taker == CHECK_INPUT_CODE_TERMINATOR || taker == CHECK_INPUT_CODE_CONDITION || taker == CHECK_INPUT_CODE_RETURN || taker == CHECK_INPUT_CODE_INITIALIZE);
+            at = takes ? parser->tree.parents[at] : count;
+        }
+    }
+    *read += token - opening - 1;
+    return lost;
+}
+
 // The roots the front has lost so far, by its report (node_alone_body).
 static inline uint64_t node_alone_lost(const NodeFrontShadow* report)
 {
@@ -157,6 +212,10 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     // the times it lost its waiting values. A token left below a declarator or a label reaches no root, and loses none.
     const uint64_t lost = node_alone_lost(alone->report);
     uint8_t verdict = BUSTER_NODE_ALONE_BODY_WHOLE;
+    // Its ticks: the reading's and the machine's first run's, and those spent when it is first stopped.
+    const uint64_t reading_before = alone->shadow->alone_prepare_ticks + alone->shadow->alone_front_ticks + alone->shadow->alone_write_ticks;
+    const uint64_t machine_before = alone->types->ticks;
+    uint64_t stopped_at = UINT64_MAX;
     // No value waits at a body's opening brace: the front begins it with nothing held, its ordinals going on.
     front->count = 0;
     front->pending = 0;
@@ -269,6 +328,20 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
                                   (flags & BUSTER_NODE_FRONT_TYPED_SWEPT) == 0 || results->sweep_refusals[root] != NODE_MACHINE_TAKEN ? BUSTER_NODE_ALONE_BODY_SWEEP :
                                                                                                                                        BUSTER_NODE_ALONE_BODY_WHOLE;
                     }
+                    if (root < alone->view.count && alone->shadow->alone_root_tokens != NULL)
+                    {
+                        // Its control's token, as the tokens alone give it: an initialization's is its declaration's.
+                        const uint32_t own = front->tokens[record];
+                        const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE && own < reader->parser->tokens.count;
+                        const uint32_t control = initialization ? reader->initializer_declarations[own] : own;
+                        alone->shadow->alone_root_tokens[root] = control;
+                        if (control < reader->parser->tokens.count && !node_machine_reader_discard(reader, front, record, operand))
+                        {
+                            // The control's token's one root; a second one of the same control's is several.
+                            uint32_t* slot = &alone->shadow->alone_control_roots[control];
+                            *slot = *slot == 0 || *slot == root + 1 ? root + 1 : UINT32_MAX;
+                        }
+                    }
                     if (root < alone->view.count && alone->view.tokens[root] < reader->parser->tokens.count)
                     {
                         // The roots of one token (a table's values, each discarded at its declaration's `;`, that the
@@ -284,10 +357,28 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
                 }
             }
         }
+        if (stopped_at == UINT64_MAX && (verdict != BUSTER_NODE_ALONE_BODY_WHOLE || node_alone_lost(alone->report) != lost))
+        {
+            // The body is stopped in this chunk: what it has cost by the chunk's end.
+            stopped_at = alone->shadow->alone_prepare_ticks + alone->shadow->alone_front_ticks + alone->shadow->alone_write_ticks - reading_before +
+                         alone->types->ticks - machine_before;
+        }
     }
     alone->shadow->alone_bodies += room;
     alone->shadow->alone_bodies_left += !room;
     alone->shadow->alone_positions += end - first;
+    {
+        const uint64_t reading = alone->shadow->alone_prepare_ticks + alone->shadow->alone_front_ticks + alone->shadow->alone_write_ticks - reading_before;
+        const uint64_t machine = alone->types->ticks - machine_before;
+        const uint32_t slot = alone->shadow->alone_body_count;
+        const uint64_t scan = __rdtsc();
+        const bool scanned = node_alone_scan(reader, opening, &alone->shadow->alone_scan_tokens);
+        alone->shadow->alone_scan_ticks += __rdtsc() - scan;
+        alone->shadow->alone_body_reading[slot] = reading;
+        alone->shadow->alone_body_machine[slot] = machine;
+        alone->shadow->alone_body_before[slot] = stopped_at != UINT64_MAX ? stopped_at : reading + machine;
+        alone->shadow->alone_body_scanned[slot] = scanned;
+    }
     // The verdict, as it stands before the walk acts at the body's first token: a root the front lost comes before any
     // root's refusal, since its expression has no root at all.
     verdict = !room ? BUSTER_NODE_ALONE_BODY_ROOM : node_alone_lost(alone->report) != lost ? BUSTER_NODE_ALONE_BODY_LEFT : verdict;
@@ -306,7 +397,9 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
 static __attribute__((noinline)) void node_alone_bodies(struct NodeAlone* alone, NodeFront* front, CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     const uint64_t start = __rdtsc();
-    while (alone->next_body < alone->body_count && alone->body_firsts[alone->next_body] < end)
+    // (Every body at the first call where the unit asks: BUSTER_NODE_READER_ALONE_FIRST.)
+    const bool every = (reader->pp->options.node_reader & BUSTER_NODE_READER_ALONE_FIRST) != 0;
+    while (alone->next_body < alone->body_count && (every || alone->body_firsts[alone->next_body] < end))
     {
         const uint32_t body = alone->next_body;
         alone->next_body += 1;
@@ -326,6 +419,16 @@ static __attribute__((noinline)) void node_alone_bodies(struct NodeAlone* alone,
 static void node_alone_finish(struct NodeAlone* alone, const CheckInputReader* reader)
 {
     const uint8_t* declined = reader->expression_declined;
+    // The marks the walk left in the bodies read here: how many tokens.
+    for (uint32_t body = 0; declined != NULL && body < alone->body_count; body += 1)
+    {
+        const uint32_t opening = alone->body_openings[body];
+        const uint32_t closing = reader->parser->tree.parents[opening];
+        for (uint32_t token = opening; token <= closing && token < reader->parser->tokens.count; token += 1)
+        {
+            alone->shadow->alone_declined_tokens += declined[token] != 0;
+        }
+    }
     const NodeFrontTypes* results = alone->types;
     const CheckGraph* view = &alone->view;
     const uint32_t tokens = reader->parser->tokens.count;
@@ -387,7 +490,21 @@ static NodeFrontTypes* node_alone_results(CheckInputReader* reader, const NodeFr
         types->kinds = arena_push_array(arena, capacity, sizeof(uint8_t), 1);
         types->declared = arena_push_array(arena, capacity, sizeof(TypeId), _Alignof(TypeId));
         types->declarations = arena_push_array(arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
-        room = types->digests != NULL && types->firsts != NULL && types->counts != NULL && types->refusals != NULL && types->library != NULL &&
+        // What a splice reads beside a tape: a root's, and the stores, a place a node at most.
+        uint32_t** sides[] = { &types->side_label_firsts, &types->side_label_counts, &types->side_call_firsts, &types->side_call_counts, &types->side_temporaries,
+                               &types->side_labels,       &types->side_call_targets, &types->side_call_argument_counts, &types->side_call_argument_firsts };
+        bool sided = true;
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sides); c += 1)
+        {
+            *sides[c] = arena_push_array(arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+            sided = sided && *sides[c] != NULL;
+        }
+        types->side_facts = arena_push_array(arena, capacity, sizeof(uint8_t), 1);
+        types->side_call_variadic = arena_push_array(arena, capacity, sizeof(uint8_t), 1);
+        types->side_argument_classes = arena_push_array(arena, capacity, sizeof(uint8_t), 1);
+        types->side_capacity = capacity;
+        sided = sided && types->side_facts != NULL && types->side_call_variadic != NULL && types->side_argument_classes != NULL;
+        room = sided && types->digests != NULL && types->firsts != NULL && types->counts != NULL && types->refusals != NULL && types->library != NULL &&
                types->sweep_refusals != NULL && types->targets != NULL && types->objects != NULL && types->tape_firsts != NULL && types->tape_counts != NULL &&
                types->side_digests != NULL && types->tape_kinds != NULL && types->tape_classes != NULL && types->tape_values != NULL && types->tests != NULL &&
                types->kinds != NULL && types->declared != NULL && types->declarations != NULL;
@@ -400,6 +517,7 @@ static NodeFrontTypes* node_alone_results(CheckInputReader* reader, const NodeFr
         memset(types->library, 0, capacity);
         types->tape_capacity = tape_capacity;
         types->node_capacity = capacity;
+        types->split = (reader->pp->options.node_reader & BUSTER_NODE_READER_SPLIT) != 0;
         types->object_declarations = from->object_declarations;
         types->object_facts = from->object_facts;
         types->object_count = from->object_count;
@@ -424,6 +542,8 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint64_t* past = arena_push_array(reader->scratch, words, sizeof(uint64_t), _Alignof(uint64_t));
     uint32_t* roots = arena_push_array(reader->arena, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* chains = arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* root_tokens = arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* control_roots = arena_push_array(reader->arena, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
     // A body an opening brace at most: the room for every one.
     uint32_t bodies = 0;
     for (uint32_t token = 0; token < count; token += 1)
@@ -435,7 +555,9 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint32_t* openings = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* verdict_openings = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint8_t* verdicts = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
-    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL &&
+    uint64_t* body_ticks = arena_push_array(reader->arena, 3 * ((uint64_t)bodies + 1), sizeof(uint64_t), _Alignof(uint64_t));
+    uint8_t* body_scanned = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
+    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && root_tokens != NULL && control_roots != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL && body_ticks != NULL && body_scanned != NULL &&
                 typer != NULL && typer->types != NULL && typer->tests != NULL && typer->types->sweep_refusals != NULL && typer->facts == NULL &&
                 reader->postorder != NULL && reader->postorder_positions != NULL;
     if (room)
@@ -461,6 +583,8 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         memset(past, 0, (uint64_t)words * sizeof(uint64_t));
         memset(roots, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(chains, 0, (uint64_t)capacity * sizeof(uint32_t));
+        memset(root_tokens, 0xff, (uint64_t)capacity * sizeof(uint32_t));
+        memset(control_roots, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         report->nodes = bits;
         report->past = past;
         // The front marks a node's context unknown where a left token takes its value: in the graph's own column.
@@ -533,11 +657,17 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         alone->body_openings = openings;
         shadow->alone_body_openings = verdict_openings;
         shadow->alone_body_verdicts = verdicts;
+        shadow->alone_body_reading = body_ticks;
+        shadow->alone_body_machine = body_ticks + bodies + 1;
+        shadow->alone_body_before = body_ticks + 2 * ((uint64_t)bodies + 1);
+        shadow->alone_body_scanned = body_scanned;
         shadow->alone_body_count = 0;
         // What the shadow reads after the pipeline is the walk's front's report.
         shadow->alone_types = types;
         shadow->alone_roots = roots;
         shadow->alone_chains = chains;
+        shadow->alone_root_tokens = root_tokens;
+        shadow->alone_control_roots = control_roots;
     }
     return room ? alone : NULL;
 }

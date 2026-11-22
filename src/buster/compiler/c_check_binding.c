@@ -279,6 +279,87 @@ static uint32_t check_input_use_events(const CBindings* events, uint32_t* list, 
     return found;
 }
 
+// Whether a function definition's declarations up to it (`event`'s, and the earlier ones of its scope) give it a
+// constructor or destructor attribute (#3300): clang's DeclMustBeEmitted emits such a definition, which
+// ShouldWarnIfUnusedFileScopedDecl then never calls unused. One only declared is still unused, and so is one whose
+// attribute comes after its definition, which clang ignores. Asked only of an unused function's definition.
+static bool check_input_unused_structor(const CheckInput* input, const CBindings* events, uint32_t event)
+{
+    bool structor = false;
+    for (uint32_t at = event + 1, steps = 0; !structor && at != 0 && at <= events->count && steps < events->count; steps += 1)
+    {
+        const uint32_t declaration = at - 1;
+        const bool chained = events->operation[declaration] == C_BINDING_DECLARE && events->key[declaration] == events->key[event] &&
+                             events->depth[declaration] == events->depth[event] && events->declaration[declaration] < input->token_count;
+        const CheckInputAttributes* attributes = chained ? check_input_attributes_at(input, events->declaration[declaration]) : NULL;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            structor |= !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_CONSTRUCTOR || attribute->kind == CHECK_ATTRIBUTE_DESTRUCTOR);
+        }
+        at = chained ? events->previous[declaration] : 0;
+    }
+    return structor;
+}
+
+// The functions and variables alias and ifunc attributes name (#3300, CheckInputAttribute.alias_target): each is used and
+// read, with the declarations of its scope before it, as a use's walk in check_input_binding_answers makes its
+// declaration's chain; the later declarations follow there. An attribute its subject check ignored marks nothing. Only
+// a unit whose reading found such a target pays: a scan of its tokens with attributes, and one of its declarations.
+static bool check_input_alias_used(CheckInputReader* reader, uint8_t* used, uint8_t* used_tokens, uint8_t* read_tokens, const uint32_t* declares,
+                                   uint32_t declare_count)
+{
+    const CheckInput* input = reader->output;
+    const CBindings* events = &reader->bindings;
+    const uint32_t count = reader->parser->tokens.count;
+    uint8_t* named = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, count);
+    const bool valid = named != NULL;
+    if (valid)
+    {
+        memset(named, 0, count);
+    }
+    for (uint32_t first = valid ? check_input_attributed_next(input->attributes, 0, count) : count; first < count;
+         first = check_input_attributed_next(input->attributes, first + 16, count))
+    {
+        for (uint32_t selected = check_input_attributed_group(input->attributes, first, count); selected != 0; selected &= selected - 1)
+        {
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, first + (uint32_t)__builtin_ctz(selected));
+            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                const uint32_t target = attribute->alias_target;
+                const bool aliasing = attribute->kind == CHECK_ATTRIBUTE_ALIAS || attribute->kind == CHECK_ATTRIBUTE_IFUNC;
+                if (aliasing && !attribute->ignored && target != 0 && target <= count)
+                {
+                    named[target - 1] = 1;
+                }
+            }
+        }
+    }
+    for (uint32_t at_declare = 0; valid && at_declare < declare_count; at_declare += 1)
+    {
+        const uint32_t event = declares != NULL ? declares[at_declare] : at_declare;
+        const uint32_t token = events->declaration[event];
+        uint32_t at = events->operation[event] == C_BINDING_DECLARE && token < count && named[token] != 0 ? event + 1 : 0;
+        for (uint32_t steps = 0; at != 0 && at <= events->count && steps < events->count; steps += 1)
+        {
+            const uint32_t declaration = at - 1;
+            const uint32_t walked = events->declaration[declaration];
+            const bool chained = events->operation[declaration] == C_BINDING_DECLARE && events->key[declaration] == events->key[event] &&
+                                 events->depth[declaration] == events->depth[event] && used[declaration] == 0 && walked < count;
+            if (chained)
+            {
+                used[declaration] = 1;
+                used_tokens[walked] = 1;
+                read_tokens[walked] = 1;
+            }
+            at = chained ? events->previous[declaration] : 0;
+        }
+    }
+    reader->output->resource |= !valid;
+    return valid;
+}
+
 // Defined with the command-line mapping and diagnostic-pragma history in c_check_diagnostic.c.
 static bool check_input_unused_may_report(const Preprocessor* pp, const CheckInput* input);
 
@@ -378,10 +459,15 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         // scope's end with the unused ones (#2409). A static local's too; a parameter's is the -Wuninitialized pass's.
         const bool set_only = local && !parameter && kind == C_BINDING_OBJECT && declaration_used && !invalid_declaration &&
                               read_tokens[token] == 0;
+        // A constructor's or destructor's definition is emitted, never unused (check_input_unused_structor): asked last,
+        // as it walks the chain.
+        const bool definition = kind == C_BINDING_FUNCTION && token < count && output->declaration_bits != NULL &&
+                                check_input_bit(output->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
         const bool selected = events->operation[event] == C_BINDING_DECLARE && events->key[event] / events->name_capacity == C_BINDING_ORDINARY &&
                               token < count && !implicit && !inline_function && (!declaration_used || set_only) &&
                               !check_input_unused_suppressed(output, token, kind) && chain_marked[event] == 0 && main_file &&
-                              (parameter || local_typedef || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u));
+                              (parameter || local_typedef || check_input_linkage(output->declaration_bits, token) == (local ? 0u : 1u)) &&
+                              !(definition && check_input_unused_structor(output, events, event));
         const uint32_t first = events->operation[event] == C_BINDING_DECLARE ? chain_first[event] : event;
         const uint32_t chosen = chain_definition[first] != 0 ? chain_definition[first] : events->declaration[first];
         const uint32_t id = set_only ? CHECK_WARNING_ID_UNUSED_BUT_SET_VARIABLE : kind == C_BINDING_FUNCTION ? CHECK_WARNING_ID_UNUSED_FUNCTION :
@@ -738,8 +824,10 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                     }
                 }
             }
+            // An alias's or ifunc's target is used too, as clang's markUsedForAliasOrIfunc makes it (#3300).
+            const bool aliased = !reader->alias_targets || check_input_alias_used(reader, used, used_tokens, read_tokens, declares, declare_count);
             // A use that bound an earlier declaration also keeps a later definition of the same entity used.
-            for (uint32_t at_declare = 0; at_declare < declare_count; at_declare += 1)
+            for (uint32_t at_declare = 0; aliased && at_declare < declare_count; at_declare += 1)
             {
                 const uint32_t event = declares != NULL ? declares[at_declare] : at_declare;
                 const uint32_t previous = events->previous[event];
@@ -750,7 +838,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                     used[event] = 1;
                 }
             }
-            if (check_input_parameter_marks(output, parser, parameters))
+            if (aliased && check_input_parameter_marks(output, parser, parameters))
             {
                 check_input_unused_events(reader, used, used_tokens, read_tokens, parameters, reported, declares, declare_count);
             }

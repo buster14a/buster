@@ -371,7 +371,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone|--front-alone-split|--front-alone-first] [--bodies] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -2751,7 +2751,8 @@ It reports three lines a run:
   the bodies alone); the roots it took at whose tokens the walk then raised
   a warning's event; and the roots it took with, among their expression's
   tokens, one the walk's class actions left to its visit (the option asks
-  the walk to mark them, as its numbering's check does).
+  the walk to mark them, as its numbering's check does), with how many such
+  tokens the bodies hold.
 - `alone lowered-bodies' verdicts before the walk` and `alone bodies whole`:
   what it said of each body the lowering lowered, before the walk acted at
   it (every root taken; or a root the front lost, a root not run, T's
@@ -2759,13 +2760,113 @@ It reports three lines a run:
   the times its front lost its waiting values; and its whole bodies against
   those whose every popped root the machine on the walk's nodes takes.
 
+Two more kinds of line follow in every such run:
+
+- `alone verdict=... bodies=... tokens=... ticks: reading=...
+  the-machine's-first-run=... by-the-chunk-that-stops-them=...
+  a-scan-of-the-tokens-refuses: bodies=... tokens=...`, one a verdict: its
+  bodies' ticks (their reading, the machine's first run on them, and what
+  was spent by the end of the chunk in which each is first stopped), and how
+  many of them a scan of their tokens alone finds a lost root in.
+- `alone a scan of every body's tokens for a root the front would lose:
+  tokens-read=... ticks=... a-token-read=...`: the scan's own cost. It reads
+  a body's tokens' kinds and parents and the walk's visit bytes before any of
+  the body is compacted, and finds a lost root where a token the front
+  leaves (a `sizeof` or `_Alignof`, a token of the walk's own visit, a
+  character constant with an escape or of several characters) has its value
+  reach a root's token through the parents that take values. It refuses
+  nothing here: the lines say what it would.
+
+`--front-alone-split` is the same run with the clock read before each of the
+machine's sweeps and after the last, in its first run, and one line more:
+`alone the machine's first run by sweep: T=... the-tests=... C=... X=...`, the
+reads it took, and what is left of the run (its loop, the roots' ranges, the
+settling of the types made since the last chunk).
+
+`--front-alone-first` reads every body of the unit before the walk's first
+chunk, where `--front-alone` reads each before the walk acts at it: what a
+compile that walks none of them would read.
+
 A difference, a root only one of the two ran on in a body, a root taken
 before an event of the walk's or with a token its actions left, or a lowered
 body it did not read makes the command exit 1. While the machine runs, the
 reader's own graph has no column of nodes, so a read of the walk's node
 faults. `--list N` prints the first N
-differences (`alone difference file=... line=... field=...`) and the first N
-bodies it refuses whose popped roots the other takes.
+differences (`alone difference file=... line=... field=...`), the first N
+bodies it refuses whose popped roots the other takes, and the first N bodies
+the scan and the front disagree on (`alone the scan finds ...`).
+
+### A body's entries from its controls and its tapes (#2850)
+
+`./build/compiler measure-node-machine --shadow --bodies [--list N] [preprocessor options] file...`
+makes each lowered body's stream again, after the pipeline, from the
+program's controls and the tapes the machine makes of the body's roots, and
+compares it with the lowered function's, entry for entry: kind, class and
+value. No compile takes it
+([the node machine](../node-machine.md#a-bodys-entries-from-its-controls-and-its-tapes)).
+
+It reports two lines a run, and a third where it applies:
+
+- `bodies lowered=... the-machine-takes-every-root-of=... attempted=...
+  same=... different=...`: the lowered bodies and their tokens; those whose
+  every popped root the machine takes; those the piece attempts, with their
+  tokens and the entries it made; those whose entries are the lowered
+  function's, and those that differ.
+- `bodies left out, by the first reason: ...`: the others, in bodies and
+  tokens: a root the machine does not take; a root that is no control's of
+  its own; a tracked stack; copies of parameters without a prototype; a
+  result of another class; a control of another kind; a return of another
+  kind; an initialization of another form; no room.
+
+Where a body is left out for a control of another kind, a third line counts
+those bodies by the first such control's kind (`switch=...`).
+
+With `--front-alone` the comparison is made a second time before the walk
+([the node machine](../node-machine.md#the-same-comparison-before-the-walk)),
+and the run has these lines more:
+
+- `alone roots against the program's controls with an expression, in the
+  lowered bodies: evaluate=... branch=... return=... initialize=...
+  another=...`: by the control's kind, the controls, those whose
+  expression's root's token has one root the machine ran on before the walk,
+  none or several, and those whose root's control's token is the control's;
+  then the roots it ran on in those bodies and those some control has.
+- `bodies before the walk lowered=... attempted=... same=... different=...`
+  and `bodies before the walk left out, by the first reason: ...`: the same
+  two lines for the entries made from the tapes kept before the walk, each
+  control finding its root by its token; "every root the machine's" is that
+  machine's verdict of the body before the walk. Two reasons are its own: a
+  control whose root is not kept before the walk, and a condition that is a
+  constant (an `if`'s).
+- `bodies before the walk the program dropped a range of=...
+  attempted-there=...`: the bodies with a constant `if` the program folded,
+  and those of them attempted, which must be none.
+- `controls from the tokens: attempted=... same=... different=... left out:
+  ...`: the bodies whose controls the twin made from the tokens, its
+  controls, the bodies whose controls are the program's and those that
+  differ, and the others by reason (not whole before the walk, a range the
+  program dropped, a `switch`, an `asm` statement, a variable-length array or
+  `typeof`, a cleanup, a jump of another kind, a block's static or extern
+  declaration, a statement expression, a shape it does not know, no room).
+
+- `controls from the tokens, the return flow: its silence proved for=...
+  the program warns of=... proved-silent-and-warned-of=...`: of the bodies
+  the twin attempts, those whose END its controls cannot reach (or whose
+  function is `main`, or has no result and is not `noreturn`), those the
+  program's own return flow has a warning for, and those of them the proof
+  called silent, which must be none.
+
+A body that differs in either, one attempted where the program dropped a
+range, or one proved silent that the program warns of makes the command exit
+1; `--list N` prints the first N of each
+(`bodies before the walk difference ...`, `controls from the tokens
+difference file=... line=... field=... control=...`).
+
+A body that differs makes the command exit 1. `--list N` prints the first N
+(`bodies difference file=... line=... field=... entry=...`: the body's first
+line, the first field that differs among `count`, `locals`, `calls`,
+`calls'-rows`, `kind`, `class`, `local`, `label`, `temporary` and `value`,
+and the entry).
 
 ### Compiling with the window (#2850)
 

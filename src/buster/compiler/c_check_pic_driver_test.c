@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #811: PIC predefines must not advertise shared-library code generation that the backend does not implement.
-// Exercise the real driver, including option ordering and rejection before output publication. -c's object refuses
-// -fPIC and -fpic; a link's executable takes them (#2101), the same code as without them, with clang's predefined macros.
+// #811 and #2101: -fPIC's and -fpic's code, through the real driver. -c's object (and check -c's, and -S's) is
+// position-independent code a shared library may take: a symbol another module may preempt through its GOT, a
+// thread-local by general- or local-dynamic access (CheckProgramOptions.pic); -shared links one, through the mixed
+// path's writer; a link's executable takes the options with the code it has without them, byte for byte. The library
+// test builds clang 23's -fPIC library's twins three ways (buster's -shared, buster's -c and cc -shared, and their
+// executables linked from the objects) and runs the same programs against each: a threaded one, one that preempts the
+// library's definitions, and a dlopen harness. The option order's last PIC or PIE option decides, with clang's macros.
 
 typedef enum CheckPicAction
 {
@@ -419,6 +423,195 @@ static void check_test_driver_pic_kinds(CheckTest* test, const char* executable,
     unlink(output);
 }
 
+// Runs `arguments` (a null-terminated list) and keeps its standard output in `*text` (the caller frees it): its status.
+static int check_test_driver_pic_output(char* const* arguments, char** text)
+{
+    *text = NULL;
+    return check_test_driver_spawn_stream(arguments, text, true);
+}
+
+// #2101: a shared library of -fPIC's code. Its source has what clang 23.1.4's -fPIC reaches otherwise than -fPIE's: an
+// exported object (through its GOT slot), a function called by its PLT entry and whose address goes through its GOT
+// slot, an exported thread-local (general-dynamic) and the unit's own (local-dynamic), the program's object it refers
+// to, besides a hidden object, a static one and a static function, which stay direct; and its unwind tables, which
+// refer to their functions through their section's symbol; then thread-locals of every shape (`shapes`), one of them a
+// second unit's, which defines it and has no function. Three programs, linked by the driver against clang's
+// library at DIRECTORY/libpic.so: `main` calls it from two threads, `preempt` defines the library's exported object,
+// thread-local and function, which the library must then reach (its address of the function, as Tier 1, like clang
+// -O1, may expand a call of it), and `dl` (clang's, with -rdynamic) loads it by dlopen. Each library takes clang's place
+// in turn, and each program's output must be the one it gives with clang's: buster's -shared at Tier 0 with -fPIC and
+// at Tier 1 with -fpic, and its -c object linked by cc -shared; then executables of the program and the object, linked
+// by the driver and by cc.
+static void check_test_driver_pic_library(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char library_text[] =
+        "int shared_counter = 5;\nstatic int local_counter = 7;\n__attribute__((visibility(\"hidden\"))) int hidden_value = 9;\n"
+        "_Thread_local int tls_value = 3;\nstatic _Thread_local int tls_own = 4;\nextern int program_value;\n"
+        "int helper(int x) { return x * 2; }\nstatic int private_helper(int x) { return x + 1; }\nconst char* message = \"pic\";\n"
+        "int (*helper_pointer)(int) = helper;\nint (*helper_address(void))(int) { return helper; }\nint* tls_address(void) { return &tls_value; }\n"
+        "long api(int x)\n{\n    shared_counter += x;\n    local_counter++;\n    tls_value += x;\n    tls_own++;\n"
+        "    return ((((long)shared_counter * 100 + local_counter) * 100 + tls_value) * 100 + tls_own) * 10000 + helper(x) + program_value +\n"
+        "           private_helper(x) + hidden_value + message[0];\n}\n"
+        // Thread-locals' shapes, each access a call of an accessor and the access through its result: updates of
+        // every class (long double's in memory), an array, a struct's members and bit-fields, a volatile one, an
+        // atomic one, a block-scope one, one whose address is kept, and another unit's.
+        "_Thread_local char tls_char = 3;\n_Thread_local _Bool tls_bool;\n_Thread_local float tls_float = 1.5f;\n_Thread_local double tls_double = 2.25;\n"
+        "_Thread_local long double tls_long_double = 3.5L;\n_Thread_local int tls_array[4] = { 1, 2, 3, 4 };\n"
+        "_Thread_local struct { int a; double b; unsigned bits : 5; unsigned more : 3; } tls_record = { 4, 5.5, 7, 2 };\n"
+        "static _Thread_local volatile int tls_volatile = 9;\n_Thread_local _Atomic int tls_atomic = 10;\n_Thread_local int* tls_pointer;\n"
+        "extern _Thread_local int tls_other;\n"
+        "long shapes(int x)\n{\n    static _Thread_local int calls;\n    long sum = tls_own++ + ++tls_value + (calls += x);\n"
+        "    tls_char += (char)x;\n    tls_bool = !tls_bool;\n    tls_float *= 2.0f;\n    tls_double += x;\n    tls_long_double = tls_long_double * 2 + x;\n"
+        "    sum += tls_char + tls_bool + (long)tls_float + (long)(tls_double * 4) + (long)tls_long_double;\n"
+        "    for (int i = 0; i < 4; i++) { tls_array[i] += i * x; sum += tls_array[i]; }\n"
+        "    tls_record.a -= x;\n    tls_record.b *= 1.5;\n    tls_record.bits += 3;\n    tls_record.more ^= 1;\n"
+        "    sum += tls_record.a + (long)tls_record.b + tls_record.bits + tls_record.more;\n    tls_volatile = tls_volatile + 1;\n"
+        "    tls_atomic += x;\n    tls_pointer = &tls_value;\n    *tls_pointer += 100;\n    sum += tls_volatile + tls_atomic + *tls_pointer + tls_other;\n"
+        "    tls_other = x;\n    return sum;\n}\n";
+    // A unit with a thread-local and no function: no accessor, and no unwind table.
+    static const char data_text[] = "_Thread_local int tls_other = 42;\n";
+    static const char main_text[] =
+        "#include <pthread.h>\n#include <stdio.h>\nlong api(int);\nextern int shared_counter;\nextern _Thread_local int tls_value;\n"
+        "int* tls_address(void);\nlong shapes(int);\nint program_value = 100;\n"
+        "static void* worker(void* argument)\n{\n    (void)argument;\n    tls_value = 50;\n    const long first = api(1);\n    const long second = shapes(5);\n"
+        "    printf(\"%ld %d %ld\\n\", first, tls_address() == &tls_value, second);\n    return 0;\n}\n"
+        // (Each call a statement of its own: the calls change what the others read, in any order of the arguments.)
+        "int main(void)\n{\n    long first = api(2);\n    long second = shapes(1);\n    printf(\"%ld %ld\\n\", first, second);\n    tls_value += 10;\n"
+        "    first = api(3);\n    second = shapes(2);\n    printf(\"%ld %d %ld\\n\", first, tls_address() == &tls_value, second);\n"
+        "    pthread_t thread;\n    if (pthread_create(&thread, 0, worker, 0) != 0 || pthread_join(thread, 0) != 0) return 1;\n"
+        "    printf(\"%d %d\\n\", shared_counter, tls_value);\n    return 0;\n}\n";
+    static const char preempt_text[] =
+        "#include <stdio.h>\nint program_value = 1000;\nint shared_counter = 40;\n_Thread_local int tls_value = 20;\nint helper(int x) { return -x; }\n"
+        "long api(int);\nint (*helper_address(void))(int);\nextern int (*helper_pointer)(int);\nint* tls_address(void);\n"
+        "int main(void)\n{\n    api(1);\n    printf(\"%d %d %d %d %d\\n\", shared_counter, tls_value, helper_address() == helper, helper_pointer == helper,\n"
+        "           tls_address() == &tls_value);\n    return 0;\n}\n";
+    static const char dl_text[] =
+        "#include <dlfcn.h>\n#include <stdio.h>\nint program_value = 7;\n"
+        "int main(int argc, char** argv)\n{\n    void* library = argc > 1 ? dlopen(argv[1], RTLD_NOW) : 0;\n    if (library == 0) return 2;\n"
+        "    long (*api)(int) = (long (*)(int))dlsym(library, \"api\");\n    int* tls = (int*)dlsym(library, \"tls_value\");\n"
+        "    if (api == 0 || tls == 0) return 3;\n    printf(\"%ld\\n\", api(5));\n    const long last = api(6);\n    printf(\"%ld %d\\n\", last, *tls);\n    return 0;\n}\n";
+    char library_source[256];
+    char data_source[256];
+    char data_object[256];
+    char main_source[256];
+    char preempt_source[256];
+    char dl_source[256];
+    char library[256];
+    char object[256];
+    char programs[3][256];
+    char direct[256];
+    char rpath[300];
+    char label[512];
+    snprintf(library_source, sizeof(library_source), "%s/pic-library.c", directory);
+    snprintf(data_source, sizeof(data_source), "%s/pic-library-data.c", directory);
+    snprintf(data_object, sizeof(data_object), "%s/pic-library-data.o", directory);
+    snprintf(main_source, sizeof(main_source), "%s/pic-main.c", directory);
+    snprintf(preempt_source, sizeof(preempt_source), "%s/pic-preempt.c", directory);
+    snprintf(dl_source, sizeof(dl_source), "%s/pic-dl.c", directory);
+    snprintf(library, sizeof(library), "%s/libpic.so", directory);
+    snprintf(object, sizeof(object), "%s/pic-library.o", directory);
+    snprintf(programs[0], sizeof(programs[0]), "%s/pic-main", directory);
+    snprintf(programs[1], sizeof(programs[1]), "%s/pic-preempt", directory);
+    snprintf(programs[2], sizeof(programs[2]), "%s/pic-dl", directory);
+    snprintf(direct, sizeof(direct), "%s/pic-direct", directory);
+    snprintf(rpath, sizeof(rpath), "-Wl,-rpath,%s", directory);
+    const bool written = parse_test_write(library_source, library_text, sizeof(library_text) - 1) && parse_test_write(data_source, data_text, sizeof(data_text) - 1) &&
+                         parse_test_write(main_source, main_text, sizeof(main_text) - 1) &&
+                         parse_test_write(preempt_source, preempt_text, sizeof(preempt_text) - 1) && parse_test_write(dl_source, dl_text, sizeof(dl_text) - 1);
+    // clang's library, and the programs against it.
+    char* text = NULL;
+    char* clang_library[] = { "clang", "-shared", "-fPIC", "-O0", "-Wl,-soname,libpic.so", "-o", library, library_source, data_source, NULL };
+    const bool reference = written && check_test_driver_spawn(clang_library, &text) == 0;
+    free(text);
+    char* link_main[] = { (char*)executable, "-pthread", "-o", programs[0], main_source, library, rpath, NULL };
+    char* link_preempt[] = { (char*)executable, "-o", programs[1], preempt_source, library, rpath, NULL };
+    char* link_dl[] = { "clang", "-rdynamic", "-o", programs[2], dl_source, NULL };
+    char* const* links[3] = { link_main, link_preempt, link_dl };
+    bool linked = reference;
+    for (uint32_t p = 0; linked && p < 3; p += 1)
+    {
+        text = NULL;
+        linked = check_test_driver_spawn(links[p], &text) == 0;
+        free(text);
+    }
+    check_test_expect(test, linked, "PIC library: clang's library and the programs against it, linked by the driver");
+    char* expected[3] = { NULL, NULL, NULL };
+    char* run_main[] = { programs[0], NULL };
+    char* run_preempt[] = { programs[1], NULL };
+    char* run_dl[] = { programs[2], library, NULL };
+    char* const* runs[3] = { run_main, run_preempt, run_dl };
+    bool expectations = linked;
+    for (uint32_t p = 0; expectations && p < 3; p += 1)
+    {
+        expectations = check_test_driver_pic_output(runs[p], &expected[p]) == 0 && expected[p] != NULL;
+    }
+    check_test_expect(test, expectations && strcmp(expected[1], "41 21 1 1 1\n") == 0, "PIC library: clang's library runs, preempted by the program");
+    // Buster's libraries in its place.
+    char* tier0[] = { (char*)executable, "-shared", "-fPIC", "-Wl,-soname,libpic.so", "-o", library, library_source, data_source, NULL };
+    char* tier1[] = { (char*)executable, "-shared", "-fpic", "--tier1", "-Wl,-soname=libpic.so", "-o", library, library_source, data_source, NULL };
+    char* compiled[] = { (char*)executable, "-c", "-fPIC", "-o", object, library_source, NULL };
+    char* compiled_data[] = { (char*)executable, "-c", "-fPIC", "-o", data_object, data_source, NULL };
+    char* system_link[] = { "cc", "-shared", "-Wl,-soname,libpic.so", "-o", library, object, data_object, NULL };
+    static const char* const variants[] = {
+        "-shared -fPIC",
+        "-shared -fpic --tier1",
+        "-c -fPIC and cc -shared",
+    };
+    for (uint32_t v = 0; expectations && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        unlink(library);
+        text = NULL;
+        bool built = check_test_driver_spawn(v == 0 ? tier0 : v == 1 ? tier1 : compiled, &text) == 0;
+        free(text);
+        if (built && v == 2)
+        {
+            text = NULL;
+            built = check_test_driver_spawn(compiled_data, &text) == 0;
+            free(text);
+            text = NULL;
+            built = built && check_test_driver_spawn(system_link, &text) == 0;
+            free(text);
+        }
+        snprintf(label, sizeof(label), "PIC library: buster's library by %s links", variants[v]);
+        check_test_expect(test, built, label);
+        for (uint32_t p = 0; built && p < 3; p += 1)
+        {
+            char* output = NULL;
+            const int status = check_test_driver_pic_output(runs[p], &output);
+            snprintf(label, sizeof(label), "PIC library: buster's library by %s runs %s as clang's does", variants[v], p == 0 ? "the threads" : p == 1 ? "the preempting program" : "dlopen's harness");
+            check_test_expect(test, status == 0 && output != NULL && strcmp(output, expected[p]) == 0, label);
+            free(output);
+        }
+    }
+    // The object in an executable: the driver's link (the mixed path's writer) and cc's relax its general- and
+    // local-dynamic accesses and its GOT loads.
+    char* link_direct[] = { (char*)executable, "-pthread", "-o", direct, main_source, object, data_object, NULL };
+    char* system_direct[] = { "cc", "-pthread", "-o", direct, main_source, object, data_object, NULL };
+    char* run_direct[] = { direct, NULL };
+    for (uint32_t l = 0; expectations && l < 2; l += 1)
+    {
+        unlink(direct);
+        text = NULL;
+        const bool built = access(object, F_OK) == 0 && access(data_object, F_OK) == 0 && check_test_driver_spawn(l == 0 ? link_direct : system_direct, &text) == 0;
+        free(text);
+        char* output = NULL;
+        const int status = built ? check_test_driver_pic_output(run_direct, &output) : -1;
+        snprintf(label, sizeof(label), "PIC library: an executable of the program and the -fPIC object, linked by %s, runs as clang's library does", l == 0 ? "the driver" : "cc");
+        check_test_expect(test, status == 0 && output != NULL && strcmp(output, expected[0]) == 0, label);
+        free(output);
+    }
+    for (uint32_t p = 0; p < 3; p += 1)
+    {
+        free(expected[p]);
+        unlink(programs[p]);
+    }
+    const char* const files[] = { library_source, data_source, main_source, preempt_source, dl_source, library, object, data_object, direct };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
+    {
+        unlink(files[f]);
+    }
+}
+
 static void check_test_driver_pic(CheckTest* test, const char* executable, const char* directory)
 {
     check_test_driver_object_options(test, executable, directory);
@@ -468,8 +661,8 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
             {
                 for (uint32_t mode = BUSTER_CHECK_PIC_OBJECT; mode <= BUSTER_CHECK_PIC_LINK; mode += 1)
                 {
-                    // -c's object, which another link may take, is refused; a link's executable takes the option and
-                    // runs (#2101), replacing what was at its path.
+                    // -c's and check -c's object, which a shared library may take (#2101), and a link's executable, which
+                    // runs, each replacing what was at its path.
                     const bool linked = mode == BUSTER_CHECK_PIC_LINK;
                     for (uint32_t existing = 0; existing < 2; existing += 1)
                     {
@@ -479,31 +672,44 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
                         char* text = NULL;
                         const int status = check_test_driver_pic_command(executable, source, output, scalar != 0, (CheckPicAction)mode,
                                                                         options, BUSTER_ARRAY_LENGTH(options), &text);
-                        char expected[128];
-                        snprintf(expected, sizeof(expected), "unsupported code generation option '%s'", flags[flag]);
-                        const bool refused = status == 1 && text != NULL && strstr(text, expected) != NULL &&
-                                             (existing == 0 ? access(output, F_OK) != 0 : saved_written && check_test_driver_same_files(saved, output));
+                        const bool written = status == 0 && access(output, F_OK) == 0 && !check_test_driver_same_files(saved, output);
                         char* run[] = { output, NULL };
                         char* run_text = NULL;
-                        const int ran = linked && status == 0 ? check_test_driver_spawn(run, &run_text) : -1;
+                        const int ran = linked && written ? check_test_driver_spawn(run, &run_text) : 0;
                         free(run_text);
-                        snprintf(label, sizeof(label), "PIC %s fixture=%u scalar=%u flag=%s mode=%u existing=%u", linked ? "link" : "rejection", fixture, scalar,
+                        snprintf(label, sizeof(label), "PIC %s fixture=%u scalar=%u flag=%s mode=%u existing=%u", linked ? "link" : "object", fixture, scalar,
                                  flags[flag], mode, existing);
-                        check_test_expect(test, prepared && (linked ? status == 0 && ran == 0 : refused), label);
+                        check_test_expect(test, prepared && written && ran == 0, label);
                         free(text);
                     }
                 }
             }
         }
     }
-    // The complete PIC/PIE family shares one last-option state in the predefines parser. Check both orders.
+    // The complete PIC/PIE family shares one last-option state in the predefines parser. Check both orders: the last
+    // decides between -fPIC's object and the one without it, which differ (the exported object through its GOT slot).
     const bool ordinary = parse_test_write(source, programs[0], strlen(programs[0]));
     check_test_expect(test, ordinary, "PIC option-order fixture is written");
     if (ordinary)
     {
         check_test_driver_pic_kinds(test, executable, directory, source);
+        check_test_driver_pic_library(test, executable, directory);
     }
-    for (uint32_t flag = 0; ordinary && flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
+    char plain[256];
+    char positioned[256];
+    snprintf(plain, sizeof(plain), "%s/pic-driver-plain.o", directory);
+    snprintf(positioned, sizeof(positioned), "%s/pic-driver-pic.o", directory);
+    const char* pic_option[] = { "-fPIC" };
+    char* reference_text = NULL;
+    unlink(plain);
+    unlink(positioned);
+    const bool references = ordinary && check_test_driver_pic_command(executable, source, plain, false, BUSTER_CHECK_PIC_OBJECT, NULL, 0, &reference_text) == 0;
+    free(reference_text);
+    reference_text = NULL;
+    const bool pic_reference = references && check_test_driver_pic_command(executable, source, positioned, false, BUSTER_CHECK_PIC_OBJECT, pic_option, 1, &reference_text) == 0;
+    free(reference_text);
+    check_test_expect(test, pic_reference && !check_test_driver_same_files(plain, positioned), "PIC option order: -fPIC's object isn't the one without it");
+    for (uint32_t flag = 0; pic_reference && flag < BUSTER_ARRAY_LENGTH(flags); flag += 1)
     {
         for (uint32_t override = 0; override < BUSTER_ARRAY_LENGTH(overrides); override += 1)
         {
@@ -517,11 +723,8 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
                 char* text = NULL;
                 const int status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_OBJECT,
                                                                 options, BUSTER_ARRAY_LENGTH(options), &text);
-                snprintf(label, sizeof(label), "PIC option order %s %s", options[0], options[1]);
-                char expected[128];
-                snprintf(expected, sizeof(expected), "unsupported code generation option '%s'", flags[flag]);
-                check_test_expect(test, reverse != 0 ? status == 1 && text != NULL && strstr(text, expected) != NULL && access(output, F_OK) != 0 :
-                                                      status == 0 && access(output, F_OK) == 0, label);
+                snprintf(label, sizeof(label), "PIC option order %s %s is %s object", options[0], options[1], reverse != 0 ? "-fPIC's" : "the plain");
+                check_test_expect(test, status == 0 && check_test_driver_same_files(reverse != 0 ? positioned : plain, output), label);
                 free(text);
             }
         }
@@ -530,10 +733,7 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
         unlink(output);
         const int status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_OBJECT,
                                                         repeated, BUSTER_ARRAY_LENGTH(repeated), &text);
-        char expected[128];
-        snprintf(expected, sizeof(expected), "unsupported code generation option '%s'", flags[flag]);
-        check_test_expect(test, status == 1 && text != NULL && strstr(text, expected) != NULL && access(output, F_OK) != 0,
-                          "PIC diagnostic names the final PIC spelling");
+        check_test_expect(test, status == 0 && check_test_driver_same_files(positioned, output), "PIC option order: -fpic's code is -fPIC's");
         free(text);
         // An option value that happens to spell a PIC flag is a filename, not another code generation request.
         snprintf(header, sizeof(header), "%s/%s", directory, flags[flag]);
@@ -660,14 +860,6 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
         check_test_expect(test, status == 0 && ran == levels[i].status, label);
         free(text);
     }
-    // -shared is still no option of the driver's (#2101's half-step): -fPIC beside it makes no library.
-    const char* shared[] = { "-shared", "-fPIC" };
-    char* shared_text = NULL;
-    unlink(output);
-    const int shared_status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_LINK, shared, BUSTER_ARRAY_LENGTH(shared), &shared_text);
-    check_test_expect(test, shared_status == 1 && shared_text != NULL && strstr(shared_text, "unknown argument: -shared") != NULL && access(output, F_OK) != 0,
-                      "-shared -fPIC is refused and writes nothing");
-    free(shared_text);
     const bool macros_written = parse_test_write(source, macro_program, sizeof(macro_program) - 1);
     check_test_expect(test, macros_written, "PIC macro fixture is written");
     for (uint32_t scalar = 0; macros_written && scalar < 2; scalar += 1)
@@ -690,4 +882,6 @@ static void check_test_driver_pic(CheckTest* test, const char* executable, const
     unlink(source);
     unlink(output);
     unlink(saved);
+    unlink(plain);
+    unlink(positioned);
 }

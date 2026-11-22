@@ -1693,6 +1693,9 @@ static ForeignLinkError foreign_link_dynamic_finish(ForeignLink* output, const F
         output->dynamic.init = foreign_link_named(output, foreign, "_init");
         output->dynamic.fini = foreign_link_named(output, foreign, "_fini");
         output->dynamic.note = foreign_link_abi_note(foreign);
+        // The link's __tls_get_addr (#2101), the loader's, whose general- and local-dynamic accesses (-fPIC's objects')
+        // the writer relaxes to local- and initial-exec, consuming their calls, as the direct path's dynamic_inputs has it.
+        output->dynamic.tls_get_addr = foreign_link_symbol(output, foreign, "__tls_get_addr");
     }
     return result;
 }

@@ -444,13 +444,19 @@ from the command's common options and its recorded language. The single-input
 kernels, option boundaries and a `.S` preprocessing/reassembly execution round-trip.
 
 C-only links retain the existing direct path, including its shared-library
-version validation and runtime snapshot. Mixed links validate the shared
-libraries' versions as the direct path does (#1590,
-`ForeignCommand.library_versions`): a needed library's versioned reference
-binds only to an export at its version and keeps an `--as-needed` library
-that exports it, unless the referring library's `DT_NEEDED` names one, and
-the loaded libraries' version needs are checked before anything is written;
-version needs that don't read are refused as malformed input. When a `-lNAME` or `-l:FILE` request
+validation and runtime snapshot. Mixed links validate shared libraries'
+references and version needs as the direct path does (#1590, #2910,
+`ForeignCommand.library_versions`). A needed library's strong unversioned
+reference requires a default library export or a surviving executable
+definition with default or protected visibility; a versioned reference
+requires an export at that version. An `--as-needed` provider is retained
+unless the executable satisfies the reference or the referring library's
+`DT_NEEDED` already names it. Unversioned retention waits for archive
+resolution and COMDAT selection. Missing strong references are refused
+unless a dependency is absent from the link, and the loaded libraries'
+version needs are checked before anything is written. Weak references do
+not retain providers or cause these refusals. Version needs that don't read
+are refused as malformed input. When a `-lNAME` or `-l:FILE` request
 selects a populated archive, the source command uses the mixed/foreign path
 (#1470), so that archive gets the same lazy member selection and input ordering
 as a positional archive. Empty archives retain the direct path. The selection
@@ -536,7 +542,12 @@ the options say so, and otherwise naming the source and the symbol:
 
 The unwind tables are the `.eh_frame` section's bytes with their symbolic
 relocations (`.long function-.`), as `-c`'s object has them, not CFI
-directives, which are stage 4's. `-save-temps` is still an unknown argument.
+directives, which are stage 4's. With `-fPIC` (#2101) an FDE of a global
+function names a local label the sink puts at it (`.long .Lbuster.lN-.`), as
+`-c`'s object names its section's symbol, so that GNU as's object links into a
+shared library. A position-independent unit that reaches a thread-local is
+refused by name: its accessors are code without instruction records, and the
+sink doesn't print thread-local storage yet. `-save-temps` is still an unknown argument.
 
 The acceptance (`test-assembly-output --c-testsuite DIRECTORY --subset FILE`,
 the inventory's row): each program of `tests/c-testsuite/subset.txt`, at Tier 0

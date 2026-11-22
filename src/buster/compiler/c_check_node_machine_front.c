@@ -134,10 +134,22 @@
 // X run on a graph made of those records alone. After the pipeline each root's results are compared with the ones the
 // machine made of the walk's nodes (BUSTER_NODE_FRONT_TYPES, _SWEEPS and BUSTER_NODE_READER_TESTS, which it asks for).
 #define BUSTER_NODE_READER_ALONE 8192u
+// With it (--front-alone-split): its machine's first run timed by sweep, a clock's read between each two (NodeFrontTypes.
+// sweep_ticks). A reading of its own: the reads are among the sweeps' ticks, so the run's whole is the other's.
+#define BUSTER_NODE_READER_SPLIT 16384u
+// With it (--front-alone-first): every body read before the walk acts at the unit's first chunk, where it otherwise
+// reads a body before the walk acts at that body, the bodies before it walked already. A compile that takes bodies in
+// a row walks none of them, so what it reads of a body must not lean on the walk of another.
+#define BUSTER_NODE_READER_ALONE_FIRST 32768u
 // What it says of a body (NodeFrontShadow.alone_body_verdicts): every root the front made of it is taken (T took it, the
 // tests left it silent, C and X took it) and the front left no token of it; or the first thing in the body's order that
 // stops it: a token the front left or a value it lost (an expression it makes no root of), a root the machine didn't run
 // on, T's refusal, the tests', C's or X's.
+// A kept tape's root's facts (NodeFrontTypes.side_facts): the root is branches (BUSTER_NODE_MACHINE_BRANCHED: its
+// control writes no branch of its own); and its value is a constant: a condition's truth that the program may fold
+// where it is an `if`'s (check_control_fold_truth).
+#define BUSTER_NODE_FRONT_SIDE_BRANCHED 0x01u
+#define BUSTER_NODE_FRONT_SIDE_CONSTANT 0x02u
 #define BUSTER_NODE_ALONE_BODY_WHOLE 0u
 #define BUSTER_NODE_ALONE_BODY_LEFT 1u
 #define BUSTER_NODE_ALONE_BODY_UNRUN 2u
@@ -401,6 +413,11 @@ struct NodeFrontTypes
     // By root node: a digest of T's records (node_machine_digest), the expression's first node and its records (0: T
     // wasn't run on it), and T's refusal (BUSTER_NODE_FRONT_TYPED_REFUSAL) with, after the pipeline, whether the
     // lowering popped the root (_POPPED) and whether the shadow compared it (_COMPARED).
+    // Where the unit asks (BUSTER_NODE_READER_SPLIT), the first run's ticks by sweep: T, the census's tests, C and X; and
+    // how many of the clock's reads made them.
+    bool split;
+    uint64_t sweep_ticks[4];
+    uint64_t sweep_reads;
     uint64_t* digests;
     uint32_t* firsts;
     uint32_t* counts;
@@ -452,6 +469,29 @@ struct NodeFrontTypes
     uint64_t* tape_values;
     uint64_t tape_count;
     uint64_t tape_capacity;
+    // What a splice reads of a kept tape beside its entries (the machine with no node of the walk's alone; null
+    // elsewhere), by root node, for a root C and X took: its labels' first place in `side_labels` (UINT32_MAX: the
+    // stores had no room for the root's) and their count, its calls' first row in the calls' columns and their count,
+    // its temporaries, and its root's facts (BUSTER_NODE_FRONT_SIDE_*). The stores: each label's place on its tape; and,
+    // a call's row, what stands for its callee's symbol (0: none), its arguments' count, their first class in
+    // `side_argument_classes`, and whether it is variadic.
+    uint32_t* side_label_firsts;
+    uint32_t* side_label_counts;
+    uint32_t* side_call_firsts;
+    uint32_t* side_call_counts;
+    uint32_t* side_temporaries;
+    uint8_t* side_facts;
+    uint32_t* side_labels;
+    uint32_t* side_call_targets;
+    uint32_t* side_call_argument_counts;
+    uint32_t* side_call_argument_firsts;
+    uint8_t* side_call_variadic;
+    uint8_t* side_argument_classes;
+    uint64_t side_label_count;
+    uint64_t side_call_count;
+    uint64_t side_argument_count;
+    uint64_t side_capacity;
+    uint64_t side_unkept;
     // A summary's side facts (BUSTER_NODE_READER_WINDOW_ROWS; null otherwise), by root node, for an expression the
     // rows take whole on the window: its references' first in their store (UINT32_MAX: none is kept for the root) and
     // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
@@ -667,6 +707,19 @@ struct NodeFrontShadow
     uint32_t* alone_body_openings;
     uint8_t* alone_body_verdicts;
     uint32_t alone_body_count;
+    // By body, beside its verdict: its reading's ticks and its machine's first run's; those of the two spent by the end
+    // of the chunk in which the body is first stopped (a root lost or refused: all of them for a body that is whole);
+    // and whether a scan of its tokens' kinds and classes alone finds a `sizeof` or `_Alignof`, or a token of the
+    // walk's own visit: what could refuse it before its compaction.
+    uint64_t* alone_body_reading;
+    uint64_t* alone_body_machine;
+    uint64_t* alone_body_before;
+    uint8_t* alone_body_scanned;
+    // By its root's node there: the token of the control a root is the expression of, as the reader has it before the walk
+    // (its root's record's own: a statement's terminator, a condition's, a return's; an initialization's declaration).
+    uint32_t* alone_root_tokens;
+    // By a control's token: the root it is the expression of, plus one (0: none; UINT32_MAX: several).
+    uint32_t* alone_control_roots;
     // What it read: the bodies it read whole and those it left (a body whose tokens are no run of the postorder, or past
     // its graph's room), their postorder positions, the records it made of them, and its ticks, all of it (the
     // compaction, the entries, the front, the records' copy and the machine's runs).
@@ -685,9 +738,16 @@ struct NodeFrontShadow
     // expression with one has no root, and the walk's visit is where its own warnings are).
     uint64_t alone_taken_checked;
     uint64_t alone_taken_declined;
+    // The tokens of the bodies it read that the walk's class actions left to its visit, as the walk marked them: what
+    // the count above is read against (none marked would say nothing).
+    uint64_t alone_declined_tokens;
     uint64_t alone_prepare_ticks;
     uint64_t alone_front_ticks;
     uint64_t alone_write_ticks;
+    // The scan of a body's tokens that says, before any of it is compacted, whether the front would lose a root of it
+    // (node_alone_scan): its ticks and the tokens it read, over every body. It is counted here and refuses nothing.
+    uint64_t alone_scan_ticks;
+    uint64_t alone_scan_tokens;
     // The flat front (BUSTER_NODE_FRONT_FLAT, c_check_node_machine_flat.c). Its passes' ticks after the compaction, its
     // own compaction's, and each stage's (BUSTER_NODE_FLAT_STAGE_*); the tokens it visited, the records it made and
     // the places it left empty, the children its tokens hopped over, the tokens with a child past the rings' reach, and

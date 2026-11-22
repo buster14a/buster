@@ -416,8 +416,8 @@ static SymbolId foreign_driver_entry(const ForeignDriver* driver, const Foreign*
     return name != 0 ? converted->names[name - 1] : 0;
 }
 
-// A shared library's version that the resolution refuses (#1590, ForeignCommand.library_versions), worded as the direct
-// path words it (c_checker_driver.c): a needed library's reference that no library exports at its version, as GNU ld
+// A shared library's reference or version that the resolution refuses (#1590, #2910), worded as the direct
+// path words it (c_checker_driver.c): a needed library's unresolved reference, with its version if any, as GNU ld
 // words it, and a version a loaded library needs of another that that one doesn't define, as glibc's loader words it;
 // each library by its path.
 static void foreign_driver_version_error(const Foreign* foreign)
@@ -429,8 +429,13 @@ static void foreign_driver_version_error(const Foreign* foreign)
     {
         const ImportReferences* references = &library->library.references;
         const String8 version = library->versions.reference_versions[failure->reference];
-        fprintf(stderr, "link-foreign: %.*s: undefined reference to '%.*s@%.*s'\n", (int)path.length, path.pointer, (int)references->length[failure->reference],
-                (const char*)references->name[failure->reference], (int)version.length, version.pointer);
+        fprintf(stderr, "link-foreign: %.*s: undefined reference to '%.*s", (int)path.length, path.pointer, (int)references->length[failure->reference],
+                (const char*)references->name[failure->reference]);
+        if (version.length != 0)
+        {
+            fprintf(stderr, "@%.*s", (int)version.length, version.pointer);
+        }
+        fprintf(stderr, "'\n");
     }
     else
     {

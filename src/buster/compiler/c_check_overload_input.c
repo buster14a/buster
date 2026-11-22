@@ -25,17 +25,20 @@ static uint32_t check_input_overload_flags(const CheckInputAttributes* attribute
 // list (check_input_count_tokens), says it may have some: room for `capacity` candidates, its operands, and `calls`
 // calls, its calls' and function declarators' closing parentheses. check_input_run counts them in its pass over the
 // tokens (check_input_count_tokens).
-static bool check_input_overload_initialize(CheckInputReader* reader, bool present, uint32_t capacity, uint32_t calls)
+static bool check_input_overload_initialize(CheckInputReader* reader, bool present, uint32_t capacity, uint32_t calls, Arena* index_arena)
 {
     const Parser* parser = reader->parser;
+    reader->overload_planned_capacity = capacity;
+    reader->overload_call_capacity = calls;
     bool valid = true;
     if (present)
     {
         CheckInput* input = reader->output;
         reader->overload_capacity = capacity;
+        reader->name_hooks = true;
         reader->overload_candidates = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckOverloadCandidate, (uint64_t)capacity + 1);
         input->overload_heads = BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)parser->tokens.count + 1);
-        valid = check_overload_index_initialize(&reader->overload_index, reader->scratch, capacity, reader->pp->table->count);
+        valid = check_overload_index_initialize(&reader->overload_index, index_arena, capacity, reader->pp->table->count);
         input->graph.overload_calls = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckOverloadCall, (uint64_t)calls + 1);
         input->graph.overload_capacity = calls;
         input->graph.overload_candidates = reader->overload_candidates;
