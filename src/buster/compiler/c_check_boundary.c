@@ -513,6 +513,7 @@ static void check_boundary_begin(const char* source)
 
 // A recording's end: the unit's bodies written to its path. `bodies` is the recorded count.
 static void check_boundary_record_finish(void);
+static void check_boundary_record_position(uint32_t position);
 
 // A supplying compile's report, in its directory beside the recording (never on the diagnostics' stream, which must stay
 // the ordinary compile's).

@@ -534,6 +534,38 @@ static void check_boundary_record_diagnostic(uint32_t token)
     }
 }
 
+// A body with a diagnostic whose place among the diagnostics is `position` is refused. A place between two bodies may be
+// the one before's (a body's diagnostics may be published at its end) or the one after's (its declarator's): both.
+static void check_boundary_record_position(uint32_t position)
+{
+    CheckBoundaryUnit* unit = &check_boundary_unit;
+    uint32_t low = 0;
+    uint32_t high = check_boundary.range_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (check_boundary.ranges[middle].closing < position)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    const bool inside = low < check_boundary.range_count && position >= check_boundary.ranges[low].opening;
+    const uint32_t after = low < check_boundary.range_count ? check_boundary.ranges[low].opening : UINT32_MAX;
+    const uint32_t before = !inside && low != 0 ? check_boundary.ranges[low - 1].opening : UINT32_MAX;
+    for (uint32_t r = 0; check_boundary_recording() && r < unit->row_count; r += 1)
+    {
+        CheckBoundaryRow* row = &unit->rows[r];
+        if ((row->opening == after || row->opening == before) && row->refusal == CHECK_BOUNDARY_SUPPLIED)
+        {
+            row->refusal = CHECK_BOUNDARY_DIAGNOSTIC;
+        }
+    }
+}
+
 static void check_boundary_record_finish(void)
 {
     CheckBoundaryUnit* unit = &check_boundary_unit;

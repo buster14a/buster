@@ -13948,7 +13948,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     {
         for (const PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL; record = record->next)
         {
-            check_boundary_record_diagnostic((uint32_t)(record->position / PP_DIAGNOSTIC_PHASE_COUNT));
+            check_boundary_record_position((uint32_t)(record->position / PP_DIAGNOSTIC_PHASE_COUNT));
         }
         check_boundary_record_finish();
     }

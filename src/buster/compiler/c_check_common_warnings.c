@@ -181,6 +181,22 @@ static void check_common_publish(const Parser* parser, Preprocessor* pp, uint32_
                                  uint32_t id, CheckWarningSeverity severity, const char* message, const CheckCommonNote* notes, uint32_t note_count,
                                  Arena* scratch)
 {
+    // SCAFFOLD (c_check_boundary.c): a recording refuses the body a common warning or one of its notes is at. Its place among
+    // the diagnostics is its body's end or later, so its token says where it is.
+    if (__builtin_expect(check_boundary_recording(), 0))
+    {
+        if (token < parser->tokens.count)
+        {
+            check_boundary_refuse(parse_origin(parser, token));
+        }
+        for (uint32_t n = 0; n < note_count; n += 1)
+        {
+            if (notes[n].token < parser->tokens.count)
+            {
+                check_boundary_refuse(parse_origin(parser, notes[n].token));
+            }
+        }
+    }
     const char* option = id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[id].option : NULL;
     const bool error = severity >= CHECK_WARNING_ERROR;
     // (An error by default names its group alone, as clang's does.)
