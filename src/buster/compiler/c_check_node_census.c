@@ -3568,6 +3568,13 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
     return room ? tests : NULL;
 }
 
+// The tests' state reading `input` for the reader's output: the machine with no node of the walk's has a graph of its
+// own (c_check_node_machine_alone.c), and the census's code reads an expression's nodes there.
+static void node_census_reader_input(NodeCensusReader* tests, const CheckInput* input)
+{
+    tests->program.input = input;
+}
+
 // The reader's warning events since the last chunk, into the tests' bits. Out of line: its caller is inlined into the
 // front's own function, whose code this would move with each change here (on the 9700X its window's ticks read 1.3%
 // to 1.6% higher with ten instructions more inline).
@@ -4764,6 +4771,22 @@ struct NodeShadowRecord
     bool fronted;
 };
 
+// The fields of a root's results the machine with no node of the walk's is compared by (NodeShadow.alone_fields).
+#define BUSTER_NODE_ALONE_FIELD_RECORDS 0u
+#define BUSTER_NODE_ALONE_FIELD_REFUSAL 1u
+#define BUSTER_NODE_ALONE_FIELD_DIGEST 2u
+#define BUSTER_NODE_ALONE_FIELD_TESTED 3u
+#define BUSTER_NODE_ALONE_FIELD_TESTS 4u
+#define BUSTER_NODE_ALONE_FIELD_SWEPT 5u
+#define BUSTER_NODE_ALONE_FIELD_SWEEP_REFUSAL 6u
+#define BUSTER_NODE_ALONE_FIELD_ROOT 7u
+#define BUSTER_NODE_ALONE_FIELD_TAPE 8u
+#define BUSTER_NODE_ALONE_FIELD_SIDE 9u
+#define BUSTER_NODE_ALONE_FIELDS 10u
+static const char* const node_alone_field_names[BUSTER_NODE_ALONE_FIELDS] = {
+    "records", "refusal", "digest", "tested", "tests", "swept", "sweep-refusal", "root", "tape", "side",
+};
+
 typedef struct NodeShadow NodeShadow;
 struct NodeShadow
 {
@@ -4947,6 +4970,29 @@ struct NodeShadow
     uint64_t swept_compared_entries;
     uint64_t swept_references;
     uint64_t swept_call_targets;
+    // The machine with no node of the walk's (--front-alone, c_check_node_machine_alone.c): the bodies it read whole and
+    // those it left, their postorder positions, its records, and its ticks, all of it and the sweeps' first run's; the
+    // roots it ran on; those the machine ran on from the walk's nodes too, compared, and the ones that differ, by the
+    // first field that does (the records' count, T's refusal, the records' digest, whether the tests ran, their bits or
+    // the root's kind, whether C and X ran, their refusal, the root's target or object, the tape, the side's digest);
+    // the roots only one of the two ran on (the walk's nodes' alone: in a function body, and outside any); and the
+    // roots it took whose tests the walk's own events then refused.
+    uint64_t alone_bodies;
+    uint64_t alone_bodies_left;
+    uint64_t alone_positions;
+    uint64_t alone_records;
+    uint64_t alone_ticks;
+    uint64_t alone_sweep_ticks;
+    uint64_t alone_roots;
+    uint64_t alone_taken;
+    uint64_t alone_compared;
+    uint64_t alone_differences;
+    uint64_t alone_fields[BUSTER_NODE_ALONE_FIELDS];
+    uint64_t alone_walk_only;
+    uint64_t alone_walk_only_outside;
+    uint64_t alone_own_only;
+    uint64_t alone_events_after;
+    uint64_t alone_listed;
     uint64_t swept_differences;
     uint64_t swept_root_differences;
     uint64_t swept_refusal_differences;
@@ -7241,6 +7287,24 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                shadow->swept_compared, shadow->swept_compared_entries, shadow->swept_differences, shadow->swept_root_differences, shadow->swept_refusal_differences,
                shadow->swept_tape_differences, shadow->swept_side_differences, shadow->swept_references, shadow->swept_call_targets);
     }
+    if (shadow->alone_bodies != 0 || shadow->alone_bodies_left != 0)
+    {
+        // The machine with no node of the walk's.
+        printf("node-shadow: alone bodies=%" PRIu64 " left=%" PRIu64 " postorder-positions=%" PRIu64 " records=%" PRIu64 " roots=%" PRIu64 " taken=%" PRIu64 " ticks=%" PRIu64
+               " (the sweeps' first run %" PRIu64 ")\n",
+               shadow->alone_bodies, shadow->alone_bodies_left, shadow->alone_positions, shadow->alone_records, shadow->alone_roots, shadow->alone_taken, shadow->alone_ticks,
+               shadow->alone_sweep_ticks);
+        printf("node-shadow: alone compared=%" PRIu64 " differences=%" PRIu64, shadow->alone_compared, shadow->alone_differences);
+        for (uint32_t field = 0; field < BUSTER_NODE_ALONE_FIELDS; field += 1)
+        {
+            if (shadow->alone_fields[field] != 0)
+            {
+                printf(" %s=%" PRIu64, node_alone_field_names[field], shadow->alone_fields[field]);
+            }
+        }
+        printf(" roots-of-the-walk's-nodes-alone=%" PRIu64 " (outside a body %" PRIu64 ") roots-of-its-own-alone=%" PRIu64 " taken-before-an-event-of-the-walk's=%" PRIu64 "\n",
+               shadow->alone_walk_only, shadow->alone_walk_only_outside, shadow->alone_own_only, shadow->alone_events_after);
+    }
     // The reader's coded walk in the files' one reading, by its parts (TSC ticks): beside the front's where it ran, and
     // alone where it didn't, the walk as it is.
     printf("node-shadow: walk ticks classes=%" PRIu64 " prepare=%" PRIu64 " actions=%" PRIu64 " visits=%" PRIu64 "\n",
@@ -7382,6 +7446,145 @@ static NodeShadowObject node_shadow_object(uint8_t facts, uint32_t reader_declar
 
 // File `file`, read with `options`, prepared and lowered as -c lowers it, counted into `census`: whether its options could
 // be read.
+// The machine with no node of the walk's (c_check_node_machine_alone.c) against the machine on the walk's nodes, a root
+// at a time, after the pipeline: a root the two ran on is one token's, the walk's node's in `graph` and the other graph's
+// node kept by that token. Their records' count, T's refusal, the records' digest, the tests and their bits, C's and
+// X's refusal, the root's target and object, the tape and the side's digest must be the same; the first field that
+// isn't is counted, and listed with --list. The roots one of them alone ran on are counted, the walk's nodes' by
+// whether they are in a function body (the other reads the bodies alone).
+static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, const NodeFrontTypes* typed, const CheckGraph* graph, const Parser* parser,
+                              Preprocessor* pp, const char* file)
+{
+    const NodeFrontTypes* alone = front->alone_types;
+    const uint32_t tokens = parser->tokens.count;
+    // A byte a token: whether a function body holds it.
+    uint8_t* inside = calloc((size_t)tokens + 1, 1);
+    for (uint32_t token = 0; inside != NULL && token < tokens; token += 1)
+    {
+        const uint32_t closing = parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[token] : tokens;
+        if (closing < tokens && closing > token)
+        {
+            memset(inside + token, 1, closing - token + 1);
+        }
+    }
+    shadow->alone_bodies += front->alone_bodies;
+    shadow->alone_bodies_left += front->alone_bodies_left;
+    shadow->alone_positions += front->alone_positions;
+    shadow->alone_records += front->alone_records;
+    shadow->alone_ticks += front->alone_ticks;
+    shadow->alone_sweep_ticks += alone->ticks;
+    shadow->alone_roots += alone->expressions;
+    // The walk's nodes' roots in their order, each against the other's next one at its token: a token's roots are in the
+    // order they were made in both (`next`: by token, the other's next root + 1 there once its first is taken, or
+    // UINT32_MAX after its last).
+    uint32_t* next = calloc((size_t)tokens + 1, sizeof(uint32_t));
+    uint64_t matched = 0;
+    for (uint32_t node = 0; next != NULL && node < graph->count && node < typed->node_capacity; node += 1)
+    {
+        if (typed->counts[node] != 0)
+        {
+            const uint32_t token = graph->tokens[node];
+            const uint32_t kept = token >= tokens || next[token] == UINT32_MAX ? 0 : next[token] != 0 ? next[token] : front->alone_roots[token];
+            const uint32_t own = kept != 0 ? kept - 1 : BUSTER_CHECK_NONE;
+            if (token < tokens && own < alone->node_capacity)
+            {
+                next[token] = front->alone_chains[own] != 0 ? front->alone_chains[own] : UINT32_MAX;
+            }
+            if (own >= alone->node_capacity || alone->counts[own] == 0)
+            {
+                const bool body = inside != NULL && token < tokens && inside[token] != 0;
+                shadow->alone_walk_only += body;
+                shadow->alone_walk_only_outside += !body;
+                if (body && shadow->alone_listed < node_census_list)
+                {
+                    shadow->alone_listed += 1;
+                    printf("node-shadow: alone ran on no root the walk's nodes gave one file=%s line=%u token=%u\n", file, node_census_line(pp, parser, token), token);
+                }
+            }
+            else
+            {
+                matched += 1;
+                const uint8_t walk_flags = typed->refusals[node];
+                const uint8_t own_flags = alone->refusals[own];
+                const bool taken = (own_flags & BUSTER_NODE_FRONT_TYPED_REFUSAL) == NODE_MACHINE_TAKEN;
+                const bool tested = (walk_flags & BUSTER_NODE_FRONT_TYPED_TESTED) != 0 && (own_flags & BUSTER_NODE_FRONT_TYPED_TESTED) != 0;
+                const bool swept = (walk_flags & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0 && (own_flags & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0;
+                const bool both_taken = swept && typed->sweep_refusals[node] == NODE_MACHINE_TAKEN && alone->sweep_refusals[own] == NODE_MACHINE_TAKEN;
+                uint32_t field = BUSTER_NODE_ALONE_FIELDS;
+                if (typed->counts[node] != alone->counts[own])
+                {
+                    field = BUSTER_NODE_ALONE_FIELD_RECORDS;
+                }
+                else if ((walk_flags & BUSTER_NODE_FRONT_TYPED_REFUSAL) != (own_flags & BUSTER_NODE_FRONT_TYPED_REFUSAL))
+                {
+                    field = BUSTER_NODE_ALONE_FIELD_REFUSAL;
+                }
+                else if (typed->digests[node] != alone->digests[own])
+                {
+                    field = BUSTER_NODE_ALONE_FIELD_DIGEST;
+                }
+                else if ((walk_flags & BUSTER_NODE_FRONT_TYPED_TESTED) != (own_flags & BUSTER_NODE_FRONT_TYPED_TESTED))
+                {
+                    field = BUSTER_NODE_ALONE_FIELD_TESTED;
+                }
+                else if (tested && (typed->tests[node] != alone->tests[own] || typed->kinds[node] != alone->kinds[own]))
+                {
+                    field = BUSTER_NODE_ALONE_FIELD_TESTS;
+                }
+                else if ((walk_flags & BUSTER_NODE_FRONT_TYPED_SWEPT) != (own_flags & BUSTER_NODE_FRONT_TYPED_SWEPT))
+                {
+                    field = BUSTER_NODE_ALONE_FIELD_SWEPT;
+                }
+                else if (swept && typed->sweep_refusals[node] != alone->sweep_refusals[own])
+                {
+                    field = BUSTER_NODE_ALONE_FIELD_SWEEP_REFUSAL;
+                }
+                else if (swept && (typed->targets[node] != alone->targets[own] || typed->objects[node] != alone->objects[own]))
+                {
+                    field = BUSTER_NODE_ALONE_FIELD_ROOT;
+                }
+                else if (both_taken)
+                {
+                    const uint32_t entries = typed->tape_counts[node];
+                    const uint64_t walk_first = typed->tape_firsts[node];
+                    const uint64_t own_first = alone->tape_firsts[own];
+                    const bool same = entries == alone->tape_counts[own] &&
+                                      (entries == UINT32_MAX || entries == 0 ||
+                                       (memcmp(typed->tape_kinds + walk_first, alone->tape_kinds + own_first, entries) == 0 &&
+                                        memcmp(typed->tape_classes + walk_first, alone->tape_classes + own_first, entries) == 0 &&
+                                        memcmp(typed->tape_values + walk_first, alone->tape_values + own_first, (size_t)entries * sizeof(uint64_t)) == 0));
+                    field = !same ? BUSTER_NODE_ALONE_FIELD_TAPE : typed->side_digests[node] != alone->side_digests[own] ? BUSTER_NODE_ALONE_FIELD_SIDE : field;
+                }
+                shadow->alone_compared += 1;
+                shadow->alone_taken += taken && tested && alone->tests[own] == 0 && (own_flags & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0 &&
+                                       alone->sweep_refusals[own] == NODE_MACHINE_TAKEN;
+                // A root it took before the walk raised an event at one of its tokens: what the gate on the walk's own
+                // diagnostics counts (the tests' bits differ there, which is counted above too).
+                shadow->alone_events_after += tested && (typed->tests[node] & (UINT64_C(1) << NODE_CENSUS_EVENT)) != 0 &&
+                                              (alone->tests[own] & (UINT64_C(1) << NODE_CENSUS_EVENT)) == 0;
+                if (field != BUSTER_NODE_ALONE_FIELDS)
+                {
+                    shadow->alone_differences += 1;
+                    shadow->alone_fields[field] += 1;
+                    if (shadow->alone_listed < node_census_list)
+                    {
+                        shadow->alone_listed += 1;
+                        printf("node-shadow: alone difference file=%s line=%u token=%u field=%s records=%u (alone %u) refusal=%s (alone %s) tests=%#" PRIx64 " (alone %#" PRIx64
+                               ")\n",
+                               file, node_census_line(pp, parser, token), token, node_alone_field_names[field], typed->counts[node], alone->counts[own],
+                               node_machine_refusal_names[walk_flags & BUSTER_NODE_FRONT_TYPED_REFUSAL], node_machine_refusal_names[own_flags & BUSTER_NODE_FRONT_TYPED_REFUSAL],
+                               (walk_flags & BUSTER_NODE_FRONT_TYPED_TESTED) != 0 ? typed->tests[node] : 0, (own_flags & BUSTER_NODE_FRONT_TYPED_TESTED) != 0 ? alone->tests[own] : 0);
+                    }
+                }
+            }
+        }
+    }
+    // The roots it alone ran on: it ran on `expressions` of them, and the walk's nodes gave `matched` of those one.
+    shadow->alone_own_only += alone->expressions > matched ? alone->expressions - matched : 0;
+    free(next);
+    free(inside);
+}
+
 static bool node_census_file(NodeCensus* census, const char* file, char** options, uint32_t option_count)
 {
     static LowerSource source;
@@ -7763,6 +7966,10 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                         const NodeCensusPolicy policy = node_census_policy(&source.pp, selected.program.input);
                         shadow->tested_policy_differences += typed->policy == NULL || memcmp(typed->policy, &policy, sizeof(policy)) != 0;
                     }
+                    if (front->alone_types != NULL && front->alone_roots != NULL)
+                    {
+                        node_shadow_alone(shadow, front, typed, &path->input.graph, &source.parser, &source.pp, file);
+                    }
                     const CheckProgram* program = &selected.program;
                     for (uint32_t node = 0; node < path->input.graph.count && node < typed->node_capacity; node += 1)
                     {
@@ -7922,7 +8129,7 @@ static bool node_shadow_differs(const NodeShadow* shadow)
            shadow->facts_differences != 0 || shadow->facts_list_differences != 0 || shadow->facts_failures != 0 ||
            shadow->facts_conversions != shadow->facts_conversions_derived || shadow->reads.same_differences != 0 || shadow->reads.misplaced != 0 ||
            shadow->front_differences != 0 || shadow->typed_differences != 0 || shadow->typed_object_differences != 0 || shadow->typed_library_differences != 0 ||
-           shadow->swept_differences != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
+           shadow->swept_differences != 0 || shadow->alone_differences != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
            shadow->tested_missed != 0 || shadow->tested_policy_differences != 0 || shadow->reader_twin_differences != 0 || shadow->own_count_differences != 0 ||
            shadow->own_quiet_wrong != 0 || shadow->own_quiet_calls_wrong != 0 || shadow->own_quiet_calls_loud != 0 || shadow->own_quiet_casts_wrong != 0 ||
            shadow->own_quiet_orders_wrong != 0 || shadow->own_values_wrong != 0 || shadow->own_tree_wrong != 0 || shadow->own_direct_wrong != 0 ||
@@ -8030,6 +8237,13 @@ static int run_node_census(int count, char** arguments)
             // The census's tests at reader time, between T and C and X there, by the census's code on the view.
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
             shadow.reader |= BUSTER_NODE_READER_TESTS;
+        }
+        else if (strcmp(arguments[i], "--front-alone") == 0)
+        {
+            // The machine with no node of the walk's, a body at a time before the walk acts at it; and the machine on the
+            // walk's nodes after it, which it is compared with: T, the census's tests, C and X at reader time.
+            shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
+            shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE;
         }
         else if (strcmp(arguments[i], "--front-facts") == 0 || strcmp(arguments[i], "--front-window") == 0)
         {

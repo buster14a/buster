@@ -67,6 +67,9 @@ struct NodeMachineReader
     uint32_t strings;
     // The census's tests at reader time (c_check_node_census.c's), or null.
     struct NodeCensusReader* tests;
+    // Whether `graph` is the machine's own, made of the front's records alone (c_check_node_machine_alone.c): a chunk's
+    // run then leaves it as it stands, where it otherwise takes the reader's graph as the walk has left it.
+    bool alone;
     // #2850's fact words' kernel at reader time (c_check_node_machine_facts.c's), or null.
     struct NodeFactsReader* facts;
 };
@@ -392,6 +395,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         typer->strings = 0;
         typer->tests = NULL;
         typer->facts = NULL;
+        typer->alone = false;
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
                                          symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
     }
@@ -534,8 +538,11 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
     const bool tested = typer->tests != NULL;
     const bool last = (reader->pp->options.node_reader & BUSTER_NODE_READER_LAST) != 0;
     // The graph as it stands after the chunk, and the types made since the last.
-    typer->graph = reader->output->graph;
-    typer->graph.contexts = front->shadow->contexts;
+    if (!typer->alone)
+    {
+        typer->graph = reader->output->graph;
+        typer->graph.contexts = front->shadow->contexts;
+    }
     node_machine_settle(machine);
     node_machine_reader_strings(typer, reader->output);
     if (tested)
