@@ -16932,6 +16932,10 @@ static void check_input_output_none(CheckInput* input, CheckInputReader* reader,
     memset(input->declarations, 0xff, bytes);
     memset(input->token_nodes, 0xff, bytes);
     memset(reader->initializer_declarations, 0xff, bytes);
+    if (reader->selected_tokens != NULL)
+    {
+        memset(reader->selected_tokens, 0xff, bytes);
+    }
     if (reader->deferred != NULL)
     {
         memset(reader->initializer_finish_heads, 0xff, bytes);
