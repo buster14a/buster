@@ -234,6 +234,17 @@ static void check_common_report_published(const Parser* parser, Preprocessor* pp
                                         note_count, scratch);
 }
 
+// A warning Sema gives while it constructs an expression (#2899's full conditional's condition), at `publication`
+// and whatever the context's evaluation. It shares the deferred phase with a failed assertion's discarded comma
+// operand (#2409), so that at one boundary the conditionals' suborders keep construction order before the comma's
+// marker, and the completed expression's logical conversions follow both.
+static void check_common_report_constructed(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t publication,
+                                            uint32_t id, bool default_ignored, const char* message, Arena* scratch)
+{
+    const uint32_t publication_source = check_common_publication_source(parser, pp, publication);
+    check_common_report_published_phase(parser, pp, input, token, publication_source, PP_DIAGNOSTIC_DEFERRED, id, default_ignored, message, NULL, 0, scratch);
+}
+
 // Whether two operands' spellings are one typedef's sugar (#1447): its uses (check_input_typedef_sugar) are its declaration.
 static bool check_common_same_spelling(const CheckInput* input, const Parser* parser, uint32_t left, uint32_t right)
 {
@@ -6176,7 +6187,7 @@ static void check_common_int_in_bool_at(const Parser* parser, Preprocessor* pp, 
         const uint32_t publication = at_once != BUSTER_CHECK_NONE ? at_once : check_common_full_expression_end(parser, graph, parents, expression);
         if (construction)
         {
-            check_common_report_at(parser, pp, input, token, publication, id, id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT, message, NULL, 0, scratch);
+            check_common_report_constructed(parser, pp, input, token, publication, id, id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT, message, scratch);
         }
         else
         {
@@ -6315,7 +6326,7 @@ static void check_common_floating_conversion(const Parser* parser, Preprocessor*
             }
             if (construction)
             {
-                check_common_report_at(parser, pp, input, token, publication, CHECK_WARNING_ID_LITERAL_CONVERSION, false, message, NULL, 0, scratch);
+                check_common_report_constructed(parser, pp, input, token, publication, CHECK_WARNING_ID_LITERAL_CONVERSION, false, message, scratch);
             }
             else
             {
@@ -6477,7 +6488,7 @@ static void check_common_conditional_receipt(const Parser* parser, Preprocessor*
                               fact == BUSTER_CHECK_BOOL_SHIFT_TRUE ? "converting the result of '<<' to a boolean always evaluates to true" :
                               fact == BUSTER_CHECK_BOOL_SHIFT_SIGNED ? "converting the result of '<<' to a boolean; did you mean to compare with '0'?" :
                               "converting the result of '?:' with integer constants to a boolean always evaluates to 'true'";
-        check_common_report_at(parser, pp, input, token, event->completion, event->id, fact == BUSTER_CHECK_BOOL_SHIFT_SIGNED, message, NULL, 0, scratch);
+        check_common_report_constructed(parser, pp, input, token, event->completion, event->id, fact == BUSTER_CHECK_BOOL_SHIFT_SIGNED, message, scratch);
     }
     pp_diagnostic_suborder(pp, previous, (uint64_t)parser->tokens.count - event->token + 1);
 }
