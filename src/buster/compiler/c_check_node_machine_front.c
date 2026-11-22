@@ -711,6 +711,10 @@ struct NodeFrontShadow
     uint64_t alone_prepare_ticks;
     uint64_t alone_front_ticks;
     uint64_t alone_write_ticks;
+    // The scan of a body's tokens that says, before any of it is compacted, whether the front would lose a root of it
+    // (node_alone_scan): its ticks and the tokens it read, over every body. It is counted here and refuses nothing.
+    uint64_t alone_scan_ticks;
+    uint64_t alone_scan_tokens;
     // The flat front (BUSTER_NODE_FRONT_FLAT, c_check_node_machine_flat.c). Its passes' ticks after the compaction, its
     // own compaction's, and each stage's (BUSTER_NODE_FLAT_STAGE_*); the tokens it visited, the records it made and
     // the places it left empty, the children its tokens hopped over, the tokens with a child past the rings' reach, and

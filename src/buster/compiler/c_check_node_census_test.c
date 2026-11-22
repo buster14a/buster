@@ -1620,6 +1620,10 @@ struct NodeAloneExpected
     // The tokens the walk's class actions left to its visit, in the bodies: the fixture's `sizeof`, `_Alignof` and the
     // rest of the walk's own visits, which the count of taken roots with one is read against.
     uint32_t declined;
+    // The bodies with a root the front lost that a scan of their tokens finds one in, before any of them is compacted:
+    // the `sizeof`'s, the `_Alignof`'s and the several characters'. The floating constant out of range and the table
+    // that overflows the front's stack are none of the scan's; the escape under a label is one it must leave.
+    uint32_t scanned;
 };
 
 static bool node_alone_test_fixture(const char* directory, char** options, uint32_t option_count, bool split, const NodeAloneExpected* expected)
@@ -1691,10 +1695,12 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
                       shadow.alone_taken_declined == 0;
     bool counts = shadow.alone_bodies == expected->bodies && shadow.alone_compared == expected->roots && shadow.alone_whole_own == expected->own &&
                   shadow.alone_whole_walk == expected->walk && shadow.alone_whole_walk_static == expected->statics && shadow.alone_resets == expected->lost &&
-                  shadow.alone_declined_tokens == expected->declined;
+                  shadow.alone_declined_tokens == expected->declined && shadow.alone_scan_tokens != 0;
     for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
     {
-        counts = counts && shadow.alone_verdicts[verdict] == expected->verdicts[verdict];
+        // The scan finds a lost root in the bodies it should, and in no body of another verdict.
+        counts = counts && shadow.alone_verdicts[verdict] == expected->verdicts[verdict] &&
+                 shadow.alone_verdict_scanned[verdict] == (verdict == BUSTER_NODE_ALONE_BODY_LEFT ? expected->scanned : 0);
     }
     if (!same || !counts)
     {
@@ -1702,7 +1708,7 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
                 " differ, %" PRIu64 " the walk's nodes' alone, %" PRIu64 " its own alone, %" PRIu64 " taken before an event of the walk's; verdicts: whole %" PRIu64 " (%u), a root lost %"
                 PRIu64 " (%u), not run %" PRIu64 " (%u), T %" PRIu64 " (%u), the tests %" PRIu64 " (%u), C or X %" PRIu64 " (%u), no room %" PRIu64 " (%u); whole for it alone %" PRIu64
                 " (%u), for the walk's nodes' alone %" PRIu64 " (%u), with a block's static %" PRIu64 " (%u); waiting values lost %" PRIu64 " times (%u); %" PRIu64
-                " tokens the walk's actions left (%u)\n",
+                " tokens the walk's actions left (%u); the scan finds a lost root in %" PRIu64 " of the bodies with one (%u) and in %" PRIu64 " others (0)\n",
                 valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.alone_bodies, expected->bodies, shadow.alone_bodies_left, shadow.alone_bodies_unread,
                 shadow.alone_compared, expected->roots, shadow.alone_differences, shadow.alone_walk_only, shadow.alone_own_only, shadow.alone_events_after,
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_WHOLE], expected->verdicts[BUSTER_NODE_ALONE_BODY_WHOLE], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_LEFT],
@@ -1710,7 +1716,11 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_TYPE], expected->verdicts[BUSTER_NODE_ALONE_BODY_TYPE], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_TESTS],
                 expected->verdicts[BUSTER_NODE_ALONE_BODY_TESTS], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_SWEEP], expected->verdicts[BUSTER_NODE_ALONE_BODY_SWEEP],
                 shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_ROOM], expected->verdicts[BUSTER_NODE_ALONE_BODY_ROOM], shadow.alone_whole_own, expected->own, shadow.alone_whole_walk,
-                expected->walk, shadow.alone_whole_walk_static, expected->statics, shadow.alone_resets, expected->lost, shadow.alone_declined_tokens, expected->declined);
+                expected->walk, shadow.alone_whole_walk_static, expected->statics, shadow.alone_resets, expected->lost, shadow.alone_declined_tokens, expected->declined,
+                shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_LEFT], expected->scanned,
+                shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_WHOLE] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_UNRUN] +
+                    shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_TYPE] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_TESTS] +
+                    shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_SWEEP] + shadow.alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_ROOM]);
     }
     free(text);
     unlink(path);
@@ -7384,6 +7394,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .statics = 1,
         .lost = 2,
         .declined = 7,
+        .scanned = 3,
     };
     check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), false, &alone_expected),
                       "node-alone: the machine on the front's records alone, before the walk, makes every root's results the machine makes of the walk's nodes");

@@ -4987,6 +4987,9 @@ struct NodeShadow
     uint64_t alone_front_ticks;
     uint64_t alone_write_ticks;
     uint64_t alone_sweep_ticks;
+    // The scan of each body's tokens for a root the front would lose: its ticks and the tokens it read.
+    uint64_t alone_scan_ticks;
+    uint64_t alone_scan_tokens;
     // With --front-alone-split, the machine's first run by sweep (T, the tests, C, X) and the clock's reads that made it.
     uint64_t alone_step_ticks[4];
     uint64_t alone_step_reads;
@@ -7384,6 +7387,8 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                        shadow->alone_verdict_scanned_tokens[verdict]);
             }
         }
+        printf("node-shadow: alone a scan of every body's tokens for a root the front would lose: tokens-read=%" PRIu64 " ticks=%" PRIu64 " a-token-read=%.2f\n",
+               shadow->alone_scan_tokens, shadow->alone_scan_ticks, shadow->alone_scan_tokens != 0 ? (double)shadow->alone_scan_ticks / (double)shadow->alone_scan_tokens : 0.0);
         printf("node-shadow: alone bodies whole for it and for the walk's nodes' machine=%" PRIu64 " (tokens %" PRIu64 ") for-it-alone=%" PRIu64 " for-the-walk's-nodes'-alone=%" PRIu64
                " (and with a block's static or extern declaration %" PRIu64 ")\n",
                shadow->alone_whole_both, shadow->alone_whole_both_tokens, shadow->alone_whole_own, shadow->alone_whole_walk, shadow->alone_whole_walk_static);
@@ -7631,6 +7636,8 @@ static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, 
     shadow->alone_prepare_ticks += front->alone_prepare_ticks;
     shadow->alone_front_ticks += front->alone_front_ticks;
     shadow->alone_write_ticks += front->alone_write_ticks;
+    shadow->alone_scan_ticks += front->alone_scan_ticks;
+    shadow->alone_scan_tokens += front->alone_scan_tokens;
     shadow->alone_sweep_ticks += alone->ticks;
     for (uint32_t step = 0; step < 4; step += 1)
     {

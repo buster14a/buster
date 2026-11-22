@@ -140,6 +140,61 @@ static bool node_alone_write(struct NodeAlone* alone, const CheckInputReader* re
     return room;
 }
 
+// Whether the front would lose a root of the body whose opening brace is `opening`, by the body's tokens alone, before
+// any of it is compacted: a token the front leaves (a `sizeof` or `_Alignof`, by its kind; a token of the walk's own
+// visit, by its class; a character constant with an escape or of several characters, by its spelling) whose value
+// reaches a root's token. A value's consumer is its token's parent, so its way up is the parents that take values (the
+// walk acts at them, and not to drop them), to a statement's terminator, a condition, a return or an initialization;
+// a parent that takes none (a declarator's, a label's) ends it, and loses no root.
+// `read` gains the tokens it read to decide: all of the body's where it finds none, those up to the first it finds.
+static bool node_alone_scan(const CheckInputReader* reader, uint32_t opening, uint64_t* read)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t closing = parser->tree.parents[opening];
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint8_t* visits = reader->visits;
+    bool lost = false;
+    uint32_t token = opening + 1;
+    for (; !lost && token < closing && token < count; token += 1)
+    {
+        const uint8_t visit = visits[token];
+        const uint32_t code = (visit & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+        bool left = kinds[token] == PARSE_KIND_SIZEOF || ((visit & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && code == CHECK_INPUT_CODE_SCALAR);
+        if (!left && kinds[token] == PARSE_KIND_CHARACTER)
+        {
+            const uint8_t* bytes = NULL;
+            uint32_t length = 0;
+            if (check_input_spelling((CheckInputReader*)reader, token, &bytes, &length))
+            {
+                // More than one character between its quotes, or an escape.
+                uint32_t quote = 0;
+                while (quote < length && bytes[quote] != '\'')
+                {
+                    quote += 1;
+                }
+                left = length > quote + 3;
+                for (uint32_t i = quote; i < length; i += 1)
+                {
+                    left = left || bytes[i] == '\\';
+                }
+            }
+        }
+        // The token's own action may be a root's (the walk's visit of a statement): its value's way up starts at it.
+        for (uint32_t at = left ? token : count, steps = 0; at > opening && at < closing && steps < 1024 && !lost; steps += 1)
+        {
+            const uint8_t up = visits[at];
+            const uint32_t taker = (up & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
+            const bool takes = at == token || ((up & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && taker != CHECK_INPUT_CODE_DROP);
+            lost = at != token && takes &&
+                   (taker == CHECK_INPUT_CODE_TERMINATOR || taker == CHECK_INPUT_CODE_CONDITION || taker == CHECK_INPUT_CODE_RETURN || taker == CHECK_INPUT_CODE_INITIALIZE);
+            at = takes ? parser->tree.parents[at] : count;
+        }
+    }
+    *read += token - opening - 1;
+    return lost;
+}
+
 // The roots the front has lost so far, by its report (node_alone_body).
 static inline uint64_t node_alone_lost(const NodeFrontShadow* report)
 {
@@ -302,17 +357,9 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
         const uint64_t reading = alone->shadow->alone_prepare_ticks + alone->shadow->alone_front_ticks + alone->shadow->alone_write_ticks - reading_before;
         const uint64_t machine = alone->types->ticks - machine_before;
         const uint32_t slot = alone->shadow->alone_body_count;
-        // What a scan of the tokens alone would find, before any compaction: a `sizeof` or `_Alignof` by its kind, a token
-        // of the walk's own visit by its class.
-        const Parser* parser = reader->parser;
-        const uint32_t closing = parser->tree.parents[opening];
-        bool scanned = false;
-        for (uint32_t token = opening; !scanned && token <= closing && token < parser->tokens.count; token += 1)
-        {
-            const uint8_t visit = reader->visits[token];
-            scanned = parser->tokens.kinds[token] == PARSE_KIND_SIZEOF ||
-                      ((visit & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && (visit & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT == CHECK_INPUT_CODE_SCALAR);
-        }
+        const uint64_t scan = __rdtsc();
+        const bool scanned = node_alone_scan(reader, opening, &alone->shadow->alone_scan_tokens);
+        alone->shadow->alone_scan_ticks += __rdtsc() - scan;
         alone->shadow->alone_body_reading[slot] = reading;
         alone->shadow->alone_body_machine[slot] = machine;
         alone->shadow->alone_body_before[slot] = stopped_at != UINT64_MAX ? stopped_at : reading + machine;
