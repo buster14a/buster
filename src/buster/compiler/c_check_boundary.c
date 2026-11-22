@@ -122,9 +122,12 @@ struct CheckBoundary
     CheckBoundaryMode mode;
     const char* directory;
     char path[768];
-    // A supplying compile's selection: the supplied bodies whose ordinal modulo `modulus` is `residue`.
+    // A supplying compile's selection: the supplied bodies whose ordinal modulo `modulus` is `residue`, of those from
+    // ordinal `first` to before `end` (BUSTER_BOUNDARY_RANGE=FIRST:END, every one by default).
     uint32_t modulus;
     uint32_t residue;
+    uint32_t first;
+    uint32_t end;
     uint32_t token_count;
     CheckBoundaryBody* bodies;
     uint32_t body_count;
@@ -260,6 +263,8 @@ static void check_boundary_unit_path(const char* directory, const char* source)
     snprintf(check_boundary.path, sizeof(check_boundary.path), "%s/%s.%016llx.boundary", directory, slash != NULL ? slash + 1 : source, (unsigned long long)hash);
 }
 
+static void check_boundary_unit_reset(void);
+
 // A unit's start: what the environment asks of it. A recording starts empty; a supplying compile reads the unit's
 // recording, and supplies nothing where there is none.
 static void check_boundary_begin(const char* source)
@@ -267,6 +272,7 @@ static void check_boundary_begin(const char* source)
     free(check_boundary.bytes);
     free(check_boundary.bodies);
     check_boundary = (CheckBoundary){ 0 };
+    check_boundary_unit_reset();
     const char* record = getenv("BUSTER_BOUNDARY_RECORD");
     const char* supply = getenv("BUSTER_BOUNDARY_SUPPLY");
     if (record != NULL && source != NULL)
@@ -284,6 +290,9 @@ static void check_boundary_begin(const char* source)
         const char* select = getenv("BUSTER_BOUNDARY_SELECT");
         check_boundary.modulus = select != NULL && strtoul(select, NULL, 10) != 0 ? (uint32_t)strtoul(select, NULL, 10) : 1;
         check_boundary.residue = select != NULL && strchr(select, ':') != NULL ? (uint32_t)strtoul(strchr(select, ':') + 1, NULL, 10) : 0;
+        const char* range = getenv("BUSTER_BOUNDARY_RANGE");
+        check_boundary.first = range != NULL ? (uint32_t)strtoul(range, NULL, 10) : 0;
+        check_boundary.end = range != NULL && strchr(range, ':') != NULL ? (uint32_t)strtoul(strchr(range, ':') + 1, NULL, 10) : UINT32_MAX;
         FILE* file = fopen(check_boundary.path, "rb");
         check_boundary.dropped = file == NULL ? "no recording" : NULL;
         if (file != NULL)

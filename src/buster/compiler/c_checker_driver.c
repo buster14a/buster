@@ -12712,6 +12712,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             const uint8_t* selected = lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0;
             // SCAFFOLD (c_check_boundary.c): a supplying compile masks the bodies it takes from the unit's recording, each
             // checked to be a body of this parse between the recording's tokens.
+            if (check_boundary_recording())
+            {
+                check_boundary.token_count = checking->tokens.count;
+            }
             if (check_boundary_supplying() && !prefix_only && selected == NULL)
             {
                 check_boundary_load();
@@ -12735,7 +12739,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                         else if (body->refusal == CHECK_BOUNDARY_SUPPLIED)
                         {
-                            if (ordinal % check_boundary.modulus == check_boundary.residue % check_boundary.modulus)
+                            if (ordinal % check_boundary.modulus == check_boundary.residue % check_boundary.modulus && ordinal >= check_boundary.first &&
+                                ordinal < check_boundary.end)
                             {
                                 memset(boundary_mask + body->opening, 1, body->closing - body->opening + 1);
                                 body->taken = true;

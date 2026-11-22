@@ -14629,10 +14629,11 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             const CheckBoundaryBody* taken = check_boundary_taken(i);
             for (uint32_t s = 0; taken != NULL && s < taken->string_count; s += 1)
             {
-                const CheckInitString* string = check_input_string(reader, taken->strings[s].token);
-                if (string == NULL || (uint32_t)(string - reader->output->strings) != taken->strings[s].index)
+                // (Its index may be another than the recording's, whose reader may have read a view of the unit: the
+                // records' order is what the data emission reads.)
+                if (check_input_string(reader, taken->strings[s].token) == NULL)
                 {
-                    check_boundary.dropped = "a string's record out of the recording's order";
+                    check_boundary.dropped = "a string literal the reader makes no record of";
                     reader->output->resource = true;
                 }
             }

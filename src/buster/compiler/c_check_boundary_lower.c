@@ -109,7 +109,8 @@ typedef struct CheckBoundaryUnit CheckBoundaryUnit;
 struct CheckBoundaryUnit
 {
     const CheckProgram* program;
-    // Per body of the program: a floating builtin of it may set errno.
+    // Per body of the program: a floating builtin of it may set errno (bit 0); an asm statement is in it (bit 1), whose
+    // number among the unit's names its helper whether or not its function has a row for it.
     uint8_t* errno_bodies;
     // Per string record of the reader: its body + 1, or 0 for one outside every body.
     uint32_t* string_bodies;
@@ -120,6 +121,8 @@ struct CheckBoundaryUnit
 };
 
 static CheckBoundaryUnit check_boundary_unit;
+// A recording's bodies by name, for a person: a line a body beside the recording (its tokens, refusal, entries, name).
+static FILE* check_boundary_names;
 
 // The program's body that holds `token`, or BUSTER_CHECK_NONE: the bodies are in their openings' order.
 static uint32_t check_boundary_body_of(const CheckProgram* program, uint32_t token)
@@ -142,15 +145,27 @@ static uint32_t check_boundary_body_of(const CheckProgram* program, uint32_t tok
     return low != 0 && token <= program->parser->tree.parents[program->bodies[body].opening] ? body : BUSTER_CHECK_NONE;
 }
 
+// A unit's start (check_boundary_begin): nothing of the unit before it.
+static void check_boundary_unit_reset(void)
+{
+    free(check_boundary_unit.errno_bodies);
+    free(check_boundary_unit.string_bodies);
+    free(check_boundary_unit.runtime_marks);
+    free(check_boundary_unit.rows);
+    check_boundary_unit = (CheckBoundaryUnit){ 0 };
+    if (check_boundary_names != NULL)
+    {
+        fclose(check_boundary_names);
+        check_boundary_names = NULL;
+    }
+}
+
 static void check_boundary_unit_prepare(const CheckProgram* program)
 {
     if (check_boundary_unit.program != program)
     {
-        free(check_boundary_unit.errno_bodies);
-        free(check_boundary_unit.string_bodies);
-        free(check_boundary_unit.runtime_marks);
-        free(check_boundary_unit.rows);
-        check_boundary_unit = (CheckBoundaryUnit){ .program = program };
+        check_boundary_unit_reset();
+        check_boundary_unit.program = program;
         const CheckInput* input = program->input;
         const CheckStream* stream = program->stream;
         check_boundary_unit.errno_bodies = calloc((uint64_t)program->body_count + 1, 1);
@@ -162,7 +177,15 @@ static void check_boundary_unit_prepare(const CheckProgram* program)
             const uint32_t body = stream->floating[k].may_set_errno ? check_boundary_body_of(program, input->graph.tokens[stream->floating[k].node]) : BUSTER_CHECK_NONE;
             if (body != BUSTER_CHECK_NONE)
             {
-                check_boundary_unit.errno_bodies[body] = 1;
+                check_boundary_unit.errno_bodies[body] |= 1;
+            }
+        }
+        for (uint32_t s = 0; check_boundary_unit.errno_bodies != NULL && s < input->asm_count; s += 1)
+        {
+            const uint32_t body = check_boundary_body_of(program, input->asm_statements[s].token);
+            if (body != BUSTER_CHECK_NONE)
+            {
+                check_boundary_unit.errno_bodies[body] |= 2;
             }
         }
         for (uint32_t s = 0; check_boundary_unit.string_bodies != NULL && s < input->string_count; s += 1)
@@ -170,8 +193,20 @@ static void check_boundary_unit_prepare(const CheckProgram* program)
             const uint32_t body = check_boundary_body_of(program, input->strings[s].token);
             check_boundary_unit.string_bodies[s] = body != BUSTER_CHECK_NONE ? body + 1 : 0;
         }
-        check_boundary.token_count = input->token_count;
     }
+}
+
+// The recording names every token by its index in the unit's own parse (parse_origin): a compile of several units reads
+// each through a view that leaves its attested declarations' tokens out, and a supplying compile, whose mask holds the
+// view off, reads the parse itself. An object is its token + 1.
+static uint32_t check_boundary_origin(const CheckProgram* program, uint32_t token)
+{
+    return parse_origin(program->parser, token);
+}
+
+static uint32_t check_boundary_object_origin(const CheckProgram* program, uint32_t object)
+{
+    return object != 0 ? parse_origin(program->parser, object - 1) + 1 : 0;
 }
 
 // What the function's name `symbol` is to the recording: a fix-up for an object's or a runtime function's (true), or the
@@ -186,7 +221,7 @@ static bool check_boundary_classify(const CheckLowerShared* shared, SymbolId sym
     if (symbol != 0 && symbol <= program->symbol_count)
     {
         fixup->name = CHECK_BOUNDARY_NAME_OBJECT;
-        fixup->payload = program->symbol_objects[symbol - 1];
+        fixup->payload = check_boundary_object_origin(program, program->symbol_objects[symbol - 1]);
         named = true;
     }
     else if (symbol >= helpers && symbol < pools)
@@ -241,7 +276,8 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
         refusal = refusal == 0 && (function->asm_body_count != 0 || function->call_asm != NULL || (naked != NULL && naked->planned)) ? CHECK_BOUNDARY_ASM : refusal;
         refusal = refusal == 0 && function->label_count != 0 ? CHECK_BOUNDARY_LABELS : refusal;
         refusal = refusal == 0 && function->call_tails != NULL ? CHECK_BOUNDARY_TAILS : refusal;
-        refusal = refusal == 0 && unit->errno_bodies[b] != 0 ? CHECK_BOUNDARY_ERRNO : refusal;
+        refusal = refusal == 0 && (unit->errno_bodies[b] & 2) != 0 ? CHECK_BOUNDARY_ASM : refusal;
+        refusal = refusal == 0 && (unit->errno_bodies[b] & 1) != 0 ? CHECK_BOUNDARY_ERRNO : refusal;
         // Its tokens that are objects with symbols: its string literals' alone may be.
         for (uint32_t token = body.opening; refusal == 0 && token <= closing; token += 1)
         {
@@ -291,7 +327,13 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
         }
         if (refusal == 0 && fixups != NULL)
         {
-            check_boundary_write(program->references + body.reference_first, body.reference_count, sizeof(uint32_t));
+            uint32_t* references = malloc(((uint64_t)body.reference_count + 1) * sizeof(uint32_t));
+            for (uint32_t r = 0; references != NULL && r < body.reference_count; r += 1)
+            {
+                references[r] = check_boundary_object_origin(program, program->references[body.reference_first + r]);
+            }
+            check_boundary_write(references, references != NULL ? body.reference_count : 0, sizeof(uint32_t));
+            free(references);
             uint32_t string_count = 0;
             for (uint32_t s = 0; s < input->string_count; s += 1)
             {
@@ -303,7 +345,7 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
             {
                 if (unit->string_bodies[s] == b + 1)
                 {
-                    strings[written++] = (CheckBoundaryString){ .token = input->strings[s].token, .index = s };
+                    strings[written++] = (CheckBoundaryString){ .token = check_boundary_origin(program, input->strings[s].token), .index = s };
                 }
             }
             check_boundary_write(strings, strings != NULL ? string_count : 0, sizeof(CheckBoundaryString));
@@ -328,10 +370,24 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
             }
         }
         free(fixups);
+        if (check_boundary_names == NULL)
+        {
+            char names[800];
+            snprintf(names, sizeof(names), "%s.bodies", check_boundary.path);
+            check_boundary_names = fopen(names, "w");
+        }
+        if (check_boundary_names != NULL)
+        {
+            const uint32_t identifier = program->parser->tokens.names[body.declaration];
+            const char* spelling = program->identifiers != NULL && identifier != 0 && identifier < program->identifiers->count ?
+                                   (const char*)intern_bytes(program->identifiers, identifier) : "?";
+            fprintf(check_boundary_names, "%u\t%u\t%s\t%u\t%s\n", check_boundary_origin(program, body.opening), check_boundary_origin(program, closing),
+                    check_boundary_refusal_names[refusal], function->count, spelling);
+        }
         unit->rows[unit->row_count++] = (CheckBoundaryRow){
-            .opening = body.opening,
-            .closing = closing,
-            .declaration = body.declaration,
+            .opening = check_boundary_origin(program, body.opening),
+            .closing = check_boundary_origin(program, closing),
+            .declaration = check_boundary_origin(program, body.declaration),
             .refusal = refusal,
             .entries = function->count,
             .offset = mark,
@@ -363,9 +419,12 @@ static void check_boundary_record_diagnostic(uint32_t token)
 static void check_boundary_record_finish(void)
 {
     CheckBoundaryUnit* unit = &check_boundary_unit;
-    if (check_boundary_recording() && unit->rows != NULL)
+    if (check_boundary_recording())
     {
-        qsort(unit->rows, unit->row_count, sizeof(CheckBoundaryRow), check_boundary_row_order);
+        if (unit->rows != NULL)
+        {
+            qsort(unit->rows, unit->row_count, sizeof(CheckBoundaryRow), check_boundary_row_order);
+        }
         FILE* file = fopen(check_boundary.path, "wb");
         if (file != NULL)
         {
@@ -373,8 +432,14 @@ static void check_boundary_record_finish(void)
             const uint64_t blob = check_boundary.length;
             fwrite(header, sizeof(header), 1, file);
             fwrite(&blob, sizeof(blob), 1, file);
-            fwrite(unit->rows, sizeof(CheckBoundaryRow), unit->row_count, file);
-            fwrite(check_boundary.bytes, 1, check_boundary.length, file);
+            if (unit->row_count != 0)
+            {
+                fwrite(unit->rows, sizeof(CheckBoundaryRow), unit->row_count, file);
+            }
+            if (check_boundary.length != 0)
+            {
+                fwrite(check_boundary.bytes, 1, check_boundary.length, file);
+            }
             fclose(file);
         }
         // The report reads the bodies' table.
@@ -388,7 +453,7 @@ static void check_boundary_record_finish(void)
         }
         check_boundary_report("recorded");
     }
-    check_boundary_unit.program = NULL;
+    check_boundary_unit_reset();
 }
 
 // A supplying compile's recording parsed, once its bytes are read (check_boundary_begin): the bodies' table, and each
