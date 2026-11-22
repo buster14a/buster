@@ -52,7 +52,7 @@ static void tier1_schedule_fixture_close(Tier1ScheduleFixture* fixture)
     *fixture = (Tier1ScheduleFixture){ 0 };
 }
 
-static bool tier1_schedule_fixture_open(Tier1ScheduleFixture* fixture, Tier1ScheduleGraph* graph, uint16_t* order, bool vector)
+static bool tier1_schedule_fixture_open(Tier1ScheduleFixture* fixture, Tier1ScheduleGraph* graph, uint16_t* order)
 {
     X86Instruction body[BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS];
     for (uint32_t i = 0; i < BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS; i += 4)
@@ -67,7 +67,7 @@ static bool tier1_schedule_fixture_open(Tier1ScheduleFixture* fixture, Tier1Sche
         .count = BUSTER_TIER1_SCHEDULE_FIXTURE_RECORDS,
     };
     Tier1ScheduleStats stats = { 0 };
-    bool valid = tier1_schedule_block(input, graph, order, input.count, vector, &stats) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, order);
+    bool valid = tier1_schedule_block(input, graph, order, input.count, &stats) == TIER1_SCHEDULE_OK && tier1_schedule_verify(input, order);
     fixture->moved = stats.moved;
     for (uint32_t variant = 0; valid && variant < 2; variant += 1)
     {
@@ -99,11 +99,8 @@ static bool tier1_schedule_fixture_open(Tier1ScheduleFixture* fixture, Tier1Sche
             if (valid)
             {
                 records[branch].displacement = (int32_t)offsets[loop] - (int32_t)offsets[branch + 1];
-                uint8_t scalar[BUSTER_TIER1_SCHEDULE_FIXTURE_BYTES];
                 fixture->sizes[variant] = x86_encode(records, count, fixture->code[variant], BUSTER_TIER1_SCHEDULE_FIXTURE_BYTES, 0, 0);
-                const int64_t scalar_size = x86_encode_scalar(records, count, scalar, sizeof(scalar), 0, 0);
-                valid = fixture->sizes[variant] > 0 && scalar_size == fixture->sizes[variant] && memcmp(scalar, fixture->code[variant], (uint64_t)scalar_size) == 0 &&
-                        mprotect(fixture->code[variant], BUSTER_TIER1_SCHEDULE_FIXTURE_BYTES, PROT_READ | PROT_EXEC) == 0;
+                valid = fixture->sizes[variant] > 0 && mprotect(fixture->code[variant], BUSTER_TIER1_SCHEDULE_FIXTURE_BYTES, PROT_READ | PROT_EXEC) == 0;
             }
         }
     }

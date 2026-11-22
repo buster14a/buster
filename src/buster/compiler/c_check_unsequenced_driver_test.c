@@ -58,8 +58,127 @@ static const char check_driver_unsequenced_contexts_source[] =
     "    y = y++;\n"
     "}\n";
 
+// The scans' lanes (#2924): a modification and a read of x with 0 to 20 constants between them, in roots of even and
+// of odd node counts (a negation), so that the read takes each of check_unseq_repeats' 16 lanes; the same in a call's
+// argument, where the increment is the root's only modification, so that its mark (check_unseq_marks) takes each lane
+// (an assignment's root is marked by its = whatever its increment's mark); and each compound assignment as a root's
+// only modification of x, ^= (the operators' range's end) among them.
+static const char check_driver_unsequenced_lanes_source[] =
+    "int g(int);\n"
+    "void f(int x, int y) {\n"
+    "    y = x++ + x;\n"
+    "    y = x++ + 1 + x;\n"
+    "    y = x++ + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x;\n"
+    "    y = x++ + -1 + x;\n"
+    "    y = x++ + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x;\n"
+    "    y = (x += 1) + x; y = (x -= 1) + x; y = (x *= 2) + x; y = (x /= 2) + x; y = (x %= 2) + x;\n"
+    "    y = (x <<= 1) + x; y = (x >>= 1) + x; y = (x &= 1) + x; y = (x |= 1) + x; y = (x ^= 1) + x;\n"
+    "}\n"
+    "void h(int x) {\n"
+    "    g(x++ + x);\n"
+    "    g(x++ + 1 + x);\n"
+    "    g(x++ + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + x);\n"
+    "    g(x++ + -1 + x);\n"
+    "    g(x++ + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "    g(x++ + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + -1 + x);\n"
+    "}\n";
+
+// A sole outer modification may read its own target. A nested modification, or a sibling use,
+// still diagnoses the offending operator with its original macro expansion.
+static const char check_driver_unsequenced_sole_source[] =
+    "#define STEP(v) ((v)++)\n"
+    "void pair(int, int);\n"
+    "int f(volatile int x, int y, int *p) {\n"
+    "    x = x + y; x += x; ++x; x--; (void)(x -= y); *p = x;\n"
+    "    if ((x = y)) { (void)STEP(x); }\n"
+    "    x = STEP(x);\n"
+    "    x += ++x;\n"
+    "    pair(STEP(x), x);\n"
+    "    return x += y;\n"
+    "}\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_unsequenced_fixtures[] =
 {
+    {
+        .name = "sole volatile modifications and nested unsequenced accesses",
+        .source = check_driver_unsequenced_sole_source,
+        .options = { "-Wno-everything", "-Wunsequenced" },
+        .warnings = 3,
+        .notes = 2,
+    },
     {
         .name = "unsequenced modifications and reads by operator",
         .source = check_driver_unsequenced_operators_source,
@@ -89,6 +208,11 @@ static const CheckDriverDefaultWarningFixture check_driver_unsequenced_fixtures[
         .warnings = 5,
         .errors = 20,
         .syntax_only = true,
+    },
+    {
+        .name = "unsequenced modifications and reads on every lane of the scans",
+        .source = check_driver_unsequenced_lanes_source,
+        .warnings = 94,
     },
     {
         .name = "unsequenced accesses by context",

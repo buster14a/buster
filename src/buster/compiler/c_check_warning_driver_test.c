@@ -15,6 +15,7 @@ struct CheckDriverDefaultWarningFixture
     uint32_t notes;
     bool c23;
     bool compare_warning_text;
+    bool compare_node_window;
     bool syntax_only;
 };
 
@@ -1499,6 +1500,11 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "_Noreturn void f(void){}\n",
         .options = { "-Wno-return-type" },
         .warnings = 1,
+    },
+    {
+        .name = "noreturn call when return-type warnings are disabled",
+        .source = "_Noreturn void g(void);_Noreturn void f(void){g();}\n",
+        .options = { "-Wno-return-type" },
     },
     {
         .name = "noreturn group disabled",
@@ -3062,22 +3068,23 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                 check_test_expect(test, oracle_matches, description);
                 for (uint32_t lane = 0; oracle_ready && lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
                 {
-                    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                    const char* alternate = fixture->compare_node_window ? "--node-window-assignments" : "--scalar";
+                    for (uint32_t route = 0; route < 2; route += 1)
                     {
                         arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");
-                        arguments[7] = objects[scalar];
+                        arguments[7] = objects[route];
                         arguments[count] = "--lanes";
                         arguments[count + 1] = (char*)lanes[lane];
-                        arguments[count + 2] = scalar != 0 ? "--scalar" : NULL;
+                        arguments[count + 2] = route != 0 ? (char*)alternate : NULL;
                         arguments[count + 3] = NULL;
-                        unlink(objects[scalar]);
+                        unlink(objects[route]);
                         static const char sentinel[] = "preserved-warning-output";
                         const bool preserve = mode != 0 && oracle == 1;
-                        const bool prior = !preserve || parse_test_write(objects[scalar], sentinel, sizeof(sentinel));
+                        const bool prior = !preserve || parse_test_write(objects[route], sentinel, sizeof(sentinel));
                         char* actual = NULL;
                         const int status = check_test_driver_spawn(arguments, &actual);
                         snprintf(description, sizeof(description), "%s policy=%u mode=%u lanes=%s %s: complete Clang diagnostics",
-                                 fixture->name, policy, mode, lanes[lane], scalar != 0 ? "scalar" : "vector");
+                                 fixture->name, policy, mode, lanes[lane], route != 0 ? alternate : "default");
                         const char* expected_text = fixture->compare_warning_text ? strstr(expected, "warning: ") : NULL;
                         expected_text = fixture->compare_warning_text && expected_text == NULL ? strstr(expected, "error: ") : expected_text;
                         const char* actual_text = fixture->compare_warning_text && expected_text != NULL ?
@@ -3094,7 +3101,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                         }
                         if (preserve)
                         {
-                            FILE* retained = fopen(objects[scalar], "rb");
+                            FILE* retained = fopen(objects[route], "rb");
                             char bytes[sizeof(sentinel)] = { 0 };
                             const bool unchanged = retained != NULL && fread(bytes, 1, sizeof(bytes), retained) == sizeof(bytes) &&
                                                    memcmp(bytes, sentinel, sizeof(bytes)) == 0 && fgetc(retained) == EOF;
@@ -3106,7 +3113,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                         }
                         else
                         {
-                            check_test_expect(test, (access(objects[scalar], F_OK) == 0) == (mode != 0 && status == 0),
+                            check_test_expect(test, (access(objects[route], F_OK) == 0) == (mode != 0 && status == 0),
                                               "default warning policy controls object publication");
                         }
                         free(actual);
@@ -3114,7 +3121,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                     if (mode != 0 && oracle == 0)
                     {
                         check_test_expect(test, check_test_driver_same_files(objects[0], objects[1]),
-                                          "default warning source has identical scalar/vector objects at each lane request");
+                                          "default warning source has identical objects through both routes at each lane request");
                         if (lane == 0)
                         {
                             check_test_expect(test, link(objects[0], objects[3]) == 0, "the first lane request retains a frozen object twin");
@@ -3209,37 +3216,56 @@ static void check_test_driver_default_warnings(CheckTest* test, const char* clan
 {
     check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, check_driver_default_warning_fixtures,
                                              BUSTER_ARRAY_LENGTH(check_driver_default_warning_fixtures), true);
+    if (check_test_driver_takes())
+    {
+        check_test_driver_warning_catalog(test, clang, executable, directory, "checker/division-by-zero");
+    }
 }
 
-// -flazy-system-headers defers only system-header bodies. A unit with no deferred body must still publish its
-// translation-unit-final warnings, exactly as a run without the flag does.
+// -flazy-system-headers defers only system-header bodies. A unit must still publish its translation-unit-final
+// warnings, exactly as a run without the flag does: one with no deferred body, and one whose system header has a body
+// the planner defers (an unused static function's), whose user code's internal function is used and never defined.
 static void check_test_driver_lazy_final_warnings(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char source_text[] = "static int missing(void);int f(void){return missing();}\n";
+    static const char header_text[] = "#pragma GCC system_header\nstatic int unused(int x){return x+1;}\n";
+    static const char* const source_texts[2] = {
+        "static int missing(void);int f(void){return missing();}\n",
+        "#include \"lazy-final-warning.h\"\nstatic int missing(void);int f(void){return missing();}\n",
+    };
+    char header[PATH_MAX];
     char source[PATH_MAX];
+    snprintf(header, sizeof(header), "%s/lazy-final-warning.h", directory);
     snprintf(source, sizeof(source), "%s/lazy-final-warning.c", directory);
-    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
-    char* expected = NULL;
-    char* arguments[] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", source, NULL };
-    const int oracle = written ? check_test_driver_spawn(arguments, &expected) : -1;
-    const CheckDriverDiagnosticCounts counts = check_test_driver_diagnostic_counts(expected);
-    check_test_expect(test, oracle == 0 && expected != NULL && counts.warnings == 1 && counts.notes == 1,
-                      "a lazy-system-header run without a deferred body has Clang's final warning oracle");
-    for (uint32_t route = 0; written && route < 2; route += 1)
+    for (uint32_t deferring = 0; deferring < 2; deferring += 1)
     {
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        const bool written = parse_test_write(header, header_text, sizeof(header_text) - 1) &&
+                             parse_test_write(source, source_texts[deferring], strlen(source_texts[deferring]));
+        char* expected = NULL;
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", source, NULL };
+        const int oracle = written ? check_test_driver_spawn(arguments, &expected) : -1;
+        const CheckDriverDiagnosticCounts counts = check_test_driver_diagnostic_counts(expected);
+        check_test_expect(test, oracle == 0 && expected != NULL && counts.warnings == 1 && counts.notes == 1,
+                          deferring != 0 ? "a lazy-system-header run with a deferred body has Clang's final warning oracle" :
+                                           "a lazy-system-header run without a deferred body has Clang's final warning oracle");
+        for (uint32_t route = 0; written && route < 2; route += 1)
         {
-            char* run[] = { (char*)(executable != NULL && route != 0 ? executable : "/proc/self/exe"), "-std=gnu17",
-                            "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", "-flazy-system-headers", source,
-                            scalar != 0 ? "--scalar" : NULL, NULL };
-            char* actual = NULL;
-            const int status = check_test_driver_spawn(run, &actual);
-            check_test_expect(test, status == oracle && actual != NULL && expected != NULL && strcmp(actual, expected) == 0,
-                              scalar != 0 ? "lazy-system-headers scalar run publishes the same final warning" :
-                              "lazy-system-headers vector run publishes the same final warning");
-            free(actual);
+            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            {
+                char* run[] = { (char*)(executable != NULL && route != 0 ? executable : "/proc/self/exe"), "-std=gnu17",
+                                "-fno-caret-diagnostics", "-fno-color-diagnostics", "-fsyntax-only", "-flazy-system-headers", source,
+                                scalar != 0 ? "--scalar" : NULL, NULL };
+                char* actual = NULL;
+                const int status = check_test_driver_spawn(run, &actual);
+                check_test_expect(test, status == oracle && actual != NULL && expected != NULL && strcmp(actual, expected) == 0,
+                                  deferring != 0 ? (scalar != 0 ? "lazy-system-headers scalar run with a deferred body publishes the same final warning" :
+                                                                  "lazy-system-headers vector run with a deferred body publishes the same final warning") :
+                                                   (scalar != 0 ? "lazy-system-headers scalar run publishes the same final warning" :
+                                                                  "lazy-system-headers vector run publishes the same final warning"));
+                free(actual);
+            }
         }
+        free(expected);
     }
-    free(expected);
     unlink(source);
+    unlink(header);
 }

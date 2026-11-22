@@ -196,7 +196,7 @@ static void check_control_fold_branch(CheckControlFoldWalk* walk, uint32_t token
         alternate = child > token && role == PARSE_ROLE_ELSE ? child : alternate;
         body = child > token && role != PARSE_ROLE_ELSE ? child : body;
     }
-    const uint32_t node = loop ? (condition != BUSTER_CHECK_NONE ? writer->token_first[condition] : BUSTER_CHECK_NONE) : input->token_nodes[token];
+    const uint32_t node = loop ? (condition != BUSTER_CHECK_NONE ? check_control_statement_head(writer, condition) : BUSTER_CHECK_NONE) : input->token_nodes[token];
     CheckValue value = { 0 };
     bool truth = true;
     walk->valid = !loop || (first != BUSTER_CHECK_NONE && condition != BUSTER_CHECK_NONE && check_control_fold_prefix(walk, first));

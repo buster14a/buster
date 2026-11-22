@@ -1250,7 +1250,7 @@ static bool pp_directive_test_guard(const PPDirectiveTestGuard* fixture, const c
             result = false;
         }
     }
-    result = result && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], fixture->name);
+    result = result && ran[0] && ran[1] && pp_same_streams(&runs[0], &runs[1], fixture->name) && pp_kernel_digest_check(&runs[0], "guards", fixture->name);
     if (result && with_clang)
     {
         char* const argv[] = { "clang", "-E", "-P", "-std=gnu17", path, 0 };
@@ -1466,10 +1466,9 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
             char* output = 0;
             char* errors = 0;
             const int status = pp_directive_test_command(argv, &output, &errors);
-            // benchmark-preprocessor's refusal by a scalar build, which runs no benchmark, or by the stand-in of Develop or
-            // a sanitizer build (#2639), which leave its unit out (docs/commands/build.md, "Develop"): Release's and
-            // Debug's executables without a sanitizer check the option.
-            static const char scalar_refusal[] = "benchmarks require an AVX-512 host build; run tests with this scalar build\n";
+            // benchmark-preprocessor's refusal by the stand-in of Develop or a sanitizer build (#2639), which leave its
+            // unit out (docs/commands/build.md, "Develop"): Release's and Debug's executables without a sanitizer check
+            // the option.
             static const char develop_refusal[] =
                 "buster: this command is in the Release and Debug configurations' executables; Develop's leaves c_preprocessor_benchmark.c "
                 "out (docs/commands/build.md, \"Develop\"): build Release with ./build.sh --config Release\n";
@@ -1479,17 +1478,17 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
             const bool benchmark = strcmp(runs[r].command, "benchmark-preprocessor") == 0;
             const bool refused = status == 1 && output != 0 && output[0] == 0 && errors != 0;
             const bool develop = benchmark && refused && (strcmp(errors, develop_refusal) == 0 || strcmp(errors, sanitizer_refusal) == 0);
-            const bool unavailable = develop || (!BUSTER_HOST_VECTOR && benchmark);
+            const bool unavailable = develop;
             const char* text = runs[r].status == 0 ? output : errors;
             // clang's driver reports an option it doesn't know, or a value it takes for an input, as an error.
-            const bool same = unavailable ? refused && (develop || strcmp(errors, scalar_refusal) == 0)
+            const bool same = unavailable ? refused
                                           : status == runs[r].status && text != 0 && strstr(text, runs[r].says) != 0 &&
                                                 (runs[r].status != 0 || (errors != 0 && strstr(errors, "error:") == 0));
             if (!same)
             {
                 printf("location option: %s %s--location-limit %s exits with %d, wanted %d with \"%s\"; its output:\n%s%s", runs[r].command,
                        with_clang && runs[r].mode != 0 ? (compare ? "--compare-clang " : "--clang ") : "", runs[r].limit, status,
-                       unavailable ? 1 : runs[r].status, unavailable ? "benchmarks require an AVX-512 host build" : runs[r].says,
+                       unavailable ? 1 : runs[r].status, unavailable ? "this command is in the Release and Debug configurations' executables" : runs[r].says,
                        output != 0 ? output : "", errors != 0 ? errors : "");
             }
             failures += !same;

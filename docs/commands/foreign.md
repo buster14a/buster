@@ -15,7 +15,7 @@ requirements. [Command index](README.md).
   headers and global symbols parsed into columns of the round's own, their
   records exchanged over fixed hash partitions into each partition's tables,
   archive members loaded in frontier rounds (for the needed shared libraries'
-  references too), and COMDAT groups picked by signature; GNU ld's results
+  unversioned references too), and COMDAT groups picked by signature; GNU ld's results
   where they don't depend on the archives' order, lld's where they do. Each
   phase has a vector path and an exact twin.
   `foreign_test.c` holds its tests (`main.c` includes both;
@@ -69,6 +69,14 @@ and every COMDAT group's fate.
   defines, needed and under `--as-needed` (the member loads), and under
   `--as-needed` with nothing needing it (nothing loads); and a thin archive
   that holds another archive's member (GNU ar's `/N:M`);
+- versioned library references (#2911): a needed library's `foo@V1` leaves
+  an archive's unversioned `foo` unloaded, including when `--as-needed`
+  retains the library in a later round. Regular references still extract,
+  and a definition already loaded stays eligible for export by its bare name.
+  The raw `link-foreign` cases run their executables and inspect `.dynsym`.
+  `--cross-check` compares the no-extraction output with GNU ld/lld; the
+  selected-definition controls preserve Buster's existing export-by-name
+  behavior, which differs from their version-sensitive export selection;
 - with `--cross-check`, which needs `ld.bfd`, `ld.lld`, `cc` and (for the C++
   cases) `g++`: each program and case linked by GNU ld (`--trace` twice, `-Map`
   and `-y`) and by lld (`--why-extract`, `-Map` and `-y`). The members each
@@ -111,7 +119,20 @@ and every COMDAT group's fate.
   symbols in sections 65522 and 65521 through `SHN_XINDEX` (the values of
   `SHN_COMMON` and `SHN_ABS`) beside an absolute and a common one: each must
   be what its `st_shndx` says, by both paths, and with a second object that
-  defines the first strongly too, a duplicate.
+  defines the first strongly too, a duplicate;
+- shared libraries' versions (`foreign_versions_test.c`, #1590), with
+  `ForeignCommand.library_versions` as the source driver's mixed links set
+  it: libraries `cc` builds with version scripts, libA's `foo@V1` of
+  `libB.so` against libBs of `foo@V1` alone and of `foo@@V2` alone, a libC of
+  `foo@@V1` and 40 libraries of another name, under `--as-needed`. The
+  failure (the library, its reference or need, and the provider) or the
+  libraries needed must be the case's: libB not kept for `foo@V1` (libA's
+  `DT_NEEDED` names it), libC kept for it, also as the 42nd library;
+  `foo@V1` refused where no library exports it; libA's need of `V1` refused
+  against a libB without it; the same linked without the flag, as
+  `link-foreign` links it; and libA's references unchecked without a libB on
+  the line. The driver's own cases are `test-checker-driver`'s
+  `check_test_driver_versions`, by the direct route and a mixed one.
 
 The files go in a new directory under `--directory` (`TMPDIR` or `/tmp`),
 removed unless `--keep`. `--seed N` changes the generated programs, and

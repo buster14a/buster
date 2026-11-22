@@ -41,7 +41,14 @@ requirements. [Command index](README.md).
   a value in rax across a `lock cmpxchg`, which keeps rax in r11, and must be
   certified; the rule that keeps rax (`tier1_cert_emitted_kept`) is checked on
   its own cases too. Its realigned fixture's prologue, its allocation moved
-  before its push of rbx and its epilogue matched, must be refused. `test-tier1-masks` corrupts machine rows and wide vectors'
+  before its push of rbx and its epilogue matched, must be refused. Its barrier
+  fixture (#2963) keeps a value in its call-save row across an asm body's `lock
+  or dword [rsp], 0`, and must be certified; the barrier aimed at that row, its
+  writes that leave the row as it was must be certified and those that change
+  it refused. Its forwarded-destination fixtures (#2820) run a call whose
+  aggregate result goes through the hidden pointer to a pointer value, which
+  the call's moves put in rdi in place of a frame object's `lea`, natively and
+  certified, and refuse that move into rdi left out. `test-tier1-masks` corrupts machine rows and wide vectors'
   moves: borrowed masks' reloads left out, staging copies onto live registers,
   claimed placements of roles sharing a register while both hold values, of k0
   for a numbered opmask register or of a corrupted split (#1283's early
@@ -57,10 +64,22 @@ requirements. [Command index](README.md).
   also requires zero repeat stores for a single earlier
   predecessor, while joins and backward-layout predecessors still store.
   Its aggregate-copy regression (#1816) runs the real emitter and decoder with
-  a rematerialized address and dead, live, owed, expired, spilled or relocated
+  a rematerialized address, 16 bytes from rsp and at rsp itself (rsp's
+  register copy, #3149), and dead, live, owed, expired, spilled or relocated
   rax ownership. The independent value-flow checker proves the live value
   survives or is repaid, and rejects missing or corrupted preservation and a
-  saved unknown register.
+  saved unknown register. Its frame-copy fixture (#3149,
+  `tier1_code_certificate_frame_copy`) decodes one record recomputing a frame
+  address into rbx, its recipe 0 or 16 bytes from the frame's base, rsp or
+  (under a frame pointer) rbp, and the checker must find the value in rbx: the
+  emitter's copy (`mov rbx, base` at 0, a lea at 16) is certified; `mov rbx,
+  base` for the recipe at 16, `lea rbx, [base]`, a lea at the other
+  displacement and the other register's copy are refused, and so is every
+  record of a value without a recipe. The check certifies that a record is
+  `tier1_rematerialize`'s copy, not what the copy computes;
+  `test-tier1-allocation`'s frame copies check that. `test-checker-driver
+  --executable`'s frame fixture runs C functions whose recomputed address is at
+  rsp itself through `--tier1 --verify`.
   The full driver's `tier1-shapes` fixture covers the original rematerialization
   failure through compilation, linking and execution.
   The debug-definition fixture (#1114) emits the real call program with source
@@ -103,7 +122,7 @@ requirements. [Command index](README.md).
   using the scalar form-choice oracle, and checks the concrete records and
   clobbers. Unsupported straight-line shapes publish no definition claims.
 - #938's harness allocates every problem it adapts through
-  `tier1_problem_allocate`, by both allocator paths, and reports an allocation
+  `tier1_problem_allocate`, by `tier1_allocate`, and reports an allocation
   only past `tier1_problem_certify`:
   - `tests/tier1-problem/report.c` reports problem files;
   - the integration fuzzer certifies every problem it decodes;
@@ -127,5 +146,7 @@ options] file...` times the emitted code's certificate, its decoding, its check
 and both, per IR instruction and per record, beside the emission it certifies,
 on every function whose code it certifies, with the certificates' sizes and the
 uncertified functions by reason. A refusal, or a step out of memory or past a
-limit, fails it with no report. The 9700X job runs it on
+limit, fails it with no report, naming the function by its index in the corpus
+and the emission's cause and error (a code certificate's reason by name,
+#2870). The 9700X job runs it on
 the frozen `sqlite3.c` where `changes`' `tier1-code-certificate` entry says.

@@ -52,6 +52,105 @@ static void cc_mixed_refusal(CCCompatibilityTest* test, const char* name, const 
 
 #include "c_driver_named_libraries_test.c"
 
+// A needed library's foo@V1 must not pull an archive's unversioned foo (#2911). If another input already defines
+// foo, or loads its member for another name, that definition must still be exported for the library's reference.
+static void cc_mixed_versioned_archive(CCCompatibilityTest* test)
+{
+    const bool files = cc_compat_write(test, "archive-version-main.c",
+        "extern int a_func(void);\n"
+        "#if defined(DEFINE_FOO)\nint foo(void) { return 77; }\n"
+        "#elif defined(REFERENCE_FOO)\nextern int foo(void);\n#endif\n"
+        "#if defined(REFERENCE_MEMBER)\nextern int member_anchor(void);\n#endif\n"
+        "int main(void) {\n"
+        "#if defined(REFERENCE_FOO)\nif (foo() != 99) return 2;\n#endif\n"
+        "#if defined(REFERENCE_MEMBER)\nif (member_anchor() != 1) return 3;\n#endif\n"
+        "return a_func() != EXPECTED; }\n") &&
+        cc_compat_write(test, "archive-version-a.c",
+            "extern int foo(void);\n__asm__(\".symver foo,foo@V1\");\nint a_func(void) { return foo(); }\n") &&
+        cc_compat_write(test, "archive-version-b.c",
+            "int foo_v1(void) { return 11; }\n__asm__(\".symver foo_v1,foo@V1\");\n") &&
+        cc_compat_write(test, "archive-version.map", "V1 { global: foo; local: *; };\n") &&
+        cc_compat_write(test, "archive-version-member.c", "int foo(void) { return 99; }\nint member_anchor(void) { return 1; }\n") &&
+        cc_compat_write(test, "archive-version-extra.c", "int archive_version_extra;\n");
+    cc_compat_expect(test, files, "write versioned-library archive fixtures");
+    bool built = files;
+    const char* const commands[][16] = {
+        { "-shared", "-fPIC", "archive-version-b.c", "-Wl,--version-script=archive-version.map", "-Wl,-soname,libversion_b2911.so", "-o", "libversion_b2911.so", NULL },
+        { "-shared", "-fPIC", "archive-version-a.c", "-L.", "-lversion_b2911", "-Wl,-soname,libversion_a2911.so", "-Wl,-rpath,$ORIGIN", "-o", "libversion_a2911.so", NULL },
+        { "-c", "archive-version-member.c", "-o", "archive-version-member.o", NULL },
+        { "-c", "archive-version-extra.c", "-o", "archive-version-extra.o", NULL },
+    };
+    for (uint32_t i = 0; built && i < sizeof(commands) / sizeof(commands[0]); i += 1)
+    {
+        CCCompatibilityRun run = cc_compat_run(test, test->clang, NULL, commands[i]);
+        built = run.status == 0;
+        if (!built)
+        {
+            fprintf(stderr, "  versioned archive fixture %u: %s\n", i, run.errors != NULL ? run.errors : "(missing diagnostics)");
+        }
+        cc_compat_release(&run);
+    }
+    if (built)
+    {
+        const char* const arguments[] = { "rcs", "libversion_member2911.a", "archive-version-member.o", NULL };
+        CCCompatibilityRun archive = cc_compat_run(test, "ar", NULL, arguments);
+        built = archive.status == 0;
+        cc_compat_release(&archive);
+    }
+    cc_compat_expect(test, built, "build a versioned library reference and an unversioned archive definition");
+    static const struct
+    {
+        const char* name;
+        const char* option;
+        const char* expected;
+        bool exported;
+    } cases[] = {
+        { "versioned library reference leaves the bare archive member unloaded", NULL, "-DEXPECTED=11", false },
+        { "own definition remains exported for a versioned library reference", "-DDEFINE_FOO", "-DEXPECTED=77", true },
+        { "regular reference still extracts beside a versioned library reference", "-DREFERENCE_FOO", "-DEXPECTED=99", true },
+        { "a member loaded for another name exports its versioned-library target", "-DREFERENCE_MEMBER", "-DEXPECTED=99", true },
+    };
+    for (uint32_t c = 0; built && c < sizeof(cases) / sizeof(cases[0]); c += 1)
+    {
+        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        {
+            for (uint32_t lanes = 0; lanes < 2; lanes += 1)
+            {
+                const char* arguments[24];
+                uint32_t count = 0;
+                arguments[count++] = "archive-version-main.c";
+                arguments[count++] = "archive-version-extra.o";
+                arguments[count++] = cases[c].expected;
+                if (cases[c].option != NULL)
+                {
+                    arguments[count++] = cases[c].option;
+                }
+                arguments[count++] = "-L.";
+                arguments[count++] = "-lversion_a2911";
+                arguments[count++] = "libversion_member2911.a";
+                arguments[count++] = "-lversion_b2911";
+                arguments[count++] = "-Wl,-rpath,$ORIGIN";
+                arguments[count++] = "-o";
+                arguments[count++] = "program";
+                arguments[count++] = "--lanes";
+                arguments[count++] = lanes == 0 ? "1" : "3";
+                if (scalar != 0)
+                {
+                    arguments[count++] = "--scalar";
+                }
+                arguments[count] = NULL;
+                cc_mixed_command(test, cases[c].name, arguments, NULL, true);
+                const char* const symbols[] = { "-D", "--defined-only", "--format=posix", "program", NULL };
+                CCCompatibilityRun names = cc_compat_run(test, "nm", NULL, symbols);
+                const bool exported = names.output != NULL && (strncmp(names.output, "foo ", 4) == 0 || strstr(names.output, "\nfoo ") != NULL);
+                cc_compat_expect(test, names.status == 0 && exported == cases[c].exported,
+                                 "only a loaded definition is exported for the library's versioned reference");
+                cc_compat_release(&names);
+            }
+        }
+    }
+}
+
 static void cc_mixed_unsupported_sources(CCCompatibilityTest* test)
 {
     static const char* const suffixes[] = {
@@ -259,6 +358,7 @@ static int driver_mixed_tests(const char* compiler, const char* clang)
         cc_mixed_refusal(&test, "linker option cannot consume a source operand", missing_link_value, "missing");
         cc_mixed_refusal(&test, "mixed multiple -c -o rejected", multiple_output, "multiple output");
         cc_mixed_named_libraries(&test);
+        cc_mixed_versioned_archive(&test);
         cc_mixed_unsupported_sources(&test);
         const char* const fatal_order[] = { "-c", "-Wfatal-errors", "fatal.S", "later.c", NULL };
         CCCompatibilityRun fatal = cc_compat_run(&test, test.compiler, NULL, fatal_order);

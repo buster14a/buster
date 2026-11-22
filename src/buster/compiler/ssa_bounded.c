@@ -34,7 +34,7 @@ struct SsaBounded
     uint32_t* mapping;
 };
 
-static SsaError ssa_bounded_accesses(const SsaWork* work, SsaBounded* bounded)
+static SsaError ssa_bounded_accesses(const SsaWork* work, SsaBounded* bounded, bool retain_parts)
 {
     const SsaInput* input = work->input;
     const uint32_t locals = input->local_count;
@@ -76,8 +76,8 @@ static SsaError ssa_bounded_accesses(const SsaWork* work, SsaBounded* bounded)
         const uint32_t accesses = offsets[locals];
         const uint32_t parts = accesses < locals ? accesses : locals;
         bounded->accesses = ssa_allocate(work->scratch, accesses, sizeof(uint32_t));
-        bounded->parts = ssa_allocate(work->scratch, parts, sizeof(SsaBoundedPart));
-        if (bounded->accesses == 0 || bounded->parts == 0)
+        bounded->parts = retain_parts ? ssa_allocate(work->scratch, parts, sizeof(SsaBoundedPart)) : 0;
+        if (bounded->accesses == 0 || (retain_parts && bounded->parts == 0))
         {
             error = SSA_ERROR_MEMORY;
         }
@@ -117,7 +117,6 @@ static SsaError ssa_bounded_rename(SsaWork* work, const uint32_t* accesses, uint
             limit += 1;
         }
         uint32_t current = kinds[accesses[first]] == BUSTER_SSA_READ ? ssa_read_entry(work, block, 0, stack) : BUSTER_SSA_NONE;
-#if BUSTER_HOST_VECTOR
         if (vector && work->construction_error == SSA_OK)
         {
             const __m512i positions = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -155,7 +154,6 @@ static SsaError ssa_bounded_rename(SsaWork* work, const uint32_t* accesses, uint
             }
         }
         else
-#endif
         {
             while (first < limit && work->construction_error == SSA_OK)
             {
@@ -354,7 +352,7 @@ static SsaError ssa_construct_bounded(SsaWork* work, bool vector)
     const uint32_t* operands = input->operands;
     const uint32_t* instruction_blocks = work->instruction_blocks;
     SsaBounded bounded = { 0 };
-    SsaError error = ssa_bounded_accesses(work, &bounded);
+    SsaError error = ssa_bounded_accesses(work, &bounded, true);
     SsaWork local_work = *work;
     local_work.promoted_count = 1;
     local_work.phi_capacity = blocks;

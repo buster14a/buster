@@ -197,20 +197,20 @@ refusal is `certificate-rejected`, and its capacity is `capacity`. No success
 stub is supplied.
 
 The harness allocates through `tier1_problem_allocate`, and nothing it reports
-skips the gate. The function adapts a problem and allocates it by both of
-buster's allocator paths, `tier1_allocate` and its scalar twin. It certifies
-each allocation by the gate and returns the function's one terminal reason:
+skips the gate. The function adapts a problem and allocates it by
+`tier1_allocate`. It certifies the allocation by the gate and returns the
+function's one terminal reason:
 * the adapter's refusal;
-* `allocation-refused`, where a path can't allocate the problem;
-* `capacity`, where the arena can't hold an allocation or its check;
-* `certificate-rejected`, where either path's allocation fails its certificate;
-* otherwise `ok`, with both allocations and their certificates' reports.
+* `allocation-refused`, where the allocator can't allocate the problem;
+* `capacity`, where the arena can't hold the allocation or its check;
+* `certificate-rejected`, where the allocation fails its certificate;
+* otherwise `ok`, with the allocation and its certificate's report.
 
 On any reason but `ok`, the arena is as it was and nothing is published.
 
 Its callers:
 * `tests/tier1-problem/report.c` reads problem files. It prints each function's
-  reason and, for an accepted one, its allocations' fragments and spills, then
+  reason and, for an accepted one, its allocation's fragments and spills, then
   the tally. It exits with status 1 on a `certificate-rejected` allocation.
 * The integration build of `fuzz.c` allocates every problem it decodes and
   aborts on a `certificate-rejected` one.
@@ -227,13 +227,14 @@ Run from the repository root. These commands are correctness tests, not
 performance measurements; use the approved shared host lock for target runs.
 
 ```sh
-clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION tests/tier1-problem/test.c -o /tmp/tier1-problem && /tmp/tier1-problem
+clang -std=c17 -O2 -g -march=native -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread -DBUSTER_TP_INTEGRATION tests/tier1-problem/test.c -o /tmp/tier1-problem && /tmp/tier1-problem
 ```
 
 Without `-DBUSTER_TP_INTEGRATION`, only the standalone codec is tested. With it,
-the test includes the real arena, real `tier1_allocate`, scalar twin and actual
+the test includes the real arena, real `tier1_allocate` and actual
 input validator, never substitute implementations. The focused hosted workflow
-runs both baseline/native builds, ASan/UBSan, and seeded libFuzzer tests. These
+runs the native build on a drawn AVX-512 runner (#2924; the baseline build went
+with the scalar host), ASan/UBSan, and seeded libFuzzer tests. These
 are separate from the repository's required full qualification.
 
 Fixtures cover native/wire round trips, canonical byte identity, all truncated
@@ -243,24 +244,24 @@ class membership, phase/tie/alias/mask retention, refusals by reason,
 capacity rollback, unchanged publication and the current allocator bridge.
 The allocator smoke checks occupancy only; #939's acceptance is the gate, which
 `harness_tests` drives:
-* the fixtures' allocations, both paths', certified, and each the allocator's
-  own;
+* the fixtures' allocations certified, and each the allocator's own;
 * every arena too small, refused as `capacity` with nothing published;
 * the adapter's refusals, which keep their reasons, and an import the allocator
   refuses (`allocation-refused`);
 * 400 seeded straight-line imports of up to 48 instructions on 2 to 8
   allocatable registers, generated, round-tripped through the wire and
-  certified by both paths. 251 of them spill.
+  certified. 251 of them spill.
 
 `seed.c` emits explicitly synthetic straight/CFG/form seeds. `fuzz.c` verifies
 that every successfully decoded mutation canonically re-encodes byte for byte.
 With `-DBUSTER_TP_INTEGRATION` it also allocates each one through the gate.
 
 The report runs on the seeds. The workflow checks that it accepts the
-straight-line one with both paths certified and refuses the others by reason:
+straight-line one with its allocation certified (`certified=1`) and refuses the
+others by reason:
 
 ```sh
-clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread tests/tier1-problem/report.c -o /tmp/tier1-problem-report && /tmp/tier1-problem-report FILE...
+clang -std=c17 -O2 -g -march=native -Wall -Wextra -Werror -Wno-unused-function -Wno-psabi -fno-strict-aliasing -fwrapv -funsigned-char -pthread tests/tier1-problem/report.c -o /tmp/tier1-problem-report && /tmp/tier1-problem-report FILE...
 ```
 
 ## Remaining #938 acceptance

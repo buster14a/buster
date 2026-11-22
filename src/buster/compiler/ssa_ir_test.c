@@ -547,9 +547,9 @@ static bool ssa_ir_test_promote(SsaIrTestTally* tally, const IrFunction* input, 
     if (ok)
     {
         ok = ssa_ir_test_expect(tally, vector.dominance_checked && scalar.dominance_checked, "both promotion paths check real dominance");
-        ok = ssa_ir_test_expect(tally, ir_verify(result, scratch, 0).error == IR_OK && ir_verify_scalar(result, scratch, 0).error == IR_OK &&
-                                      ir_verify(twin, scratch, 0).error == IR_OK && ir_verify_scalar(twin, scratch, 0).error == IR_OK,
-                                 "both IR verifiers accept both outputs") && ok;
+        ok = ssa_ir_test_expect(tally, ir_verify(result, scratch, 0).error == IR_OK &&
+                                      ir_verify(twin, scratch, 0).error == IR_OK,
+                                 "the IR verifier accepts both outputs") && ok;
     }
     return ok;
 }
@@ -1860,7 +1860,7 @@ static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
                 const uint32_t first = function->block_offsets[1];
                 const uint32_t compared = first + phis;
                 ssa_ir_test_expect(tally, phis != 0 && compared < function->block_offsets[2] && function->op[compared] == IR_ICMP && function->a[compared] == compared - 1,
-                                   "the first-read counter is the last local-ordered header phi, including on baseline hosts");
+                                   "the first-read counter is the last local-ordered header phi");
             }
             const uint64_t arguments[1] = { 10 };
             ssa_ir_test_execute(tally, &parsed, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture in memory");

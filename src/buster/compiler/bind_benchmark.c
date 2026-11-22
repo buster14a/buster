@@ -25,7 +25,6 @@
 // The exit status is 1 if the arguments are invalid, a program can't be made or bound, or the paths disagree.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -87,6 +86,7 @@ static const char* const bind_benchmark_kind_names[RUNTIME_KINDS] = {
     [RUNTIME_KIND_STATIC] = "the static",
     [RUNTIME_KIND_STATIC_PIE] = "the static PIE's",
     [RUNTIME_KIND_SHARED] = "the shared library's",
+    [RUNTIME_KIND_NO_PIE] = "the position-dependent executable's",
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -405,11 +405,14 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
         bind_benchmark_restore(&begun, link, &program->bytes);
         result = bind_begin(&bind, link, runtime, path, &program->bytes, units, arena);
         bind_benchmark_restore(&begun, link, &program->bytes);
-        memset(bind.name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
-        bind.named_count = 0;
-        bind_benchmark_start(clock);
-        bind_match(&bind, link, 1, link->symbols.count);
-        bind_benchmark_stop(clock, &figure[BIND_BENCHMARK_MATCH], run);
+        if (result)
+        {
+            memset(bind.name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
+            bind.named_count = 0;
+            bind_benchmark_start(clock);
+            bind_match(&bind, link, 1, link->symbols.count);
+            bind_benchmark_stop(clock, &figure[BIND_BENCHMARK_MATCH], run);
+        }
         bind_benchmark_restore(&begun, link, &program->bytes);
         arena_pop_to(arena, bind_arena);
         bind_benchmark_start(clock);
@@ -418,8 +421,11 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
         arena_pop_to(arena, bind_arena);
     }
     // bind_end, each run from the program's atoms as they were after bind_begin.
-    bind_benchmark_restore(&begun, link, &program->bytes);
-    result = result && bind_begin(&bind, link, runtime, path, &program->bytes, units, arena) && link_program_generate_atoms(program);
+    if (result)
+    {
+        bind_benchmark_restore(&begun, link, &program->bytes);
+        result = bind_begin(&bind, link, runtime, path, &program->bytes, units, arena) && link_program_generate_atoms(program);
+    }
     // The libraries named with -l, which binding takes between bind_begin and bind_end, as the driver sets them.
     bind.libraries = libraries;
     BindBenchmarkMark atoms_added;
@@ -633,11 +639,3 @@ int run_bind_benchmark(int argc, char** argv)
     return result ? 0 : 1;
 }
 
-#else
-int run_bind_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

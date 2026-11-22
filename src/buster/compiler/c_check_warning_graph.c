@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Source conversion facts after checking, before initializer/liveness pruning. Select candidate opcodes in
-// sixteen-node blocks; scalar is the independent traversal twin. Only established warning facts allocate storage.
+// sixteen-node blocks. Only established warning facts allocate storage.
 // Stage a new immutable suffix so failure cannot publish an event pointer into a rolled-back arena.
 
 static uint32_t check_warning_graph_first(const CheckGraph* graph, const Parser* parser, uint32_t node)
@@ -517,9 +517,8 @@ static uint32_t check_interrupt_opening(const Parser* parser, uint32_t close)
 // of interrupt service routines and their -Wexcessive-regsave warnings (check_interrupt_call_report). A call's callee is
 // the postfix expression before its `(`, and the name it names one written alone, in parentheses or after one `&`, which
 // must be a declared name's use or a builtin's; a callee through a member or a postfix expression (`s.f()`) names nothing,
-// and is warned of without a note (#1447). The graph's tokens are marked in a bitset; the
-// vector path then compares 64 tokens' roles at a time with PARSE_ROLE_CLOSE_CALL, the scalar path, its twin, each
-// token's.
+// and is warned of without a note (#1447). The graph's tokens are marked in a bitset; then 64 tokens' roles at a time
+// are compared with PARSE_ROLE_CLOSE_CALL.
 static void check_interrupt_evaluated_calls(CheckInputReader* reader, const CheckInterruptCalls* calls)
 {
     CheckInput* input = reader->output;
@@ -541,20 +540,9 @@ static void check_interrupt_evaluated_calls(CheckInputReader* reader, const Chec
     for (uint32_t first = 0; graphed != NULL && !input->resource && first < count; first += 64)
     {
         const uint32_t live = count - first < 64 ? count - first : 64;
-        uint64_t selected = 0;
-        if (!BUSTER_SCALAR_PATH(parser->options.scalar))
-        {
-            const __mmask64 lanes = live == 64 ? ~(__mmask64)0 : ((__mmask64)1 << live) - 1;
-            const __m512i roles = _mm512_maskz_loadu_epi8(lanes, parser->tree.roles + first);
-            selected = _mm512_mask_cmpeq_epi8_mask(lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_CALL));
-        }
-        else
-        {
-            for (uint32_t k = 0; k < live; k += 1)
-            {
-                selected |= (uint64_t)(parser->tree.roles[first + k] == PARSE_ROLE_CLOSE_CALL) << k;
-            }
-        }
+        const __mmask64 lanes = live == 64 ? ~(__mmask64)0 : ((__mmask64)1 << live) - 1;
+        const __m512i roles = _mm512_maskz_loadu_epi8(lanes, parser->tree.roles + first);
+        uint64_t selected = _mm512_mask_cmpeq_epi8_mask(lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_CALL));
         selected &= ~graphed[first / 64];
         for (; !input->resource && selected != 0; selected &= selected - 1)
         {
@@ -626,15 +614,14 @@ static void check_interrupt_evaluated_calls(CheckInputReader* reader, const Chec
 // isn't). The calls are the graph's, in its order, which is clang's: a call's callee's and arguments' calls first; then
 // those the reader's evaluator alone reads (a typeof's, a constant array bound's: check_interrupt_evaluated_calls),
 // each at its place. A unit without the
-// attributes takes none of this; one with them, two columns of its objects and a pass over its nodes, the vector path 16
-// nodes' operations at a time, the scalar path, its twin, each node's.
+// attributes takes none of this; one with them, two columns of its objects and a pass over its nodes, 16 nodes' operations
+// at a time.
 static void check_input_interrupt_calls(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
     const CheckGraph* graph = &input->graph;
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = parser->options.scalar;
     Arena* scratch = reader->scratch;
     const uint64_t mark = scratch->length;
     const uint32_t report_begin = input->report_count;
@@ -647,10 +634,10 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
         memset(interrupts, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(saving, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
         const CheckSparseWide all = input->attributes;
-        for (uint32_t first = check_sparse_wide_present(all) ? check_input_attributed_next(all, 0, count, scalar) : count; first < count;
-             first = check_input_attributed_next(all, first + 16, count, scalar))
+        for (uint32_t first = check_sparse_wide_present(all) ? check_input_attributed_next(all, 0, count) : count; first < count;
+             first = check_input_attributed_next(all, first + 16, count))
         {
-            const uint32_t lanes = check_input_attributed_group(all, first, count, scalar);
+            const uint32_t lanes = check_input_attributed_group(all, first, count);
             for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -670,8 +657,7 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     }
     // In a unit whose lookups found other declarations than their entities' latest (#1447, CheckInput.redeclaration_links),
     // each declaration's marks: its own and those of the declaration it found (the link's, or its object's latest before
-    // it), in source order. A scan of the declaring tokens, the vector path comparing 64 tokens' kinds at a time with
-    // C_BINDING_FUNCTION, the scalar path, its twin, each token's.
+    // it), in source order. A scan of the declaring tokens, comparing 64 tokens' kinds at a time with C_BINDING_FUNCTION.
     uint8_t* marks = valid && input->redeclaration_link_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     uint32_t* latest = marks != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
     valid = valid && (input->redeclaration_link_count == 0 || latest != NULL);
@@ -684,20 +670,9 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
         for (uint32_t first = 0; first < limit; first += 64)
         {
             const uint32_t live = limit - first < 64 ? limit - first : 64;
-            uint64_t selected = 0;
-            if (!BUSTER_SCALAR_PATH(parser->options.scalar))
-            {
-                const __mmask64 lanes = live == 64 ? ~(__mmask64)0 : ((__mmask64)1 << live) - 1;
-                const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, input->declaration_kinds + first);
-                selected = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8((char)C_BINDING_FUNCTION));
-            }
-            else
-            {
-                for (uint32_t k = 0; k < live; k += 1)
-                {
-                    selected |= (uint64_t)(input->declaration_kinds[first + k] == C_BINDING_FUNCTION) << k;
-                }
-            }
+            const __mmask64 lanes = live == 64 ? ~(__mmask64)0 : ((__mmask64)1 << live) - 1;
+            const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, input->declaration_kinds + first);
+            uint64_t selected = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8((char)C_BINDING_FUNCTION));
             for (; selected != 0; selected &= selected - 1)
             {
                 const uint32_t d = first + (uint32_t)__builtin_ctzll(selected);
@@ -728,8 +703,8 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     // The bodies of the functions they mark, in token order.
     const bool bodied = valid && check_sparse_present(input->body_declarations);
     uint32_t body_count = 0;
-    for (uint32_t opening = bodied ? check_sparse_next(input->body_declarations, 0, count, !BUSTER_SCALAR_PATH(scalar)) : count; opening < count;
-         opening = check_sparse_next(input->body_declarations, opening + 1, count, !BUSTER_SCALAR_PATH(scalar)))
+    for (uint32_t opening = bodied ? check_sparse_next(input->body_declarations, 0, count) : count; opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count))
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         const uint32_t object = declaration < count ? input->objects[declaration] : 0;
@@ -739,8 +714,8 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     CheckInterruptBody* bodies = valid && body_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInterruptBody, body_count) : NULL;
     valid = valid && (body_count == 0 || bodies != NULL);
     uint32_t filled = 0;
-    for (uint32_t opening = bodied && bodies != NULL ? check_sparse_next(input->body_declarations, 0, count, !BUSTER_SCALAR_PATH(scalar)) : count; opening < count;
-         opening = check_sparse_next(input->body_declarations, opening + 1, count, !BUSTER_SCALAR_PATH(scalar)))
+    for (uint32_t opening = bodied && bodies != NULL ? check_sparse_next(input->body_declarations, 0, count) : count; opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count))
     {
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         const uint32_t object = declaration < count ? input->objects[declaration] : 0;
@@ -757,20 +732,16 @@ static void check_input_interrupt_calls(CheckInputReader* reader)
     for (uint32_t first = 0; valid && first < graph->count; first += 16)
     {
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
-        uint32_t selected = (1u << live) - 1;
-        if (!BUSTER_SCALAR_PATH(scalar))
-        {
-            const __mmask16 lanes = (__mmask16)selected;
-            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
-            selected = _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL)) |
-                       _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_UNARY)) |
-                       _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW)) |
-                       _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VARARGS)) |
-                       (_mm512_mask_cmpge_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_MISC)) &
-                        _mm512_mask_cmple_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_ATOMIC))) |
-                       _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_VECTOR)) |
-                       _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_X86));
-        }
+        const __mmask16 lanes = (__mmask16)((1u << live) - 1);
+        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+        uint32_t selected = _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL)) |
+                            _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_UNARY)) |
+                            _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_OVERFLOW)) |
+                            _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VARARGS)) |
+                            (_mm512_mask_cmpge_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_MISC)) &
+                             _mm512_mask_cmple_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_ATOMIC))) |
+                            _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_VECTOR)) |
+                            _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_X86));
         for (; valid && selected != 0; selected &= selected - 1)
         {
             const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
@@ -1339,38 +1310,22 @@ static bool check_warning_graph_effect_reached(const CheckInput* input, const Pa
 
 // Whether the tokens [first, end), an unevaluated operand's whose parent is `stop`, hold a side effect HasSideEffects finds
 // (check_warning_graph_effect_reached). The candidates are the operators of assignments, increments and decrements and
-// the closers of calls and keywords' operations: 64 tokens' roles and kinds at a time, the scalar path's twin a token at
-// a time; each candidate's node says whether it is one.
+// the closers of calls and keywords' operations: 64 tokens' roles and kinds at a time; each candidate's node says whether
+// it is one.
 static bool check_warning_graph_side_effects(const CheckInput* input, const Parser* parser, uint32_t first, uint32_t end, uint32_t stop)
 {
-    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     bool result = false;
     for (uint32_t block = first; !result && block < end; block += 64)
     {
         const uint32_t live = end - block < 64 ? end - block : 64;
         const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
-        uint64_t candidates = 0;
-        if (vector)
-        {
-            const __m512i roles = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tree.roles + block);
-            const __m512i kinds = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + block);
-            candidates = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_ASSIGN)) |
-                         _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_CALL)) |
-                         _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_KEYWORD)) |
-                         _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_PLUSPLUS)) |
-                         _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_MINUSMINUS));
-        }
-        else
-        {
-            for (uint32_t lane = 0; lane < live; lane += 1)
-            {
-                const uint8_t role = parser->tree.roles[block + lane];
-                const uint8_t kind = parser->tokens.kinds[block + lane];
-                const bool candidate = role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_CLOSE_CALL || role == PARSE_ROLE_CLOSE_KEYWORD ||
-                                       kind == PARSE_KIND_PLUSPLUS || kind == PARSE_KIND_MINUSMINUS;
-                candidates |= candidate ? UINT64_C(1) << lane : 0;
-            }
-        }
+        const __m512i roles = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tree.roles + block);
+        const __m512i kinds = _mm512_maskz_loadu_epi8((__mmask64)lanes, parser->tokens.kinds + block);
+        uint64_t candidates = _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_ASSIGN)) |
+                              _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_CALL)) |
+                              _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, roles, _mm512_set1_epi8((char)PARSE_ROLE_CLOSE_KEYWORD)) |
+                              _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_PLUSPLUS)) |
+                              _mm512_mask_cmpeq_epi8_mask((__mmask64)lanes, kinds, _mm512_set1_epi8((char)PARSE_KIND_MINUSMINUS));
         for (; !result && candidates != 0; candidates &= candidates - 1)
         {
             const uint32_t token = block + (uint32_t)__builtin_ctzll(candidates);
@@ -1443,18 +1398,17 @@ static bool check_warning_graph_type_name(const CheckInputReader* reader, uint32
 }
 
 // The sizeof and alignof operations the constant reader reads (#1447): an array bound's, an enumerator's value's, which
-// have no node (check_warning_graph_operand warns of the graph's). Their keywords found 64 tokens at a time (the scalar
-// path's twin visits every token); an expression operand with a side effect warns as clang's
+// have no node (check_warning_graph_operand warns of the graph's). Their keywords found 64 tokens at a time; an expression
+// operand with a side effect warns as clang's
 // CheckUnaryExprOrTypeTraitOperand does, a type name's not.
 static void check_warning_graph_constant_queries(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     const CheckInput* input = reader->output;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     for (uint32_t first = 0; input->token_nodes != NULL && first < count && !reader->output->resource; first += 64)
     {
-        uint64_t active = scalar ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_SIZEOF);
+        uint64_t active = check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_SIZEOF);
         for (; active != 0 && !reader->output->resource; active &= active - 1)
         {
             const uint32_t keyword = first + (uint32_t)__builtin_ctzll(active);
@@ -1491,16 +1445,15 @@ static void check_warning_graph_constant_queries(CheckInputReader* reader)
 }
 
 // The controlling expression of each _Generic (check_warning_graph_unevaluated): its keyword's kind found 64 tokens at a
-// time (the scalar path's twin visits every token), its `)` the keyword's parent, its operand the tokens after its `(` up
+// time, its `)` the keyword's parent, its operand the tokens after its `(` up
 // to its first separator, whose bracket depth is its first token's.
 static void check_warning_graph_generics(CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
-    const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     for (uint32_t first = 0; first < count && !reader->output->resource; first += 64)
     {
-        uint64_t active = scalar ? check_input_scan_all(first, count) : check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_GENERIC);
+        uint64_t active = check_input_scan_equal(parser->tokens.kinds, first, count, PARSE_KIND_GENERIC);
         for (; active != 0 && !reader->output->resource; active &= active - 1)
         {
             const uint32_t keyword = first + (uint32_t)__builtin_ctzll(active);
@@ -1570,22 +1523,18 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
     for (uint32_t first = 0; valid && first < graph->count; first += 16)
     {
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
-        uint32_t selected = (1u << live) - 1;
-        if (!BUSTER_SCALAR_PATH(parser->options.scalar))
-        {
-            const __mmask16 lanes = (__mmask16)selected;
-            const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
-            selected = _mm512_mask_cmpge_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_LESS)) &
-                       _mm512_mask_cmple_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_GREATER_EQUAL));
-            selected |= _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_INITIALIZE)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CONVERT)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
-                        _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CAST));
-        }
+        const __mmask16 lanes = (__mmask16)((1u << live) - 1);
+        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+        uint32_t selected = _mm512_mask_cmpge_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_LESS)) &
+                            _mm512_mask_cmple_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_GREATER_EQUAL));
+        selected |= _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_INITIALIZE)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CONVERT)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CAST));
         for (; valid && selected != 0; selected &= selected - 1)
         {
             const uint32_t node = first + (uint32_t)__builtin_ctz(selected);

@@ -64,6 +64,32 @@ static __attribute__((unused)) void pp_diagnostic_suborder(Preprocessor* pp, con
     }
 }
 
+// Order the new records among the others at their publication position by their tokens rather than by discovery (#2252):
+// publication puts each before the first other record there whose token follows its own, the others keeping their order.
+// A function body's constant's comma is clang's in source order among the body's queued diagnostics, which the reader
+// finds before the graph's. Their suborders are their tokens, which order them among themselves.
+static __attribute__((unused)) void pp_diagnostic_source_order(Preprocessor* pp, const PPDiagnosticRecord* previous)
+{
+    for (PPDiagnosticRecord* record = previous != NULL ? previous->next : pp->diagnostic_first; record != NULL; record = record->next)
+    {
+        record->source_ordered = true;
+        record->suborder = record->token;
+        pp->diagnostic_source_ordered = true;
+    }
+}
+
+// Order the new records among a position's source-ordered ones (pp_diagnostic_source_merge) by where clang queues them,
+// `end`, the exclusive end of the expression whose building or completion queues them, rather than by their tokens
+// (#2252): a function body's array index, unused result, unsequenced or conversion warning at its full expression's end,
+// a division's or a shift's at its operator's, after a constant's comma their expression holds.
+static __attribute__((unused)) void pp_diagnostic_queued(Preprocessor* pp, const PPDiagnosticRecord* previous, uint32_t end)
+{
+    for (PPDiagnosticRecord* record = previous != NULL ? previous->next : pp->diagnostic_first; record != NULL; record = record->next)
+    {
+        record->token = end;
+    }
+}
+
 BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp);
 
 // The diagnostic location and its publication boundary can differ. A runtime warning, for example, completes

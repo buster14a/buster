@@ -178,7 +178,7 @@ static bool check_init_object_retain(CheckInitObjects* objects, const CheckInput
             CheckInitializer constant = { 0 };
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                        input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
-                                       true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects, NULL);
+                                       true, diagnostic_only, true, output, scratch, &constant, &input->graph, NULL, objects, NULL, NULL);
             valid = accepted || constant.status != CHECK_INIT_RESOURCE;
             known = accepted && check_init_object_bytes(types, &constant, bytes, size);
             arena_pop_to(output, output_mark);
@@ -647,9 +647,9 @@ static bool check_init_converted_nonconstant(const CheckInput* input, const Chec
 // Optional warning sink storage belongs to the caller and precedes both arena suffixes. It receives distinct
 // original token IDs in source order, including warnings before a later semantic failure. capacity == parser->tokens.count is
 // sufficient for an empty sink. Resource/input failure restores its entry count and both arena lengths.
-static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, const CheckInput* input, const CheckStream* stream,
-                                                 const Parser* parser, TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch,
-                                                 CheckInitWarningSink* warnings)
+static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const CheckInput* input, const CheckStream* stream,
+                                             const Parser* parser, TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch,
+                                             CheckInitWarningSink* warnings, CheckInitCounted* counted)
 {
     *result = (CheckInitDiagnostic){
         .token = BUSTER_CHECK_NONE,
@@ -930,7 +930,7 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                                          input->declared_types[declaration], begin, end, check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0,
                                                          true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects,
-                                                         &sink);
+                                                         &sink, counted);
             initialized = accepted;
             if (!accepted)
             {
@@ -1106,6 +1106,31 @@ static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, co
     return valid;
 }
 
+static bool check_initializers_diagnose_warnings(CheckInitDiagnostic* result, const CheckInput* input, const CheckStream* stream,
+                                                 const Parser* parser, TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch,
+                                                 CheckInitWarningSink* warnings)
+{
+    return check_initializers_diagnose_walk(result, input, stream, parser, types, before_token, output, scratch, warnings, NULL);
+}
+
+// The errors of the unit's initializations of counted_by and counted_by_or_null pointer members whose pointee is
+// incomplete (#1842's 3d, CheckInitCounted): a diagnostic walk of the initializers check_initializers_diagnose_warnings
+// walks, which traces their lists, in `counted->arena`. Only for a unit that has such members (check_init_counted_unit).
+static bool check_initializers_counted(CheckInitCounted* counted, const CheckInput* input, const CheckStream* stream, const Parser* parser, TypeTable* types,
+                                       Arena* output, Arena* scratch)
+{
+    counted->tag_count = types->tags.count;
+    counted->tags = counted->tag_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(counted->arena, uint32_t, counted->tag_count) : NULL;
+    counted->failed = counted->tag_count != 0 && counted->tags == NULL;
+    if (counted->tags != NULL)
+    {
+        memset(counted->tags, 0, (uint64_t)counted->tag_count * sizeof(uint32_t));
+    }
+    CheckInitDiagnostic result = { 0 };
+    const bool valid = !counted->failed && check_initializers_diagnose_walk(&result, input, stream, parser, types, BUSTER_CHECK_NONE, output, scratch, NULL, counted);
+    return valid && !counted->failed;
+}
+
 static bool check_initializers_diagnose(CheckInitDiagnostic* result, const CheckInput* input, const CheckStream* stream,
                                         const Parser* parser, TypeTable* types, uint32_t before_token, Arena* output, Arena* scratch)
 {
@@ -1199,7 +1224,8 @@ static bool check_initializers_run_events(CheckInitializers* result, const Check
             check_initializers_noderef(&warnings, input, token);
             valid = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                       input->declared_types[token], check_sparse_get(input->initializer_begins, token), check_sparse_get(input->initializer_ends, token),
-                                      check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects, NULL);
+                                      check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) != 0, false, true, output, scratch, plan, &input->graph, &collector, &objects, NULL,
+                                      NULL);
         }
         if (valid && !check_init_object_retain(&objects, input, stream, parser, types, token, plan, false, output, scratch))
         {

@@ -29,14 +29,15 @@
 //    every such value is live out at once; each phi to its operand's at the exit of a chosen predecessor; and a value
 //    that a phi takes, to the first register of the phi, or of the next phi along, that has one before it. A range of a
 //    loop's body laid out before its header, with no anchor, takes the hint of its phi's at the header, back to the first
-//    range of another value before it (tier1_cfg_body_hints, #2784). Each value then stays where control from its
+//    range of another value before it (tier1_cfg_body_hints, #2784), and a phi's first range there that the chain leaves
+//    unhinted takes an operand's register at the loop's entry (#2834). Each value then stays where control from its
 //    definition brings it, and an edge moves what its own source block changed. A range live out of its block names the
 //    range whose opening is the value's place at its first successor's entry, where that one comes first (#2774): a
 //    value whose place there is its slot is the first the allocator evicts.
 //    A general range live across a fixed register's sequence (sequences, #2767: a division's rax and rdx, a shift's rcx)
 //    avoids the registers it writes (tier1_cfg_crossed): it takes one only where no other register is free, so that the
 //    sequence's consumer saves no value around it.
-// 3. tier1_allocate, or its scalar twin, assigns the intervals.
+// 3. tier1_allocate assigns the intervals.
 // 4. Each edge moves its successor's live-in values and phis from their locations at the predecessor's last position
 //    to their entry locations (tier1_cfg_entry_location). A store of the same value to its own slot is omitted where
 //    the predecessor block already establishes that slot (tier1_cfg_slot_current, #1216). A changed phi operand still
@@ -133,6 +134,10 @@ struct Tier1CfgInput
     const uint32_t* use_offsets;
     const uint32_t* use_positions;
     const uint8_t* use_required;
+    // Optional, per use (#2646): the register of its value's class that the use reads it in, or UINT8_MAX: a call's
+    // register argument's. An interval whose last use names one takes it where no value hint names another and it is
+    // free (Tier1AllocationInput.register_hints).
+    const uint8_t* use_registers;
     // Block b's phis are phi_values[phi_offsets[b] .. phi_offsets[b + 1]); phi k's operand from its block's j-th
     // predecessor is phi_operands[phi_operand_offsets[k] + j], or BUSTER_TIER1_CFG_NONE for an undefined one (the IR's
     // undef): any value is the phi's along that edge, so the edge moves nothing for it and nothing is live for it there.
@@ -174,6 +179,14 @@ struct Tier1CfgInput
     const uint32_t* sequence_operands;
     const uint32_t* sequence_results;
     uint32_t sequence_count;
+    // Optional (#2819): general registers every general range avoids, as one avoids a sequence's above: a leaf function's
+    // callee-saved registers, which a range takes only where no caller-saved one is free.
+    uint32_t avoided_general;
+    // Optional (#2611): the dominator tree of this CFG but its first `dominator_shift` blocks (0, or 1 where an entry was
+    // added before the tree's entry, which then dominates every block), block b's node b - dominator_shift, with its idom,
+    // preorder and subtree_end; tier1_cfg_anchors reads it rather than analyzing the CFG. Null analyzes it.
+    const Dominators* dominators;
+    uint32_t dominator_shift;
     uint32_t block_count;
     uint32_t edge_count;
     uint32_t value_count;
@@ -1125,6 +1138,24 @@ static void tier1_cfg_piece(Tier1CfgPieces* pieces, const Tier1CfgInput* input, 
     pieces->splits += split;
 }
 
+// Block b's immediate dominator in a CFG whose blocks from `shift` on are `tree`'s, block b its node b - shift (#2611): an
+// added entry (shift 1) dominates the tree's entry, and its own is none. BUSTER_TIER1_CFG_NONE for an unreachable block.
+static uint32_t tier1_cfg_dominator(const Dominators* tree, uint32_t shift, uint32_t b)
+{
+    const uint32_t node = b - shift;
+    const uint32_t idom = b >= shift ? tree->idom[node] : BUSTER_DOMINATOR_NONE;
+    const bool entry = b >= shift && node == tree->entry && shift != 0;
+    return entry ? 0 : b < shift || idom == BUSTER_DOMINATOR_NONE || node == tree->entry ? BUSTER_TIER1_CFG_NONE : idom + shift;
+}
+
+// Whether block `dominator` dominates block `block` in tier1_cfg_dominator's CFG, for a dominator past the added entry (the
+// anchors ask whether a block dominates a predecessor laid out before it, so never of block 0): no such block dominates the
+// added entry.
+static bool tier1_cfg_dominates(const Dominators* tree, uint32_t shift, uint32_t dominator, uint32_t block)
+{
+    return dominator >= shift && block >= shift && dominators_dominates(tree, dominator - shift, block - shift);
+}
+
 // Each block's anchor and chosen predecessor (#2553), from dominators.c's tree, which `scratch` holds until they are read,
 // with its temporaries on `output`; both arenas end as they began, but for the caller's two columns. False where the
 // analysis fails.
@@ -1153,11 +1184,16 @@ static bool tier1_cfg_anchors(const Tier1CfgInput* input, Arena* output, Arena* 
     };
     DominatorOptions options = dominators_options();
     options.outputs = 0;
-    Dominators tree = { 0 };
-    const bool analyzed = dominators_analyze(scratch, output, &graph, options, &tree) == DOMINATOR_OK;
+    Dominators analysis = { 0 };
+    // The tree the input gives (#2611), where it covers the CFG but its added entry, or the CFG's own.
+    const Dominators* given = input->dominators;
+    const uint32_t shift = input->dominator_shift;
+    const bool reused = given != 0 && shift <= 1 && given->block_count + shift == input->block_count && given->idom != 0 && given->preorder != 0 && given->subtree_end != 0;
+    const bool analyzed = reused || dominators_analyze(scratch, output, &graph, options, &analysis) == DOMINATOR_OK;
+    const Dominators* tree = reused ? given : &analysis;
     for (uint32_t b = 0; analyzed && b < input->block_count; b += 1)
     {
-        const uint32_t dominator = b != 0 ? tree.idom[b] : BUSTER_TIER1_CFG_NONE;
+        const uint32_t dominator = b != 0 ? tier1_cfg_dominator(tree, reused ? shift : 0, b) : BUSTER_TIER1_CFG_NONE;
         anchors[b] = dominator < b ? dominator : BUSTER_TIER1_CFG_NONE;
         uint32_t latch = BUSTER_TIER1_CFG_NONE;
         uint32_t anchored = BUSTER_TIER1_CFG_NONE;
@@ -1167,7 +1203,7 @@ static bool tier1_cfg_anchors(const Tier1CfgInput* input, Arena* output, Arena* 
             const uint32_t p = input->predecessors[input->predecessor_offsets[b] + j];
             const bool earlier = p < b;
             const bool closer = nearest == BUSTER_TIER1_CFG_NONE || p > input->predecessors[input->predecessor_offsets[b] + nearest];
-            const bool back = earlier && dominators_dominates(&tree, b, p);
+            const bool back = earlier && tier1_cfg_dominates(tree, reused ? shift : 0, b, p);
             latch = back && (latch == BUSTER_TIER1_CFG_NONE || p > input->predecessors[input->predecessor_offsets[b] + latch]) ? j : latch;
             anchored = earlier && p == anchors[b] ? j : anchored;
             nearest = earlier && closer ? j : nearest;
@@ -1326,6 +1362,15 @@ static void tier1_cfg_ties(const Tier1CfgInput* input, const uint32_t* offsets, 
 // them through the scratch register twice on its loop's path for a plain character. A hint back to the value's own
 // earlier range adds nothing to the register it follows anyway; and one to an exit in a slot never makes the range wait
 // in its own (tier1_allocate_scan_uses).
+//
+// Where the chain reaches no such range (#2834), a phi's first range in layout takes an operand's register at the exit
+// of a predecessor of the phi's block, the nearest in layout that ends before the range: the loop's entry, where the
+// value comes in. patterns_gsub's latch, whose join's ranges are their values' first, is laid out between the body and
+// the header, so that the chain led back to the body's own range, which then took the lowest free register and swapped
+// two values with the header's on every iteration. The value's later ranges keep its own last place: a phi of
+// sqlite3VdbeExec's opcode loop that rested in its slot through the handlers took its entry's register in each of them
+// instead, and the dispatch, short of one, stored the step counter on every opcode. A recipe's exit without a register
+// names no place (tier1_allocation_valued_hint).
 static void tier1_cfg_body_hints(const Tier1CfgInput* input, const uint32_t* offsets, Tier1CfgPieces* pieces)
 {
     for (uint32_t v = 0; v < input->value_count; v += 1)
@@ -1346,6 +1391,30 @@ static void tier1_cfg_body_hints(const Tier1CfgInput* input, const uint32_t* off
             if (before && pieces->values[earlier] != v && pieces->classes[earlier] == pieces->classes[i])
             {
                 pieces->hint_intervals[i] = named;
+            }
+        }
+    }
+    for (uint32_t b = 0; b < input->block_count; b += 1)
+    {
+        const uint32_t degree = input->predecessor_offsets[b + 1] - input->predecessor_offsets[b];
+        for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
+        {
+            const uint32_t v = input->phi_values[k];
+            const uint32_t first = offsets[v];
+            const bool open = first != offsets[v + 1] && pieces->starts[first] < input->definitions[v] && pieces->hint_intervals[first] == BUSTER_TIER1_CFG_NONE && pieces->hints[first] == v;
+            uint32_t nearest = BUSTER_TIER1_CFG_NONE;
+            for (uint32_t j = 0; open && j < degree; j += 1)
+            {
+                const uint32_t predecessor = input->predecessors[input->predecessor_offsets[b] + j];
+                const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
+                const uint32_t exit = input->block_starts[predecessor + 1] - 1;
+                const uint32_t taken = operand != BUSTER_TIER1_CFG_NONE && operand != v ? tier1_cfg_piece_at(pieces, offsets[operand], offsets[operand + 1], exit) : BUSTER_TIER1_CFG_NONE;
+                const bool fits = taken != BUSTER_TIER1_CFG_NONE && pieces->ends[taken] <= pieces->starts[first] && pieces->classes[taken] == pieces->classes[first];
+                nearest = fits && (nearest == BUSTER_TIER1_CFG_NONE || pieces->ends[taken] > pieces->ends[nearest]) ? taken : nearest;
+            }
+            if (nearest != BUSTER_TIER1_CFG_NONE)
+            {
+                pieces->hint_intervals[first] = nearest | BUSTER_TIER1_ALLOCATE_HINT_EXIT;
             }
         }
     }
@@ -1928,12 +1997,11 @@ struct Tier1CfgPrepared
     uint32_t splits;
     uint64_t output_saved;
     uint64_t scratch_saved;
-    bool vector;
 };
 
 // Validation, homes and dense values, hints, liveness, block lists and the intervals (1. and 2. above), for `input`'s
 // problem. Failure restores both arenas.
-static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgPrepared* prepared)
+static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgPrepared* prepared)
 {
     Tier1CfgError error = TIER1_CFG_INVALID;
     const uint64_t output_saved = output != 0 ? output->length : 0;
@@ -2121,7 +2189,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         }
         if (ready)
         {
-            candidate.liveness_iterations = BUSTER_VECTOR_PATH(vector) ? dataflow_liveness_vector(&liveness) : dataflow_liveness_scalar(&liveness);
+            candidate.liveness_iterations = dataflow_liveness(&liveness);
             // The same edge uses contribute to OUT even when their defining block kills propagation to IN.
             // Local operands have no dense id; their flag supplies the home tail during interval construction.
             for (uint32_t b = 0; b < blocks; b += 1)
@@ -2513,6 +2581,15 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     }
                 }
                 use_offsets[count] = input->use_count;
+                // Each interval whose last use reads its value in a named register, at the interval's end (#2646).
+                uint8_t* register_hints = input->use_registers != 0 ? arena_push(output, (uint64_t)count + 1, 1) : 0;
+                ready = input->use_registers == 0 || register_hints != 0;
+                for (uint32_t i = 0; register_hints != 0 && i < count; i += 1)
+                {
+                    const uint32_t end = use_offsets[i + 1];
+                    const bool used = end > use_offsets[i] && input->use_positions[end - 1] + 1 == pieces.ends[i];
+                    register_hints[i] = used ? input->use_registers[end - 1] : UINT8_MAX;
+                }
                 tier1_cfg_phi_exits(input, chosen, ups, firsts, dispatchers, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
@@ -2529,6 +2606,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                     .alternate_intervals = pieces.alternates,
                     .continuation_intervals = pieces.continuations,
                     .hint_intervals = pieces.hint_intervals,
+                    .register_hints = register_hints,
                     .rematerializable = input->rematerializable != 0 ? pieces.remat : 0,
                     .use_offsets = use_offsets,
                     .use_positions = input->use_positions,
@@ -2556,8 +2634,18 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         // A general value live across a fixed sequence avoids its registers in all its ranges, as does its phi web (#2767),
         // the same in every problem over these intervals. The ranges are whole now, a merged block's having grown past the
         // piece the builder started.
-        uint32_t* crossed = ready && input->sequence_count != 0 ? arena_push_array(output, (uint64_t)candidate.intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && (input->sequence_count == 0 || (crossed != 0 && tier1_cfg_crossed(input, pieces.starts, pieces.ends, pieces.values, pieces.classes, candidate.intervals.count, scratch, crossed)));
+        // And every general range avoids the problem's avoided_general registers (#2819).
+        const bool avoids = input->sequence_count != 0 || input->avoided_general != 0;
+        uint32_t* crossed = ready && avoids ? arena_push_array(output, (uint64_t)candidate.intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+        if (crossed != 0 && input->sequence_count == 0)
+        {
+            memset(crossed, 0, ((uint64_t)candidate.intervals.count + 1) * sizeof(uint32_t));
+        }
+        ready = ready && (!avoids || (crossed != 0 && (input->sequence_count == 0 || tier1_cfg_crossed(input, pieces.starts, pieces.ends, pieces.values, pieces.classes, candidate.intervals.count, scratch, crossed))));
+        for (uint32_t i = 0; ready && input->avoided_general != 0 && i < candidate.intervals.count; i += 1)
+        {
+            crossed[i] |= pieces.classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? input->avoided_general : 0;
+        }
         candidate.intervals.avoided_registers = crossed;
         if (ready)
         {
@@ -2575,7 +2663,6 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 .splits = (uint32_t)pieces.splits,
                 .output_saved = output_saved,
                 .scratch_saved = scratch_saved,
-                .vector = vector,
             };
             error = TIER1_CFG_OK;
         }
@@ -2615,7 +2702,7 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
     Tier1CfgAllocation candidate = prepared->candidate;
     candidate.intervals.allowed_registers = column != 0 ? column : candidate.intervals.allowed_registers;
     tier1_cfg_problem_registers(input, &candidate.intervals);
-    const Tier1AllocationError allocated = BUSTER_VECTOR_PATH(prepared->vector) ? tier1_allocate(&candidate.intervals, output, &candidate.allocation) : tier1_allocate_scalar(&candidate.intervals, output, &candidate.allocation);
+    const Tier1AllocationError allocated = tier1_allocate(&candidate.intervals, output, &candidate.allocation);
     const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
     if (error == TIER1_CFG_OK)
     {
@@ -2889,11 +2976,11 @@ static void tier1_cfg_release(const Tier1CfgPrepared* prepared, Arena* scratch)
 }
 
 // The three in a row, for the input's own problem.
-static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgAllocation* result)
+static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
 {
     Tier1CfgPrepared prepared = { 0 };
     Tier1CfgAllocation candidate = { 0 };
-    Tier1CfgError error = result != 0 ? tier1_cfg_prepare(input, output, scratch, vector, &prepared) : TIER1_CFG_INVALID;
+    Tier1CfgError error = result != 0 ? tier1_cfg_prepare(input, output, scratch, &prepared) : TIER1_CFG_INVALID;
     const bool held = error == TIER1_CFG_OK;
     error = held ? tier1_cfg_assign(input, &prepared, 0, output, &candidate) : error;
     error = error == TIER1_CFG_OK ? tier1_cfg_finish(input, &prepared, output, scratch, &candidate) : error;
@@ -2912,12 +2999,7 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
 
 static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
 {
-    return tier1_cfg_allocate_impl(input, output, scratch, BUSTER_HOST_VECTOR, result);
-}
-
-static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate_scalar(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
-{
-    return tier1_cfg_allocate_impl(input, output, scratch, false, result);
+    return tier1_cfg_allocate_impl(input, output, scratch, result);
 }
 
 // Whether each value's registers lie in its class's, and its definition's in its allowed ones: tier1_cfg_input_valid's
@@ -2942,17 +3024,6 @@ static bool tier1_cfg_sets_valid_vector(const Tier1CfgInput* input)
     return bad == 0;
 }
 
-// The scalar twin of tier1_cfg_sets_valid_vector: tier1_cfg_input_valid's two compares per value.
-static bool tier1_cfg_sets_valid_scalar(const Tier1CfgInput* input)
-{
-    bool valid = true;
-    for (uint32_t v = 0; valid && v < input->value_count; v += 1)
-    {
-        valid = (input->allowed_registers[v] & ~input->registers[input->classes[v]]) == 0 && (input->definition_registers == 0 || (input->definition_registers[v] & ~input->allowed_registers[v]) == 0);
-    }
-    return valid;
-}
-
 // The registers each prepared interval may take in another problem over the same values (#2538): `input` is the
 // prepared one but for its registers, allowed_registers and definition_registers. Each value's run of intervals takes its
 // allowed set, and the interval that holds its definition its definition's registers where some are bound, as
@@ -2969,7 +3040,7 @@ static __attribute__((unused)) Tier1CfgError tier1_cfg_column(const Tier1CfgInpu
     }
     valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_GPR] & 0xffff0000u) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_GPR] < 16;
     valid = valid && (input->registers[BUSTER_TIER1_ALLOCATE_MASK] & ~BUSTER_TIER1_ALLOCATE_MASK_REGISTERS) == 0 && input->scratch_registers[BUSTER_TIER1_ALLOCATE_MASK] < 8;
-    valid = valid && (BUSTER_VECTOR_PATH(prepared->vector) ? tier1_cfg_sets_valid_vector(input) : tier1_cfg_sets_valid_scalar(input));
+    valid = valid && tier1_cfg_sets_valid_vector(input);
     uint32_t* written = valid ? arena_push_array(output, (uint64_t)intervals->intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     for (uint32_t v = 0; written != 0 && v < input->value_count; v += 1)
     {
@@ -3007,7 +3078,7 @@ static Tier1CfgError tier1_cfg_assign_verdict(const Tier1CfgInput* input, const 
     {
         verdict.registers[c] = other->registers[c];
     }
-    const Tier1AllocationError allocated = tier1_allocate_verdict(&candidate.intervals, output, prepared->vector, &verdict, &candidate.allocation);
+    const Tier1AllocationError allocated = tier1_allocate_verdict(&candidate.intervals, output, &verdict, &candidate.allocation);
     const Tier1CfgError error = allocated == TIER1_ALLOCATION_OK ? TIER1_CFG_OK : allocated == TIER1_ALLOCATION_CONSTRAINT ? TIER1_CFG_CONSTRAINT : allocated == TIER1_ALLOCATION_INVALID ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
     if (error == TIER1_CFG_OK)
     {
@@ -3066,10 +3137,10 @@ struct Tier1CfgOrder
 
 // The one-call order's first half: the intervals (tier1_cfg_prepare), whose columns the preference reads in
 // `order->prepared.candidate`. tier1_cfg_order_run or tier1_cfg_release ends what this holds.
-static __attribute__((unused)) Tier1CfgError tier1_cfg_order_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, bool vector, Tier1CfgOrder* order)
+static __attribute__((unused)) Tier1CfgError tier1_cfg_order_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgOrder* order)
 {
     *order = (Tier1CfgOrder){ 0 };
-    return tier1_cfg_prepare(input, output, scratch, vector, &order->prepared);
+    return tier1_cfg_prepare(input, output, scratch, &order->prepared);
 }
 
 // The plain problem assigned whole over the prepared intervals: with `freed`, its definitions already free, over the free
@@ -3209,7 +3280,8 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
     differs = same || differs != 0 ? differs : 2;
     same = same && tier1_cfg_same_column(a->hint_values, b->hint_values, count * 4) && tier1_cfg_same_column(a->hint_intervals, b->hint_intervals, count * 4) &&
            tier1_cfg_same_column(a->alternate_intervals, b->alternate_intervals, count * 4) && tier1_cfg_same_column(a->continuation_intervals, b->continuation_intervals, count * 4) &&
-           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count);
+           tier1_cfg_same_column(a->rematerializable, b->rematerializable, count) && tier1_cfg_same_column(a->flags, b->flags, count) && tier1_cfg_same_column(a->hints, b->hints, count) &&
+           tier1_cfg_same_column(a->register_hints, b->register_hints, count);
     differs = same || differs != 0 ? differs : 3;
     same = same && tier1_cfg_same_column(a->use_offsets, b->use_offsets, (count + 1) * 4) && a->use_positions == b->use_positions && a->use_required == b->use_required;
     differs = same || differs != 0 ? differs : 4;

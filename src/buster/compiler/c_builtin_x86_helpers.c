@@ -355,23 +355,12 @@ static const X86Instruction cbuiltin_x86_helper_memset_inline[] = {
 // FLT_ROUNDS's values (0xc9 << (2v + 4), its x87 bits 10 and 11; and those bits 3 places up for MXCSR's 13 and 14);
 // __builtin_extend_pointer's pointer as an unsigned long long; and __builtin_verbose_trap's ud2, as __builtin_trap's.
 static const X86Instruction cbuiltin_x86_helper_init_dwarf_reg_size_table[] = {
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 1, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 2, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 3, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 4, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 5, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 6, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 7, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 8, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 9, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 10, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 11, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 12, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 13, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 14, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 15, .form = X86_FORM_MOV_RM8_IMM8 },
-    { .immediate = 8, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOV_RM8_IMM8 },
+    // Broadcast four size bytes to XMM0. MOVUPS accepts any alignment, and AL holds the final register's size.
+    { .immediate = 0x08080808, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 },
+    { .reg = 0, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOVD_X_RM32 },
+    { .reg = 0, .rm = 0, .immediate = 0, .form = X86_FORM_SHUFPS_X_XM128_IMM8 },
+    { .reg = 0, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOVUPS_XM_X },
+    { .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RDI, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 16, .form = X86_FORM_MOV_RM8_R8 },
     { .form = X86_FORM_RET },
 };
 

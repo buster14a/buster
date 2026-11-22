@@ -132,7 +132,7 @@ static void check_test_function_name_fixture(CheckTest* test, const CheckFunctio
         CheckInput input = { 0 };
         const bool adapted = ready && check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch);
         CheckStream stream = { 0 };
-        const CheckOptions check_options = { .scalar = variant == 0 };
+        const CheckOptions check_options = { 0 };
         const bool checked = adapted && check_graph_run(&types.table, &input.graph, &output_arena, &scratch, &check_options, &stream);
         char description[256];
         snprintf(description, sizeof(description), "%s: predefined arrays survive source and graph checking", fixture->label);

@@ -2,15 +2,13 @@
 
 `src/buster/compiler/x86_64_disassembler.c` decodes bounded raw machine-code
 slices into the encoder's semantic instruction records and retains each input
-instruction's offset and encoded length. Its AVX-512 path and scalar reference
-share the form catalogue; the scalar reference retains the full operand validator
-as an independent check on optimized validation. It does not execute input.
-`x86_64_disassembly.c` supplies planned Intel formatting and SIMD address/byte
-listings, with the original bounded scalar formatter retained as a separate oracle.
+instruction's offset and encoded length. It has one implementation, the AVX-512
+one (#2924); it does not execute input. `x86_64_disassembly.c` supplies planned
+Intel formatting and SIMD address/byte listings; the bounded formatter takes
+buffers smaller than a form's planned bound, and forms without a plan.
 
 ```sh
 ./build/compiler disassemble input.text
-./build/compiler disassemble --scalar input.text
 ./build/compiler disassemble --assembly input.text
 ./build/compiler test-x86-disassembler --objdump
 ./build/compiler benchmark-x86-disassembler
@@ -105,21 +103,17 @@ exact-size cell table. A unique cell names a candidate, an empty cell rejects it
 and an ambiguous cell retains the ordered SIMD scan. Wildcard rows populate all
 matching cells. Incomplete headers still take the ordinary matcher so missing
 signature bytes do not turn truncation into unsupported input. Candidate construction
-and operand validation remain mandatory after a direct lookup. The basic `avx512`
-and `compact` benchmark controls retain the original bucket scan.
+and operand validation remain mandatory after a direct lookup.
 
-The basic AVX-512 matcher classifies 64 input bytes at once using two nibble-table byte
+The matcher classifies 64 input bytes at once using two nibble-table byte
 shuffles and a mask intersection. It reuses the prefix mask across instructions
-and matches eight candidate signatures in one vector comparison. Scalar lookup
-walks the same bucket and exits on the first complete match. Both paths produce
-the same records, counts, status and consumed offset, including malformed input.
+and matches eight candidate signatures in one vector comparison, taking the first
+complete match in catalogue order.
 For ordinary operand classes, initialization packs register/decorator masks and
 memory admission into a small descriptor. Parsing establishes consistent addressing
 modes, base/index bounds, immediate widths and high-byte/REX exclusion; the compact
 checks validate the remaining constraints. Special classes, VSIB, grouped registers
-and other exceptional relationships retain the full validator. The benchmark's
-`compact` control uses these same checks with scalar classification and matching,
-separating validation specialization from SIMD's contribution.
+and other exceptional relationships retain the full validator.
 
 The default `batched` AVX-512 path computes speculative instruction lengths at
 64 byte positions in parallel. A 256-byte opcode metadata table is derived
@@ -151,11 +145,11 @@ buffer, returns its NUL-terminated text length, or `-1` when capacity is insuffi
 Formatting plans resolve operand roles, register classes, prefixes, memory sizes
 and a conservative output bound once per supported form. With enough capacity,
 the writer copies packed register tokens, converts decimal digits in pairs and
-uses an XMM nibble shuffle for hexadecimal immediates. Smaller buffers retain the
-fully bounded scalar writer. A listing converts up to fifteen instruction bytes
+uses an XMM nibble shuffle for hexadecimal immediates. Smaller buffers, and forms
+without a plan, take the fully bounded writer (`x86_disassembly_format_scalar`, a
+fallback that #2924's phase D owns). A listing converts up to fifteen instruction bytes
 with masked loads and in-register byte permutations, then stores the exact fixed
-56-byte address/byte prefix. The scalar text and listing paths remain independent
-references. Operand selection and decimal conversion are still scalar; formatting
+56-byte address/byte prefix. Operand selection and decimal conversion are still scalar; formatting
 is not described as entirely vectorized.
 
 The design follows uops.info's measured Zen 5 costs:
@@ -194,14 +188,30 @@ standalone FWAIT in generated streams so objdump cannot fold it into the next
 instruction. Raw byte fixtures separately test waiting-instruction boundaries.
 GNU objdump's PCLMUL immediate-02/03 display aliases are accepted only for the
 mnemonic comparison; exact GNU-as operand roundtrips still check the original
-immediate. Scalar/vector agreement alone cannot validate shared catalogue facts.
+immediate.
 
-Every decoded record also compares the optimized and full scalar text and listing
-writers. All supported forms exercise capacities from zero through their planned
-bound at a guard page. Command tests compare empty, one-instruction and 3,073-instruction
-files against the original scalar output convention in both modes and paths, and
-check delayed `/dev/full` failures. The larger file crosses record and text-buffer
-boundaries.
+Without GNU's tools the test still has oracles that aren't the decoder (#2924
+removed its scalar twin). Streams the encoder generated decode to the generator's
+boundaries, and each record re-encodes to its own bytes; the record is the
+generated instruction itself for about 97 to 99% of records, and the rest encode
+the same bytes from other field values (an 8-bit immediate the generator wrote
+signed, read back unsigned). The prefix classifier answers as a prefix table
+written in the test. The hand-written fixtures name their operands. Every decode
+also keeps the decoder's contract: records tile the consumed bytes from the start
+and nothing is written past them; each record decodes alone to itself (a
+one-instruction slice takes the matcher, never the lanes of a batch); every slice
+of a stream keeps the stream's records that end inside it, and one that ends on a
+record boundary decodes to exactly those; bytes that stop a decode decode alone to
+nothing, with the same status; a smaller capacity keeps the first records; and the
+record re-encodes to an instruction that decodes back to it.
+
+A record's text is the same at every capacity that holds it: the planned writer at
+a full buffer, the bounded writer below the plan's bound. All supported forms
+exercise capacities from zero through their planned bound at a guard page. The
+listing's address and byte columns are compared with columns the test writes
+itself. Command tests compare empty, one-instruction and 3,073-instruction files
+against listings written the same way, in both modes, and check delayed `/dev/full`
+failures. The larger file crosses record and text-buffer boundaries.
 
 The benchmark reports decode, a standalone prefix-classification diagnostic,
 decode plus Intel formatting, and decode plus address/byte listing separately. The classification diagnostic scans
@@ -215,10 +225,10 @@ fails on incomplete coverage instead of timing only a supported prefix.
 Each result is a median of 21 interleaved passes with retained batches of at
 least 2 ms, reporting ns, hardware cycles and instructions per instruction
 (per byte for classification). The min/max are observed samples, not confidence
-intervals. `--only scalar|compact|avx512|batched` isolates an implementation.
-`--phase decode|classify|format|listing` isolates work for profiling; `--iterations N`
-fixes the number of stream decodes per sample instead of calibrating to 2 ms.
-`--after-scalar MS` runs the scalar decoder as warm work before each sample;
+intervals. `--phase decode|classify|format|listing` isolates work for profiling;
+`--iterations N` fixes the number of stream decodes per sample instead of
+calibrating to 2 ms. `--after-scalar MS` runs scalar warm work (an FNV-1a hash of
+the stream, one dependent multiply a byte) before each sample;
 this is a transition-sensitive burst measurement, distinct from sustained
 back-to-back runs. Hardware counters are zero when unavailable. Initialization,
 input generation and file I/O are excluded; the decode-plus-format phase
@@ -226,6 +236,22 @@ includes formatting but excludes terminal I/O. Compiler memory barriers make all
 published records and all rendered text observable. Initialization reports the
 normal and address32 encoder prerequisites separately from decoder/formatter setup;
 table bytes include the formatting plans and compressed lookup cells.
+
+## One implementation (#2924)
+
+The scalar reference (`x86_disassemble_scalar`, the full validator through the
+one-form-at-a-time matcher), the `compact` and `avx512` benchmark controls, the
+scalar classifier, the scalar listing and `disassemble --scalar` were removed in
+#2924's phase C, with the benchmark's `--only`. The gate, on the 9700X before the
+removal, is in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17):
+`x86_disassemble` was 1.6 to 3.8 times as fast as the scalar reference in every
+phase, on both synthetic streams and the compiler's own 31.3 MB `.text`. The
+selector's scalar arms (the prefix test and the single-form scan, the `compact`
+control) were as fast as its vector arms or up to 2.3% faster unbatched, and
+2.9% faster than the default path on the all-VEX/EVEX vector mix, as PR #240
+found below; the default path keeps the vector arms. The sections below are
+history: their tables name the removed controls.
 
 ## Recorded validation
 
@@ -513,7 +539,7 @@ and [command](https://github.com/buster14a/buster/blob/42630114aeb0553c3e2fabfd7
 
 Catalogue → `x86_disassembler_initialize` publishes read-only signature/index,
 validation and formatting-plan tables before workers. Counted bytes →
-`x86_disassemble`/scalar → `X86Decoded` records → `x86_disassembly_format` or
+`x86_disassemble` → `X86Decoded` records → `x86_disassembly_format` or
 `x86_disassembly_listing` → buffered output is implemented. A record is 24
 bytes: the 16-byte semantic instruction, u32 byte offset, u8 actual length,
 u8 address mode and u16 reserved. The byte input and record output are disjoint;
@@ -530,7 +556,7 @@ re-encoding, which may choose a different displacement or prefix length.
 
 Formatting retains catalogue-only decisions and bounded register tokens instead
 of rebuilding them per instruction. Smaller output capacities use the exact
-scalar writer; insufficient room returns -1. Listing additionally borrows the
+bounded writer; insufficient room returns -1. Listing additionally borrows the
 original bytes through formatting and uses the actual length, with a rebased
 display address. Semantic assembly formatting needs only the validated record
 and live tables. The command retains source mappings through all chunks and
@@ -542,6 +568,6 @@ both listing and semantic-record consumers, startup, validation and output.
 The complete-path and fresh-command comparisons above already include record
 stores, formatting and their stated I/O/startup scopes on the 9700X, including
 lighter-phase controls; they are historical evidence at their recorded heads.
-`test-x86-disassembler --objdump` checks scalar/vector records, truncation,
+`test-x86-disassembler --objdump` checks the decoder's contract, truncation,
 guarded capacities, external bytes/reassembly and command chunk boundaries.
 No new decoder optimization or wider instruction support is claimed here.
