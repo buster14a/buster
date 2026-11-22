@@ -678,6 +678,8 @@ struct CheckAttestedField
 static const CheckAttestedField check_attested_input_fields[] =
 {
     { "graph", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "discard_roots", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "statement_heads", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "environment", CHECK_ATTESTED_FIELD_NAME },
     { "diagnostic_pragmas", CHECK_ATTESTED_FIELD_AMBIENT },
     { "nonnull_pragmas", CHECK_ATTESTED_FIELD_AMBIENT },
@@ -1121,6 +1123,9 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "scope_marks", CHECK_ATTESTED_FIELD_OWN },
     { "scope_ends", CHECK_ATTESTED_FIELD_OWN },
     { "scope_openings", CHECK_ATTESTED_FIELD_OWN },
+    { "plain_declarations", CHECK_ATTESTED_FIELD_AMBIENT },
+    { "plain_prefixes", CHECK_ATTESTED_FIELD_AMBIENT },
+    { "plain_declaration", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "scope_count", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "function_result", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "function_end", CHECK_ATTESTED_FIELD_TRANSIENT },

@@ -3684,23 +3684,6 @@ static __attribute__((noinline)) void node_facts_slow_each(NodeFacts* facts, uin
     }
 }
 
-// A class's loop's list of the operators its short path left, made by two passes, each in the window's order (`first`
-// places, then the rest up to `count`): the two as one in that order, by insertion. Few: a call the rule takes.
-static __attribute__((noinline, cold)) void node_facts_rare_order(uint32_t* rare, uint32_t first, uint32_t count)
-{
-    for (uint32_t i = first; i < count; i += 1)
-    {
-        const uint32_t w = rare[i];
-        uint32_t at = i;
-        while (at != 0 && rare[at - 1] > w)
-        {
-            rare[at] = rare[at - 1];
-            at -= 1;
-        }
-        rare[at] = w;
-    }
-}
-
 // The operators that have no loop of their own (a comma, sizeof, `?:`, a unary plus) and those of the levels past the
 // classes', `count` of them listed in the window's order: each by its rule, up the postorder.
 static __attribute__((noinline)) void node_facts_slow_list(NodeFacts* facts, uint32_t first, const uint32_t* list, uint32_t count)
@@ -3859,56 +3842,30 @@ static inline __attribute__((always_inline)) void node_facts_calls_of(NodeFacts*
     const uint16_t* const left = facts->left + first;
     const uint8_t* const fits = facts->fits + first;
     const NodeFactsView view = node_facts_view(facts, first);
+    const bool lean = mode == BUSTER_NODE_FACTS_LEAN;
     for (uint32_t i = 0; i < batched; i += 1)
     {
         const uint32_t w = batch[i];
         const uint32_t a = w - left[w];
-        const bool taken = mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_call_load(records, &view, w, a)
-                                                           : node_facts_call_fast(records, &view, w, a, mode == BUSTER_NODE_FACTS_LEAN);
-        if (__builtin_expect(!taken, 0))
+        bool taken = mode == BUSTER_NODE_FACTS_LOADS ? fits[w] != 0 && node_facts_call_load(records, &view, w, a)
+                                                     : node_facts_call_fast(records, &view, w, a, lean);
+        if (mode != BUSTER_NODE_FACTS_LOADS && taken)
         {
-            rare[rare_count] = w;
-            rare_count += 1;
-            records[w].standing = BUSTER_NODE_MACHINE_WIDE;
-        }
-    }
-    if (mode != BUSTER_NODE_FACTS_LOADS)
-    {
-        // The taken calls' arguments' conversions, in the batch's order: a call whose arguments' answers don't keep its
-        // record is the rule's as one the short path left, and marked so before the next call's arguments are read. A
-        // call of the batch may be an argument of a later one (a call's code is not after a call's): the short path
-        // made that one from this one's record as it stood, so it goes to the rule after it, which reads the record
-        // the rule has left by then. The loads' kernel writes a record's type and word alone, which no argument's
-        // conversion changes.
-        const bool lean = mode == BUSTER_NODE_FACTS_LEAN;
-        const uint32_t left_before = rare_count;
-        for (uint32_t i = 0; i < batched; i += 1)
-        {
-            const uint32_t w = batch[i];
-            if ((records[w].standing & BUSTER_NODE_MACHINE_WIDE) == 0)
+            const NodeFactsRow* row = node_facts_row_of(&view, records[a].type);
+            const uint32_t outcome = node_facts_call_arguments(facts, records, &view, w, row, lean);
+            taken = (outcome & BUSTER_NODE_FACTS_ARGUMENT_KEPT) != 0;
+            if (taken)
             {
-                const NodeFactsRow* row = node_facts_row_of(&view, records[w - left[w]].type);
-                const uint32_t outcome = node_facts_call_arguments(facts, records, &view, w, row, lean);
-                if (__builtin_expect((outcome & BUSTER_NODE_FACTS_ARGUMENT_KEPT) == 0, 0))
-                {
-                    rare[rare_count] = w;
-                    rare_count += 1;
-                    records[w].standing = BUSTER_NODE_MACHINE_WIDE;
-                }
-                else
-                {
-                    // It is not quiet for the census's tests where an argument may be a null pointer constant that is no
-                    // literal, whatever the short path said of the arguments by themselves.
-                    const uint32_t loud = (outcome & BUSTER_NODE_FACTS_ARGUMENT_QUIET) == 0 ? (uint32_t)BUSTER_NODE_FACTS_QUIET_CALL : 0u;
-                    const uint32_t says = lean ? 0u : node_facts_call_says(outcome, row->function);
-                    records[w].exponent = (uint16_t)((records[w].exponent & ~loud) | says);
-                }
+                const uint32_t loud = (outcome & BUSTER_NODE_FACTS_ARGUMENT_QUIET) == 0 ? (uint32_t)BUSTER_NODE_FACTS_QUIET_CALL : 0u;
+                const uint32_t says = lean ? 0u : node_facts_call_says(outcome, row->function);
+                records[w].exponent = (uint16_t)((records[w].exponent & ~loud) | says);
             }
         }
-        // The rules run in the window's order (node_facts_slow_each): the two passes' lists, each in it, as one.
-        if (__builtin_expect(rare_count != left_before, 0))
+        if (__builtin_expect(!taken, 0))
         {
-            node_facts_rare_order(rare, left_before, rare_count);
+            // A later call in this batch can use this result as its callee or argument. Both then reach the rule in postorder.
+            records[w].standing = BUSTER_NODE_MACHINE_WIDE;
+            rare[rare_count++] = w;
         }
     }
     if (rare_count != 0)

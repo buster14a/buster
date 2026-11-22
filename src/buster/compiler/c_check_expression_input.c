@@ -1280,6 +1280,41 @@ static inline __attribute__((always_inline)) bool check_input_expression_termina
     {
         region->result = values.first;
     }
+    if (input->discard_roots != NULL && !condition && region == NULL && values.count == 1 && batch->count != 0 &&
+        values.first == batch->base + batch->count - 1 && input->overload_heads == NULL && input->graph.fp_environments == NULL)
+    {
+        const uint32_t place = batch->count - 1;
+        const CheckOp op = batch->ops[place];
+        const Parser* parser = reader->parser;
+        const uint32_t owner = parser->tree.parents[token];
+        const bool block = owner < input->token_count && (parser->tree.roles[owner] == PARSE_ROLE_CLOSE_BODY || parser->tree.roles[owner] == PARSE_ROLE_CLOSE_BLOCK);
+        if (block && parser->tree.roles[token] == PARSE_ROLE_TERMINATOR &&
+            (op == CHECK_OP_CALL || op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
+             (op >= CHECK_OP_NEGATIVE && op <= CHECK_OP_LOGICAL_OR) ||
+             (op == CHECK_OP_CAST && reader->query_types[batch->tokens[place]] == BUSTER_TYPE_VOID)))
+        {
+            // The source end of the operand is the semicolon or a closing grouping parenthesis before it.
+            // The program can recover this same token from the end and a single bit on the physical node.
+            uint32_t end = reader->ends[batch->tokens[place]] + 1;
+            while (end < token && token - end <= 8 && parser->tokens.kinds[end] == PARSE_KIND_R_PAREN)
+            {
+                end += 1;
+            }
+            if (end == token)
+            {
+                input->discard_roots[values.first / 64] |= UINT64_C(1) << (values.first % 64);
+                if (input->statement_heads != NULL)
+                {
+                    input->statement_heads[token] = values.first + 1;
+                }
+                if (reader->region_roots != NULL)
+                {
+                    reader->region_roots[token] = values.first;
+                }
+                return true;
+            }
+        }
+    }
     uint32_t last = BUSTER_CHECK_NONE;
     for (uint32_t value = acted ? values.first : BUSTER_CHECK_NONE; value != BUSTER_CHECK_NONE; value = reader->value_next[value])
     {
@@ -1287,6 +1322,10 @@ static inline __attribute__((always_inline)) bool check_input_expression_termina
                                                        CHECK_INPUT_FORM_DISCARD);
         if (discard != BUSTER_CHECK_NONE)
         {
+            if (value == values.first && input->statement_heads != NULL)
+            {
+                input->statement_heads[token] = discard + 1;
+            }
             if (reader->region_roots != NULL)
             {
                 if (last == BUSTER_CHECK_NONE)
