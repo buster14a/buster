@@ -362,6 +362,62 @@ static void ir_reduce_test_contracts(IrReduceTest* test)
     arena_release(&input);
 }
 
+static void ir_reduce_test_identity_scratch(IrReduceTest* test, uint32_t blocks)
+{
+    const uint32_t rows = 16 * blocks;
+    Arena input = arena_reserve(1u << 22);
+    Arena output = arena_reserve(1u << 22);
+    const uint64_t capacity = 1u << 20;
+    uint8_t* bytes = arena_push(&input, capacity, 64);
+    const IrSizes sizes = { .block_count = blocks, .instruction_count = rows };
+    IrFunction source = { 0 };
+    const bool ready = bytes != NULL && output.base != NULL && ir_create(&input, &sizes, &source) == IR_OK;
+    ir_reduce_test_expect(test, ready, "identity rebuild scratch fixture allocates");
+    if (ready)
+    {
+        memset(source.op, IR_UNDEF, rows);
+        memset(source.type, IR_I32, rows);
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            const uint32_t last = (b + 1) * 16 - 1;
+            source.block_offsets[b + 1] = last + 1;
+            source.op[last] = b + 1 == blocks ? IR_RET : IR_BR;
+            source.type[last] = IR_VOID;
+            source.a[last] = b + 1 == blocks ? BUSTER_IR_NONE : b + 1;
+        }
+        const IrRebuildPlan explicit_identity = { 0 };
+        Arena mapped = { .base = bytes, .capacity = capacity };
+        IrFunction control_copy = { 0 };
+        const IrCheck control = ir_rebuild(&source, &explicit_identity, &output, &mapped, &control_copy);
+        const uint64_t saved = sizeof(uint32_t) * (rows + blocks);
+        ir_reduce_test_expect(test, control.error == IR_OK && mapped.peak > saved, "explicit identity builds both maps");
+        if (control.error == IR_OK && mapped.peak > saved)
+        {
+            Arena tight = { .base = bytes, .capacity = mapped.peak - saved };
+            IrFunction copy = { 0 };
+            const IrCheck check = ir_rebuild(&source, NULL, &output, &tight, &copy);
+            ir_reduce_test_expect(test, check.error == IR_OK && tight.length == 0 && copy.op != source.op && copy.a != control_copy.a,
+                                  "null-plan rebuild fits without either map and owns its output columns");
+            if (check.error == IR_OK)
+            {
+                uint64_t lengths[2], hashes[2];
+                const uint8_t* expected = ir_reduce_key(&control_copy, &output, &lengths[0], &hashes[0]);
+                const uint8_t* actual = ir_reduce_key(&copy, &output, &lengths[1], &hashes[1]);
+                ir_reduce_test_expect(test, expected != NULL && actual != NULL && lengths[0] == lengths[1] && memcmp(expected, actual, lengths[0]) == 0,
+                                      "null and explicit identity rebuilds serialize to the same bytes");
+                const uint64_t mark = output.length;
+                const IrFunction before = copy;
+                tight.capacity = tight.peak - 1;
+                const IrCheck exhausted = ir_rebuild(&source, NULL, &output, &tight, &copy);
+                ir_reduce_test_expect(test, exhausted.error == IR_ERROR_MEMORY && output.length == mark && tight.length == 0 && memcmp(&before, &copy, sizeof(copy)) == 0,
+                                      "one byte below the new scratch peak restores both arenas and the published result");
+            }
+        }
+    }
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static void ir_reduce_test_rebuild(IrReduceTest* test)
 {
     Arena input = arena_reserve(UINT64_C(1) << 22);
@@ -649,6 +705,8 @@ static int run_ir_reduce_tests(int argc, char** argv)
     {
         IrReduceTest test = { .random = seed != 0 ? seed : UINT64_C(0xd153e733) };
         ir_reduce_test_rebuild(&test);
+        ir_reduce_test_identity_scratch(&test, 128);
+        ir_reduce_test_identity_scratch(&test, 1024);
         ir_reduce_test_lifetimes(&test);
         ir_reduce_test_metadata(&test);
         ir_reduce_test_ownership(&test);
