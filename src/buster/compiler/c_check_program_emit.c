@@ -548,6 +548,9 @@ struct CheckTier1Lane
     uint8_t* allowed;
     // The vector operations the target selects, for the loop vectorizer (ir_vectorize_target.c), in `forms` with `allowed`.
     struct IrVectorizeTarget* vectorize;
+    // The opt-in C vectorizer's source qualifier guard (#2805), indexed by body, including inline callees.
+    const uint8_t* vectorize_volatile;
+    uint32_t emitting_body;
     X86Target target;
     bool reserved;
     // Which optional steps are among the reserved ones: bit k for step BUSTER_CHECK_TIER1_STEPS_ALWAYS + k.
@@ -1248,6 +1251,7 @@ struct CheckEmitRun
     // With --tier1, each body's complete outcome and its published code's counts (zero on refusal).
     CheckTier1Outcome* tier1_outcomes;
     CheckTier1Counts* tier1_counts;
+    const uint8_t* vectorize_volatile;
     uint64_t* costs;
     uint64_t* boundaries;
     uint32_t* orders[BUSTER_CHECK_EMIT_MAX_LANES];
@@ -1891,6 +1895,53 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     return valid;
 }
 
+// Indirect C accesses lose their volatile qualifier in the typed stream (docs/ir.md). Until the stream carries
+// per-access flags, the opt-in vectorizer can only widen reads in a body whose checked expressions are all clear.
+// Inspect the unit once. Only set bits need their source token mapped to a body. Qualifiers on a cast's result
+// matter at the dereference, just as they do on a parameter's pointee.
+static uint8_t* check_program_vectorize_volatile(const CheckProgram* program, Arena* arena)
+{
+    uint8_t* bodies = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, program->body_count);
+    const CheckStream* stream = program->stream;
+    if (bodies != NULL)
+    {
+        const bool known = stream != NULL && check_stream_has_values(stream) && check_program_bodies_ordered(program);
+        memset(bodies, known ? 0 : 1, program->body_count);
+        for (uint32_t first = 0; known && first < stream->count;)
+        {
+            const uint32_t count = stream->count - first < 16 ? stream->count - first : 16;
+            const __mmask16 active = (__mmask16)((1u << count) - 1);
+            __m512i types;
+            __m512i flags;
+            if (stream->dense_values == NULL)
+            {
+                types = _mm512_maskz_loadu_epi32(active, stream->value_types + first);
+                flags = _mm512_maskz_loadu_epi32(active, stream->value_flags + first);
+            }
+            else
+            {
+                const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+                const __m512i offsets = _mm512_mullo_epi32(lanes, _mm512_set1_epi32(sizeof(CheckValue)));
+                types = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, &stream->dense_values[first].type, 1);
+                flags = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, offsets, &stream->dense_values[first].flags, 1);
+            }
+            uint32_t volatile_nodes = _mm512_test_epi32_mask(types, _mm512_set1_epi32(BUSTER_TYPE_VOLATILE)) |
+                                      _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_CHECK_VOLATILE_PART));
+            for (; volatile_nodes != 0; volatile_nodes &= volatile_nodes - 1)
+            {
+                const uint32_t node = first + (uint32_t)__builtin_ctz(volatile_nodes);
+                const uint32_t body = check_program_token_body(program, program->input->graph.tokens[node]);
+                if (body != 0)
+                {
+                    bodies[body - 1] = 1;
+                }
+            }
+            first += count;
+        }
+    }
+    return bodies;
+}
+
 // Body `b`'s code by Tier 1's pipeline (--tier1, check_tier1_compile) into run->codes[b], on its lane's arenas for it,
 // the code in its lane's scratch as Tier 0's is, with an explicit outcome and disposition. A naked
 // function's code is its templates'. Out of line, so that the plain emission carries none of it.
@@ -1907,6 +1958,8 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     lane->tier1->summaries = run->tier1_inline != NULL && run->tier1_inline->arenas != NULL ? &run->tier1_inline->arenas[2 * (lane - run->lane_states)] : NULL;
     lane->tier1->schedule = run->lanes->tier1_schedule;
     lane->tier1->passes = run->lanes->tier1_passes;
+    lane->tier1->vectorize_volatile = run->vectorize_volatile;
+    lane->tier1->emitting_body = b;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
                                                             !run->lanes->tier1_no_rematerialize, run->lanes->tier1_gvn, run->verify, run->sources, lane->scratch,
@@ -3928,6 +3981,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
     run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
+    const bool vectorize = tier1 && (lanes->tier1_passes & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0;
+    run.vectorize_volatile = vectorize ? check_program_vectorize_volatile(program, scratch) : NULL;
     // The windows (#2536), where the bodies are compiled alone: the plain emission's, since --tier1's inlining and
     // --helper-report read the bodies' streams after every body's code.
     run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting && !lanes->assembly ? lanes->window_tokens : 0;
@@ -3974,7 +4029,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->status = check_tier1_ready ? result->status : CHECK_PROGRAM_BACKEND;
     }
     valid = valid && (count == 0 || (run.codes != 0 && run.bodies != 0)) && (frames == 0 || run.frames != 0) && run.costs != 0 &&
-            (!tier1 || (run.tier1_outcomes != 0 && run.tier1_counts != 0 && check_tier1_ready));
+            (!tier1 || (run.tier1_outcomes != 0 && run.tier1_counts != 0 && check_tier1_ready)) && (!vectorize || run.vectorize_volatile != NULL);
     uint64_t total = 0;
     uint64_t largest = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)

@@ -72,6 +72,7 @@ struct CheckTier1Summary
     Arena frozen;
     uint32_t inlined;
     bool vectors;
+    bool vectorize_volatile;
 };
 
 // The emission's generations of its inlining tables.
@@ -571,7 +572,7 @@ static bool check_tier1_inline_aggregates(const IrFunction* function, uint32_t n
 // steps[4], before the expansion. *vectors is whether the body's source has vectors (Tier0Function.vectors) or an
 // expanded callee's summary's does (CheckTier1Summary.vectors).
 static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inline* inlining, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar,
-                                      IrFunction* result, uint32_t* inlined, bool* verified, bool* vectors)
+                                      IrFunction* result, uint32_t* inlined, bool* verified, bool* vectors, bool* vectorize_volatile)
 {
     const CheckProgram* program = inlining->program;
     *inlined = 0;
@@ -684,7 +685,12 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
                 const bool selected = expanded.decisions[call] == IR_INLINE_SELECTED;
                 const uint32_t node = expanded.call_nodes[call];
                 aggregates = aggregates || (selected && check_tier1_inline_aggregates(lowered, node));
-                *vectors = *vectors || (selected && inlining->summaries[inlining->candidates[lowered->a[node]] - 1].vectors);
+                if (selected)
+                {
+                    const CheckTier1Summary* callee = &inlining->summaries[inlining->candidates[lowered->a[node]] - 1];
+                    *vectors |= callee->vectors;
+                    *vectorize_volatile |= callee->vectorize_volatile;
+                }
             }
         }
     }
@@ -756,8 +762,9 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     uint32_t inlined = 0;
     bool verified = true;
     bool vectors = function->vectors;
-    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified, &vectors);
-    CheckTier1Summary summary = { .vectors = vectors };
+    bool vectorize_volatile = lane->vectorize_volatile != NULL && lane->vectorize_volatile[b] != 0;
+    const bool changed = check.error == IR_OK && check_tier1_inline_expand(lane, inlining, b, &lowered, target, scalar, &expanded, &inlined, &verified, &vectors, &vectorize_volatile);
+    CheckTier1Summary summary = { .vectors = vectors, .vectorize_volatile = vectorize_volatile };
     bool built = false;
     if (check.error == IR_OK)
     {
@@ -769,6 +776,7 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
             .verified = verified,
             .unexpanded = changed && inlined != 0 ? &lowered : NULL,
             .summary = true,
+            .vectorize_volatile = vectorize_volatile,
         };
         IrVerifiedRevision revision = { 0 };
         const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, scalar, certify, NULL, &lane->steps[2], output, analyses, &revision, &summary.passes);
@@ -874,7 +882,7 @@ static bool check_tier1_inline_summary(CheckTier1Lane* lane, const CheckTier1Inl
 // steps[4] and steps[5], verified where *verified; or false, and `lowered` stays the body's. The unit stage runs first,
 // once.
 static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar, bool certify, IrFunction* result,
-                               uint32_t* inlined, bool* verified)
+                               uint32_t* inlined, bool* verified, bool* vectorize_volatile)
 {
     const CheckTier1Inline* inlining = lane->inlining;
     const Tier0Function* function = &inlining->lowered->functions[caller];
@@ -893,7 +901,7 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
             }
         }
         bool vectors = false;
-        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified, &vectors);
+        changed = check_tier1_inline_expand(lane, inlining, caller, lowered, target, scalar, result, inlined, verified, &vectors, vectorize_volatile);
     }
     return changed;
 }
