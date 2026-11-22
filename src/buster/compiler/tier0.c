@@ -161,6 +161,9 @@
 //   - COPY: copies `value` bytes (1 to BUSTER_TIER0_MAX_COPY_BYTES) to the address the first operand (U64) holds from
 //     the one the last (U64) holds, and pushes nothing (`class` VOID): a struct's assignment. The two ranges are the
 //     same or apart. A front end copies more through a runtime call (the C producer uses memmove for self-assignment).
+//     A `value` past BUSTER_TIER0_MAX_COPY_BYTES, to BUSTER_TIER0_MAX_COPY_VALUE, is a move instead (#1373,
+//     tier0_copy_moves): of BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES bytes (tier0_copy_bytes),
+//     whose ranges may overlap either way, as memmove's: every byte is read before any is written.
 //   - ALLOCA: reserves as many bytes as the operand (U64) says, rounded up to a multiple of 16 (of the frame's alignment
 //     in a realigned frame, which so stays aligned), on the stack, and pushes their address (`class` U64, a multiple of
 //     16; `value` 0): a variable-length array's storage. The bytes stay until a STACK_RESTORE releases them or the
@@ -5761,6 +5764,34 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
 // copy-shapes-2693-2026-11-15).
 #define BUSTER_TIER0_COPY_NARROW_BYTES 32
 
+// A COPY's move form (#1373): its `value` past BUSTER_TIER0_MAX_COPY_BYTES, BUSTER_TIER0_MOVE_VALUE of its bytes, from
+// BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES, so that every value to BUSTER_TIER0_MAX_COPY_VALUE
+// is a copy's or a move's: a plain memmove of such a constant size, which the lowering computes in place as clang's
+// code does. Its 16-byte pieces, at most 8, are all loaded, into the floating stack's free registers from its first
+// (tier0_copy_move), before any is stored.
+#define BUSTER_TIER0_MAX_MOVE_BYTES 128
+#define BUSTER_TIER0_MOVE_VALUE(bytes) ((uint64_t)(bytes) + BUSTER_TIER0_MAX_COPY_BYTES - BUSTER_TIER0_COPY_NARROW_BYTES)
+#define BUSTER_TIER0_MAX_COPY_VALUE BUSTER_TIER0_MOVE_VALUE(BUSTER_TIER0_MAX_MOVE_BYTES)
+
+// Whether a COPY's `value` is its move form's.
+static inline bool tier0_copy_moves(uint64_t value)
+{
+    return value > BUSTER_TIER0_MAX_COPY_BYTES;
+}
+
+// A COPY's bytes, its move form's too.
+static inline uint32_t tier0_copy_bytes(uint64_t value)
+{
+    return (uint32_t)(tier0_copy_moves(value) ? value - (BUSTER_TIER0_MAX_COPY_BYTES - BUSTER_TIER0_COPY_NARROW_BYTES) : value);
+}
+
+// The 16-byte pieces a move of `size` bytes (BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES) takes:
+// the floating registers it holds at once.
+static inline uint32_t tier0_move_pieces(uint32_t size)
+{
+    return (size + 15) / 16;
+}
+
 // The widest piece a copy of `size` bytes uses: 8 for a small aggregate, 16 for a larger one.
 static uint32_t tier0_copy_width(uint32_t size)
 {
@@ -5806,6 +5837,25 @@ static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement,
             tier0_put(writer, tier0_instruction(load, general, from, BUSTER_X86_MEMORY_BASE, from_displacement + (int32_t)(size - piece), 0));
             tier0_put(writer, tier0_instruction(store, general, to, BUSTER_X86_MEMORY_BASE, to_displacement + (int32_t)(size - piece), 0));
         }
+    }
+}
+
+// A move of `size` bytes (COPY's move form) from [from] to [to], whose ranges may overlap: each 16-byte piece, the last
+// ending at the end, loaded into XMM register `xmm` and the ones after it, all before the first store, so that a store
+// overwrites no byte a later piece reads; then the stores, the last piece's first. clang's code moves llvm.memmove's
+// bytes so, in its widest vectors. A load and a store per piece (tier0_move_pieces).
+static void tier0_copy_move(Tier0Writer* writer, uint8_t to, uint8_t from, uint32_t size, uint8_t xmm)
+{
+    const uint32_t pieces = tier0_move_pieces(size);
+    for (uint32_t p = 0; p < pieces; p += 1)
+    {
+        const int32_t at = (int32_t)(p + 1 < pieces ? 16 * p : size - 16);
+        tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_X_XM, (uint8_t)(xmm + p), from, BUSTER_X86_MEMORY_BASE, at, 0));
+    }
+    for (uint32_t p = pieces; p-- > 0;)
+    {
+        const int32_t at = (int32_t)(p + 1 < pieces ? 16 * p : size - 16);
+        tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, (uint8_t)(xmm + p), to, BUSTER_X86_MEMORY_BASE, at, 0));
     }
 }
 
@@ -7389,10 +7439,31 @@ static void tier0_emit_shift(const Tier0Entries* entries, const Tier0Frame* fram
 // whole). The ranges are the same or apart, so overlapping pieces copy what they would apart.
 static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, Tier0Writer* writer)
 {
-    const uint32_t size = (uint32_t)function->values[i];
+    const uint32_t size = tier0_copy_bytes(function->values[i]);
     const uint32_t depth = entries->depths[i];
-    tier0_copy(writer, tier0_integer_depths[depth - 2], 0, tier0_integer_depths[depth - 1], 0, size,
-               size <= BUSTER_TIER0_COPY_NARROW_BYTES ? tier0_integer_depths[depth] : 0, entries->floating_depths[i], tier0_copy_local_source(function, i));
+    if (tier0_copy_moves(function->values[i]))
+    {
+        tier0_copy_move(writer, tier0_integer_depths[depth - 2], tier0_integer_depths[depth - 1], size, entries->floating_depths[i]);
+    }
+    else
+    {
+        tier0_copy(writer, tier0_integer_depths[depth - 2], 0, tier0_integer_depths[depth - 1], 0, size,
+                   size <= BUSTER_TIER0_COPY_NARROW_BYTES ? tier0_integer_depths[depth] : 0, entries->floating_depths[i], tier0_copy_local_source(function, i));
+    }
+}
+
+// How many records tier0_emit_copy writes for COPY entry `i`.
+static uint32_t tier0_count_copy(const Tier0Function* function, uint32_t i)
+{
+    const uint64_t value = function->values[i];
+    return tier0_copy_moves(value) ? 2 * tier0_move_pieces(tier0_copy_bytes(value)) : tier0_copy_records((uint32_t)value, tier0_copy_local_source(function, i));
+}
+
+// The floating registers past its first free one that COPY entry `i` writes: a move's pieces after the first.
+static uint32_t tier0_copy_reach(const Tier0Function* function, uint32_t i)
+{
+    const uint64_t value = function->values[i];
+    return tier0_copy_moves(value) ? tier0_move_pieces(tier0_copy_bytes(value)) - 1 : 0;
 }
 
 // ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's (#177)
@@ -9940,7 +10011,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
-        count = tier0_copy_records((uint32_t)function->values[i], tier0_copy_local_source(function, i));
+        count = tier0_count_copy(function, i);
     }
     else if (tier0_moves_stack(kind))
     {
@@ -10471,10 +10542,11 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 else if (function->kinds[i] == BUSTER_TYPED_COPY)
                 {
                     // A copy's scratch, its stacks' first free register: an XMM one above BUSTER_TIER0_COPY_NARROW_BYTES,
-                    // a general one below.
+                    // a general one below; a move's, its pieces' XMM registers from the first free one.
                     const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
+                    const int32_t reach = floating + (int32_t)tier0_copy_reach(function, i);
                     integer_top = !wide && depth > integer_top ? depth : integer_top;
-                    floating_top = wide && floating > floating_top ? floating : floating_top;
+                    floating_top = wide && reach > floating_top ? reach : floating_top;
                 }
                 else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
                 {
@@ -10651,13 +10723,14 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
-        // Its two addresses, and its scratch at the depth (an XMM register's above BUSTER_TIER0_COPY_NARROW_BYTES).
+        // Its two addresses, and its scratch at the depth (an XMM register's above BUSTER_TIER0_COPY_NARROW_BYTES; a
+        // move's, its pieces' from it).
         const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
         uses[0] = true;
         window[0] = 2;
         touch[0] = wide ? (int32_t)before[0] - 1 : (int32_t)before[0];
         uses[1] = wide;
-        touch[1] = (int32_t)before[1];
+        touch[1] = (int32_t)before[1] + (int32_t)tier0_copy_reach(function, i);
     }
     else if (kind == BUSTER_TYPED_CONVERT)
     {
@@ -13118,7 +13191,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar_entries(const 
                 const uint32_t source = tier0_pop(&validator, i);
                 const uint32_t destination = tier0_pop(&validator, i);
                 if (source != BUSTER_TYPED_CLASS_U64 || destination != BUSTER_TYPED_CLASS_U64 || class != BUSTER_TYPED_CLASS_VOID || value == 0 ||
-                    value > BUSTER_TIER0_MAX_COPY_BYTES)
+                    value > BUSTER_TIER0_MAX_COPY_VALUE)
                 {
                     tier0_reject(&validator, i, "a copy's addresses, class or size");
                 }
@@ -14220,8 +14293,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             else if (function->kinds[i] == BUSTER_TYPED_COPY)
             {
                 const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
+                const int32_t reach = (int32_t)entry_floating + (int32_t)tier0_copy_reach(function, i);
                 deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
-                deferred_floating_top = wide && entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
+                deferred_floating_top = wide && reach > deferred_floating_top ? reach : deferred_floating_top;
             }
             else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
             {
@@ -15499,7 +15573,7 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     const uint32_t x87_count = function->x87_constant_count;
     const uint32_t symbol_limit = function->symbol_access == 0 ? UINT32_MAX : function->symbol_count == 0 ? 0 : function->symbol_count - 1;
     const __m512i minimum = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, x87_count == 0 ? 1 : 0, 0, 1, 1, 0, call_count == 0 ? 1 : 0, local_count == 0 ? 1 : 0, 0);
-    const __m512i maximum = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, (int)(x87_count == 0 ? 0 : x87_count - 1), 0, BUSTER_TIER0_MAX_COPY_BYTES, (int)symbol_limit,
+    const __m512i maximum = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, (int)(x87_count == 0 ? 0 : x87_count - 1), 0, (int)BUSTER_TIER0_MAX_COPY_VALUE, (int)symbol_limit,
                                              (int)count, (int)(call_count == 0 ? 0 : call_count - 1), (int)(local_count == 0 ? 0 : local_count - 1), (int)UINT32_MAX);
     // Every kind's classes with the function's: long double's and the 128-bit integers' only where it has them; RETURN's
     // the address of an aggregate's bytes (U64) where the function returns one, no 128-bit integer, and F80 exactly where

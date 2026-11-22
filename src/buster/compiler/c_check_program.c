@@ -3917,8 +3917,8 @@ static uint32_t check_program_token_body(const CheckProgram* program, uint32_t t
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
 // cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
 // makes the builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL) whose row computes it (CBuiltinLibraryComputed), with
-// its prototype's arguments, memcpy, memmove and memset with a constant size of at most
-// BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES; but of one with an asm label on a declaration, which clang's code calls by its
+// its prototype's arguments, memcpy, memmove and memset with a constant size of at most cbuiltin_library_inline_bytes's;
+// but of one with an asm label on a declaration, which clang's code calls by its
 // label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it): CheckProgram.object_labelled. The references' pass and
 // the lowering ask for every call, so it reads no token: a search of the unit's declarations for each computed memcpy
 // took sqlite3.c's -c from 126 to 187 ms on the 9700X.
@@ -3937,7 +3937,7 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
     if (marked && memory)
     {
         const uint32_t size_node = graph->argument_nodes[graph->argument_offsets[node] + 2];
-        marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
+        marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= cbuiltin_library_inline_bytes(computed);
     }
     const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;

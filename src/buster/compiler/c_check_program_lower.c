@@ -13532,14 +13532,19 @@ static void check_lower_piece_address(CheckLowerWriter* writer, uint32_t pointer
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, pointer);
 }
 
-// memcpy, memmove and memset of a constant size of at most BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES, plain (#1373,
+// memcpy, memmove and memset of a constant size of at most cbuiltin_library_inline_bytes's, plain (#1373,
 // check_program_call_computed), as clang -O0's code computes llvm.memcpy of such a size: the destination's and the
 // source's operands (memset's value's) evaluated in order, each into a temporary; then memcpy's COPY of the size (its
 // ranges are apart, or the same, or the call is undefined), as __builtin_memcpy's recipe copies (c_builtin_misc_lower.c);
-// memmove's pieces, all loaded before any is stored, so that ranges that overlap in either direction move right: 8 bytes
-// each, the last ending at the size, or below 8 bytes, the widest that fits at the start and one ending at the size;
+// memmove's pieces, all loaded before any is stored, so that ranges that overlap in either direction move right: past
+// BUSTER_TIER0_COPY_NARROW_BYTES, COPY's move form (tier0_copy_moves, 16-byte pieces that Tier 0 holds in XMM registers),
+// else 8 bytes each, the last ending at the size, or below 8 bytes, the widest that fits at the start and one ending at
+// the size;
 // memset's stores of those pieces of its value's byte repeated, a constant value's computed here. The size, a constant,
 // runs no code, and nor does memset's constant value. Its value is the destination. The tasks run in reverse.
+_Static_assert(BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES <= BUSTER_TIER0_MAX_MOVE_BYTES && BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES == BUSTER_TIER0_COPY_NARROW_BYTES,
+               "a computed memmove past the scalar pieces' bytes is COPY's move form");
+
 static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, CBuiltinLibraryComputed computed)
 {
     const CheckProgram* program = writer->program;
@@ -13556,11 +13561,12 @@ static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, 
     const uint32_t piece = bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1;
     const uint8_t class = check_lower_piece_class(piece);
     const uint32_t count = bytes == 0 ? 0 : bytes >= 8 ? (bytes + 7) / 8 : bytes > piece ? 2 : 1;
+    const bool vectors = computed == CBUILTIN_LIBRARY_COMPUTED_MOVE && bytes > BUSTER_TIER0_COPY_NARROW_BYTES;
     const uint32_t destination = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     // memcpy's and memmove's source, or memset's repeated byte where its value is no constant.
     const uint32_t source = !constant ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) : BUSTER_CHECK_NONE;
     uint32_t pieces[4] = { 0 };
-    for (uint32_t p = 0; computed == CBUILTIN_LIBRARY_COMPUTED_MOVE && p < count; p += 1)
+    for (uint32_t p = 0; computed == CBUILTIN_LIBRARY_COMPUTED_MOVE && !vectors && p < count; p += 1)
     {
         pieces[p] = check_lower_temporary(writer, class);
     }
@@ -13569,6 +13575,12 @@ static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, 
     if (computed == CBUILTIN_LIBRARY_COMPUTED_COPY && bytes != 0)
     {
         check_lower_instruction(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, bytes);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+    }
+    else if (vectors)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_MOVE_VALUE(bytes));
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
     }
@@ -16468,7 +16480,13 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         const uint32_t selected = check_program_builtin_index(stream->floating, stream->floating_count, sizeof(CheckBuiltinFloatEffect), node);
         const CheckBuiltinFloatEffect* effect = selected != BUSTER_CHECK_NONE ? stream->floating + selected : NULL;
-        if (effect != NULL && effect->math_kind != CHECK_BUILTIN_MATH_NONE && effect->runtime_builtin != CBUILTIN_NONE)
+        if (effect != NULL && effect->math_kind == CHECK_BUILTIN_MATH_COPYSIGN && effect->runtime_builtin != CBUILTIN_NONE)
+        {
+            // __builtin_copysign and __builtin_copysignf, computed in place as the plain copysign's call is (#1373): no
+            // helper was planned for them (check_program_helpers).
+            check_lower_library_sign(writer, node, true);
+        }
+        else if (effect != NULL && effect->math_kind != CHECK_BUILTIN_MATH_NONE && effect->runtime_builtin != CBUILTIN_NONE)
         {
             check_lower_math(writer, node, effect);
         }
