@@ -7708,6 +7708,103 @@ by a body's verdict, and what that changes in the order of the pieces after
 it. `--front-alone-first` reads every body before the walk's first chunk, as
 a compile that walks none of them would: nothing differs there either.
 
+### A body's entries from its controls and its tapes
+
+The shadow compares a tape with the entries its expression's nodes own,
+relative to the expression's first: it never reads the entries a control
+owns (a condition's branch, a return, an initializer's store, a jump), nor a
+temporary's local number. Whether the tapes splice into the function the
+lowering writes had not been shown. `measure-node-machine --shadow --bodies`
+shows it for the bodies it attempts
+([the guide](commands/lowering.md#a-bodys-entries-from-its-controls-and-its-tapes-2850),
+[its specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7083062068)):
+after the pipeline, each lowered body's stream is made again from the
+program's controls and the tapes the machine makes of the body's roots, and
+compared with the lowered function's, entry for entry: its kind, its class
+and its value.
+
+**How a value is made.**
+
+- **A control's label** is its first entry, the body's end's the entry after
+  its last control's. A branch's or a jump's value is its target's label's
+  entry.
+- **A local.** A declared object's or a parameter's local is the lowered
+  function's, by the pairing the tape's comparison keeps (every use must
+  agree). A temporary's is absolute: the function's locals less the body's
+  temporaries, plus the temporaries of the tapes before it. So the body's
+  locals have to be the declared ones and the tapes' temporaries and nothing
+  else, or the body differs.
+- **A label of the tape's** is the tape's first entry in the body plus the
+  label's place on the tape. A branch to the control's own label (a
+  condition that is branches) is the entry its control's target begins at.
+- **A call's row** is the body's calls before its tape plus its row there;
+  the rows' contents are compared at that row.
+- **A control's own entries** follow its root's: a condition's branch of
+  class I32, unless the condition is branches (the root's record says so); a
+  return's RETURN of the result's class, after a zero where a function with
+  a result returns none; an initialization's SET_LOCAL of its plan's type's
+  class; a jump's JUMP. Then the implicit return: a void function's RETURN,
+  `main`'s zero and RETURN.
+
+**A body it attempts:** every root the lowering popped of it is the
+machine's (T, the census's tests, C and X), each the one root of an
+EVALUATE, a branch, a RETURN or an INITIALIZE of one whole scalar value; it
+has no other control but JUMP and END; its stack is not tracked; its function
+has a prototype or no parameter; its result is void or a scalar of a class I8
+to F64. Every other body is counted by the first reason that leaves it out,
+a root first.
+
+**What it measured** (Develop builds on this session's machine; counts):
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| lowered bodies | 2,668 | 1,096 | 1,498 | 2,756 |
+| every popped root the machine's: bodies; their tokens | 2,134; 48.58% | 728; 38.35% | 281; 4.82% | 1,499; 33.15% |
+| attempted: bodies; their tokens | 2,086; 44.35% | 671; 29.94% | 271; 4.18% | 1,447; 29.38% |
+| their entries | 159,437 | 29,079 | 11,997 | 54,399 |
+| the lowered function's, entry for entry | 2,086 | 671 | 271 | 1,447 |
+| that differ | 0 | 0 | 0 | 0 |
+| left out for a control of another kind | 48 | 57 | 8 | 51 |
+| for an initialization of another form; a result of another class | 0; 0 | 0; 0 | 1; 1 | 1; 0 |
+
+With `-g` the same bodies and none differs; with `-Wall -Wextra` 1,704, 602,
+226 and 1,286 bodies are attempted and none differs.
+
+- **The tapes and the controls hold the function.** In 4,475 bodies no local
+  was made between two expressions that the tapes do not name, no label is
+  numbered by anything but its control's index or its tape, and no entry of a
+  control's own is other than its kind's.
+- **What stands between the bodies the machine takes whole and this piece is
+  small:** a control of another kind (4.2% of `sqlite3.c`'s body tokens: a
+  `switch`'s in each of its 48, in Lua's 57, in 7 of the compiler's own 8
+  and 34 of musl's 51, an `asm` statement in the others), and three bodies in
+  four corpora.
+- **The share is of the machine after the pipeline,** on the walk's nodes.
+  At reader time the front gives it fewer (35.6% of `sqlite3.c`'s body
+  tokens whole, "The machine with no node of the walk's").
+
+**Its fixture's faults.** Sixteen single changes to the piece, each built
+and run against the fixture: a jump's target, a condition's branch left out
+or written twice or of the other sense, a return's class, an initialization's
+store's class, the tapes' temporaries or calls not counted, a temporary's
+number or a call's row left the tape's own, a tape's label or a control's
+moved by one, the two implicit returns left out, a body with a `switch`
+attempted. Each fails it. The first run had two that did not: the fixture's
+only do statement had a condition that is branches, so its control wrote no
+branch of its own, and no tape had a label of its own. It has a body for each
+since.
+
+The function it equals is the shadow's pipeline's: `-c`'s without the
+statement controls' path (`PPOptions.statement_controls`), where an expression
+statement's value has its cast to void for a root.
+
+**What it does not do,** each a later piece: the controls from the tokens (it
+reads the program's, whose folding of a constant `if` reads a node's value);
+the locals' table; the calls' rows' locations; the references; a body-level
+proof of silence (the return flow's, with the default warnings); and any of it
+at reader time, where a tape's labels' places and calls' records are only
+digested today.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
