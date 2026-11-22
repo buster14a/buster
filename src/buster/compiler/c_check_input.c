@@ -2478,7 +2478,7 @@ static void check_input_selection_set(CheckInputReader* reader, uint32_t token, 
     }
     else if (check_sparse_present(reader->selected_sparse))
     {
-        check_sparse_set(&reader->output->sparse_pool, reader->selected_sparse, token, value);
+        check_sparse_set(reader->output->sparse_pool, reader->selected_sparse, token, value);
     }
 }
 
