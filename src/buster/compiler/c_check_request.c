@@ -64,6 +64,16 @@ struct CheckRequestScan
     bool pack_value;
 };
 
+// What a request makes of its code (check_request_refusal, check_request_read): none (-E, -fsyntax-only, check and the
+// dumps), an object that another link may take (-c, and the clients that compile as -c does), or the executable of a
+// link, whose code no other link takes. A request that emits code is any but NONE.
+typedef enum CheckRequestCode
+{
+    CHECK_REQUEST_CODE_NONE,
+    CHECK_REQUEST_CODE_OBJECT,
+    CHECK_REQUEST_CODE_EXECUTABLE,
+} CheckRequestCode;
+
 // What a request asks for that the driver doesn't implement (check_request_refusal), in the order the driver reports
 // them: the first that applies.
 typedef enum CheckRequestError
@@ -79,8 +89,10 @@ typedef enum CheckRequestError
     CHECK_REQUEST_SANITIZER,
     CHECK_REQUEST_COVERAGE,
     CHECK_REQUEST_OPENMP,
-    // Position-independent code for shared libraries (-fPIC, -fpic), for a request that emits code: Tier 0 can't yet
-    // emit shared-library-safe symbol and TLS accesses (#811).
+    // Position-independent code for shared libraries (-fPIC, -fpic), for a request that emits code other than a link's
+    // executable: Tier 0 can't yet emit shared-library-safe symbol and TLS accesses (#811). A link takes them (#2101):
+    // its executable's code is the code it has without them, and only interposition, which an executable's definitions
+    // don't have, tells -fPIC's code from -fPIE's.
     CHECK_REQUEST_PIC,
     // An ABI layout the checker doesn't implement (-fshort-enums, -fpack-struct).
     CHECK_REQUEST_LAYOUT,
@@ -294,12 +306,16 @@ static bool check_request_scan_match(CheckRequestScan* scan, const char* argumen
 }
 
 // What the request scanned into `scan` asks for that the driver doesn't implement: code generation's options, with the
-// object and linkage options' when `emits` (-c, or a link), which the driver reports before a usage error; then, with
-// `options` (null before they are parsed), its instrumentation and its position-independent code when `emits`, its
-// layout and its language and target too, the first that applies in that order.
-static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, const PPOptions* options, bool emits)
+// object and linkage options' when it emits code (`code` OBJECT for -c, EXECUTABLE for a link), which the driver
+// reports before a usage error; then, with `options` (null before they are parsed), its instrumentation when it emits
+// code, its position-independent code when it emits any but a link's executable (#2101), its layout and its language
+// and target too, the first that applies in that order.
+static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, const PPOptions* options, CheckRequestCode code)
 {
     CheckRequestRefusal result = { .error = CHECK_REQUEST_ACCEPTED };
+    const bool emits = code != CHECK_REQUEST_CODE_NONE;
+    // -fPIC and -fpic are refused wherever code is emitted, but in a link's executable (#2101).
+    const bool pic_refused = emits && code != CHECK_REQUEST_CODE_EXECUTABLE;
     const char* visibility = check_request_visibility(scan->visibility) ? scan->visibility : NULL;
     const char* object = !emits ? NULL : visibility != NULL ? visibility : scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
     const char* codegen = scan->codegen != NULL ? scan->codegen : scan->stack_protector != NULL ? scan->stack_protector :
@@ -307,8 +323,8 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
     const bool sanitized = options != NULL && emits && options->predefines.sanitizers != 0;
     const bool covered = options != NULL && emits && options->predefines.sanitize_coverage;
     const bool parallel = options != NULL && emits && options->predefines.openmp_enabled;
-    const char* pic = options != NULL && emits ? (options->predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
-                                                  options->predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
+    const char* pic = options != NULL && pic_refused ? (options->predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
+                                                        options->predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
     const char* packed = scan->pack_value ? scan->packed_value : scan->packed_bare;
     const char* layout = scan->invalid_pack != NULL ? scan->invalid_pack : scan->short_enums != NULL ? scan->short_enums : packed;
     if (codegen != NULL)
@@ -406,12 +422,12 @@ static void check_request_describe_text(const CheckRequestRefusal* refusal, char
 // taken out), as the driver reads them (the source benchmarks', the IR's commands' on real C): the arguments scanned
 // (check_request_scan), those that go on and the file parsed by pp_parse_options in `arena`, which the result's strings
 // and arrays borrow from, then refused or accepted as the driver would (check_request_refusal, with code generation's
-// refusals when `emits`). Whether the request was read and accepted, with it in *parsed (semantic pragmas on, as every
+// refusals as `code` asks). Whether the request was read and accepted, with it in *parsed (semantic pragmas on, as every
 // semantic consumer reads them) and the file's path in *input (null if the arguments name none); otherwise *parsed is
 // all zero, never a partly read configuration, *input is null, and *refusal says why, if the options were read and
 // refused, or is CHECK_REQUEST_ACCEPTED where they couldn't be read at all (no room, an option pp_parse_options refuses
 // or one without its value, or -o).
-static bool check_request_read(PPOptions* parsed, CheckRequestRefusal* refusal, const char** input, char** arguments, uint32_t count, bool emits, Arena* arena)
+static bool check_request_read(PPOptions* parsed, CheckRequestRefusal* refusal, const char** input, char** arguments, uint32_t count, CheckRequestCode code, Arena* arena)
 {
     char** own = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)count + 1);
     CheckRequestScan scan = { 0 };
@@ -439,10 +455,10 @@ static bool check_request_read(PPOptions* parsed, CheckRequestRefusal* refusal, 
     const char* path = 0;
     const char* output = 0;
     bool markers = false;
-    const CheckRequestRefusal codegen = check_request_refusal(&scan, NULL, emits);
+    const CheckRequestRefusal codegen = check_request_refusal(&scan, NULL, code);
     const bool read = own != 0 && codegen.error == CHECK_REQUEST_ACCEPTED && pp_parse_options((int)passed, own, &result, arena, &path, &output, &markers) &&
                       output == 0;
-    *refusal = read ? check_request_refusal(&scan, &result, emits) : codegen;
+    *refusal = read ? check_request_refusal(&scan, &result, code) : codegen;
     const bool accepted = read && refusal->error == CHECK_REQUEST_ACCEPTED;
     result.semantic_pragmas = true;
     if (accepted)
@@ -460,7 +476,7 @@ static bool check_request_read(PPOptions* parsed, CheckRequestRefusal* refusal, 
 // check_request_read of `file` read with `options` (`option_count` of them, -E's, before it): accepted only with the
 // file as its input, so that an option without its value, which would take the file's place, leaves no configuration.
 static bool check_request_parse(PPOptions* parsed, CheckRequestRefusal* refusal, const char** input, const char* file, char** options, uint32_t option_count,
-                                bool emits, Arena* arena)
+                                CheckRequestCode code, Arena* arena)
 {
     char** arguments = BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)option_count + 1);
     for (uint32_t i = 0; arguments != 0 && i < option_count; i += 1)
@@ -471,7 +487,7 @@ static bool check_request_parse(PPOptions* parsed, CheckRequestRefusal* refusal,
     {
         arguments[option_count] = (char*)file;
     }
-    bool accepted = arguments != 0 && check_request_read(parsed, refusal, input, arguments, option_count + 1, emits, arena);
+    bool accepted = arguments != 0 && check_request_read(parsed, refusal, input, arguments, option_count + 1, code, arena);
     if (arguments == 0)
     {
         *refusal = (CheckRequestRefusal){ .error = CHECK_REQUEST_ACCEPTED };

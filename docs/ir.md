@@ -8,18 +8,17 @@ test corpus is imported.
 
 ## Status and consumers
 
-The producers are `ir_lower_typed` / `ir_lower_typed_scalar` and their explicit
-output-target variants `ir_lower_typed_target` / `ir_lower_typed_target_scalar`,
-which take the C driver's typed streams (`check_program_emit`'s
+The producer is `ir_lower_typed` and its explicit output-target variant
+`ir_lower_typed_target`, which take the C driver's typed streams (`check_program_emit`'s
 `Tier0Function`s, #133), the
 handwritten fixtures, `ir_parse.c` (#175) and the synthetic benchmarks. The
-consumers are the two verifiers, the CFG and use-list builders, the printer,
+consumers are the verifier, the CFG and use-list builders, the printer,
 `ssa_ir.c`'s promotion (#134), the optimizer passes (#139), the interpreters
 (#176) and Tier 1's selection (#138).
 
 The IR lowered from every function of the corpora verifies (#131): `test-ir-source`
-lowers every function `-c` compiles of a set of C files by both paths, which must
-agree column for column and verify, and promotes each by both of `ssa_ir.c`'s
+lowers every function `-c` compiles of a set of C files, which must verify, and
+promotes each by both of `ssa_ir.c`'s
 paths, whose results verify with dominance checked ("Tests and measurements"
 below). Every function of the frozen `sqlite3.c` (2,602 of them), of c-testsuite's
 subset (430, in its 220 programs), of Lua 5.4.8's 32 files but `lua.c` and
@@ -63,7 +62,7 @@ The producer writes disjoint columns directly and publishes a complete function.
 The byte columns have stride 1 and the operand columns stride 4; allocation
 aligns their bases to 64 bytes. There is **no readable or writable tail padding**.
 Logical length, allocation capacity and the kernel's 16-lane width are distinct.
-The vector verifier uses masked final loads and bounded indexed byte reads;
+The verifier uses masked final loads and bounded indexed byte reads;
 callers may also supply unaligned, exact-length views. Empty functions are valid
 only with zero blocks and a void result. Empty side arrays may have null bases.
 Raw pointers must actually cover their declared counts; no verifier can establish
@@ -137,7 +136,7 @@ column comparisons deterministic.
 | `compress_store` | as `masked_store`; the set lanes are written one after another from the address, and no other byte ([gathers and compressing stores](ir-simd.md#gathers-compressing-stores-and-truncating-stores-1840)) |
 | `gather` | `a:ptr` the base, `b` the index vector of a dword or a qword per lane, `c` the mask of the lanes in flags (i32 or i64), `alignment_log2` the scale's log2; lane i is the lane's bytes at `a + sext(b[i]) * scale` where the bit is set, 0 elsewhere, and a clear lane is never read |
 | `scatter` | `a:ptr` the base, `b` the index vector as a gather's, and in `extra` at `c`'s index the stored vector (lanes in flags, i32 or i64) and its mask; `alignment_log2` the scale's log2; result is `void`. Lane i is written at `a + sext(b[i]) * scale` where its bit is set, from lane 0 up, and a clear lane is never written ([scatters](ir-simd.md#scatters-1840)) |
-| `fma` | `a,b,c` of the result's type, `f32` or `f64`; `a * b + c` rounded once, the first NaN of `a`, `b` and `c` quieted, or the default NaN for an invalid product or sum of numbers ([scalar fused multiply-adds](ir-simd.md#scalar-fused-multiply-adds-1840)) |
+| `fma` | `a,b,c` of the result's type, `f32` or `f64`, or a vector of `f32` or `f64` lanes in the flags; `a * b + c` rounded once per value, the first NaN of `a`, `b` and `c` quieted, or the default NaN for an invalid product or sum of numbers ([scalar fused multiply-adds](ir-simd.md#scalar-fused-multiply-adds-1840)) |
 | `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls`; `c` an aggregate result's destination (a `ptr`), or absent |
 | `phi` | `a` is an extra-word offset, `b` the incoming count; pairs are `(predecessor, value)` |
 | `br` | `a` is a block ID |
@@ -275,9 +274,8 @@ repeated uses. Void-result instructions have empty slices. Block IDs, symbols,
 slots, constants and side-table offsets never count as value uses. Derived counts
 are accumulated in u64 and checked before becoming u32 offsets.
 
-The builder has two twins (#1634). The scalar one, `ir_uses_validated_scalar`,
-decodes each operand through `ir_operand`. The vector one, `ir_uses_validated`,
-decodes 16 instructions at a time (`ir_uses_batch`):
+The builder, `ir_uses_validated` (#1634), decodes 16 instructions at a time
+(`ir_uses_batch`):
 
 - One two-register byte permute (`vpermi2b`) of the opcode tables, 128 entries
   each since the masked loads and stores took opcodes 64 and 65 (#1840), gives
@@ -293,10 +291,10 @@ decodes 16 instructions at a time (`ir_uses_batch`):
 - A phi's inputs or a call's arguments follow that instruction's own fixed
   operands, so the mask is walked in segments that end at each phi or call.
 
-Both twins allocate the same arrays and build identical lists. The optimizer's
-preparation uses the scalar twin on its scalar path. Placing a use is still
-a dependent increment of its value's cursor, so a value with many uses
-serializes its own increments in both twins.
+Placing a use is still a dependent increment of its value's cursor, so a value
+with many uses serializes its own increments. The builder's scalar twin, which
+decoded each operand through `ir_operand`, is deleted (#2924); `test-ir` folds
+every list it builds into a digest frozen while both built identical lists.
 
 On the 9700X, against `687f44c3` (before the twins), `BUSTER_DEBUG_INFO=0`,
 CPU 2, three `ab` rounds:
@@ -326,14 +324,20 @@ function's first 64 (its parameters' and entry constants'); only a value in
 neither is a byte load of its own, so no read is a hardware gather or an
 accidental four-byte read from a byte column (`ir_operand_types`, #786).
 Constants, calls, phis, switches and conversions use exact scalar handling; a
-failing vector batch also uses the scalar rule to produce the same diagnostic.
-`ir_verify_scalar` checks one instruction at a time. Both return the same
-`IrCheck` fields, including the first error location.
+failing vector batch also uses the scalar rule to produce the diagnostic.
+
+The verifier's scalar twin, `ir_verify_scalar`, which checked one instruction
+at a time, is deleted (#2924). In #2924's C9 gate on the 9700X, the area of the
+verified optimizer, its verification included, took 1.09 to 1.16 times as long
+on the twins in every size bin
+([the gate](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-ir-gate)).
+`test-ir` folds every verdict (the error, its instruction, detail and whether
+dominance was checked) into a digest frozen while both verifiers agreed.
 
 The graph phase checks phi coverage/types, duplicate switch constants and use
 ordering. Duplicate switch detection uses stable byte-radix sorting with at most
 16 passes, so adversarial i128 keys cannot cause a quadratic hash-probe scan. The
-vector path finds the phis and switches 64 operations at a time; a phi after a
+check finds the phis and switches 64 operations at a time; a phi after a
 non-phi of its block is the first misplaced one, so the check needs no state
 carried through the block.
 
@@ -355,8 +359,8 @@ dominator tree: #174 owns that analysis.
 
 ## Typed-stream lowering
 
-`ir_lower_typed(input, result_type, symbol_count, output, scratch, result)` and
-its scalar twin accept the current `Tier0Function` contract after validating it.
+`ir_lower_typed(input, result_type, symbol_count, output, scratch, result)`
+accepts the current `Tier0Function` contract after validating it.
 The semantic result type is explicit because the stream's `AbiReturn` describes
 locations, not its source type: it is the RETURN entries' class, which for an
 aggregate is its address's (U64, `i64`). A source producer takes it from the
@@ -385,13 +389,12 @@ than U64 is a structural error).
 address becomes a `ptr`, with its size and location; a call with a result object
 (`call_result_objects`) gets the object's slot address as its destination and the
 object's size as its `result_size`. A call that passes the function's own hidden
-pointer on (#2684, `BUSTER_TIER0_RESULT_HIDDEN`) returns into the function's one
-forwarding slot, past the dispatch slot, of `hidden_size` bytes aligned to
-`hidden_alignment`, which is then copied where parameter 0 points, by a `COPY`'s
-pieces or, past 256 bytes, a call of the front end's `memmove` (`hidden_copy`), as
-the lowering's copy of a call's object was: Tier 1 takes a
-call's destination as a frame object's address alone (`tier1_select_call_abi`), so
-its code keeps the copy that Tier 0's and the interpreter's leave out. An object parameter is a `ptr` whose bytes the
+pointer on (#2684, `BUSTER_TIER0_RESULT_HIDDEN`) has parameter 0's pointer as its
+destination (`inttoptr` of its slot's load), of `hidden_size` bytes, and copies
+nothing, as Tier 0's and the interpreter's call doesn't: Tier 1 takes a destination
+that is a pointer value, no frame object's address, as the call's last effective
+use, which the call's general moves put in rdi (#2820,
+`tier1_select_call_destination`). The front end's `hidden_copy` is no longer read. An object parameter is a `ptr` whose bytes the
 preheader copies into its object, as `COPY` copies (below); a result in
 registers (`result_size`) returns `inttoptr` of its RETURN's address, and the
 IR's result type is `ptr`. A function with an object parameter or an aggregate
@@ -406,7 +409,7 @@ at least 16 bytes, which `LOCAL`, `STORE_LOCAL` and `SET_LOCAL` read and write a
 their first 10 or 16 bytes. The expression slots that carry stack values across
 blocks are 16 bytes, aligned to 16, in a function with values of these classes,
 and 8 otherwise. The classification's signedness and floating tables (one byte
-per class, which both paths read) take `I128` as signed and `F80` as floating,
+per class) take `I128` as signed and `F80` as floating,
 which Tier 0's own predicates leave apart.
 
 #136's frame objects (a local with a size in `local_sizes`: an array, a struct
@@ -486,7 +489,7 @@ The ordered replay is written once in `ir_lower_emit.c` and instantiated for
 counting and filling. Counting fixes its output to null; filling receives the
 non-null local function after `ir_create` succeeds. Constructor helpers stay
 inline so count mode can erase column writes and fill mode can erase null checks
-before general inlining decisions. Both scalar/vector paths use the same two
+before general inlining decisions. The lowering uses the same two
 instantiations, and all existing allocation, validation and rollback gates remain.
 
 ### Slot lifetimes (#177)
@@ -571,8 +574,8 @@ value without adding a fence instruction (#1396). It still has write-only
 source semantics: an initializing store never reads undefined bytes in either
 interpreter. Tier 1 copies a live desired value into its reserved scratch before
 the destructive exchange. An explicit `fence.void seq_cst` still emits `mfence`.
-Both verifiers check the flags (`ir_access_flags_valid`; the vector path sends
-any row with flags past `volatile` to the scalar rule), and the type and the
+The verifier checks the flags (`ir_access_flags_valid`; the 16-row batch sends
+any row with flags past `volatile` to the per-row rule), and the type and the
 alignment (`ir_atomic_access`): an atomic access declared below its natural
 alignment is refused, since the backend emits one access of its size whatever
 the address. The typed stream's producer is the C lowering's direct
@@ -870,7 +873,7 @@ floating environment and termination.
   is one), control, calls or MXCSR, or may fault. So a locked access, `mfence` and
   every SSE floating operation keep their places (`test-tier1-schedule`).
 - **Tier 1's load folding** moves a load into its single consumer past no store,
-  call, fence, `rmw`, stack move or other load (`tier1_select_fold_barrier`):
+  call, fence, `rmw`, stack move or other load (`tier1_select_barriers`):
   - The typed stream doesn't carry a C access's volatility, so the IR's loads of
     volatile objects aren't flagged `volatile`. Two volatile reads must keep their
     order, so the IR treats every unflagged load as possibly volatile.
@@ -901,7 +904,7 @@ frame address (`INTERPRETER_UNSUPPORTED`); the inliner takes no function with a
 `stack_save` of either kind.
 Alignment is exactly the typed contract's fixed 16 bytes, not a configurable
 alignment or the type's size. No sparse metadata is needed: the usual 16 bytes
-per instruction suffice. The operand/rule tables drive both verifiers, use lists,
+per instruction suffice. The operand/rule tables drive the verifier, use lists,
 SSA rewrites, printer and parser. Counts other than i64, wrong result types,
 extraneous fields and memory modifiers are rejected deterministically.
 
@@ -985,7 +988,7 @@ conceal real lifetime errors. The existing generator FP-to-integer/CVTT oracle b
 also excluded from the strict dynamic case. Neither gap is claimed resolved.
 
 The adapter finds block boundaries, compares incoming stack shapes exactly,
-classifies 16 entries at once (one at a time in the twin), counts output, then
+classifies 16 entries at once, counts output, then
 emits into final-sized columns. Stack replay and irregular calls/control flow
 are shared ordered work. Locals begin in typed slots. Only expression-stack
 depths live across block boundaries receive temporary slots, one for each depth
@@ -1265,25 +1268,26 @@ and vector classification produce identical columns, side arrays and block range
 ./build/compiler test-ir --seed 81985529216486895 --count 1024
 ./build/compiler test-ir-lowering
 ./build/compiler benchmark-ir
-./build/compiler benchmark-ir --only vector --after-scalar 200
+./build/compiler benchmark-ir --only verify
 ./build/compiler benchmark-ir-lowering
-./build/compiler benchmark-ir-lowering --only vector --after-scalar 200
 ./build/compiler test-ir-source [--print NAME] [preprocessor options] file...
 ./build/compiler benchmark-ir-source [--only VARIANT] [--after-scalar MS] [preprocessor options] file...
 ```
 
-`test-ir` compares the two use-list twins on its printer fixtures, guarded
-tails, every-operand-kind fixture, generated functions and allocation
-failures. `test-ir-source` compares them on every lowered and promoted source
-form (`uses_forms`, `uses_failed`). `test-ir` also has independently expected CFG/use lists and rejection fixtures,
+`test-ir` folds the use lists of its printer fixtures, guarded tails,
+every-operand-kind fixture and generated functions, and every verdict of its
+fixtures, into two digests; a default run (`--seed 1 --count 64`) must give the
+frozen ones, taken while the deleted scalar twins agreed (#2924).
+`test-ir-source` checks the use lists of every lowered and promoted source form
+against their definition, each operand `ir_operand` enumerates the next use of
+its value (`uses_forms`, `uses_failed`). `test-ir` also has independently expected CFG/use lists and rejection fixtures,
 conversion and constant coverage, loop/diamond/self phis, duplicate targets,
 8,192 adversarial i128 switch cases, guarded columns of lengths 0 through 33,
 dominance tails, overflow, arena rollback, exact printer text and random
-integer DAG mutations. Agreement alone is insufficient: malformed fixtures must
-be rejected by both paths. Generated functions of up to 40 blocks, with phis,
-selects, stores, addresses with and without an index and returns, are valid but
-for where each value is used; both paths must report the first use error, or
-none, that an independent oracle gives under no dominator view, a chain of
+integer DAG mutations. Malformed fixtures must be rejected. Generated functions
+of up to 40 blocks, with phis, selects, stores, addresses with and without an
+index and returns, are valid but for where each value is used; the verifier
+must report the first use error, or none, that an independent oracle gives under no dominator view, a chain of
 blocks (some unreachable) and random intervals (`ir_test_dominance_generated`,
 #786: four per `--count`). A labels fixture (`ir_test_labels`) checks
 `br_indirect`'s successors (three labels, two distinct blocks: two edges), a
@@ -1304,8 +1308,9 @@ both parser paths, runs through both optimizer twins, reprints byte for byte
 and executes on both sides: [#175](https://github.com/buster14a/buster/issues/175)'s
 last acceptance item ([the tools guide](ir-tools.md#pass-fixtures-in-the-text-form)).
 
-`test-ir-lowering` lowers generated typed programs through both paths, verifies
-every function, compares their columns, and executes the resulting IR in a
+`test-ir-lowering` lowers generated typed programs, verifies every function,
+folds their columns into a digest frozen while the deleted scalar twin agreed
+(#2924), and executes the resulting IR in a
 test-only explicit-frame executor against the existing typed-stream interpreter.
 Calls and global-memory effects are compared, with targeted fixtures for values
 across conditional joins, backedges to entry zero, narrow shifts and wide pointer
@@ -1347,7 +1352,7 @@ size too wide, and an object's slot rounded down to 8 bytes, each fail the
 command (checked by mutation when this was added).
 
 Every lowered function of both sets is then promoted by both of `ssa_ir.c`'s
-paths, which must accept it with real dominance checking, pass both verifiers,
+paths, which must accept it with real dominance checking, pass the verifier,
 and keep each object's slot (a `void` slot that isn't a temporary) with its
 size, alignment and flags, in order: promotion compacts the slots it removes
 and must never take an object's. The two paths may order their output
@@ -1385,7 +1390,7 @@ signed or unsigned semantics, and F32 arithmetic/conversion rounds at F32 precis
 independent accounting and calibration happen outside retained samples. Rebuild
 timings include allocation, clearing and filling. Each sample lasts at least
 2 ms, variants rotate order, and the default is 21 passes. `--only` isolates a
-path; `--after-scalar` conditions the vector path with lighter scalar verification.
+variant.
 It reports ns/function, ns/instruction, useful instructions/s, TSC ticks and
 actual core/CFG/use arena charges. TSC ticks are not core cycles.
 

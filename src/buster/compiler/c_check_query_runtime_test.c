@@ -34,7 +34,7 @@ static void check_test_query_source(CheckTest* test, const CheckQueryFixture* fi
         Arena output = arena_reserve(UINT64_C(1) << 20);
         Arena scratch = arena_reserve(UINT64_C(1) << 21);
         const ParseOptions parse_options = { .scalar = path == 0 };
-        const CheckOptions options = { .scalar = path == 0, .batch_size = (index % BUSTER_CHECK_BATCH) + 1 };
+        const CheckOptions options = { .batch_size = (index % BUSTER_CHECK_BATCH) + 1 };
         bool ready = parse_initialize(&parser, &parse_options, pp_options.language) && parse_translation_unit(&parser, &pp) && check_test_types_open(&types);
         CheckInputReport reports[16];
         CheckInput input = { .reports = reports, .report_capacity = BUSTER_ARRAY_LENGTH(reports) };
@@ -101,7 +101,7 @@ static void check_test_query_conversion_proofs(CheckTest* test, TypeTable* table
                 const uint32_t query = check_test_special_node(&graph, CHECK_OP_BUILTIN_QUERY, CBUILTIN_CONSTANT_P, &cast, 1);
                 for (uint32_t path = 0; path < 2; path += 1)
                 {
-                    const CheckOptions options = { .scalar = path == 0 };
+                    const CheckOptions options = { 0 };
                     CheckStream stream;
                     // Saturated, as clang folds the undefined conversion (a NaN to 0), and so constant, as clang's
                     // __builtin_constant_p of it answers in either FP environment.
@@ -160,7 +160,7 @@ static void check_test_query_replay(CheckTest* test)
             CheckStream streams[2] = { 0 };
             for (uint32_t replay = 0; ready && replay < 2; replay += 1)
             {
-                const CheckOptions options = { .scalar = path == 0, .batch_size = BUSTER_CHECK_BATCH, .replay_queries = replay != 0 };
+                const CheckOptions options = { .batch_size = BUSTER_CHECK_BATCH, .replay_queries = replay != 0 };
                 ready = check_graph_run(&types.table, &input.graph, &outputs[replay], &scratch, &options, &streams[replay]);
             }
             const CheckStream* skipped = &streams[0];

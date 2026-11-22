@@ -2012,12 +2012,12 @@ static void check_asm_unit_number(Arena* output, int64_t value, bool* valid)
 }
 
 // Records `records[0, count)` as the bytes they encode, a `.byte` line of them each (check_asm_unit_helper).
-static void check_asm_unit_records(Arena* output, const X86Instruction* records, uint32_t count, bool scalar, bool* valid)
+static void check_asm_unit_records(Arena* output, const X86Instruction* records, uint32_t count, bool* valid)
 {
     for (uint32_t r = 0; *valid && r < count; r += 1)
     {
         uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
-        const int64_t length = BUSTER_SCALAR_PATH(scalar) ? x86_encode_scalar(records + r, 1, bytes, sizeof(bytes), 0, 0) : x86_encode(records + r, 1, bytes, sizeof(bytes), 0, 0);
+        const int64_t length = x86_encode(records + r, 1, bytes, sizeof(bytes), 0, 0);
         *valid = length > 0 && length <= 15;
         check_asm_unit_text(output, ".byte ", valid);
         for (int64_t b = 0; *valid && b < length; b += 1)
@@ -2062,7 +2062,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
     const Tier0Code code = check_asm_helper_code(places, count, &empty, saved, stores, block, pops, 0, 0, labels, exit, &first, scratch);
     bool valid = code.error == TIER0_OK;
     check_asm_unit_text(output, ".att_syntax prefix\n", &valid);
-    check_asm_unit_records(output, code.records, valid ? first : 0, scalar, &valid);
+    check_asm_unit_records(output, code.records, valid ? first : 0, &valid);
     check_asm_unit_bytes(output, text.pointer, text.length, &valid);
     // The template may have left another syntax or another section behind; the helper's stores and epilogue are its own
     // default text section's.
@@ -2083,7 +2083,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
         }
         if (r % 2 == 0)
         {
-            check_asm_unit_records(output, code.records + first + r, 1, scalar, &valid);
+            check_asm_unit_records(output, code.records + first + r, 1, &valid);
         }
         else
         {
@@ -2097,7 +2097,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
         check_asm_unit_goto(output, statement, BUSTER_CHECK_NONE, &valid);
         check_asm_unit_text(output, ":\n", &valid);
     }
-    check_asm_unit_records(output, valid ? code.records + first + exits : 0, valid ? code.count - first - exits : 0, scalar, &valid);
+    check_asm_unit_records(output, valid ? code.records + first + exits : 0, valid ? code.count - first - exits : 0, &valid);
     const uint64_t length = output->length - mark;
     AsmResult result = valid ? asm_assemble((String8){ .pointer = (char*)output->base + mark, .length = length }, index,
                                             (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output) :
@@ -3751,6 +3751,8 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
     {
         const CheckControl control = controls[i];
         const uint32_t s = control.target;
+        // A target_clones copy's statement has a plan of its own (#2247), whose index gives %= its number.
+        CheckProgramAsm* plan = control.kind == CHECK_CONTROL_ASM ? check_program_asm_plan_of(result, b, s, input->asm_count) : 0;
         if (control.kind == CHECK_CONTROL_END)
         {
             // The body's closing brace.
@@ -3759,7 +3761,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
         {
             reason = "statements other than asm statements in naked functions";
         }
-        else if (s >= input->asm_count || result->plans == 0 || result->plans[s].planned)
+        else if (plan == 0 || plan->planned)
         {
             result->status = CHECK_PROGRAM_INVALID;
             result->token = control.token;
@@ -3771,7 +3773,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
             const uint32_t count = statement->output_count + statement->input_count;
             CheckAsmPlace* places = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckAsmPlace, count) : 0;
             valid = count == 0 || places != 0;
-            result->plans[s] = (CheckProgramAsm){ .helper = BUSTER_CHECK_NONE, .planned = true };
+            *plan = (CheckProgramAsm){ .helper = BUSTER_CHECK_NONE, .planned = true };
             reason = statement->is_goto ? "asm goto" : count > BUSTER_CHECK_ASM_OPERANDS ? "inline assembly statements of more than 64 operands" : NULL;
             for (uint32_t k = 0; valid && reason == NULL && k < count; k += 1)
             {
@@ -3800,7 +3802,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
             }
             if (valid && reason == NULL)
             {
-                reason = check_asm_substitute(statement, places, program->identifiers, s, scratch, texts + statements, &valid);
+                reason = check_asm_substitute(statement, places, program->identifiers, (uint32_t)(plan - result->plans), scratch, texts + statements, &valid);
                 length += texts[statements].length + 1 + (statements != 0 ? sizeof(att) - 1 : 0);
                 statements += 1;
             }

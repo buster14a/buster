@@ -205,7 +205,6 @@ static void check_wide_bitwise_scalar(CheckWideBitwise op, uint64_t* destination
 
 static void check_wide_bitwise_vector(CheckWideBitwise op, uint64_t* destination, const uint64_t* a, const uint64_t* b, uint32_t count)
 {
-#if BUSTER_HOST_VECTOR
     const uint8_t imm = op == CHECK_WIDE_AND ? 0xc0 : op == CHECK_WIDE_OR ? 0xfc : op == CHECK_WIDE_XOR ? 0x3c : 0x0f;
     for (uint32_t i = 0; i < count; i += BUSTER_CHECK_WIDE_VECTOR_LIMBS)
     {
@@ -223,9 +222,6 @@ static void check_wide_bitwise_vector(CheckWideBitwise op, uint64_t* destination
         }
         _mm512_mask_storeu_epi64(destination + i, mask, r);
     }
-#else
-    check_wide_bitwise_scalar(op, destination, a, b, count);
-#endif
 }
 
 // destination = a + (invert ? ~b : b) + carry, over `count` limbs; returns the carry out of the top limb.
@@ -245,7 +241,6 @@ static uint32_t check_wide_add_scalar(uint64_t* destination, const uint64_t* a, 
 static uint32_t check_wide_add_vector(uint64_t* destination, const uint64_t* a, const uint64_t* b, uint32_t count, bool invert, uint32_t carry)
 {
     uint32_t c = carry;
-#if BUSTER_HOST_VECTOR
     const __m512i ones = _mm512_set1_epi64(-1);
     const __m512i flip = invert ? ones : _mm512_setzero_si512();
     for (uint32_t i = 0; i < count; i += BUSTER_CHECK_WIDE_VECTOR_LIMBS)
@@ -266,9 +261,6 @@ static uint32_t check_wide_add_vector(uint64_t* destination, const uint64_t* a, 
         const uint32_t shift = left >= BUSTER_CHECK_WIDE_VECTOR_LIMBS ? BUSTER_CHECK_WIDE_VECTOR_LIMBS : left;
         c = (total >> shift) & 1u;
     }
-#else
-    c = check_wide_add_scalar(destination, a, b, count, invert, carry);
-#endif
     return c;
 }
 
@@ -286,7 +278,6 @@ static int32_t check_wide_compare_scalar(const uint64_t* a, const uint64_t* b, u
 static int32_t check_wide_compare_vector(const uint64_t* a, const uint64_t* b, uint32_t count)
 {
     int32_t result = 0;
-#if BUSTER_HOST_VECTOR
     // From the top chunk down; the first that differs decides, by its highest differing limb.
     uint32_t end = count;
     while (result == 0 && end != 0)
@@ -306,9 +297,6 @@ static int32_t check_wide_compare_vector(const uint64_t* a, const uint64_t* b, u
         }
         end = start;
     }
-#else
-    result = check_wide_compare_scalar(a, b, count);
-#endif
     return result;
 }
 
@@ -328,7 +316,6 @@ static void check_wide_shift_left_scalar(uint64_t* destination, const uint64_t* 
 
 static void check_wide_shift_left_vector(uint64_t* destination, const uint64_t* a, uint32_t count, uint32_t amount)
 {
-#if BUSTER_HOST_VECTOR
     const uint32_t limbs = amount / BUSTER_CHECK_WIDE_LIMB_BITS;
     const __m512i bits = _mm512_set1_epi64(amount % BUSTER_CHECK_WIDE_LIMB_BITS);
     const __m512i lane = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
@@ -346,9 +333,6 @@ static void check_wide_shift_left_vector(uint64_t* destination, const uint64_t* 
         const __m512i low = _mm512_maskz_loadu_epi64(low_valid, (const void*)((uintptr_t)a + (uint64_t)((base - 1) * (int64_t)sizeof(uint64_t))));
         _mm512_mask_storeu_epi64(destination + i, mask, _mm512_shldv_epi64(high, low, bits));
     }
-#else
-    check_wide_shift_left_scalar(destination, a, count, amount);
-#endif
 }
 
 // destination = a >> amount over `count` limbs (amount below count * 64), zeros shifted in.
@@ -366,7 +350,6 @@ static void check_wide_shift_right_scalar(uint64_t* destination, const uint64_t*
 
 static void check_wide_shift_right_vector(uint64_t* destination, const uint64_t* a, uint32_t count, uint32_t amount)
 {
-#if BUSTER_HOST_VECTOR
     const uint32_t limbs = amount / BUSTER_CHECK_WIDE_LIMB_BITS;
     const __m512i bits = _mm512_set1_epi64(amount % BUSTER_CHECK_WIDE_LIMB_BITS);
     const __m512i lane = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
@@ -384,9 +367,6 @@ static void check_wide_shift_right_vector(uint64_t* destination, const uint64_t*
         const __m512i high = _mm512_maskz_loadu_epi64(high_valid, (const void*)((uintptr_t)a + (base + 1) * sizeof(uint64_t)));
         _mm512_mask_storeu_epi64(destination + i, mask, _mm512_shrdv_epi64(low, high, bits));
     }
-#else
-    check_wide_shift_right_scalar(destination, a, count, amount);
-#endif
 }
 
 // The kernels' choice: the checker's scalar path takes the twins.

@@ -326,7 +326,7 @@ static void tier1_stack_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     const bool created = parameters ? tier1_stack_parameters_function(&test->input, fixture == 1, fixture == 3, &function) : tier1_stack_calls_function(&test->input, &function);
     Tier1SelectPlan plan;
     uint32_t node = BUSTER_IR_NONE;
-    const bool planned = created && tier1_select_plan(&function, 0, &test->output, &test->scratch, vector, &plan, &node) == TIER1_SELECT_OK;
+    const bool planned = created && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the stack arguments' fixture selects");
     const Tier1EmitOptions options = {
         .register_mask = register_mask,

@@ -2,14 +2,14 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Lower the existing typed stack stream into Tier 1's all-in-memory IR. Include after tier0.c and ir.c.
-// ir_lower_typed and ir_lower_typed_scalar validate the input, plan block/stack shapes, count output, then emit directly
-// into exact-sized columns. Locals and expression values crossing edges use stack slots for #134 to promote. A separate
+// ir_lower_typed validates the input, plans block/stack shapes, counts output, then emits directly into exact-sized
+// columns. Locals and expression values crossing edges use stack slots for #134 to promote. A separate
 // preheader initializes parameters once, even when source entry zero is a loop target. Pointer-valued U64 entries are
 // converted explicitly at pointer operations. ABI locations never enter the IR. An explicit semantic return type is
 // required because Tier0Function.result only describes the ABI. Frame objects become address-taken slots of their own
 // size and alignment, and COPY loads and stores of integer pieces. See docs/ir.md for limits and pending integration.
 // Layout: IrTypedPlan/ir_typed_plan; ir_typed_classify; IrTypedSink and count/fill replay in ir_lower_emit.c;
-// ir_lower_typed_path.
+// ir_lower_typed_target_path.
 
 // Preserve the typed validator's width-qualified stack classes. The byte classifier remains unchanged for scalar
 // entries; only VECTOR entries need this sparse metadata lookup. DUP and control-only entries inherit their stack.
@@ -126,9 +126,6 @@ struct IrTypedPlan
     uint32_t indirect;
     // Whether a call argument is one the convention ignores (#141, ir_typed_ignored_arguments).
     bool ignored_arguments;
-    // Whether a call passes the function's own hidden pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN): its result goes to
-    // a slot of its own, after the dispatch slot (IrTypedSink.forward_slot), then where parameter 0 points.
-    bool forwarded;
     // The vectors' widths a whole-vector aggregate parameter's entry copy may take (#1282, ir_typed_vector_whole): bit 0
     // 16 bytes, bit 1 32, bit 2 64; none in a function without vectors, or for a target without AVX-512.
     uint8_t vector_copies;
@@ -264,10 +261,6 @@ static IrTypedPlan ir_typed_plan(const Tier0Function* input, Arena* scratch)
         {
             const uint32_t bytes = input->classes[i] == BUSTER_TYPED_CLASS_VECTOR ? ir_typed_vector_bytes(input, i) : tier0_class_memory(input->classes[i]) ? 16 : 8;
             plan.spill_bytes = bytes > plan.spill_bytes ? bytes : plan.spill_bytes;
-        }
-        for (uint32_t c = 0; input->call_result_objects != 0 && c < input->call_count; c += 1)
-        {
-            plan.forwarded |= input->call_result_objects[c] == BUSTER_TIER0_RESULT_HIDDEN;
         }
         for (uint32_t i = 0; i <= count && ok; i += 1)
         {
@@ -587,48 +580,32 @@ static const uint8_t ir_typed_floating_ops[64] = {
     [BUSTER_TYPED_DIV] = IR_FDIV,
 };
 
-// The vector path classifies sixteen source entries per batch, before the
-// ordered stack replay. Tail accesses cover only the logical source length.
-// That replay is shared with its scalar twin, including count/place/fill.
-static void ir_typed_classify(const Tier0Function* input, uint8_t* ops, uint8_t* types, bool vector)
+// Classifies sixteen source entries per batch, before the ordered stack replay.
+// Tail accesses cover only the logical source length.
+static void ir_typed_classify(const Tier0Function* input, uint8_t* ops, uint8_t* types)
 {
-    (void)vector;
-
-    if (BUSTER_VECTOR_PATH(vector))
+    const __m512i integer_ops = _mm512_loadu_si512(ir_typed_integer_ops);
+    const __m512i signed_ops = _mm512_loadu_si512(ir_typed_signed_ops);
+    const __m512i floating_ops = _mm512_loadu_si512(ir_typed_floating_ops);
+    const __m128i type_table = _mm_loadu_si128((const __m128i*)ir_typed_types);
+    const __m128i signed_table = _mm_loadu_si128((const __m128i*)ir_typed_signed_classes);
+    const __m128i floating_table = _mm_loadu_si128((const __m128i*)ir_typed_floating_classes);
+    for (uint32_t i = 0; i < input->count; i += 16)
     {
-        const __m512i integer_ops = _mm512_loadu_si512(ir_typed_integer_ops);
-        const __m512i signed_ops = _mm512_loadu_si512(ir_typed_signed_ops);
-        const __m512i floating_ops = _mm512_loadu_si512(ir_typed_floating_ops);
-        const __m128i type_table = _mm_loadu_si128((const __m128i*)ir_typed_types);
-        const __m128i signed_table = _mm_loadu_si128((const __m128i*)ir_typed_signed_classes);
-        const __m128i floating_table = _mm_loadu_si128((const __m128i*)ir_typed_floating_classes);
-        for (uint32_t i = 0; i < input->count; i += 16)
-        {
-            const uint32_t remaining = input->count - i;
-            const uint32_t active_count = remaining < 16 ? remaining : 16;
-            const __mmask16 active = (__mmask16)((1u << active_count) - 1);
-            const __m128i kinds = _mm_maskz_loadu_epi8(active, input->kinds + i);
-            const __m128i classes = _mm_maskz_loadu_epi8(active, input->classes + i);
-            const __m512i indices = _mm512_zextsi128_si512(kinds);
-            const __m128i integer = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, integer_ops));
-            const __m128i signed_integer = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, signed_ops));
-            const __m128i floating = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, floating_ops));
-            const __mmask16 is_signed = _mm_test_epi8_mask(_mm_shuffle_epi8(signed_table, classes), _mm_set1_epi8(1));
-            const __mmask16 is_floating = _mm_test_epi8_mask(_mm_shuffle_epi8(floating_table, classes), _mm_set1_epi8(1));
-            const __m128i integral = _mm_mask_blend_epi8(is_signed, integer, signed_integer);
-            _mm_mask_storeu_epi8(ops + i, active, _mm_mask_blend_epi8(is_floating, integral, floating));
-            _mm_mask_storeu_epi8(types + i, active, _mm_shuffle_epi8(type_table, classes));
-        }
-    }
-    else
-    {
-        for (uint32_t i = 0; i < input->count; i += 1)
-        {
-            const uint8_t kind = input->kinds[i];
-            const uint8_t class = input->classes[i];
-            types[i] = ir_typed_types[class];
-            ops[i] = ir_typed_floating(class) ? ir_typed_floating_ops[kind] : ir_typed_signed(class) ? ir_typed_signed_ops[kind] : ir_typed_integer_ops[kind];
-        }
+        const uint32_t remaining = input->count - i;
+        const uint32_t active_count = remaining < 16 ? remaining : 16;
+        const __mmask16 active = (__mmask16)((1u << active_count) - 1);
+        const __m128i kinds = _mm_maskz_loadu_epi8(active, input->kinds + i);
+        const __m128i classes = _mm_maskz_loadu_epi8(active, input->classes + i);
+        const __m512i indices = _mm512_zextsi128_si512(kinds);
+        const __m128i integer = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, integer_ops));
+        const __m128i signed_integer = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, signed_ops));
+        const __m128i floating = _mm512_castsi512_si128(_mm512_permutexvar_epi8(indices, floating_ops));
+        const __mmask16 is_signed = _mm_test_epi8_mask(_mm_shuffle_epi8(signed_table, classes), _mm_set1_epi8(1));
+        const __mmask16 is_floating = _mm_test_epi8_mask(_mm_shuffle_epi8(floating_table, classes), _mm_set1_epi8(1));
+        const __m128i integral = _mm_mask_blend_epi8(is_signed, integer, signed_integer);
+        _mm_mask_storeu_epi8(ops + i, active, _mm_mask_blend_epi8(is_floating, integral, floating));
+        _mm_mask_storeu_epi8(types + i, active, _mm_shuffle_epi8(type_table, classes));
     }
 }
 
@@ -639,8 +616,6 @@ struct IrTypedSink
     IrSizes sizes;
     // The plan's ignored_arguments: whether a call's arguments' locations need reading (ir_typed_aggregate_call).
     bool ignored_arguments;
-    // The slot a call that passes the function's own hidden pointer on returns into (#2684, IrTypedPlan.forwarded).
-    uint32_t forward_slot;
 };
 
 // Keep constructor updates visible in both replay instantiations: count erases column writes and fill erases null
@@ -1988,7 +1963,7 @@ static bool ir_typed_dominated(const Dominators* dominators, uint32_t top, uint3
 // in the functions with a hoisted symbol alone, the loops' walks in those with loops, each walk's edges taken from a
 // shared budget of sixteen per edge, past which a loop keeps its definition lifted. The dominators' columns go on
 // `output`, popped before return. False where an arena is short.
-static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, Arena* output, Arena* scratch, bool vector)
+static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, Arena* output, Arena* scratch)
 {
     bool ok = true;
     const uint32_t symbols = plan->hoisted_count;
@@ -2110,7 +2085,6 @@ static bool ir_typed_plan_places(const Tier0Function* input, IrTypedPlan* plan, 
             .predecessors = predecessors,
         };
         DominatorOptions options = dominators_options();
-        options.path = vector ? DOMINATOR_AUTO : DOMINATOR_SCALAR;
         options.outputs = cyclic ? BUSTER_DOMINATOR_LOOPS : 0;
         analyzed = dominators_analyze(output, scratch, &graph, options, &dominators);
         ok = analyzed != DOMINATOR_NO_MEMORY;
@@ -2433,35 +2407,21 @@ static bool ir_typed_own_records(const Tier0Function* input)
 
 // Whether any of the function's call arguments is one the convention ignores (#141: an empty struct, of no bytes) or a
 // static chain in r10 (#148, __builtin_call_with_static_chain's), whose call then has ABI records (ir_typed_aggregate_call):
-// once a function, so that no call reads its arguments' locations where none is. The vector path tests the kinds of 8
-// locations a load (AbiLocation's byte 6, IGNORE 0), and their kinds with their first registers (bytes 6 and 4) for
-// REGISTERS in r10; its scalar twin one at a time, which must agree.
-static bool ir_typed_ignored_arguments(const Tier0Function* input, bool vector)
+// once a function, so that no call reads its arguments' locations where none is. It tests the kinds of 8 locations a
+// load (AbiLocation's byte 6, IGNORE 0), and their kinds with their first registers (bytes 6 and 4) for REGISTERS in r10.
+static bool ir_typed_ignored_arguments(const Tier0Function* input)
 {
-    (void)vector;
-
     const uint32_t count = input->argument_locations != 0 ? input->argument_count : 0;
     bool ignored = false;
-    if (BUSTER_VECTOR_PATH(vector))
+    for (uint32_t first = 0; !ignored && first < count; first += 8)
     {
-        for (uint32_t first = 0; !ignored && first < count; first += 8)
-        {
-            const uint32_t lanes = count - first < 8 ? count - first : 8;
-            const __mmask8 active = (__mmask8)((1u << lanes) - 1);
-            const __m512i locations = _mm512_maskz_loadu_epi64(active, input->argument_locations + first);
-            const __m512i chain = _mm512_set1_epi64((int64_t)((uint64_t)BUSTER_ABI_LOCATION_REGISTERS << 48 | (uint64_t)BUSTER_ABI_R10 << 32));
-            const __m512i kind_register = _mm512_and_si512(locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff00ff00000000)));
-            ignored = (_mm512_mask_testn_epi64_mask(active, locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff000000000000))) != 0) ||
-                      (_mm512_mask_cmpeq_epi64_mask(active, kind_register, chain) != 0);
-        }
-    }
-    else
-    {
-        for (uint32_t a = 0; !ignored && a < count; a += 1)
-        {
-            const AbiLocation location = input->argument_locations[a];
-            ignored = location.kind == BUSTER_ABI_LOCATION_IGNORE || (location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] == BUSTER_ABI_R10);
-        }
+        const uint32_t lanes = count - first < 8 ? count - first : 8;
+        const __mmask8 active = (__mmask8)((1u << lanes) - 1);
+        const __m512i locations = _mm512_maskz_loadu_epi64(active, input->argument_locations + first);
+        const __m512i chain = _mm512_set1_epi64((int64_t)((uint64_t)BUSTER_ABI_LOCATION_REGISTERS << 48 | (uint64_t)BUSTER_ABI_R10 << 32));
+        const __m512i kind_register = _mm512_and_si512(locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff00ff00000000)));
+        ignored = (_mm512_mask_testn_epi64_mask(active, locations, _mm512_set1_epi64((int64_t)UINT64_C(0x00ff000000000000))) != 0) ||
+                  (_mm512_mask_cmpeq_epi64_mask(active, kind_register, chain) != 0);
     }
     return ignored;
 }
@@ -2562,58 +2522,14 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
     return ir_typed_emit(sink, IR_CALL, IR_VOID, 0, descriptor, BUSTER_IR_NONE, 0);
 }
 
-// The copy of a forwarded call's result (#2684) from the forwarding slot `source` to where the hidden pointer points
-// (`destination`, a ptr): past BUSTER_TIER0_MAX_COPY_BYTES a call of the front end's memmove (Tier0Function.hidden_copy,
-// its arguments the two pointers and the size, its result the destination, a ptr nothing reads, as the interpreters'
-// memmove binding has it), as the lowering's copy of a call's object calls it; else the pieces of a typed COPY of a
-// local source, 8 bytes at a time (#2693): the callee's stores built the slot's bytes just before it, as they build a
-// call object's.
-static __attribute__((always_inline)) inline void ir_typed_forward_copy(IrTypedSink* sink, const Tier0Function* input, uint32_t destination, uint32_t source)
-{
-    const uint64_t bytes = input->hidden_size;
-    if (bytes > BUSTER_TIER0_MAX_COPY_BYTES && input->hidden_copy != 0)
-    {
-        const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
-        const uint32_t first = (uint32_t)sink->sizes.extra_count;
-        const uint32_t type_first = (uint32_t)sink->sizes.call_type_count;
-        const uint32_t size = ir_typed_constant(sink, IR_I64, bytes);
-        if (sink->output != 0)
-        {
-            IrFunction* output = sink->output;
-            output->calls[descriptor] = (IrCall){
-                .argument_first = first,
-                .argument_count = 3,
-                .type_first = type_first,
-                .parameter_count = 3,
-                .result_type = IR_PTR,
-            };
-            output->extra[first] = destination;
-            output->extra[first + 1] = source;
-            output->extra[first + 2] = size;
-            output->call_types[type_first] = IR_PTR;
-            output->call_types[type_first + 1] = IR_PTR;
-            output->call_types[type_first + 2] = IR_I64;
-        }
-        sink->sizes.call_count += 1;
-        sink->sizes.extra_count += 3;
-        sink->sizes.call_type_count += 3;
-        ir_typed_emit(sink, IR_CALL, IR_PTR, input->hidden_copy, descriptor, BUSTER_IR_NONE, 0);
-    }
-    else
-    {
-        ir_typed_copy_pointers(sink, destination, source, bytes, false);
-    }
-}
-
 // Call `call` of the calls table: a direct one of its target's symbol, or with `callee` a pointer value (not
 // BUSTER_IR_NONE) an indirect one through it. An aggregate argument (its address on the stack) is a ptr, converted in
 // place in `arguments` (the stack's, which the call pops), and a call that passes or returns an aggregate has its ABI
 // records: each argument's location and size, the call's totals and result, and its result object's slot address as the
 // destination (c) of an aggregate result, its bytes the object's. A call that passes the function's own hidden pointer
-// on (#2684, BUSTER_TIER0_RESULT_HIDDEN) returns into the function's forwarding slot (IrTypedSink.forward_slot), of the
-// function's result's bytes (Tier0Function.hidden_size), which are then copied where parameter 0 points, as the lowering's
-// copy of a result object would (ir_typed_forward_copy): Tier 1 takes a call's destination as a frame object's address
-// alone (tier1_select_call_abi), so its code keeps the copy that Tier 0's and the interpreter's leave out.
+// on (#2684, BUSTER_TIER0_RESULT_HIDDEN) returns where parameter 0 points, of the function's result's bytes
+// (Tier0Function.hidden_size): its destination is that pointer, as Tier 0's and the interpreter's is, and Tier 1 moves
+// it into rdi with the call's arguments (#2820, tier1_select_call_abi).
 static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, uint32_t* arguments, uint32_t callee)
 {
     const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
@@ -2625,7 +2541,13 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     const uint32_t passed = (uint32_t)sink->sizes.passed_count;
     const uint32_t object = input->call_result_objects != 0 ? input->call_result_objects[call] : 0;
     const bool forwarded = object == BUSTER_TIER0_RESULT_HIDDEN;
-    const uint32_t into = forwarded ? sink->forward_slot : object != 0 ? object - 1 : BUSTER_IR_NONE;
+    // Parameter 0, the hidden pointer, is a U64 local's value: its slot's, loaded before the arguments are converted.
+    uint32_t into = object != 0 && !forwarded ? object - 1 : BUSTER_IR_NONE;
+    if (forwarded)
+    {
+        const uint32_t hidden = ir_typed_emit(sink, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
+        into = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, hidden, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
     // An aggregate's argument is its address; a narrow one is extended to 32 bits by its class (ir_typed_narrow).
     for (uint32_t a = 0; a < count; a += 1)
     {
@@ -2680,17 +2602,8 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_call(IrTypedSink*
     sink->sizes.call_type_count += count;
     sink->sizes.abi_call_count += aggregate;
     sink->sizes.passed_count += aggregate ? count : 0;
-    // The result object's slot address is its local's preheader instruction, as the forwarding slot's is.
-    const uint32_t result = ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee,
-                                          descriptor, into, 0);
-    if (forwarded)
-    {
-        // Parameter 0, the hidden pointer, is a U64 local's value: its slot's.
-        const uint32_t hidden = ir_typed_emit(sink, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE, ir_typed_alignment(BUSTER_TYPED_CLASS_U64));
-        const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, hidden, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-        ir_typed_forward_copy(sink, input, destination, into);
-    }
-    return result;
+    // The result object's slot address is its local's preheader instruction.
+    return ir_typed_emit(sink, callee == BUSTER_IR_NONE ? IR_CALL : IR_CALL_INDIRECT, result_type, callee == BUSTER_IR_NONE ? input->call_targets[call] : callee, descriptor, into, 0);
 }
 
 // A br_indirect's labels (#785), into extra: jump table t's for `owner` 1 + t, or with 0 those of no table; the count. A
@@ -3184,7 +3097,7 @@ static bool ir_typed_debug_scalars(const Tier0Function* input, const IrTypedPlan
 
 // `pieces`: a vector wider than the target moves whole (ir_typed_vector_piece) is taken as its pieces' moves would be, for
 // a caller that splits it into them before selection (#1624, ir_vector_split.c); otherwise it is refused.
-static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector, uint64_t target_features,
+static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, uint64_t target_features,
                                           bool pieces, bool sources)
 {
 
@@ -3246,11 +3159,6 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
         {
             check.error = IR_ERROR_STRUCTURE;
             check.instruction = typed.node;
-        }
-        else if (input->hidden_copy >= symbol_count)
-        {
-            // The memmove of a forwarded result's copy (#2684, ir_typed_forward_copy), a call's symbol as any other's.
-            check.error = IR_ERROR_OPERAND;
         }
     }
     IrSimdTypedOperation* operations = 0;
@@ -3355,7 +3263,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     {
         plan = ir_typed_plan(input, scratch);
         plan.operations = operations;
-        plan.ignored_arguments = ir_typed_ignored_arguments(input, BUSTER_VECTOR_PATH(vector));
+        plan.ignored_arguments = ir_typed_ignored_arguments(input);
         // A function with vectors copies its whole-vector aggregate parameters by vectors of the widths its target has
         // (#1282): the lowering admits those widths alone (ir_typed_vector_copies, as a vector entry's).
         plan.vector_copies = input->vectors ? ir_typed_vector_copies(target_features) : 0;
@@ -3364,7 +3272,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             plan.error = "no scratch memory for the depth slots";
             plan.error_code = IR_ERROR_MEMORY;
         }
-        if (plan.error == 0 && !(ir_typed_plan_hoisted(input, &plan, scratch) && ir_typed_plan_places(input, &plan, output, scratch, vector)))
+        if (plan.error == 0 && !(ir_typed_plan_hoisted(input, &plan, scratch) && ir_typed_plan_places(input, &plan, output, scratch)))
         {
             plan.error = "no scratch memory for the hoisted symbol addresses";
             plan.error_code = IR_ERROR_MEMORY;
@@ -3389,7 +3297,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     IrFunction candidate = {0};
     if (check.error == IR_OK)
     {
-        ir_typed_classify(input, ops, types, BUSTER_VECTOR_PATH(vector));
+        ir_typed_classify(input, ops, types);
         if (input->vectors)
         {
             // A vector's and a mask's (#179) IR types are their widths', which the class doesn't carry.
@@ -3429,7 +3337,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             candidate.symbol_count = symbol_count;
             if (check.error == IR_OK)
             {
-                check = BUSTER_VECTOR_PATH(vector) ? ir_verify(&candidate, scratch, 0) : ir_verify_scalar(&candidate, scratch, 0);
+                check = ir_verify(&candidate, scratch, 0);
             }
         }
     }
@@ -3445,12 +3353,6 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     return check;
 }
 
-// Preserve scalar clients of the internal path as well as the public entry points.
-static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, bool vector)
-{
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, vector, 0, false, false);
-}
-
 // The legacy typed stream erases pointer categories into U64, so its i64 values
 // cross explicit ptrtoint/inttoptr instructions at memory/address boundaries.
 // result_type is mandatory semantic information; it is not inferred from the
@@ -3458,22 +3360,11 @@ static IrCheck ir_lower_typed_path(const Tier0Function* input, IrType result_typ
 // the variadic bit, but the stream does not carry the named-parameter count.
 // Consequently each current argument is recorded as a checked parameter; a
 // future complete checker adapter must provide its actual prototype boundary.
-// Both paths preserve the input and caller's result on failure and reclaim all
+// The lowering preserves the input and caller's result on failure and reclaims all
 // scratch. Output, scratch, and input storage must be disjoint.
-static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result);
-
 static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
-#if !BUSTER_HOST_VECTOR
-    return ir_lower_typed_scalar(input, result_type, symbol_count, output, scratch, result);
-#else
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, true, 0, false, false);
-#endif
-}
-
-static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
-{
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, 0, false, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, 0, false, false);
 }
 
 // Output features are explicit. The old entry points intentionally grant none: a vector producer must retain its
@@ -3481,34 +3372,29 @@ static __attribute__((unused)) IrCheck ir_lower_typed_scalar(const Tier0Function
 // unsupported forms from missing target features on IR_ERROR_UNSUPPORTED.
 static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, BUSTER_HOST_VECTOR != 0, target_features, false, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, false, false);
 }
 
-static __attribute__((unused)) IrCheck ir_lower_typed_target_scalar(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
-{
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, false, target_features, false, false);
-}
-
-// ir_lower_typed_target's replay with source identity columns, by the vector path or its scalar twin: #2541 step 3's
-// summaries under -g, whose expansions carry their callee's origins (IrDebugInline).
+// ir_lower_typed_target's replay with source identity columns: #2541 step 3's summaries under -g, whose expansions
+// carry their callee's origins (IrDebugInline).
 static __attribute__((unused)) IrCheck ir_lower_typed_target_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
-                                                                     IrFunction* result, bool scalar)
+                                                                     IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, false, true);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, false, true);
 }
 
 // The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for
-// ir_vector_split to split into the target's widest vectors after promotion; by the vector path, or by its scalar twin.
+// ir_vector_split to split into the target's widest vectors after promotion.
 static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
-                                                                    IrFunction* result, bool scalar)
+                                                                    IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, true, false);
 }
 
 // The same code-producing replay, with optional source identity columns. The ordinary entry points keep their
 // source-less instantiation, so collecting these identities adds no per-entry work to a compile without -g.
 static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
-                                                                            IrFunction* result, bool scalar)
+                                                                            IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, !scalar && BUSTER_HOST_VECTOR != 0, target_features, true, true);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, true, true);
 }

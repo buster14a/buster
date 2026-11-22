@@ -25,6 +25,11 @@ static IrSimdOperation ir_interpreter_simd_opcode(uint8_t op)
         case IR_FSUB: operation = IR_SIMD_FSUB; break;
         case IR_FMUL: operation = IR_SIMD_FMUL; break;
         case IR_FDIV: operation = IR_SIMD_FDIV; break;
+        case IR_FMA: operation = IR_SIMD_FMA; break;
+        case IR_SITOFP: operation = IR_SIMD_SITOFP; break;
+        case IR_UITOFP: operation = IR_SIMD_UITOFP; break;
+        case IR_FPTOSI: operation = IR_SIMD_FPTOSI; break;
+        case IR_FPTOUI: operation = IR_SIMD_FPTOUI; break;
         case IR_VCMP: operation = IR_SIMD_COMPARE; break;
         case IR_VSELECT: operation = IR_SIMD_SELECT; break;
         default: break;
@@ -182,15 +187,27 @@ static InterpreterStatus ir_interpreter_simd_operation(const IrInterpreterFrame*
             .lane = intrinsic ? IR_SIMD_LANE_I32 : (IrSimdLane)function->flags[i],
             .index = intrinsic ? function->flags[i] : 0,
         };
-        IrSimdValue values[3] = {0};
+        IrSimdValue converted[3];
         const IrSimdValue* operands[3] = {0};
         for (uint32_t p = 0; p < 3; p += 1)
         {
             if ((mask & (1u << p)) != 0)
             {
-                values[p] = ir_interpreter_simd_value(frame, ids[p]);
-                operands[p] = values + p;
-                action.operands[p] = ir_simd_shape(function->type[ids[p]]);
+                const uint32_t id = ids[p];
+                const uint8_t type = function->type[id];
+                if (ir_vector_type(type))
+                {
+                    // The frame owns these slots for the whole call. The interpreter writes the destination
+                    // after evaluation, so repeated uses can read the same slot.
+                    operands[p] = frame->vector_values + frame->vector_indices[id];
+                }
+                else
+                {
+                    const InterpreterValue scalar = frame->values[id];
+                    converted[p] = (IrSimdValue){ .words = { scalar.low, scalar.high } };
+                    operands[p] = converted + p;
+                }
+                action.operands[p] = ir_simd_shape(type);
             }
         }
         executed = ir_simd_evaluate(&action, operands, 0, 0, 0, result);

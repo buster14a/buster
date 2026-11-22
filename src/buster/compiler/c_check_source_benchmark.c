@@ -562,11 +562,11 @@ static bool check_source_body_equal(const CheckGraph* source_graph, const CheckS
     return equal;
 }
 
-// The paths a sample takes: the scalar schedule (postorder, a node at a time), the vector path (in node order), the vector
-// path with its regions by dependency level (CheckOptions.level_order), the vector path by its memoized transitions in node
-// order (CheckOptions.transitions, #1050) and the vector path with its regions in postorder batches (CheckOptions.regions),
-// on the same actions: #133's question of which order wins, which these decided, what the transitions save, and #1050's
-// of what the regions do.
+// The paths a sample takes: the scalar reader's graph (the front end's scalar paths, CheckOptions' default since #2924
+// removed the checker's scalar schedule), the vector path (in node order), its regions by dependency level
+// (CheckOptions.level_order), its memoized transitions in node order (CheckOptions.transitions, #1050) and its regions in
+// postorder batches (CheckOptions.regions), on the same actions: #133's question of which order wins, which these decided,
+// what the transitions save, and #1050's of what the regions do.
 #define BUSTER_CHECK_SOURCE_PATHS 5u
 
 static const char* const check_source_path_names[BUSTER_CHECK_SOURCE_PATHS] = { "scalar", "vector", "levels", "transitions", "regions" };
@@ -575,7 +575,6 @@ static bool check_source_graph_run(TypeTable* types, const CheckGraph* graph, Ar
 {
     arena_pop_to(output, 0);
     const CheckOptions options = {
-        .scalar = path == 0,
         .level_order = path == 2,
         .transitions = path == 3,
         .regions = path == 4,
@@ -631,7 +630,7 @@ static int run_checker_source_benchmark(int count, char** arguments)
     const char* file = 0;
     CheckRequestRefusal refusal = { .error = CHECK_REQUEST_ACCEPTED };
     valid = valid && passes != 0 && passes <= BUSTER_CHECK_SOURCE_MAX_PASSES && iterations <= 1000000 && after <= 1000 &&
-            check_request_read(&pp_options, &refusal, &file, own, used, false, &option_arena) && file != 0;
+            check_request_read(&pp_options, &refusal, &file, own, used, CHECK_REQUEST_CODE_NONE, &option_arena) && file != 0;
     if (refusal.error != CHECK_REQUEST_ACCEPTED)
     {
         fprintf(stderr, "error: ");

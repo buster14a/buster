@@ -33,10 +33,12 @@
 // as with them in another order, and both paths' programs must run as expected. The report adds how many of the tests'
 // functions Tier 1 compiled (the vector path's --tier1-report).
 //
-// --code-size requires --tier1 and implies --cross-check. The object compile also emits the explicit per-body
-// size report, kept apart from readelf's and the linker's logs. Each successful cross-check reads that report against
-// the same objects whose symbols were compared. The report compares the corpus's sum of all emitted Tier 1 function
-// bytes with the matching clang -O0 functions' sum. An unpaired Tier 1 body stays in our sum and adds no reference bytes;
+// --code-size requires --tier1 and implies --cross-check. After a successful cross-check, the test is compiled to an
+// object once more with --tier1-no-inline and the explicit per-body size report, kept apart from readelf's and the
+// linker's logs (#2646): each function is measured against clang -O0's same function, as measure-tier1-programs measures
+// SQLite and Lua, which the cross-check's object, inlined, can't give. That object must link and run as the cross-check's
+// does, and its report is read against it and clang -O0's object. The report compares the corpus's sum of all emitted
+// Tier 1 function bytes with the matching clang -O0 functions' sum. An unpaired Tier 1 body stays in our sum and adds no reference bytes;
 // its bytes are reported as a subset of our total. Fallback bodies are separate. Missing or invalid evidence and an empty
 // comparison fail in both modes; --check-code-size also requires the Tier 1 sum not to exceed the reference sum.
 //
@@ -397,8 +399,8 @@ static bool c_testsuite_ran(const CTestsuite* suite, const char* program, const 
 // Whether the object at `object` defines the functions and objects that clang -O0 -c's object of `source` does (but for
 // the local functions --tier1's inlining left without code, which `code_report`, the -c compile's log, counts); if not,
 // why, in `detail`: the first difference.
-static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, const char* directory, const char* object, const char* code_report,
-                               Tier1CodeSize* code_size, char* detail, uint64_t capacity)
+static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, const char* directory, const char* object, const char* code_report, char* detail,
+                               uint64_t capacity)
 {
     char oracle[PATH_MAX];
     char log[PATH_MAX];
@@ -469,10 +471,48 @@ static bool c_testsuite_symbols(const CTestsuite* suite, const char* source, con
             snprintf(detail, capacity, "cross-check: the object's symbols aren't clang -O0 -c's: %s, %u in all", report, differences);
         }
     }
-    if (valid && suite->code_size)
+    arena_release(&arena);
+    return valid;
+}
+
+// --code-size's evidence (#2646): `source` compiled again with -c and --tier1-no-inline, its per-body size report beside
+// it, as measure-tier1-programs compiles SQLite's and Lua's. The bound compares each function with clang -O0's same
+// function, which an expansion of another function's body makes no counterpart of (#2541 step 2): the cross-check's
+// object, whose callers hold their callees' bodies and whose dead callees have no code, would compare other code. This
+// object must link and run as that one does, and its report is read against the clang -O0 object c_testsuite_symbols
+// made in `directory`. Whether it did, with the sizes in `code_size`; if not, why, in `detail`.
+static bool c_testsuite_sizes(const CTestsuite* suite, const char* source, const char* directory, const char* expected, Tier1CodeSize* code_size, char* detail, uint64_t capacity)
+{
+    char object[PATH_MAX];
+    char oracle[PATH_MAX];
+    char program[PATH_MAX];
+    char log[PATH_MAX];
+    char report[PATH_MAX];
+    char output[PATH_MAX];
+    snprintf(object, sizeof(object), "%s/object-sizes.o", directory);
+    snprintf(oracle, sizeof(oracle), "%s/object-clang.o", directory);
+    snprintf(program, sizeof(program), "%s/program-sizes", directory);
+    snprintf(log, sizeof(log), "%s/object-sizes-link.txt", directory);
+    snprintf(report, sizeof(report), "%s/object-sizes.txt", directory);
+    snprintf(output, sizeof(output), "%s/output-sizes.txt", directory);
+    char* compile[BUSTER_C_TESTSUITE_ARGUMENTS];
+    char* const compile_rest[] = { "-c", (char*)source, "-o", object, "--tier1-function-sizes", "--tier1-no-inline" };
+    c_testsuite_compile_arguments(compile, suite, compile_rest, BUSTER_ARRAY_LENGTH(compile_rest));
+    char* const link[] = { "cc", object, "-lm", "-o", program, 0 };
+    bool timed_out = false;
+    int status = c_testsuite_run(compile, directory, report, suite->compile_timeout, &timed_out);
+    bool valid = c_testsuite_compiled(status, timed_out, report, "code-size: -c --tier1-no-inline", detail, capacity);
+    if (valid)
+    {
+        status = c_testsuite_run(link, directory, log, suite->compile_timeout, &timed_out);
+        valid = c_testsuite_compiled(status, timed_out, log, "code-size: cc", detail, capacity);
+    }
+    valid = valid && c_testsuite_ran(suite, program, directory, output, expected, "code-size: cc's program", detail, capacity);
+    Arena arena = valid ? arena_reserve(UINT64_C(1) << 32) : (Arena){ 0 };
+    if (valid)
     {
         char size_detail[192] = { 0 };
-        valid = tier1_code_size_read(code_size, object, oracle, code_report, &arena, size_detail, sizeof(size_detail));
+        valid = arena.base != 0 && tier1_code_size_read(code_size, object, oracle, report, &arena, size_detail, sizeof(size_detail));
         if (!valid)
         {
             snprintf(detail, capacity, "code-size: %s", size_detail);
@@ -500,8 +540,8 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     snprintf(compile_log, sizeof(compile_log), "%s/object-compile.txt", directory);
     snprintf(output, sizeof(output), "%s/output-cc.txt", directory);
     char* compile[BUSTER_C_TESTSUITE_ARGUMENTS];
-    char* const compile_rest[] = { "-c", (char*)source, "-o", object, "--tier1-function-sizes" };
-    c_testsuite_compile_arguments(compile, suite, compile_rest, BUSTER_ARRAY_LENGTH(compile_rest) - !suite->code_size);
+    char* const compile_rest[] = { "-c", (char*)source, "-o", object };
+    c_testsuite_compile_arguments(compile, suite, compile_rest, BUSTER_ARRAY_LENGTH(compile_rest));
     char* const readelf[] = { "readelf", "-a", "-W", object, 0 };
     char* const link[] = { "cc", object, "-lm", "-o", program, 0 };
     bool timed_out = false;
@@ -540,7 +580,11 @@ static bool c_testsuite_cross_check(const CTestsuite* suite, const char* source,
     }
     if (valid)
     {
-        valid = c_testsuite_symbols(suite, source, directory, object, compile_log, code_size, detail, capacity);
+        valid = c_testsuite_symbols(suite, source, directory, object, compile_log, detail, capacity);
+    }
+    if (valid && suite->code_size)
+    {
+        valid = c_testsuite_sizes(suite, source, directory, expected, code_size, detail, capacity);
     }
     return valid || (unsupported && !required);
 }
@@ -936,14 +980,18 @@ static bool c_testsuite_report(const CTestsuite* suite, bool subset)
 // unsupported, and set to `kill`, it is then killed by a signal. With C_TESTSUITE_EXTRA_SYMBOL set, -c of 00001 writes a
 // real object (cc's) of a program that prints the expected line, with a function more than 00001 has. With C_TESTSUITE_ABNORMAL set, every compile refuses
 // its test, naming a feature, and then ends otherwise than a refusal does but in 00001's vector path: 00001's scalar path
-// and both of 00002's are killed by a signal, and both of 00003's sleep past the compile's time limit. A size-report
-// request makes 00001's real object compile, link, run and match the oracle's symbols, but omits the requested report.
+// and both of 00002's are killed by a signal, and both of 00003's sleep past the compile's time limit. A --tier1 -c
+// compile of 00001 makes a real object that links, runs and matches the oracle's symbols; one that asks for the size
+// report (c_testsuite_sizes's) omits it. Any compile that asks for that report without --tier1-no-inline, or for that
+// without the report, fails.
 static const char c_testsuite_stand_in[] =
     "#!/bin/sh\n"
-    "object=0 scalar=0 sizes=0 source= output=\n"
+    "object=0 scalar=0 tier1=0 sizes=0 whole=0 source= output=\n"
     "while [ $# -gt 0 ]; do\n"
-    "    case \"$1\" in -c) object=1;; --scalar) scalar=1;; --tier1-function-sizes) sizes=1;; -o) output=$2; shift;; -*) ;; *) source=$1;; esac; shift\n"
+    "    case \"$1\" in -c) object=1;; --scalar) scalar=1;; --tier1) tier1=1;; --tier1-function-sizes) sizes=1;; --tier1-no-inline) whole=1;;\n"
+    "        -o) output=$2; shift;; -*) ;; *) source=$1;; esac; shift\n"
     "done\n"
+    "[ $sizes = $whole ] || { echo \"error: a size report needs --tier1-no-inline, and only it\" >&2; exit 2; }\n"
     "[ -f \"$source\" ] || { echo \"error: no such file: $source\" >&2; exit 1; }\n"
     "refuse() { echo \"error: unsupported: $1\" >&2; case \"$2\" in kill) kill -KILL $$;; sleep) exec sleep 30;; esac; exit 1; }\n"
     "if [ -n \"$C_TESTSUITE_ABNORMAL\" ]; then\n"
@@ -957,7 +1005,7 @@ static const char c_testsuite_stand_in[] =
     "if [ $object = 1 ] && [ -n \"$C_TESTSUITE_EXTRA_SYMBOL\" ]; then case \"$source\" in *00001.c)\n"
     "    printf '#include <stdio.h>\\nint extra_symbol(void) { return 1; }\\nint main(void) { puts(\"passed\"); return 0; }\\n' > \"$output.c\"\n"
     "    exec cc -c \"$output.c\" -o \"$output\";; esac; fi\n"
-    "if [ $object = 1 ] && [ $sizes = 1 ]; then case \"$source\" in *00001.c)\n"
+    "if [ $object = 1 ] && [ $tier1 = 1 ]; then case \"$source\" in *00001.c)\n"
     "    printf '#include <stdio.h>\\nint main(void) { puts(\"passed\"); return 0; }\\n' > \"$output.c\"\n"
     "    exec cc -c \"$output.c\" -o \"$output\";; esac; fi\n"
     "case \"$source\" in *00002.c) refuse 'a stand-in feature';; esac\n"
@@ -1199,7 +1247,7 @@ static int c_testsuite_self_test(CTestsuite* suite)
             { C_TESTSUITE_FAILED, "the program: timed out" },
         },
         {
-            { C_TESTSUITE_FAILED, "code-size:" },
+            { C_TESTSUITE_FAILED, "code-size: code size: missing, malformed or inconsistent Tier 1 function manifest" },
             { C_TESTSUITE_UNSUPPORTED, "a stand-in feature" },
             { C_TESTSUITE_FAILED, "the program: timed out" },
         },

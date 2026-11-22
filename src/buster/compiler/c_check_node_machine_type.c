@@ -21,6 +21,8 @@
 #ifndef BUSTER_C_CHECK_NODE_MACHINE_TYPE_INCLUDED
 #define BUSTER_C_CHECK_NODE_MACHINE_TYPE_INCLUDED
 
+#include <pthread.h>
+
 // The builtin types a row's operand may be: a code below this.
 #define BUSTER_NODE_MACHINE_KINDS 24u
 
@@ -322,6 +324,20 @@ static bool node_machine_tables_initialize(void)
     return valid;
 }
 
+// Baked compilers start with the rows. In PIE builds (including TSan, MSan and fuzzing) the
+// first enabled reader makes the same rows once, before any lane uses them. The image baker
+// calls the initializer directly while checking its writes to the image's table section.
+static void node_machine_tables_runtime(void)
+{
+    (void)node_machine_tables_initialize();
+}
+
+bool check_node_window_prepare(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    return pthread_once(&once, node_machine_tables_runtime) == 0 && node_machine_tables_ready;
+}
+
 // The first source position at which check_context_source_complete takes `type` as complete, with `graph`'s tag history:
 // none (UINT32_MAX) for an incomplete type, every one (0) without a history or for a type whose base, past its arrays,
 // names no tag, and else its tag's completion's (none past the history).
@@ -407,7 +423,7 @@ static inline __attribute__((always_inline)) void node_machine_record(NodeMachin
 }
 
 // Record `r`'s value from `value`: into its columns where they hold it whole (node_machine_record_value gives it back
-// field for field: at most one of its integer, offset and floating value is no zero), and else into `wides`.
+// field for field: node_machine_whole), and else into `wides`.
 static void node_machine_put_value(NodeMachine* machine, uint32_t r, const CheckValue* value)
 {
     NodeMachineColumns* columns = machine->columns;
@@ -421,8 +437,7 @@ static void node_machine_put_value(NodeMachine* machine, uint32_t r, const Check
     const bool rare = high != 0 || value->imaginary_storage[0] != 0 || (value->imaginary_storage[1] & 0xffffu) != 0 || value->overload_head != 0 ||
                       value->bit_width != 0 || value->fault != CHECK_FAULT_NONE || value->fault_node != 0 || value->object_bit_offset != 0 ||
                       (uint32_t)value->category > 0x03u || (uint32_t)kind > 0x07u;
-    const uint32_t fields = (low != 0) + (offset != 0) + floating;
-    const bool whole = !rare && fields <= 1;
+    const bool whole = !rare && node_machine_whole(kind, low, offset, floating);
     columns->value_types[r] = value->type;
     columns->value_flags[r] = value->flags;
     columns->objects[r] = value->object;
@@ -576,7 +591,7 @@ static bool node_machine_discard(NodeMachine* machine, uint32_t r, uint32_t node
     const CheckConstantKind constant_kind = (CheckConstantKind)((standing >> 2) & 0x07u);
     const uint8_t kind = (uint8_t)(columns->words[a] >> 16);
     const bool taken = (wide == NULL || wide->overload_head == 0) && graph->types != NULL && graph->types[node] == BUSTER_TYPE_VOID &&
-                       graph->overload_candidate_count == 0 && (standing & 0x03u) == CHECK_RVALUE && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION &&
+                       !machine->overloads && (standing & 0x03u) == CHECK_RVALUE && !type_kind_is_array(kind) && kind != BUSTER_TYPE_KIND_FUNCTION &&
                        kind != BUSTER_TYPE_KIND_VECTOR && kind != BUSTER_TYPE_KIND_EXT_VECTOR && kind != BUSTER_TYPE_KIND_COMPLEX;
     const CheckConversion none = { 0 };
     if (taken && wide == NULL && (kind != BUSTER_TYPE_KIND_BIT_INT || constant_kind == CHECK_CONSTANT_NONE))
@@ -1202,11 +1217,12 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
 
 // Whether call record `r` (node `node`, callee record `a`) has a callee with semantics of its own, which the machine
 // leaves to the pipeline (docs/node-machine.md, "T: bind and type"): a library builtin's call that the catalogue folds or
-// computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library), any call in a unit with overload sets, a callee without a prototype
-// or of another convention than System V's (what check_lower_convention_call refuses, and the conventions that keep more
-// registers), more arguments than Tier 0's calls take, or a callee that returns twice (check_lower_calls_twice's and
-// check_lower_indirect_twice's, which the lowering marks its function for). The census refuses before it the callees
-// whose attributes or names the warnings read (node_census_callee).
+// computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library) and any the reader marked for one in a
+// unit with a rename pragma (node_machine_renames), any call in a unit with overload sets (node_machine_overloads), a
+// callee without a prototype or of another convention than System V's (what check_lower_convention_call refuses, and
+// the conventions that keep more registers), more arguments than Tier 0's calls take, or a callee that returns twice
+// (check_lower_calls_twice's and check_lower_indirect_twice's, which the lowering marks its function for). The census
+// refuses before it the callees whose attributes or names the warnings read (node_census_callee).
 static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a)
 {
     const NodeMachineColumns* columns = machine->columns;
@@ -1214,7 +1230,7 @@ static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, 
     const TypeTable* types = machine->types;
     const uint32_t member = graph->members != NULL ? graph->members[node] : 0;
     const TypeId function = node_machine_callee_function(machine, a);
-    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && node_machine_call_library(machine, r, node)) || graph->overload_candidate_count != 0 || function == 0 ||
+    bool refused = ((member & BUSTER_CHECK_LIBRARY_CALL) != 0 && (machine->renames || node_machine_call_library(machine, r, node))) || machine->overloads || function == 0 ||
                    columns->argument_counts[r] > BUSTER_TIER0_MAX_CALL_ARGUMENTS;
     refused = refused || (types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 ||
               type_function_abi_kind(types, function) != TYPE_FUNCTION_ABI_SYSV || type_function_has_parameter_abis(types, function);
@@ -2217,9 +2233,18 @@ static __attribute__((cold, noinline)) NodeMachineRefusal node_machine_type_acti
     return refusal;
 }
 
+// Whether operand `k` of comparison `r` supplies an address with a symbolic base. Loading a pointer object
+// consumes its designator's address; array and function decay preserve the base.
+static bool node_machine_symbolic_operand(const NodeMachine* machine, uint32_t r, uint32_t k, uint32_t operand)
+{
+    const NodeMachineColumns* columns = machine->columns;
+    return operand < r && node_machine_record_constant_kind(machine, operand) == CHECK_CONSTANT_ADDRESS && columns->objects[operand] != 0 &&
+           (columns->conversion_flags[2 * r + k] & BUSTER_CHECK_CONVERT_LVALUE) == 0;
+}
+
 // T: every record's value and its operands' conversions, up the postorder, for the expression of `count` records, graph
 // nodes `first` to first + count - 2 and `root`. A refusal stops it, at machine->stopped.
-static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count)
+static NodeMachineRefusal node_machine_type_in_context(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count, bool constant_evaluated)
 {
     NodeMachineColumns* columns = machine->columns;
     const CheckGraph* graph = machine->graph;
@@ -2307,6 +2332,15 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
             {
                 refusal = node_machine_type_action(machine, r, op, call);
             }
+            // The ordinary checker can fold symbolic pointer equality only under required constant evaluation.
+            // T's comparison rules and scalar action run with the runtime context. Leave that proof to the checker.
+            if (__builtin_expect(constant_evaluated && (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL), 0) &&
+                refusal == NODE_MACHINE_TAKEN && node_machine_record_constant_kind(machine, r) == CHECK_CONSTANT_NONE &&
+                check_action_kind(machine->types, columns->converted[2 * r]) == BUSTER_TYPE_KIND_POINTER &&
+                (node_machine_symbolic_operand(machine, r, 0, a) || node_machine_symbolic_operand(machine, r, 1, b)))
+            {
+                refusal = NODE_MACHINE_REFUSED_CONTEXT;
+            }
             word = node_machine_word(machine, columns->value_types[r]);
         }
         const uint8_t facts = (uint8_t)(word >> 8);
@@ -2322,6 +2356,13 @@ static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first
         machine->stopped = refusal == NODE_MACHINE_TAKEN ? r - 1 : r;
     }
     return refusal;
+}
+
+static NodeMachineRefusal node_machine_type(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count)
+{
+    const CheckStream* stream = machine->program != NULL ? machine->program->stream : NULL;
+    const bool required = stream != NULL && stream->constant_evaluated != NULL && root < machine->graph->count && stream->constant_evaluated[root] != 0;
+    return node_machine_type_in_context(machine, first, root, count, required);
 }
 
 #endif

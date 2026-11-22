@@ -402,7 +402,7 @@ static __attribute__((no_sanitize("function"))) uint64_t cbuiltin_atomic_rmw_tes
     return result;
 }
 
-static bool cbuiltin_atomic_rmw_test_map(CBuiltinAtomicRmwTest* test, const Tier0Code* helper, const Tier0Code* caller, bool scalar, CBuiltinAtomicRmwTestProgram* program, uint32_t item)
+static bool cbuiltin_atomic_rmw_test_map(CBuiltinAtomicRmwTest* test, const Tier0Code* helper, const Tier0Code* caller, CBuiltinAtomicRmwTestProgram* program, uint32_t item)
 {
     X86Instruction records[BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS];
     uint32_t offsets[BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS + 1];
@@ -420,18 +420,15 @@ static bool cbuiltin_atomic_rmw_test_map(CBuiltinAtomicRmwTest* test, const Tier
     if (result)
     {
         memcpy(records, helper->records, helper->count * sizeof(*records));
-        const BranchSizing sized = scalar ? size_branches_scalar(records, helper->count, helper->branches, helper->targets, helper->branch_count, offsets) :
-                                          size_branches(records, helper->count, helper->branches, helper->targets, helper->branch_count, offsets);
-        const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 : scalar ? x86_encode_scalar(records, helper->count, program->mapping, helper_capacity, NULL, NULL) :
-                                                                            x86_encode(records, helper->count, program->mapping, helper_capacity, NULL, NULL);
+        const BranchSizing sized = size_branches(records, helper->count, helper->branches, helper->targets, helper->branch_count, offsets);
+        const int64_t encoded = sized.error != BRANCH_SIZING_OK ? -1 : x86_encode(records, helper->count, program->mapping, helper_capacity, NULL, NULL);
         result = cbuiltin_atomic_rmw_test_expect(test, encoded > 0, "branch sizing and native helper encoding", item);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
         if (result && caller != NULL)
         {
             uint32_t ends[BUSTER_X86_ENCODER_FIXUP_CAPACITY(1)] = { 0 };
-            const int64_t caller_bytes = scalar ? x86_encode_scalar(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends) :
-                                                 x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
+            const int64_t caller_bytes = x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
             result = cbuiltin_atomic_rmw_test_expect(test, caller_bytes > 0 && caller->reference_count == 1 && caller->references[0].target == 1 &&
                 caller->references[0].kind == BUSTER_LINK_FIXUP_CALL && caller->references[0].field == X86_FIXUP_DISPLACEMENT &&
                 caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "real Tier 0 unknown-effect helper CALL reference", item);
@@ -554,7 +551,7 @@ static bool cbuiltin_atomic_rmw_test_caller(CBuiltinAtomicRmwTest* test, Arena* 
         result = cbuiltin_atomic_rmw_test_expect(test, code.error == TIER0_OK && code.branch_count == 0 && code.reference_count == 1, "Tier 0 CALL compiles with retained live prefix", ordinal);
         if (result)
         {
-            result = cbuiltin_atomic_rmw_test_map(test, &helper->code, &code, path == 0, &item->programs[path][variant], ordinal);
+            result = cbuiltin_atomic_rmw_test_map(test, &helper->code, &code, &item->programs[path][variant], ordinal);
         }
     }
     arena_pop_to(arena, mark);
@@ -659,7 +656,10 @@ static bool cbuiltin_atomic_rmw_test_prepare(CBuiltinAtomicRmwTest* test, Arena*
     const CBuiltinAtomicRmwHelper helper = cbuiltin_atomic_rmw_helper_emit(item->spec.id, item->bytes, item->format, arena);
     const bool release = (item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_RELEASE) != 0;
     const bool cas = (item->spec.flags & BUSTER_CBUILTIN_RMW_TEST_CAS) != 0;
-    const uint32_t branches = release || (cas && item->spec.id != CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N) ? 0 : 1;
+    const CBuiltinId id = item->spec.id;
+    const bool exchange = id == CBUILTIN_ATOMIC_EXCHANGE_N || id == CBUILTIN_SYNC_LOCK_TEST_AND_SET ||
+                          id == CBUILTIN_SYNC_SWAP || id == CBUILTIN_ATOMIC_TEST_AND_SET;
+    const uint32_t branches = release || exchange || (cas && id != CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N) ? 0 : 1;
     bool result = cbuiltin_atomic_rmw_test_expect(test, helper.code.error == TIER0_OK && helper.code.count > 0 &&
         helper.code.count <= BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS && helper.code.branch_count == branches && helper.code.reference_count == 0 &&
         helper.parameter_count == item->spec.parameters && helper.result_class == (release ? BUSTER_TYPED_CLASS_VOID : BUSTER_TYPED_CLASS_U64) &&
@@ -677,6 +677,25 @@ static bool cbuiltin_atomic_rmw_test_prepare(CBuiltinAtomicRmwTest* test, Arena*
         result = cbuiltin_atomic_rmw_test_expect(test, helper.code.branches[b] < helper.code.count && helper.code.targets[b] < helper.code.count &&
             helper.code.records[helper.code.branches[b]].displacement == 0, "unsized branch has a bounded target and zero displacement", ordinal);
     }
+    if (result && exchange)
+    {
+        const uint16_t form = item->bytes == 1 ? X86_FORM_XCHG_RM8_R8 : item->bytes == 2 ? X86_FORM_XCHG_RM16_R16 :
+                              item->bytes == 4 ? X86_FORM_XCHG_RM32_R32 : X86_FORM_XCHG_RM64_R64;
+        uint32_t accesses = 0;
+        bool shape = helper.code.branches == NULL && helper.code.targets == NULL;
+        for (uint32_t i = 0; i < helper.code.count; i += 1)
+        {
+            const X86Instruction record = helper.code.records[i];
+            if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0)
+            {
+                accesses += 1;
+                shape &= record.form == form && record.mode == BUSTER_X86_MEMORY_BASE && record.rm == X86_REGISTER_RDI && record.displacement == 0;
+            }
+            const uint32_t control = x86_effects_control(x86_effects(record.form));
+            shape &= control == (i + 1 == helper.code.count ? BUSTER_X86_CONTROL_RETURN : BUSTER_X86_CONTROL_NONE);
+        }
+        result = cbuiltin_atomic_rmw_test_expect(test, shape && accesses == 1, "one exact-width memory XCHG on the object, straight through to RET", ordinal);
+    }
     if (result && release)
     {
         uint32_t memory = 0;
@@ -693,7 +712,7 @@ static bool cbuiltin_atomic_rmw_test_prepare(CBuiltinAtomicRmwTest* test, Arena*
     }
     for (uint32_t path = 0; result && path < 2; path += 1)
     {
-        result = cbuiltin_atomic_rmw_test_map(test, &helper.code, NULL, path == 0, &item->programs[path][0], ordinal);
+        result = cbuiltin_atomic_rmw_test_map(test, &helper.code, NULL, &item->programs[path][0], ordinal);
     }
     for (uint32_t variant = 1; result && variant < 3; variant += 1)
     {

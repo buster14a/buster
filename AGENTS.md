@@ -92,10 +92,10 @@ precedence; do not undo it or add the trailer manually instead.
 
 The Zen 5 requirement describes the **host compiler executable**, not necessarily
 the instruction set of every program it generates. Keep host ISA, generated-code
-ISA, and output ABI separate. Linux/x86-64 hosts without the complete AVX-512
-feature set use scalar implementations. `BUSTER_HOST_ARCH=x86-64` builds the
-baseline executable; `native` is the default and `znver5` selects approved
-benchmark builds. The host choice is made at build time, outside compiler hot paths.
+ISA, and output ABI separate. The host needs the complete AVX-512 feature set
+`host_isa.h` names; a build for any other target stops there (#2924). `native`
+is the default, `znver5` selects approved benchmark builds and `vector` is CI's
+explicit target. The host choice is made at build time, outside compiler hot paths.
 Do not add other host operating systems. Broader output targets and extra
 applications are outside the current scope; but the x86 encoder encodes 16- and
 32-bit modes' instructions too, as the owner asked.
@@ -400,9 +400,9 @@ git -C build/c-testsuite checkout -q FETCH_HEAD
 ./build/compiler benchmark-backend-source build/c-testsuite/tests/single-exec/*.c
 ```
 
-The compiler's host path follows the target feature macros, which the
+The compiler's host check follows the target feature macros, which the
 preprocessor's predefines give as clang's do for the same options
-(`c_predefines.c`). A baseline `-march=x86-64` build selects the scalar host path.
+(`c_predefines.c`), so `-march=native` self-checks need an AVX-512 host.
 
 ## Command and module index
 
@@ -418,7 +418,7 @@ index](docs/commands/README.md#detailed-sections).
 - `./build.sh, bake-tables, test-baked-tables` — `baked.c` — [guide](docs/commands/build.md).
 - `test-builtins, test-check-builtins, test-builtin-lowering, measure-helpers` — `c_builtin.c` — [guide](docs/commands/builtins.md).
 - `check-call-graph, test-call-graph` — `call_graph.c` — [guide](docs/commands/call-graph.md).
-- `test-calling-convention, benchmark-calling-convention` — `calling_convention.c` — [guide](docs/commands/calling-convention.md).
+- `{test,benchmark}-calling-convention` — `calling_convention.c` — [guide](docs/commands/calling-convention.md).
 - `check, test-checker[-driver]` — `c_checker.c` — [guide](docs/commands/checker.md).
 - `test-checker-asm` — `c_check_program_asm.c` — [guide](docs/commands/checker-asm.md).
 - `test-checker-corpus` — `c_check_corpus.c` — [guide](docs/commands/checker-corpus.md).
@@ -435,7 +435,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-dominators, benchmark-dominators` — `dominators.c` — [guide](docs/commands/dominators.md).
 - `test-emission-metadata` — `emission_metadata.c` — [guide](docs/commands/emission-metadata.md).
 - `test-emitted-code` — `emitted_code.c` — [guide](docs/commands/emission.md).
-- `-E, parse, -fsyntax-only, -c` — `main.c` — [guide](docs/commands/driver.md).
+- `-E, parse, -fsyntax-only, -c, -S, test-assembly-output` — `main.c` — [guide](docs/commands/driver.md).
 - `test-executable, test-dynamic, test-static` — `executable.c` — [guide](docs/commands/executable.md).
 - `test-files, benchmark-files` — `c_files.c` — [guide](docs/commands/files.md).
 - `benchmark-floors, test-floors-input` — [guide](docs/commands/floors.md).
@@ -462,7 +462,7 @@ index](docs/commands/README.md#detailed-sections).
 - `test-oracle-cache, BUSTER_ORACLE_CACHE` — `oracle_cache.c` — [guide](docs/commands/oracle-cache.md).
 - `parallel, test-parallel, test-tool` — `parallel.c`, `test_tool.c` — [guide](docs/commands/parallel.md).
 - `test-parser, benchmark-parser` — `c_parser.c` — [guide](docs/commands/parser.md).
-- `test-preprocessor, benchmark-preprocessor` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
+- `{test,benchmark}-preprocessor, test-carets` — `c_preprocessor.c` — [guide](docs/commands/preprocessor.md).
 - `test-preprocessor-fuzz, benchmark-preprocessor-fuzz` — `preprocessor_fuzz.c` — [guide](docs/commands/preprocessor-fuzz.md).
 - `ab, time-runs, test-profile` — `profile.c` — [guide](docs/commands/profiling.md).
 - `test-refinement, benchmark-refinement` — `c_intern.c` — [guide](docs/commands/refinement.md).

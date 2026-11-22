@@ -7,7 +7,7 @@ drivers hand them to GNU ld; callers supply startup objects and libraries in
 link order. It does not invoke a system linker to produce its output.
 
 ```text
-build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared]
+build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie|-no-pie] [-shared]
     [-soname NAME] [--dynamic-linker PATH] [--no-dynamic-linker]
     [--lanes N] [--scalar] [-s|--strip-all] [-S|--strip-debug] [--time]
     [--gc-sections|--no-gc-sections]
@@ -18,12 +18,17 @@ build/compiler link-foreign [-o OUTPUT] [-e ENTRY] [-static] [-pie] [-shared]
 
 Defaults are a static executable named `a.out`, entry `_start`, the lanes
 its objects pay for (below), and all optional transformations disabled. `-pie` makes a dynamic PIE,
-`-static` with `-pie` a static PIE (as GNU ld and lld read the two together;
-GCC's `-static-pie` line is `-static -pie --no-dynamic-linker -z text`), and
-`-shared` a shared library, which has no entry point unless `-e` names one,
-with `-soname NAME` (or GNU ld's `-h NAME`, `--soname=NAME`) for its
-`DT_SONAME`. `-shared` with `-static` or `-pie`, and `--no-dynamic-linker`
-without `-static -pie`, are refused. Named regular symbols and the inputs'
+`-no-pie` (or `--no-pie`, `--no-pic-executable`) a position-dependent dynamic
+executable (#1503): an `ET_EXEC` at a fixed address with the interpreter, as
+GNU ld writes a dynamically linked executable that isn't a PIE, the last of
+`-pie` and `-no-pie` counting, as GNU ld and lld take them. `-static` with
+`-pie` makes a static PIE (as GNU ld and lld read the two together; GCC's
+`-static-pie` line is `-static -pie --no-dynamic-linker -z text`), `-static`
+with `-no-pie` or alone a static executable, and `-shared` a shared library,
+whatever `-no-pie` says (as lld takes it), which has no entry point unless
+`-e` names one, with `-soname NAME` (or GNU ld's `-h NAME`, `--soname=NAME`)
+for its `DT_SONAME`. `-shared` with `-static` or `-pie`, and
+`--no-dynamic-linker` without `-static -pie`, are refused. Named regular symbols and the inputs'
 DWARF are emitted by default (below, "Debug information"); `-s` and
 `--strip-all` omit `.symtab`, `.strtab` and the DWARF while preserving the
 dynamic symbol table and runtime dependencies, and `-S` and `--strip-debug`
@@ -86,7 +91,9 @@ and `-z now`, `-z relro`, `-z noexecstack` and `-z text` (the writer never
 writes a relocation in read-only memory). `-dynamic-linker` is
 `--dynamic-linker`. Any other `-m` or `-z` keyword is refused, naming it. So
 a driver's command line for supported inputs can be passed directly: `-pie`
-for a PIE, `-static`, `-static -pie` and `-shared` for the others. GCC's
+for a PIE, `-static`, `-static -pie` and `-shared` for the others, and
+`-no-pie` added for a line of `clang -no-pie`'s or `gcc -no-pie`'s, which
+names neither (this command's default is a static executable). GCC's
 `collect2` line's LTO plugin options are taken too: `-plugin PATH` (or
 `--plugin PATH`, joined as `-plugin=PATH` too) when PATH names GCC's
 `liblto_plugin.so` (or a versioned `liblto_plugin.so.N`) or LLVM's
@@ -106,7 +113,7 @@ Runtime search paths use `-rpath PATH`, `--rpath PATH`, either equals form,
 or `-R PATH` / `-RPATH`. `-R` follows lld's alias for `--rpath`; an existing
 non-directory argument is GNU ld's `--just-symbols` form and is refused rather
 than silently reinterpreted. Repeated paths are joined with `:` without expansion.
-Dynamic PIE and shared-library output record `DT_RUNPATH` by default;
+Dynamic executable and shared-library output record `DT_RUNPATH` by default;
 `--disable-new-dtags` selects `DT_RPATH`, and `--enable-new-dtags` restores
 RUNPATH. The last dtags option wins. Static output refuses runtime paths.
 See [the linker-option contract](linker-options.md) for forwarding from the C
@@ -117,8 +124,8 @@ driver and the shared writer's ownership and validation rules.
 Driver options are removed without reordering paths, `-L`, `-l`, `-u`,
 `--undefined`, archive groups, whole-archive, as-needed or library-search
 controls. The static kinds (a static executable and a static PIE) start
-library search with archives only; a PIE and a shared library start with the
-resolver's ordinary DSO preference. Explicit ordered `-Bstatic`/`-Bdynamic`
+library search with archives only; a dynamic executable and a shared library
+start with the resolver's ordinary DSO preference. Explicit ordered `-Bstatic`/`-Bdynamic`
 override that initial choice. An explicit `-static` also stays in the input
 stream, preserving its existing search effect. `--push-state` saves the
 as-needed, library-search and whole-archive settings; `--pop-state` restores
@@ -160,10 +167,29 @@ lld make of them, where the corpus test below compares it:
   an executable whose libraries' dependencies it doesn't see. A library's
   reference doesn't make an `--as-needed` library needed either; only a
   regular object's or the command line's does.
-- **Copy relocations,** as both linkers make them: a library's data that a
+- **Versions, in the source driver's mixed links (#1590).** With
+  `ForeignCommand.library_versions`, which the source driver sets and
+  `link-foreign` doesn't, the resolution checks the libraries' versions as
+  the direct path checks its `-l` libraries' (foreign.c's "Shared libraries'
+  versions"): a needed library's strong reference that requires a version
+  binds only to an export at that version, its name's default or not, of the
+  first library on the line that has one, which an `--as-needed` library is
+  then kept for unless the referring library's `DT_NEEDED` names it, as GNU ld
+  keeps it; such a reference that no library exports is refused
+  (`FOREIGN_ERROR_LIBRARY_UNDEFINED`, `PATH: undefined reference to
+  'foo@V1'`), unless the library's `DT_NEEDED` names a library the link
+  doesn't have; version needs that don't read are malformed; and the version
+  needs of the libraries the program loads, the needed ones and those their
+  `DT_NEEDED` entries name, must be defined by the library each entry's file
+  names, unless it defines no versions or the need is weak
+  (`FOREIGN_ERROR_LIBRARY_VERSION`, `PATH: version 'V1' not found (required
+  by PATH)`, as glibc's loader words it). A refusal comes before the
+  conversion, so the output that was there stays.
+- **Copy relocations,** as both linkers make them, in a dynamic PIE and in a
+  position-dependent executable (`-no-pie`) alike: a library's data that a
   retained fixup reaches other than through the GOT or by an address the
   loader relocates (GCC's `-fPIE` code reads `stdout` and `environ` by
-  `PC32`) gets a copy in `.bss`, an `R_X86_64_COPY` relocation and an export,
+  `PC32`, and `-fno-pie` code by `PC32` or `ABS32`) gets a copy in `.bss`, an `R_X86_64_COPY` relocation and an export,
   so that the library's own references bind to the copy. The library's other
   names at the same address (`environ`'s `_environ` and `__environ`), all of
   them, are defined at the copy and exported too, as lld's `getSymbolsAt`
@@ -440,7 +466,11 @@ runs, and a shared library's hidden IFUNC called by its exported function
 must run alike and define the bounds alike. The driver's own tests link a
 shared library with `-soname` and with `-h`, check its `DT_SONAME`, export,
 missing entry point and interpreter, and run a PIE that calls it; check that
-`-pie` with `-static` writes a static PIE; refuse `-shared` with `-static`,
+`-pie` with `-static` writes a static PIE; link `-pie -no-pie` as a
+position-dependent executable (an `ET_EXEC` at the fixed base with the
+interpreter, `.dynamic` and no `DF_1_PIE`, RELR or RELATIVE relocation) and
+`-no-pie -pie` as a PIE, each by both paths and every lane count into the
+same bytes, which run; refuse `-shared` with `-static`,
 `--no-dynamic-linker` with `-pie` and `-soname` without a value; and link
 programs without libc whose `_start` calls an IFUNC. They are refused, naming
 the IFUNC and why, as a static executable and as a static PIE, with a pointer

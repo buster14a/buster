@@ -4,18 +4,17 @@
 // The liveness benchmark uses dataflow_program.c's arena-owned synthetic CFGs and input rows. Measurement helpers
 // are original to this module; no external fixtures or benchmark implementation are incorporated.
 //
-// benchmark-dataflow [--seed N] [--after-scalar MS] [--only scalar|avx512] checks scalar/vector equality, then
-// measures complete solves including the rows each solver clears. Twenty-one passes alternate which implementation runs
-// first, after warm-up and sample-size calibration; --only times one alone, back to back. Each retained sample lasts at
-// least 2 ms. Printed ranges are within one process; repeat this command in separately locked processes to measure
+// benchmark-dataflow [--seed N] [--after-scalar MS] checks each workload's solve by the liveness equations, and for the
+// default seed its rows' digest and sweep count, frozen from main's runs that compared the AVX-512 solver with its
+// scalar twin before #2924 removed it; then it measures complete solves, including the in rows the solver clears, in
+// twenty-one passes after warm-up and sample-size calibration. Each retained sample lasts at least 2 ms. Printed ranges are within one process; repeat this command in separately locked processes to measure
 // variation between runs rather than holding the shared host lock around a series. Hardware counters count this
 // thread's user cycles, instructions and the throttle, read as the dispatch slots Zen 5's power cap withholds
 // (BUSTER_DATAFLOW_BENCHMARK_THROTTLE_EVENT); unavailable counters print zero, never a time estimate. --after-scalar MS
-// runs the scalar solver for MS ms before every AVX-512 sample (dataflow_benchmark_after_scalar), the state a
-// compiler's vector phases run in after lighter ones. Run on the 9700X through exclusive.sh with taskset -c 2.
+// runs scalar work for MS ms before every sample (dataflow_benchmark_after_scalar), the state a compiler's vector
+// phases run in after lighter ones. Run on the 9700X through exclusive.sh with taskset -c 2.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -84,6 +83,10 @@ struct DataflowBenchmarkWorkload
     uint32_t blocks;
     uint32_t values;
     uint32_t shape;
+    // Seed 1's digest of the solved rows and sweep count, which main's scalar twin and AVX-512 solver gave alike before
+    // #2924 (buster-performance scalar-paths-removal-2924-2026-11-17, c-dataflow-gate and dataflow-2950/exp2).
+    uint64_t digest;
+    uint64_t iterations;
 };
 
 static const DataflowBenchmarkWorkload dataflow_benchmark_workloads[] =
@@ -93,24 +96,48 @@ static const DataflowBenchmarkWorkload dataflow_benchmark_workloads[] =
         .blocks = 16,
         .values = 127,
         .shape = BUSTER_DATAFLOW_SHAPE_DIAMOND,
+        .digest = UINT64_C(0x81cdbfe19f97334e),
+        .iterations = 2,
+    },
+    {
+        .name = "mid-sparse-nested",
+        .blocks = 48,
+        .values = 24,
+        .shape = BUSTER_DATAFLOW_SHAPE_NESTED_LOOP,
+        .digest = UINT64_C(0x9fe648fe3e57ad38),
+        .iterations = 3,
+    },
+    {
+        .name = "mid-sparse-diamond",
+        .blocks = 96,
+        .values = 60,
+        .shape = BUSTER_DATAFLOW_SHAPE_DIAMOND,
+        .digest = UINT64_C(0x99736df306e06ce9),
+        .iterations = 2,
     },
     {
         .name = "medium-nested",
         .blocks = 256,
         .values = 1025,
         .shape = BUSTER_DATAFLOW_SHAPE_NESTED_LOOP,
+        .digest = UINT64_C(0x5d588c1b6a261367),
+        .iterations = 3,
     },
     {
         .name = "large-local",
         .blocks = 4096,
         .values = 4097,
         .shape = BUSTER_DATAFLOW_SHAPE_RANDOM,
+        .digest = UINT64_C(0x08e2c185595a28d1),
+        .iterations = 5,
     },
     {
         .name = "large-dispatch",
         .blocks = 4096,
         .values = 4097,
         .shape = BUSTER_DATAFLOW_SHAPE_DISPATCH,
+        .digest = UINT64_C(0xe0892cd70ef36780),
+        .iterations = 3,
     },
 };
 
@@ -231,21 +258,15 @@ static void dataflow_benchmark_stop_counters(DataflowBenchmarkCounters* counters
     }
 }
 
-// Each wrapper starts a 64-byte line, so that every build lays its solver's loops out in lines the same way, however
+// The wrapper starts a 64-byte line, so that every build lays the solver's loops out in lines the same way, however
 // much driver code comes before them (docs/dataflow.md, "Where the scalar twin's code falls").
-static __attribute__((noinline, aligned(64))) uint64_t dataflow_benchmark_vector(Dataflow* flow)
+static __attribute__((noinline, aligned(64))) uint64_t dataflow_benchmark_solve(Dataflow* flow)
 {
-    const uint64_t iterations = dataflow_liveness_vector(flow);
+    const uint64_t iterations = dataflow_liveness(flow);
     return iterations;
 }
 
-static __attribute__((noinline, aligned(64))) uint64_t dataflow_benchmark_scalar(Dataflow* flow)
-{
-    const uint64_t iterations = dataflow_liveness_scalar(flow);
-    return iterations;
-}
-
-static bool dataflow_benchmark_run(Dataflow* flow, bool vector, uint64_t repeats, DataflowBenchmarkCounters* counters, DataflowBenchmarkSample* sample)
+static bool dataflow_benchmark_run(Dataflow* flow, uint64_t repeats, DataflowBenchmarkCounters* counters, DataflowBenchmarkSample* sample)
 {
     struct timespec begin;
     struct timespec end;
@@ -254,23 +275,12 @@ static bool dataflow_benchmark_run(Dataflow* flow, bool vector, uint64_t repeats
     bool valid = clock_gettime(CLOCK_MONOTONIC_RAW, &begin) == 0;
     if (valid)
     {
-        // Both implementations cross an out-of-line wrapper with direct calls, so neither is inlined into the
-        // repetition loop. The memory barrier makes every complete set of output rows observable between solves.
-        if (vector)
+        // The solver crosses an out-of-line wrapper with direct calls, so it is not inlined into the repetition loop.
+        // The memory barrier makes every complete set of output rows observable between solves.
+        for (uint64_t repeat = 0; repeat < repeats; repeat += 1)
         {
-            for (uint64_t repeat = 0; repeat < repeats; repeat += 1)
-            {
-                sample->iterations += dataflow_benchmark_vector(flow);
-                __asm__ volatile("" : : "r"(flow->in), "r"(flow->out) : "memory");
-            }
-        }
-        else
-        {
-            for (uint64_t repeat = 0; repeat < repeats; repeat += 1)
-            {
-                sample->iterations += dataflow_benchmark_scalar(flow);
-                __asm__ volatile("" : : "r"(flow->in), "r"(flow->out) : "memory");
-            }
+            sample->iterations += dataflow_benchmark_solve(flow);
+            __asm__ volatile("" : : "r"(flow->in), "r"(flow->out) : "memory");
         }
         valid = clock_gettime(CLOCK_MONOTONIC_RAW, &end) == 0;
     }
@@ -282,28 +292,37 @@ static bool dataflow_benchmark_run(Dataflow* flow, bool vector, uint64_t repeats
     return valid;
 }
 
-// --after-scalar: complete scalar solves of `flow` for at least `milliseconds`, untimed, before an AVX-512 sample. A
-// compiler runs its vector phases in short bursts after lighter ones, which let the clock boost (from about 5.31 to
-// 5.52 GHz on the 9700X, over 30 to 300 ms), and at that clock a heavy vector loop runs under the core's power cap
-// until the clock comes down, 5 to 20 ms later (#199; docs/dataflow.md). Back-to-back samples miss that state.
-static bool dataflow_benchmark_after_scalar(Dataflow* flow, uint64_t milliseconds)
+static volatile uint64_t dataflow_benchmark_sink;
+
+// --after-scalar: scalar work, an FNV-1a hash of the workload's use rows, one dependent multiply a byte, for at least
+// `milliseconds`, untimed, before each sample. A compiler runs its vector phases in short bursts after lighter ones,
+// which let the clock boost (from about 5.31 to 5.52 GHz on the 9700X, over 30 to 300 ms), and at that clock a heavy
+// vector loop runs under the core's power cap until the clock comes down, 5 to 20 ms later (#199; docs/dataflow.md).
+// Back-to-back samples miss that state. Before #2924 this ran the scalar twin's solves.
+static bool dataflow_benchmark_after_scalar(const Dataflow* flow, uint64_t milliseconds)
 {
     struct timespec now;
     bool valid = clock_gettime(CLOCK_MONOTONIC_RAW, &now) == 0;
     const uint64_t end = (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec + milliseconds * 1000000ull;
+    const uint8_t* bytes = (const uint8_t*)flow->use;
+    const uint64_t size = (uint64_t)flow->block_count * flow->row_words * sizeof(uint64_t);
+    uint64_t hash = 0xcbf29ce484222325ull;
     bool running = valid;
     while (running)
     {
-        dataflow_benchmark_scalar(flow);
-        __asm__ volatile("" : : "r"(flow->in), "r"(flow->out) : "memory");
+        for (uint64_t i = 0; i < size; i += 1)
+        {
+            hash = (hash ^ bytes[i]) * 0x100000001b3ull;
+        }
+        hash += size == 0;
+        dataflow_benchmark_sink = hash;
         valid = clock_gettime(CLOCK_MONOTONIC_RAW, &now) == 0;
         running = valid && (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec < end;
     }
     return valid;
 }
 
-// `timed` has a bit per implementation to time (--only): bit 0 for the scalar solver and bit 1 for the AVX-512 one.
-static bool dataflow_benchmark_calibrate(Dataflow* flows, uint64_t iterations, uint32_t timed, uint64_t* repeats)
+static bool dataflow_benchmark_calibrate(Dataflow* flow, uint64_t iterations, uint64_t* repeats)
 {
     DataflowBenchmarkCounters no_counters =
     {
@@ -317,23 +336,15 @@ static bool dataflow_benchmark_calibrate(Dataflow* flows, uint64_t iterations, u
     *repeats = 1;
     while (valid && !ready)
     {
-        // Repeated warm batches account for clocks and caches settling after the first solve. The timed
-        // implementations use one repetition count, and every order must reach twice the required retained-sample
-        // duration.
+        // Repeated warm batches account for clocks and caches settling after the first solve. Two batches must each
+        // reach twice the required retained-sample duration.
         double shortest = BUSTER_DATAFLOW_BENCHMARK_CALIBRATION_NS;
         for (uint32_t round = 0; valid && round < 2; round += 1)
         {
-            for (uint32_t turn = 0; valid && turn < 2; turn += 1)
-            {
-                const uint32_t variant = (round + turn) % 2;
-                if (timed & (1u << variant))
-                {
-                    DataflowBenchmarkSample sample;
-                    valid = dataflow_benchmark_run(&flows[variant], variant != 0, *repeats, &no_counters, &sample);
-                    valid = valid && sample.iterations == iterations * (*repeats);
-                    shortest = sample.nanoseconds < shortest ? sample.nanoseconds : shortest;
-                }
-            }
+            DataflowBenchmarkSample sample;
+            valid = dataflow_benchmark_run(flow, *repeats, &no_counters, &sample);
+            valid = valid && sample.iterations == iterations * (*repeats);
+            shortest = sample.nanoseconds < shortest ? sample.nanoseconds : shortest;
         }
         ready = shortest >= BUSTER_DATAFLOW_BENCHMARK_CALIBRATION_NS;
         if (valid && !ready)
@@ -379,10 +390,24 @@ static DataflowBenchmarkStatistics dataflow_benchmark_statistics(const double* s
     return result;
 }
 
-static bool dataflow_benchmark_equal(const Dataflow* scalar, const Dataflow* vector)
+// The liveness equations over every row: in = use | (out & ~def), out = the OR of the successors' in. They admit larger
+// solutions than the least one, which the default seed's frozen digest rules out.
+static bool dataflow_benchmark_equations(const Dataflow* flow)
 {
-    const uint64_t bytes = (uint64_t)scalar->block_count * scalar->row_words * sizeof(uint64_t);
-    const bool result = bytes == 0 || (memcmp(scalar->in, vector->in, bytes) == 0 && memcmp(scalar->out, vector->out, bytes) == 0);
+    bool result = true;
+    for (uint32_t block = 0; block < flow->block_count; block += 1)
+    {
+        for (uint64_t word = 0; word < flow->row_words; word += 1)
+        {
+            const uint64_t index = (uint64_t)block * flow->row_words + word;
+            uint64_t out = 0;
+            for (uint32_t edge = flow->successor_offsets[block]; edge < flow->successor_offsets[block + 1]; edge += 1)
+            {
+                out |= flow->in[(uint64_t)flow->successors[edge] * flow->row_words + word];
+            }
+            result = result && flow->out[index] == out && flow->in[index] == (flow->use[index] | (out & ~flow->def[index]));
+        }
+    }
     return result;
 }
 
@@ -398,34 +423,33 @@ static uint64_t dataflow_benchmark_digest(const Dataflow* flow)
     return result;
 }
 
-static bool dataflow_benchmark_workload(const DataflowBenchmarkWorkload* workload, uint64_t seed, uint32_t timed, uint64_t after_scalar, DataflowBenchmarkCounters* counters)
+static bool dataflow_benchmark_workload(const DataflowBenchmarkWorkload* workload, uint64_t seed, uint64_t after_scalar, DataflowBenchmarkCounters* counters)
 {
     Arena arena = arena_reserve(BUSTER_DATAFLOW_BENCHMARK_ARENA_BYTES);
-    Dataflow flows[2] = { 0 };
-    bool valid = dataflow_generate(&arena, workload->blocks, workload->values, workload->shape, seed, &flows[0]);
-    valid = valid && dataflow_generate(&arena, workload->blocks, workload->values, workload->shape, seed, &flows[1]);
+    Dataflow flow = { 0 };
+    bool valid = dataflow_generate(&arena, workload->blocks, workload->values, workload->shape, seed, &flow);
     uint64_t iterations = 0;
     if (valid)
     {
-        iterations = dataflow_benchmark_scalar(&flows[0]);
-        const uint64_t vector_iterations = dataflow_benchmark_vector(&flows[1]);
-        valid = iterations == vector_iterations && dataflow_benchmark_equal(&flows[0], &flows[1]);
+        iterations = dataflow_benchmark_solve(&flow);
+        valid = dataflow_benchmark_equations(&flow);
+        valid = valid && (seed != 1 || (dataflow_benchmark_digest(&flow) == workload->digest && iterations == workload->iterations));
     }
 
     uint64_t repeats = 1;
     if (valid)
     {
-        valid = dataflow_benchmark_calibrate(flows, iterations, timed, &repeats);
+        valid = dataflow_benchmark_calibrate(&flow, iterations, &repeats);
         if (!valid)
         {
             fprintf(stderr, "dataflow warm calibration failed for %s\n", workload->name);
         }
     }
 
-    double nanoseconds[2][BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
-    double cycles[2][BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
-    double instructions[2][BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
-    double throttle[2][BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
+    double nanoseconds[BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
+    double cycles[BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
+    double instructions[BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
+    double throttle[BUSTER_DATAFLOW_BENCHMARK_PASSES] = { 0 };
     bool complete = false;
     uint32_t restarts = 0;
     while (valid && !complete)
@@ -433,31 +457,24 @@ static bool dataflow_benchmark_workload(const DataflowBenchmarkWorkload* workloa
         bool short_sample = false;
         for (uint32_t pass = 0; valid && !short_sample && pass < BUSTER_DATAFLOW_BENCHMARK_PASSES; pass += 1)
         {
-            for (uint32_t turn = 0; valid && !short_sample && turn < 2; turn += 1)
+            DataflowBenchmarkSample sample = { 0 };
+            if (after_scalar != 0)
             {
-                const uint32_t variant = (pass + turn) % 2;
-                if (timed & (1u << variant))
-                {
-                    DataflowBenchmarkSample sample = { 0 };
-                    if (after_scalar != 0 && variant != 0)
-                    {
-                        valid = dataflow_benchmark_after_scalar(&flows[0], after_scalar);
-                    }
-                    valid = valid && dataflow_benchmark_run(&flows[variant], variant != 0, repeats, counters, &sample);
-                    valid = valid && sample.iterations == iterations * repeats;
-                    short_sample = sample.nanoseconds < BUSTER_DATAFLOW_BENCHMARK_SAMPLE_NS;
-                    nanoseconds[variant][pass] = sample.nanoseconds / (double)repeats;
-                    cycles[variant][pass] = sample.cycles / (double)repeats;
-                    instructions[variant][pass] = sample.instructions / (double)repeats;
-                    throttle[variant][pass] = sample.throttle / (double)repeats;
-                }
+                valid = dataflow_benchmark_after_scalar(&flow, after_scalar);
             }
+            valid = valid && dataflow_benchmark_run(&flow, repeats, counters, &sample);
+            valid = valid && sample.iterations == iterations * repeats;
+            short_sample = sample.nanoseconds < BUSTER_DATAFLOW_BENCHMARK_SAMPLE_NS;
+            nanoseconds[pass] = sample.nanoseconds / (double)repeats;
+            cycles[pass] = sample.cycles / (double)repeats;
+            instructions[pass] = sample.instructions / (double)repeats;
+            throttle[pass] = sample.throttle / (double)repeats;
         }
         complete = !short_sample;
         if (valid && !complete)
         {
-            // Never mix repetition counts in a reported distribution. If either path becomes faster after warm-up,
-            // discard the entire attempt and restart all passes with twice as many complete solves on both paths.
+            // Never mix repetition counts in a reported distribution. If the solve becomes faster after warm-up,
+            // discard the entire attempt and restart all passes with twice as many complete solves.
             if (restarts < BUSTER_DATAFLOW_BENCHMARK_MAX_RESTARTS && repeats < BUSTER_DATAFLOW_BENCHMARK_MAX_REPEATS)
             {
                 repeats *= 2;
@@ -470,33 +487,27 @@ static bool dataflow_benchmark_workload(const DataflowBenchmarkWorkload* workloa
             }
         }
     }
-    valid = valid && dataflow_benchmark_equal(&flows[0], &flows[1]);
+    valid = valid && dataflow_benchmark_equations(&flow);
     if (valid)
     {
         printf("%s: blocks=%u values=%u edges=%u row_bytes=%" PRIu64 " iterations=%" PRIu64 " repeats=%" PRIu64 " restarts=%u digest=%016" PRIx64 "\n",
-               workload->name, workload->blocks, workload->values, flows[0].edge_count, flows[0].row_words * sizeof(uint64_t),
-               iterations, repeats, restarts, dataflow_benchmark_digest(&flows[0]));
-        for (uint32_t variant = 0; variant < 2; variant += 1)
-        {
-            if (timed & (1u << variant))
-            {
-                const DataflowBenchmarkStatistics time = dataflow_benchmark_statistics(nanoseconds[variant]);
-                const DataflowBenchmarkStatistics cycle = counters->available ? dataflow_benchmark_statistics(cycles[variant]) : (DataflowBenchmarkStatistics){ 0 };
-                const DataflowBenchmarkStatistics instruction = counters->available ? dataflow_benchmark_statistics(instructions[variant]) : (DataflowBenchmarkStatistics){ 0 };
-                const DataflowBenchmarkStatistics slots = counters->available ? dataflow_benchmark_statistics(throttle[variant]) : (DataflowBenchmarkStatistics){ 0 };
-                const double blocks_iterations = (double)workload->blocks * (double)iterations;
-                printf("  %-6s %.1f [%.1f-%.1f] ns/function %.1f [%.1f-%.1f] cycles/function %.3f [%.3f-%.3f] cycles/block/iteration %.1f instructions/function %.2f IPC %.3f throttle/block/iteration min_sample_ms=%.3f\n",
-                       variant == 0 ? "scalar" : "avx512", time.median, time.minimum, time.maximum,
-                       cycle.median, cycle.minimum, cycle.maximum,
-                       cycle.median / blocks_iterations, cycle.minimum / blocks_iterations, cycle.maximum / blocks_iterations,
-                       instruction.median, cycle.median != 0 ? instruction.median / cycle.median : 0,
-                       slots.median / blocks_iterations, time.minimum * (double)repeats / 1e6);
-            }
-        }
+               workload->name, workload->blocks, workload->values, flow.edge_count, flow.row_words * sizeof(uint64_t),
+               iterations, repeats, restarts, dataflow_benchmark_digest(&flow));
+        const DataflowBenchmarkStatistics time = dataflow_benchmark_statistics(nanoseconds);
+        const DataflowBenchmarkStatistics cycle = counters->available ? dataflow_benchmark_statistics(cycles) : (DataflowBenchmarkStatistics){ 0 };
+        const DataflowBenchmarkStatistics instruction = counters->available ? dataflow_benchmark_statistics(instructions) : (DataflowBenchmarkStatistics){ 0 };
+        const DataflowBenchmarkStatistics slots = counters->available ? dataflow_benchmark_statistics(throttle) : (DataflowBenchmarkStatistics){ 0 };
+        const double blocks_iterations = (double)workload->blocks * (double)iterations;
+        printf("  avx512 %.1f [%.1f-%.1f] ns/function %.1f [%.1f-%.1f] cycles/function %.3f [%.3f-%.3f] cycles/block/iteration %.1f instructions/function %.2f IPC %.3f throttle/block/iteration min_sample_ms=%.3f\n",
+               time.median, time.minimum, time.maximum,
+               cycle.median, cycle.minimum, cycle.maximum,
+               cycle.median / blocks_iterations, cycle.minimum / blocks_iterations, cycle.maximum / blocks_iterations,
+               instruction.median, cycle.median != 0 ? instruction.median / cycle.median : 0,
+               slots.median / blocks_iterations, time.minimum * (double)repeats / 1e6);
     }
     else
     {
-        fprintf(stderr, "dataflow benchmark failed for %s (allocation, clock, calibration, or scalar/vector disagreement)\n", workload->name);
+        fprintf(stderr, "dataflow benchmark failed for %s (allocation, clock, calibration, the equations, or seed 1's frozen digest or count)\n", workload->name);
     }
     arena_release(&arena);
     return valid;
@@ -521,8 +532,6 @@ int run_dataflow_benchmark(int argc, char** argv)
     bool valid = true;
     uint64_t seed = 1;
     uint64_t after_scalar = 0;
-    // Bit 0 times the scalar solver and bit 1 the AVX-512 one; --only keeps one.
-    uint32_t timed = 3;
     for (int argument = 1; argument < argc; argument += 1)
     {
         if (strcmp(argv[argument], "--seed") == 0 && argument + 1 < argc)
@@ -535,13 +544,6 @@ int run_dataflow_benchmark(int argc, char** argv)
             valid = valid && dataflow_benchmark_number(argv[argument + 1], 10, &after_scalar) && after_scalar <= BUSTER_DATAFLOW_BENCHMARK_AFTER_SCALAR_MAX_MS;
             argument += 1;
         }
-        else if (strcmp(argv[argument], "--only") == 0 && argument + 1 < argc)
-        {
-            const char* name = argv[argument + 1];
-            valid = valid && (strcmp(name, "scalar") == 0 || strcmp(name, "avx512") == 0);
-            timed = strcmp(name, "scalar") == 0 ? 1 : 2;
-            argument += 1;
-        }
         else
         {
             valid = false;
@@ -549,20 +551,16 @@ int run_dataflow_benchmark(int argc, char** argv)
     }
     if (!valid)
     {
-        fprintf(stderr, "usage: %s [--seed N] [--after-scalar MS] [--only scalar|avx512]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--seed N] [--after-scalar MS]\n", argv[0]);
     }
     else
     {
         DataflowBenchmarkCounters counters = dataflow_benchmark_open_counters();
-        printf("dataflow: generator=%u seed=%" PRIu64 ", 21 interleaved-pass median [min-max]; complete solves including the rows each solver clears", BUSTER_DATAFLOW_GENERATOR_VERSION,
+        printf("dataflow: generator=%u seed=%" PRIu64 ", 21-pass median [min-max]; complete solves including the rows the solver clears", BUSTER_DATAFLOW_GENERATOR_VERSION,
                seed);
-        if (timed != 3)
-        {
-            printf("; only %s", timed == 1 ? "scalar" : "avx512");
-        }
         if (after_scalar != 0)
         {
-            printf("; each avx512 sample after %" PRIu64 " ms of scalar solves", after_scalar);
+            printf("; each sample after %" PRIu64 " ms of scalar work", after_scalar);
         }
         printf("\nthrottle: PMCx1A0 umask 0x08, read as the dispatch slots Zen 5's power cap takes (#199)\n");
         if (!counters.available)
@@ -576,18 +574,9 @@ int run_dataflow_benchmark(int argc, char** argv)
         const uint32_t count = sizeof(dataflow_benchmark_workloads) / sizeof(dataflow_benchmark_workloads[0]);
         for (uint32_t workload = 0; valid && workload < count; workload += 1)
         {
-            valid = dataflow_benchmark_workload(&dataflow_benchmark_workloads[workload], seed, timed, after_scalar, &counters);
+            valid = dataflow_benchmark_workload(&dataflow_benchmark_workloads[workload], seed, after_scalar, &counters);
         }
         dataflow_benchmark_close_counters(&counters);
     }
     return valid ? 0 : 1;
 }
-
-#else
-int run_dataflow_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR
