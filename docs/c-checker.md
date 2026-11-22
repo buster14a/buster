@@ -7216,12 +7216,16 @@ walk. `check_driver_reports_from` therefore calls
 `check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
 Its bounded worklist visits the retained condition tree, using the existing
 integer and floating literal conversion emitters. The source span also locates
-retained conditional and comma nodes, including detached operands of static
-selections, through the token-to-node map (`check_common_failed_assert_source`).
-Those nodes are checked first in graph postorder, as Clang constructs their
-source expressions; the assertion's own conversion and nested logical operands
-then follow the completed expression's order. An inner assertion owns its own
-warnings. Explicit casts do not create implicit conversions, and a conditional's
+retained comma nodes, including detached operands of static selections, through
+the token-to-node map (`check_common_failed_assert_source`). Those nodes are
+checked first in graph postorder, as Clang constructs their source expressions;
+the assertion's own conversion and nested logical operands then follow the
+completed expression's order. A full conditional's condition is not this walk's:
+`check_common_conditional_conversions` publishes it once at construction for
+every retained conditional, and for each one a declaration/type query erased
+from the reader's sparse receipt (#2899), in the deferred phase the comma's
+marker shares, so that at one boundary a conditional built in a comma's right
+operand comes first. An inner assertion owns its own warnings. Explicit casts do not create implicit conversions, and a conditional's
 arms do not inherit its outer boolean context. GNU omitted-middle conditionals
 visit their shared condition once and do not diagnose that saved value as a
 new conversion of the written expression. Discarded comma operands reuse the
@@ -7238,17 +7242,15 @@ successful and non-warning controls, unrelated errors, macro expansion notes,
 C17/C23 and both reader choices and lane requests. The focused driver selector
 is `--assert-bool-only`; `--assert-diagnostics-only` also runs requirement
 printing and member-recovery checks. Clang is the external behavioral oracle;
-the fixtures and implementation are original. The cold path cannot recover
-operands that queries or type declarations erased altogether; those and the
-ordinary successful-expression gaps are tracked in
+the fixtures and implementation are original. `--query-bool-only` checks the
+erased and successful-expression conversions of
 [#2899](https://github.com/buster14a/buster/issues/2899).
 `-Wconstant-logical-operand`, absent from ordinary expressions too, is tracked
 in [#2900](https://github.com/buster14a/buster/issues/2900).
 The ordinary equality emitter's extra assignment-suggestion note for a
 nonassignable left operand is tracked in
 [#2906](https://github.com/buster14a/buster/issues/2906).
-Successful-assertion conditional warning ordering continues to use the
-ordinary warning walk.
+A successful assertion's conditionals are the construction pass's too.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
