@@ -4982,6 +4982,7 @@ struct NodeShadow
     uint64_t alone_positions;
     uint64_t alone_records;
     uint64_t alone_ticks;
+    uint64_t alone_machine_ticks;
     uint64_t alone_sweep_ticks;
     uint64_t alone_roots;
     uint64_t alone_taken;
@@ -7290,10 +7291,13 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
     if (shadow->alone_bodies != 0 || shadow->alone_bodies_left != 0)
     {
         // The machine with no node of the walk's.
-        printf("node-shadow: alone bodies=%" PRIu64 " left=%" PRIu64 " postorder-positions=%" PRIu64 " records=%" PRIu64 " roots=%" PRIu64 " taken=%" PRIu64 " ticks=%" PRIu64
-               " (the sweeps' first run %" PRIu64 ")\n",
-               shadow->alone_bodies, shadow->alone_bodies_left, shadow->alone_positions, shadow->alone_records, shadow->alone_roots, shadow->alone_taken, shadow->alone_ticks,
-               shadow->alone_sweep_ticks);
+        // Its ticks in place, one run of it: the compaction, the entries, the front and the records' copy (all of it less
+        // the machine's two runs), and the machine's first run on the chunks' roots (T, the tests, C and X).
+        const uint64_t reading = shadow->alone_ticks > shadow->alone_machine_ticks ? shadow->alone_ticks - shadow->alone_machine_ticks : 0;
+        printf("node-shadow: alone bodies=%" PRIu64 " left=%" PRIu64 " postorder-positions=%" PRIu64 " records=%" PRIu64 " roots=%" PRIu64 " taken=%" PRIu64
+               " ticks: its-reading=%" PRIu64 " the-machine's-first-run=%" PRIu64 " a-position=%.1f\n",
+               shadow->alone_bodies, shadow->alone_bodies_left, shadow->alone_positions, shadow->alone_records, shadow->alone_roots, shadow->alone_taken, reading,
+               shadow->alone_sweep_ticks, shadow->alone_positions != 0 ? (double)(reading + shadow->alone_sweep_ticks) / (double)shadow->alone_positions : 0.0);
         printf("node-shadow: alone compared=%" PRIu64 " differences=%" PRIu64, shadow->alone_compared, shadow->alone_differences);
         for (uint32_t field = 0; field < BUSTER_NODE_ALONE_FIELDS; field += 1)
         {
@@ -7472,6 +7476,7 @@ static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, 
     shadow->alone_positions += front->alone_positions;
     shadow->alone_records += front->alone_records;
     shadow->alone_ticks += front->alone_ticks;
+    shadow->alone_machine_ticks += front->alone_machine_ticks;
     shadow->alone_sweep_ticks += alone->ticks;
     shadow->alone_roots += alone->expressions;
     // The walk's nodes' roots in their order, each against the other's next one at its token: a token's roots are in the

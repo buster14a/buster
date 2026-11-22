@@ -276,7 +276,11 @@ static uint64_t node_machine_digest(const NodeMachine* machine, NodeMachineRefus
         digest = node_machine_mix(digest, (uint64_t)value.object << 32 | value.overload_head);
         digest = node_machine_mix(digest, (uint64_t)value.offset);
         digest = node_machine_mix(digest, (uint64_t)value.bit_width << 32 | (uint64_t)value.fault);
-        digest = node_machine_mix(digest, (uint64_t)value.fault_node << 32 | value.object_bit_offset);
+        // A fault's node as its record of the expression's: the nodes are another graph's where the machine reads the
+        // front's records alone (c_check_node_machine_alone.c), and the record is the same in both.
+        const uint32_t fault_record = value.fault == CHECK_FAULT_NONE ? value.fault_node : value.fault_node == machine->root ? machine->count - 1 :
+                                                                                           value.fault_node - machine->first;
+        digest = node_machine_mix(digest, (uint64_t)fault_record << 32 | value.object_bit_offset);
         digest = node_machine_mix(digest, (uint64_t)columns->words[r] << 32 | (uint64_t)columns->facts[r] << 8 | columns->value_classes[r]);
         digest = node_machine_mix(digest, (uint64_t)node_machine_record_converted(machine, r, 0) << 32 | node_machine_record_conversion_flags(machine, r, 0));
         digest = node_machine_mix(digest, (uint64_t)node_machine_record_converted(machine, r, 1) << 32 | node_machine_record_conversion_flags(machine, r, 1));

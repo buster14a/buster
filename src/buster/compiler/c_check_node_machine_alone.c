@@ -106,6 +106,19 @@ static bool node_alone_write(struct NodeAlone* alone, const CheckInputReader* re
             view->types[node] = front->types[record];
             view->members[node] = front->members[record];
             view->contexts[node] = node_alone_context(front, reader, record);
+            // What the walk's flush gives a node of its token alone (check_input_expression_flush): its expression's end,
+            // its warnings' suppression, its floating-point environment.
+            const uint32_t token = front->tokens[record];
+            view->source_positions[node] = check_input_expression_end(reader, token);
+            if (view->warning_suppressed != NULL)
+            {
+                view->warning_suppressed[node] = reader->warning_suppressed != NULL ? reader->warning_suppressed[token] : 0;
+            }
+            if (view->fp_environments != NULL)
+            {
+                const uint8_t mask = BUSTER_CHECK_FP_EVAL_MASK | BUSTER_CHECK_FP_CONTRACT_MASK | (reader->constant_contexts[token] == 0 ? BUSTER_CHECK_FP_ENV_ACCESS : 0);
+                view->fp_environments[node] = reader->output->fp_environments[token] & mask;
+            }
             if (argument_count != 0)
             {
                 const uint32_t first = front->argument_firsts[record];
@@ -139,6 +152,23 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     front->full = false;
     front->argument_count = 0;
     front->wide_count = 0;
+    // What the reader's graph has of the unit and no node's: its tables and its defaults, as they stand.
+    const CheckGraph* unit = &reader->output->graph;
+    alone->view.marked_members = unit->marked_members;
+    alone->view.marked_member_count = unit->marked_member_count;
+    alone->view.availability_contexts = unit->availability_contexts;
+    alone->view.ns_constant_string = unit->ns_constant_string;
+    alone->view.cfstring_class = unit->cfstring_class;
+    alone->view.const_values = unit->const_values;
+    alone->view.const_warnings = unit->const_warnings;
+    alone->view.const_warning_count = unit->const_warning_count;
+    alone->view.fp_contract_default = unit->fp_contract_default;
+    alone->view.system_tokens = unit->system_tokens;
+    alone->view.system_token_count = unit->system_token_count;
+    alone->view.tag_completions = unit->tag_completions;
+    alone->view.transparent_unions = unit->transparent_unions;
+    alone->view.tag_completion_count = unit->tag_completion_count;
+    alone->view.extensions = unit->extensions;
     const CheckGraph graph = typer->graph;
     NodeFrontTypes* const types = typer->types;
     struct NodeCensusReader* const tests = typer->tests;
@@ -170,7 +200,9 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
             alone->input = *reader->output;
             alone->input.graph = alone->view;
             typer->graph = alone->view;
+            const uint64_t machine = __rdtsc();
             node_machine_reader_chunk(typer, front, reader);
+            alone->shadow->alone_machine_ticks += __rdtsc() - machine;
             // Each root by its token: the node its results are kept by (an initialization's is its value's).
             for (uint32_t record = front->made; record < front->count; record += 1)
             {
@@ -306,6 +338,15 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     {
         memset(alone, 0, sizeof(*alone));
         room = check_graph_initialize(&alone->view, reader->scratch, capacity, reader->output->graph.argument_capacity);
+    }
+    if (room)
+    {
+        // The columns the reader's graph has only in some units: a node's warnings' suppression and its floating-point
+        // environment.
+        alone->view.warning_suppressed = reader->output->graph.warning_suppressed != NULL ? arena_push_array(reader->scratch, capacity, sizeof(uint8_t), 1) : NULL;
+        alone->view.fp_environments = reader->output->graph.fp_environments != NULL ? arena_push_array(reader->scratch, capacity, sizeof(uint8_t), 1) : NULL;
+        room = (alone->view.warning_suppressed != NULL) == (reader->output->graph.warning_suppressed != NULL) &&
+               (alone->view.fp_environments != NULL) == (reader->output->graph.fp_environments != NULL);
     }
     NodeFrontTypes* types = room ? node_alone_results(reader, typer->types, capacity) : NULL;
     room = room && types != NULL;

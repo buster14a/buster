@@ -651,12 +651,14 @@ struct NodeFrontShadow
     uint32_t* alone_chains;
     // What it read: the bodies it read whole and those it left (a body whose tokens are no run of the postorder, or past
     // its graph's room), their postorder positions, the records it made of them, and its ticks, all of it (the
-    // compaction, the entries, the front, the records' copy and the sweeps).
+    // compaction, the entries, the front, the records' copy and the machine's runs).
     uint64_t alone_bodies;
     uint64_t alone_bodies_left;
     uint64_t alone_positions;
     uint64_t alone_records;
     uint64_t alone_ticks;
+    // Of its ticks, the machine's two runs on the chunks' roots (the first is timed in its results, the second keeps them).
+    uint64_t alone_machine_ticks;
     // The flat front (BUSTER_NODE_FRONT_FLAT, c_check_node_machine_flat.c). Its passes' ticks after the compaction, its
     // own compaction's, and each stage's (BUSTER_NODE_FLAT_STAGE_*); the tokens it visited, the records it made and
     // the places it left empty, the children its tokens hopped over, the tokens with a child past the rings' reach, and
