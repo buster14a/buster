@@ -982,6 +982,8 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-ir-licm
 "$BUSTER_COMPILER" test-ir-unroll
 "$BUSTER_COMPILER" test-ir-sroa
+# #3309: loop store motion's fixtures against the interpreter as they are, promoted and optimized, and its faults.
+"$BUSTER_COMPILER" test-ir-store-motion
 # #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
 "$BUSTER_COMPILER" test-ir-vectorize
 # #2805: compare the C reductions built by the opt-in Tier 1 vectorizer and Clang.
@@ -1066,3 +1068,11 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_symbols.c -o build/test-driver-tier1-symbols
 ./build/test-driver-tier1-symbols "$BUSTER_COMPILER" "$(command -v clang)"
+== Test Tier 1's loop store motion against Clang's output, its report and the unit's distinct objects
+# #3309: loops over globals in every shape the pass takes or refuses, strictly at Tier 1 with the pass and without it on
+# both host paths, each program's lines Clang -O0's; the report's counts; the issue's kernel with one load and one store
+# of each global; and which declarations' objects the emission lists (a definition of the unit's, not a weak, aliased,
+# preemptible, asm-labeled, section, common, volatile or thread-local one).
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_store_motion.c -o build/test-driver-tier1-store-motion
+./build/test-driver-tier1-store-motion "$BUSTER_COMPILER" "$(command -v clang)"

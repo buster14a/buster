@@ -127,7 +127,7 @@ struct OptionTestCase
 
 #define BUSTER_OPTION_TEST_USAGE_E "usage: compiler -E/-M/-MM "
 #define BUSTER_OPTION_TEST_USAGE_CHECK "usage: compiler [check] "
-#define BUSTER_OPTION_TEST_TIER1_PASSES "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, vectorize, unroll, vectors, gvn, inline or all\n"
+#define BUSTER_OPTION_TEST_TIER1_PASSES "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, memory, vectorize, unroll, vectors, storemotion, gvn, inline or all\n"
 
 static const OptionTestCase option_test_cases[] = {
     // Joined and separate values, each family's order.

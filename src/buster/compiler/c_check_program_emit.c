@@ -501,8 +501,9 @@ struct CheckEmitGrowth
 // lane reserves the first BUSTER_CHECK_TIER1_STEPS_ALWAYS steps; the others are the optional passes' outputs, reserved
 // only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
 // and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
-// the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither.
-#define BUSTER_CHECK_TIER1_STEPS 12
+// the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither;
+// and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol.
+#define BUSTER_CHECK_TIER1_STEPS 13
 #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
 // block's IR instructions before selection and allocation (tier1_schedule_ir.c).
@@ -510,8 +511,9 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
 #define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
 // --tier1-passes= (#139): the passes of Tier 1's pipeline whose default the option turns over, a bit each, so that 0 is
-// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM, SROA nor value
-// numbering with memory (#2718: the 9700X measured no run time it gains for its compile time) on every function. SCCP's,
+// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges and loop store motion (#3309),
+// and neither LICM, SROA nor value numbering with memory (#2718: the 9700X measured no run time it gains for its
+// compile time) on every function. SCCP's,
 // dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP, DCE, CFG and MERGE;
 // value numbering with memory's maps to its BUSTER_IR_OPTIMIZE_MEMORY. #866's solver and the inlining keep their own
 // options (--tier1-gvn, --tier1-no-inline), which the option's list sets too. VECTORS (#2781, on by default) is the
@@ -531,7 +533,10 @@ struct CheckEmitGrowth
 // Value numbering with memory (#2718, ir_optimize_memory.c), off by default; past the driver's own bits
 // (c_checker_driver.c's BUSTER_CHECK_DRIVER_PASS_GVN and INLINE).
 #define BUSTER_CHECK_TIER1_PASS_MEMORY 2048u
-#define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS)
+// Loop store motion (#3309, ir_store_motion.c): a loop's globals read from registers, before promotion; on by default.
+#define BUSTER_CHECK_TIER1_PASS_STORE_MOTION 4096u
+#define BUSTER_CHECK_TIER1_PASSES_DEFAULT \
+    (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | BUSTER_CHECK_TIER1_PASS_STORE_MOTION)
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
      BUSTER_CHECK_TIER1_PASS_MEMORY)
@@ -541,6 +546,10 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_VECTORIZE_COUNTS 15
 // The unroller's outcomes, IrUnrollRefusal's (the unrolled loops', then each refusal's), which --tier1-report prints.
 #define BUSTER_CHECK_TIER1_UNROLL_OUTCOMES 15
+// Loop store motion's counts (#3309, --tier1-report), IrStoreMotionResult's: the loops by IrStoreMotionOutcome, their
+// stored keys by IrStoreMotionKeyRefusal, then the loads that read a slot, the stores a slot takes too and the
+// instructions added.
+#define BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS 17
 
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane
@@ -551,9 +560,14 @@ struct CheckTier1Lane
     uint8_t* allowed;
     // The vector operations the target selects, for the loop vectorizer (ir_vectorize_target.c), in `forms` with `allowed`.
     struct IrVectorizeTarget* vectorize;
-    // The opt-in C vectorizer's source qualifier guard (#2805), indexed by body, including inline callees.
+    // The opt-in C vectorizer's source qualifier guard (#2805), indexed by body, including inline callees. Loop store
+    // motion's too (#3309): a body with a volatile expression keeps every access.
     const uint8_t* vectorize_volatile;
     uint32_t emitting_body;
+    // Loop store motion's symbols (#3309, IrStoreMotionOptions.symbol_bytes): by SymbolId, the bytes of the unit's own
+    // distinct objects (check_program_store_motion_symbols), null where the pass is off.
+    const uint32_t* symbol_bytes;
+    uint32_t symbol_bytes_count;
     X86Target target;
     bool reserved;
     // Which optional steps are among the reserved ones: bit k for step BUSTER_CHECK_TIER1_STEPS_ALWAYS + k.
@@ -680,6 +694,8 @@ struct CheckTier1Counts
     uint32_t unroll_added;
     // The loop vectorizer's (BUSTER_CHECK_TIER1_VECTORIZE_COUNTS).
     uint32_t vectorize[BUSTER_CHECK_TIER1_VECTORIZE_COUNTS];
+    // Loop store motion's (BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS).
+    uint32_t store_motion[BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS];
 };
 
 #define BUSTER_CHECK_TIER1_OPERATIONS 256
@@ -731,6 +747,7 @@ struct CheckTier1Report
     uint64_t unroll_reductions;
     uint64_t unroll_added;
     uint64_t vectorize[BUSTER_CHECK_TIER1_VECTORIZE_COUNTS];
+    uint64_t store_motion[BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS];
     // The functions the inlining left without code (#2541 step 2, CheckProgramCode.dead_functions).
     uint64_t dead_functions;
 };
@@ -1257,6 +1274,8 @@ struct CheckEmitRun
     CheckTier1Outcome* tier1_outcomes;
     CheckTier1Counts* tier1_counts;
     const uint8_t* vectorize_volatile;
+    // Loop store motion's symbols (#3309, check_program_store_motion_symbols), `access_count` of them, or null.
+    const uint32_t* symbol_bytes;
     uint64_t* costs;
     uint64_t* boundaries;
     uint32_t* orders[BUSTER_CHECK_EMIT_MAX_LANES];
@@ -1947,6 +1966,79 @@ static uint8_t* check_program_vectorize_volatile(const CheckProgram* program, Ar
     return bodies;
 }
 
+// Loop store motion's symbols (#3309, IrStoreMotionOptions.symbol_bytes): by SymbolId, the bytes of each object the unit
+// knows for a distinct one, and 0 for every other symbol; `count` entries, the access column's, in `arena`. A distinct
+// object is one whose bytes no other symbol names and no other module's definition replaces, so that a store through
+// another object's address can't write it and a load of its bytes can't fault:
+// - a named object (not a literal, a function or a label) that the unit defines or tentatively defines
+//   (check_program_object_access's `defined`) and reaches directly (`access`): not a thread-local, and not one another
+//   module may preempt in position-independent code;
+// - of a complete type that isn't volatile-qualified, whose size is its bytes;
+// - none of whose declarations has an attribute but those that leave its symbol and its storage's identity alone
+//   (aligned, alignas, unused, used, deprecated, nonstring, visibility, nocommon): weak, selectany, alias, weakref,
+//   section, common, an asm label and whatever isn't listed keep the object out.
+// And the unit names no symbol twice: it has no alias, ifunc or weakref, no `#pragma weak` or redefine_extname, no asm
+// statement (a template may define or `.set` a symbol), no section pragma, no -fcommon, and no object's declaration
+// with an asm label (`extern long y asm("x")` names `x`'s bytes); a unit with any of them lists nothing. The rule is
+// narrower than clang's, which takes any two global variables for distinct objects, declarations of another unit's
+// too: two of those may be one object's names (musl's weak_alias), which only their definitions' unit can see.
+// The attributed declarations are found 16 tokens at a time, as check_tier1_inline_marks finds them; with --tier1 every
+// body is read before the emission, so the columns are complete. Returns NULL without room; `*listed` is how many
+// symbols it lists.
+static uint32_t* check_program_store_motion_symbols(const CheckProgram* program, const uint8_t* access, const uint8_t* defined, uint32_t count, Arena* arena, uint32_t* listed)
+{
+    const CheckInput* input = program->input;
+    const TypeTable* types = program->types;
+    const uint32_t tokens = input->token_count;
+    uint32_t* bytes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
+    uint8_t* attributed = bytes != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)tokens + 1) : NULL;
+    const bool valid = bytes != NULL && attributed != NULL;
+    bool plain = valid && program->alias_count == 0 && program->weak_late_count == 0 && (input->symbol_pragmas == NULL || input->symbol_pragmas->count == 0) &&
+                 input->asm_count == 0 && input->sections == NULL && !input->common_tentatives;
+    *listed = 0;
+    if (valid)
+    {
+        memset(bytes, 0, (uint64_t)count * sizeof(uint32_t));
+        memset(attributed, 0, (uint64_t)tokens + 1);
+    }
+    const CheckSparseWide attributes = input->attributes;
+    for (uint32_t first = plain ? check_input_attributed_next(attributes, 0, tokens) : tokens; plain && first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
+    {
+        for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            const bool declares = input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_OBJECT;
+            const CheckInputAttributes* records = declares ? check_input_attributes_at(input, token) : 0;
+            const uint32_t object = input->objects[token];
+            const bool variable = !check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER);
+            for (uint32_t i = 0; records != 0 && i < records->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = &records->records[i];
+                const CheckInputAttributeKind kind = attribute->kind;
+                const bool harmless = kind == CHECK_ATTRIBUTE_ALIGNED || kind == CHECK_ATTRIBUTE_ALIGNAS || kind == CHECK_ATTRIBUTE_UNUSED || kind == CHECK_ATTRIBUTE_USED ||
+                                      kind == CHECK_ATTRIBUTE_DEPRECATED || kind == CHECK_ATTRIBUTE_NONSTRING || kind == CHECK_ATTRIBUTE_VISIBILITY || kind == CHECK_ATTRIBUTE_NOCOMMON;
+                attributed[object <= tokens ? object : 0] |= attribute->ignored || harmless ? 0 : 1;
+                plain = plain && (attribute->ignored || kind != CHECK_ATTRIBUTE_ASM_LABEL || !variable);
+            }
+        }
+    }
+    for (uint32_t s = 0; plain && s < program->symbol_count && s + 1 < count; s += 1)
+    {
+        const uint32_t object = program->symbol_objects[s];
+        const uint32_t declaration = program->object_declarations[object];
+        const bool named = declaration != BUSTER_CHECK_NONE && declaration < tokens && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) &&
+                           input->declaration_kinds[declaration] == C_BINDING_OBJECT;
+        const bool own = named && object <= tokens && defined[object] != 0 && attributed[object] == 0 && access[s + 1] == BUSTER_TIER0_ACCESS_DIRECT &&
+                         !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) && program->object_symbols[object] == s + 1;
+        const TypeId type = own ? input->declared_types[declaration] : 0;
+        const bool sized = own && type != 0 && type_is_complete(types, type) && (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) == 0;
+        const uint64_t size = sized ? type_size(types, type) : 0;
+        bytes[s + 1] = size < UINT32_MAX ? (uint32_t)size : UINT32_MAX;
+        *listed += size != 0;
+    }
+    return valid ? bytes : NULL;
+}
+
 // Body `b`'s code by Tier 1's pipeline (--tier1, check_tier1_compile) into run->codes[b], on its lane's arenas for it,
 // the code in its lane's scratch as Tier 0's is, with an explicit outcome and disposition. A naked
 // function's code is its templates'. Out of line, so that the plain emission carries none of it.
@@ -1964,6 +2056,8 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     lane->tier1->schedule = run->lanes->tier1_schedule;
     lane->tier1->passes = run->lanes->tier1_passes;
     lane->tier1->vectorize_volatile = run->vectorize_volatile;
+    lane->tier1->symbol_bytes = run->symbol_bytes;
+    lane->tier1->symbol_bytes_count = run->symbol_bytes != NULL ? run->access_count : 0;
     lane->tier1->emitting_body = b;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
@@ -4107,7 +4201,16 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
     const bool vectorize = tier1 && (lanes->tier1_passes & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0;
-    run.vectorize_volatile = vectorize ? check_program_vectorize_volatile(program, scratch) : NULL;
+    // Loop store motion (#3309): the unit's distinct objects, and the bodies with a volatile expression, which keep
+    // every access (the typed stream's indirect accesses have no flag for it, #2805). A unit that lists no symbol
+    // runs none of the pass.
+    uint32_t motion_listed = 0;
+    const bool motion = tier1 && ((BUSTER_CHECK_TIER1_PASSES_DEFAULT ^ lanes->tier1_passes) & BUSTER_CHECK_TIER1_PASS_STORE_MOTION) != 0;
+    const uint32_t* motion_symbols = motion ? check_program_store_motion_symbols(program, access, defined, access_count, scratch, &motion_listed) : NULL;
+    valid = valid && (!motion || motion_symbols != NULL);
+    run.symbol_bytes = motion_listed != 0 ? motion_symbols : NULL;
+    const bool guarded = vectorize || run.symbol_bytes != NULL;
+    run.vectorize_volatile = guarded ? check_program_vectorize_volatile(program, scratch) : NULL;
     // The windows (#2536), where the bodies are compiled alone: the plain emission's, since --tier1's inlining and
     // --helper-report read the bodies' streams after every body's code.
     run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting && !lanes->assembly ? lanes->window_tokens : 0;
@@ -4154,7 +4257,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         result->status = check_tier1_ready ? result->status : CHECK_PROGRAM_BACKEND;
     }
     valid = valid && (count == 0 || (run.codes != 0 && run.bodies != 0)) && (frames == 0 || run.frames != 0) && run.costs != 0 &&
-            (!tier1 || (run.tier1_outcomes != 0 && run.tier1_counts != 0 && check_tier1_ready)) && (!vectorize || run.vectorize_volatile != NULL);
+            (!tier1 || (run.tier1_outcomes != 0 && run.tier1_counts != 0 && check_tier1_ready)) && (!guarded || run.vectorize_volatile != NULL);
     uint64_t total = 0;
     uint64_t largest = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)
@@ -6156,6 +6259,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_VECTORIZE_COUNTS; k += 1)
         {
             lanes->tier1_report.vectorize[k] += compiled ? counts->vectorize[k] : 0;
+        }
+        for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS; k += 1)
+        {
+            lanes->tier1_report.store_motion[k] += compiled ? counts->store_motion[k] : 0;
         }
     }
     if (!valid)
