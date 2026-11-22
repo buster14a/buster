@@ -2,9 +2,10 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original assembly -> foreign resolution -> Link conversion -> string merging -> native executable. The programs
-// inspect the relocated bytes, interior aliases and requested alignment. Exact/vector producers and writers at
-// 1/2/3/8 lanes must emit identical images. Section-PC and named-PC32/CALL references exercise unchanged unmerged
-// fallback; named data-PC64 stays within one entry. GNU ld and lld execute the original programs with --cross-check.
+// inspect the relocated bytes, interior aliases, a shared one-byte suffix and requested alignment. Exact/vector
+// producers and writers at 1/2/3/8 lanes must emit identical images. Section-PC and named-PC32/CALL references
+// exercise unchanged unmerged fallback; named data-PC64 stays within one entry. GNU ld and lld execute the original
+// programs with --cross-check.
 
 static const char foreign_strings_output_entry[] =
     ".text\n.globl _start\n.type _start,@function\n_start:\n"
@@ -212,9 +213,33 @@ static void foreign_strings_output_relocations(ForeignTestTally* tally, const Fo
                         "ELF retains absolute/data-PC64/GOT forms and the precise unsupported PC32/CALL case", expected->name);
 }
 
+// The second object's "x" (.rodata.str1.1 + 7) shares the end of the first's "prefix" (#3044); the programs read it
+// through second_section32.
+static bool foreign_strings_output_suffix(const Foreign* foreign, const ForeignLink* converted, const ForeignStringsMerge* merged, uint64_t prefix)
+{
+    static const char wanted[] = ".rodata.str1.1";
+    const ForeignObject* original = &foreign->objects[2];
+    const ImportObject* imported = &converted->objects[2];
+    bool shared = false;
+    for (uint32_t section = 1; section < imported->section_count; section += 1)
+    {
+        const Elf64_Shdr header = import_section_header(&original->elf, section);
+        const AtomId atom = imported->section_atoms[section];
+        String8 name = { 0 };
+        if (atom != 0 && merged->atom_inputs[atom] != 0 && import_section_name(&original->elf, &header, &name) && name.length == sizeof(wanted) - 1 &&
+            memcmp(name.pointer, wanted, name.length) == 0)
+        {
+            uint32_t mapped = 0;
+            shared = foreign_strings_offset(&merged->strings, merged->atom_inputs[atom] - 1, 7, &mapped) && mapped == prefix + 5;
+        }
+    }
+    return shared;
+}
+
 static void foreign_strings_output_structure(ForeignTestTally* tally, const Foreign* foreign, const ForeignLink* converted, const ForeignStringsMerge* merged)
 {
     const Link* link = &converted->link;
+    const SymbolId prefix = foreign_link_test_symbol(foreign, converted, "first_prefix");
     const SymbolId first = foreign_link_test_symbol(foreign, converted, "first_shared");
     const SymbolId first_repeat = foreign_link_test_symbol(foreign, converted, "first_shared_repeat");
     const SymbolId second = foreign_link_test_symbol(foreign, converted, "second_shared");
@@ -246,6 +271,8 @@ static void foreign_strings_output_structure(ForeignTestTally* tally, const Fore
     }
     valid = valid && empty >= 7;
     foreign_test_expect(tally, valid, "stable 1/2/4-byte duplicates, distinct groups, byte-interior aliases and stronger alignment", 0);
+    const bool suffix = prefix != 0 && link->symbols.atom[prefix] == link->symbols.atom[first] && foreign_strings_output_suffix(foreign, converted, merged, link->symbols.value[prefix]);
+    foreign_test_expect(tally, suffix, "the second object's one-byte \"x\" shares the end of the first's \"prefix\"", 0);
 }
 
 // Keep the second object's section map as after GC: either no string section survives, or just its single wide4 entry.

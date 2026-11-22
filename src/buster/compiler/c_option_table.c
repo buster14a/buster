@@ -566,6 +566,7 @@
     ENTRY(PRINT_SEARCH_DIRS, "-print-search-dirs") \
     ENTRY(PTHREAD, "-pthread") \
     ENTRY(RPATH, "-rpath") \
+    ENTRY(SHARED, "-shared") \
     ENTRY(STATIC, "-static") \
     ENTRY(STATIC_PIE, "-static-pie") \
     ENTRY(STD_EQ, "-std=") \

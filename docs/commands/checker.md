@@ -81,7 +81,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
-  [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
+  [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --unused-comparison-only |
   --record-extensions-only | --auto-qualifiers-only |
@@ -134,7 +134,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   limit, and the children's wall and CPU time, each in total and per run. CI
   runs the driver's parts in these modes, with `--differential` in the native
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
-  `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
+  `cpu_dispatch` section alone, #1447; `--pic-only` runs `-fPIC`'s, `-fpic`'s
+  and `-shared`'s section alone (#2101, `c_check_pic_driver_test.c`: its shared
+  libraries against clang's, run by the same programs); `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838 (inline assembly in `target_clones` copies at both tiers among it, #2247); `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
   the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
@@ -203,7 +205,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   catalogue from `c_check_unused_result_driver_test.c`, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
-  "Semantic error recovery", #1447. The initializer suite also preserves the separately frozen
+  "Semantic error recovery", #1447. The weak-alias catalogues also compare GNU17/GNU23,
+  warning policies, error limits and one/three requested deferred lanes, with separate
+  syntax and object oracles for emission-only undefined-target errors (#2449).
+  They retain macro columns and notes while normalizing scratch-space line numbers,
+  preserve rejected outputs, and require ELF output for accepted controls. The full
+  weak-alias section additionally checks common-target refusal and defined alias
+  symbols under `-fcommon`/`-fno-common`, plus linked programs on both readers and
+  requested deferred lanes. The initializer suite also preserves the separately frozen
   compound-literal dependency boundary, which does not claim Clang parity. Its runtime `suppress_label_order.c`
   cases compare parser errors before label-subject errors under both language
   modes, warning policies and a one-error limit, with macros, split lists,

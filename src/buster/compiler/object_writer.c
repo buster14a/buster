@@ -186,6 +186,10 @@ struct ObjectOptions
     // For an assembler's objects (#1115): an undefined symbol keeps its type and size, as GNU as writes `.type x,
     // @function` and `.size x, 4` of one; otherwise only TLS's, as compilers write an undefined symbol of every other.
     bool undefined_types;
+    // Position-independent code's (#2101): an unwind table's PC32 to a global or weak symbol the object defines (an FDE's
+    // initial location, its function) refers to the symbol's section symbol, as an assembler writes it from a local label,
+    // so that a link of a shared library, where another module may preempt the symbol, takes it.
+    bool local_unwind;
     // The DWARF of each unit's functions, indexed by unit (debug_count of them, the units' count), or null for none:
     // each object takes its unit's entry (in object_write_units too), and an entry without sections or functions gives
     // it none. A unit's entry describes its functions alone: object_build refuses another unit's.
@@ -853,6 +857,14 @@ static bool object_uses_section_symbol(uint8_t kind, uint32_t code, int64_t adde
     return !kept && !pool;
 }
 
+// Whether a fixup of `kind`, in an atom of an unwind table with ObjectOptions.local_unwind (`unwind`), refers to its
+// target (whose code is `code`) through the target's section symbol: a PC32 to a global or weak symbol the object
+// defines (#2101).
+static bool object_unwind_section_symbol(bool unwind, uint8_t kind, uint32_t code)
+{
+    return unwind && kind == BUSTER_LINK_FIXUP_PC32 && (code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_GLOBAL;
+}
+
 // An empty name is no descriptor; validate every nonempty descriptor before comparing or hashing its name: its class's
 // type, or for one of bytes PROGBITS or a note's (an assembler's `.note.*`, #1848).
 static bool object_section_valid(const ObjectAtomSection* section, uint8_t class)
@@ -1200,6 +1212,7 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
             const AtomId atom = unit_atoms[i];
             const FixupId first = fixup_begin[atom];
             const FixupId end = first + fixup_count[atom];
+            const bool unwind = builder->options.local_unwind && atoms->class[atom] == BUSTER_LINK_CLASS_EH_FRAME;
             for (FixupId fixup = first; result && fixup < end; fixup += 1)
             {
                 // The first time the object meets a target, what it is: a symbol the unit defines (a local one, which
@@ -1231,13 +1244,16 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                     }
                 }
                 // A relocation that refers to a local target's section symbol needs that symbol, and the target's offset
-                // in the addend, which has to stay within 64 bits.
+                // in the addend, which has to stay within 64 bits; so does an unwind table's of a global one under
+                // ObjectOptions.local_unwind.
                 const uint32_t code = (uint32_t)entry;
-                if ((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL)
+                const bool local = (code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL;
+                if (local || unwind)
                 {
                     const uint8_t kind = kinds[fixup];
                     const int64_t addend = (kind & BUSTER_LINK_FIXUP_WIDE) != 0 ? wide_addends[(uint32_t)addends[fixup]] : addends[fixup];
-                    if (object_uses_section_symbol(kind & BUSTER_LINK_FIXUP_KIND, code, addend))
+                    if ((local && object_uses_section_symbol(kind & BUSTER_LINK_FIXUP_KIND, code, addend)) ||
+                        object_unwind_section_symbol(unwind, kind & BUSTER_LINK_FIXUP_KIND, code))
                     {
                         const AtomId target_atom = symbols->atom[target];
                         const uint64_t place = units->atom_offset[target_atom] + symbols->value[target];
@@ -1245,7 +1261,7 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                         result = place <= INT64_MAX && !__builtin_add_overflow(addend, (int64_t)place, &adjusted);
                         sections[units->atom_section[target_atom]].symbol = 1;
                     }
-                    else if (builder->local_places != 0)
+                    else if (local && builder->local_places != 0)
                     {
                         builder->local_places[code & BUSTER_OBJECT_SYMBOL_PLACE] = 1;
                     }
@@ -1926,6 +1942,7 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
                 const uint64_t base = atom_offset[atom];
                 const FixupId first = fixup_begin[atom];
                 const FixupId end = first + fixup_count[atom];
+                const bool unwind = builder->options.local_unwind && link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME;
                 for (FixupId fixup = first; fixup < end; fixup += 1)
                 {
                     // What object_count_symbols found the target to be: its index is its kind's first plus its place,
@@ -1940,7 +1957,8 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
                     {
                         index = builder->local_base + builder->local_places[code & BUSTER_OBJECT_SYMBOL_PLACE];
                     }
-                    if ((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL && object_uses_section_symbol(kind, code, addend))
+                    if (((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL && object_uses_section_symbol(kind, code, addend)) ||
+                        object_unwind_section_symbol(unwind, kind, code))
                     {
                         const AtomId target_atom = symbol_atoms[target];
                         index = sections[atom_section[target_atom]].symbol;
