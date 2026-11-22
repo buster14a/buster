@@ -9595,6 +9595,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_assert_const_driver_test.c"
 #include "c_check_assert_bool_driver_test.c"
 #include "c_check_constant_logical_driver_test.c"
+#include "c_check_query_bool_driver_test.c"
 #include "c_check_ident_driver_test.c"
 #include "c_check_c23_attributes_driver_test.c"
 #include "c_check_empty_unit_driver_test.c"
@@ -9846,6 +9847,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool operand_diagnostics_only = false;
     // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
     bool assert_bool_only = false;
+    // --query-bool-only: source conversions retained through query/type operands and selections (#2899).
+    bool query_bool_only = false;
     // --assert-diagnostics-only: assertion requirements, member recovery and boolean conversions (#2409).
     bool assert_diagnostics_only = false;
     // --unused-comparison-only: discarded comparisons' assignment-note eligibility (#2906).
@@ -9916,6 +9919,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--assert-bool-only") == 0)
         {
             assert_bool_only = true;
+        }
+        else if (strcmp(argv[i], "--query-bool-only") == 0)
+        {
+            query_bool_only = true;
         }
         else if (strcmp(argv[i], "--assert-diagnostics-only") == 0)
         {
@@ -10003,7 +10010,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
-                             (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only +
+                             (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)constant_logical_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
@@ -10560,6 +10567,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_assert_bool(&test, clang, executable, directory);
     }
+    if (temporary && query_bool_only)
+    {
+        check_test_driver_query_bool(&test, clang, executable, directory);
+    }
     if (temporary && unused_comparison_only)
     {
         check_test_driver_unused_comparisons(&test, clang, executable, directory);
@@ -10806,6 +10817,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_assert_const,
             check_test_driver_assert_bool,
             check_test_driver_constant_logical,
+            check_test_driver_query_bool,
             check_test_driver_ident,
             check_test_driver_c23_attributes,
             check_test_driver_empty_unit,
