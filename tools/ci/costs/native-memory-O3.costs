@@ -31,6 +31,7 @@
 #: cpu 3 0.81 INTEL(R) XEON(R) PLATINUM 8573C
 #: cpu 1 0.65 Intel(R) Xeon(R) 6973P-C
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
+#: unmeasured Test the early driver feedback corpus
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
 #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
 #: unmeasured Test the caret display against clang
@@ -196,6 +197,7 @@
 #: peak 84 Test Tier 1 integer truth round trips against native and instruction-shape oracles
 #: peak 142 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 #: peak 88 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+35.6 Test the early driver feedback corpus
 35.6 Test deterministic work and growth contracts [1 CPU]
 9.2 Check unity fixture ownership without rebuilding
 200.1 Test the foreign inputs [8 CPUs]

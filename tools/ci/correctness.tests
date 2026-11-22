@@ -3,6 +3,10 @@
 # BUSTER_COMPILER, its own executable's path, so that the commands test the configuration that runs them; run one by
 # hand with BUSTER_COMPILER set to a build's executable, such as build/compiler.
 
+== Test the early driver feedback corpus
+# #1427: small fixed driver cases (tests/ci/feedback/): preprocessing, parsing, checking, object generation, linking and
+# execution with clang, and an expected diagnostic. Every plain drawn item also runs it first, as its early result.
+bash tools/ci/feedback.sh smoke
 == Test deterministic work and growth contracts [1 CPU]
 # #2041: bounded dependency admission and sparse SSA storage at N, 2N and 4N, with semantic checks, deterministic
 # work/byte records, real excessive-work mutations and a check that production builds cannot enable the counters.

@@ -338,6 +338,7 @@ static AccountingPhase accounting_phase(const char* name)
         "Remove the comparison build worktree",
     };
     static const char* const correctness[] = {
+        "Early hosted feedback",
         "Test ",
         "Check ",
         "Verify ",
