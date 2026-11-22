@@ -7757,11 +7757,13 @@ static bool check_lower_wrapper_query(const CheckLowerWriter* writer, uint32_t n
     return found;
 }
 
+static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart* write);
+
 // Call `node` of wrapper `index` (#2983, check_lower_wrapper_of) expanded in place, as clang's AlwaysInliner expands it:
 // its arguments, each converted to its parameter's type, into temporaries in their order; then, with the parameters'
-// objects at those temporaries (the WRAPPER tasks' frame), the wrapper's expression, converted to the call's type, which
-// a void wrapper's is. Each argument's object sizes are taken now, for the expression's queries of its parameter. The
-// tasks run in reverse.
+// objects at those temporaries (the WRAPPER tasks' frame), its locals' values into theirs, and the wrapper's expression,
+// converted to the call's type, which a void wrapper's is; or its guards' conditionals and its last return's expression.
+// Each argument's object sizes are taken now, for the queries of its parameter. The tasks run in reverse.
 static void check_lower_wrapper_call(CheckLowerWriter* writer, uint32_t node, uint32_t index)
 {
     const CheckProgram* program = writer->program;
@@ -7783,8 +7785,42 @@ static void check_lower_wrapper_call(CheckLowerWriter* writer, uint32_t node, ui
             frame->sizes[p][mode] = check_lower_wrapper_size(writer, graph->argument_nodes[first + p], mode, wrapper->sizes[p]);
         }
     }
+    for (uint32_t l = 0; l < wrapper->local_count; l += 1)
+    {
+        const CheckInitPart* part = program->initializers->plans[wrapper->plans[l]].parts;
+        frame->temporaries[wrapper->parameter_count + l] = check_lower_temporary(writer, check_lower_class(writer, part->conversion.type));
+    }
+    const TypeId type = check_stream_type(stream, node);
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth, .address = true });
-    check_lower_expression(writer, wrapper->node, false, check_stream_type(stream, node));
+    if (wrapper->guard_count == 0)
+    {
+        check_lower_expression(writer, wrapper->node, false, type);
+    }
+    else
+    {
+        // `if (C) return E;`s, then `return E;`: as many conditionals' arms, each guard's E's value joined at `end`
+        // (check_lower_logical's), C's branch past it to the next one's.
+        const uint8_t class = check_lower_class(writer, type);
+        const uint32_t end = check_lower_label(writer);
+        check_lower_mark(writer, end);
+        check_lower_expression(writer, wrapper->node, false, type);
+        for (uint32_t g = wrapper->guard_count; g-- > 0;)
+        {
+            const uint32_t next = check_lower_label(writer);
+            check_lower_mark(writer, next);
+            check_lower_instruction(writer, BUSTER_TYPED_JUMP_VALUE, class, end);
+            check_lower_expression(writer, wrapper->guards[g][1], false, type);
+            check_lower_instruction(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, next);
+            check_lower_expression(writer, wrapper->guards[g][0], false, 0);
+        }
+    }
+    // Its locals' values, in their order, each in its temporary.
+    for (uint32_t l = wrapper->local_count; l-- > 0;)
+    {
+        const CheckInitPart* part = program->initializers->plans[wrapper->plans[l]].parts;
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, part->conversion.type), frame->temporaries[wrapper->parameter_count + l]);
+        check_lower_part_value(writer, part);
+    }
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth });
     for (uint32_t p = wrapper->parameter_count; p-- > 0;)
     {
@@ -7807,7 +7843,7 @@ static __attribute__((noinline)) void check_lower_wrapper_task(CheckLowerWriter*
     else
     {
         const CheckProgramWrapper* wrapper = program->wrappers + frame->wrapper;
-        for (uint32_t p = 0; p < wrapper->parameter_count; p += 1)
+        for (uint32_t p = 0; p < wrapper->parameter_count + wrapper->local_count; p += 1)
         {
             const uint32_t object = program->wrapper_parameters[wrapper->parameter_first + p];
             if (object != 0 && object < program->object_count)
