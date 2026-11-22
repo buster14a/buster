@@ -24,85 +24,83 @@ the plain rows in the nightly mode (#2057), and the full matrix before it.
 
 ## Early hosted feedback and reproductions (#1427)
 
-The portable row's existing shared build runs **Early hosted feedback (not
-qualification)** before publishing its compiler. It adds no compiler build.
-Its four inventory headings cover the fixed driver corpus
-(`tests/ci/feedback/`), the C lexer, link representation and deterministic
-diagnostics. After that first result, the build also proves that the corpus
-detects an injected regression in each promised area. The driver corpus
-preprocesses, parses, checks, emits matching
-selected/scalar objects, links two units with Clang, executes them and checks
-an undeclared-identifier diagnostic. It uses no random seed. A failure prevents
-publication and downstream shards. All existing PR shards, vector items,
-merge-group cases and sanitizer configurations remain full qualification.
-Drafts follow the same path. The existing PR-only supersession groups and the
-independent merge-group concurrency are unchanged.
+Every hosted job that runs the compiler is a drawn item on an AVX-512 runner
+(#2924). Each plain item of a pull request's or a merge-queue candidate's run
+gives its first result at the start of its own run: the step **Early hosted
+feedback (not qualification)**, just before "Run correctness tests within the
+hosted CPU budget". It adds no build: it runs the item's compiler, built or
+installed. It runs the fixed driver corpus (`tests/ci/feedback/`, no random
+seed), which:
 
-The `changes` job also reports an **advisory** affected-test plan. Its dependency
-map is `feedback_rules` in `tools/ci/feedback.c`; heading ownership is
-`feedback_heading`. Frontend edits select all downstream consumers; checker
-edits include emission, execution and diagnostics. Headers, unknown paths,
-build/toolchain/CI/selector changes expand to all groups. An unclassified
-heading always runs. Documentation has explicit exemptions, with CI/toolchain
-policy exceptions. Multiple paths union coverage; an empty change list expands
-all groups. An unreadable or malformed plan fails before publishing executable
-commands. Every heading's run/skip decision has a reason. This plan never
-reduces the required run.
+- preprocesses, parses and checks a unit;
+- emits two units' objects and links them with clang;
+- runs the program;
+- checks an undeclared-identifier diagnostic.
 
-Authors can request the **Hosted reproduction (not qualification)** workflow
-on their branch (Actions → Run workflow), with `smoke`, `affected`, a named
-group (`frontend`, `checker`, `object`, `link`, `diagnostics`) or `full`, and
-one of `none`, `address` (ASan/UBSan), `thread` or `memory`. `affected` accepts
-newline-separated changed paths; empty expands to full. For example:
+A failure stops the item before its suite, as the suite's own first failure
+would (`--fail-fast`). The step qualifies nothing: the suite runs the corpus's
+heading, `Test the early driver feedback corpus`, in its deal, and every row,
+item, sanitizer configuration and merge-queue case is unchanged. Sanitizer items
+skip the step, and so do dispatched and nightly runs, whose suites report every
+command. On pull requests and candidates, plain shard 1 also checks that the
+corpus fails on a compiler broken in each area it promises
+(`tests/ci/feedback.sh --compiler`). #2034's accounting counts the early step as
+first useful feedback (`accounting_phase`).
+
+`tools/ci/feedback.sh` records each item's build, early step and suite. Each
+record holds:
+
+- the log and the exact inventory and runner arguments (`command.sh`,
+  `selected.tests`);
+- the revision, configuration and flags;
+- the CPU (`cpu.txt`) and the draw's probe answers (`probe.txt`);
+- the tool pins and the apt manifest;
+- retained failing cases;
+- `result.tsv`, which tells a product failure from an infrastructure failure
+  and an incomplete run (a cancellation or a timeout, which never passes).
+
+The item uploads the records as `feedback-ROW-SANITIZER-O3-shardK-ATTEMPT`.
+To replay one, check out its `revision` clean and run `bash
+/path/to/artifact/reproduce.sh` on Ubuntu 26.04:
+
+- The CPU must pass the vector probe (`tools/ci/vector-probe.c`). A `native`
+  record needs the recorded CPU model too.
+- It uses the original run's prepared offline inputs through `gh` while
+  they're retained. Otherwise it acquires them again and refuses an apt closure
+  that differs from the record.
+- It then runs the item's setup and build steps in order, and the recorded
+  command.
+
+A full rerun on GitHub is `9700x.yml`'s `full` dispatch.
+
+The `changes` job adds an **advisory** affected-test plan to its summary
+(`continue-on-error`). Its dependency map is `feedback_rules` in
+`tools/ci/feedback.c`, and heading ownership is `feedback_heading`:
+
+- Frontend edits select every downstream group; checker edits include
+  emission, execution and diagnostics.
+- Headers, unknown paths and build, toolchain, CI and selector changes expand to
+  every group, as does an empty change list.
+- Documentation is exempt, except the CI and toolchain policy guides.
+- An unclassified heading always runs, every decision has its reason, and a
+  malformed plan publishes no commands.
+
+The plan selects nothing in CI. Locally, `feedback.sh run DIR PROFILE` runs a
+plan through `parallel` with the same records. PROFILE is one of:
+
+- `smoke`: the corpus alone, as the early step runs it;
+- `affected`, the groups of the paths in the file `BUSTER_FEEDBACK_FILES`
+  names;
+- `frontend`, `checker`, `object`, `link` or `diagnostics`, one group;
+- `full`: the whole inventory, as each item's suite runs it.
+
+The `affected` and group profiles always run the corpus and the lexer,
+link-representation and diagnostic-ordering regressions too.
 
 ```sh
-gh workflow run reproduce.yml --ref YOUR_BRANCH -f profile=checker -f sanitizer=address
-gh workflow run reproduce.yml --ref YOUR_BRANCH -f profile=full -f sanitizer=memory
-```
-
-These author-requested runs reuse the exact row workflow, pinned tools,
-fixtures, optimization and fatal detector proofs/audit. Partial profiles run
-on one hosted shard with the full row's measured peak-memory admission; full
-uses four. They have independent run-id concurrency,
-no hardware work and no qualification context. The ordinary caller explicitly
-passes `full`; a partial profile on a PR/merge-group event fails. TSan/MSan's
-separate large `main.c` compile and SQLite's full Tcl suite run only for full
-profiles. Offering these profiles starts no sanitizer build on ordinary edits.
-
-`feedback-*` artifacts retain build/suite logs, the exact selected inventory
-and quoted runner arguments, revision, configuration, actual CPU, host flags
-and selected scalar/vector path, tool pins, fixed/generated case and seed
-output, retained smoke failures and shared-product provenance. Existing
-specialized failure artifacts remain. `result.tsv` distinguishes product
-failure, infrastructure failure and incomplete execution; cancellations and
-all-skipped smoke runs never become passes. The parallel runner still reports
-the first failing heading immediately and stops PR/merge-group work as before.
-
-Download a feedback artifact, check out its `revision`, and run
-`bash /path/to/artifact/reproduce.sh` from that clean checkout on Ubuntu 26.04.
-It uses the revision's acquisition/setup scripts, rebuilds once and executes
-the recorded command without reconstructing a log. It verifies the selected
-host path; `native` failures additionally need the recorded CPU/ISA, named in
-`cpu.txt`. Image identity and the original apt manifest are retained. Pinned
-release and fixture inputs are immutable. Replay prefers the original run's
-prepared offline artifact through `gh`, while retained; otherwise it reacquires
-inputs and rejects any difference from the recorded apt closure. Replaying on a
-different image is an environment difference, not evidence that an original
-failure disappeared.
-
-`CI latency report` reports PR first-result p50/p95 from run creation
-(queue and setup included) to the first early-feedback pass or actionable
-failure. It also reports actual total runner-minutes, p50/p95 cost and sample
-counts, including setup, redraws, failed/cancelled allocated jobs and every
-attempt. Missing timestamps/incomplete results are omitted, never zero.
-Raw API data remains in its artifacts. These are observed costs, not billing
-rounding; a three-minute first-result target is not an achieved-latency claim.
-
-```sh
-bash tests/ci/feedback.sh
-# Also prove the real corpus detects regressions in each promised area:
-bash tests/ci/feedback.sh --compiler build/compiler
-bash tests/ci/timings.sh
+bash tests/ci/feedback.sh                                    # in the CI glue fixtures job
+bash tests/ci/feedback.sh --compiler build/compiler          # the corpus's mutants, plain shard 1's step
+BUSTER_COMPILER=build/compiler bash tools/ci/feedback.sh run build/feedback checker --jobs 4
 ```
 
 ## The merge queue
@@ -635,16 +633,14 @@ late.
 
 ## Setup failures re-run once
 
-A run of `9700x.yml` ("Tests and Zen 5 benchmarks") whose first attempt failed
-only because jobs
+A run of `9700x.yml` ("Tests and Zen 5 benchmarks", the only workflow that
+calls `hosted-correctness.yml`) whose first attempt failed only because jobs
 stopped in setup, before any test ran, has its failed jobs re-run once,
 automatically (#2276). `.github/workflows/rerun.yml` runs when the run
 completes (`workflow_run`). `tools/ci/rerun.sh` fetches the attempt's jobs and
 steps and its cancelled jobs' annotations, `tools/ci/rerun.c` decides, and the
 script asks for `rerun-failed-jobs`. The re-run runs tests that never ran,
-never ones that failed, so green keeps meaning the tests passed. The manual
-reproduction caller is watched too, to validate the shared allowlist, but its
-dispatch events do not qualify for automatic re-runs.
+never ones that failed, so green keeps meaning the tests passed.
 
 - **Which runs.** A failed first attempt (`run_attempt == 1`) of a push or a
   pull request from this repository, checked again just before the request.

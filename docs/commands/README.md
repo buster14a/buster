@@ -33,6 +33,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | agent memory in cloud sessions | `.claude/hooks/llm-memory.sh` | [llm-memory](llm-memory.md) |
 | hooks of sessions started beside the checkout | `.claude/hooks/parent-folder.sh` | [llm-memory](llm-memory.md#sessions-that-start-beside-the-checkout) |
 | `correctness.tests, costs / CI selection` | `tools/ci/correctness.tests`, `tools/ci/costs.c` | [ci](ci.md) |
+| `feedback / early hosted feedback and reproductions` | `tools/ci/feedback.c`, `tools/ci/feedback.sh` | [ci](ci.md#early-hosted-feedback-and-reproductions-1427) |
 | `rerun / setup failures re-run once` | `tools/ci/rerun.c`, `tools/ci/rerun.sh` | [ci](ci.md#setup-failures-re-run-once) |
 | `measure-compile, --time-stages` | `c_check_clock.c` | [compile-time](compile-time.md) |
 | `allcore counted, sampled, table, compare` (the all-core gauge) | `tools/allcore/allcore.c` | [all-core](all-core.md) |
@@ -111,6 +112,7 @@ The original section titles are retained in their owning guides.
 
 - [C driver build-system integration](../cc-driver.md).
 - [The assembly sink (#1362)](driver.md#the-assembly-sink-1362).
+- [Early hosted feedback and reproductions (#1427)](ci.md#early-hosted-feedback-and-reproductions-1427).
 - [The merge queue](ci.md#the-merge-queue).
 - [Sharing the 9700X](ci.md#sharing-the-9700x).
 - [Shard costs](ci.md#shard-costs).
