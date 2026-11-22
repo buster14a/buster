@@ -12107,7 +12107,9 @@ is also the "previous definition" a conflicting redeclaration's note names
 candidates (`check_driver_weak_alias_candidates`). References before a later
 TARGET declaration keep their earlier lookup. Local parameters and block/loop
 declarations shadow the outer lookup set normally. Later declarations diagnose
-conflicting kind, type, definition or linkage against the clone and retain
+conflicting kind, type, definition or linkage against the clone, a declaration
+whose source writes an `alias` or `ifunc` attribute being a definition, as
+clang's clone is one (its "redefinition of 'A'", #2934), and retain
 later independent errors, including repeated invalid redeclarations. A
 `static` object redeclaring an object clone gives its error before the clone's
 "weak declaration cannot have internal linkage" at the pragma, as clang checks

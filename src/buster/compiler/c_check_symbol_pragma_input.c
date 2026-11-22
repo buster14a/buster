@@ -868,7 +868,19 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                 const uint32_t clone_linkage = kind == C_BINDING_FUNCTION ? 2u : check_input_linkage(input->declaration_bits, selected);
                 const bool prior_set = alias.previous != BUSTER_CHECK_NONE;
                 const bool object_set = prior_set && (kind == C_BINDING_OBJECT || declared_kind == C_BINDING_OBJECT || alias_kind == C_BINDING_OBJECT);
-                const bool definition = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+                // A declaration with an alias or ifunc attribute defines its entity, as clang's isDefined says, so a later
+                // one redefines the clone (#2934), whose implicit alias attribute makes it a definition too. (Only one its
+                // source writes: an earlier clone's weak alias, which check_input_symbol_attribute gives a declaration
+                // that carries it, is at the declaration's own name.)
+                const CheckInputAttributes* declared_attributes = check_input_attributes_at(input, token);
+                bool aliasing = false;
+                for (uint32_t a = 0; declared_attributes != NULL && a < declared_attributes->count; a += 1)
+                {
+                    const CheckInputAttribute* attribute = declared_attributes->records + a;
+                    aliasing |= !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_ALIAS || attribute->kind == CHECK_ATTRIBUTE_IFUNC) &&
+                                attribute->name_token != token;
+                }
+                const bool definition = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || aliasing;
                 CheckRedeclarationKind detail = declared_kind != kind || object_set ? CHECK_REDECLARATION_KIND :
                     compatible == TYPE_ANSWER_NO ? (kind == C_BINDING_FUNCTION ? CHECK_REDECLARATION_FUNCTION_TYPE :
                                                    check_input_redeclaration_extern(reader->parser, token) ? CHECK_REDECLARATION_OBJECT_TYPE_EXTERN : CHECK_REDECLARATION_OBJECT_TYPE) :
