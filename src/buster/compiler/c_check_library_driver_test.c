@@ -483,6 +483,50 @@ static void check_test_library_lowering(CheckTest* test, const char* clang, cons
     unlink(source);
 }
 
+// #3208: the ELF imports of eager and deferred calls when a pragma renames their library builtin.
+static void check_test_library_renames(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* name;
+        bool imported;
+    } symbols[] = {
+        { "renamed_copy", true },
+        { "renamed_abs", true },
+        { "renamed_move", true },
+        { "memcpy", false },
+        { "abs", false },
+        { "memmove", false },
+        { "labs", false },
+        { "renamed_labs", false },
+        { "fabs", false },
+        { "renamed_fabs", false },
+    };
+    const char* compilers[] = { clang, executable };
+    char object[512];
+    snprintf(object, sizeof(object), "%s/pragma-renamed-builtins.o", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(compilers); c += 1)
+    {
+        for (uint32_t with_asm = 0; with_asm < 2; with_asm += 1)
+        {
+            char* arguments[] = { (char*)compilers[c], "-O0", "-c", "tests/driver/pragma_renamed_builtins.c", "-o", object,
+                                  with_asm ? "-DWITH_ASM_LABEL" : NULL, NULL };
+            char* diagnostics = NULL;
+            const bool compiled = check_test_driver_spawn(arguments, &diagnostics) == 0;
+            check_test_expect(test, compiled, diagnostics != NULL && *diagnostics != 0 ? diagnostics : "pragma-renamed builtins fixture compiles");
+            for (uint32_t i = 0; compiled && i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+            {
+                char description[384];
+                snprintf(description, sizeof(description), "%s should %s %s %s an unrelated asm label", compilers[c],
+                         symbols[i].imported ? "import" : "omit", symbols[i].name, with_asm ? "with" : "without");
+                check_test_expect(test, check_test_library_undefined(object, symbols[i].name) == symbols[i].imported, description);
+            }
+            free(diagnostics);
+            unlink(object);
+        }
+    }
+}
+
 // Programs built by clang and by this executable, by both paths, that must print the same and exit alike: C89's calls
 // of library functions declared implicitly, with their rows' prototypes (sin's double, sprintf's variadic call);
 // strlcat and strlcpy's calls, which reach the library's functions; a plain declaration's strcmp of constants, which
@@ -932,6 +976,7 @@ static void check_test_driver_library(CheckTest* test, const char* clang, const 
 {
     check_test_library_implicit(test, clang, executable, directory);
     check_test_library_lowering(test, clang, executable, directory);
+    check_test_library_renames(test, clang, executable, directory);
     check_test_library_runs(test, clang, executable, directory);
     check_test_cpu_model_runs(test, clang, executable, directory);
     check_test_library_release(test, clang, executable, directory);
