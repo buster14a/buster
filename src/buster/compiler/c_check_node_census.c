@@ -5045,6 +5045,8 @@ struct NodeShadow
     uint64_t bodies_different;
     uint64_t bodies_reasons[16];
     uint64_t bodies_reason_tokens[16];
+    // Those left out for a control of another kind, by the first such control's kind (CheckControlKind).
+    uint64_t bodies_other_kinds[32];
     uint64_t bodies_listed;
     uint64_t alone_body_tokens;
     uint64_t alone_whole_both;
@@ -6034,8 +6036,10 @@ struct NodeBodies
     bool placed;
     bool room;
     bool calls_same;
-    // The body's own reason (NodeBodiesReason), its result's class and whether it has none.
+    // The body's own reason (NodeBodiesReason), the kind of its first control of another kind where that is the reason, its
+    // result's class and whether it has none.
     uint8_t reason;
+    uint8_t other_kind;
     uint8_t result_class;
     bool result_void;
 };
@@ -6135,6 +6139,7 @@ static void node_bodies_begin(NodeBodies* built, const NodeCensusScratch* s, con
                  kind != CHECK_CONTROL_BRANCH_FALSE && kind != CHECK_CONTROL_BRANCH_TRUE && kind != CHECK_CONTROL_JUMP)
         {
             reason = NODE_BODIES_CONTROL;
+            built->other_kind = (uint8_t)kind;
         }
     }
     built->reason = reason == NODE_BODIES_ATTEMPTED && body->count >= built->label_capacity ? NODE_BODIES_ROOM : reason;
@@ -6288,6 +6293,7 @@ static void node_bodies_end(NodeBodies* built, NodeShadow* shadow, NodeCensusScr
     const uint8_t final = attempted ? NODE_BODIES_ATTEMPTED : reason != NODE_BODIES_ATTEMPTED ? reason : !built->placed ? NODE_BODIES_STRAY : NODE_BODIES_ROOM;
     shadow->bodies_reasons[final] += 1;
     shadow->bodies_reason_tokens[final] += tokens;
+    shadow->bodies_other_kinds[final == NODE_BODIES_CONTROL && built->other_kind < BUSTER_ARRAY_LENGTH(shadow->bodies_other_kinds) ? built->other_kind : 0] += final == NODE_BODIES_CONTROL;
     if (attempted)
     {
         // The comparison: the counts, then each entry. A temporary's local is the function's locals less the body's
@@ -7538,6 +7544,21 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
             }
         }
         printf("\n");
+        if (shadow->bodies_reasons[NODE_BODIES_CONTROL] != 0)
+        {
+            // CheckControlKind's names, in its order.
+            static const char* const kinds[] = { "evaluate", "initialize", "vla", "asm", "return", "switch", "case", "end", "stack-save", "allocate", "stack-restore", "label",
+                                                 "jump-indirect", "cleanup", "result", "lifetime", "exit", "branch-false", "branch-true", "jump" };
+            printf("node-shadow: bodies left out for a control of another kind, by the first such control:");
+            for (uint32_t kind = 0; kind < BUSTER_ARRAY_LENGTH(kinds); kind += 1)
+            {
+                if (shadow->bodies_other_kinds[kind] != 0)
+                {
+                    printf(" %s=%" PRIu64, kinds[kind], shadow->bodies_other_kinds[kind]);
+                }
+            }
+            printf("\n");
+        }
     }
     printf("node-shadow: fusion evaluated=%" PRIu64 " unevaluated=%" PRIu64 " (under an unevaluated consumer %" PRIu64 ") inherited-context=%" PRIu64 " (not a value %" PRIu64
            ") calls=%" PRIu64 " (below a call %" PRIu64 ") segments-or-splits=%" PRIu64 " updates=%" PRIu64 " labeled-expressions=%" PRIu64

@@ -1734,9 +1734,10 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
 // - Attempted: an initialization, a branch and a return; a void body, whose implicit return ends it, and one that
 //   returns early; calls in two statements, whose rows are the body's; a loop whose condition is branches (`&&`), so
 //   that its branches go to the control's own label and the control writes none; a do statement, whose branch is taken
-//   where its condition holds, under `||`; two postfix updates through an address, whose temporaries are the body's
-//   locals after its declared ones; a for statement with a continue and a break, each a jump; a body that falls off its
-//   end; a goto; and main, whose implicit return is zero.
+//   where its condition holds, with a condition that is branches (`||`) and with one that is a value; a logical
+//   operator's and a conditional's values, whose tapes have labels of their own; two postfix updates through an
+//   address, whose temporaries are the body's locals after its declared ones; a for statement with a continue and a
+//   break, each a jump; a body that falls off its end; a goto; and main, whose implicit return is zero.
 // - Left out: a result of another class (long double) in a body whose every root the machine takes; a switch; and
 //   bodies with a root the machine does not take (a braced initializer, a bit-field; and, where -Wfor-loop-analysis is
 //   enabled, the for statement's, whose clauses the census's test refuses).
@@ -1759,6 +1760,8 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
                                "static int loops(struct S* s, int n) { long r = h(n) + h(n + 1); while (n > 0 && s->a != n) { r += s->c; n -= h(1); } return (int)r; }\n"
                                "static int both(int a, int b) { if (a && b) { return 1; } else { return 2; } }\n"
                                "static int either(int a, int b) { int r = 0; do { r += a; a -= 1; } while (a > 0 || b > r); return r; }\n"
+                               "static int twice(int n) { int i = 0; do { i += 2; } while (i < n); return i; }\n"
+                               "static int values(int a, int b) { int r = a && b; r += a || b; return r + (a ? b : 3); }\n"
                                "static int post(int* p) { int v = (*p)++; return v + p[1]++; }\n"
                                "static int counts(int n) { int s = 0; for (int i = 0; i < n; i++) { if (i == 3) continue; if (i == 7) break; s += h(i); } return s; }\n"
                                "static int falls(int x) { if (x) { return 1; } g = 2; }\n"
@@ -1768,7 +1771,8 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
                                "static int braces(int i) { int v[3] = { 1, i, 3 }; return v[0] + v[2]; }\n"
                                "static int field(struct S* s) { return s->b + 1; }\n"
                                "int main(void)\n{\n    struct S s;\n    int n = 4;\n    s.a = 1;\n    s.c = 3;\n    nothing(n);\n    early(n);\n"
-                               "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s);\n}\n";
+                               "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s) + twice(n) +\n"
+                               "        values(n, 2);\n}\n";
     char path[512];
     snprintf(path, sizeof(path), "%s/bodies.c", directory);
     bool valid = parse_test_write(path, text, sizeof(text) - 1);
@@ -7474,15 +7478,15 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &alone_expected),
                       "node-alone by sweep: the same results, and each sweep's ticks within the run's");
     const NodeBodiesExpected bodies_quiet = {
-        .lowered = 15,
-        .whole = 13,
-        .attempted = 11,
+        .lowered = 17,
+        .whole = 15,
+        .attempted = 13,
         .reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
     };
     const NodeBodiesExpected bodies_loud = {
-        .lowered = 15,
-        .whole = 12,
-        .attempted = 10,
+        .lowered = 17,
+        .whole = 14,
+        .attempted = 12,
         .reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
     };
     check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), &bodies_quiet),
