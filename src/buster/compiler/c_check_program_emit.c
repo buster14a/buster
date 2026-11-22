@@ -502,7 +502,7 @@ struct CheckEmitGrowth
 // only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
 // and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
 // the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither.
-#define BUSTER_CHECK_TIER1_STEPS 12
+#define BUSTER_CHECK_TIER1_STEPS 13
 #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
 // block's IR instructions before selection and allocation (tier1_schedule_ir.c).
@@ -531,10 +531,12 @@ struct CheckEmitGrowth
 // Value numbering with memory (#2718, ir_optimize_memory.c), off by default; past the driver's own bits
 // (c_checker_driver.c's BUSTER_CHECK_DRIVER_PASS_GVN and INLINE).
 #define BUSTER_CHECK_TIER1_PASS_MEMORY 2048u
+// A loop's global scalars kept in registers (#3309, ir_optimize_promote.c), before SSA promotion.
+#define BUSTER_CHECK_TIER1_PASS_PROMOTE 4096u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS)
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
-     BUSTER_CHECK_TIER1_PASS_MEMORY)
+     BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_PROMOTE)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
 // IrVectorizeRefusal.
@@ -551,8 +553,12 @@ struct CheckTier1Lane
     uint8_t* allowed;
     // The vector operations the target selects, for the loop vectorizer (ir_vectorize_target.c), in `forms` with `allowed`.
     struct IrVectorizeTarget* vectorize;
-    // The opt-in C vectorizer's source qualifier guard (#2805), indexed by body, including inline callees.
+    // The opt-in C vectorizer's source qualifier guard (#2805), indexed by body, including inline callees; the promotion of
+    // a loop's globals (#3309) takes it too.
     const uint8_t* vectorize_volatile;
+    // Whether the unit may name one object by two symbols or have a weak symbol of no object (an alias, ifunc, weakref,
+    // weak or weak_import attribute, or `#pragma weak`): the promotion of a loop's globals (#3309) then doesn't run.
+    bool promote_refused;
     uint32_t emitting_body;
     X86Target target;
     bool reserved;
@@ -672,6 +678,8 @@ struct CheckTier1Counts
     uint32_t gvn_removed;
     // The loads value numbering with memory forwarded (#2718).
     uint32_t loads_forwarded;
+    // The global scalars promoted in loops (#3309).
+    uint32_t globals_promoted;
     // --tier1-passes=+unroll's (#2755): each loop's outcome, the copies the unrolled ones hold, the reductions they split
     // and the instructions they added.
     uint16_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
@@ -726,6 +734,7 @@ struct CheckTier1Report
     uint64_t sroa_split;
     uint64_t gvn_removed;
     uint64_t loads_forwarded;
+    uint64_t globals_promoted;
     uint64_t unroll_outcomes[BUSTER_CHECK_TIER1_UNROLL_OUTCOMES];
     uint64_t unroll_copies;
     uint64_t unroll_reductions;
@@ -1257,6 +1266,7 @@ struct CheckEmitRun
     CheckTier1Outcome* tier1_outcomes;
     CheckTier1Counts* tier1_counts;
     const uint8_t* vectorize_volatile;
+    bool promote_refused;
     uint64_t* costs;
     uint64_t* boundaries;
     uint32_t* orders[BUSTER_CHECK_EMIT_MAX_LANES];
@@ -1947,6 +1957,36 @@ static uint8_t* check_program_vectorize_volatile(const CheckProgram* program, Ar
     return bodies;
 }
 
+// Whether the promotion of a loop's globals (#3309) may run in the unit: no symbol names another's object (an alias,
+// ifunc or weakref) and none may be weak and so have no object, whose address is 0 (a weak or weak_import attribute, or
+// `#pragma weak`). The pass's preheader load may be one the loop never made, and it takes two symbols' objects apart.
+static bool check_program_promote_unit(const CheckProgram* program)
+{
+    const CheckInput* input = program->input;
+    const CheckInputSymbolPragmas* pragmas = input->symbol_pragmas;
+    bool allowed = program->alias_count == 0;
+    for (uint32_t p = 0; allowed && pragmas != NULL && p < pragmas->count; p += 1)
+    {
+        allowed = pragmas->records[p].kind != CHECK_SYMBOL_PRAGMA_WEAK;
+    }
+    const uint32_t tokens = input->token_count;
+    const CheckSparseWide attributes = input->attributes;
+    for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); allowed && first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
+    {
+        for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); allowed && selected != 0; selected &= selected - 1)
+        {
+            const CheckInputAttributes* records = check_input_attributes_at(input, first + (uint32_t)__builtin_ctz(selected));
+            for (uint32_t a = 0; allowed && records != NULL && a < records->count; a += 1)
+            {
+                const CheckInputAttributeKind kind = records->records[a].kind;
+                allowed = kind != CHECK_ATTRIBUTE_WEAK && kind != CHECK_ATTRIBUTE_WEAK_IMPORT && kind != CHECK_ATTRIBUTE_WEAKREF && kind != CHECK_ATTRIBUTE_ALIAS &&
+                          kind != CHECK_ATTRIBUTE_IFUNC;
+            }
+        }
+    }
+    return allowed;
+}
+
 // Body `b`'s code by Tier 1's pipeline (--tier1, check_tier1_compile) into run->codes[b], on its lane's arenas for it,
 // the code in its lane's scratch as Tier 0's is, with an explicit outcome and disposition. A naked
 // function's code is its templates'. Out of line, so that the plain emission carries none of it.
@@ -1964,6 +2004,7 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
     lane->tier1->schedule = run->lanes->tier1_schedule;
     lane->tier1->passes = run->lanes->tier1_passes;
     lane->tier1->vectorize_volatile = run->vectorize_volatile;
+    lane->tier1->promote_refused = run->promote_refused;
     lane->tier1->emitting_body = b;
     CheckTier1Outcome outcome = naked ? check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0) :
                                         check_tier1_compile(lane->tier1, function, check_program_result_class(function, program, b, false), target, run->scalar,
@@ -4106,8 +4147,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     const bool tier1 = valid && count != 0 && lanes != NULL && lanes->tier1;
     run.tier1_outcomes = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Outcome, count) : 0;
     run.tier1_counts = tier1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckTier1Counts, count) : 0;
-    const bool vectorize = tier1 && (lanes->tier1_passes & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0;
+    const uint32_t passes_on = (BUSTER_CHECK_TIER1_PASSES_DEFAULT ^ (tier1 ? lanes->tier1_passes : 0u)) & BUSTER_CHECK_TIER1_PASSES_ALL;
+    const bool promote = tier1 && (passes_on & BUSTER_CHECK_TIER1_PASS_PROMOTE) != 0;
+    const bool vectorize = tier1 && ((passes_on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 || promote);
     run.vectorize_volatile = vectorize ? check_program_vectorize_volatile(program, scratch) : NULL;
+    run.promote_refused = promote && !check_program_promote_unit(program);
     // The windows (#2536), where the bodies are compiled alone: the plain emission's, since --tier1's inlining and
     // --helper-report read the bodies' streams after every body's code.
     run.window_tokens = lanes != NULL && !tier1 && !lanes->helper_reporting && !lanes->assembly ? lanes->window_tokens : 0;
@@ -6146,6 +6190,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         lanes->tier1_report.sroa_split += compiled ? counts->sroa_split : 0;
         lanes->tier1_report.gvn_removed += compiled ? counts->gvn_removed : 0;
         lanes->tier1_report.loads_forwarded += compiled ? counts->loads_forwarded : 0;
+        lanes->tier1_report.globals_promoted += compiled ? counts->globals_promoted : 0;
         for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_UNROLL_OUTCOMES; k += 1)
         {
             lanes->tier1_report.unroll_outcomes[k] += compiled ? counts->unroll_outcomes[k] : 0;

@@ -340,6 +340,8 @@ struct CheckTier1Passes
     uint32_t sunk;
     // --tier1-passes=+licm's moved values (#139), or #2781's: the vector and mask values and the operands moved with them.
     uint32_t licm_moved;
+    // The global scalars a loop keeps in a register (#3309, --tier1-passes=promote).
+    uint32_t globals_promoted;
     // The instructions #2781's solver's output has fewer than its input: the merged vector and mask values and what
     // was dead.
     uint32_t gvn_removed;
@@ -413,6 +415,37 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_COMPILED, CHECK_TIER1_CAUSE_IR, 0, BUSTER_IR_NONE, 0, NULL);
     CheckTier1Stage stage = outcome.stage;
     const uint32_t on = check_tier1_passes_on(lane);
+    // #3309: a loop's global scalars kept in frame slots of their own, which promotion then keeps in registers, in
+    // steps[12], before the solver and promotion. Not where the unit may name one object twice or have a weak symbol
+    // (CheckTier1Lane.promote_refused) or the body may access a volatile object, whatever the IR's flags say. A function
+    // it changes is neither verified nor the solver's any longer; one it leaves as it was goes on so. Any other error is
+    // the function's.
+    CheckTier1PassesInput globals = *input;
+    IrFunction promoted_function = { 0 };
+    if ((on & BUSTER_CHECK_TIER1_PASS_PROMOTE) != 0 && !lane->promote_refused && !input->vectorize_volatile)
+    {
+        IrPromoteResult promoted_globals = { 0 };
+        if (!check_tier1_lane_reserve(lane, 5))
+        {
+            outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
+        }
+        else
+        {
+            const IrCheck check = ir_promote_globals(input->function, &lane->steps[12], scratch, &promoted_globals);
+            outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, NULL);
+            outcome.operation = check.instruction < input->function->instruction_count ? input->function->op[check.instruction] : IR_OP_COUNT;
+            if (check.error == IR_OK && promoted_globals.promoted != 0)
+            {
+                promoted_function = promoted_globals.function;
+                globals.function = &promoted_function;
+                globals.verified = false;
+                globals.numbered = false;
+                passes->globals_promoted = promoted_globals.promoted;
+            }
+        }
+        stage = outcome.stage;
+    }
+    input = &globals;
     // #2781: a function that has vector or mask values runs the solver and LICM on those values alone, where the
     // options don't run the pass on every value. What vector code shares is a few long-lived constants and tables,
     // built again at each use otherwise; the general registers' values, whose longer ranges the allocator spills
@@ -666,7 +699,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const bool sroa = (on & BUSTER_CHECK_TIER1_PASS_SROA) != 0;
     lane->preserve_local_storage = BUSTER_TIER1_PRIVATE_VALUES && (gvn || sroa);
     const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0) |
-                                       ((on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 ? 8u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 ? 16u : 0));
+                                       ((on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 ? 8u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 ? 16u : 0) |
+                                       ((on & BUSTER_CHECK_TIER1_PASS_PROMOTE) != 0 && !lane->promote_refused ? 32u : 0));
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
                                                 check_tier1_lane_prepare(lane, target, optional) ? 0 : BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, fault);
     CheckTier1Stage stage = outcome.stage;
@@ -953,6 +987,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .sroa_split = sroa_split,
             .gvn_removed = gvn_applied ? gvn_result.removed : passes.gvn_removed,
             .loads_forwarded = passes.optimized.forwarded_loads,
+            .globals_promoted = passes.globals_promoted,
             .unroll_copies = passes.unroll_copies,
             .unroll_reductions = passes.unroll_reductions,
             .unroll_added = passes.unroll_added,
@@ -1131,12 +1166,12 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
                     "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\tmachine_rows=%" PRIu64 "\trow_moves=%" PRIu64 "\tinlined=%" PRIu64
                     "\tschedule_blocks=%" PRIu64 "\tschedule_moved=%" PRIu64 "\tsunk=%" PRIu64 "\tfolded=%" PRIu64 "\tremoved_instructions=%" PRIu64
                     "\tremoved_blocks=%" PRIu64 "\tmerged_blocks=%" PRIu64 "\tlicm_moved=%" PRIu64 "\tsroa_split=%" PRIu64 "\tgvn_removed=%" PRIu64 "\tloads_forwarded=%" PRIu64
-                    "\tdead=%" PRIu64 "\n",
+                    "\tglobals_promoted=%" PRIu64 "\tdead=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
             report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
             report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
             report->schedule_moved, report->sunk, report->folded, report->removed_instructions, report->removed_blocks, report->merged_blocks, report->licm_moved,
-            report->sroa_split, report->gvn_removed, report->loads_forwarded, report->dead_functions);
+            report->sroa_split, report->gvn_removed, report->loads_forwarded, report->globals_promoted, report->dead_functions);
     // The loop vectorizer's (--tier1-passes=+vectorize, #2743): a line of its own, so that the line above keeps its
     // fields.
     static const char* const refusals[IR_VECTORIZE_REFUSALS] = { "shape", "induction", "phi", "operation", "address", "use", "dependence", "width" };

@@ -942,6 +942,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_unroll_test.c"
 #endif
+// #3309: a loop's global scalars kept in registers, --tier1-passes=promote.
+#include "buster/compiler/ir_optimize_promote.c"
 #include "buster/compiler/ir_optimize_sroa.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_sroa_test.c"
