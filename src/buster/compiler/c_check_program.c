@@ -150,6 +150,27 @@ struct CheckProgramBody
     uint8_t return_warning;
 };
 
+// An inline-only always_inline function whose direct calls the lowering expands in its callers (#2983,
+// check_program_select_wrappers): clang's AlwaysInliner expands every call of a body it has, an `extern inline`
+// gnu_inline one too (glibc's __fortify_function wrappers), where the unit emits none of its own. Its body is one
+// statement: `return E;` (`node` E with its conversion to the result) or, in a void function, `E;`; E's nodes are
+// `first` to `node`. Its parameters' objects are CheckProgram.wrapper_parameters' `parameter_count` from
+// `parameter_first`, 0 for an unnamed one, and their pass_object_size attributes `sizes` (CheckInputAttributes'
+// object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
+// A wrapper's parameters at most: glibc's take five.
+#define BUSTER_CHECK_WRAPPER_PARAMETERS 8u
+
+typedef struct CheckProgramWrapper CheckProgramWrapper;
+struct CheckProgramWrapper
+{
+    uint32_t object;
+    uint32_t node;
+    uint32_t first;
+    uint32_t parameter_first;
+    uint32_t parameter_count;
+    uint8_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS];
+};
+
 typedef struct CheckProgramRegion CheckProgramRegion;
 struct CheckProgramRegion
 {
@@ -617,6 +638,11 @@ struct CheckProgram
     // groups' labels, each group's `label_count` from its `label_first`, by token. Null in a unit without them.
     SymbolId* clone_label_symbols;
     uint32_t* clone_label_tokens;
+    // A selection's inline-only always_inline functions whose direct calls the lowering expands (#2983,
+    // CheckProgramWrapper), by object, and their parameters' objects; null in a unit without one, the usual one.
+    CheckProgramWrapper* wrappers;
+    uint32_t* wrapper_parameters;
+    uint32_t wrapper_count;
     // The exits through cleanups' chains (#1370, CHECK_CONTROL_EXIT's), each record's plan (by its CheckInput.cleanups
     // index, of a body with such an exit) and the destinations of the records' dispatches; null in a unit without cleanups.
     CheckProgramExit* exits;
