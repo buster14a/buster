@@ -943,6 +943,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_unroll_test.c"
 #endif
+// #3309: loop store motion, before promotion.
+#include "buster/compiler/ir_store_motion.c"
 #include "buster/compiler/ir_optimize_sroa.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_sroa_test.c"
@@ -959,6 +961,9 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_vectorize_loops.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_vectorize_loops_test.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/ir_store_motion_test.c"
 #endif
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
@@ -2410,6 +2415,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-unroll") == 0)
     {
         result = run_ir_unroll_tests(argc - 1, argv + 1);
+    }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-store-motion") == 0)
+    {
+        result = run_ir_store_motion_tests(argc - 1, argv + 1);
     }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-sroa") == 0)
     {
