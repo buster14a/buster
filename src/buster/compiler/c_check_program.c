@@ -2066,6 +2066,18 @@ static bool check_control_fold_operand(const CheckControlWriter* writer, uint32_
 // A statement on the fold walk's stack (check_control_foldable), beside the expressions' nodes: its token with this bit.
 #define BUSTER_CHECK_CONTROL_FOLD_STATEMENT UINT32_C(0x80000000)
 
+static inline uint32_t check_control_statement_head(const CheckControlWriter* writer, uint32_t token)
+{
+    return writer->token_first != NULL ? writer->token_first[token] : writer->program->input->statement_heads[token] - 1;
+}
+
+static inline uint32_t check_control_statement_next(const CheckControlWriter* writer, uint32_t token, uint32_t node)
+{
+    const CheckGraph* graph = &writer->program->input->graph;
+    return writer->node_next != NULL ? writer->node_next[node] :
+           (node + 1 < graph->count && graph->tokens[node + 1] == token ? node + 1 : BUSTER_CHECK_NONE);
+}
+
 // Whether clang's evaluator takes what the writer emits at `token` (check_control_drain's token: a statement's
 // terminator or a for statement's first `;`): its declarations' initializers, or else its expressions, each a value
 // that check_control_fold_value takes, and none a static declaration, an asm statement or a typeof's operand. The
@@ -2099,8 +2111,8 @@ static bool check_control_fold_simple(const CheckControlWriter* writer, uint32_t
                        (check_control_fold_value(&write->value) && (!source || check_control_fold_push(writer, depth, visits, write->node)));
         }
     }
-    for (uint32_t node = foldable && first_plan == BUSTER_CHECK_NONE ? writer->token_first[token] : BUSTER_CHECK_NONE; foldable && node != BUSTER_CHECK_NONE;
-         node = writer->node_next[node])
+    for (uint32_t node = foldable && first_plan == BUSTER_CHECK_NONE ? check_control_statement_head(writer, token) : BUSTER_CHECK_NONE; foldable && node != BUSTER_CHECK_NONE;
+         node = check_control_statement_next(writer, token, node))
     {
         foldable = check_control_fold_operand(writer, node, depth, visits);
     }
@@ -2176,7 +2188,7 @@ static bool check_control_fold_statement(const CheckControlWriter* writer, uint3
             body = child > statement && child_role != PARSE_ROLE_ELSE ? child : body;
         }
         const bool loop = role == PARSE_ROLE_CLOSE_FOR;
-        const uint32_t node = loop ? (condition != BUSTER_CHECK_NONE ? writer->token_first[condition] : BUSTER_CHECK_NONE) : input->token_nodes[statement];
+        const uint32_t node = loop ? (condition != BUSTER_CHECK_NONE ? check_control_statement_head(writer, condition) : BUSTER_CHECK_NONE) : input->token_nodes[statement];
         const CheckGraph* graph = &input->graph;
         const uint32_t expression = node < graph->count && graph->ops[node] == CHECK_OP_CONDITION ? graph->operand0[node] : node;
         const CheckValue value = expression < graph->count ? check_stream_value(program->stream, expression) : (CheckValue){ 0 };
@@ -2521,7 +2533,7 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
             check_control_token(writer, token);
             check_control_mark(writer, update);
             check_control_statement(writer, body, end, update);
-            const uint32_t node = writer->token_first[condition];
+            const uint32_t node = check_control_statement_head(writer, condition);
             if (node != BUSTER_CHECK_NONE)
             {
                 check_control_entry(writer, CHECK_CONTROL_BRANCH_FALSE, condition, node, end);
@@ -2908,7 +2920,7 @@ static void check_control_drain(CheckControlWriter* writer)
             }
             // The graph's token groups are in postorder. Each wrapper here is a complete discarded expression
             // or declaration initializer; expressions of nested statements have their own source tokens.
-            for (uint32_t node = plan == BUSTER_CHECK_NONE && assembly == BUSTER_CHECK_NONE ? writer->token_first[task.token] : BUSTER_CHECK_NONE; node != BUSTER_CHECK_NONE; node = writer->node_next[node])
+            for (uint32_t node = plan == BUSTER_CHECK_NONE && assembly == BUSTER_CHECK_NONE ? check_control_statement_head(writer, task.token) : BUSTER_CHECK_NONE; node != BUSTER_CHECK_NONE; node = check_control_statement_next(writer, task.token, node))
             {
                 // The evaluated typeof operand is already a control entry; the discard wrapper the expression walk
                 // made of its value at the terminator must not evaluate it again.
@@ -6124,8 +6136,10 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     uint32_t* last = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* previous = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* token_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* node_next = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
+    // The selection census enumerates every token. A VLA can ask for graph nodes at a function opening.
+    const bool indexed = input->statement_heads == NULL || input->vla_count != 0 || input->report_count != 0 || options.selection_census;
+    uint32_t* token_first = valid && indexed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* node_next = valid && indexed ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     // Discarded initializer roots ask for their declarations' storage duration only when no initializer plan covers them.
     uint64_t* static_initializers = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)node_count + 64) / 64) : NULL;
     uint32_t* plan_first = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -6178,7 +6192,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     uint8_t* addressed = valid && input->label_address_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : 0;
     CheckControl* entries = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControl, capacity) : 0;
     CheckControlTask* tasks = valid ? BUSTER_ARENA_PUSH_ARRAY(&controls, CheckControlTask, capacity) : 0;
-    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && token_first != 0 && node_next != 0 && static_initializers != NULL && labels != 0 &&
+    valid = valid && first != 0 && last != 0 && next != 0 && previous != 0 && (!indexed || (token_first != NULL && node_next != NULL)) && static_initializers != NULL && labels != 0 &&
             stack != 0 && nodes != 0 && seen != 0 && needed != 0 && (input->label_address_count == 0 || addressed != 0) && entries != 0 && tasks != 0 && plan_first != 0 && planned != 0 &&
             (options.initializers == 0 || plan_next != 0) &&
             case_first != 0 && case_next != 0 && case_map != 0 && source_labels != 0 && label_positions != 0 && reference_items != 0 && reference_sort != 0 &&
@@ -6226,7 +6240,10 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     {
         check_program_cases(program, parser, case_first, case_next, case_map, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
         // The children lists, source labels, stops and repeats are each body's, which check_control_begin fills.
-        memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        if (indexed)
+        {
+            memset(token_first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+        }
         memset(planned, 0, ((uint64_t)count + 64) / 64 * sizeof(uint64_t));
         if (variable)
         {
@@ -6295,8 +6312,44 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
             kept += check_cpu_dispatch_kind(check_input_attributes_at(input, declaration)) != CHECK_CPU_DISPATCH_DISPATCH;
         }
         body_count = input->cpu_dispatch ? kept : body_count;
-        for (uint32_t node = node_count; node-- > 0;)
+        // Group ordinary tokens in postorder. A marked root keeps its own graph token and occupies its
+        // semicolon's slot in the control list. Its source end reaches that semicolon past at most eight closers.
+        uint32_t end = indexed ? node_count : 0;
+        while (input->discard_roots != NULL && end != 0)
         {
+            const uint32_t first = (end - 1) & ~UINT32_C(63);
+            uint64_t marks = input->discard_roots[first / 64];
+            while (marks != 0)
+            {
+                const uint32_t marked = first + 63 - (uint32_t)__builtin_clzll(marks);
+                while (end > marked + 1)
+                {
+                    const uint32_t node = --end;
+                    const uint32_t token = input->graph.tokens[node];
+                    node_next[node] = token_first[token];
+                    token_first[token] = node;
+                }
+                uint32_t token = input->graph.source_positions[marked];
+                while (token < count && parser->tokens.kinds[token] == PARSE_KIND_R_PAREN)
+                {
+                    token += 1;
+                }
+                node_next[marked] = token_first[token];
+                token_first[token] = marked;
+                end = marked;
+                marks ^= UINT64_C(1) << (marked % 64);
+            }
+            while (end > first)
+            {
+                const uint32_t node = --end;
+                const uint32_t token = input->graph.tokens[node];
+                node_next[node] = token_first[token];
+                token_first[token] = node;
+            }
+        }
+        while (end != 0)
+        {
+            const uint32_t node = --end;
             const uint32_t token = input->graph.tokens[node];
             node_next[node] = token_first[token];
             token_first[token] = node;

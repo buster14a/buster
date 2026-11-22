@@ -6341,6 +6341,76 @@ static bool node_window_test_debug_driver(const char* directory)
     return same;
 }
 
+// Get the ordinary native object before requesting the typed dump, which selects a separate reader path.
+static bool node_window_test_statement_outputs(char* source, char* object, char* dump_object, bool scalar, char** dump)
+{
+    char* args[] = { "/proc/self/exe", "-nostdinc", "-c", "-o", object, source, scalar ? "--scalar" : NULL, NULL };
+    char* diagnostics = NULL;
+    bool valid = check_test_driver_spawn(args, &diagnostics) == 0;
+    free(diagnostics);
+    if (valid)
+    {
+        char* dump_args[] = { "/proc/self/exe", "-nostdinc", "-c", "--dump-typed", "-o", dump_object, source, scalar ? "--scalar" : NULL, NULL };
+        valid = check_test_driver_spawn_stream(dump_args, dump, true) == 0 && *dump != NULL && (*dump)[0] != '\0';
+    }
+    return valid;
+}
+
+// Compare both large-unit readers with an independently ineligible small unit. Appending typedefs crosses the
+// threshold without moving either function's dump tokens or changing anything the object needs to contain.
+static bool node_window_test_statement_driver(const char* directory)
+{
+    char source[PATH_MAX];
+    char small[PATH_MAX];
+    char large[PATH_MAX];
+    char dump_object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/discard.c", directory);
+    snprintf(small, sizeof(small), "%s/discard-small.o", directory);
+    snprintf(large, sizeof(large), "%s/discard-large.o", directory);
+    snprintf(dump_object, sizeof(dump_object), "%s/discard-dump.o", directory);
+    FILE* file = fopen(source, "w");
+    bool same = file != NULL;
+    if (same)
+    {
+        same = fputs("int x; void update(void){ x++; }\n"
+                     "void unwind(long offset, void *target){ (void)__builtin_eh_return(offset,target); }\n", file) >= 0;
+        same = fclose(file) == 0 && same;
+    }
+    char* expected_dump = NULL;
+    same = same && node_window_test_statement_outputs(source, small, dump_object, false, &expected_dump);
+    // The update has three rows: its lvalue, its increment, and the implicit void conversion at the semicolon.
+    const char* third = same ? strstr(expected_dump, "\n2 token=") : NULL;
+    unsigned op = 0;
+    char type[16];
+    same = third != NULL && sscanf(third, "\n2 token=%*u op=%u type=%15s", &op, type) == 2 && op == CHECK_OP_CAST && strcmp(type, "void") == 0;
+    if (same)
+    {
+        file = fopen(source, "a");
+        same = file != NULL;
+        if (same)
+        {
+            for (uint32_t i = 0; same && i < 2052; i += 1)
+            {
+                same = fprintf(file, "typedef int Pad%u;\n", i) > 0;
+            }
+            same = fclose(file) == 0 && same;
+        }
+    }
+    for (uint32_t mode = 0; same && mode < 2; mode += 1)
+    {
+        char* dump = NULL;
+        same = node_window_test_statement_outputs(source, large, dump_object, mode != 0, &dump) &&
+               check_test_driver_files_equal(small, large) && strcmp(expected_dump, dump) == 0;
+        free(dump);
+    }
+    free(expected_dump);
+    unlink(dump_object);
+    unlink(large);
+    unlink(small);
+    unlink(source);
+    return same;
+}
+
 // An explicit cast to void still has two native entries, even when the backend emits no code for either.
 static void node_window_test_void(CheckTest* test)
 {
@@ -6411,6 +6481,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     node_window_test_constants(test, true);
     char directory[] = "/tmp/buster-node-census-XXXXXX";
     const bool ready = mkdtemp(directory) != 0;
+    check_test_expect(test, ready && node_window_test_statement_driver(directory), "retained statements preserve typed dumps and exception-return native objects");
     check_test_expect(test, ready && node_window_test_debug_driver(directory), "node-window takes integer returns under -g and preserves the debug object");
 
     check_test_expect(test, ready, "node-census fixtures' directory is made");

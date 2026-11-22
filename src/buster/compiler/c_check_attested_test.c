@@ -678,6 +678,8 @@ struct CheckAttestedField
 static const CheckAttestedField check_attested_input_fields[] =
 {
     { "graph", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "discard_roots", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "statement_heads", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "environment", CHECK_ATTESTED_FIELD_NAME },
     { "diagnostic_pragmas", CHECK_ATTESTED_FIELD_AMBIENT },
     { "nonnull_pragmas", CHECK_ATTESTED_FIELD_AMBIENT },

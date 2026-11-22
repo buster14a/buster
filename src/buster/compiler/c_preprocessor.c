@@ -425,6 +425,8 @@ struct PPOptions
     bool system_header_warnings;
     // An artifact command consumes binding-derived unused declarations only through their diagnostic policy.
     bool published_unused_only;
+    // Ordinary native output may carry an implicit discard on the expression that produces its value.
+    bool statement_controls;
     // Ordered semantic warning options; a valued option's operand is never captured as diagnostic policy. The
     // arena owns the pointer slice; argument strings have the same borrowed lifetime as -D/-I option strings.
     const char* const* semantic_warning_options;
