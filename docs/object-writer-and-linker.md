@@ -4742,10 +4742,11 @@ it. It writes every kind the direct path writes: static executables (with
   `DT_NEEDED` names a library the link doesn't have, and then the version
   needs of the libraries the program loads, each against the library its
   entry's file names. The names stay unversioned in the resolution, so a
-  library's unversioned reference keeps no library and a versioned one still
-  loads the archive members that define its name, as before; GNU ld and lld
-  key a library's versioned reference as `name@VERSION`, which no unversioned
-  definition, an archive member's or the executable's, satisfies (#2911).
+  library's unversioned reference keeps no library, as before, and a
+  versioned one loads no archive member by its bare name (`foreign_fold`,
+  #2911): GNU ld and lld key a library's versioned reference as
+  `name@VERSION`, which no unversioned definition, an archive member's or the
+  executable's, satisfies.
   Both passes are scalar on lane 0, shared by both paths, over the needed
   libraries' versioned references and the loaded libraries' needs: a lookup is
   two probes of an index per library before its provider (the exports' and

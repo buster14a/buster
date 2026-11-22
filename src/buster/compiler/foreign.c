@@ -3347,11 +3347,12 @@ static void foreign_resolve(Foreign* foreign, uint32_t index, ForeignLane* lane)
 //     unless it defines no versions or the need is weak (VER_FLG_WEAK), both of which the loader only warns about
 //     (FOREIGN_ERROR_LIBRARY_VERSION). A file the link doesn't have is left unchecked.
 // The resolution's names stay unversioned: an unversioned reference of a library resolves as before, which keeps no
-// library for it (foreign_decide counts only a regular object's references), and loads the archive members that
-// define its name, as a versioned one's still does (#2911). Both passes are scalar, on lane 0, shared by both paths, as
-// bind.c's rounds are: each needed library's versioned references are looked up once, each lookup two probes of an
-// index per library before its provider, and the loaded libraries' needs once. A C program's mixed link with -lm
-// follows libc.so.6's 21 references and libm.so.6's 26 (on the 9700X's Arch Linux) and checks their 9 needs.
+// library for it (foreign_decide counts only a regular object's references) and loads the archive members that define
+// its name; a versioned one loads none by its bare name (foreign_fold, #2911). Both passes are scalar, on lane 0,
+// shared by both paths, as bind.c's rounds are: each needed library's versioned references are looked up once, each
+// lookup two probes of an index per library before its provider, and the loaded libraries' needs once. A C program's
+// mixed link with -lm follows libc.so.6's 21 references and libm.so.6's 26 (on the 9700X's Arch Linux) and checks their
+// 9 needs.
 
 // Whether `version` is the name of `library`'s version definition at `index`.
 static bool foreign_library_version_is(const ImportLibrary* library, uint16_t index, String8 version)
