@@ -8241,7 +8241,8 @@ static bool node_shadow_differs(const NodeShadow* shadow)
            shadow->facts_differences != 0 || shadow->facts_list_differences != 0 || shadow->facts_failures != 0 ||
            shadow->facts_conversions != shadow->facts_conversions_derived || shadow->reads.same_differences != 0 || shadow->reads.misplaced != 0 ||
            shadow->front_differences != 0 || shadow->typed_differences != 0 || shadow->typed_object_differences != 0 || shadow->typed_library_differences != 0 ||
-           shadow->swept_differences != 0 || shadow->alone_differences != 0 || shadow->alone_bodies_unread != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
+           shadow->swept_differences != 0 || shadow->alone_differences != 0 || shadow->alone_walk_only != 0 || shadow->alone_own_only != 0 ||
+           shadow->alone_bodies_unread != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
            shadow->tested_missed != 0 || shadow->tested_policy_differences != 0 || shadow->reader_twin_differences != 0 || shadow->own_count_differences != 0 ||
            shadow->own_quiet_wrong != 0 || shadow->own_quiet_calls_wrong != 0 || shadow->own_quiet_calls_loud != 0 || shadow->own_quiet_casts_wrong != 0 ||
            shadow->own_quiet_orders_wrong != 0 || shadow->own_values_wrong != 0 || shadow->own_tree_wrong != 0 || shadow->own_direct_wrong != 0 ||

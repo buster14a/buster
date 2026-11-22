@@ -1600,7 +1600,10 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
 // - A body of 400 statements under a loop: its tokens are several chunks of the postorder, the loop's condition waits
 //   through all of them, and its root is typed with its operand's records, which the graph still holds.
 // - A table of 4,200 elements, more values than the front's stack keeps: the front loses its waiting values, once, and
-//   the body's verdict says so.
+//   the body's verdict says so. A static table of 64, as many as a token takes at once: each value is discarded at
+//   the declaration's `;`, and the ones the machine does not know for a declaration's discards are several roots of
+//   one token, paired in their order.
+// - An address constant multiplied: its value has a fault, whose node the records' digest holds as its record.
 // `expected`: the bodies it reads, the roots it and the walk's nodes' machine both run on, and its verdicts of the bodies.
 typedef struct NodeAloneExpected NodeAloneExpected;
 struct NodeAloneExpected
@@ -1638,6 +1641,14 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
                                      "static double range(double d) { d = d + 1e999; return d; }\n"
                                      "static int several_characters(int c) { c = c + 'ab'; return c; }\n"
                                      "static int aligned(int c) { c = c + (int)_Alignof(c); return c; }\n"
+                                     "static unsigned long guard(void) { unsigned long v = (unsigned long)&g * 1103515245; return v; }\n"
+                                     "static int kinds(int i)\n{\n    static const unsigned char kind[] = {\n");
+        for (uint32_t element = 0; element < 64 && length + 16 < capacity; element += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, (element & 15) == 15 ? "%u,\n" : "%u, ", element & 7);
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length,
+                                     "    };\n    return kind[i & 63];\n}\n"
                                      "static int waits(int* a, int n)\n{\n    int x = 0;\n    while (x < n && a[0] != n)\n    {\n");
         for (uint32_t statement = 0; statement < 400 && length + 96 < capacity; statement += 1)
         {
@@ -1651,7 +1662,7 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
         length += (uint32_t)snprintf(text + length, capacity - length,
                                      "1 };\n    return big[a & 1];\n}\n"
                                      "int entry(struct S* s, int n)\n{\n    return plain(n, 2) + (int)calls(s, n) + several(n) + (text(n)[0] == 'o') + field(s) + query(&n) + label(n) + braces(n) +\n"
-                                     "           statics(n) + (int)range(1.0) + several_characters(n) + aligned(n) + waits(&n, n) + table(n);\n}\n");
+                                     "           statics(n) + (int)range(1.0) + several_characters(n) + aligned(n) + waits(&n, n) + table(n) + (int)guard() + kinds(n);\n}\n");
     }
     valid = valid && length + 1 < capacity && parse_test_write(path, text, length);
     NodeShadow shadow = {
@@ -7351,10 +7362,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-facts window: a value cut at a chunk's end is not whole again where the rows have room later");
     // The machine with no node of the walk's, a body at a time before the walk acts at it.
     const NodeAloneExpected alone_expected = {
-        .bodies = 15,
-        .roots = 433,
-        .verdicts = { [BUSTER_NODE_ALONE_BODY_WHOLE] = 9, [BUSTER_NODE_ALONE_BODY_LEFT] = 5, [BUSTER_NODE_ALONE_BODY_TESTS] = 1 },
+        .bodies = 17,
+        .roots = 440,
+        .verdicts = { [BUSTER_NODE_ALONE_BODY_WHOLE] = 10, [BUSTER_NODE_ALONE_BODY_LEFT] = 5, [BUSTER_NODE_ALONE_BODY_TYPE] = 1, [BUSTER_NODE_ALONE_BODY_TESTS] = 1 },
         .own = 1,
+        .statics = 1,
         .lost = 2,
     };
     check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), &alone_expected),

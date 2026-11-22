@@ -366,7 +366,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -2715,6 +2715,45 @@ search of lists of every length to 20, and
 case: an object's facts against the program's, the objects a rename
 pragma labelled, and a name's line by its number or its words.
 
+
+### The machine with no node of the walk's (#2850)
+
+`./build/compiler measure-node-machine --shadow --front-alone [--list N] [preprocessor options] file...`
+runs the reference machine (T, the census's tests, C and X) on the front's
+records alone: for each function body, before the reader's coded walk acts at
+its first token. The option asks for the machine at reader time on the walk's
+nodes too (`--front-types`, `--front-sweeps`, `--front-tests`), which it is
+compared with after the pipeline. No compile takes it
+([the one-core path](../one-core-path.md#the-redesigns-second-piece-the-machine-with-no-node-of-the-walks)).
+
+It reports three lines a run:
+
+- `alone bodies=... left=... postorder-positions=... records=... roots=...
+  taken=... ticks: ...`: the bodies it read whole and those it left (a body
+  within another's, one whose tokens are no run of the postorder, one past
+  its graph's room), their postorder positions, the records it made, the
+  roots it ran on and those the whole machine takes there; then its ticks:
+  its reading (the acting tokens' compaction and their entries, the front,
+  the records' writing to its graph), the machine's first run on the roots,
+  and the two a position.
+- `alone compared=... differences=...`: the roots both machines ran on,
+  paired by their token, and those that differ, by the first field that
+  does (`records`, `refusal`, `digest`, `tested`, `tests`, `swept`,
+  `sweep-refusal`, `root`, `tape`, `side`); the roots only one of the two ran
+  on (the walk's nodes' outside a function body are counted apart: it reads
+  the bodies alone); and the roots it took at whose tokens the walk then
+  raised a warning's event.
+- `alone lowered-bodies' verdicts before the walk` and `alone bodies whole`:
+  what it said of each body the lowering lowered, before the walk acted at
+  it (every root taken; or a root the front lost, a root not run, T's
+  refusal, the tests', C's or X's, no room), in bodies and in their tokens;
+  the times its front lost its waiting values; and its whole bodies against
+  those whose every popped root the machine on the walk's nodes takes.
+
+A difference, a root only one of the two ran on in a body, or a lowered body
+it did not read makes the command exit 1. `--list N` prints the first N
+differences (`alone difference file=... line=... field=...`) and the first N
+bodies it refuses whose popped roots the other takes.
 
 ### Compiling with the window (#2850)
 
