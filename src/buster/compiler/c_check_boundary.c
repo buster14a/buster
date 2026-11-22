@@ -67,7 +67,21 @@ typedef enum CheckBoundaryName
 {
     CHECK_BOUNDARY_NAME_OBJECT,
     CHECK_BOUNDARY_NAME_RUNTIME,
+    // A jump table of the body's: the payload is its place among the body's own.
+    CHECK_BOUNDARY_NAME_TABLE,
 } CheckBoundaryName;
+
+// A jump table of a supplied body (CheckLowerTable's, without what only its lowering reads): its entries are each value's
+// label among the table's own, from 0.
+typedef struct CheckBoundaryTable CheckBoundaryTable;
+struct CheckBoundaryTable
+{
+    uint32_t count;
+    uint32_t label_count;
+    uint32_t address;
+    uint32_t fallback;
+    uint64_t lower;
+};
 
 typedef struct CheckBoundaryFixup CheckBoundaryFixup;
 struct CheckBoundaryFixup
@@ -105,6 +119,10 @@ struct CheckBoundaryBody
     const uint32_t* runtimes;
     uint32_t fixup_count;
     const CheckBoundaryFixup* fixups;
+    // Its switches' jump tables, in its controls' order, and their entries one table's after another's.
+    uint32_t table_count;
+    const CheckBoundaryTable* tables;
+    const uint32_t* table_entries;
     // Its Tier0Function and its columns (c_check_boundary_lower.c), in the recording's bytes.
     void* function;
 };

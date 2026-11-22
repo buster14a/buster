@@ -211,7 +211,8 @@ static uint32_t check_boundary_object_origin(const CheckProgram* program, uint32
 
 // What the function's name `symbol` is to the recording: a fix-up for an object's or a runtime function's (true), or the
 // refusal of any other.
-static bool check_boundary_classify(const CheckLowerShared* shared, SymbolId symbol, CheckBoundaryFixup* fixup, uint32_t* refusal)
+static bool check_boundary_classify(const CheckLowerShared* shared, SymbolId symbol, uint32_t table_first, uint32_t table_count, CheckBoundaryFixup* fixup,
+                                    uint32_t* refusal)
 {
     const CheckProgram* program = shared->program;
     const CheckProgramLowered* lowered = shared->lowered;
@@ -244,6 +245,12 @@ static bool check_boundary_classify(const CheckLowerShared* shared, SymbolId sym
             named = false;
         }
     }
+    else if (symbol >= shared->provisional_tables && (uint64_t)symbol - shared->provisional_tables - table_first < table_count)
+    {
+        fixup->name = CHECK_BOUNDARY_NAME_TABLE;
+        fixup->payload = symbol - shared->provisional_tables - table_first;
+        named = true;
+    }
     else if (symbol >= shared->provisional_tables)
     {
         *refusal = CHECK_BOUNDARY_TABLE;
@@ -274,7 +281,23 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
         uint32_t refusal = CHECK_BOUNDARY_SUPPLIED;
         refusal = sources ? CHECK_BOUNDARY_SOURCES : refusal;
         refusal = refusal == 0 && (function->asm_body_count != 0 || function->call_asm != NULL || (naked != NULL && naked->planned)) ? CHECK_BOUNDARY_ASM : refusal;
-        refusal = refusal == 0 && function->label_count != 0 ? CHECK_BOUNDARY_LABELS : refusal;
+        // Its jump tables: the program's whose function it is, one after another. Its labels are theirs alone, or one is a
+        // label whose address the code takes.
+        uint32_t table_first = 0;
+        while (table_first < lowered->table_count && lowered->tables[table_first].function != b)
+        {
+            table_first += 1;
+        }
+        uint32_t table_count = 0;
+        uint32_t table_labels = 0;
+        uint64_t table_values = 0;
+        while (table_first + table_count < lowered->table_count && lowered->tables[table_first + table_count].function == b)
+        {
+            table_labels += lowered->tables[table_first + table_count].label_count;
+            table_values += lowered->tables[table_first + table_count].count;
+            table_count += 1;
+        }
+        refusal = refusal == 0 && (function->label_count != table_labels || function->table_count != table_count) ? CHECK_BOUNDARY_LABELS : refusal;
         refusal = refusal == 0 && function->call_tails != NULL ? CHECK_BOUNDARY_TAILS : refusal;
         refusal = refusal == 0 && (unit->errno_bodies[b] & 2) != 0 ? CHECK_BOUNDARY_ASM : refusal;
         refusal = refusal == 0 && (unit->errno_bodies[b] & 1) != 0 ? CHECK_BOUNDARY_ERRNO : refusal;
@@ -304,7 +327,7 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
         for (uint32_t i = 0; fixups != NULL && refusal == 0 && i < function->count; i += 1)
         {
             CheckBoundaryFixup fixup = { .place = CHECK_BOUNDARY_PLACE_VALUE, .index = i };
-            if (tier0_global_kind(function->kinds[i]) && check_boundary_classify(shared, (SymbolId)function->values[i], &fixup, &refusal))
+            if (tier0_global_kind(function->kinds[i]) && check_boundary_classify(shared, (SymbolId)function->values[i], table_first, table_count, &fixup, &refusal))
             {
                 fixups[fixup_count++] = fixup;
             }
@@ -312,7 +335,7 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
         for (uint32_t c = 0; fixups != NULL && refusal == 0 && c < function->call_count; c += 1)
         {
             CheckBoundaryFixup fixup = { .place = CHECK_BOUNDARY_PLACE_CALL, .index = c };
-            if (check_boundary_classify(shared, function->call_targets[c], &fixup, &refusal))
+            if (check_boundary_classify(shared, function->call_targets[c], table_first, table_count, &fixup, &refusal))
             {
                 fixups[fixup_count++] = fixup;
             }
@@ -320,7 +343,7 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
         if (fixups != NULL && refusal == 0)
         {
             CheckBoundaryFixup fixup = { .place = CHECK_BOUNDARY_PLACE_HIDDEN_COPY };
-            if (check_boundary_classify(shared, function->hidden_copy, &fixup, &refusal))
+            if (check_boundary_classify(shared, function->hidden_copy, table_first, table_count, &fixup, &refusal))
             {
                 fixups[fixup_count++] = fixup;
             }
@@ -360,6 +383,23 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
             }
             check_boundary_write(called, end - first, sizeof(uint32_t));
             check_boundary_write(fixups, fixup_count, sizeof(CheckBoundaryFixup));
+            CheckBoundaryTable* tables = malloc(((uint64_t)table_count + 1) * sizeof(CheckBoundaryTable));
+            uint32_t* table_entries = malloc((table_values + 1) * sizeof(uint32_t));
+            uint64_t value = 0;
+            for (uint32_t k = 0; tables != NULL && table_entries != NULL && k < table_count; k += 1)
+            {
+                const CheckLowerTable* table = &lowered->tables[table_first + k];
+                tables[k] = (CheckBoundaryTable){ .count = table->count, .label_count = table->label_count, .address = table->address, .fallback = table->fallback,
+                                                  .lower = table->lower };
+                for (uint32_t v = 0; v < table->count; v += 1)
+                {
+                    table_entries[value++] = table->entries[v] - table->first_label;
+                }
+            }
+            check_boundary_write(tables, tables != NULL && table_entries != NULL ? table_count : 0, sizeof(CheckBoundaryTable));
+            check_boundary_write(table_entries, tables != NULL && table_entries != NULL ? table_values : 0, sizeof(uint32_t));
+            free(tables);
+            free(table_entries);
             check_boundary_write(function, sizeof(Tier0Function), 1);
             for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(check_boundary_columns); c += 1)
             {
@@ -495,6 +535,9 @@ static void check_boundary_load(void)
             body->runtime_count = (uint32_t)count;
             body->fixups = check_boundary_read(&cursor, sizeof(CheckBoundaryFixup), &count);
             body->fixup_count = (uint32_t)count;
+            body->tables = check_boundary_read(&cursor, sizeof(CheckBoundaryTable), &count);
+            body->table_count = (uint32_t)count;
+            body->table_entries = check_boundary_read(&cursor, sizeof(uint32_t), &count);
             Tier0Function* function = check_boundary_read(&cursor, 1, &count);
             valid = function != NULL && count == sizeof(Tier0Function);
             for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(check_boundary_columns); c += 1)
@@ -517,11 +560,33 @@ static void check_boundary_load(void)
 
 // A supplied body's function in the supplying compile: the recording's, its names made this unit's. False where a name
 // has no symbol here (the unit is not the recording's).
-static bool check_boundary_supply(CheckLowerWriter* writer, const CheckLowerShared* shared, const CheckBoundaryBody* body, Tier0Function* function)
+static bool check_boundary_supply(CheckLowerWriter* writer, const CheckLowerShared* shared, const CheckBoundaryBody* body, uint32_t b, Tier0Function* function)
 {
     const CheckProgram* program = shared->program;
+    CheckProgramLowered* lowered = shared->lowered;
+    CheckProgramLowered* status = writer->output;
     Tier0Function* recorded = body->function;
     bool valid = true;
+    // Its jump tables, which the lowering's preparation numbered among the unit's (check_boundary_supply_tables): their
+    // labels' places among the tables' labels, in the part's label symbols, as its dispatches would have written them.
+    uint32_t table_first = BUSTER_CHECK_NONE;
+    for (uint32_t t = 0; body->table_count != 0 && table_first == BUSTER_CHECK_NONE && t < lowered->table_count; t += 1)
+    {
+        table_first = lowered->tables[t].function == b ? t : BUSTER_CHECK_NONE;
+    }
+    valid = body->table_count == 0 || (table_first != BUSTER_CHECK_NONE && table_first + body->table_count <= lowered->table_count);
+    for (uint32_t k = 0; valid && k < body->table_count; k += 1)
+    {
+        const CheckLowerTable* table = &lowered->tables[table_first + k];
+        for (uint32_t j = 0; valid && j < table->label_count; j += 1)
+        {
+            valid = status->label_symbol_count < writer->label_symbol_capacity;
+            if (valid)
+            {
+                status->label_symbols[status->label_symbol_count++] = BUSTER_CHECK_LOWER_CASE_SYMBOL | (table->first_label + j);
+            }
+        }
+    }
     // The runtime functions it called first in its part, in that order (check_lower_runtime keeps the part's order).
     for (uint32_t r = 0; r < body->runtime_count; r += 1)
     {
@@ -538,6 +603,10 @@ static bool check_boundary_supply(CheckLowerWriter* writer, const CheckLowerShar
         if (fixup.name == CHECK_BOUNDARY_NAME_OBJECT)
         {
             symbol = fixup.payload != 0 && fixup.payload < program->object_count ? program->object_symbols[fixup.payload] : 0;
+        }
+        else if (fixup.name == CHECK_BOUNDARY_NAME_TABLE)
+        {
+            symbol = table_first != BUSTER_CHECK_NONE && fixup.payload < body->table_count ? writer->provisional_tables + table_first + fixup.payload : 0;
         }
         else if (fixup.payload < CHECK_LOWER_RUNTIMES)
         {
@@ -566,6 +635,55 @@ static bool check_boundary_supply(CheckLowerWriter* writer, const CheckLowerShar
         *function = *recorded;
         function->symbol_access = NULL;
         function->symbol_count = 0;
+    }
+    return valid;
+}
+
+// The jump tables the supplied bodies of the program bring, for the tables' room (check_lower_switch_tables).
+static uint32_t check_boundary_table_room(const CheckProgram* program)
+{
+    uint32_t tables = 0;
+    for (uint32_t b = 0; check_boundary_supplying() && b < program->body_count; b += 1)
+    {
+        const CheckBoundaryBody* taken = check_boundary_taken(program->bodies[b].opening);
+        tables += taken != NULL ? taken->table_count : 0;
+    }
+    return tables;
+}
+
+// A supplied body's jump tables among the unit's, where its switches' would have been numbered (check_lower_switch_range):
+// each one's entries from the unit's next label on.
+static bool check_boundary_supply_tables(CheckProgramLowered* lowered, uint32_t capacity, const CheckBoundaryBody* body, uint32_t b, Arena* output)
+{
+    bool valid = true;
+    uint64_t value = 0;
+    for (uint32_t k = 0; valid && k < body->table_count; k += 1)
+    {
+        const CheckBoundaryTable recorded = body->tables[k];
+        uint32_t* entries = lowered->table_count < capacity ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)recorded.count + 1) : NULL;
+        valid = entries != NULL;
+        if (valid)
+        {
+            const uint32_t first = lowered->case_symbol_count;
+            for (uint32_t v = 0; v < recorded.count; v += 1)
+            {
+                entries[v] = first + body->table_entries[value++];
+            }
+            lowered->tables[lowered->table_count] = (CheckLowerTable){
+                .entries = entries,
+                .count = recorded.count,
+                .function = b,
+                .control = BUSTER_CHECK_NONE,
+                .labels = NULL,
+                .label_count = recorded.label_count,
+                .first_label = first,
+                .address = recorded.address,
+                .lower = recorded.lower,
+                .fallback = recorded.fallback,
+            };
+            lowered->table_count += 1;
+            lowered->case_symbol_count += recorded.label_count;
+        }
     }
     return valid;
 }

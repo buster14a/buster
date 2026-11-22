@@ -17740,6 +17740,10 @@ static uint32_t check_lower_switch_room(const CheckProgram* program, bool deferr
 // leave the switches' cursor at *cursor. Only a switch of four cases or more may have a plan, and the program lists
 // those (CheckProgram.switches): the bodies' among them, the two in the controls' order (a selected program's bodies are
 // some of the checked program's, with its controls). Returns false when an arena has no room.
+// SCAFFOLD (c_check_boundary_lower.c): the supplied bodies' jump tables.
+static uint32_t check_boundary_table_room(const CheckProgram* program);
+static bool check_boundary_supply_tables(CheckProgramLowered* lowered, uint32_t capacity, const CheckBoundaryBody* body, uint32_t b, Arena* output);
+
 static bool check_lower_switch_range(CheckProgramLowered* lowered, uint32_t capacity, CheckLowerSwitchTrees* trees, const CheckProgram* program, uint32_t first,
                                      uint32_t end, uint32_t* cursor, CheckLowerCaseRange* cases, CheckLowerCaseRange* sorted, Arena* output, Arena* scratch)
 {
@@ -17748,6 +17752,13 @@ static bool check_lower_switch_range(CheckProgramLowered* lowered, uint32_t capa
     for (uint32_t b = first; valid && b < end; b += 1)
     {
         const CheckProgramBody* body = program->bodies + b;
+        // SCAFFOLD (c_check_boundary.c): a supplied body's tables are the recording's, numbered here as its switches' would be.
+        const CheckBoundaryBody* taken = check_boundary_taken(body->opening);
+        if (__builtin_expect(taken != NULL, 0))
+        {
+            valid = check_boundary_supply_tables(lowered, capacity, taken, b, output);
+            continue;
+        }
         // (A target_clones copy is its body again, right after it, #2247: its switches' tables are its own.)
         while (s != 0 && program->switches[s - 1] >= body->first)
         {
@@ -17776,13 +17787,15 @@ static bool check_lower_switch_tables(CheckProgramLowered* lowered, CheckLowerSw
                                       Arena* output, Arena* scratch)
 {
     uint64_t labels = 0;
-    const uint32_t capacity = check_lower_switch_room(program, false, &labels);
+    // SCAFFOLD (c_check_boundary.c): with room for the supplied bodies' tables.
+    const uint32_t supplied_tables = check_boundary_table_room(program);
+    const uint32_t capacity = check_lower_switch_room(program, false, &labels) + supplied_tables;
     bool valid = true;
-    if (capacity != 0 && program->switch_count != 0 && program->stream != 0)
+    if (((capacity != 0 && program->switch_count != 0) || supplied_tables != 0) && program->stream != 0)
     {
         lowered->tables = BUSTER_ARENA_PUSH_ARRAY(output, CheckLowerTable, capacity);
-        CheckLowerCaseRange* cases = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
-        CheckLowerCaseRange* sorted = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, program->case_count);
+        CheckLowerCaseRange* cases = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, (uint64_t)program->case_count + 1);
+        CheckLowerCaseRange* sorted = BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerCaseRange, (uint64_t)program->case_count + 1);
         trees->capacity = sparse_trees ? capacity : 0;
         trees->items = sparse_trees ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckLowerSwitchTree, capacity) : NULL;
         valid = lowered->tables != 0 && cases != 0 && sorted != 0 && (!sparse_trees || trees->items != NULL);
@@ -20492,7 +20505,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             {
                 Tier0Function* supplied = &lowered->functions[b];
                 writer->token = body.declaration;
-                if (!check_boundary_supply(writer, shared, taken, supplied))
+                if (!check_boundary_supply(writer, shared, taken, b, supplied))
                 {
                     check_lower_unsupported(writer, "a supplied body whose names this unit doesn't have (the boundary's recording is another unit's)");
                 }
