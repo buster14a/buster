@@ -136,12 +136,13 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
-#include <sys/utsname.h>
 #include <sys/wait.h>
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
 #include <execinfo.h>
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
+// uname, for lane_test_kernel_at_least: the driver's arena checks alone ask the kernel's release.
+#include <sys/utsname.h>
 #define BUSTER_LANE_TEST_MAX_LANES 8
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
 #define BUSTER_LANE_TEST_MAX_RANGE 1000
