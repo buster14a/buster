@@ -2741,8 +2741,10 @@ It reports three lines a run:
   does (`records`, `refusal`, `digest`, `tested`, `tests`, `swept`,
   `sweep-refusal`, `root`, `tape`, `side`); the roots only one of the two ran
   on (the walk's nodes' outside a function body are counted apart: it reads
-  the bodies alone); and the roots it took at whose tokens the walk then
-  raised a warning's event.
+  the bodies alone); the roots it took at whose tokens the walk then raised
+  a warning's event; and the roots it took with, among their expression's
+  tokens, one the walk's class actions left to its visit (the option asks
+  the walk to mark them, as its numbering's check does).
 - `alone lowered-bodies' verdicts before the walk` and `alone bodies whole`:
   what it said of each body the lowering lowered, before the walk acted at
   it (every root taken; or a root the front lost, a root not run, T's
@@ -2750,8 +2752,11 @@ It reports three lines a run:
   the times its front lost its waiting values; and its whole bodies against
   those whose every popped root the machine on the walk's nodes takes.
 
-A difference, a root only one of the two ran on in a body, or a lowered body
-it did not read makes the command exit 1. `--list N` prints the first N
+A difference, a root only one of the two ran on in a body, a root taken
+before an event of the walk's or with a token its actions left, or a lowered
+body it did not read makes the command exit 1. While the machine runs, the
+reader's own graph has no column of nodes, so a read of the walk's node
+faults. `--list N` prints the first N
 differences (`alone difference file=... line=... field=...`) and the first N
 bodies it refuses whose popped roots the other takes.
 

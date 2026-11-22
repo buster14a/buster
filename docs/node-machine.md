@@ -7602,11 +7602,16 @@ No compile takes it.
   members, the system headers' tokens) are the same tables. A record the
   front keeps past a chunk keeps its node; a left token that takes a kept
   record's value marks its node's context unknown in the graph's own column.
+  While the machine runs, the reader's own graph has no column of nodes (each
+  is taken away and put back), so a read of the walk's node faults instead
+  of finding one.
 - **The bodies' records stay.** A condition's root is made at its control's
   closing token, a body after its operand. The graph holds every body's
   records one after another, so the operand's are there when the root comes,
   and T takes a root apart from its operand's range as it does on the walk's
-  nodes. No expression is lost to a chunk's end.
+  nodes. No expression is lost to a chunk's end. (The specification had the
+  front make a condition's root where its value is complete; the records
+  kept in the graph give the same without another order of roots.)
 - **The machine is the reader-time one.** `node_machine_reader_chunk` runs on
   the chunk's roots with that graph for its own and results of its own: T,
   the census's tests, C and X. The tests read the reader's output through a
@@ -7647,15 +7652,22 @@ walk acts at a token, by four ways:
 | string's action | a string's escapes | the resolution decodes every string it reads, before any body is read here; the walk's action then finds it made |
 | call's action | nothing: its decode is asked for no warning | |
 
-An expression with a token the front left has no root. The fixture has a
-floating constant out of range, a character constant of two characters and
-`_Alignof` of an expression, each in a body whose verdict is a root lost.
+An expression with a token the front left has no root. That the front leaves
+every token the walk's actions leave is counted, not read: the walk marks
+each token its class actions leave to its visit
+(`CheckInputReader.expression_declined`), and after its last chunk the piece
+looks for one among the tokens of each expression it took. None has one, on
+the corpora and in the fixture. The fixture has a floating constant out of
+range, a character constant of two characters and `_Alignof` of an
+expression, each in a body whose verdict is a root lost; and a string with
+an unknown escape, which the resolution warns of before any body is read
+here, so the tests refuse its expression for the event, as after the walk.
 
 **The fixture** (`node_alone_test_fixture`, with the default warnings and
-with `-Wall -Wextra`) is 17 bodies and 440 roots: whole bodies with calls, a
+with `-Wall -Wextra`) is 18 bodies and 444 roots: whole bodies with calls, a
 logical operator, a loop, three declarators at one `;` and a string; a
 bit-field, a `sizeof`, an escape under a label, a braced initializer and a
-block's static table; the three literals and tokens above; an address
+block's static table; the literals, the token and the string above; an address
 constant multiplied, whose value has a fault; a static table of 64 values,
 whose discards at its `;` are several roots of one token; a loop of 400
 statements, whose condition waits through several chunks; and a table of
@@ -7677,10 +7689,12 @@ statements, whose condition waits through several chunks; and a table of
 - a fault's node digested as the graph's number.
 
 **What it does not do.** It makes no function: a body's statements, its
-locals' table and its calls' rows are the next pieces', with the recorded
+locals' table and its calls' rows are other pieces', with the recorded
 functions of the boundary's scaffold as their oracle. It refuses nothing
 before its sweeps, so a body with a token left is swept to its end. And its
-cost is the reference's: the one-core path's page has it against its gate.
+cost is the reference's, which is most of what a taken body is worth: the
+one-core path's page has it against its gate, and what that changes in the
+order of the pieces after it.
 
 ### What it says of step 2
 
