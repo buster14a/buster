@@ -4994,6 +4994,22 @@ struct NodeShadow
     uint64_t alone_own_only;
     uint64_t alone_events_after;
     uint64_t alone_listed;
+    // Its verdicts of the bodies the lowering lowered, by what stops it (BUSTER_NODE_ALONE_BODY_*), in bodies and in their
+    // tokens; and against the machine on the walk's nodes, for which a body is whole where every root the lowering popped
+    // is taken there: the bodies whole for both, for it alone (a root the lowering pops that is no root of the front's:
+    // a braced initializer's element), and for the walk's nodes' alone, which would be a body it wrongly refuses.
+    uint64_t alone_verdicts[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_tokens[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_body_tokens;
+    uint64_t alone_whole_both;
+    uint64_t alone_whole_both_tokens;
+    uint64_t alone_whole_own;
+    uint64_t alone_whole_walk;
+    // Of the bodies the walk's nodes' machine takes whole and it doesn't, those with a block's static or extern
+    // declaration, which are counted apart: a static object's initializer's values are roots of the front's that the
+    // lowering never pops (they are data), so the machine on the walk's nodes is not asked about them.
+    uint64_t alone_whole_walk_static;
+    uint64_t alone_bodies_unread;
     uint64_t swept_differences;
     uint64_t swept_root_differences;
     uint64_t swept_refusal_differences;
@@ -7308,6 +7324,20 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
         }
         printf(" roots-of-the-walk's-nodes-alone=%" PRIu64 " (outside a body %" PRIu64 ") roots-of-its-own-alone=%" PRIu64 " taken-before-an-event-of-the-walk's=%" PRIu64 "\n",
                shadow->alone_walk_only, shadow->alone_walk_only_outside, shadow->alone_own_only, shadow->alone_events_after);
+        static const char* const verdict_names[BUSTER_NODE_ALONE_BODY_VERDICTS] = { "whole", "a-token-left", "a-root-not-run", "T", "the-tests", "C-or-X", "no-room" };
+        printf("node-shadow: alone lowered-bodies' verdicts before the walk (their tokens %" PRIu64 "):", shadow->alone_body_tokens);
+        for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
+        {
+            if (shadow->alone_verdicts[verdict] != 0)
+            {
+                printf(" %s=%" PRIu64 " (tokens %" PRIu64 ", %.2f%%)", verdict_names[verdict], shadow->alone_verdicts[verdict], shadow->alone_verdict_tokens[verdict],
+                       shadow->alone_body_tokens != 0 ? 100.0 * (double)shadow->alone_verdict_tokens[verdict] / (double)shadow->alone_body_tokens : 0.0);
+            }
+        }
+        printf(" not-read=%" PRIu64 "\n", shadow->alone_bodies_unread);
+        printf("node-shadow: alone bodies whole for it and for the walk's nodes' machine=%" PRIu64 " (tokens %" PRIu64 ") for-it-alone=%" PRIu64 " for-the-walk's-nodes'-alone=%" PRIu64
+               " (and with a block's static or extern declaration %" PRIu64 ")\n",
+               shadow->alone_whole_both, shadow->alone_whole_both_tokens, shadow->alone_whole_own, shadow->alone_whole_walk, shadow->alone_whole_walk_static);
     }
     // The reader's coded walk in the files' one reading, by its parts (TSC ticks): beside the front's where it ran, and
     // alone where it didn't, the walk as it is.
@@ -7370,6 +7400,9 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
     }
     bool whole = true;
     uint64_t body_nodes = 0;
+    // Whether every root the lowering popped is taken by the machine at reader time, on the walk's nodes: what the
+    // machine with no node of the walk's said of the body before the walk is compared with (below).
+    bool reader_whole = true;
     for (uint32_t p = 0; p < count; p += 1)
     {
         if (s->root_pop[p] == p)
@@ -7377,6 +7410,15 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             const NodeCensusRoot context = node_census_root(s, pops + p);
             uint32_t walked = 0;
             NodeFrontTypes* typed = program->input->node_front != NULL ? program->input->node_front->types : NULL;
+            if (typed != NULL)
+            {
+                const uint32_t root_node = pops[p].node;
+                const bool ran = root_node < typed->node_capacity && typed->counts[root_node] != 0;
+                const uint8_t flags = ran ? typed->refusals[root_node] : 0;
+                reader_whole = reader_whole && ran && (flags & BUSTER_NODE_FRONT_TYPED_REFUSAL) == NODE_MACHINE_TAKEN && (flags & BUSTER_NODE_FRONT_TYPED_TESTED) != 0 &&
+                               typed->tests != NULL && typed->tests[root_node] == 0 && (flags & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0 && typed->sweep_refusals != NULL &&
+                               typed->sweep_refusals[root_node] == NODE_MACHINE_TAKEN;
+            }
             if (typed != NULL && pops[p].node < typed->node_capacity)
             {
                 // Reader time's T ran on it, or not, before the selection: the lowering popped this root.
@@ -7403,6 +7445,57 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
         s->node_pop[pops[p].node] = none;
     }
     node_census_mark_controls(s, body, false);
+    const NodeFrontShadow* fronted = program->input->node_front;
+    if (census->shadow != NULL && fronted != NULL && fronted->alone_types != NULL && fronted->alone_body_verdicts != NULL)
+    {
+        // The body's verdict of the machine with no node of the walk's, by its opening brace among the bodies it read.
+        NodeShadow* shadow = census->shadow;
+        const uint32_t closing = program->parser->tree.parents[body->opening];
+        const uint64_t tokens = closing > body->opening ? (uint64_t)closing - body->opening + 1 : 0;
+        uint32_t low = 0;
+        uint32_t high = fronted->alone_body_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            if (fronted->alone_body_openings[middle] < body->opening)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                high = middle;
+            }
+        }
+        shadow->alone_body_tokens += tokens;
+        if (low < fronted->alone_body_count && fronted->alone_body_openings[low] == body->opening)
+        {
+            const uint8_t verdict = fronted->alone_body_verdicts[low] < BUSTER_NODE_ALONE_BODY_VERDICTS ? fronted->alone_body_verdicts[low] : BUSTER_NODE_ALONE_BODY_ROOM;
+            const bool own = verdict == BUSTER_NODE_ALONE_BODY_WHOLE;
+            shadow->alone_verdicts[verdict] += 1;
+            shadow->alone_verdict_tokens[verdict] += tokens;
+            shadow->alone_whole_both += own && reader_whole;
+            shadow->alone_whole_both_tokens += own && reader_whole ? tokens : 0;
+            shadow->alone_whole_own += own && !reader_whole;
+            bool statics = false;
+            for (uint32_t token = body->opening; !own && reader_whole && !statics && token < closing; token += 1)
+            {
+                const uint32_t name = program->parser->tokens.names[token];
+                statics = program->parser->tree.roles[token] == PARSE_ROLE_SPECIFIER && (name == C_NAME_STATIC || name == C_NAME_EXTERN);
+            }
+            shadow->alone_whole_walk += !own && reader_whole && !statics;
+            shadow->alone_whole_walk_static += !own && reader_whole && statics;
+            if (!own && reader_whole && !statics && shadow->alone_listed < node_census_list)
+            {
+                shadow->alone_listed += 1;
+                printf("node-shadow: alone refuses a body the walk's nodes' machine takes whole file=%s line=%u verdict=%u\n", s->file,
+                       node_census_line(s->pp, program->parser, body->opening), verdict);
+            }
+        }
+        else
+        {
+            shadow->alone_bodies_unread += 1;
+        }
+    }
     census->bodies += 1;
     census->bodies_taken += whole;
     census->bodies_taken_nodes += whole ? body_nodes : 0;
@@ -8134,7 +8227,7 @@ static bool node_shadow_differs(const NodeShadow* shadow)
            shadow->facts_differences != 0 || shadow->facts_list_differences != 0 || shadow->facts_failures != 0 ||
            shadow->facts_conversions != shadow->facts_conversions_derived || shadow->reads.same_differences != 0 || shadow->reads.misplaced != 0 ||
            shadow->front_differences != 0 || shadow->typed_differences != 0 || shadow->typed_object_differences != 0 || shadow->typed_library_differences != 0 ||
-           shadow->swept_differences != 0 || shadow->alone_differences != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
+           shadow->swept_differences != 0 || shadow->alone_differences != 0 || shadow->alone_whole_walk != 0 || shadow->alone_bodies_unread != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
            shadow->tested_missed != 0 || shadow->tested_policy_differences != 0 || shadow->reader_twin_differences != 0 || shadow->own_count_differences != 0 ||
            shadow->own_quiet_wrong != 0 || shadow->own_quiet_calls_wrong != 0 || shadow->own_quiet_calls_loud != 0 || shadow->own_quiet_casts_wrong != 0 ||
            shadow->own_quiet_orders_wrong != 0 || shadow->own_values_wrong != 0 || shadow->own_tree_wrong != 0 || shadow->own_direct_wrong != 0 ||

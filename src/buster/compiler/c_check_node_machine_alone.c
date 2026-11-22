@@ -40,9 +40,11 @@ struct NodeAlone
     // Its results, by the graph's nodes, and the tests' state that reads `input`.
     NodeFrontTypes* types;
     struct NodeCensusReader* tests;
-    // The unit's function bodies in the postorder's order: each one's first position and the one past its last.
+    // The unit's function bodies in the postorder's order: each one's first position, the one past its last, and its
+    // opening brace.
     uint32_t* body_firsts;
     uint32_t* body_ends;
+    uint32_t* body_openings;
     uint32_t body_count;
     uint32_t next_body;
 };
@@ -138,11 +140,23 @@ static bool node_alone_write(struct NodeAlone* alone, const CheckInputReader* re
     return room;
 }
 
+// The roots the front has lost so far, by its report (node_alone_body).
+static inline uint64_t node_alone_lost(const NodeFrontShadow* report)
+{
+    return report->resets + report->left[CHECK_INPUT_CODE_TERMINATOR] + report->left[CHECK_INPUT_CODE_CONDITION] + report->left[CHECK_INPUT_CODE_RETURN] +
+           report->left[CHECK_INPUT_CODE_INITIALIZE];
+}
+
 // One body, postorder positions `first` to `end` - 1, read whole before the walk acts at it. `typer` is the unit's
 // machine at reader time, which runs here with the graph and the results of this file for its own.
-static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, CheckInputReader* reader, uint32_t first, uint32_t end)
+static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t opening)
 {
     NodeFront* front = alone->front;
+    // The roots the front loses of the body, counted from its report before and after: a root's token left (a statement's
+    // terminator, a condition, a return, an initialization whose value it doesn't know: a token it left is below), and
+    // the times it lost its waiting values. A token left below a declarator or a label reaches no root, and loses none.
+    const uint64_t lost = node_alone_lost(alone->report);
+    uint8_t verdict = BUSTER_NODE_ALONE_BODY_WHOLE;
     // No value waits at a body's opening brace: the front begins it with nothing held, its ordinals going on.
     front->count = 0;
     front->pending = 0;
@@ -203,7 +217,9 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
             const uint64_t machine = __rdtsc();
             node_machine_reader_chunk(typer, front, reader);
             alone->shadow->alone_machine_ticks += __rdtsc() - machine;
-            // Each root by its token: the node its results are kept by (an initialization's is its value's).
+            // Each root by its token: the node its results are kept by (an initialization's is its value's). And the body's
+            // verdict: the first root in its order that the machine doesn't take whole (a declaration's discard is no
+            // root of the machine's).
             for (uint32_t record = front->made; record < front->count; record += 1)
             {
                 if (front->roots[record] != 0)
@@ -211,6 +227,17 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
                     const uint32_t operand = front->operands[0][record];
                     const uint32_t inner = operand < record ? front->nodes[operand] : BUSTER_CHECK_NONE;
                     const uint32_t root = front->ops[record] == CHECK_OP_INITIALIZE ? inner : front->nodes[record];
+                    if (verdict == BUSTER_NODE_ALONE_BODY_WHOLE && !node_machine_reader_discard(reader, front, record, operand))
+                    {
+                        const NodeFrontTypes* results = alone->types;
+                        const bool ran = root < results->node_capacity && results->counts[root] != 0;
+                        const uint8_t flags = ran ? results->refusals[root] : 0;
+                        verdict = !ran ? BUSTER_NODE_ALONE_BODY_UNRUN :
+                                  (flags & BUSTER_NODE_FRONT_TYPED_REFUSAL) != NODE_MACHINE_TAKEN ? BUSTER_NODE_ALONE_BODY_TYPE :
+                                  (flags & BUSTER_NODE_FRONT_TYPED_TESTED) == 0 || results->tests[root] != 0 ? BUSTER_NODE_ALONE_BODY_TESTS :
+                                  (flags & BUSTER_NODE_FRONT_TYPED_SWEPT) == 0 || results->sweep_refusals[root] != NODE_MACHINE_TAKEN ? BUSTER_NODE_ALONE_BODY_SWEEP :
+                                                                                                                                       BUSTER_NODE_ALONE_BODY_WHOLE;
+                    }
                     if (root < alone->view.count && alone->view.tokens[root] < reader->parser->tokens.count)
                     {
                         // The roots of one token (a declaration's discards, one a declarator, at its `;`) are a chain in
@@ -229,6 +256,12 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     alone->shadow->alone_bodies += room;
     alone->shadow->alone_bodies_left += !room;
     alone->shadow->alone_positions += end - first;
+    // The verdict, as it stands before the walk acts at the body's first token: a root the front lost comes before any
+    // root's refusal, since its expression has no root at all.
+    verdict = !room ? BUSTER_NODE_ALONE_BODY_ROOM : node_alone_lost(alone->report) != lost ? BUSTER_NODE_ALONE_BODY_LEFT : verdict;
+    alone->shadow->alone_body_openings[alone->shadow->alone_body_count] = opening;
+    alone->shadow->alone_body_verdicts[alone->shadow->alone_body_count] = verdict;
+    alone->shadow->alone_body_count += 1;
     typer->graph = graph;
     typer->types = types;
     typer->tests = tests;
@@ -246,7 +279,7 @@ static __attribute__((noinline)) void node_alone_bodies(struct NodeAlone* alone,
         alone->next_body += 1;
         if (alone->body_firsts[body] >= first)
         {
-            node_alone_body(alone, front->typer, reader, alone->body_firsts[body], alone->body_ends[body]);
+            node_alone_body(alone, front->typer, reader, alone->body_firsts[body], alone->body_ends[body], alone->body_openings[body]);
         }
         else
         {
@@ -331,7 +364,10 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     }
     uint32_t* firsts = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* ends = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
-    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && firsts != NULL && ends != NULL &&
+    uint32_t* openings = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* verdict_openings = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint8_t* verdicts = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
+    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL &&
                 typer != NULL && typer->types != NULL && typer->tests != NULL && typer->types->sweep_refusals != NULL && typer->facts == NULL &&
                 reader->postorder != NULL && reader->postorder_positions != NULL;
     if (room)
@@ -414,6 +450,7 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
                 {
                     firsts[alone->body_count] = end - size;
                     ends[alone->body_count] = end;
+                    openings[alone->body_count] = token;
                     alone->body_count += 1;
                     last = end;
                 }
@@ -425,6 +462,10 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         }
         alone->body_firsts = firsts;
         alone->body_ends = ends;
+        alone->body_openings = openings;
+        shadow->alone_body_openings = verdict_openings;
+        shadow->alone_body_verdicts = verdicts;
+        shadow->alone_body_count = 0;
         // What the shadow reads after the pipeline is the walk's front's report.
         shadow->alone_types = types;
         shadow->alone_roots = roots;

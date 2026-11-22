@@ -134,6 +134,18 @@
 // X run on a graph made of those records alone. After the pipeline each root's results are compared with the ones the
 // machine made of the walk's nodes (BUSTER_NODE_FRONT_TYPES, _SWEEPS and BUSTER_NODE_READER_TESTS, which it asks for).
 #define BUSTER_NODE_READER_ALONE 8192u
+// What it says of a body (NodeFrontShadow.alone_body_verdicts): every root the front made of it is taken (T took it, the
+// tests left it silent, C and X took it) and the front left no token of it; or the first thing in the body's order that
+// stops it: a token the front left or a value it lost (an expression it makes no root of), a root the machine didn't run
+// on, T's refusal, the tests', C's or X's.
+#define BUSTER_NODE_ALONE_BODY_WHOLE 0u
+#define BUSTER_NODE_ALONE_BODY_LEFT 1u
+#define BUSTER_NODE_ALONE_BODY_UNRUN 2u
+#define BUSTER_NODE_ALONE_BODY_TYPE 3u
+#define BUSTER_NODE_ALONE_BODY_TESTS 4u
+#define BUSTER_NODE_ALONE_BODY_SWEEP 5u
+#define BUSTER_NODE_ALONE_BODY_ROOM 6u
+#define BUSTER_NODE_ALONE_BODY_VERDICTS 7u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u
 // What the reference did with an expression (NodeFactsReader.c_ran, which the reader gives the kernel's state at each
@@ -649,6 +661,12 @@ struct NodeFrontShadow
     uint32_t* alone_roots;
     // By its graph's node, the node + 1 of the next root it made at the same token (0: the last).
     uint32_t* alone_chains;
+    // Its verdict of each body it read, in the bodies' order, as it stood before the walk acted at the body: the body's
+    // opening brace and what stops the machine there (BUSTER_NODE_ALONE_BODY_*: nothing, or the first of its roots'
+    // steps that does).
+    uint32_t* alone_body_openings;
+    uint8_t* alone_body_verdicts;
+    uint32_t alone_body_count;
     // What it read: the bodies it read whole and those it left (a body whose tokens are no run of the postorder, or past
     // its graph's room), their postorder positions, the records it made of them, and its ticks, all of it (the
     // compaction, the entries, the front, the records' copy and the machine's runs).
