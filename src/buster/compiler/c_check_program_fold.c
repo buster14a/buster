@@ -15,7 +15,9 @@ static bool check_program_constant_load(const CheckProgram* program, uint32_t no
     const CheckValue value = check_stream_value(program->stream, node);
     const uint32_t restricted = BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED;
     const uint32_t position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE;
-    const bool known = value.category == CHECK_LVALUE && value.fault == CHECK_FAULT_NONE && value.constant_kind == CHECK_CONSTANT_ADDRESS &&
+    // A bit-field can start between bytes. Its member action records the object and bit offset even there.
+    const bool located = value.constant_kind == CHECK_CONSTANT_ADDRESS || (graph->ops[node] == CHECK_OP_MEMBER && (value.flags & BUSTER_CHECK_BIT_FIELD) != 0);
+    const bool known = value.category == CHECK_LVALUE && value.fault == CHECK_FAULT_NONE && located &&
                        (value.flags & restricted) == 0 && (value.flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 &&
                        (type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) == 0 &&
                        check_const_load(program->types, graph->const_values, value.object, value.offset, value.object_bit_offset,

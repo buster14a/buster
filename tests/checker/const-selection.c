@@ -7,6 +7,7 @@ static const int off = 0;
 const long five = 5;
 static const int array[] = { 1, 0 };
 static const struct { int on; } config = { 0 };
+static const struct { signed int s:3; unsigned int u:2; } flags = { -2, 3 };
 static const union { int first; int second; } choice = { .first = 0 };
 static volatile const int changing = 0;
 
@@ -33,7 +34,7 @@ int tested(int n)
     {
         return missing();
     }
-    if (array[1] || config.on || (off && n))
+    if (array[1] || config.on || flags.u != 3 || flags.s + flags.u != 1 || (off && n))
     {
         return missing();
     }

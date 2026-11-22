@@ -243,8 +243,8 @@ definition. Its flags and edges:
   call when `off` is zero. Reference selection and target-feature checking use
   the same decision. A runtime read, an inactive union member or a label that
   can enter the skipped code keeps the ordinary control flow. The regression
-  in `tests/checker/const-selection.c` checks emitted symbols and links and runs
-  the object against Clang's result.
+  in `tests/checker/const-selection.c` compares emitted symbols and executable
+  results with Clang.
 - **Statements no control reaches (#2987):** a block's statements are walked
   in source order (`c_check_program_reach.c`). One that follows a `return`,
   `break`, `continue`, `goto` or `__builtin_unreachable()`, and that holds no
