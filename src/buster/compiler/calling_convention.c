@@ -3116,13 +3116,14 @@ static AbiScanned abi_classify_scan(AbiTable* abi, const TypeTable* table, uint3
         for (__mmask16 open = abi_unclassified(abi, base, count); open != 0; open &= (__mmask16)(open - 1))
         {
             const uint32_t index = base + (uint32_t)__builtin_ctz(open);
-            if (abi_classifiable(table, index))
-            {
-                const bool now = abi_dependencies_classified(abi, table, index, all);
-                ready[ready_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-                ready_count += now ? 1 : 0;
-                result.waiting += now ? 0 : 1;
-            }
+            // What it reads first, which a type that can't be classified (incomplete, or a function) has classified or
+            // has none of: whether it can be classified only for a type that is ready, so that a type left waiting costs
+            // a scan one check (a type that can't be classified and reads one that can't either waits for nothing).
+            const bool read = abi_dependencies_classified(abi, table, index, all);
+            const bool now = read && abi_classifiable(table, index);
+            ready[ready_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+            ready_count += now ? 1 : 0;
+            result.waiting += read ? 0 : 1;
             if (ready_count == BUSTER_ABI_SCAN_WINDOW)
             {
                 abi_classify(abi, table, ready, ready_count);
