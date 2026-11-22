@@ -1742,6 +1742,13 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
 //   bodies with a root the machine does not take (a braced initializer, a bit-field; and, where -Wfor-loop-analysis is
 //   enabled, the for statement's, whose clauses the census's test refuses).
 // `expected`: the lowered bodies, those whose every root the machine takes, those attempted, and the others by reason.
+// With `before`, the same comparison made before the walk too (docs/node-machine.md, "The same comparison before the
+// walk"): the machine with no node of the walk's keeps each root's tape and what is beside it, the bodies' entries are
+// made again from those, each control finding its root by its token, and the controls themselves are made a second way
+// from the tokens and compared with the program's. Two bodies are there for it: one with an `if` whose condition is a
+// constant, which the program folds and both leave out (the kept tapes' for the constant, the twin for the range the
+// program dropped), and one with a block's static object, whose entries name a symbol the program numbers and which
+// the twin leaves out.
 typedef struct NodeBodiesExpected NodeBodiesExpected;
 struct NodeBodiesExpected
 {
@@ -1749,9 +1756,15 @@ struct NodeBodiesExpected
     uint32_t whole;
     uint32_t attempted;
     uint32_t reasons[NODE_BODIES_REASONS];
+    // Before the walk: the bodies the machine took whole there, those attempted from the kept tapes, the others by
+    // reason; and the controls' twin's bodies by its reason, the attempted ones first.
+    uint32_t kept_whole;
+    uint32_t kept_attempted;
+    uint32_t kept_reasons[NODE_BODIES_REASONS];
+    uint32_t twin_reasons[NODE_TWIN_REASONS];
 };
 
-static bool node_bodies_test_fixture(const char* directory, char** options, uint32_t option_count, const NodeBodiesExpected* expected)
+static bool node_bodies_test_fixture(const char* directory, char** options, uint32_t option_count, bool before, const NodeBodiesExpected* expected)
 {
     static const char text[] = "struct S { int a; unsigned b : 3; long c; };\nint g;\nint h(int);\n"
                                "static int plain(int x, int y) { int t = x * 2; if (y > 3) { t += y; } return t + g; }\n"
@@ -1770,13 +1783,21 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
                                "static int chosen(int c) { switch (c) { case 1: return 2; default: return c + 3; } }\n"
                                "static int braces(int i) { int v[3] = { 1, i, 3 }; return v[0] + v[2]; }\n"
                                "static int field(struct S* s) { return s->b + 1; }\n"
+                               "static int folded(int x) { if (0) { g = x; } return x + 1; }\n"
+                               "static int counted(int x) { static int calls; calls += x; return calls; }\n"
                                "int main(void)\n{\n    struct S s;\n    int n = 4;\n    s.a = 1;\n    s.c = 3;\n    nothing(n);\n    early(n);\n"
                                "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s) + twice(n) +\n"
-                               "        values(n, 2);\n}\n";
+                               "        values(n, 2) + folded(n) + counted(n);\n}\n";
     char path[512];
     snprintf(path, sizeof(path), "%s/bodies.c", directory);
     bool valid = parse_test_write(path, text, sizeof(text) - 1);
-    NodeShadow shadow = { .bodies = true, .passes = 0, .repeat = 1 };
+    NodeShadow shadow = {
+        .front = before ? (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER) : 0,
+        .reader = before ? (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE) : 0,
+        .bodies = true,
+        .passes = 0,
+        .repeat = 1,
+    };
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
@@ -1786,6 +1807,39 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
     {
         counts = counts && shadow.bodies_reasons[0][reason] == expected->reasons[reason];
     }
+    // Before the walk: the kept tapes' bodies and the twin's, each the program's or the lowered function's; none where
+    // the program dropped a range; and nothing of either without it.
+    bool kept = shadow.bodies_different[1] == 0 && shadow.bodies_same[1] == shadow.bodies_attempted[1] && shadow.bodies_dropped_attempted == 0 && shadow.twin_different == 0 &&
+                shadow.twin_same == shadow.twin_reasons[NODE_TWIN_ATTEMPTED];
+    kept = kept && (before ? shadow.bodies_whole[1] == expected->kept_whole && shadow.bodies_attempted[1] == expected->kept_attempted && shadow.bodies_dropped == 1 &&
+                             shadow.twin_controls != 0 :
+                             shadow.bodies_lowered[1] == 0 && shadow.twin_controls == 0);
+    for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; before && reason < NODE_BODIES_REASONS; reason += 1)
+    {
+        kept = kept && shadow.bodies_reasons[1][reason] == expected->kept_reasons[reason];
+    }
+    for (uint32_t reason = 0; before && reason < NODE_TWIN_REASONS; reason += 1)
+    {
+        kept = kept && shadow.twin_reasons[reason] == expected->twin_reasons[reason];
+    }
+    if (!kept)
+    {
+        fprintf(stderr, "test-checker: node-bodies before the walk: whole there %" PRIu64 " (%u), attempted %" PRIu64 " (%u), the lowered function's %" PRIu64 ", differ %" PRIu64
+                ", where the program dropped a range %" PRIu64 " of %" PRIu64 "; left out:",
+                shadow.bodies_whole[1], expected->kept_whole, shadow.bodies_attempted[1], expected->kept_attempted, shadow.bodies_same[1], shadow.bodies_different[1],
+                shadow.bodies_dropped_attempted, shadow.bodies_dropped);
+        for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; reason < NODE_BODIES_REASONS; reason += 1)
+        {
+            fprintf(stderr, " %s %" PRIu64 " (%u)", node_bodies_reason_names[reason], shadow.bodies_reasons[1][reason], expected->kept_reasons[reason]);
+        }
+        fprintf(stderr, "; the controls' twin: the program's %" PRIu64 ", differ %" PRIu64 ", controls %" PRIu64 ";", shadow.twin_same, shadow.twin_different, shadow.twin_controls);
+        for (uint32_t reason = 0; reason < NODE_TWIN_REASONS; reason += 1)
+        {
+            fprintf(stderr, " %s %" PRIu64 " (%u)", node_twin_reason_names[reason], shadow.twin_reasons[reason], expected->twin_reasons[reason]);
+        }
+        fprintf(stderr, "\n");
+    }
+    counts = counts && kept;
     if (!same || !counts)
     {
         fprintf(stderr, "test-checker: node-bodies: %s, %s: %" PRIu64 " bodies lowered (%u expected), every root the machine's in %" PRIu64 " (%u), %" PRIu64 " attempted (%u), %" PRIu64
@@ -7478,21 +7532,33 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &alone_expected),
                       "node-alone by sweep: the same results, and each sweep's ticks within the run's");
     const NodeBodiesExpected bodies_quiet = {
-        .lowered = 17,
-        .whole = 15,
-        .attempted = 13,
+        .lowered = 19,
+        .whole = 17,
+        .attempted = 15,
         .reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
+        .kept_whole = 18,
+        .kept_attempted = 14,
+        .kept_reasons = { [NODE_BODIES_ROOT] = 1, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 1 },
+        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 15, [NODE_TWIN_UNWHOLE] = 1, [NODE_TWIN_DROPPED] = 1, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1 },
     };
     const NodeBodiesExpected bodies_loud = {
-        .lowered = 17,
-        .whole = 14,
-        .attempted = 12,
+        .lowered = 19,
+        .whole = 16,
+        .attempted = 14,
         .reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
+        .kept_whole = 17,
+        .kept_attempted = 13,
+        .kept_reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 1 },
+        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 14, [NODE_TWIN_UNWHOLE] = 2, [NODE_TWIN_DROPPED] = 1, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1 },
     };
-    check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), &bodies_quiet),
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), false, &bodies_quiet),
                       "node-bodies: a body's entries made from its controls and its roots' tapes are the lowered function's");
-    check_test_expect(test, ready && node_bodies_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), &bodies_loud),
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), false, &bodies_loud),
                       "node-bodies: the same with more warnings, one body fewer for a test's refusal");
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), true, &bodies_quiet),
+                      "node-bodies before the walk: the entries from the tapes kept there are the lowered function's, and the controls from the tokens the program's");
+    check_test_expect(test, ready && node_bodies_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &bodies_loud),
+                      "node-bodies before the walk: the same with more warnings");
     // The flat front beside the lean one, its twin: on the shadow's fixture, at the chunks' ends, where the lean front's
     // stack is full, and past its own rings' reach.
     const uint8_t flat = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_FLAT;
