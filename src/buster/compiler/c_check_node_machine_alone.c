@@ -336,7 +336,9 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
 static __attribute__((noinline)) void node_alone_bodies(struct NodeAlone* alone, NodeFront* front, CheckInputReader* reader, uint32_t first, uint32_t end)
 {
     const uint64_t start = __rdtsc();
-    while (alone->next_body < alone->body_count && alone->body_firsts[alone->next_body] < end)
+    // (Every body at the first call where the unit asks: BUSTER_NODE_READER_ALONE_FIRST.)
+    const bool every = (reader->pp->options.node_reader & BUSTER_NODE_READER_ALONE_FIRST) != 0;
+    while (alone->next_body < alone->body_count && (every || alone->body_firsts[alone->next_body] < end))
     {
         const uint32_t body = alone->next_body;
         alone->next_body += 1;

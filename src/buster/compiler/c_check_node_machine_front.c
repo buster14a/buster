@@ -137,6 +137,10 @@
 // With it (--front-alone-split): its machine's first run timed by sweep, a clock's read between each two (NodeFrontTypes.
 // sweep_ticks). A reading of its own: the reads are among the sweeps' ticks, so the run's whole is the other's.
 #define BUSTER_NODE_READER_SPLIT 16384u
+// With it (--front-alone-first): every body read before the walk acts at the unit's first chunk, where it otherwise
+// reads a body before the walk acts at that body, the bodies before it walked already. A compile that takes bodies in
+// a row walks none of them, so what it reads of a body must not lean on the walk of another.
+#define BUSTER_NODE_READER_ALONE_FIRST 32768u
 // What it says of a body (NodeFrontShadow.alone_body_verdicts): every root the front made of it is taken (T took it, the
 // tests left it silent, C and X took it) and the front left no token of it; or the first thing in the body's order that
 // stops it: a token the front left or a value it lost (an expression it makes no root of), a root the machine didn't run

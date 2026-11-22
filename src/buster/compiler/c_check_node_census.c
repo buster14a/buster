@@ -8403,12 +8403,13 @@ static int run_node_census(int count, char** arguments)
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
             shadow.reader |= BUSTER_NODE_READER_TESTS;
         }
-        else if (strcmp(arguments[i], "--front-alone") == 0 || strcmp(arguments[i], "--front-alone-split") == 0)
+        else if (strcmp(arguments[i], "--front-alone") == 0 || strcmp(arguments[i], "--front-alone-split") == 0 || strcmp(arguments[i], "--front-alone-first") == 0)
         {
             // The machine with no node of the walk's, a body at a time before the walk acts at it; and the machine on the
             // walk's nodes after it, which it is compared with: T, the census's tests, C and X at reader time.
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
-            shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | (strcmp(arguments[i], "--front-alone-split") == 0 ? BUSTER_NODE_READER_SPLIT : 0);
+            shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | (strcmp(arguments[i], "--front-alone-split") == 0 ? BUSTER_NODE_READER_SPLIT : 0) |
+                             (strcmp(arguments[i], "--front-alone-first") == 0 ? BUSTER_NODE_READER_ALONE_FIRST : 0);
         }
         else if (strcmp(arguments[i], "--front-facts") == 0 || strcmp(arguments[i], "--front-window") == 0)
         {
