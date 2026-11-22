@@ -93,8 +93,9 @@ through `testfixture` (below).
   `tclConfig.sh` (`tools/ci/tcl-config.sh` finds it). The Makefile's
   `CFLAGS.core=` drops `-fPIC`, which the driver refused until #2101:
   `make testfixture` is one link of the sources (`main.mk`'s
-  `T.link.tcl`), which takes `-fPIC` since, but the override stays until a
-  run with Tcl builds testfixture without it. Its `-rpath DIR` is accepted
+  `T.link.tcl`), which takes `-fPIC` since, and `-c -fPIC` makes
+  shared-library code since #2101's full policy, but the override stays until
+  a run with Tcl builds testfixture without it. Its `-rpath DIR` is accepted
   since #1854. With `--amalgamation`, each build's
   generated `sqlite3.c` must be that file (the frozen corpus's is). Each
   build then runs `testfixture test/testrunner.tcl --jobs N full` in an empty

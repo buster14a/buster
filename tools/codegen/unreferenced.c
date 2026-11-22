@@ -273,6 +273,30 @@ static int unreferenced_compare(const void* a, const void* b)
     return strcmp(((const UnreferencedGlobal*)a)->name, ((const UnreferencedGlobal*)b)->name);
 }
 
+static int unreferenced_compare_names(const void* a, const void* b)
+{
+    return strcmp(*(const char* const*)a, *(const char* const*)b);
+}
+
+static size_t unreferenced_protected_names(const UnreferencedFile* file, const char** names)
+{
+    size_t count = 0;
+    for (uint64_t i = 1; i < file->section_count; i += 1)
+    {
+        if (file->live[i] || !file->candidate[i])
+        {
+            const char* name = unreferenced_section_name(file, i);
+            if (name != 0)
+            {
+                names[count] = name;
+                count += 1;
+            }
+        }
+    }
+    qsort(names, count, sizeof(*names), unreferenced_compare_names);
+    return count;
+}
+
 // Whether the path can stand quoted in a linker script.
 static bool unreferenced_quotable(const char* path)
 {
@@ -337,6 +361,7 @@ int main(int argc, char** argv)
             item_count += files[f].section_count;
         }
         UnreferencedItem* items = ready ? calloc(item_count + 1, sizeof(UnreferencedItem)) : 0;
+        ready = ready && items != 0;
         uint64_t pending = 0;
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
@@ -404,18 +429,21 @@ int main(int argc, char** argv)
         uint64_t bytes = 0;
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
+            // The traversal is over. Its allocation has room for one name per section, even for the largest part.
+            _Static_assert(sizeof(UnreferencedItem) >= sizeof(const char*), "each traversal slot must fit a section name");
+            const char** names = 0;
+            size_t protected_count = 0;
             for (uint64_t i = 1; i < files[f].section_count; i += 1)
             {
                 if (files[f].candidate[i] && !files[f].live[i])
                 {
                     const char* name = unreferenced_section_name(&files[f], i);
-                    bool shared = name == 0;
-                    for (uint64_t j = 1; j < files[f].section_count && !shared; j += 1)
+                    if (names == 0)
                     {
-                        const char* other = unreferenced_section_name(&files[f], j);
-                        shared = j != i && (files[f].live[j] || !files[f].candidate[j]) && other != 0 && strcmp(other, name) == 0;
+                        names = (const char**)(void*)items;
+                        protected_count = unreferenced_protected_names(&files[f], names);
                     }
-                    if (!shared)
+                    if (name != 0 && bsearch(&name, names, protected_count, sizeof(*names), unreferenced_compare_names) == 0)
                     {
                         fprintf(script, "        \"%s\"(%s)\n", files[f].path, name);
                         dead += 1;

@@ -44,6 +44,12 @@ static uint32_t ir_rebuild_values(uint32_t op)
     return mask;
 }
 
+// The null plan retains every verified block and row at its original index.
+static uint32_t ir_rebuild_index(const uint32_t* map, uint32_t index)
+{
+    return map != NULL ? map[index] : index;
+}
+
 static uint32_t ir_rebuild_value(const IrFunction* source, const IrRebuildPlan* plan, const uint32_t* values, uint32_t value)
 {
     uint32_t result = BUSTER_IR_NONE;
@@ -57,7 +63,7 @@ static uint32_t ir_rebuild_value(const IrFunction* source, const IrRebuildPlan* 
         if (target < source->instruction_count && source->type[target] == source->type[value] &&
             (plan == NULL || plan->aliases == NULL || plan->aliases[target] == BUSTER_IR_NONE || plan->aliases[target] == target))
         {
-            result = values[target];
+            result = ir_rebuild_index(values, target);
         }
     }
     return result;
@@ -211,23 +217,25 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
     }
     if (check.error == IR_OK)
     {
-        block_map = source->block_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, source->block_count) : NULL;
-        value_map = source->instruction_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, source->instruction_count) : NULL;
+        const uint32_t mapped_blocks = plan != NULL ? source->block_count : 0;
+        const uint32_t mapped_rows = plan != NULL ? source->instruction_count : 0;
+        block_map = mapped_blocks != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, mapped_blocks) : NULL;
+        value_map = mapped_rows != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, mapped_rows) : NULL;
         slot_map = source->slot_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, source->slot_count) : NULL;
-        if ((source->block_count != 0 && block_map == NULL) || (source->instruction_count != 0 && value_map == NULL) ||
+        if ((mapped_blocks != 0 && block_map == NULL) || (mapped_rows != 0 && value_map == NULL) ||
             (source->slot_count != 0 && slot_map == NULL))
         {
             check.error = IR_ERROR_MEMORY;
         }
         else
         {
-            if (source->block_count != 0)
+            if (block_map != NULL)
             {
-                memset(block_map, 0xff, (uint64_t)source->block_count * sizeof(*block_map));
+                memset(block_map, 0xff, (uint64_t)mapped_blocks * sizeof(*block_map));
             }
-            if (source->instruction_count != 0)
+            if (value_map != NULL)
             {
-                memset(value_map, 0xff, (uint64_t)source->instruction_count * sizeof(*value_map));
+                memset(value_map, 0xff, (uint64_t)mapped_rows * sizeof(*value_map));
             }
             if (source->slot_count != 0)
             {
@@ -235,11 +243,11 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             }
         }
     }
-    for (uint32_t b = 0; check.error == IR_OK && b < blocks; b += 1)
+    for (uint32_t b = 0; check.error == IR_OK && plan != NULL && b < blocks; b += 1)
     {
-        const uint32_t old = plan != NULL && plan->blocks != NULL ? plan->blocks[b] : b;
-        const uint32_t begin = plan != NULL && plan->offsets != NULL ? plan->offsets[b] : source->block_offsets[b];
-        const uint32_t end = plan != NULL && plan->offsets != NULL ? plan->offsets[b + 1] : source->block_offsets[b + 1];
+        const uint32_t old = plan->blocks != NULL ? plan->blocks[b] : b;
+        const uint32_t begin = plan->offsets != NULL ? plan->offsets[b] : source->block_offsets[b];
+        const uint32_t end = plan->offsets != NULL ? plan->offsets[b + 1] : source->block_offsets[b + 1];
         if (old >= source->block_count || block_map[old] != BUSTER_IR_NONE || (b == 0 && old != 0) ||
             begin >= end || end > rows || (b == 0 && begin != 0) || (b + 1 == blocks && end != rows))
         {
@@ -250,7 +258,7 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             block_map[old] = b;
             for (uint32_t i = begin; check.error == IR_OK && i < end; i += 1)
             {
-                const uint32_t old_row = plan != NULL && plan->rows != NULL ? plan->rows[i] : i;
+                const uint32_t old_row = plan->rows != NULL ? plan->rows[i] : i;
                 if (old_row < source->block_offsets[old] || old_row >= source->block_offsets[old + 1] || value_map[old_row] != BUSTER_IR_NONE)
                 {
                     check.error = IR_ERROR_STRUCTURE;
@@ -314,9 +322,16 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
         }
         else if (op == IR_PHI)
         {
-            for (uint32_t p = 0; p < b; p += 1)
+            if (plan == NULL)
             {
-                sizes.extra_count += block_map[source->extra[a + p * 2]] != BUSTER_IR_NONE ? 2 : 0;
+                sizes.extra_count += (uint64_t)b * 2;
+            }
+            else
+            {
+                for (uint32_t p = 0; p < b; p += 1)
+                {
+                    sizes.extra_count += block_map[source->extra[a + p * 2]] != BUSTER_IR_NONE ? 2 : 0;
+                }
             }
         }
         else if (op == IR_SWITCH)
@@ -438,7 +453,7 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
                 const uint32_t first = extra;
                 for (uint32_t p = 0; check.error == IR_OK && p < b; p += 1)
                 {
-                    const uint32_t predecessor = block_map[source->extra[a + p * 2]];
+                    const uint32_t predecessor = ir_rebuild_index(block_map, source->extra[a + p * 2]);
                     if (predecessor != BUSTER_IR_NONE)
                     {
                         const uint32_t value = ir_rebuild_value(source, plan, value_map, source->extra[a + p * 2 + 1]);
@@ -453,10 +468,10 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             else if (op == IR_BR || op == IR_CBR)
             {
                 uint32_t* first = op == IR_BR ? candidate.a + i : candidate.b + i;
-                *first = block_map[op == IR_BR ? a : b];
+                *first = ir_rebuild_index(block_map, op == IR_BR ? a : b);
                 if (op == IR_CBR)
                 {
-                    candidate.c[i] = block_map[c];
+                    candidate.c[i] = ir_rebuild_index(block_map, c);
                 }
                 if (*first == BUSTER_IR_NONE || (op == IR_CBR && candidate.c[i] == BUSTER_IR_NONE))
                 {
@@ -466,13 +481,13 @@ static __attribute__((unused)) IrCheck ir_rebuild(const IrFunction* source, cons
             else if (op == IR_SWITCH)
             {
                 candidate.b[i] = extra;
-                candidate.extra[extra++] = block_map[source->extra[b]];
+                candidate.extra[extra++] = ir_rebuild_index(block_map, source->extra[b]);
                 check.error = candidate.extra[extra - 1] != BUSTER_IR_NONE ? check.error : IR_ERROR_OPERAND;
                 for (uint32_t p = 0; check.error == IR_OK && p < c; p += 1)
                 {
                     candidate.constants[constant] = source->constants[source->extra[b + 1 + p * 2]];
                     candidate.extra[extra++] = constant++;
-                    candidate.extra[extra++] = block_map[source->extra[b + 2 + p * 2]];
+                    candidate.extra[extra++] = ir_rebuild_index(block_map, source->extra[b + 2 + p * 2]);
                     check.error = candidate.extra[extra - 1] != BUSTER_IR_NONE ? IR_OK : IR_ERROR_OPERAND;
                 }
             }

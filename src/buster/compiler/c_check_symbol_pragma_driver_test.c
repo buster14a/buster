@@ -135,17 +135,21 @@ static void check_test_driver_symbol_pragmas(CheckTest* test, const char* clang,
 
 // #2449: late alias targets remain visible after the alias's actual error. Sources and the case inventory are runtime
 // data; the ordinary source-fixture loader owns their bytes and rejects missing, duplicate and orphaned cases.
-static void check_test_driver_weak_alias_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
+// A declared but undefined target is accepted by Sema and rejected only by code generation. Each action therefore
+// has its own oracle; the codegen catalogue's rejected flag applies only to emitting commands.
+static void check_test_driver_weak_alias_diagnostic_suite(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* suite, bool codegen)
 {
     CheckTestFixtures fixtures;
-    const bool loaded = check_test_fixtures_load(&fixtures, "checker/weak-alias");
+    const bool loaded = check_test_fixtures_load(&fixtures, suite);
     check_test_expect(test, loaded, loaded ? "weak alias diagnostic fixtures loaded" : fixtures.problem);
     char source[PATH_MAX];
     char object[PATH_MAX];
-    char expected_lines[8192];
+    char oracle_object[PATH_MAX];
+    char expected_lines[2][8192];
     char actual_lines[8192];
     snprintf(source, sizeof(source), "%s/weak-alias-diagnostic.c", directory);
     snprintf(object, sizeof(object), "%s/weak-alias-diagnostic.o", directory);
+    snprintf(oracle_object, sizeof(oracle_object), "%s/weak-alias-diagnostic-clang.o", directory);
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const policies[] = { "-ferror-limit=0", "-ferror-limit=1", "-w", "-Werror=ignored-attributes" };
     static const char sentinel[] = "preserve the existing weak alias object\n";
@@ -158,16 +162,40 @@ static void check_test_driver_weak_alias_diagnostics(CheckTest* test, const char
         {
             for (uint32_t policy = 0; policy < BUSTER_ARRAY_LENGTH(policies); policy += 1)
             {
-                char* expected = NULL;
-                char* oracle_arguments[] = { (char*)clang, (char*)standards[standard], "-fsyntax-only", "-fno-caret-diagnostics", source,
-                                            (char*)policies[policy], NULL };
-                const int oracle = check_test_driver_spawn(oracle_arguments, &expected);
-                const bool lines = (oracle == 0 || oracle == 1) && expected != NULL && check_test_diagnostic_lines(expected, expected_lines, sizeof(expected_lines));
-                check_test_expect(test, lines && oracle == (fixture->rejected ? 1 : 0), "weak alias oracle agrees with independent acceptance expectation");
-                for (uint32_t mode = 0; lines && mode < 6; mode += 1)
+                char* expected[2] = { NULL, NULL };
+                int oracle[2] = { -1, -1 };
+                bool lines[2] = { false, false };
+                for (uint32_t action = 0; action < 2; action += 1)
+                {
+                    char* oracle_arguments[] = { (char*)clang, (char*)standards[standard], action != 0 ? "-c" : "-fsyntax-only",
+                                                "-fno-caret-diagnostics", source, (char*)policies[policy], "-o", oracle_object, NULL };
+                    unlink(oracle_object);
+                    oracle[action] = check_test_driver_spawn(oracle_arguments, expected + action);
+                    if (expected[action] != NULL)
+                    {
+                        // Scratch-buffer line numbers are compiler-internal; retain the spelling column and all
+                        // real source coordinates and macro backtraces.
+                        pp_test_normalize_scratch(expected[action]);
+                    }
+                    lines[action] = (oracle[action] == 0 || oracle[action] == 1) && expected[action] != NULL &&
+                                    check_test_diagnostic_lines(expected[action], expected_lines[action], sizeof(expected_lines[action]));
+                    const bool rejected = fixture->rejected && (!codegen || action != 0);
+                    char description[512];
+                    snprintf(description, sizeof(description), "%s, %s %s %s: weak alias oracle agrees with independent acceptance expectation",
+                             fixture->name, standards[standard], policies[policy], action != 0 ? "object" : "syntax");
+                    check_test_expect(test, lines[action] && oracle[action] == (rejected ? 1 : 0), description);
+                    if (!lines[action] || oracle[action] != (rejected ? 1 : 0))
+                    {
+                        fprintf(stderr, "%s\nclang:\n%s\n", description, expected[action] != NULL ? expected[action] : "(no output)");
+                    }
+                    unlink(oracle_object);
+                }
+                for (uint32_t mode = 0; lines[0] && lines[1] && mode < 6; mode += 1)
                 {
                     const bool emitting = mode >= 2;
                     const bool deferred = mode >= 4;
+                    const uint32_t action = emitting ? 1 : 0;
+                    const bool rejected = fixture->rejected && (!codegen || emitting);
                     char* actual = NULL;
                     char* arguments[16] = { (char*)executable, (char*)standards[standard], emitting ? "-c" : "-fsyntax-only",
                                            "-fno-caret-diagnostics", source, (char*)policies[policy] };
@@ -192,38 +220,180 @@ static void check_test_driver_weak_alias_diagnostics(CheckTest* test, const char
                     const bool existing = emitting && (mode & 1u) != 0;
                     bool published = !existing || parse_test_write(object, sentinel, sizeof(sentinel) - 1);
                     const int status = check_test_driver_spawn(arguments, &actual);
+                    if (actual != NULL)
+                    {
+                        pp_test_normalize_scratch(actual);
+                    }
                     const bool same = actual != NULL && check_test_diagnostic_lines(actual, actual_lines, sizeof(actual_lines)) &&
-                                      strcmp(expected_lines, actual_lines) == 0;
-                    if (emitting && (existing || !fixture->rejected))
+                                      strcmp(expected_lines[action], actual_lines) == 0;
+                    if (emitting && (existing || !rejected))
                     {
                         const int descriptor = open(object, O_RDONLY);
                         char* contents = NULL;
-                        published &= descriptor >= 0 && check_test_driver_read_file(descriptor, &contents) && contents != NULL;
+                        struct stat information = { 0 };
+                        published &= descriptor >= 0 && fstat(descriptor, &information) == 0 &&
+                                     check_test_driver_read_file(descriptor, &contents) && contents != NULL;
                         if (descriptor >= 0)
                         {
                             close(descriptor);
                         }
-                        published &= contents != NULL && (fixture->rejected ? strcmp(contents, sentinel) == 0 :
-                                                            strlen(contents) >= 4 && memcmp(contents, "\177ELF", 4) == 0);
+                        published &= contents != NULL && (rejected ? information.st_size == (off_t)(sizeof(sentinel) - 1) &&
+                                                                    memcmp(contents, sentinel, sizeof(sentinel) - 1) == 0 :
+                                                                    information.st_size >= 4 && memcmp(contents, "\177ELF", 4) == 0);
                         free(contents);
                     }
                     else if (emitting)
                     {
                         published &= access(object, F_OK) != 0;
                     }
-                    const bool correct = same && status == oracle && published;
+                    const bool correct = same && status == oracle[action] && published;
                     char description[512];
                     snprintf(description, sizeof(description), "%s, %s %s mode %u: status %d (clang %d), complete diagnostic output and publication", fixture->name,
-                             standards[standard], policies[policy], mode, status, oracle);
+                             standards[standard], policies[policy], mode, status, oracle[action]);
                     check_test_expect(test, correct, description);
                     if (!correct)
                     {
-                        fprintf(stderr, "%s\nours:\n%s\nclang:\n%s\n", description, actual != NULL ? actual : "(no output)", expected);
+                        fprintf(stderr, "%s\nours:\n%s\nclang:\n%s\n", description, actual != NULL ? actual : "(no output)", expected[action]);
                     }
                     free(actual);
                     unlink(object);
                 }
-                free(expected);
+                free(expected[0]);
+                free(expected[1]);
+            }
+        }
+    }
+    unlink(source);
+    arena_release(&fixtures.storage);
+}
+
+static void check_test_driver_weak_alias_diagnostics(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_weak_alias_diagnostic_suite(test, clang, executable, directory, "checker/weak-alias", false);
+    check_test_driver_weak_alias_diagnostic_suite(test, clang, executable, directory, "checker/weak-alias-codegen", true);
+}
+
+// A non-common tentative definition and its alias are definitions in the same ordinary ELF section. Checking the
+// section as well as binding prevents an accepted control from keeping SHN_COMMON or an undefined alias unnoticed.
+static bool check_test_weak_alias_common_symbols(const char* path, uint8_t binding)
+{
+    Arena storage = arena_reserve(UINT64_C(1) << 20);
+    CheckTestElf elf = { 0 };
+    bool valid = storage.base != NULL && check_test_elf_open(&elf, object_test_read_file(&storage, path));
+    const uint32_t target = valid ? check_test_elf_defined(&elf, "common_target") : 0;
+    const uint32_t alias = valid ? check_test_elf_defined(&elf, "common_alias") : 0;
+    uint16_t target_flags = UINT16_MAX;
+    uint16_t alias_flags = UINT16_MAX;
+    valid &= target != 0 && alias == target && check_test_visibility_symbol(path, "common_target", &target_flags) &&
+             check_test_visibility_symbol(path, "common_alias", &alias_flags) && target_flags == (uint16_t)(STB_GLOBAL << 8) &&
+             alias_flags == (uint16_t)(binding << 8);
+    arena_release(&storage);
+    return valid;
+}
+
+// #2449's common-symbol boundary deliberately remains a named refusal: Clang's integrated assembler rejects the
+// assignment, rather than Sema rejecting the declaration. Every compiler mode must preserve an existing output;
+// -fno-common independently checks that the same source still emits the alias, including a pragma-only clone.
+static void check_test_driver_weak_alias_common(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    CheckTestFixtures fixtures;
+    const bool loaded = check_test_fixtures_load(&fixtures, "checker/weak-alias-common");
+    check_test_expect(test, loaded, loaded ? "common-target alias fixtures loaded" : fixtures.problem);
+    char source[PATH_MAX];
+    char object[PATH_MAX];
+    char oracle_object[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/weak-alias-common.c", directory);
+    snprintf(object, sizeof(object), "%s/weak-alias-common.o", directory);
+    snprintf(oracle_object, sizeof(oracle_object), "%s/weak-alias-common-clang.o", directory);
+    static const char sentinel[] = "keep the existing common-target alias object\n";
+    for (uint32_t f = 0; loaded && f < fixtures.count; f += 1)
+    {
+        const CheckSourceFixture* fixture = fixtures.cases + f;
+        const bool written = parse_test_write(source, fixture->source, strlen(fixture->source));
+        check_test_expect(test, written, "common-target alias source written");
+        const uint8_t binding = strcmp(fixtures.files[f], "attribute.c") == 0 ? STB_GLOBAL : STB_WEAK;
+        for (uint32_t common = 0; written && common < 2; common += 1)
+        {
+            const char* option = common != 0 ? "-fcommon" : "-fno-common";
+            const bool rejected = common != 0 && fixture->rejected;
+            char* expected = NULL;
+            char* oracle_arguments[] = { (char*)clang, "-std=gnu17", "-O0", "-c", (char*)option, "-fno-caret-diagnostics", source,
+                                        "-o", oracle_object, NULL };
+            unlink(oracle_object);
+            const int oracle = check_test_driver_spawn(oracle_arguments, &expected);
+            const bool oracle_valid = expected != NULL && (rejected ? oracle == 1 && strstr(expected, "Common symbol") != NULL :
+                                                                                 oracle == 0 && check_test_weak_alias_common_symbols(oracle_object, binding));
+            char description[512];
+            snprintf(description, sizeof(description), "%s %s: Clang rejects common aliases and defines the non-common control", fixture->name, option);
+            check_test_expect(test, oracle_valid, description);
+            if (!oracle_valid)
+            {
+                fprintf(stderr, "%s\nclang:\n%s\n", description, expected != NULL ? expected : "(no output)");
+            }
+            free(expected);
+            unlink(oracle_object);
+            for (uint32_t mode = 0; mode < 6; mode += 1)
+            {
+                const bool prior = parse_test_write(object, sentinel, sizeof(sentinel) - 1);
+                char* actual = NULL;
+                char* arguments[16] = { (char*)executable, "-std=gnu17", "-O0", "-c", (char*)option, "-fno-caret-diagnostics", source,
+                                       "-o", object };
+                uint32_t count = 9;
+                if ((mode & 1u) != 0)
+                {
+                    arguments[count++] = "--scalar";
+                }
+                if (mode >= 2)
+                {
+                    arguments[count++] = "--deferred-bodies";
+                    arguments[count++] = "--lanes";
+                    arguments[count++] = mode < 4 ? "1" : "3";
+                }
+                arguments[count] = NULL;
+                const int status = check_test_driver_spawn(arguments, &actual);
+                bool correct = prior && actual != NULL && status == (rejected ? 1 : 0);
+                if (rejected)
+                {
+                    const int descriptor = open(object, O_RDONLY);
+                    struct stat information = { 0 };
+                    char* contents = NULL;
+                    const bool preserved = descriptor >= 0 && fstat(descriptor, &information) == 0 &&
+                                           information.st_size == (off_t)(sizeof(sentinel) - 1) && check_test_driver_read_file(descriptor, &contents) &&
+                                           contents != NULL && memcmp(contents, sentinel, sizeof(sentinel) - 1) == 0;
+                    if (descriptor >= 0)
+                    {
+                        close(descriptor);
+                    }
+                    correct &= preserved && actual != NULL && strstr(actual, "common symbol") != NULL;
+                    free(contents);
+                }
+                else
+                {
+                    correct &= check_test_weak_alias_common_symbols(object, binding);
+                }
+                snprintf(description, sizeof(description), "%s %s mode %u: common alias refusal preserves output, non-common alias retains its binding",
+                         fixture->name, option, mode);
+                check_test_expect(test, correct, description);
+                if (!correct)
+                {
+                    fprintf(stderr, "%s\nstatus %d, ours:\n%s\n", description, status, actual != NULL ? actual : "(no output)");
+                }
+                free(actual);
+                unlink(object);
+                if (rejected)
+                {
+                    actual = NULL;
+                    const int absent_status = check_test_driver_spawn(arguments, &actual);
+                    const bool absent = absent_status == 1 && actual != NULL && strstr(actual, "common symbol") != NULL && access(object, F_OK) != 0;
+                    snprintf(description, sizeof(description), "%s -fcommon mode %u: rejected common alias creates no output", fixture->name, mode);
+                    check_test_expect(test, absent, description);
+                    if (!absent)
+                    {
+                        fprintf(stderr, "%s\nstatus %d, ours:\n%s\n", description, absent_status, actual != NULL ? actual : "(no output)");
+                    }
+                    free(actual);
+                    unlink(object);
+                }
             }
         }
     }
@@ -235,8 +405,8 @@ static void check_test_driver_weak_alias_diagnostics(CheckTest* test, const char
 // objects must be the same bytes, linked and run as clang's object: the shapes whose A the unit declares, and clang's
 // clones of T's declaration (an A never declared, of a function or a variable, a static, a T defined later; an A declared
 // before the pragma, never named, of another kind, type, thread-local storage or with a section); an A that is an alias
-// already, which keeps its own; the shapes still refused by name, which clang's Sema errors at; and the warning for a T
-// never declared, line for line clang's.
+// already, which keeps its own; and the warning for a T never declared, line for line clang's. Deferred runs must retain
+// each target and publish its alias exactly as the eager reader does.
 static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char source[] =
@@ -254,21 +424,10 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
     static const char* const names[] = {
         "t", "w_storage", "s", "a", "v", "ps", "b", "c", "later", "main", "u1", "u2", "u3", "u4", "k1", "k2", "k3", "k4", "k5", "k6", "st", "other", "tls_t",
     };
-    static const char* const refused[] = {
-        // T not defined: "alias must point to a defined variable or function".
-        "int t(void);\nint a(void);\n#pragma weak a = t\n",
-        // A defined after the pragma: "redefinition of 'a'".
-        "int t = 1;\n#pragma weak a = t\nint a = 2;\n",
-        // A declared after the pragma with another type: "redeclaration of 'a' with a different type".
-        "long t = 1;\n#pragma weak a = t\nextern int a;\n",
-        // Unlike an object/function lookup set, different function parameters can form a valid clang overload set.
-        // This still requires overload selection, so it must remain an explicit refusal rather than ambiguity.
-        "long a(int);\nint t(double d) { return d; }\n#pragma weak a = t\nint use(void) { return a(1); }\n",
-    };
     char path[512];
-    static const char* const modes[] = { "clang", "vector", "scalar", "debug" };
-    char objects[BUSTER_ARRAY_LENGTH(modes)][512];
-    char programs[BUSTER_ARRAY_LENGTH(modes)][512];
+    static const char* const modes[] = { "clang", "vector", "scalar", "deferred-one-lane", "deferred-three-lanes", "debug" };
+    char objects[BUSTER_ARRAY_LENGTH(modes)][512] = { { 0 } };
+    char programs[BUSTER_ARRAY_LENGTH(modes)][512] = { { 0 } };
     char captured[BUSTER_ARRAY_LENGTH(modes)][256] = { { 0 } };
     snprintf(path, sizeof(path), "%s/weak-aliases.c", directory);
     const bool written = parse_test_write(path, source, sizeof(source) - 1);
@@ -278,10 +437,18 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         snprintf(objects[p], sizeof(objects[p]), "%s/weak-aliases-%u.o", directory, p);
         snprintf(programs[p], sizeof(programs[p]), "%s/weak-aliases-%u", directory, p);
         char* text = NULL;
-        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p], p == 2 ? "--scalar" : p == 3 ? "-g" : NULL, NULL };
+        const bool deferred = p == 3 || p == 4;
+        char* arguments[] = { (char*)(p == 0 ? clang : executable), "-std=gnu17", "-O0", "-c", path, "-o", objects[p],
+                              deferred ? "--deferred-bodies" : p == 2 ? "--scalar" : p == 5 ? "-g" : NULL,
+                              deferred ? "--lanes" : NULL, p == 3 ? "1" : p == 4 ? "3" : NULL, NULL };
         const bool compiled = check_test_driver_spawn(arguments, &text) == 0;
+        check_test_expect(test, compiled, "weak alias pragmas compile through clang and every checker path");
+        if (!compiled)
+        {
+            fprintf(stderr, "weak alias pragma object pass %u did not compile:\n%s\n", p, text != NULL ? text : "(no output)");
+        }
         free(text);
-        check_test_expect(test, compiled, "weak alias pragmas compile through clang and the checker");
+        text = NULL;
         for (uint32_t n = 0; compiled && p != 0 && n < BUSTER_ARRAY_LENGTH(names); n += 1)
         {
             uint16_t ours = UINT16_MAX;
@@ -297,22 +464,14 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         check_test_expect(test, linked && check_test_driver_capture(programs[p], captured[p], sizeof(captured[p])), "weak alias pragmas' objects link and run");
     }
     check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[2]), "weak alias pragmas' scalar and vector objects match byte for byte");
-    check_test_expect(test, captured[0][0] != 0 && strcmp(captured[1], captured[0]) == 0 && strcmp(captured[2], captured[0]) == 0 && strcmp(captured[3], captured[0]) == 0,
-                      "weak alias pragmas' programs run as clang's");
+    for (uint32_t p = 1; p < BUSTER_ARRAY_LENGTH(modes); p += 1)
+    {
+        check_test_expect(test, captured[0][0] != 0 && strcmp(captured[p], captured[0]) == 0, "weak alias pragmas' programs run as clang's, by every path");
+    }
     for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(modes); p += 1)
     {
         unlink(objects[p]);
         unlink(programs[p]);
-    }
-    for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(refused); r += 1)
-    {
-        const bool shape = parse_test_write(path, refused[r], strlen(refused[r]));
-        char* text = NULL;
-        char* arguments[] = { (char*)executable, "-std=gnu17", "-O0", "-c", path, "-o", objects[1], NULL };
-        const int status = shape ? check_test_driver_spawn(arguments, &text) : 0;
-        check_test_expect(test, status != 0 && text != NULL && strstr(text, "'#pragma weak'") != NULL, "a weak alias pragma of a shape not modeled is refused by name");
-        free(text);
-        unlink(objects[1]);
     }
     // A target never declared: clang's warning at the alias's name, by both paths, at -fsyntax-only.
     static const char undeclared[] = "#pragma weak d = undeclared_target\nint x;\n";
@@ -333,4 +492,5 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
     free(theirs);
     unlink(path);
     check_test_driver_weak_alias_diagnostics(test, clang, executable, directory);
+    check_test_driver_weak_alias_common(test, clang, executable, directory);
 }

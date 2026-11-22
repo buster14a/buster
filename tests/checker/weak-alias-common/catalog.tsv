@@ -1,0 +1,5 @@
+buster-fixtures v1 checker-sources
+duplicate-defined	duplicate-defined.c	-	a later ignored common clone cannot replace the first defined alias
+attribute	attribute.c	rejected	an ordinary alias of a common target retains its named emission refusal
+pragma-before	pragma-before.c	rejected	a pragma-only clone of a later common target cannot publish an object
+pragma-after	pragma-after.c	rejected	a pragma-only clone of an existing common target cannot publish an object

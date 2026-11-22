@@ -1560,6 +1560,160 @@ lines come before every diagnostic of the unit, where clang interleaves them.
 `c_driver_compatibility_test.c` (`test-checker-driver`) compares the lines with
 clang's byte for byte.
 
+### `-E`'s output modes: `-C`, `-CC`, `-dD`, `-dI` and `-dN` (#1380)
+
+`-C` keeps the files' comments in `-E`'s output, `-CC` keeps those of macros'
+replacement lists and arguments too, `-dD` prints each `#define` and `#undef`
+where it runs, and `-dI` each `#include`, `#include_next` and `#import` before
+what it includes, as clang 23 does. `-C` and `-CC` need `-E`, as clang's driver
+has it (`invalid argument '-C' only allowed with '-E'`, even with `-M`);
+`-dD` and `-dI` are taken with any action and change only `-E`'s output; `-dM`
+turns all four off, as clang's `-dM` does. `-dN` is taken and reported as
+clang's driver reports it, `argument unused during compilation: '-dN'`, once
+for each, under `-Wunused-command-line-argument`'s policy: `-w` and
+`-Wno-unused-command-line-argument` silence it, `-Werror` makes it an error
+and `-Wno-error=unused-command-line-argument` a warning again
+(`pp_unused_arguments_diagnose`, beside the unknown warning options' check,
+whose policy it shares).
+
+**Comments are tokens.** Clang's lexer returns a comment as a token under `-C`
+everywhere but in a directive's line, and that changes preprocessing, as GCC's
+documentation says of its `-C`: `/* c */ #define X 1` is text, as the comment
+takes the line's start (in a group a skip passes over too, so `/* c */ #endif`
+ends no group), `F /* c */ (1)` doesn't invoke `F`, whose name the comment
+follows rather than a `(`, and `_Pragma(/* c */ "x")` is an error. So under
+`-C` the files' comments are tokens here too:
+
+- The scalar lexer makes them, with `C_TOKENIZER_KEEP_COMMENTS`: a
+  `C_TOKEN_UNKNOWN` token from the comment's `/` to past its `*/`, or to the
+  newline that ends a `//` one, which takes the start-of-line bit where it
+  starts its logical line. No other unknown token starts with `/` (a `/` alone is
+  a slash), so that is what marks one (`pp_comment_token`). Only the scalar
+  lexer has the flag, as only it has `C_TOKENIZER_NO_DOLLARS`, and such a file is
+  prepared whole, not by windows; `PPPrepare.comments` is part of the file
+  cache's key. `test-lexer` checks the tokens against the lexer's own without the
+  flag on 20,000 random inputs and fixtures, in both number modes, with and
+  without trigraphs (`check_kept_comments`): the same tokens but the comments,
+  the start of each line where one of its comments or its first token has it,
+  and nothing but blanks and splices between the kept tokens.
+- Before refinement, `pp_drop_directive_comments` drops the comments a
+  directive's line holds, as clang's lexer keeps none there, but with `-CC` those
+  of a `#define`'s replacement list: from the token after the macro's name, or
+  after the `)` of its parameters when a `(` follows the name with only line
+  splices between them, as clang turns comments on again there. The token after
+  a dropped comment keeps its gap, which refinement reads as whitespace.
+- A file's include guard counts its comments as nothing (`pp_guard_tokens`), as
+  clang's multiple-include optimization doesn't count them: a header with a
+  comment before its `#ifndef` is still skipped, its comments not printed again.
+- In the main loop a comment is an unknown token: it goes to the output as any
+  token does, stops a function-like macro's name from taking a `(` after it, and
+  is a token that `_Pragma` refuses. `-C` drops it from a macro's arguments, as
+  clang's `ReadMacroCallArgumentList` does: those are collected a token at a time
+  (`pp_collect_step`, `Preprocessor.drop_argument_comments`), with
+  `pp_invoke_file` and the arguments' bulk collectors standing aside, and a
+  builtin's operands keep it. `-CC` keeps it there and in replacement lists, from
+  which it reaches stringizing (`"5 /* c */ 6"`) and pasting: a comment pasted on
+  the left is skipped, as clang's raw lexer skips it in the joined text
+  (`/* c */ ## b` is `b`). A directive's line expanded into a capture (`#if`,
+  `#elif`, a computed `#include`, `#line`, `#embed`) drops the comments the
+  replacement lists put in it (`pp_capture_drop_comments`), as clang's readers of
+  those lines skip them (`LexNonComment`).
+- A comment's spelling is clang's: as written, line splices and trigraphs and
+  all, as clang's lexer skips its body without marking it for cleaning, but where
+  a splice splits its opener or, in a `//` comment, escapes a newline, which
+  makes clang clean it (`pp_without_splices`).
+- The printer counts a comment's line breaks into the line, as clang's
+  `HandleNewlinesInToken` does, and after a `//` comment the next token starts a
+  line, as after clang's `setEmittedDirectiveOnThisLine`. Under `-CC` a `//`
+  comment of a replacement list prints as clang's lexer made it there,
+  `/* x*/` (`pp_comment_in_directive`), and a `//` comment among a macro's
+  arguments ends the expansion's line.
+
+**Directives among the tokens.** With `-dD` or `-dI`, `pp_define`, `#undef`
+and `pp_include_file` record a `PPOutputEvent` as they run: the output token it
+goes before, the include exits recorded before it, and its place (the macro's
+name, or the directive's `#`). A definition refers to its macro's record, which
+no later definition changes (`pp_new_macro`). `pp_print_events` prints each at
+its line as a token that starts a line is placed (`pp_print_place`), after the
+include exits that go first, and the next token starts a line after it: a
+`#define` as `-dM` prints its macro (`pp_print_macro_definition`, which both
+share), an `#undef` whether the name was defined or not, and an include as
+`#include "name" /* clang -E -dI */` with its directive's name and the name it
+gives, after any expansion, whether the file is entered or skipped. The
+predefines' and the command line's definitions print under `<built-in>` and
+`<command line>`; such a root's includer is the main file at its first line
+(`pp_print_includer`), as clang includes its `<built-in>` buffer there. A
+history replay records none: the run's records are the printer's.
+
+**The printer.** `-E`'s one printer (`pp_print_vector_mode`, #2924) prints
+these modes too. A comment is an unknown token, which it takes as any other;
+under `-C` and `-CC` step 2 makes the token after a `//` comment start a line
+(`line_comments`, carried to the next chunk by `force_line`). `-CC`'s chunks
+that hold an unknown token go through the general loop, which spells a
+replacement list's `//` comment as a block comment: the rarest of these modes.
+`-dD`'s and `-dI`'s directives stop the batches at a chunk that holds one, as
+an include exit does, and `pp_print_events` prints it through stdio before the
+token it precedes.
+
+**The default path does none of this** (#2925). `pp_print` gives these modes
+an instance of the loop of their own (`pp_print_modes`, its `modes`
+argument), so that `-E`'s default instances test none of them. In those
+instances the `-CC` mask, the line starts after `//` comments and the
+directives' tests had cost `-E -P`'s printing of `main.c` 3.8% on the 9700X.
+The helpers that the default instances inline are `BUSTER_INLINE`, since the
+second caller made the compiler call some of them out of line instead, which
+cost the printing with line markers 1.6%. Elsewhere the modes' work is out of
+line, behind a test of the option: `pp_collect_step` (`pp_argument_comment`),
+`pp_paste` (`pp_paste_comments`), `pp_without_splices`
+(`pp_comment_as_written`), the include guard (`pp_guard_comments`) and
+preparation (`pp_drop_directive_comments`, `pp_comment_closed`). The options'
+and the preprocessor's new fields sit in what were holes, or at the end,
+so that the other fields keep their offsets.
+
+**Cost** (the 9700X, CPU 2, the frozen `sqlite3.c` with its pinned headers; [the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/e-output-modes-1380-2026-11-17),
+buster-performance `59c2b612`). Without these options a run is main's: `-E -P`,
+`-E` and `-c` of `sqlite3.c` within main's own repeat (11.435 against 11.450 ms,
+13.878 against 13.878, 120.220 against 120.586), with 0.05% fewer, 0.08% and
+0.02% more instructions. With them, `-E -P -C` takes 28.8 ms against `-E -P`'s
+11.5, and `-E -C` 34.7 against 13.9: the scalar lexer takes 15.7 ms where the
+vectorized one takes 2.4 without comments, refinement 4.6 against 1.5 (the
+comments' bytes are tokens'), and the main loop 6.9 against 5.4 (`-C`'s arguments
+a token at a time). `-E -P -CC` took 39.4 ms, its printing by the scalar printer
+13.5 against 2.1, before #2924 removed that printer and `-CC` moved to the
+vector printer's general loop (not measured on the 9700X since). `-E -dD -dI`
+takes 15.4 ms against `-E`'s 13.9 (26.5 before the vector printer printed them).
+These modes are `-E`'s opt-in output for tools and small inputs (a linker
+script's `$(CPP) -P -C`), which no compile reads: the comments' lexer stays the
+scalar one, and a vectorized lexer's comment tokens would be the next step if a
+corpus needed them fast.
+
+**Where clang's output differs.** Line markers differ in form, as `-E`'s do.
+The predefines under `<built-in>` are buster's, in its order. After each `-dI`
+line clang writes a marker back to that line (`# 3 "a.c"`), which a reader
+takes as the same place; we don't. Clang's `-dD -CC` doesn't count the line
+breaks of a comment it prints in a definition, so what follows a definition
+whose comment spans lines is a line late on clang's side until its next marker;
+ours is on its line. `-P`'s blank lines and indentation differ as `-E -P`'s do.
+
+**Tests.** `test-preprocessor`'s cases run each mode as the other cases run,
+with their digests (`tests/preprocessor-kernels/digests.tsv`) and the exact
+text with markers: comments where clang keeps them, a comment before a
+skipped group's `#endif`, `-CC`'s replacement lists, arguments, stringizing and
+pasting, `-dD`'s definitions (a redefinition, an undefined name's `#undef`),
+`-dI`'s guarded, computed and `#include_next` includes, the modes together, and
+`-dN`. With `--clang` they are compared with clang's output: comments as tokens
+(`pp_test_lex_flags` keeps them), and `-dD`'s and `-dI`'s lines one by one with
+their presumed places, but those under `<built-in>`, `<command line>` and
+`--predefines`' file, then blanked for the tokens' comparison
+(`pp_test_dumped_directives`); files given with these options too.
+`test-preprocessor --clang -E -C` and `-E -CC` of this compiler's `main.c`, with
+both sides given the same system directories, match clang's tokens, comments
+and places (2.48 million tokens), with and without `-trigraphs`, and so do
+`-dD`'s and `-dI`'s lines (about 15,000), but for `-dD -CC`'s line after a
+definition whose comment spans lines, above.
+
+
 ### The predefined macros
 
 `c_predefines.c` gives the macros that the target and the command-line options
@@ -3608,7 +3762,7 @@ spellings alone would miss this change (#272).
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang path/to/sqlite3.c
 taskset -c 2 ./build/compiler benchmark-preprocessor --clang -march=native -Isrc -fwrapv -funsigned-char \
     -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
-./build/compiler -E [-P] [-dM] [-H] [-o file] [options] file.c
+./build/compiler -E [-P] [-dM] [-dD] [-dI] [-C|-CC] [-H] [-o file] [options] file.c
 ./build/compiler test-preprocessor --generate-targets   # c_predefines.c's generated tables, from clang
 ./build/compiler test-preprocessor --tables src path/to/libc
 taskset -c 2 ./build/compiler benchmark-preprocessor --tables path/to/libc

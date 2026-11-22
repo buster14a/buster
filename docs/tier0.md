@@ -1303,7 +1303,10 @@ code reaches it (`BUSTER_TIER0_ACCESS_*`):
   an executable.
 - **The column is per unit:** one array serves every function. The producer (`check_program_emit`) fills it from what
   the unit defines, as clang's `-fPIE` does: a symbol the unit doesn't define through the GOT, and a thread-local by
-  local-exec where the unit defines it and by initial-exec where it doesn't.
+  local-exec where the unit defines it and by initial-exec where it doesn't. Position-independent code's (`-fPIC`'s,
+  #2101) reaches through the GOT every symbol another module may preempt, the unit's own definitions of external
+  linkage and default visibility among them, as clang's `-fPIC` does; its thread-locals' accesses are calls the lowering
+  makes (the checker's guide's "Position-independent code"), and the column says initial-exec of any it left.
 - **How:** fusion keys an entry of a symbol that isn't direct by one of Tier 0's own kinds, past the stream's
   (`BUSTER_TIER0_KIND_GOT`, `_LOCAL_EXEC` and `_INITIAL_EXEC`, four each, in the global kinds' order:
   `tier0_access_kind`). Their templates load the slot into R0, the register free above the operand (beside a floating
