@@ -784,6 +784,9 @@ struct CheckControlTask
     uint32_t token;
     uint32_t stop;
     uint32_t repeat;
+    // 1 when the statement is reached only through a label or case inside it (#2987). A block then starts with no
+    // insertion point, so statements before that label are left out. 0, the ordinary push, enters at the start.
+    uint8_t unentered;
 };
 
 typedef struct CheckControlWriter CheckControlWriter;
@@ -1648,12 +1651,18 @@ static bool check_control_static_chain(const CheckInput* input, uint32_t node)
     return value < graph->count && graph->ops[value] == CHECK_OP_BUILTIN_MISC && graph->members[value] == CBUILTIN_CALL_WITH_STATIC_CHAIN;
 }
 
-static void check_control_statement(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat)
+static void check_control_statement_at(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat, bool entered)
 {
     if (token != BUSTER_CHECK_NONE)
     {
-        check_control_push(writer, (CheckControlTask){ .kind = CHECK_CONTROL_TASK_STATEMENT, .token = token, .stop = stop, .repeat = repeat });
+        check_control_push(writer, (CheckControlTask){ .kind = CHECK_CONTROL_TASK_STATEMENT, .token = token, .stop = stop, .repeat = repeat,
+                                                       .unentered = entered ? 0 : 1 });
     }
+}
+
+static void check_control_statement(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat)
+{
+    check_control_statement_at(writer, token, stop, repeat, true);
 }
 
 static void check_control_token(CheckControlWriter* writer, uint32_t token)
@@ -2330,6 +2339,7 @@ static void check_control_drop(CheckControlWriter* writer, uint32_t low, uint32_
 }
 
 #include "c_check_program_switch.c"
+#include "c_check_program_reach.c"
 
 // Appends a source label's number, a writer's label, to the writer's CheckProgram.label_positions, which the bodies'
 // loop turns into its place once the label's body is written: a label is a token, so the column has room.
@@ -2370,13 +2380,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         {
             check_control_cleanups(writer, token, BUSTER_CHECK_NONE, block);
         }
-        for (uint32_t child = writer->last[token]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
-        {
-            if (parser->tree.roles[child] != PARSE_ROLE_OPEN_BODY && parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK)
-            {
-                check_control_statement(writer, child, task.stop, task.repeat);
-            }
-        }
+        // Statements after a return, break, continue, goto or __builtin_unreachable() are left out (#2987).
+        check_control_emit_sequence(writer, token, task.stop, task.repeat, task.unentered == 0, writer->opening, false);
         if (lifetimes)
         {
             check_control_entry(writer, CHECK_CONTROL_LIFETIME, token, 0, token);
@@ -2656,13 +2661,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
     }
     else if (role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE)
     {
-        for (uint32_t child = writer->last[token]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
-        {
-            if (child > token && child != writer->region_final)
-            {
-                check_control_statement(writer, child, task.stop, task.repeat);
-            }
-        }
+        // The statements after the colon are this label's children. A return among them leaves out the rest (#2987).
+        check_control_emit_sequence(writer, token, task.stop, task.repeat, true, token, true);
         if (role == PARSE_ROLE_LABEL && writer->addressed != 0 && writer->addressed[token] != 0)
         {
             check_control_entry(writer, CHECK_CONTROL_LABEL, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
@@ -2784,13 +2784,7 @@ static void check_control_begin(CheckControlWriter* writer, uint32_t opening)
     writer->cleanup_count = end - first;
     // A body has its function declarator as an earlier sibling of its opening brace. Only body statements enter
     // this worklist; this also avoids interpreting a function's parameter/declarator expressions as executable.
-    for (uint32_t child = writer->last[closing]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
-    {
-        if (child > opening)
-        {
-            check_control_statement(writer, child, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-        }
-    }
+    check_control_emit_sequence(writer, closing, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, true, opening, false);
     if (writer->variable && writer->vla_first[opening] != BUSTER_CHECK_NONE)
     {
         check_control_token(writer, opening);
@@ -2808,11 +2802,22 @@ static void check_control_drain(CheckControlWriter* writer)
         }
         else if (task.kind == CHECK_CONTROL_TASK_ENTRY)
         {
-            if (writer->count < writer->capacity)
+            // A cleanup whose declaration was left out (#2987) does not run and does not select its function.
+            const CheckInput* input = writer->program->input;
+            const uint32_t record = task.entry.kind == CHECK_CONTROL_CLEANUP ? task.entry.target : BUSTER_CHECK_NONE;
+            const uint32_t declaration = record < input->cleanup_count ? input->cleanups[record].declaration : BUSTER_CHECK_NONE;
+            bool dropped = false;
+            for (uint32_t i = 0; !dropped && declaration != BUSTER_CHECK_NONE && i < writer->dropped_range_count; i += 1)
+            {
+                const uint32_t low = (uint32_t)(writer->dropped_ranges[i] >> 32);
+                const uint32_t high = (uint32_t)writer->dropped_ranges[i];
+                dropped = declaration >= low && declaration <= high;
+            }
+            if (!dropped && writer->count < writer->capacity)
             {
                 writer->entries[writer->count++] = task.entry;
             }
-            else
+            else if (!dropped)
             {
                 check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, task.token);
             }

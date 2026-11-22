@@ -932,11 +932,50 @@ static void check_common_report_evaluated(const Parser* parser, Preprocessor* pp
     }
 }
 
-static void check_common_report_unused(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t id,
-                                       const char* message, const CheckCommonNote* notes, uint32_t note_count, Arena* scratch)
+// The root of the full expression holding `node`: its root up `parents`, or the first initialization on the way
+// (check_common_full_expression_end).
+static uint32_t check_common_full_expression_root(const CheckGraph* graph, const uint32_t* parents, uint32_t node)
 {
+    uint32_t root = node;
+    for (uint32_t steps = 0; parents != NULL && root < graph->count && graph->ops[root] != CHECK_OP_INITIALIZE && parents[root] < graph->count &&
+         steps < graph->count; steps += 1)
+    {
+        root = parents[root];
+    }
+    return root;
+}
+
+// Where clang queues the runtime warning just published, if one was, for a function body's constant's comma the reader
+// finds to come among the body's queued diagnostics in clang's order (#2252, pp_diagnostic_queued): the exclusive end of
+// `node`, whose building queues it (a division's, a shift's, a comma's left operand's), or, `full`, of the full
+// expression holding it, whose completion does (CheckCompletedExpr's array index, unsequenced and conversion checks, a
+// statement's unused result). A for statement's third clause's discard wrapper is at its `)`, whose extent holds the
+// body: its full expression ends there. Only a published warning pays the climb.
+static void check_common_queue(const Parser* parser, Preprocessor* pp, const PPDiagnosticRecord* previous, const CheckGraph* graph,
+                               const uint32_t* parents, uint32_t node, bool full)
+{
+    if (pp->diagnostic_last != previous && node < graph->count && graph->source_positions != NULL)
+    {
+        const uint32_t root = full ? check_common_full_expression_root(graph, parents, node) : node;
+        const uint32_t token = root < graph->count ? graph->tokens[root] : BUSTER_CHECK_NONE;
+        const bool clause = token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_FOR;
+        const uint32_t end = clause ? token + 1 : root < graph->count ? graph->source_positions[root] : BUSTER_CHECK_NONE;
+        if (end <= parser->tokens.count)
+        {
+            pp_diagnostic_queued(pp, previous, end);
+        }
+    }
+}
+
+// An unused result's, queued as its statement's full expression, holding `node` up `parents`, completes (#2252).
+static void check_common_report_unused(const Parser* parser, Preprocessor* pp, const CheckInput* input, uint32_t token, const uint32_t* parents,
+                                       uint32_t node, uint32_t id, const char* message, const CheckCommonNote* notes, uint32_t note_count,
+                                       Arena* scratch)
+{
+    const PPDiagnosticRecord* previous = pp->diagnostic_last;
     check_common_report_evaluated(parser, pp, input, token, check_common_function_boundary(parser, token), PP_DIAGNOSTIC_DEFERRED, id, false,
                                   message, notes, note_count, scratch);
+    check_common_queue(parser, pp, previous, &input->graph, parents, node, true);
 }
 
 // A comma's left operand's "has no effect", check_common_report_unused's. In a file-scope initializer clang's
@@ -956,6 +995,7 @@ static void check_common_report_comma_left(const Parser* parser, Preprocessor* p
     {
         pp_diagnostic_suborder(pp, previous, (uint64_t)input->graph.source_positions[comma] + 1);
     }
+    check_common_queue(parser, pp, previous, &input->graph, NULL, comma, false);
 }
 
 // The deferred publication an expression warning gets inside a function: every unused-result, bounds,
@@ -2006,6 +2046,7 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     const uint32_t contexts = graph->contexts != NULL ? graph->contexts[node] : 0;
     const bool ice = (contexts & (BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT)) != 0;
     const bool emitted = (emission->emitted[node] & BUSTER_CHECK_EMITTED_SHIFT_COUNT) != 0;
+    const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
     // A stashed warning's count highlighted (#2376), as a new one's below.
     if (!emitted && right < graph->count && check_common_shift_stashed(emission->shifts, token))
     {
@@ -2016,6 +2057,8 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
     if (replayed)
     {
         emission->emitted[node] |= BUSTER_CHECK_EMITTED_SHIFT_COUNT;
+        // A folded shift's, queued as the shift is built (#2252).
+        check_common_queue(emission->parser, emission->pp, previous, graph, NULL, node, false);
     }
     // Constant if/switch folding removes dead arms before the control walk can mark their roots unreachable.
     // Their ordinary counts stay quiet; detached static-selection arms still have no CFG block in Clang.
@@ -2035,6 +2078,8 @@ static void check_common_shift_count(CheckCommonEmission* emission, uint32_t nod
                                          negative ? CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE : CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW,
                                          false, negative ? "shift count is negative" : "shift count >= width of type",
                                          NULL, 0, emission->scratch);
+            // Queued as the shift is built (#2252).
+            check_common_queue(emission->parser, emission->pp, previous, graph, NULL, node, false);
             pp_diagnostic_ranges_clear(emission->pp);
             // An ineligible ordinary visit (notably a dropped arm) cannot suppress a later detached visit.
             emission->emitted[node] |= BUSTER_CHECK_EMITTED_SHIFT_COUNT;
@@ -2177,6 +2222,7 @@ static void check_common_atomic_report(const Parser* parser, Preprocessor* pp, c
         {
             pp_diagnostic_suborder(pp, previous, (uint64_t)graph->source_positions[node] + 1);
         }
+        check_common_queue(parser, pp, previous, graph, NULL, node, false);
     }
 }
 
@@ -2205,8 +2251,11 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
         {
             const uint32_t star = graph->tokens[node];
             const CheckCommonNote note = { star, "consider using __builtin_trap() or qualifying pointer with 'volatile'" };
+            const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
             check_common_report_deferred(emission->parser, emission->pp, emission->input, star, CHECK_WARNING_ID_NULL_DEREFERENCE, false,
                                          "indirection of non-volatile null pointer will be deleted, not trap", &note, 1, emission->scratch);
+            // Queued as its reader is built, which converts it (#2252).
+            check_common_queue(emission->parser, emission->pp, previous, graph, NULL, parent < graph->count ? parent : node, false);
         }
     }
     else if (check_common_division_op(op))
@@ -2238,6 +2287,7 @@ static void check_common_arithmetic_own(CheckCommonEmission* emission, uint32_t 
                 {
                     pp_diagnostic_suborder(emission->pp, previous, (uint64_t)emission->input->graph.source_positions[node] + 1);
                 }
+                check_common_queue(parser, emission->pp, previous, graph, NULL, node, false);
             }
         }
     }
@@ -2659,6 +2709,7 @@ static bool check_common_out_of_range(CheckCommonEmission* emission, uint32_t no
                 // After what building the declarator's expression queued, as CheckCompletedExpr analyzes it once complete.
                 pp_diagnostic_suborder(emission->pp, previous, UINT64_MAX >> 1);
             }
+            check_common_queue(parser, emission->pp, previous, graph, emission->parents, node, true);
         }
     }
     // In range, a constant from a macro or an enumerator decides nothing (IsEnumConstOrFromMacro).
@@ -2849,8 +2900,10 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
             {
                 const char* message = check_warning_text(scratch, "comparison of integers of different signs: %.*s and %.*s",
                                                           (int)left_name.length, left_name.pointer, (int)right_name.length, right_name.pointer);
+                const PPDiagnosticRecord* previous = emission->pp->diagnostic_last;
                 check_common_report_deferred(parser, emission->pp, emission->input, graph->tokens[node], CHECK_WARNING_ID_SIGN_COMPARE, true,
                                              message, NULL, 0, scratch);
+                check_common_queue(parser, emission->pp, previous, graph, emission->parents, node, true);
             }
         }
     }
@@ -3741,9 +3794,12 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
                         if (message != NULL)
                         {
                             // Array bounds queues in clang's function-end diagnostics where the body's walk
-                            // emitted it — right after this expression's own discard warnings.
+                            // emitted it — right after this expression's own discard warnings, as its full expression
+                            // completes (#2252).
+                            const PPDiagnosticRecord* previous = pp->diagnostic_last;
                             check_common_report_bounds(parser, pp, input, graph->tokens[root], message, note.message != NULL ? &note : NULL,
                                                        note.message != NULL ? 1u : 0u, scratch);
+                            check_common_queue(parser, pp, previous, graph, emission->parents, node, true);
                         }
                     }
                 }
@@ -3944,7 +4000,8 @@ static __attribute__((noinline)) void check_common_unused_report(CheckCommonEmis
         }
         else
         {
-            check_common_report_unused(parser, emission->pp, emission->input, spot, CHECK_WARNING_ID_UNUSED_VALUE, message, NULL, 0, emission->scratch);
+            check_common_report_unused(parser, emission->pp, emission->input, spot, emission->parents, unused->node, CHECK_WARNING_ID_UNUSED_VALUE, message,
+                                       NULL, 0, emission->scratch);
         }
     }
 }
@@ -4115,7 +4172,8 @@ static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node)
         const uint32_t right_start = right < count ? check_common_emission_subtree_start(emission, right) : right;
         if (right_start < parent && !check_common_expression_has_effect(parser, right_start, parent))
         {
-            check_common_report_unused(parser, pp, input, right, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, scratch);
+            check_common_report_unused(parser, pp, input, right, emission->parents, node, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL,
+                                       0, scratch);
         }
     }
 }
@@ -4154,8 +4212,8 @@ static __attribute__((noinline)) void check_common_selected_marker(CheckCommonEm
             name == C_NAME_BUILTIN_OMP_REQUIRED_SIMD_ALIGN || name == C_NAME_IS_BITWISE_CLONEABLE || name == C_NAME_IS_DESTRUCTIBLE ||
             name == C_NAME_IS_NOTHROW_DESTRUCTIBLE)
         {
-            check_common_report_unused(parser, emission->pp, emission->input, keyword, CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0,
-                                       emission->scratch);
+            check_common_report_unused(parser, emission->pp, emission->input, keyword, emission->parents, node, CHECK_WARNING_ID_UNUSED_VALUE,
+                                       "expression result unused", NULL, 0, emission->scratch);
         }
     }
 }
@@ -4180,7 +4238,7 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
         // (#1447).
         if (parent_role != PARSE_ROLE_TERMINATOR || check_common_statement_value(parser, parent))
         {
-            check_common_report_unused(parser, emission->pp, emission->input, token, CHECK_WARNING_ID_UNUSED_VALUE,
+            check_common_report_unused(parser, emission->pp, emission->input, token, emission->parents, node, CHECK_WARNING_ID_UNUSED_VALUE,
                                        "expression result unused", NULL, 0, emission->scratch);
         }
     }
@@ -4219,7 +4277,7 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
         }
         else
         {
-            check_common_report_unused(parser, emission->pp, emission->input, report != BUSTER_CHECK_NONE ? report : token,
+            check_common_report_unused(parser, emission->pp, emission->input, report != BUSTER_CHECK_NONE ? report : token, emission->parents, node,
                                        CHECK_WARNING_ID_UNUSED_VALUE, "expression result unused", NULL, 0, emission->scratch);
         }
     }
@@ -6024,12 +6082,7 @@ static bool check_common_nondecimal_literal(const Parser* parser, Preprocessor* 
 // operands), which publishing them all at this one boundary keeps. Only a reported warning asks: the climb is its cost.
 static uint32_t check_common_full_expression_end(const Parser* parser, const CheckGraph* graph, const uint32_t* parents, uint32_t node)
 {
-    uint32_t root = node;
-    for (uint32_t steps = 0; parents != NULL && root < graph->count && graph->ops[root] != CHECK_OP_INITIALIZE && parents[root] < graph->count &&
-         steps < graph->count; steps += 1)
-    {
-        root = parents[root];
-    }
+    const uint32_t root = check_common_full_expression_root(graph, parents, node);
     const uint32_t end = graph->source_positions != NULL && root < graph->count ? graph->source_positions[root] : BUSTER_CHECK_NONE;
     const uint32_t result = end <= parser->tokens.count ? end : graph->tokens[node];
     return result;
@@ -6296,8 +6349,14 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             const bool body = !width && check_common_function_end(parser, token) != token;
             const uint32_t publication = body ? check_common_function_boundary(parser, token) :
                                          at_once != BUSTER_CHECK_NONE ? at_once : check_common_full_expression_end(parser, graph, parents, source);
+            const PPDiagnosticRecord* previous = pp->diagnostic_last;
             check_common_report_evaluated(parser, pp, input, token, publication, body || width ? PP_DIAGNOSTIC_DEFERRED : PP_DIAGNOSTIC_RUNTIME,
                                         CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
+            // A body's, queued as its full expression completes (#2252).
+            if (body)
+            {
+                check_common_queue(parser, pp, previous, graph, parents, source, true);
+            }
         }
     }
     else if (value->constant_kind == CHECK_CONSTANT_FLOATING && (leaves & BUSTER_CHECK_LEAVES_FLOATING) != 0 &&
@@ -6489,6 +6548,12 @@ static bool check_common_failed_assert_source(const Parser* parser, Preprocessor
                 if (!pp->fatal && emitted != NULL && emitted->position / PP_DIAGNOSTIC_PHASE_COUNT <= publication)
                 {
                     emitted->position = (uint64_t)publication * PP_DIAGNOSTIC_PHASE_COUNT + PP_DIAGNOSTIC_DEFERRED;
+                }
+                else if (!pp->fatal && emitted != NULL)
+                {
+                    // At a function body's end, clang queued it as it read the assertion: in source order among the body's
+                    // queued diagnostics, as a constant's comma is (#2252).
+                    pp_diagnostic_source_order(pp, previous);
                 }
             }
         }

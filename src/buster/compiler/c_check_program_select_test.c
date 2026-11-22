@@ -449,8 +449,78 @@ static void check_test_program_folded_ifs(CheckTest* test, const char* clang)
                                      CHECK_PROGRAM_OK, 0, 0, 0, true);
 }
 
+// #2987: a statement clang -O0 leaves out is not selected, and one it emits is. Each static callee is selected only
+// where the kept statement calls it. The counts are the external root plus those callees.
+static void check_test_program_unreachable_statements(CheckTest* test, const char* clang)
+{
+    typedef struct CheckUnreachable CheckUnreachable;
+    struct CheckUnreachable
+    {
+        const char* name;
+        const char* source;
+        uint32_t functions;
+    };
+    static const CheckUnreachable fixtures[] = {
+        { "unreachable-after-return",
+          "static int dead(void){return 1;}int tested(void){return 0;dead();}", 1 },
+        { "unreachable-after-break",
+          "static int dead(void){return 1;}int tested(void){do{break;dead();}while(0);return 0;}", 1 },
+        { "unreachable-after-continue",
+          "static int dead(void){return 1;}static int loop(void){for(;;){continue;dead();}}int tested(int n){return n==100?loop():n;}", 2 },
+        { "unreachable-after-goto",
+          "static int dead(void){return 1;}static int kept(void){return 2;}int tested(void){goto skip;dead();skip:return kept();}", 2 },
+        { "unreachable-block-after-goto",
+          "static int dead(void){return 1;}int tested(void){goto skip;{dead();}skip:return 0;}", 1 },
+        { "unreachable-after-both-returns",
+          "static int dead(void){return 1;}int tested(int a){if(a)return 0;else return 1;dead();}", 1 },
+        { "unreachable-after-compound-return",
+          "static int dead(void){return 1;}int tested(void){{return 0;}dead();}", 1 },
+        { "unreachable-builtin",
+          "static int dead(void){return 1;}static int stop(void){__builtin_unreachable();return dead();}int tested(int n){return n==100?stop():n;}", 2 },
+        { "unreachable-folded-if-true",
+          "static int dead(void){return 1;}int tested(void){if(1)return 0;return dead();}", 1 },
+        { "unreachable-before-switch-case",
+          "static int dead(void){return 1;}static int kept(void){return 2;}int tested(int a){switch(a){dead();case 1:return kept();}return 0;}", 2 },
+        { "reachable-local-before-switch-case",
+          "struct M{int v;};int tested(int a){switch(a){struct M y;case 1:y.v=a;return y.v;default:return 0;}}", 1 },
+        { "unreachable-init-before-switch-case",
+          "static int dead(void){return 7;}int tested(int a){switch(a){int y=dead();case 1:return a;default:return 0;}}", 1 },
+        { "reachable-local-after-goto",
+          "int tested(int a){goto skip;int y;skip:y=a;return y;}", 1 },
+        { "unreachable-switch-without-a-case",
+          "static int dead(void){return 1;}int tested(int a){switch(a)dead();return 0;}", 1 },
+        { "unreachable-after-infinite-for",
+          "static int dead(void){return 1;}static int loop(void){for(;;){}return dead();}int tested(int n){return n==100?loop():n;}", 2 },
+        { "reachable-after-constant-for",
+          "static int kept(void){return 1;}static int loop(void){for(;1;){}return kept();}int tested(int n){return n==100?loop():n;}", 3 },
+        { "unreachable-after-infinite-while",
+          "static int dead(void){return 1;}static int loop(void){while(1){}return dead();}int tested(int n){return n==100?loop():n;}", 2 },
+        { "reachable-after-broken-for",
+          "static int kept(void){return 1;}int tested(int a){for(;;){if(a)break;if(!a)break;}return kept();}", 2 },
+        { "reachable-after-one-arm",
+          "static int kept(void){return 1;}int tested(int a){if(a)return 0;return kept();}", 2 },
+        { "reachable-after-trap",
+          "static int kept(void){return 1;}static int boom(void){__builtin_trap();return kept();}int tested(int n){return n==100?boom():n;}", 3 },
+        { "reachable-targeted-label",
+          "static int kept(void){return 1;}int tested(int a){if(a)goto back;return 0;back:return kept();}", 2 },
+        { "reachable-unused-label",
+          "static int kept(void){return 1;}int tested(void){return 0;back:return kept();}", 2 },
+        { "reachable-after-do",
+          "static int kept(void){return 1;}int tested(void){do{return 0;}while(0);return kept();}", 2 },
+        { "reachable-cleanup-before-return",
+          "static void clean(int*p){(void)p;}int tested(void){int x __attribute__((cleanup(clean)))=1;return x;}", 2 },
+        { "unreachable-cleanup-after-return",
+          "static void clean(int*p){(void)p;}int tested(void){return 0;int x __attribute__((cleanup(clean)))=1;(void)x;}", 1 },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        check_test_program_selection_run(test, fixtures[i].source, fixtures[i].name, fixtures[i].functions, 0, CHECK_PROGRAM_OK, clang, clang, 0, false);
+    }
+}
+
 static void check_test_program_selection(CheckTest* test, const char* clang)
 {
+    check_test_program_unreachable_statements(test, clang);
     check_test_program_selection_case(test, "", "empty-selected-unit", 0, 0, clang, false);
     check_test_program_selection_case(test, "static int dead=3;int kept=9;", "selected-data-only-unit", 0, 1, clang, false);
     check_test_program_selection_case(test,
