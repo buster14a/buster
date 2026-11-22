@@ -134,6 +134,9 @@
 // X run on a graph made of those records alone. After the pipeline each root's results are compared with the ones the
 // machine made of the walk's nodes (BUSTER_NODE_FRONT_TYPES, _SWEEPS and BUSTER_NODE_READER_TESTS, which it asks for).
 #define BUSTER_NODE_READER_ALONE 8192u
+// With it (--front-alone-split): its machine's first run timed by sweep, a clock's read between each two (NodeFrontTypes.
+// sweep_ticks). A reading of its own: the reads are among the sweeps' ticks, so the run's whole is the other's.
+#define BUSTER_NODE_READER_SPLIT 16384u
 // What it says of a body (NodeFrontShadow.alone_body_verdicts): every root the front made of it is taken (T took it, the
 // tests left it silent, C and X took it) and the front left no token of it; or the first thing in the body's order that
 // stops it: a token the front left or a value it lost (an expression it makes no root of), a root the machine didn't run
@@ -401,6 +404,11 @@ struct NodeFrontTypes
     // By root node: a digest of T's records (node_machine_digest), the expression's first node and its records (0: T
     // wasn't run on it), and T's refusal (BUSTER_NODE_FRONT_TYPED_REFUSAL) with, after the pipeline, whether the
     // lowering popped the root (_POPPED) and whether the shadow compared it (_COMPARED).
+    // Where the unit asks (BUSTER_NODE_READER_SPLIT), the first run's ticks by sweep: T, the census's tests, C and X; and
+    // how many of the clock's reads made them.
+    bool split;
+    uint64_t sweep_ticks[4];
+    uint64_t sweep_reads;
     uint64_t* digests;
     uint32_t* firsts;
     uint32_t* counts;

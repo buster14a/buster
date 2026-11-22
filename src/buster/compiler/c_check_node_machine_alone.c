@@ -400,6 +400,7 @@ static NodeFrontTypes* node_alone_results(CheckInputReader* reader, const NodeFr
         memset(types->library, 0, capacity);
         types->tape_capacity = tape_capacity;
         types->node_capacity = capacity;
+        types->split = (reader->pp->options.node_reader & BUSTER_NODE_READER_SPLIT) != 0;
         types->object_declarations = from->object_declarations;
         types->object_facts = from->object_facts;
         types->object_count = from->object_count;

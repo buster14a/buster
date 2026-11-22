@@ -4987,6 +4987,9 @@ struct NodeShadow
     uint64_t alone_front_ticks;
     uint64_t alone_write_ticks;
     uint64_t alone_sweep_ticks;
+    // With --front-alone-split, the machine's first run by sweep (T, the tests, C, X) and the clock's reads that made it.
+    uint64_t alone_step_ticks[4];
+    uint64_t alone_step_reads;
     uint64_t alone_roots;
     uint64_t alone_taken;
     uint64_t alone_compared;
@@ -7328,6 +7331,14 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                shadow->alone_bodies, shadow->alone_bodies_left, shadow->alone_positions, shadow->alone_records, shadow->alone_roots, shadow->alone_taken, reading,
                shadow->alone_prepare_ticks, shadow->alone_front_ticks, shadow->alone_write_ticks, shadow->alone_sweep_ticks,
                shadow->alone_positions != 0 ? (double)(reading + shadow->alone_sweep_ticks) / (double)shadow->alone_positions : 0.0);
+        if (shadow->alone_step_reads != 0)
+        {
+            // The first run by sweep: each sweep's ticks, with the clock's reads that bound it.
+            printf("node-shadow: alone the machine's first run by sweep: T=%" PRIu64 " the-tests=%" PRIu64 " C=%" PRIu64 " X=%" PRIu64 " (%" PRIu64
+                   " of the clock's reads among them) the-rest-of-the-run=%" PRIu64 "\n",
+                   shadow->alone_step_ticks[0], shadow->alone_step_ticks[1], shadow->alone_step_ticks[2], shadow->alone_step_ticks[3], shadow->alone_step_reads,
+                   shadow->alone_sweep_ticks - (shadow->alone_step_ticks[0] + shadow->alone_step_ticks[1] + shadow->alone_step_ticks[2] + shadow->alone_step_ticks[3]));
+        }
         printf("node-shadow: alone compared=%" PRIu64 " differences=%" PRIu64, shadow->alone_compared, shadow->alone_differences);
         for (uint32_t field = 0; field < BUSTER_NODE_ALONE_FIELDS; field += 1)
         {
@@ -7593,6 +7604,11 @@ static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, 
     shadow->alone_front_ticks += front->alone_front_ticks;
     shadow->alone_write_ticks += front->alone_write_ticks;
     shadow->alone_sweep_ticks += alone->ticks;
+    for (uint32_t step = 0; step < 4; step += 1)
+    {
+        shadow->alone_step_ticks[step] += alone->sweep_ticks[step];
+    }
+    shadow->alone_step_reads += alone->sweep_reads;
     shadow->alone_roots += alone->expressions;
     // The walk's nodes' roots in their order, each against the other's next one at its token: a token's roots are in the
     // order they were made in both (`next`: by token, the other's next root + 1 there once its first is taken, or
@@ -8359,12 +8375,12 @@ static int run_node_census(int count, char** arguments)
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
             shadow.reader |= BUSTER_NODE_READER_TESTS;
         }
-        else if (strcmp(arguments[i], "--front-alone") == 0)
+        else if (strcmp(arguments[i], "--front-alone") == 0 || strcmp(arguments[i], "--front-alone-split") == 0)
         {
             // The machine with no node of the walk's, a body at a time before the walk acts at it; and the machine on the
             // walk's nodes after it, which it is compared with: T, the census's tests, C and X at reader time.
             shadow.front = (uint8_t)(shadow.front | BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | ((shadow.front & BUSTER_NODE_FRONT_ORDER) != 0 ? 0 : BUSTER_NODE_FRONT_AFTER));
-            shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE;
+            shadow.reader |= BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | (strcmp(arguments[i], "--front-alone-split") == 0 ? BUSTER_NODE_READER_SPLIT : 0);
         }
         else if (strcmp(arguments[i], "--front-facts") == 0 || strcmp(arguments[i], "--front-window") == 0)
         {
