@@ -120,7 +120,7 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
 
 static uint32_t check_input_packed_selection(const CheckInputReader* reader, uint32_t token)
 {
-    const uint32_t selected = reader->selected_tokens[token];
+    const uint32_t selected = check_input_selection_at(reader, token);
     return selected != BUSTER_CHECK_NONE ? selected & ~CHECK_INPUT_SOURCE_SELECTION : BUSTER_CHECK_NONE;
 }
 

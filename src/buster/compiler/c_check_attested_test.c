@@ -991,6 +991,7 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "designator_tokens", CHECK_ATTESTED_FIELD_OWN },
     { "designator_ranges", CHECK_ATTESTED_FIELD_OWN },
     { "selected_tokens", CHECK_ATTESTED_FIELD_OWN },
+    { "selected_sparse", CHECK_ATTESTED_FIELD_OWN },
     { "selection_type_ends", CHECK_ATTESTED_FIELD_OWN },
     { "selection_types", CHECK_ATTESTED_FIELD_OWN },
     { "cached_constants", CHECK_ATTESTED_FIELD_OWN },
