@@ -154,11 +154,15 @@ struct CheckProgramBody
 // check_program_select_wrappers): clang's AlwaysInliner expands every call of a body it has, an `extern inline`
 // gnu_inline one too (glibc's __fortify_function wrappers), where the unit emits none of its own. Its body is one
 // statement: `return E;` (`node` E with its conversion to the result) or, in a void function, `E;`; E's nodes are
-// `first` to `node`. Its parameters' objects are CheckProgram.wrapper_parameters' `parameter_count` from
-// `parameter_first`, 0 for an unnamed one, and their pass_object_size attributes `sizes` (CheckInputAttributes'
-// object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
-// A wrapper's parameters at most: glibc's take five.
+// `first` to `node`. Or, with a result, the shape of glibc's longer wrappers (fgets's, wcscpy's, realpath's): scalar
+// locals with an initializer each (`local_count`, their plans `plans`, CheckInitializers'), then `guard_count` guards
+// `if (C) return E;` (`guards`' C, the branch's condition, and E), then `return E;`, or for the last guard an `else return E;`. Its parameters' objects are CheckProgram.wrapper_parameters'
+// `parameter_count` from `parameter_first`, 0 for an unnamed one, then its locals'; and its parameters' pass_object_size
+// attributes `sizes` (CheckInputAttributes' object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
+// A wrapper's parameters and locals at most: glibc's take seven (recvfrom's six and its bound).
 #define BUSTER_CHECK_WRAPPER_PARAMETERS 8u
+// A wrapper's guards at most: glibc's take two.
+#define BUSTER_CHECK_WRAPPER_GUARDS 4u
 
 typedef struct CheckProgramWrapper CheckProgramWrapper;
 struct CheckProgramWrapper
@@ -168,6 +172,10 @@ struct CheckProgramWrapper
     uint32_t first;
     uint32_t parameter_first;
     uint32_t parameter_count;
+    uint32_t local_count;
+    uint32_t guard_count;
+    uint32_t plans[BUSTER_CHECK_WRAPPER_PARAMETERS];
+    uint32_t guards[BUSTER_CHECK_WRAPPER_GUARDS][2];
     uint8_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS];
 };
 
