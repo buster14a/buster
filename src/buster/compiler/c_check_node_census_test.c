@@ -1596,7 +1596,9 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
 // - A braced initializer, whose elements are roots of the lowering's and none of the front's; a block's static table,
 //   whose values are roots of the front's that the lowering never pops.
 // - The walk's own warnings, each at a literal or a token the front leaves, so that no root is taken before one: a
-//   floating constant out of range, a character constant of several characters, `_Alignof` of an expression.
+//   floating constant out of range, a character constant of several characters, `_Alignof` of an expression. And a
+//   string with an unknown escape, which the resolution warns of before any body is read here: the tests refuse its
+//   expression for the event, here as after the walk.
 // - A body of 400 statements under a loop: its tokens are several chunks of the postorder, the loop's condition waits
 //   through all of them, and its root is typed with its operand's records, which the graph still holds.
 // - A table of 4,200 elements, more values than the front's stack keeps: the front loses its waiting values, once, and
@@ -1641,6 +1643,7 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
                                      "static double range(double d) { d = d + 1e999; return d; }\n"
                                      "static int several_characters(int c) { c = c + 'ab'; return c; }\n"
                                      "static int aligned(int c) { c = c + (int)_Alignof(c); return c; }\n"
+                                     "static const char* escape(int k) { const char* s = \"a\\qb\"; if (k) { s = \"c\"; } return s; }\n"
                                      "static unsigned long guard(void) { unsigned long v = (unsigned long)&g * 1103515245; return v; }\n"
                                      "static int kinds(int i)\n{\n    static const unsigned char kind[] = {\n");
         for (uint32_t element = 0; element < 64 && length + 16 < capacity; element += 1)
@@ -1662,7 +1665,8 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
         length += (uint32_t)snprintf(text + length, capacity - length,
                                      "1 };\n    return big[a & 1];\n}\n"
                                      "int entry(struct S* s, int n)\n{\n    return plain(n, 2) + (int)calls(s, n) + several(n) + (text(n)[0] == 'o') + field(s) + query(&n) + label(n) + braces(n) +\n"
-                                     "           statics(n) + (int)range(1.0) + several_characters(n) + aligned(n) + waits(&n, n) + table(n) + (int)guard() + kinds(n);\n}\n");
+                                     "           statics(n) + (int)range(1.0) + several_characters(n) + aligned(n) + waits(&n, n) + table(n) + (int)guard() + kinds(n) +\n"
+                                     "           (escape(n)[0] == 'a');\n}\n");
     }
     valid = valid && length + 1 < capacity && parse_test_write(path, text, length);
     NodeShadow shadow = {
@@ -1675,7 +1679,8 @@ static bool node_alone_test_fixture(const char* directory, char** options, uint3
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
     const bool same = valid && !node_shadow_differs(&shadow) && shadow.alone_differences == 0 && shadow.alone_walk_only == 0 && shadow.alone_own_only == 0 &&
-                      shadow.alone_events_after == 0 && shadow.alone_bodies_left == 0 && shadow.alone_bodies_unread == 0;
+                      shadow.alone_events_after == 0 && shadow.alone_bodies_left == 0 && shadow.alone_bodies_unread == 0 && shadow.alone_taken_checked != 0 &&
+                      shadow.alone_taken_declined == 0;
     bool counts = shadow.alone_bodies == expected->bodies && shadow.alone_compared == expected->roots && shadow.alone_whole_own == expected->own &&
                   shadow.alone_whole_walk == expected->walk && shadow.alone_whole_walk_static == expected->statics && shadow.alone_resets == expected->lost;
     for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
@@ -7362,9 +7367,9 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-facts window: a value cut at a chunk's end is not whole again where the rows have room later");
     // The machine with no node of the walk's, a body at a time before the walk acts at it.
     const NodeAloneExpected alone_expected = {
-        .bodies = 17,
-        .roots = 440,
-        .verdicts = { [BUSTER_NODE_ALONE_BODY_WHOLE] = 10, [BUSTER_NODE_ALONE_BODY_LEFT] = 5, [BUSTER_NODE_ALONE_BODY_TYPE] = 1, [BUSTER_NODE_ALONE_BODY_TESTS] = 1 },
+        .bodies = 18,
+        .roots = 444,
+        .verdicts = { [BUSTER_NODE_ALONE_BODY_WHOLE] = 10, [BUSTER_NODE_ALONE_BODY_LEFT] = 5, [BUSTER_NODE_ALONE_BODY_TYPE] = 1, [BUSTER_NODE_ALONE_BODY_TESTS] = 2 },
         .own = 1,
         .statics = 1,
         .lost = 2,

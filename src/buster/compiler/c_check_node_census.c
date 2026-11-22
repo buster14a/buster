@@ -4996,6 +4996,10 @@ struct NodeShadow
     uint64_t alone_walk_only_outside;
     uint64_t alone_own_only;
     uint64_t alone_events_after;
+    // The roots it took, checked after the walk against the tokens the walk's class actions left to its visit, and
+    // those with one among their expression's tokens.
+    uint64_t alone_taken_checked;
+    uint64_t alone_taken_declined;
     uint64_t alone_listed;
     // Its verdicts of the bodies the lowering lowered, by what stops it (BUSTER_NODE_ALONE_BODY_*), in bodies and in their
     // tokens; and against the machine on the walk's nodes, for which a body is whole where every root the lowering popped
@@ -7332,8 +7336,10 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                 printf(" %s=%" PRIu64, node_alone_field_names[field], shadow->alone_fields[field]);
             }
         }
-        printf(" roots-of-the-walk's-nodes-alone=%" PRIu64 " (outside a body %" PRIu64 ") roots-of-its-own-alone=%" PRIu64 " taken-before-an-event-of-the-walk's=%" PRIu64 "\n",
-               shadow->alone_walk_only, shadow->alone_walk_only_outside, shadow->alone_own_only, shadow->alone_events_after);
+        printf(" roots-of-the-walk's-nodes-alone=%" PRIu64 " (outside a body %" PRIu64 ") roots-of-its-own-alone=%" PRIu64 " taken-before-an-event-of-the-walk's=%" PRIu64
+               " taken-with-a-token-the-walk's-actions-left=%" PRIu64 " (of %" PRIu64 " checked)\n",
+               shadow->alone_walk_only, shadow->alone_walk_only_outside, shadow->alone_own_only, shadow->alone_events_after, shadow->alone_taken_declined,
+               shadow->alone_taken_checked);
         static const char* const verdict_names[BUSTER_NODE_ALONE_BODY_VERDICTS] = { "whole", "a-token-left", "a-root-not-run", "T", "the-tests", "C-or-X", "no-room" };
         printf("node-shadow: alone lowered-bodies' verdicts before the walk (their tokens %" PRIu64 "):", shadow->alone_body_tokens);
         for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
@@ -7581,6 +7587,8 @@ static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, 
     shadow->alone_ticks += front->alone_ticks;
     shadow->alone_machine_ticks += front->alone_machine_ticks;
     shadow->alone_resets += front->alone_resets;
+    shadow->alone_taken_checked += front->alone_taken_checked;
+    shadow->alone_taken_declined += front->alone_taken_declined;
     shadow->alone_prepare_ticks += front->alone_prepare_ticks;
     shadow->alone_front_ticks += front->alone_front_ticks;
     shadow->alone_write_ticks += front->alone_write_ticks;
@@ -8242,7 +8250,7 @@ static bool node_shadow_differs(const NodeShadow* shadow)
            shadow->facts_conversions != shadow->facts_conversions_derived || shadow->reads.same_differences != 0 || shadow->reads.misplaced != 0 ||
            shadow->front_differences != 0 || shadow->typed_differences != 0 || shadow->typed_object_differences != 0 || shadow->typed_library_differences != 0 ||
            shadow->swept_differences != 0 || shadow->alone_differences != 0 || shadow->alone_walk_only != 0 || shadow->alone_own_only != 0 ||
-           shadow->alone_bodies_unread != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
+           shadow->alone_bodies_unread != 0 || shadow->alone_taken_declined != 0 || shadow->alone_events_after != 0 || shadow->tested_unsound != 0 || shadow->tested_differences != 0 || shadow->tested_kind_differences != 0 ||
            shadow->tested_missed != 0 || shadow->tested_policy_differences != 0 || shadow->reader_twin_differences != 0 || shadow->own_count_differences != 0 ||
            shadow->own_quiet_wrong != 0 || shadow->own_quiet_calls_wrong != 0 || shadow->own_quiet_calls_loud != 0 || shadow->own_quiet_casts_wrong != 0 ||
            shadow->own_quiet_orders_wrong != 0 || shadow->own_values_wrong != 0 || shadow->own_tree_wrong != 0 || shadow->own_direct_wrong != 0 ||

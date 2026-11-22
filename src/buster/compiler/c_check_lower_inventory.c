@@ -650,6 +650,9 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
     pp_options.node_window_assignments = (window & BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS) != 0;
     pp_options.node_front = lower_source_node_front;
     pp_options.node_reader = lower_source_node_reader;
+    // The machine with no node of the walk's is checked against the tokens the walk's actions leave to its visit, which
+    // the walk marks where its numbering is asked for.
+    pp_options.expression_numbering = pp_options.expression_numbering || (lower_source_node_reader & BUSTER_NODE_READER_ALONE) != 0;
     source->path = (CheckCorpusPath){ 0 };
     source->data = (CheckDataPrepared){ 0 };
     source->program = (CheckProgram){ 0 };

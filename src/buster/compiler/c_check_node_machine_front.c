@@ -680,6 +680,11 @@ struct NodeFrontShadow
     // for the body), the front, and the records' writing to its graph.
     uint64_t alone_machine_ticks;
     uint64_t alone_resets;
+    // The roots the whole machine took there, counted after the walk against the tokens the walk's class actions left to
+    // its own visit: those with such a token among their expression's (none: the front leaves every one, so an
+    // expression with one has no root, and the walk's visit is where its own warnings are).
+    uint64_t alone_taken_checked;
+    uint64_t alone_taken_declined;
     uint64_t alone_prepare_ticks;
     uint64_t alone_front_ticks;
     uint64_t alone_write_ticks;
@@ -960,6 +965,9 @@ static void node_machine_reader_finish(struct NodeMachineReader* typer);
 struct NodeAlone;
 static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* reader);
 static void node_alone_bodies(struct NodeAlone* alone, NodeFront* front, CheckInputReader* reader, uint32_t first, uint32_t end);
+// After the walk's last chunk: the roots it took against the tokens the walk's class actions left to its visit
+// (CheckInputReader.expression_declined), which the walk has marked by then.
+static void node_alone_finish(struct NodeAlone* alone, const CheckInputReader* reader);
 #endif
 
 // Whether the walk acts at `token` so as to read its children's values: a token it never acts at, or whose action is

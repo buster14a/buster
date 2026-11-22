@@ -221,9 +221,33 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
             alone->input = *reader->output;
             alone->input.graph = alone->view;
             typer->graph = alone->view;
+            // While the machine runs, the reader's own graph has no column of nodes: a read of the walk's node faults
+            // (the unit's tables, which are no node's, stay).
+            const CheckGraph walked = reader->output->graph;
+            CheckGraph* const poisoned = &reader->output->graph;
+            poisoned->ops = NULL;
+            poisoned->tokens = NULL;
+            poisoned->operand0 = NULL;
+            poisoned->operand1 = NULL;
+            poisoned->operand2 = NULL;
+            poisoned->leaf_records = NULL;
+            poisoned->leaf_payloads = NULL;
+            poisoned->dense_leaves = NULL;
+            poisoned->leaf_slots = NULL;
+            poisoned->types = NULL;
+            poisoned->members = NULL;
+            poisoned->contexts = NULL;
+            poisoned->fp_environments = NULL;
+            poisoned->warning_suppressed = NULL;
+            poisoned->source_positions = NULL;
+            poisoned->argument_offsets = NULL;
+            poisoned->argument_counts = NULL;
+            poisoned->argument_nodes = NULL;
+            poisoned->argument_tokens = NULL;
             const uint64_t machine = __rdtsc();
             node_machine_reader_chunk(typer, front, reader);
             alone->shadow->alone_machine_ticks += __rdtsc() - machine;
+            reader->output->graph = walked;
             // Each root by its token: the node its results are kept by (an initialization's is its value's). And the body's
             // verdict: the first root in its order that the machine doesn't take whole (a declaration's discard is no
             // root of the machine's).
@@ -297,6 +321,41 @@ static __attribute__((noinline)) void node_alone_bodies(struct NodeAlone* alone,
         }
     }
     alone->shadow->alone_ticks += __rdtsc() - start;
+}
+
+static void node_alone_finish(struct NodeAlone* alone, const CheckInputReader* reader)
+{
+    const uint8_t* declined = reader->expression_declined;
+    const NodeFrontTypes* results = alone->types;
+    const CheckGraph* view = &alone->view;
+    const uint32_t tokens = reader->parser->tokens.count;
+    for (uint32_t root = 0; declined != NULL && root < view->count && root < results->node_capacity; root += 1)
+    {
+        const uint8_t flags = results->counts[root] != 0 ? results->refusals[root] : BUSTER_NODE_FRONT_TYPED_REFUSAL;
+        const bool taken = (flags & BUSTER_NODE_FRONT_TYPED_REFUSAL) == NODE_MACHINE_TAKEN && (flags & BUSTER_NODE_FRONT_TYPED_TESTED) != 0 && results->tests[root] == 0 &&
+                           (flags & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0 && results->sweep_refusals[root] == NODE_MACHINE_TAKEN;
+        if (taken)
+        {
+            // Its expression's tokens: from the lowest to the highest of its records', which a subtree's are all between.
+            const uint32_t first = results->firsts[root];
+            const uint32_t count = results->counts[root];
+            uint32_t low = view->tokens[root];
+            uint32_t high = view->tokens[root];
+            for (uint32_t node = first; node + 1 < first + count && node < view->count; node += 1)
+            {
+                const uint32_t token = view->tokens[node];
+                low = token < low ? token : low;
+                high = token > high ? token : high;
+            }
+            bool left = false;
+            for (uint32_t token = low; token <= high && token < tokens; token += 1)
+            {
+                left = left || declined[token] != 0;
+            }
+            alone->shadow->alone_taken_checked += 1;
+            alone->shadow->alone_taken_declined += left;
+        }
+    }
 }
 
 // The results' columns for `capacity` nodes, as node_machine_reader_begin makes the walk's nodes' (`from`), whose objects'

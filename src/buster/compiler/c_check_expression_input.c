@@ -2442,6 +2442,13 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             reader->output->expression_acted[code] = tokens_reached - reader->output->expression_left[code];
         }
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (front != NULL && front->alone != NULL)
+    {
+        // The roots the machine with no node of the walk's took, against the tokens the walk's actions left.
+        node_alone_finish(front->alone, reader);
+    }
+#endif
     if (reader->expression_declined != NULL && !reader->output->resource)
     {
         check_input_expression_numbering(reader, base, tokens, classes);
