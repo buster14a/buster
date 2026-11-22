@@ -55,6 +55,11 @@
 // and of every bit, locked or not, 4 or 8 bytes wide) is certified, and one that changes it (an or of 1, an and of
 // 0x7fffffff, an adc of 0, which adds the carry, a mov of 0, an or of a register) is refused, the restore reading bytes
 // the barrier wrote.
+//
+// A frame address recomputed at its base itself (#3149), rsp or, under a frame pointer, rbp: the base's register copy,
+// `mov rbx, base`, is its recipe's copy and is certified, the checker finding the value in rbx; the same record for a
+// recipe 16 bytes from the base, a lea at the base, a lea at the other displacement and the other register's copy are
+// refused (tier1_code_certificate_frame_copy).
 
 typedef struct Tier1CodeCertificateCounts Tier1CodeCertificateCounts;
 struct Tier1CodeCertificateCounts
@@ -1771,33 +1776,38 @@ static bool tier1_code_certificate_aggregate_copy_checked(Tier1EmitTest* test, c
 // #1816: a rematerialized aggregate address uses r11, so its bytes go through RAX. Controlled allocation columns
 // cover a dead RAX, a live one, a live value still owed from a call-save row, and a stale owner whose current interval
 // expired, spilled or moved to another register. The real emitter and decoder run, then the independent certificate
-// checks their records and preservation mutants.
+// checks their records and preservation mutants. Each state twice: the address 16 bytes from rsp, recomputed by a lea,
+// and 0 bytes from it, recomputed by rsp's register copy into r11 (#3149).
 static void tier1_code_certificate_aggregate_copy(Tier1EmitTest* test)
 {
     uint32_t certified = 0;
     uint32_t refused = 0;
-    for (uint32_t state = 0; state < 6; state += 1)
+    uint32_t copies = 0;
+    // The address at 16 from rsp, recomputed by a lea, and at 0, by rsp's register copy (#3149).
+    for (uint32_t state = 0; state < 12; state += 1)
     {
-        const bool live = state == 1 || state == 2;
-        const bool owed = state == 2;
+        const uint64_t displacement = state < 6 ? 16 : 0;
+        const uint32_t rax_state = state % 6;
+        const bool live = rax_state == 1 || rax_state == 2;
+        const bool owed = rax_state == 2;
         uint32_t node_values[3] = { 0, 1, BUSTER_TIER1_CFG_NONE };
         uint32_t value_nodes[2] = { 0, 1 };
         uint32_t sizes[3] = { 8, 8, 0 };
         uint32_t value_offsets[3] = { 0, 1, 2 };
         uint32_t starts[2] = { 0, 0 };
-        uint32_t ends[2] = { 8, state == 3 ? 4 : 8 };
+        uint32_t ends[2] = { 8, rax_state == 3 ? 4 : 8 };
         uint32_t fragment_offsets[3] = { 0, 1, 2 };
         uint32_t spill_ids[2] = { BUSTER_TIER1_CFG_NONE, 0 };
         uint8_t classes[2] = { BUSTER_TIER1_ALLOCATE_GPR, BUSTER_TIER1_ALLOCATE_GPR };
         uint8_t rematerializable[2] = { 1, 0 };
-        uint8_t kinds[2] = { BUSTER_TIER1_ALLOCATE_REMATERIALIZE, state == 4 ? BUSTER_TIER1_ALLOCATE_SPILL : BUSTER_TIER1_ALLOCATE_REGISTER };
-        uint8_t registers[2] = { UINT8_MAX, state == 5 ? X86_REGISTER_RCX : X86_REGISTER_RAX };
+        uint8_t kinds[2] = { BUSTER_TIER1_ALLOCATE_REMATERIALIZE, rax_state == 4 ? BUSTER_TIER1_ALLOCATE_SPILL : BUSTER_TIER1_ALLOCATE_REGISTER };
+        uint8_t registers[2] = { UINT8_MAX, rax_state == 5 ? X86_REGISTER_RCX : X86_REGISTER_RAX };
         uint8_t hinted_registers[2] = { UINT8_MAX, X86_REGISTER_RAX };
         const Tier1RematerializationInput recipes = {
             .operations = (const uint8_t[]){ BUSTER_TIER1_REMAT_STACK, BUSTER_TIER1_REMAT_NONE, BUSTER_TIER1_REMAT_NONE },
             .widths = (const uint8_t[]){ 8, 8, 0 },
             .flags = (const uint8_t[]){ BUSTER_TIER1_REMAT_STABLE, 0, 0 },
-            .values = (const uint64_t[]){ 16, 0, 0 },
+            .values = (const uint64_t[]){ displacement, 0, 0 },
             .count = 3,
         };
         Tier1EmitResult emitted = {
@@ -1817,13 +1827,19 @@ static void tier1_code_certificate_aggregate_copy(Tier1EmitTest* test)
         {
             transitions.owners[r] = BUSTER_IR_NONE;
         }
-        transitions.owners[X86_REGISTER_RAX] = state == 0 ? BUSTER_IR_NONE : 1;
+        transitions.owners[X86_REGISTER_RAX] = rax_state == 0 ? BUSTER_IR_NONE : 1;
         X86Instruction records[8] = { 0 };
         Tier1EmitBuffer buffer = { .records = records, .capacity = BUSTER_ARRAY_LENGTH(records) };
         const Tier1EmitError error = tier1_emit_cfg_aggregate_copy(&emitted, &transitions, owed ? 1u << X86_REGISTER_RAX : 0, 0, 4, X86_REGISTER_RSP, 0, 0, 8, &buffer);
         const uint32_t copied = buffer.count;
-        const bool kept = state == 1;
+        const bool kept = rax_state == 1;
         tier1_emit_test_expect(test, error == TIER1_EMIT_OK && copied == (kept ? 5u : 3u), "aggregate copies preserve only a live RAX that is physically present");
+        // The recomputed address's record: rsp's register copy into the scratch register at 0, a lea at 16.
+        for (uint32_t r = 0; error == TIER1_EMIT_OK && r < copied; r += 1)
+        {
+            const bool copy = records[r].form == X86_FORM_MOV_R64_RM64 && records[r].mode == BUSTER_X86_REGISTER_DIRECT && records[r].reg == BUSTER_TIER1_SELECT_SCRATCH && records[r].rm == X86_REGISTER_RSP;
+            copies += copy && displacement == 0 ? 1 : copy ? 100 : 0;
+        }
         if (error == TIER1_EMIT_OK && owed)
         {
             tier1_emit_append(&buffer, (X86Instruction){ .displacement = 32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 });
@@ -1873,13 +1889,483 @@ static void tier1_code_certificate_aggregate_copy(Tier1EmitTest* test)
             refused += rejected;
         }
     }
-    tier1_emit_test_expect(test, certified == 6 && refused == 7, "aggregate preservation covers all six RAX states and all seven mutants");
+    tier1_emit_test_expect(test, certified == 12 && refused == 14, "aggregate preservation covers all six RAX states and all seven mutants, its address at 16 and at 0 from rsp");
+    tier1_emit_test_expect(test, copies == 6, "the address at 0 is recomputed by rsp's register copy in each RAX state, and at 16 by none");
+}
+
+// #3149: a recomputed frame address's record `record`, alone, decoded as the CFG consumer's move of node 0 (its value
+// 0's recipe a frame address `displacement` bytes from the frame's base register `base`, rsp or, under a frame pointer,
+// rbp; rematerializable or not) and checked by the independent certificate, which must find value 0 in rbx after it.
+// Whether it is certified.
+static bool tier1_code_certificate_frame_copy_checked(Tier1EmitTest* test, uint8_t base, uint64_t displacement, bool recomputed, X86Instruction record)
+{
+    const bool pointer = base == X86_REGISTER_RBP;
+    uint32_t node_values[2] = {
+        0,
+        BUSTER_TIER1_CFG_NONE,
+    };
+    uint32_t value_nodes[1] = { 0 };
+    uint32_t sizes[2] = {
+        8,
+        0,
+    };
+    uint8_t classes[1] = { BUSTER_TIER1_ALLOCATE_GPR };
+    uint8_t rematerializable[1] = { recomputed ? 1 : 0 };
+    X86Instruction records[1] = { record };
+    const Tier1RematerializationInput recipes = {
+        .operations = (const uint8_t[]){ BUSTER_TIER1_REMAT_STACK },
+        .widths = (const uint8_t[]){ 8 },
+        .flags = (const uint8_t[]){ BUSTER_TIER1_REMAT_STABLE },
+        .values = &displacement,
+        .count = 1,
+    };
+    Tier1EmitResult emitted = {
+        .prepared = {
+            .recipes = recipes,
+            .sizes = sizes,
+        },
+        .frame = {
+            .base_register = base,
+            .frame_pointer = pointer,
+        },
+        .cfg_input = {
+            .classes = classes,
+            .rematerializable = rematerializable,
+            .value_count = 1,
+        },
+        .node_values = node_values,
+        .value_nodes = value_nodes,
+    };
+    emitted.code.records = records;
+    emitted.code.count = 1;
+    const IrFunction function = { .instruction_count = 1 };
+    const Tier1SelectPlan plan = { .function = &function };
+    Tier1CertLocation locations[64] = { 0 };
+    Tier1CertSource source[4] = { 0 };
+    Tier1CertInstruction code[4] = { 0 };
+    uint32_t references[1] = { UINT32_MAX };
+    Tier1CertEmittedStats stats = { 0 };
+    Tier1CertEmittedBuild build = {
+        .plan = &plan,
+        .emitted = &emitted,
+        .stats = &stats,
+        .locations = locations,
+        .location_count = 32,
+        .location_capacity = BUSTER_ARRAY_LENGTH(locations),
+        .low = -128,
+        .high = 64,
+        .base = base,
+        .source = source,
+        .source_capacity = BUSTER_ARRAY_LENGTH(source),
+        .code = code,
+        .code_capacity = BUSTER_ARRAY_LENGTH(code),
+        .references = references,
+        .frame_pointer = pointer ? -8 : INT64_MIN,
+        .frame_unit = 128,
+    };
+    for (uint32_t r = 0; r < 32; r += 1)
+    {
+        locations[r] = (Tier1CertLocation){
+            .unit = 8 * (r / 2),
+            .width = r % 2 == 0 ? 8 : 4,
+            .extent = 8,
+            .class = TIER1_CERT_GPR,
+            .reg = (uint8_t)(r / 2),
+        };
+    }
+    bool valid = tier1_cert_emitted_append_move(&build, 0, 0, BUSTER_CERT_NONE);
+    const Tier1CertFact exit = {
+        .value = 0,
+        .location = tier1_cert_emitted_gpr(X86_REGISTER_RBX, 8),
+    };
+    const Tier1CertValue values[1] = {
+        {
+            .width = 8,
+            .class = TIER1_CERT_GPR,
+            .recipe = recomputed ? TIER1_CERT_INTEGER_RECIPE : TIER1_CERT_NO_RECIPE,
+        },
+    };
+    const Tier1CertBlock block = {
+        .source = source,
+        .code = code,
+        .source_count = build.source_count,
+        .code_count = build.code_count,
+    };
+    const Tier1CertProgram program = {
+        .locations = locations,
+        .values = values,
+        .blocks = &block,
+        .exit = &exit,
+        .unit_count = 320,
+        .location_count = build.location_count,
+        .value_count = BUSTER_ARRAY_LENGTH(values),
+        .block_count = 1,
+        .exit_count = 1,
+        .flags_location = BUSTER_CERT_NONE,
+    };
+    const uint64_t saved = test->scratch.length;
+    const size_t bytes = valid ? tier1_certificate_scratch_size(&program) : 0;
+    void* scratch = bytes != 0 ? arena_push(&test->scratch, bytes, 64) : NULL;
+    Tier1CertReport report = { 0 };
+    valid = valid && scratch != NULL && tier1_certificate_check(&program, scratch, bytes, &report) == TIER1_CERT_OK;
+    arena_pop_to(&test->scratch, saved);
+    return valid;
+}
+
+// #3149: a frame address recomputed into rbx, its recipe 0 or 16 bytes from the frame's base register: rsp, or rbp
+// under a frame pointer. The emitter's copy (tier1_rematerialize: the base's register copy `mov rbx, base` at 0, `lea
+// rbx, [base + 16]` at 16) is certified; the base's register copy for the recipe at 16 (a move of the base, which holds
+// no value), a lea at 0 (no recipe's record now), a lea at the other displacement and the other register's copy (`mov
+// rbx, rbp` where rsp is the base, `mov rbx, rsp` where rbp is) are refused, and so is each record for a value without
+// a recipe.
+static void tier1_code_certificate_frame_copy(Tier1EmitTest* test)
+{
+    uint32_t certified = 0;
+    uint32_t refused = 0;
+    uint32_t bare = 0;
+    for (uint32_t b = 0; b < 2; b += 1)
+    {
+        const uint8_t base = b == 0 ? X86_REGISTER_RSP : X86_REGISTER_RBP;
+        const uint8_t other = b == 0 ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+        const X86Instruction move = {
+            .reg = X86_REGISTER_RBX,
+            .rm = base,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOV_R64_RM64,
+        };
+        const X86Instruction near = {
+            .reg = X86_REGISTER_RBX,
+            .rm = base,
+            .mode = BUSTER_X86_MEMORY_BASE,
+            .form = X86_FORM_LEA_R64_M,
+        };
+        const X86Instruction far = {
+            .displacement = 16,
+            .reg = X86_REGISTER_RBX,
+            .rm = base,
+            .mode = BUSTER_X86_MEMORY_BASE,
+            .form = X86_FORM_LEA_R64_M,
+        };
+        const X86Instruction crossed = {
+            .reg = X86_REGISTER_RBX,
+            .rm = other,
+            .mode = BUSTER_X86_REGISTER_DIRECT,
+            .form = X86_FORM_MOV_R64_RM64,
+        };
+        const X86Instruction records[4] = {
+            move,
+            near,
+            far,
+            crossed,
+        };
+        for (uint32_t d = 0; d < 2; d += 1)
+        {
+            const uint64_t displacement = d == 0 ? 0 : 16;
+            const uint8_t operation = BUSTER_TIER1_REMAT_STACK;
+            const uint8_t width = 8;
+            const uint8_t stable = BUSTER_TIER1_REMAT_STABLE;
+            const Tier1RematerializationInput input = {
+                .operations = &operation,
+                .widths = &width,
+                .flags = &stable,
+                .values = &displacement,
+                .count = 1,
+            };
+            Tier1Rematerialized copy = { 0 };
+            const bool made = tier1_rematerialize(&input, 0, X86_REGISTER_RBX, base, 0, &copy);
+            tier1_emit_test_expect(test, made && memcmp(&copy.instruction, &records[d == 0 ? 0 : 2], sizeof(X86Instruction)) == 0, "a frame address at 0 from its base is the base's register copy, at 16 a lea");
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(records); k += 1)
+            {
+                const bool expected = k == (d == 0 ? 0u : 2u);
+                const bool checked = tier1_code_certificate_frame_copy_checked(test, base, displacement, true, records[k]);
+                tier1_emit_test_expect(test, checked == expected, expected ? "a frame address's recomputation is certified" : "a frame address's other record is refused");
+                certified += checked && expected;
+                refused += !checked && !expected;
+                bare += !tier1_code_certificate_frame_copy_checked(test, base, displacement, false, records[k]);
+            }
+        }
+    }
+    tier1_emit_test_expect(test, certified == 4 && refused == 12 && bare == 16, "each recipe's own copy alone is certified, from rsp and from rbp, and no record of a value without a recipe");
+    printf("tier1 code certificate: frame addresses recomputed from rsp and rbp, %u of 4 copies certified, %u of 12 other records and %u of 16 without a recipe refused\n", certified, refused, bare);
+}
+
+// #2820's destination: a call whose aggregate result goes through the hidden pointer to a pointer value, no frame
+// object's, as a call that passes its function's own hidden pointer on has it. q(x, f, d) calls f(x) through its pointer,
+// its 64-byte result to d: x arrives in rdi and goes to rsi (rdi is the hidden pointer's), f in rsi and goes to r10, d in
+// rdx and goes to rdi, one parallel move whose order matters. Shape 1 then returns d's first quadword, which keeps d live
+// across the call; shape 2's d is an inttoptr of an I64, as ir_lower makes a forwarded call's (#2820's ir_typed_call),
+// which the call's use alone keeps; shape 3 makes the call 48 times, each with its argument, its callee and its
+// destination, more effective uses than one a call and every other node's room hold. Each compile, by each path, is
+// certified; each call's effective uses end with its destination, no lea writes rdi, and the native code writes f's
+// result to d's bytes alone, against the callee called directly. The first call's move into rdi made a move of rdi into
+// itself is refused, and so is a plan whose call reads the callee where its destination was (the liveness validation).
+typedef struct Tier1CodeCertificateWide Tier1CodeCertificateWide;
+struct Tier1CodeCertificateWide
+{
+    int64_t words[8];
+};
+
+static Tier1CodeCertificateWide tier1_code_certificate_wide(int64_t x)
+{
+    Tier1CodeCertificateWide wide;
+    for (uint32_t k = 0; k < 8; k += 1)
+    {
+        wide.words[k] = x * 3 + (int64_t)k * 0x0101010101010101;
+    }
+    return wide;
+}
+
+// The emitted code called with f and d (the destination); the sanitizer's function check stays out, since the code has
+// no type prefix before it.
+static __attribute__((no_sanitize("function"))) int64_t tier1_code_certificate_forwarded_call(const void* code, int64_t x, void* destination)
+{
+    int64_t (*function)(int64_t, Tier1CodeCertificateWide (*)(int64_t), void*);
+    memcpy(&function, &code, sizeof(function));
+    return function(x, tier1_code_certificate_wide, destination);
+}
+
+// The emitted code called with f alone, for the frame object's control.
+static __attribute__((no_sanitize("function"))) int64_t tier1_code_certificate_object_call(const void* code, int64_t x)
+{
+    int64_t (*function)(int64_t, Tier1CodeCertificateWide (*)(int64_t));
+    memcpy(&function, &code, sizeof(function));
+    return function(x, tier1_code_certificate_wide);
+}
+
+#define BUSTER_TIER1_CODE_CERTIFICATE_FORWARDED_CALLS 48u
+
+static void tier1_code_certificate_forwarded(Tier1EmitTest* test, bool vector, uint32_t shape, uint32_t* refused)
+{
+    char text[4096];
+    const bool converted = shape == 2;
+    int length = snprintf(text, sizeof(text),
+                          "function (i64, ptr, %s) -> %s {\n"
+                          "  passed #0 size=0 loc(1,6,255,0,0)\n"
+                          "  abi #0 call(0,4,2,0,ret(2,0,0,255,255,255,255)) passed=#0 result=64\n"
+                          "b0:\n"
+                          "  %%0 = param.i64 0\n"
+                          "  %%1 = param.ptr 1\n"
+                          "  %%2 = param.%s 2\n",
+                          converted ? "i64" : "ptr", shape == 0 ? "void" : "i64", converted ? "i64" : "ptr");
+    const uint32_t destination = converted ? 3 : 2;
+    if (converted)
+    {
+        length += snprintf(text + length, sizeof(text) - (size_t)length, "  %%3 = inttoptr.ptr %%2\n");
+    }
+    const uint32_t first_call = destination + 1;
+    const uint32_t calls = shape == 3 ? BUSTER_TIER1_CODE_CERTIFICATE_FORWARDED_CALLS : 1;
+    for (uint32_t k = 0; k < calls; k += 1)
+    {
+        length += snprintf(text + length, sizeof(text) - (size_t)length, "  %%%u = call_indirect.void %%1(%%0) fixed=(i64) variadic=0 abi=#0 into=%%%u\n", first_call + k, destination);
+    }
+    const uint32_t after = first_call + calls;
+    if (shape == 0)
+    {
+        length += snprintf(text + length, sizeof(text) - (size_t)length, "  %%%u = ret.void\n}\n", after);
+    }
+    else
+    {
+        length += snprintf(text + length, sizeof(text) - (size_t)length, "  %%%u = load.i64 %%%u align=8\n  %%%u = ret.void %%%u\n}\n", after, destination, after + 1, after);
+    }
+    const String8 source = { .pointer = text, .length = (uint64_t)length };
+    IrFunction function;
+    const bool valid = length > 0 && (size_t)length < sizeof(text) && ir_parse(source, &test->input, &test->scratch, &function).error == IR_PARSE_OK &&
+                       ir_verify(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the forwarded destination's fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const uint64_t output_mark = test->output.length;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
+    tier1_emit_test_expect(test, planned, "a call whose result goes through the hidden pointer to a pointer value selects");
+    // Every call's effective uses are its argument, its callee and its destination, in that order, inside the plan's
+    // storage.
+    bool used = planned && (const uint8_t*)(plan.effective_use_values + plan.effective_use_count) <= (const uint8_t*)test->output.base + output_mark + plan.arena_bytes;
+    for (uint32_t k = 0; used && k < calls; k += 1)
+    {
+        const uint32_t call = first_call + k;
+        const uint32_t u = plan.effective_use_offsets[call];
+        used = plan.covered[call] == 0 && plan.effective_use_offsets[call + 1] - u == 3 && plan.effective_use_values[u] == 0 && plan.effective_use_values[u + 1] == 1 &&
+               plan.effective_use_values[u + 2] == destination;
+    }
+    tier1_emit_test_expect(test, used, "each call's effective uses are its argument, its callee and its destination, in that order");
+    if (used)
+    {
+        // The liveness validation refuses a call that reads its callee where its destination was.
+        const uint32_t u = plan.effective_use_offsets[first_call] + 2;
+        plan.effective_use_values[u] = 1;
+        tier1_emit_test_expect(test, tier1_liveness_validate_plan(&plan, &test->scratch, true) == TIER1_LIVENESS_INVALID, "a call's effective uses that end with another value than its destination are refused");
+        plan.effective_use_values[u] = destination;
+    }
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    Tier1EmitResult emitted = { 0 };
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+    tier1_emit_test_expect(test, certified, "the forwarded destination's code passes the emitted-code certificate");
+    // Each call's use of its destination names rdi (Tier1CfgInput.use_registers, #2646's hints).
+    const Tier1CfgInput* input = &emitted.cfg_input;
+    const uint32_t base = certified ? 2 * (input->block_count - function.block_count) : 0;
+    const uint32_t v = certified ? emitted.node_values[destination] : BUSTER_TIER1_CFG_NONE;
+    uint32_t named = 0;
+    for (uint32_t u = v != BUSTER_TIER1_CFG_NONE && input->use_registers != 0 ? input->use_offsets[v] : 0; v != BUSTER_TIER1_CFG_NONE && input->use_registers != 0 && u < input->use_offsets[v + 1]; u += 1)
+    {
+        const uint32_t position = input->use_positions[u];
+        const bool at_call = position >= base + 2 * first_call && position < base + 2 * (first_call + calls) && (position - base) % 2 == 0;
+        named += at_call && input->use_registers[u] == X86_REGISTER_RDI;
+    }
+    tier1_emit_test_expect(test, named == calls, "each call's use of its destination names rdi");
+    // No lea writes rdi; the last record before the first call that writes rdi is the parallel move's, from d's register.
+    uint32_t call = UINT32_MAX;
+    uint32_t into = UINT32_MAX;
+    uint32_t called = 0;
+    bool lea = false;
+    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+    {
+        const X86Instruction record = emitted.code.records[r];
+        lea |= record.form == X86_FORM_LEA_R64_M && record.reg == X86_REGISTER_RDI;
+        uint64_t read = 0;
+        uint64_t written = 0;
+        x86_instruction_effects_scalar(&record, &read, &written);
+        into = call == UINT32_MAX && (written & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RDI)) != 0 ? r : into;
+        call = call == UINT32_MAX && record.form == X86_FORM_CALL_RM64 ? r : call;
+        called += record.form == X86_FORM_CALL_RM64;
+    }
+    tier1_emit_test_expect(test, certified && !lea && called == calls && call != UINT32_MAX && into != UINT32_MAX && into < call, "the destination reaches rdi by a move before each call, with no lea");
+    void* executable = MAP_FAILED;
+    uint64_t bytes = 0;
+    if (certified && tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+    {
+        uint64_t random = UINT64_C(0x2820282028202820) ^ (vector ? 1 : 0) ^ ((uint64_t)shape << 8);
+        for (uint32_t sample = 0; sample < 16; sample += 1)
+        {
+            const int64_t x = sample == 0 ? 0 : sample == 1 ? -1 : sample == 2 ? INT64_MAX : (int64_t)tier1_emit_test_random(&random);
+            // Guard words each side of the destination, which the callee must leave alone.
+            int64_t storage[10];
+            for (uint32_t k = 0; k < 10; k += 1)
+            {
+                storage[k] = (int64_t)UINT64_C(0xa5a5a5a5a5a5a5a5);
+            }
+            const Tier1CodeCertificateWide expected = tier1_code_certificate_wide(x);
+            const int64_t returned = tier1_code_certificate_forwarded_call(executable, x, storage + 1);
+            const bool guarded = storage[0] == (int64_t)UINT64_C(0xa5a5a5a5a5a5a5a5) && storage[9] == (int64_t)UINT64_C(0xa5a5a5a5a5a5a5a5);
+            const bool same = memcmp(storage + 1, expected.words, sizeof(expected.words)) == 0 && (shape == 0 || returned == expected.words[0]);
+            tier1_emit_test_expect(test, guarded && same, "the call writes its result where the destination points, its bytes alone");
+        }
+    }
+    if (executable != MAP_FAILED)
+    {
+        munmap(executable, bytes);
+    }
+    if (certified && into != UINT32_MAX && into < call)
+    {
+        const bool rejected = tier1_code_certificate_refuses(test, &plan, &emitted, into, (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RDI, .rm = X86_REGISTER_RDI }, UINT32_MAX);
+        tier1_emit_test_expect(test, rejected, "the destination's move into rdi left out is refused");
+        *refused += rejected;
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
+// The same call into a 64-byte frame object (#789): its destination is no effective use, a lea of the object writes rdi
+// before the call, and the function returns the object's first quadword, f(x)'s.
+static void tier1_code_certificate_object_destination(Tier1EmitTest* test, bool vector)
+{
+    static const char text[] = "function (i64, ptr) -> i64 {\n"
+                               "  passed #0 size=0 loc(1,6,255,0,0)\n"
+                               "  abi #0 call(0,4,2,0,ret(2,0,0,255,255,255,255)) passed=#0 result=64\n"
+                               "  slot $0 size=64 align=8 type=void flags=0x01\n"
+                               "b0:\n"
+                               "  %0 = param.i64 0\n"
+                               "  %1 = param.ptr 1\n"
+                               "  %2 = stack_addr.ptr $0\n"
+                               "  %3 = call_indirect.void %1(%0) fixed=(i64) variadic=0 abi=#0 into=%2\n"
+                               "  %4 = load.i64 %2 align=8\n"
+                               "  %5 = ret.void %4\n"
+                               "}\n";
+    const String8 source = { .pointer = (char*)text, .length = sizeof(text) - 1 };
+    IrFunction function;
+    const bool valid = ir_parse(source, &test->input, &test->scratch, &function).error == IR_PARSE_OK && ir_verify(&function, &test->scratch, 0).error == IR_OK;
+    tier1_emit_test_expect(test, valid, "the object destination's fixture is valid IR");
+    IrDominance dominance;
+    const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
+    const bool used = planned && plan.effective_use_offsets[4] - plan.effective_use_offsets[3] == 2;
+    tier1_emit_test_expect(test, used, "a call into a frame object selects, its destination no effective use");
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    Tier1EmitResult emitted = { 0 };
+    const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
+    const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
+    bool lea = false;
+    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+    {
+        lea |= emitted.code.records[r].form == X86_FORM_LEA_R64_M && emitted.code.records[r].reg == X86_REGISTER_RDI;
+    }
+    tier1_emit_test_expect(test, certified && lea, "a call into a frame object is certified, a lea of the object writing rdi");
+    void* executable = MAP_FAILED;
+    uint64_t bytes = 0;
+    if (certified && tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
+    {
+        const int64_t x = 0x2820;
+        const int64_t returned = tier1_code_certificate_object_call(executable, x);
+        tier1_emit_test_expect(test, returned == tier1_code_certificate_wide(x).words[0], "the frame object holds the call's result");
+    }
+    if (executable != MAP_FAILED)
+    {
+        munmap(executable, bytes);
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->scratch, 0);
+    arena_pop_to(&test->input, 0);
+}
+
+// An aggregate result in registers (#789) goes where its call's into operand addresses, which must be a frame object's:
+// one into a pointer value is refused, its function left to Tier 0 (#2820 takes a hidden pointer's alone), where the
+// same call into a 16-byte frame object selects.
+static void tier1_code_certificate_registers_into_pointer(Tier1EmitTest* test)
+{
+    for (uint32_t object = 0; object < 2; object += 1)
+    {
+        char text[1024];
+        const int length = snprintf(text, sizeof(text),
+                                    "function (ptr, ptr) -> void {\n"
+                                    "  abi #0 call(0,4,0,0,ret(1,0,8,0,2,255,255)) passed=#0 result=16\n"
+                                    "%s"
+                                    "b0:\n"
+                                    "  %%0 = param.ptr 0\n"
+                                    "  %%1 = param.ptr 1\n"
+                                    "%s"
+                                    "  %%%u = call_indirect.void %%0() fixed=() variadic=0 abi=#0 into=%%%u\n"
+                                    "  %%%u = ret.void\n"
+                                    "}\n",
+                                    object ? "  slot $0 size=16 align=8 type=void flags=0x01\n" : "", object ? "  %2 = stack_addr.ptr $0\n" : "", object ? 3u : 2u, object ? 2u : 1u,
+                                    object ? 4u : 3u);
+        const String8 source = { .pointer = text, .length = (uint64_t)length };
+        IrFunction function;
+        const bool valid = length > 0 && (size_t)length < sizeof(text) && ir_parse(source, &test->input, &test->scratch, &function).error == IR_PARSE_OK &&
+                           ir_verify(&function, &test->scratch, 0).error == IR_OK;
+        tier1_emit_test_expect(test, valid, "the registers-into-a-pointer fixture is valid IR");
+        IrDominance dominance;
+        const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
+        Tier1SelectPlan plan;
+        uint32_t node = BUSTER_IR_NONE;
+        const Tier1SelectError selection = dominated ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+        tier1_emit_test_expect(test, dominated && selection == (object ? TIER1_SELECT_OK : TIER1_SELECT_ERROR_UNSUPPORTED),
+                               "a result in registers into a frame object selects, and into a pointer value is refused");
+        arena_pop_to(&test->output, 0);
+        arena_pop_to(&test->scratch, 0);
+        arena_pop_to(&test->input, 0);
+    }
 }
 
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
     tier1_code_certificate_aggregate_copy(test);
+    tier1_code_certificate_frame_copy(test);
     for (uint32_t variant = 0; variant < 8; variant += 1)
     {
         tier1_code_certificate_carry(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0);
@@ -1921,6 +2407,15 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
         tier1_code_certificate_literals(test, variant != 0, &literals_refused);
     }
     tier1_emit_test_expect(test, literals_refused == 10, "every corrupted literal of both paths' compiles is refused");
+    uint32_t forwarded_refused = 0;
+    for (uint32_t variant = 0; variant < 8; variant += 1)
+    {
+        tier1_code_certificate_forwarded(test, (variant & 1) != 0, variant >> 1, &forwarded_refused);
+    }
+    tier1_emit_test_expect(test, forwarded_refused == 8, "every compile's destination move into rdi left out is refused (#2820)");
+    tier1_code_certificate_registers_into_pointer(test);
+    tier1_code_certificate_object_destination(test, false);
+    tier1_code_certificate_object_destination(test, true);
     tier1_emit_test_expect(test, counts.realigned == 2 && counts.late == 2, "the realigned-frame fixture's compiles push a register past rbp, and their allocation moves before it");
     tier1_emit_test_expect(test, counts.narrow == 2 && counts.narrow_register == 2 && counts.narrow_stack == 2, "the narrow-parameter fixture's compiles have an extension in a register and one from a slot");
     tier1_emit_test_expect(test, counts.exchange == 2 && counts.exchange_live == 2, "the compare-exchange fixture's compiles each restore rax around the exchange");

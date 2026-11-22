@@ -1515,9 +1515,17 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                             tier1_pipeline_expect(test, emitted->callee_used != 0 || (emitted->call_stores != 0 && emitted->call_loads != 0),
                                                   "nonconstant values live across a direct call keep callee-saved registers or reach caller-save stores and reloads");
                         }
-                        if (shape == 13)
+                        if (shape == 13 && test->rematerialize)
                         {
                             tier1_pipeline_expect(test, emitted->general && emitted->allocation.spill_count != 0, "values carried around a loop past the registers reach spill slots");
+                        }
+                        if (shape == 13 && !test->rematerialize)
+                        {
+                            // Without a frame pointer, the leaf's callee-saved registers hold what its five caller-saved
+                            // ones can't (#2819, tier1_emit_cfg_leaf): no slot, and the prologue saves each one it took.
+                            tier1_pipeline_expect(test, emitted->general && emitted->allocation.spill_count == 0 && emitted->callee_used != 0 &&
+                                                            (emitted->frame.saved_registers & emitted->callee_used) == emitted->callee_used,
+                                                  "a leaf's values carried around a loop past the caller-saved registers take callee-saved ones, which its prologue saves");
                         }
                         test->stores += emitted->spill_stores;
                         test->loads += emitted->spill_loads;

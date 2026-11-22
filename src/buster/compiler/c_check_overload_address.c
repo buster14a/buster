@@ -5,7 +5,10 @@
 // context are the same as ordinary overload calls. A singleton is already an ordinary function designator: select
 // it before conversions, including its availability constraint. Several distinct declarations need an expected
 // function-pointer type and exactly one canonical whole-function match. C compatible enum/integer, old-style
-// prototype and transparent-union relations do not select an address from several overloads.
+// prototype and transparent-union relations do not select an address from several overloads. Where no function type is
+// expected, a `void *` target (which C matches with any function, clang's AddMatchingNonTemplateFunction) or a set
+// without one (CheckOverloadContext.placeholder) selects its one candidate whose address is available, not made
+// ineligible by an enable_if (#2935); with none or several, the set has no address.
 //
 // Installed Clang 23 diagnoses an unavailable singleton even in typeof or an unselected generic association, but
 // accepts a contextual address selected from several overloads even when that selected declaration is unavailable.
@@ -45,6 +48,7 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
     }
     uint32_t selected = valid && length != 0 && !multiple ? single : UINT32_MAX;
     TypeId function = 0;
+    bool any = valid && multiple && context->placeholder && target == 0;
     if (valid && multiple && target != 0 && check_action_kind(table, target) == BUSTER_TYPE_KIND_POINTER)
     {
         const TypeId pointee = table->types.base[type_index(type_strip_aligned(table, target))];
@@ -52,10 +56,11 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
         {
             function = pointee;
         }
+        any = check_action_kind(table, pointee) == BUSTER_TYPE_KIND_VOID;
     }
     bool full = false;
     uint32_t matched = 0;
-    if (valid && multiple && function != 0)
+    if (valid && multiple && (function != 0 || any))
     {
         uint64_t capacity = 1;
         while (capacity < (uint64_t)length * 2)
@@ -83,7 +88,8 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
             if (candidate->object_sizes == NULL && seen[bucket] == UINT32_MAX)
             {
                 seen[bucket] = candidate->canonical;
-                const TypeAnswer same = conditions == NULL || !conditions->restricted ? type_same_canonical(table, candidate->type, function) : TYPE_ANSWER_NO;
+                const TypeAnswer same = conditions != NULL && conditions->restricted ? TYPE_ANSWER_NO :
+                                        any ? TYPE_ANSWER_YES : type_same_canonical(table, candidate->type, function);
                 full = same == TYPE_ANSWER_FULL;
                 if (same == TYPE_ANSWER_YES)
                 {
@@ -96,7 +102,7 @@ static CheckOverloadResult check_overload_address(const TypeTable* table, const 
     if (valid)
     {
         result.status = full ? CHECK_OVERLOAD_FULL : length == 0 ? (head != UINT32_MAX ? CHECK_OVERLOAD_AMBIGUOUS : CHECK_OVERLOAD_NO_MATCH) :
-                        multiple && (function == 0 || matched > 1) ? CHECK_OVERLOAD_AMBIGUOUS :
+                        multiple && ((function == 0 && !any) || matched > 1) ? CHECK_OVERLOAD_AMBIGUOUS :
                         selected == UINT32_MAX ? CHECK_OVERLOAD_NO_MATCH : CHECK_OVERLOAD_OK;
         if (result.status == CHECK_OVERLOAD_OK)
         {

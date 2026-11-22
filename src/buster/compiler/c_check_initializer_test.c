@@ -372,7 +372,7 @@ static void check_init_test_source_language(CheckTest* test, const char* source,
         ready = ready && parse_translation_unit(&parser, &pp) && parser.errors == 0 && parser.fatal == PARSE_MESSAGE_NONE;
         CheckInput input = { 0 };
         ready = ready && check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch);
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         CheckStream stream = { 0 };
         ready = ready && check_graph_run(&types.table, &input.graph, &stream_arena, &scratch, &options, &stream) && stream.report_count == 0;
         CheckInitializers initializers = { 0 };

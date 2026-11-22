@@ -1050,7 +1050,7 @@ static uint32_t files_search_key(const FilesRun* run, const FilesRequest* reques
     const bool absolute = request->item == BUSTER_PP_NONE || (request->length != 0 && request->name[0] == '/');
     const bool resumes = request->next && search != BUSTER_PP_NONE;
     const bool local = !absolute && !resumes && !request->angled;
-    const uint32_t start = absolute ? UINT32_MAX : resumes ? search + 1 : request->angled ? run->search->angled_first : 0;
+    const uint32_t start = absolute ? UINT32_MAX : resumes ? search + 1 : request->angled ? run->search->search.angled_first : 0;
     uint32_t length = 0;
     memcpy(key, &start, sizeof(start));
     length += sizeof(start);
@@ -1185,7 +1185,7 @@ static PPCandidate files_candidate(const FilesRun* run, const FilesSearch* searc
                                       index, path, path_length, &system, directory);
         const bool absolute = request->length != 0 && request->name[0] == '/';
         const uint32_t own = includer.directory_length != BUSTER_PP_NONE ? includer.directory_length : 1;
-        *directory_length = absolute ? BUSTER_PP_NONE : *directory != BUSTER_PP_NONE ? run->search->directory_lengths[*directory] : own;
+        *directory_length = absolute ? BUSTER_PP_NONE : *directory != BUSTER_PP_NONE ? run->search->search.directory_lengths[*directory] : own;
     }
     return result;
 }

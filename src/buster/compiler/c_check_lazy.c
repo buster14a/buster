@@ -271,7 +271,7 @@ static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Pre
             {
                 const uint32_t name = parser->tokens.names[declaration];
                 row->flags = check_lazy_header(parser, pp, firsts[declaration], row->begin, &bindings);
-                const bool system = check_lazy_system(pp, parser->tokens.sources[declaration]) && check_lazy_system(pp, parser->tokens.sources[row->begin]);
+                const bool system = check_lazy_system(pp, parse_source_index(&parser->tokens, declaration)) && check_lazy_system(pp, parse_source_index(&parser->tokens, row->begin));
                 row->flags |= system ? BUSTER_CHECK_LAZY_SYSTEM : 0;
                 if (targets[name] != 0)
                 {

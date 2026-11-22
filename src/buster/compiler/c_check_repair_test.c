@@ -46,7 +46,7 @@ static uint32_t check_test_repair_source_line(Preprocessor* pp, uint32_t source)
 
 static uint32_t check_test_repair_line(const Parser* parser, Preprocessor* pp, uint32_t token)
 {
-    const uint32_t line = check_test_repair_source_line(pp, parser->tokens.sources[token]);
+    const uint32_t line = check_test_repair_source_line(pp, parse_source_index(&parser->tokens, token));
     return line;
 }
 
@@ -300,7 +300,7 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
                 bool original_tokens = cut != 0 && cut < count && cut <= original.diagnostics[repair.diagnostic].token &&
                                        memcmp(view->tokens.kinds, original.tokens.kinds, cut) == 0 &&
                                        memcmp(view->tokens.names, original.tokens.names, (uint64_t)cut * sizeof(uint32_t)) == 0 &&
-                                       memcmp(view->tokens.sources, original.tokens.sources, (uint64_t)cut * sizeof(uint32_t)) == 0 &&
+                                       parse_sources_equal(&view->tokens, &original.tokens, cut) &&
                                        memcmp(view->tokens.flags, original.tokens.flags, cut) == 0;
                 check_test_expect(test, original_tokens, "repair preserves every original token, name, source and flag before its cutoff");
                 uint32_t original_pragmas = 0;
@@ -331,7 +331,7 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
                     for (uint32_t side = 0; side < 2; side += 1)
                     {
                         const int64_t token = offsets[side];
-                        padded &= view->tokens.kinds[token] == 0 && view->tokens.names[token] == 0 && view->tokens.sources[token] == 0 &&
+                        padded &= view->tokens.kinds[token] == 0 && view->tokens.names[token] == 0 && parse_source_index(&view->tokens, token) == 0 &&
                                   view->tokens.flags[token] == 0 && view->tree.roles[token] == 0 && view->tree.parents[token] == 0 &&
                                   view->tree.depths[token] == 0 && view->postorder[token] == 0 && view->sizes[token] == 0;
                     }
@@ -381,7 +381,7 @@ static void check_test_repair_fixture(CheckTest* test, const CheckRepairFixture*
                 }
                 if (adapted || input.diagnostic_graph)
                 {
-                    const CheckOptions check_options = { .scalar = path_index == 0 };
+                    const CheckOptions check_options = { 0 };
                     CheckStream stream;
                     const bool checked = check_graph_run(&types.table, &input.graph, &values, &scratch, &check_options, &stream);
                     check_test_expect(test, checked, "repair diagnostic graph is valid");
