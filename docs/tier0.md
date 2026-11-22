@@ -1409,8 +1409,10 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
 
 1. A parameter whose register the body never touches stays where it arrives.
 2. The other locals, most referenced first, take the caller-saved registers no entry touches: neither the depths
-   reached, nor a template's fixed registers, nor anything if the function calls.
-3. Then they take the callee-saved registers, for a local referenced at least twice (a push and a pop).
+   reached, nor a template's fixed registers, nor anything if the function calls. A reference counts 8 times for each
+   loop it is in, up to 4 loops deep (below, "Loop weights").
+3. Then they take the callee-saved registers, for a local whose references are worth at least 2 (a push and a pop):
+   referenced twice, or once inside a loop.
 4. Floating locals take free XMM registers.
 5. Address-taken locals and the rest get 8-byte frame slots (a `VA_LIST` 24 bytes), rsp-relative (rbp-relative with
    a frame pointer, below), after a variadic function's 176-byte save area. A stack parameter keeps its incoming slot, unless it took a
@@ -1425,6 +1427,19 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
    and every displacement is checked in 64 bits before it narrows to a disp32.
 
    The vector path finds the objects 16 locals at a time as a mask of nonzero sizes, as it finds the slots.
+
+**Loop weights (#2841).** A reference in a loop runs once a pass, so a count of the function's references gave a
+large function's registers to the locals its straight-line code names most and runs once. A spliced callee's loop
+(#1398 step 5's shapes) lost them: the vector lexer's `write_chunk`, spliced into `tokenize_chunks` (32,148
+instructions), kept its output cursors in frame slots. A back edge is a branch or jump to its own entry or one before
+it, and its loop is the entries from its target to it. `tier0_loop_weights` marks +1 at each back edge's target and −1
+past it, finding the branches 64 entries at a time (`vpshufbitqmb` of their kinds), and a prefix sum 16 entries at a
+time gives each entry's depth and its weight, `1 << 3 * min(depth, 4)`; both paths' counts add each reference's
+weight, saturating at `UINT32_MAX`. A function without back edges keeps a weight of 1 everywhere and allocates
+nothing. A local nothing references still counts 0, so the frame's slots and the prologue's moves are unchanged;
+`tier0_direct_references` takes an asm goto dispatch's references back at its call's weight. `test-tier0`'s "loop
+weights" checks the weights against a naive count of the back edges around each entry, and a function whose loop's
+two locals take registers from 18 straight-line locals named more often.
 
 This is what beats clang -O0, which loads and stores every local at every use. The counting loop for `s += i` compiles
 to `xor edx, edx; xor ecx, ecx; mov eax, ecx; cmp eax, edi; jge; add edx, ecx; inc ecx; jmp`.
@@ -1549,7 +1564,8 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    whose touches (a call's saves, division's fixed registers) are taken an entry at a time. The first unsupported
    entry is looked for only when there is one, in a compile that fails.
 2. **Homes:** the references' count takes the referring entries of 64 at a time as a mask (`vpshufbitqmb` of their
-   kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The greedy loop gives the k-th local of
+   kinds in the four kinds' bitset), then each set bit's loop weight ("Loop weights", above), without a branch per
+   entry. The greedy loop gives the k-th local of
    a kind that takes a register (not in one yet, its address not taken, referenced) the k-th free register of its
    kind: the caller-saved registers in depth order, then the callee-saved ones to a local referenced twice or more
    (those come first in the order), or the XMM registers. So for up to 64 locals the vector path needs no order:
