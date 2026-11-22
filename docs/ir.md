@@ -136,7 +136,7 @@ column comparisons deterministic.
 | `compress_store` | as `masked_store`; the set lanes are written one after another from the address, and no other byte ([gathers and compressing stores](ir-simd.md#gathers-compressing-stores-and-truncating-stores-1840)) |
 | `gather` | `a:ptr` the base, `b` the index vector of a dword or a qword per lane, `c` the mask of the lanes in flags (i32 or i64), `alignment_log2` the scale's log2; lane i is the lane's bytes at `a + sext(b[i]) * scale` where the bit is set, 0 elsewhere, and a clear lane is never read |
 | `scatter` | `a:ptr` the base, `b` the index vector as a gather's, and in `extra` at `c`'s index the stored vector (lanes in flags, i32 or i64) and its mask; `alignment_log2` the scale's log2; result is `void`. Lane i is written at `a + sext(b[i]) * scale` where its bit is set, from lane 0 up, and a clear lane is never written ([scatters](ir-simd.md#scatters-1840)) |
-| `fma` | `a,b,c` of the result's type, `f32` or `f64`; `a * b + c` rounded once, the first NaN of `a`, `b` and `c` quieted, or the default NaN for an invalid product or sum of numbers ([scalar fused multiply-adds](ir-simd.md#scalar-fused-multiply-adds-1840)) |
+| `fma` | `a,b,c` of the result's type, `f32` or `f64`, or a vector of `f32` or `f64` lanes in the flags; `a * b + c` rounded once per value, the first NaN of `a`, `b` and `c` quieted, or the default NaN for an invalid product or sum of numbers ([scalar fused multiply-adds](ir-simd.md#scalar-fused-multiply-adds-1840)) |
 | `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls`; `c` an aggregate result's destination (a `ptr`), or absent |
 | `phi` | `a` is an extra-word offset, `b` the incoming count; pairs are `(predecessor, value)` |
 | `br` | `a` is a block ID |
@@ -389,13 +389,12 @@ than U64 is a structural error).
 address becomes a `ptr`, with its size and location; a call with a result object
 (`call_result_objects`) gets the object's slot address as its destination and the
 object's size as its `result_size`. A call that passes the function's own hidden
-pointer on (#2684, `BUSTER_TIER0_RESULT_HIDDEN`) returns into the function's one
-forwarding slot, past the dispatch slot, of `hidden_size` bytes aligned to
-`hidden_alignment`, which is then copied where parameter 0 points, by a `COPY`'s
-pieces or, past 256 bytes, a call of the front end's `memmove` (`hidden_copy`), as
-the lowering's copy of a call's object was: Tier 1 takes a
-call's destination as a frame object's address alone (`tier1_select_call_abi`), so
-its code keeps the copy that Tier 0's and the interpreter's leave out. An object parameter is a `ptr` whose bytes the
+pointer on (#2684, `BUSTER_TIER0_RESULT_HIDDEN`) has parameter 0's pointer as its
+destination (`inttoptr` of its slot's load), of `hidden_size` bytes, and copies
+nothing, as Tier 0's and the interpreter's call doesn't: Tier 1 takes a destination
+that is a pointer value, no frame object's address, as the call's last effective
+use, which the call's general moves put in rdi (#2820,
+`tier1_select_call_destination`). The front end's `hidden_copy` is no longer read. An object parameter is a `ptr` whose bytes the
 preheader copies into its object, as `COPY` copies (below); a result in
 registers (`result_size`) returns `inttoptr` of its RETURN's address, and the
 IR's result type is `ptr`. A function with an object parameter or an aggregate

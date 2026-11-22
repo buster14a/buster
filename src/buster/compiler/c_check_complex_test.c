@@ -102,6 +102,118 @@ static void check_test_complex_integer_actions(CheckTest* test, TypeTable* table
     }
 }
 
+// A complex integer constant's part (check_complex_component) as a signed number of its element's width, when it is
+// one of `expected`'s value: its low 128 bits, sign-extended past the width up to them, which a part past 128 bits keeps
+// in `integer` with its limbs.
+static bool check_test_complex_wide_part(const TypeTable* table, const CheckValue* value, bool imaginary, uint32_t width, int64_t expected)
+{
+    const CheckValue part = check_complex_component(table, value, imaginary);
+    const uint32_t bits = width < 128 ? width : 128;
+    const unsigned __int128 mask = check_action_mask(bits);
+    bool limbs = true;
+    if (width > 128)
+    {
+        const uint32_t count = check_wide_count(width);
+        const uint64_t* held = check_wide_limbs(&part, count);
+        limbs = held != NULL;
+        for (uint32_t limb = 2; limbs && limb < count; limb += 1)
+        {
+            const uint64_t fill = expected < 0 ? UINT64_MAX : 0;
+            limbs = held[limb] == (limb + 1 == count ? fill & check_wide_top_mask(width) : fill);
+        }
+    }
+    return part.constant_kind == CHECK_CONSTANT_INTEGER && part.type == type_unqualified(type_element(table, value->type)) &&
+           (part.integer & mask) == ((unsigned __int128)(__int128)expected & mask) && limbs;
+}
+
+// Complex _BitInt constants of 65 to 200 bits and _Complex __int128's (#2219), whose parts are limbs: a conversion into
+// them, + - * / of them as clang's evaluator gives them, unary - and ~ (GNU's conjugate), parts, equality and truth,
+// conversions out of them, and their parts' object representation, whose bits past a width extend its sign.
+static void check_test_complex_wide_actions(CheckTest* test, TypeTable* table)
+{
+    const TypeId elements[] = {
+        type_bit_int(table, 65, false),
+        type_bit_int(table, 100, false),
+        type_bit_int(table, 128, false),
+        BUSTER_TYPE_INT128,
+        type_bit_int(table, 129, false),
+        type_bit_int(table, 200, false),
+    };
+    const uint32_t widths[] = { 65, 100, 128, 128, 129, 200 };
+    const TypeId narrow = type_complex(table, BUSTER_TYPE_INT);
+    for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(elements); e += 1)
+    {
+        const TypeId type = type_complex(table, elements[e]);
+        const uint32_t width = widths[e];
+        const CheckAction lefts = { .op = CHECK_OP_CAST, .operands = { check_test_integer_complex_value(narrow, 3, 4) }, .type = type };
+        const CheckAction rights = { .op = CHECK_OP_CAST, .operands = { check_test_integer_complex_value(narrow, 1, (uint32_t)-2) }, .type = type };
+        const CheckValue left = check_test_action(test, table, lefts).value;
+        const CheckValue right = check_test_action(test, table, rights).value;
+        char description[192];
+        snprintf(description, sizeof(description), "complex integer of %u bits: a conversion into it holds both parts", width);
+        check_test_expect(test, left.type == type && left.constant_kind == CHECK_CONSTANT_COMPLEX && check_test_complex_wide_part(table, &left, false, width, 3) &&
+                               check_test_complex_wide_part(table, &left, true, width, 4) && check_test_complex_wide_part(table, &right, true, width, -2),
+                          description);
+        const CheckOp operations[] = { CHECK_OP_ADD, CHECK_OP_SUBTRACT, CHECK_OP_MULTIPLY, CHECK_OP_DIVIDE };
+        const int64_t real[] = { 4, 2, 11, -1 };
+        const int64_t imaginary[] = { 2, 6, -2, 2 };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operations); i += 1)
+        {
+            const CheckAction action = { .op = operations[i], .operands = { left, right } };
+            const CheckActionResult result = check_test_action(test, table, action);
+            snprintf(description, sizeof(description), "complex integer of %u bits: operation %u folds as clang's evaluator", width, i);
+            check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.type == type && result.value.constant_kind == CHECK_CONSTANT_COMPLEX &&
+                                   result.value.fault == CHECK_FAULT_NONE && check_test_complex_wide_part(table, &result.value, false, width, real[i]) &&
+                                   check_test_complex_wide_part(table, &result.value, true, width, imaginary[i]),
+                              description);
+        }
+        const CheckOp unary[] = { CHECK_OP_NEGATIVE, CHECK_OP_BIT_NOT };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unary); i += 1)
+        {
+            const CheckAction action = { .op = unary[i], .operands = { left } };
+            const CheckActionResult result = check_test_action(test, table, action);
+            snprintf(description, sizeof(description), "complex integer of %u bits: unary %s", width, i == 0 ? "-" : "~ (conjugate)");
+            check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_COMPLEX &&
+                                   check_test_complex_wide_part(table, &result.value, false, width, i == 0 ? -3 : 3) &&
+                                   check_test_complex_wide_part(table, &result.value, true, width, -4),
+                              description);
+        }
+        const CheckAction equal = { .op = CHECK_OP_EQUAL, .operands = { left, left } };
+        const CheckAction unequal = { .op = CHECK_OP_NOT_EQUAL, .operands = { left, right } };
+        const CheckAction truth = { .op = CHECK_OP_CAST, .operands = { left }, .type = BUSTER_TYPE_BOOL };
+        const CheckAction real_part = { .op = CHECK_OP_CAST, .operands = { right }, .type = BUSTER_TYPE_LONG };
+        const CheckActionResult results[] = {
+            check_test_action(test, table, equal),
+            check_test_action(test, table, unequal),
+            check_test_action(test, table, truth),
+            check_test_action(test, table, real_part),
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(results); i += 1)
+        {
+            snprintf(description, sizeof(description), "complex integer of %u bits: %s", width,
+                     i == 0 ? "equality" : i == 1 ? "inequality" : i == 2 ? "truth" : "conversion to its real part's type");
+            check_test_expect(test, results[i].diagnostic == CHECK_DIAG_NONE && results[i].value.constant_kind == CHECK_CONSTANT_INTEGER && results[i].value.integer == 1,
+                              description);
+        }
+        const CheckValue zero = check_test_action(test, table, (CheckAction){ .op = CHECK_OP_CAST, .operands = { check_test_integer_complex_value(narrow, 0, 0) },
+                                                                               .type = type }).value;
+        const CheckActionResult falsity = check_test_action(test, table, (CheckAction){ .op = CHECK_OP_CAST, .operands = { zero }, .type = BUSTER_TYPE_BOOL });
+        snprintf(description, sizeof(description), "complex integer of %u bits: zero is false", width);
+        check_test_expect(test, falsity.value.constant_kind == CHECK_CONSTANT_INTEGER && falsity.value.integer == 0, description);
+        const uint64_t size = type_size(table, elements[e]);
+        uint8_t bytes[64];
+        memset(bytes, 0xa5, sizeof(bytes));
+        const bool written = check_complex_wide_bytes(&right, true, width, true, bytes, size);
+        bool extended = written;
+        for (uint64_t i = 0; extended && i < size; i += 1)
+        {
+            extended = bytes[i] == (i == 0 ? 0xfe : 0xff);
+        }
+        snprintf(description, sizeof(description), "complex integer of %u bits: a negative part's bytes extend its sign through its storage", width);
+        check_test_expect(test, extended && bytes[size] == 0xa5, description);
+    }
+}
+
 static void check_test_complex_actions(CheckTest* test, TypeTable* table)
 {
     const CheckValue left = check_test_complex_value(BUSTER_TYPE_COMPLEX_DOUBLE, 3, 4);
@@ -267,9 +379,19 @@ static void check_test_complex_oracles(CheckTest* test, const char* clang)
         "double _Complex x=1i2;\n",
         "double _Complex x=1ii;\n",
         "double _Complex x=1ij;\n",
+        // Imaginary bit-precise constants (#2219) and their operations: _Complex _BitInt(4)'s product wraps as clang's
+        // evaluator's integer products do, and those past 64 and 128 bits fold by their parts' limbs.
+        "_Static_assert(__imag__ 5wbi==5 && __real__ 5wbi==0 && __imag__ 5uwbi==5 && __imag__ 5iwb==5 && sizeof(5wbi)==2,\"imaginary bit-precise\");\n",
+        "_Static_assert(__real__(5wbi*2wbi)==6 && __imag__(3wbi+4wbi)==7 && __imag__(~(1+2wbi))==-2,\"_Complex _BitInt(4)\");\n",
+        "_Static_assert(__imag__(0x10000000000000000wbi*(1+2wbi))==0x10000000000000000wb && "
+        "__real__(0x10000000000000000wbi*(1+2wbi))==-0x20000000000000000wb,\"_Complex _BitInt(66)\");\n",
+        "_Static_assert(__imag__(5wbi*((_BitInt(200))1<<150))==(_BitInt(200))5<<150 && __real__((5wbi*(_BitInt(200))3)/3wbi)==5 && "
+        "__imag__((5wbi*(_BitInt(200))3)/3wbi)==0,\"_Complex _BitInt(200)\");\n",
+        "_Static_assert(__imag__ 5wbi==4,\"mutation\");\n",
+        "double _Complex x=5iwbi;\n",
     };
     const bool rejected[] = { false, true, false, false, true, false, false, true, true, true, false, false, true, false, true, false,
-                              false, false, true, false, true, true, true, true };
+                              false, false, true, false, true, true, true, true, false, false, false, false, true, true };
     char directory[] = "/tmp/buster-check-complex-XXXXXX";
     bool ready = mkdtemp(directory) != NULL;
     char paths[BUSTER_ARRAY_LENGTH(sources)][160];
@@ -310,6 +432,7 @@ static __attribute__((noinline)) void check_test_complex(CheckTest* test, TypeTa
 {
     check_test_complex_literals(test);
     check_test_complex_integer_actions(test, table);
+    check_test_complex_wide_actions(test, table);
     check_test_complex_actions(test, table);
     check_test_complex_oracles(test, clang);
 }

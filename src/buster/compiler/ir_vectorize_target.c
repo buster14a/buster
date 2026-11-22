@@ -87,6 +87,20 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
             }
             target->splat[lane] |= splat ? bit : 0;
         }
+        if (moves)
+        {
+            // Packed fma and the i32/f32 conversions (#2806). The bits are the float lane's.
+            const uint16_t fma32 = tier1_select_packed_fma_form(IR_SIMD_LANE_F32, width, encoding);
+            const uint16_t fma64 = tier1_select_packed_fma_form(IR_SIMD_LANE_F64, width, encoding);
+            target->binary[IR_FMA][IR_SIMD_LANE_F32] |= ir_vectorize_target_allows(allowed, fma32) ? bit : 0;
+            target->binary[IR_FMA][IR_SIMD_LANE_F64] |= ir_vectorize_target_allows(allowed, fma64) ? bit : 0;
+            const uint32_t conversions[] = { IR_SITOFP, IR_UITOFP, IR_FPTOSI, IR_FPTOUI };
+            for (uint32_t k = 0; k < 4; k += 1)
+            {
+                const uint16_t form = tier1_select_packed_convert_form(conversions[k], width, encoding);
+                target->binary[conversions[k]][IR_SIMD_LANE_F32] |= ir_vectorize_target_allows(allowed, form) ? bit : 0;
+            }
+        }
         for (uint32_t from = 0; moves && from < 4; from += 1)
         {
             for (uint32_t to = 0; to < 4; to += 1)
@@ -108,6 +122,9 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
                 }
             }
             target->popcount[from] |= !legacy && ir_vectorize_target_allows(allowed, ir_simd_lane_unary_forms[BUSTER_IR_LANE_UNARY_POPCOUNT][from][w]) ? bit : 0;
+            // The masked tail's (#2807): a masked load and store of the lanes (tier1_select_masked_move's).
+            const bool masked = ir_vectorize_target_allows(allowed, ir_simd_masked_moves[from][0][w]) && ir_vectorize_target_allows(allowed, ir_simd_masked_moves[from][1][w]);
+            target->masked[from] |= !legacy && masked ? bit : 0;
         }
         // A reduction: tier1_select_reduce's halvings down to one lane, each with its combining form, then lane 0's move.
         for (uint32_t size = 2; moves && size < 4; size += 1)
@@ -125,6 +142,14 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
                 target->reduce[size][operation] |= legal ? bit : 0;
             }
         }
+    }
+    // The masked tail's mask of 1 << k lanes from a general register (#2807): TIER1_RULE_MASK_FROM_INTEGER's kmov of the mask
+    // type's bytes, at least one (kmovb, AVX512DQ's, for 8 lanes or fewer).
+    for (uint32_t k = 1; k <= 6; k += 1)
+    {
+        const uint32_t lanes = 1u << k;
+        const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
+        target->mask |= ir_vectorize_target_allows(allowed, tier1_select_mask_forms(mask_bytes)->from_general) ? (uint8_t)(1u << k) : 0;
     }
 }
 

@@ -63,21 +63,39 @@ static void check_test_transition_classes(CheckTest* test, const char* name, con
     arena_pop_to(scratch, mark);
 }
 
-// The static words by the vector path, 16 nodes at a time, against the scalar path's, node by node: for the graph as read,
+// The static words, 16 nodes at a time, against their definition (check_test_transition_statics_definition), node by node: for the graph as read,
 // and with system-header marks of every third token, in arrays from the tokens' whole count down to fewer than a gather's
 // 4 bytes, so that the gather's lanes past the array's end go one at a time.
+// check_transition_statics' definition (#2924): each node's word by check_transition_static, then every vector member's
+// that isn't a leaf BUSTER_CHECK_TRANSITION_OTHER.
+static void check_test_transition_statics_definition(const CheckGraph* graph, const CheckStream* stream, uint32_t* statics)
+{
+    for (uint32_t node = 0; node < graph->count; node += 1)
+    {
+        statics[node] = check_transition_static(graph, stream, node);
+    }
+    for (uint32_t i = 0; i < graph->vector_member_count; i += 1)
+    {
+        const uint32_t member = graph->vector_members[i].node;
+        if (member < graph->count && statics[member] != BUSTER_CHECK_TRANSITION_LEAF)
+        {
+            statics[member] = BUSTER_CHECK_TRANSITION_OTHER;
+        }
+    }
+}
+
 static void check_test_transition_statics(CheckTest* test, const char* name, const CheckGraph* graph, const CheckStream* stream, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     uint32_t* vector = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count + 1);
-    uint32_t* scalar = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count + 1);
+    uint32_t* defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, graph->count + 1);
     uint32_t tokens = 0;
     for (uint32_t node = 0; graph->tokens != NULL && node < graph->count; node += 1)
     {
         tokens = graph->tokens[node] != BUSTER_CHECK_NONE && graph->tokens[node] + 1 > tokens ? graph->tokens[node] + 1 : tokens;
     }
     uint8_t* marks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)tokens + 1);
-    bool valid = vector != NULL && scalar != NULL && marks != NULL;
+    bool valid = vector != NULL && defined != NULL && marks != NULL;
     for (uint32_t token = 0; valid && token < tokens; token += 1)
     {
         marks[token] = token % 3 == 1;
@@ -93,18 +111,18 @@ static void check_test_transition_statics(CheckTest* test, const char* name, con
             marked.system_tokens = marks;
             marked.system_token_count = counts[variant] < tokens ? counts[variant] : tokens;
         }
-        check_transition_statics(&marked, stream, vector, false);
-        check_transition_statics(&marked, stream, scalar, true);
-        valid = memcmp(vector, scalar, (uint64_t)graph->count * sizeof(uint32_t)) == 0;
+        check_transition_statics(&marked, stream, vector);
+        check_test_transition_statics_definition(&marked, stream, defined);
+        valid = memcmp(vector, defined, (uint64_t)graph->count * sizeof(uint32_t)) == 0;
         for (uint32_t node = 0; valid && node < graph->count; node += 1)
         {
-            keyed += variant == 0 && scalar[node] > BUSTER_CHECK_TRANSITION_LEAF;
-            system += scalar[node] > BUSTER_CHECK_TRANSITION_LEAF &&
-                      (scalar[node] >> BUSTER_CHECK_KEY_EXTENSIONS_SHIFT & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0;
+            keyed += variant == 0 && defined[node] > BUSTER_CHECK_TRANSITION_LEAF;
+            system += defined[node] > BUSTER_CHECK_TRANSITION_LEAF &&
+                      (defined[node] >> BUSTER_CHECK_KEY_EXTENSIONS_SHIFT & BUSTER_CHECK_EXTENSION_SYSTEM_HEADER) != 0;
         }
     }
     char description[256];
-    snprintf(description, sizeof(description), "%s: the static words 16 nodes at a time are the scalar path's (%u nodes, %u keyed, %u system-header words)", name,
+    snprintf(description, sizeof(description), "%s: the static words 16 nodes at a time are their definition's (%u nodes, %u keyed, %u system-header words)", name,
              graph->count, keyed, system);
     check_test_expect(test, valid, description);
     arena_pop_to(scratch, mark);
@@ -149,7 +167,7 @@ static void check_test_transition_policy_keys(CheckTest* test)
     uint32_t objects[COUNT] = { 0 };
     uint32_t classes[COUNT];
     uint8_t environments[COUNT];
-    uint32_t scalar[COUNT];
+    uint32_t defined[COUNT];
     uint32_t vector[COUNT];
     uint32_t inherited[COUNT];
     uint64_t keys[BUSTER_ARRAY_LENGTH(cases)][4];
@@ -187,10 +205,10 @@ static void check_test_transition_policy_keys(CheckTest* test)
         argument_counts[NODE] = cases[variant].arguments;
         memcpy(objects, cases[variant].objects, sizeof(cases[variant].objects));
         memset(environments, cases[variant].environment, sizeof(environments));
-        check_transition_statics(&graph, &stream, scalar, true);
-        check_transition_statics(&graph, &stream, vector, false);
-        check_test_expect(test, memcmp(scalar, vector, sizeof(scalar)) == 0,
-                          "scalar and vector transition statics preserve contraction, evaluation and call-count fields");
+        check_test_transition_statics_definition(&graph, &stream, defined);
+        check_transition_statics(&graph, &stream, vector);
+        check_test_expect(test, memcmp(defined, vector, sizeof(defined)) == 0,
+                          "the transition statics, as their definition, preserve contraction, evaluation and call-count fields");
         const uint32_t sentinel = UINT32_C(0xa5a5a5a5);
         uint32_t words[WORDS];
         for (uint32_t i = 0; i < WORDS; i += 1)
@@ -198,7 +216,7 @@ static void check_test_transition_policy_keys(CheckTest* test)
             words[i] = sentinel;
         }
         CheckTransitionMiss miss = { 0 };
-        const CheckTransitionKind kind = check_transition_key(&graph, &stream, classes, NODE, scalar[NODE], &miss, words);
+        const CheckTransitionKind kind = check_transition_key(&graph, &stream, classes, NODE, defined[NODE], &miss, words);
         bool bounded = true;
         for (uint32_t i = 0; i < WORDS; i += 1)
         {
@@ -216,12 +234,9 @@ static void check_test_transition_policy_keys(CheckTest* test)
         {
             graph.fp_environments = NULL;
             graph.fp_contract_default = cases[variant].environment;
-            for (uint32_t path = 0; path < 2; path += 1)
-            {
-                check_transition_statics(&graph, &stream, inherited, path != 0);
-                check_test_expect(test, memcmp(scalar, inherited, sizeof(scalar)) == 0,
-                                  "a graph's contraction default keys exactly as the same explicit lexical policy");
-            }
+            check_transition_statics(&graph, &stream, inherited);
+            check_test_expect(test, memcmp(defined, inherited, sizeof(defined)) == 0,
+                              "a graph's contraction default keys exactly as the same explicit lexical policy");
         }
     }
 }
@@ -257,12 +272,14 @@ static void check_test_transition_source(CheckTest* test, const CheckTransitionF
                 parse_translation_unit(&parsers[path], &pp) &&
                 check_input(&input[path], &parsers[path], &pp, &types[path].table, &storage[path], &scratch[path]);
     }
-    const CheckOptions scalar = { .scalar = true, .verify = true };
-    ready = ready && check_graph_run(&types[0].table, &input[0].graph, &output[0], &scratch[0], &scalar, &oracle);
+    const CheckOptions node_order = { .verify = true };
+    ready = ready && check_graph_run(&types[0].table, &input[0].graph, &output[0], &scratch[0], &node_order, &oracle);
     char description[320];
     snprintf(description, sizeof(description), "%s: the scalar oracle checks the source (%u reports, %s expected)", fixture->name, oracle.report_count,
              fixture->reported ? "some" : "none");
     check_test_expect(test, ready && (oracle.report_count != 0) == fixture->reported, description);
+    check_test_expect(test, !ready || check_test_stream_recorded(&oracle, &input[0].graph, input[0].graph.argument_count, "transitions"),
+                      "transitions: the oracle's stream is its recorded digest");
     // Node order first, on a fresh table, so that its misses intern the types the oracle's did; then the others.
     const CheckOptions variants[4] =
     {
@@ -397,8 +414,10 @@ static void check_test_transition_limit(CheckTest* test)
                  pp_run_source(&pp, "wide.c", text.base, text.length - 1) && check_test_types_open_with(&types, capacity) &&
                  parse_initialize(&parser, &parsing, options.language) &&
                  parse_translation_unit(&parser, &pp) && check_input(&input, &parser, &pp, &types.table, &storage, &scratch);
-    const CheckOptions scalar = { .scalar = true };
-    ready = ready && check_graph_run(&types.table, &input.graph, &output, &scratch, &scalar, &oracle) && oracle.report_count == 0;
+    const CheckOptions node_order = { 0 };
+    ready = ready && check_graph_run(&types.table, &input.graph, &output, &scratch, &node_order, &oracle) && oracle.report_count == 0;
+    check_test_expect(test, !ready || check_test_stream_recorded(&oracle, &input.graph, input.graph.argument_count, "transition-room"),
+                      "transition-room: the oracle's stream is its recorded digest");
     check_test_expect(test, ready, "the table's limit: the wide source checks");
     const CheckOptions full = { .transitions = true, .verify_transitions = true };
     CheckStream whole;

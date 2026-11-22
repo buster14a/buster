@@ -295,6 +295,141 @@ static bool pp_test_clang_reference(void)
     return result;
 }
 
+// FNV-1a of `size` bytes, from `digest`: the tests' recorded digests (TestDigests) fold their cases' outputs with it.
+static uint64_t pp_kernel_fold(uint64_t digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* at = bytes;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        digest = (digest ^ at[i]) * 0x100000001b3ull;
+    }
+    return digest;
+}
+
+static uint64_t pp_kernel_fold_u64(uint64_t digest, uint64_t value)
+{
+    return pp_kernel_fold(digest, &value, sizeof(value));
+}
+
+// A table of recorded digests, read from the repository's root (`path`): a line a comparison, its key (the comparison's
+// site, '/', the case's name), a tab and the digest, recorded where the vectorized kernels and their scalar twins agreed
+// (#2924). With the environment variable `record` set to a file, each comparison appends its line there instead, and the
+// lines, sorted, make the table again. A case whose outputs hold its temporary directory's name (an interned path) has
+// '-' for its digest, which any digest matches: two recordings with $TMPDIR of other lengths find them. The
+// preprocessor's (pp_kernel_digests), the parser's (parse_kernel_digests) and the checker's (check_source_digests)
+// share this. A table with `unrecorded` set lets a case it has no line for pass, once it has loaded lines: the
+// checker's, whose cases added after the twins went have no agreement to record; `matched` and `unlisted` count its
+// cases with and without a line.
+typedef struct TestDigests TestDigests;
+struct TestDigests
+{
+    const char* path;
+    const char* record;
+    char* text;
+    char** keys;
+    uint64_t* digests;
+    bool* any;
+    uint32_t count;
+    uint32_t matched;
+    uint32_t unlisted;
+    bool loaded;
+    bool unrecorded;
+};
+
+static void test_digests_load(TestDigests* table)
+{
+    table->loaded = true;
+    FILE* file = fopen(table->path, "rb");
+    long size = -1;
+    if (file != 0 && fseek(file, 0, SEEK_END) == 0)
+    {
+        size = ftell(file);
+    }
+    if (size > 0 && fseek(file, 0, SEEK_SET) == 0)
+    {
+        table->text = malloc((size_t)size + 1);
+        const bool read = table->text != 0 && fread(table->text, 1, (size_t)size, file) == (size_t)size;
+        uint32_t lines = 0;
+        for (long i = 0; read && i < size; i += 1)
+        {
+            lines += table->text[i] == '\n';
+        }
+        table->keys = read ? malloc(sizeof(char*) * (lines + 1)) : 0;
+        table->digests = read ? malloc(sizeof(uint64_t) * (lines + 1)) : 0;
+        table->any = read ? malloc(sizeof(bool) * (lines + 1)) : 0;
+        if (table->keys != 0 && table->digests != 0 && table->any != 0)
+        {
+            table->text[size] = 0;
+            char* line = table->text;
+            while (*line != 0)
+            {
+                char* end = strchr(line, '\n');
+                char* tab = strrchr(line, '\t');
+                if (end != 0)
+                {
+                    *end = 0;
+                    tab = strrchr(line, '\t');
+                }
+                if (tab != 0)
+                {
+                    *tab = 0;
+                    table->keys[table->count] = line;
+                    table->digests[table->count] = strtoull(tab + 1, 0, 16);
+                    table->any[table->count] = tab[1] == '-';
+                    table->count += 1;
+                }
+                line = end != 0 ? end + 1 : line + strlen(line);
+            }
+        }
+    }
+    if (file != 0)
+    {
+        fclose(file);
+    }
+}
+
+// Whether `digest`, the comparison `site`'s on the case `name`, is the one `table` recorded (or, recording, whether its
+// line was written). A case without a recorded digest fails, unless the table lets it pass (`unrecorded`) and has
+// loaded lines; unless `quiet`, a failure says why.
+static bool test_digest_matches(TestDigests* table, uint64_t digest, const char* site, const char* name, bool quiet)
+{
+    char key[4400];
+    snprintf(key, sizeof(key), "%s/%s", site, name);
+    for (char* c = key; *c != 0; c += 1)
+    {
+        *c = *c == '\t' || *c == '\n' ? ' ' : *c;
+    }
+    const char* record = getenv(table->record);
+    bool result = false;
+    if (record != 0 && *record != 0)
+    {
+        FILE* file = fopen(record, "a");
+        result = file != 0 && fprintf(file, "%s\t%016llx\n", key, (unsigned long long)digest) > 0;
+        result = file != 0 && fclose(file) == 0 && result;
+    }
+    else
+    {
+        if (!table->loaded)
+        {
+            test_digests_load(table);
+        }
+        uint32_t found = UINT32_MAX;
+        for (uint32_t i = 0; found == UINT32_MAX && i < table->count; i += 1)
+        {
+            found = strcmp(table->keys[i], key) == 0 ? i : found;
+        }
+        table->matched += found != UINT32_MAX;
+        table->unlisted += found == UINT32_MAX;
+        result = found != UINT32_MAX ? table->any[found] || table->digests[found] == digest : table->unrecorded && table->count != 0;
+        if (!result && !quiet)
+        {
+            printf("%s: %s %016llx (%s)\n", key, found == UINT32_MAX ? "no recorded digest for the vectorized kernels' outputs, which are" : "the vectorized kernels' outputs aren't their recorded digest, but",
+                   (unsigned long long)digest, table->path);
+        }
+    }
+    return result;
+}
+
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
 
@@ -595,21 +730,6 @@ static bool pp_same_directive_tables(const Preprocessor* a, const Preprocessor* 
 
 #define BUSTER_PP_KERNEL_DIGESTS "tests/preprocessor-kernels/digests.tsv"
 
-static uint64_t pp_kernel_fold(uint64_t digest, const void* bytes, uint64_t size)
-{
-    const uint8_t* at = bytes;
-    for (uint64_t i = 0; i < size; i += 1)
-    {
-        digest = (digest ^ at[i]) * 0x100000001b3ull;
-    }
-    return digest;
-}
-
-static uint64_t pp_kernel_fold_u64(uint64_t digest, uint64_t value)
-{
-    return pp_kernel_fold(digest, &value, sizeof(value));
-}
-
 // What the comparisons of the vectorized kernels with their scalar twins read of a run (pp_same_streams,
 // pp_same_directive_tables, the diagnostics' counts), FNV-1a: the errors and warnings, the stream token for token
 // (kind, flags, value, location), the expansion history, and each file's directive table and raw errors. Every field is
@@ -652,117 +772,8 @@ static uint64_t pp_kernel_digest(const Preprocessor* pp)
     return digest;
 }
 
-// A table of recorded digests, read from the repository's root (`path`): a line a comparison, its key (the comparison's
-// site, '/', the case's name), a tab and the digest, recorded where the vectorized kernels and their scalar twins agreed
-// (#2924). With the environment variable `record` set to a file, each comparison appends its line there instead, and the
-// lines, sorted, make the table again. A case whose outputs hold its temporary directory's name (an interned path) has
-// '-' for its digest, which any digest matches: two recordings with $TMPDIR of other lengths find them. The
-// preprocessor's (pp_kernel_digests) and the parser's (parse_kernel_digests) share this.
-typedef struct TestDigests TestDigests;
-struct TestDigests
-{
-    const char* path;
-    const char* record;
-    char* text;
-    char** keys;
-    uint64_t* digests;
-    bool* any;
-    uint32_t count;
-    bool loaded;
-};
-
 static TestDigests pp_kernel_digests = { .path = BUSTER_PP_KERNEL_DIGESTS, .record = "BUSTER_PP_RECORD_DIGESTS" };
 
-static void test_digests_load(TestDigests* table)
-{
-    table->loaded = true;
-    FILE* file = fopen(table->path, "rb");
-    long size = -1;
-    if (file != 0 && fseek(file, 0, SEEK_END) == 0)
-    {
-        size = ftell(file);
-    }
-    if (size > 0 && fseek(file, 0, SEEK_SET) == 0)
-    {
-        table->text = malloc((size_t)size + 1);
-        const bool read = table->text != 0 && fread(table->text, 1, (size_t)size, file) == (size_t)size;
-        uint32_t lines = 0;
-        for (long i = 0; read && i < size; i += 1)
-        {
-            lines += table->text[i] == '\n';
-        }
-        table->keys = read ? malloc(sizeof(char*) * (lines + 1)) : 0;
-        table->digests = read ? malloc(sizeof(uint64_t) * (lines + 1)) : 0;
-        table->any = read ? malloc(sizeof(bool) * (lines + 1)) : 0;
-        if (table->keys != 0 && table->digests != 0 && table->any != 0)
-        {
-            table->text[size] = 0;
-            char* line = table->text;
-            while (*line != 0)
-            {
-                char* end = strchr(line, '\n');
-                char* tab = strrchr(line, '\t');
-                if (end != 0)
-                {
-                    *end = 0;
-                    tab = strrchr(line, '\t');
-                }
-                if (tab != 0)
-                {
-                    *tab = 0;
-                    table->keys[table->count] = line;
-                    table->digests[table->count] = strtoull(tab + 1, 0, 16);
-                    table->any[table->count] = tab[1] == '-';
-                    table->count += 1;
-                }
-                line = end != 0 ? end + 1 : line + strlen(line);
-            }
-        }
-    }
-    if (file != 0)
-    {
-        fclose(file);
-    }
-}
-
-// Whether `digest`, the comparison `site`'s on the case `name`, is the one `table` recorded (or, recording, whether its
-// line was written). A case without a recorded digest fails; unless `quiet`, a failure says why.
-static bool test_digest_matches(TestDigests* table, uint64_t digest, const char* site, const char* name, bool quiet)
-{
-    char key[4400];
-    snprintf(key, sizeof(key), "%s/%s", site, name);
-    for (char* c = key; *c != 0; c += 1)
-    {
-        *c = *c == '\t' || *c == '\n' ? ' ' : *c;
-    }
-    const char* record = getenv(table->record);
-    bool result = false;
-    if (record != 0 && *record != 0)
-    {
-        FILE* file = fopen(record, "a");
-        result = file != 0 && fprintf(file, "%s\t%016llx\n", key, (unsigned long long)digest) > 0;
-        result = file != 0 && fclose(file) == 0 && result;
-    }
-    else
-    {
-        if (!table->loaded)
-        {
-            test_digests_load(table);
-        }
-        uint32_t found = UINT32_MAX;
-        for (uint32_t i = 0; found == UINT32_MAX && i < table->count; i += 1)
-        {
-            found = strcmp(table->keys[i], key) == 0 ? i : found;
-        }
-        result = found != UINT32_MAX && (table->any[found] || table->digests[found] == digest);
-        if (!result && !quiet)
-        {
-            printf("%s: %s %016llx (%s)\n", key, found == UINT32_MAX ? "no recorded digest for the vectorized kernels' outputs, which are" : "the vectorized kernels' outputs aren't their recorded digest, but",
-                   (unsigned long long)digest, table->path);
-        }
-    }
-    return result;
-}
 
 // Whether `digest`, the comparison `site`'s on the case `name`, is the preprocessor's recorded one.
 static bool pp_kernel_digest_matches(uint64_t digest, const char* site, const char* name)
@@ -3598,10 +3609,14 @@ static bool pp_test_lookup_accounting(const char* directory)
     // The successful run needs ordinary missing candidates: a symlink loop is fatal even for __has_include, and is
     // tested separately above. Print any unexpected diagnostic from this run rather than hiding its failure's cause.
     options.quiet = false;
+    Arena search_arena = arena_reserve(1ull << 20);
+    PPSearchDirectories search = { 0 };
+    result = result && pp_prepare_search(&search, &search_arena, &options);
     static InternTable tables[3];
     static Preprocessor runs[3];
     for (uint32_t k = 0; result && k < 3; k += 1)
     {
+        options.search = k == 0 ? NULL : &search;
         options.scalar = k == 1;
         options.timing = k != 2;
         Preprocessor* pp = &runs[k];
@@ -3612,7 +3627,7 @@ static bool pp_test_lookup_accounting(const char* directory)
         result = result && pp->probes.opens == 10 && pp->probes.fstats == 4 && pp->probes.reads == 3 && pp->probes.maps == 0;
         if (options.timing)
         {
-            result = result && stats->directory_stats == 4 && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == 8 &&
+            result = result && stats->directory_stats == (options.search == NULL ? 4u : 0u) && stats->include_searches == 7 && stats->include_found == 3 && stats->include_opens == 8 &&
                      stats->include_fstats == 2 && stats->include_ticks != 0 && stats->embed_searches == 5 && stats->embed_found == 3 && stats->embed_stats == 10 &&
                      stats->embed_ticks != 0;
         }
@@ -3657,6 +3672,7 @@ static bool pp_test_lookup_accounting(const char* directory)
         pp_release(&runs[k]);
         intern_release(&tables[k]);
     }
+    arena_release(&search_arena);
     unlink(path);
     unlink(header);
     unlink(alias);
@@ -7684,16 +7700,16 @@ static bool pp_test_header_beside(void)
                  pp_clang_resource_directory(resource, sizeof(resource), 0) && (size_t)snprintf(includer_path, sizeof(includer_path), "%s/immintrin.h", resource) < sizeof(includer_path);
         // The search directory clang's headers are in: the fallback, or the resource directory.
         uint32_t search = BUSTER_PP_NONE;
-        for (uint32_t i = 0; result && i < pp.directory_count; i += 1)
+        for (uint32_t i = 0; result && i < pp.search.directory_count; i += 1)
         {
-            search = strcmp(pp.directories[i], resource) == 0 ? i : search;
+            search = strcmp(pp.search.directories[i], resource) == 0 ? i : search;
         }
-        result = result && search != BUSTER_PP_NONE && (buster == 0 || search == pp.fallback_directory);
+        result = result && search != BUSTER_PP_NONE && (buster == 0 || search == pp.search.fallback_directory);
         const uint32_t includer = result ? pp_lookup_path(&pp, includer_path, (uint32_t)strlen(includer_path), BUSTER_PP_NONE, 0, BUSTER_PP_SYSTEM_FILE) : BUSTER_PP_NONE;
         result = includer != BUSTER_PP_NONE && pp.files[includer].data != BUSTER_PP_NONE;
         uint32_t found_in = BUSTER_PP_NONE;
         const uint32_t stddef = result ? pp_find_include(&pp, (const uint8_t*)"stddef.h", 8, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;
-        const char* expected = buster != 0 ? pp.buster_directory : resource;
+        const char* expected = buster != 0 ? pp.search.buster_directory : resource;
         const size_t expected_length = expected != 0 ? strlen(expected) : 0;
         const bool stddef_right = stddef != BUSTER_PP_NONE && strncmp(pp.files[stddef].path, expected, expected_length) == 0 && pp.files[stddef].path[expected_length] == '/';
         const uint32_t other = result ? pp_find_include(&pp, (const uint8_t*)"mmintrin.h", 10, false, false, includer, search, &found_in, BUSTER_PP_NONE) : BUSTER_PP_NONE;

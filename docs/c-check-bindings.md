@@ -58,6 +58,13 @@ A parameter reactivated in its body keeps its token, so its body uses and its
 prototype uses get the same `d`. A closed scope's declarations stop being
 heads at its `RESTORE`, so a later use sees the earlier one again.
 
+The `internal_linkage` redeclaration diagnostic needs the oldest active
+declaration of its ordinary name. The source-order reader walks that name's
+previous handles on its first query, then keeps the root until its scope
+closes. A finite `end` on the cached declaration invalidates it. Other names
+leave the cache's fresh pages untouched. Deferred readers walk their own
+remapped handles.
+
 ## The modes
 
 Every mode feeds one consumer, `check_input_binding_answers`, which first

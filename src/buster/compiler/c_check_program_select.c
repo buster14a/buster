@@ -124,9 +124,9 @@ static uint32_t check_program_select_bounds(const CheckProgram* full, uint32_t o
     for (uint32_t pass = 0; valid && pass < 2; pass += 1)
     {
         label_count = 0;
-        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
+        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
         {
-            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
                 const uint32_t object = input->objects[token];
@@ -505,7 +505,8 @@ struct CheckProgramBodyCursor
     uint32_t opened;
 };
 
-static uint32_t check_program_token_body_next(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
+// Count bodies opening at or before token. Selected target clones each count as one body.
+static uint32_t check_program_opened_through(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
 {
     uint32_t opened = 0;
     if (token >= last->token)
@@ -533,6 +534,12 @@ static uint32_t check_program_token_body_next(const CheckProgram* program, uint3
         }
     }
     *last = (CheckProgramBodyCursor){ .token = token, .opened = opened };
+    return opened;
+}
+
+static uint32_t check_program_token_body_next(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
+{
+    const uint32_t opened = check_program_opened_through(program, token, last);
     const uint32_t body = opened != 0 && token <= program->parser->tree.parents[program->bodies[opened - 1].opening] ? opened : 0;
     return body;
 }

@@ -106,6 +106,29 @@
 // meets another key's answer at its slot wherever the last answer was another's. The calls' loop then takes a slot's
 // answer for a key only where the slot has that key, or the kernel's records are not T's.
 #define BUSTER_NODE_READER_ONE_SLOT 256u
+// X's rows on that window too, first their shapes (measure-node-machine --shadow --window-rows, with
+// BUSTER_NODE_READER_WINDOW_CONTEXTS, whose answers they are made from; c_check_node_machine_rows.c's
+// node_rows_window_chunk; "X's rows on the window"): the kinds, the classes and the values of the entries X writes
+// for the expressions C takes there, compared with X's tape on T's columns at reader time.
+#define BUSTER_NODE_READER_WINDOW_ROWS 512u
+// test-checker's control of that comparison (with BUSTER_NODE_READER_WINDOW_ROWS): the reference's tape is read with
+// one of its answers changed for each expression the rows take (its first entry's kind, its last's class, its length
+// or an entry's value, in turn), so that the comparison is seen to count every one of them
+// (node_rows_window_compare); and one of a chunk's first run's answers is changed, so that its second run's
+// comparison is seen to count every chunk (node_rows_window_chunk).
+#define BUSTER_NODE_READER_WINDOW_ROWS_FAULT 1024u
+// test-checker's control of a summary's side facts' comparison (with BUSTER_NODE_READER_WINDOW_ROWS; the shadow's
+// node_shadow_summaries, after the pipeline): the facts are kept with one of them changed for each expression (a
+// reference more, a reference's object, its return fact's stop or its unknown, in turn), so that the comparison with
+// the program's own walks is seen to count every one of them; one of a chunk's first run's facts is changed, so that
+// its second run's comparison is seen to count every chunk; and the comparison asks its truth and its fold of every
+// root reader time typed, kept or not, so that the two are seen to count the expressions the window lists for them.
+#define BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT 2048u
+// The shadow's switch for the side facts' cost (with BUSTER_NODE_READER_WINDOW_ROWS): X's rows on the window with no
+// summary's side facts. Neither the lines' column, the calls' mask nor the sweep is made, and nothing is kept for the
+// comparison; the turns list what they list with them. One executable then reads the other sweeps with the facts and
+// without.
+#define BUSTER_NODE_READER_WINDOW_SUMMARY_OFF 4096u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u
 // What the reference did with an expression (NodeFactsReader.c_ran, which the reader gives the kernel's state at each
@@ -169,6 +192,7 @@ typedef enum NodeFactsCount
     NODE_FACTS_COUNT_DECLARATION_LINES,
     NODE_FACTS_COUNT_LINE_TICKS,
     NODE_FACTS_COUNT_LINE_VERSIONS,
+    NODE_FACTS_COUNT_LINE_ASKS,
     NODE_FACTS_COUNT_MEMBER_SLOTS,
     NODE_FACTS_COUNT_PAIR_SLOTS,
     NODE_FACTS_COUNT_TAKEN_RECORDS,
@@ -252,6 +276,81 @@ typedef enum NodeFactsCount
     // The updates C asks its plan of, and those of them the loop's masks took: another lists its expression.
     NODE_FACTS_COUNT_CONTEXTS_UPDATES,
     NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN,
+    // The records the loop evaluates as branches (a statement's CONDITION over `&&`, `||` and `!`), and those of them
+    // that are the CONDITION.
+    NODE_FACTS_COUNT_CONTEXTS_BRANCHED,
+    NODE_FACTS_COUNT_CONTEXTS_BRANCHED_ROOTS,
+    // The records the loop gives an operator's value's two labels (a conditional's, an `&&`'s and an `||`'s), those of
+    // them that list their expression for the conversion their consumer puts into their arms, and the commas it takes.
+    NODE_FACTS_COUNT_CONTEXTS_VALUED,
+    NODE_FACTS_COUNT_CONTEXTS_SUNK,
+    NODE_FACTS_COUNT_CONTEXTS_COMMAS,
+    // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS): the expressions it ran on (those C takes on the window)
+    // and their records; those whose tape it made, their records and their entries; the listed ones by their first
+    // record's reason (BUSTER_NODE_ROWS_REASON_*, in its order); the made tapes that differ from the reference's, and
+    // those the reference kept no tape of; the chunks' records its sweeps ran over and the entries they wrote; the
+    // chunks whose second run wrote other entries than its first; the records its loops read for (a target's word,
+    // where the target is not the record's type; a line or a table of the unit's; an update's plan) and the updates
+    // whose rows it made;
+    // and its ticks: the reads, the shapes, the rows' write, an expression's part, and the reference's X on the
+    // expressions taken; then the four's in a second run over the same chunk.
+    NODE_FACTS_COUNT_ROWS_EXPRESSIONS,
+    NODE_FACTS_COUNT_ROWS_RECORDS,
+    NODE_FACTS_COUNT_ROWS_TAKEN,
+    NODE_FACTS_COUNT_ROWS_TAKEN_RECORDS,
+    NODE_FACTS_COUNT_ROWS_ENTRIES,
+    NODE_FACTS_COUNT_ROWS_LISTED_UPDATE,
+    NODE_FACTS_COUNT_ROWS_LISTED_BRANCHES,
+    NODE_FACTS_COUNT_ROWS_LISTED_CONVERSION,
+    NODE_FACTS_COUNT_ROWS_LISTED_FLOATING,
+    NODE_FACTS_COUNT_ROWS_DIFFERENCES,
+    NODE_FACTS_COUNT_ROWS_UNKEPT,
+    NODE_FACTS_COUNT_ROWS_SWEPT,
+    NODE_FACTS_COUNT_ROWS_WRITTEN,
+    NODE_FACTS_COUNT_ROWS_AGAIN_DIFFERENCES,
+    NODE_FACTS_COUNT_ROWS_WORDS,
+    NODE_FACTS_COUNT_ROWS_LINES,
+    NODE_FACTS_COUNT_ROWS_UPDATES,
+    NODE_FACTS_COUNT_ROWS_BRANCHED,
+    NODE_FACTS_COUNT_ROWS_READ_TICKS,
+    NODE_FACTS_COUNT_ROWS_SHAPE_TICKS,
+    NODE_FACTS_COUNT_ROWS_UPDATE_TICKS,
+    NODE_FACTS_COUNT_ROWS_WRITE_TICKS,
+    NODE_FACTS_COUNT_ROWS_PART_TICKS,
+    NODE_FACTS_COUNT_ROWS_REFERENCE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_READ_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_SHAPE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_UPDATE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_WRITE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_PART_TICKS,
+    // The rows' values: the records each of the values' lists has (BUSTER_NODE_ROWS_LISTS of them, in their order),
+    // the expressions whose calls' rows, labels and temporaries are numbered, the tapes that differ from the
+    // reference's by a value alone, and the values' sweep's ticks, a chunk's first run's and its second's.
+    NODE_FACTS_COUNT_ROWS_LIST,
+    NODE_FACTS_COUNT_ROWS_LIST_LAST = NODE_FACTS_COUNT_ROWS_LIST + 6,
+    NODE_FACTS_COUNT_ROWS_NUMBERED,
+    NODE_FACTS_COUNT_ROWS_NUMBER_STEPS,
+    NODE_FACTS_COUNT_ROWS_VALUE_DIFFERENCES,
+    NODE_FACTS_COUNT_ROWS_VALUE_TICKS,
+    NODE_FACTS_COUNT_ROWS_LATER_VALUE_TICKS,
+    // A summary's side facts on the window (c_check_node_machine_rows.c's node_rows_window_summary): the records it
+    // lists for a reference, and the calls it asks a record at a time (one whose callee is no plain function's name
+    // in its block or the block before); the expressions the rows take whose facts it keeps, and their references;
+    // those of them with an unknown for a return fact, those with a stop; the expressions whose fact the flow's
+    // reduction made a record at a time; the chunks whose second run's facts differ from its first's, which must be
+    // none; the operators whose turn lists their expression for a second operand whose truth is known; and its
+    // ticks, a chunk's first run's and its second's.
+    NODE_FACTS_COUNT_SUMMARY_LISTED,
+    NODE_FACTS_COUNT_SUMMARY_SUSPECTS,
+    NODE_FACTS_COUNT_SUMMARY_EXPRESSIONS,
+    NODE_FACTS_COUNT_SUMMARY_REFERENCES,
+    NODE_FACTS_COUNT_SUMMARY_UNKNOWN,
+    NODE_FACTS_COUNT_SUMMARY_STOPS,
+    NODE_FACTS_COUNT_SUMMARY_REDUCED,
+    NODE_FACTS_COUNT_SUMMARY_AGAIN_DIFFERENCES,
+    NODE_FACTS_COUNT_SUMMARY_DECIDED,
+    NODE_FACTS_COUNT_SUMMARY_TICKS,
+    NODE_FACTS_COUNT_SUMMARY_LATER_TICKS,
     NODE_FACTS_COUNTS,
 } NodeFactsCount;
 
@@ -336,6 +435,21 @@ struct NodeFrontTypes
     uint64_t* tape_values;
     uint64_t tape_count;
     uint64_t tape_capacity;
+    // A summary's side facts (BUSTER_NODE_READER_WINDOW_ROWS; null otherwise), by root node, for an expression the
+    // rows take whole on the window: its references' first in their store (UINT32_MAX: none is kept for the root) and
+    // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
+    // objects, followed only for a switch by its selector's TypeId. `summary_count` counts all words stored,
+    // of `summary_capacity`; an expression it had no room for keeps none
+    // (`summary_unkept`). And the unit's functions the return flow leaves unknown from a declaration on
+    // (check_program_return_unknowns' table, by object; null where the unit has none).
+    uint32_t* summary_firsts;
+    uint16_t* summary_counts;
+    uint8_t* summary_facts;
+    uint32_t* summary_words;
+    uint64_t summary_count;
+    uint64_t summary_capacity;
+    uint64_t summary_unkept;
+    const uint32_t* return_unknowns;
     // The expressions C and X ran on (those T took), by their refusal; their entries; and the tapes the store had no
     // room for. With them `ticks` is of T, C and X together.
     uint64_t swept;
@@ -345,11 +459,13 @@ struct NodeFrontTypes
     // The census's tests at reader time (BUSTER_NODE_READER_TESTS; null otherwise), by root node, for a root T took
     // (BUSTER_NODE_FRONT_TYPED_TESTED in `refusals`): the tests that refuse its expression, as bits of NodeCensusTest;
     // its root's kind as the reader derives it from the front's root (a NodeCensusRoot); and the declared type of the
-    // object it initializes (0 for none). C and X then run on the expressions no test refuses. `policy` is the unit's
-    // enabled warnings as reader time read them (a NodeCensusPolicy), which the shadow compares with the pipeline's.
+    // object it initializes (0 for none) and that object's declaration's token (BUSTER_CHECK_NONE for none). C and X
+    // then run on the expressions no test refuses. `policy` is the unit's enabled warnings as reader time read them (a
+    // NodeCensusPolicy), which the shadow compares with the pipeline's.
     uint64_t* tests;
     uint8_t* kinds;
     TypeId* declared;
+    uint32_t* declarations;
     const void* policy;
     // The expressions the tests ran on and those they refused; by test, the expressions it refuses (`tested_any`) and
     // those it refuses first in the tests' order (`tested_first`); and the nodes a test asked of T's records that the
@@ -403,6 +519,10 @@ struct NodeFrontTypes
     uint64_t own_quiet_casts;
     uint64_t own_quiet_casts_checked;
     uint64_t own_quiet_casts_wrong;
+    // And the ordered comparisons of two operands that are pointers once converted, which the orders' rule left out.
+    uint64_t own_quiet_orders;
+    uint64_t own_quiet_orders_checked;
+    uint64_t own_quiet_orders_wrong;
     // With the reader's verify: the integer constants whose record says its value (node_facts_small), and those of them
     // whose payload is another.
     uint64_t own_values_checked;
@@ -447,6 +567,10 @@ struct NodeFrontTypes
     uint64_t contexts_listed[BUSTER_NODE_CONTEXTS_REASONS];
     uint32_t contexts_tokens[BUSTER_NODE_FRONT_LISTED];
     uint32_t contexts_shown;
+    // X's rows on the window (BUSTER_NODE_READER_WINDOW_ROWS): the first made tapes that differ from the reference's,
+    // each by its expression's root's token.
+    uint32_t rows_tokens[BUSTER_NODE_FRONT_LISTED];
+    uint32_t rows_shown;
 };
 
 #define BUSTER_NODE_FRONT_TYPED_REFUSAL 0x0fu
@@ -1595,7 +1719,7 @@ static inline __attribute__((always_inline)) void node_front_chunk_by(NodeFront*
                 case CHECK_INPUT_CODE_RETURN:
                 {
                     const uint32_t count = node_front_values(front, mine, values);
-                    const TypeId type = reader->return_types[token];
+                    const TypeId type = reader->query_types[token];
                     left = type == 0 || count == BUSTER_NODE_FRONT_UNKNOWN || count > 1;
                     if (!left && count == 1)
                     {

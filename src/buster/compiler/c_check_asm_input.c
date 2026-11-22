@@ -101,25 +101,61 @@ static bool check_asm_text_equal(CheckAsmText text, const char* expected)
     return text.length == strlen(expected) && (text.length == 0 || memcmp(text.bytes, expected, text.length) == 0);
 }
 
+// The first version of target_clones attribute `clones` (its versions joined by commas, check_input_target_clones), or
+// none where its list has no "default": clang drops such an attribute after its error, and the function has the unit's
+// features.
+static String8 check_input_asm_clones_first(const CheckInputAttribute* clones)
+{
+    const String8 text = clones->text;
+    String8 first = { 0 };
+    bool has_default = false;
+    for (uint64_t cursor = 0; text.pointer != NULL && cursor <= text.length;)
+    {
+        uint64_t end = cursor;
+        while (end < text.length && text.pointer[end] != ',')
+        {
+            end += 1;
+        }
+        const String8 item = { text.pointer + cursor, end - cursor };
+        first = cursor == 0 ? item : first;
+        has_default |= check_input_attribute_equal(item, "default");
+        cursor = end + 1;
+    }
+    return has_default ? first : (String8){ 0 };
+}
+
 // The widest vector register of the current function's features (#2231, CheckInputAsm.vector_bits), as clang's
-// validateOperandSize reads its feature map (ASTContext::getFunctionFeatureMap): the unit's, or those a target attribute
-// on the function's definition gives (predefines_function_target). Once a body: its statements share it.
+// validateOperandSize reads its feature map (ASTContext::getFunctionFeatureMap): those a target attribute on the
+// function's definition gives (predefines_function_target); else a target_clones function's first version's (#2247), of
+// the definition's attribute or the declaration that made the function multiversioned (its list is every declaration's),
+// as Sema asks for the GlobalDecl's version index 0, whichever clone later can't place an operand: its CPU's features and
+// the version's alone (predefines_clone_target); else the unit's. A multiversioned function's unit is read in source
+// order (check_deferred_bodies), whose records check_target_versions_since reads. Once a body: its statements share it.
 static uint16_t check_input_asm_vector_bits(CheckInputReader* reader)
 {
     const uint32_t body = reader->function_body;
     if (reader->asm_vector_bits == 0 || reader->asm_vector_body != body)
     {
         X86Target target = reader->pp->options.target;
-        const uint32_t function = body < reader->parser->tokens.count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
-        const CheckInputAttribute* attribute = function < reader->parser->tokens.count ?
-            check_input_attribute_of(check_input_attributes_at(reader->output, function), CHECK_ATTRIBUTE_TARGET) : NULL;
+        const uint32_t count = reader->parser->tokens.count;
+        const uint32_t function = body < count ? check_sparse_get(reader->output->body_declarations, body) : BUSTER_CHECK_NONE;
+        const CheckInputAttribute* attribute = function < count ? check_input_attribute_of(check_input_attributes_at(reader->output, function), CHECK_ATTRIBUTE_TARGET) : NULL;
+        const CheckInputAttribute* clones = attribute == NULL && function < count ?
+            check_target_versions_own(check_input_attributes_at(reader->output, function), CHECK_ATTRIBUTE_TARGET_CLONES) : NULL;
+        const bool inherited = attribute == NULL && clones == NULL && function < count && reader->output->target_multiversion && !reader->lane;
+        const uint32_t since = inherited ? check_target_versions_since(reader, reader->objects[function]) : BUSTER_CHECK_NONE;
+        clones = since < count ? check_target_versions_own(check_input_attributes_at(reader->output, since), CHECK_ATTRIBUTE_TARGET_CLONES) : clones;
+        const String8 first = clones != NULL ? check_input_asm_clones_first(clones) : (String8){ 0 };
+        const String8 text = attribute != NULL ? attribute->text : first;
         int32_t cpu = -1;
-        const bool version = attribute != NULL && attribute->text.length < UINT32_MAX &&
-                             predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+        const bool is_default = first.length != 0 && check_input_attribute_equal(first, "default");
+        const bool version = text.length != 0 && text.length < UINT32_MAX &&
+                             (is_default || predefines_target_attribute(text.pointer, (uint32_t)text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION);
         if (version)
         {
             const PredefinesHost host = predefines_host_of(&reader->pp->options.predefines);
-            target = predefines_function_target(&reader->pp->options.predefines, &host, target, attribute->text.pointer, (uint32_t)attribute->text.length, cpu);
+            target = attribute != NULL ? predefines_function_target(&reader->pp->options.predefines, &host, target, text.pointer, (uint32_t)text.length, cpu) :
+                                         predefines_clone_target(&reader->pp->options.predefines, &host, target, text.pointer, is_default ? 0 : (uint32_t)text.length, cpu);
         }
         reader->asm_vector_bits = (target.features & BUSTER_X86_FEATURE(AVX512F)) != 0 ? 512 : (target.features & BUSTER_X86_FEATURE(AVX)) != 0 ? 256 : 128;
         reader->asm_vector_body = body;
@@ -840,15 +876,13 @@ static bool check_input_asm_label_use(const CheckInputReader* reader, uint32_t t
     return evaluated;
 }
 
-// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877, #1167): the
-// vector path skips 256 tokens without attributes with a load of their directory entries and tests 16 tokens' values 8
-// at a time (check_sparse_wide_entries); the scalar path, its twin, tests each token's. The asm labels' passes read them
-// rather than the column, which a unit's few attributed tokens left them sweeping three times.
-static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint32_t limit, uint32_t* tokens, bool scalar)
+// The tokens below `limit` with attributes, in order, into `tokens` (room for `limit`), and how many (#877, #1167): it
+// skips 256 tokens without attributes with a load of their directory entries and tests 16 tokens' values 8 at a time
+// (check_sparse_wide_entries). The asm labels' passes read them rather than the column, which a unit's few attributed
+// tokens left them sweeping three times.
+static uint32_t check_input_asm_attributed_tokens(const CheckInput* input, uint32_t limit, uint32_t* tokens)
 {
-    (void)scalar;
-
-    return check_sparse_wide_entries(input->attributes, limit, !BUSTER_SCALAR_PATH(scalar), tokens);
+    return check_sparse_wide_entries(input->attributes, limit, tokens);
 }
 
 // Whether bit `index` of `bits` is set: words of 32 bits, as the kernels below gather them.
@@ -861,83 +895,57 @@ static bool check_input_asm_bit(const uint32_t* bits, uint32_t index)
 // token's, (count + 31) / 32 words), which it writes whole (#877): a labelled object's declarations, to which the uses
 // below refer. AVX-512 gathers 16 tokens' words of `labelled` where the labelled objects' filter (CheckInputFilter)
 // passes one of their objects, and stores their 16 bits at once: a unit that includes glibc's headers labels a few dozen
-// objects, and gathering at every 16 tokens in both kernels took 0.45% of sqlite3.c's -c's cycles (#529). The scalar
-// path, its twin, tests each token's.
-static void check_input_asm_labelled_tokens(const CheckInput* input, const uint32_t* labelled, uint32_t* declared, bool scalar)
+// objects, and gathering at every 16 tokens in both kernels took 0.45% of sqlite3.c's -c's cycles (#529).
+static void check_input_asm_labelled_tokens(const CheckInput* input, const uint32_t* labelled, uint32_t* declared)
 {
-    (void)scalar;
-
     const uint32_t count = input->token_count;
     const uint32_t slots = count + 1;
-    if (BUSTER_SCALAR_PATH(scalar))
+    // A group's 16 bits are a 16-bit half of `declared`'s 32-bit words: on x86-64's little-endian words, group g is tokens
+    // 16g to 16g + 15, bits 16(g % 2) to 16(g % 2) + 15 of word g / 2. The build's -fno-strict-aliasing allows the 16-bit
+    // stores into the words, and an odd last group's other half is zeroed below, so that every word the tokens reach is
+    // whole.
+    uint16_t* halves = (uint16_t*)declared;
+    const __m512i ones = _mm512_set1_epi32(1);
+    const CheckInputFilter filter = check_input_filter_bits(labelled, (slots + 31) / 32);
+    for (uint32_t first = 0; first < count; first += 16)
     {
-        memset(declared, 0, ((uint64_t)count + 31) / 32 * sizeof(uint32_t));
-        for (uint32_t token = 0; token < count; token += 1)
+        const __mmask16 lanes = (__mmask16)check_input_scan_all(first, count);
+        const __m512i objects = _mm512_maskz_loadu_epi32(lanes, input->objects + first);
+        const __mmask16 named = _mm512_mask_test_epi32_mask(lanes, objects, objects) & _mm512_cmplt_epu32_mask(objects, _mm512_set1_epi32((int32_t)slots));
+        const __mmask16 candidates = check_input_filter_test(&filter, objects, named);
+        __mmask16 marked = 0;
+        if (candidates != 0)
         {
-            const uint32_t object = input->objects[token];
-            if (object != 0 && object < slots && check_input_asm_bit(labelled, object))
-            {
-                declared[token / 32] |= UINT32_C(1) << (token % 32);
-            }
+            const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(objects, 5), labelled, 4);
+            const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(objects, _mm512_set1_epi32(31)));
+            marked = _mm512_mask_test_epi32_mask(candidates, bits, ones);
         }
+        halves[first / 16] = marked;
     }
-    else
+    // The last word's other half, past the tokens.
+    if (((count + 15) / 16) % 2 != 0)
     {
-        // A group's 16 bits are a 16-bit half of `declared`'s 32-bit words: on x86-64's little-endian words, group g is
-        // tokens 16g to 16g + 15, bits 16(g % 2) to 16(g % 2) + 15 of word g / 2, the scalar path's bits. The build's
-        // -fno-strict-aliasing allows the 16-bit stores into the words, and an odd last group's other half is zeroed
-        // below, so that every word the tokens reach is whole.
-        uint16_t* halves = (uint16_t*)declared;
-        const __m512i ones = _mm512_set1_epi32(1);
-        const CheckInputFilter filter = check_input_filter_bits(labelled, (slots + 31) / 32);
-        for (uint32_t first = 0; first < count; first += 16)
-        {
-            const __mmask16 lanes = (__mmask16)check_input_scan_all(first, count);
-            const __m512i objects = _mm512_maskz_loadu_epi32(lanes, input->objects + first);
-            const __mmask16 named = _mm512_mask_test_epi32_mask(lanes, objects, objects) & _mm512_cmplt_epu32_mask(objects, _mm512_set1_epi32((int32_t)slots));
-            const __mmask16 candidates = check_input_filter_test(&filter, objects, named);
-            __mmask16 marked = 0;
-            if (candidates != 0)
-            {
-                const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(objects, 5), labelled, 4);
-                const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(objects, _mm512_set1_epi32(31)));
-                marked = _mm512_mask_test_epi32_mask(candidates, bits, ones);
-            }
-            halves[first / 16] = marked;
-        }
-        // The last word's other half, past the tokens.
-        if (((count + 15) / 16) % 2 != 0)
-        {
-            halves[(count + 15) / 16] = 0;
-        }
+        halves[(count + 15) / 16] = 0;
     }
 }
 
 // Of the next 16 tokens from `first` below `end`, those whose declaration (CheckInput.declarations) is a token `declared`
 // marks: the uses and declarations of labelled objects. AVX-512 gathers their words of `declared` where `filter`
-// (check_input_filter_bits of `declared`) passes one of their declarations; the scalar path, its twin, takes every token,
-// whose declaration the pass tests, and leaves the filter unread.
-static uint32_t check_input_asm_labelled_uses(const CheckInput* input, const uint32_t* declared, const CheckInputFilter* filter, uint32_t first, uint32_t end,
-                                              bool scalar)
+// (check_input_filter_bits of `declared`) passes one of their declarations.
+static uint32_t check_input_asm_labelled_uses(const CheckInput* input, const uint32_t* declared, const CheckInputFilter* filter, uint32_t first, uint32_t end)
 {
-    (void)scalar;
-    (void)filter;
-
-    uint32_t lanes = (uint32_t)check_input_scan_all(first, end) & 0xffff;
-    if (!BUSTER_SCALAR_PATH(scalar))
+    const uint32_t lanes = (uint32_t)check_input_scan_all(first, end) & 0xffff;
+    const __m512i declarations = _mm512_maskz_loadu_epi32((__mmask16)lanes, input->declarations + first);
+    const __mmask16 named = _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, declarations, _mm512_set1_epi32((int32_t)input->token_count));
+    const __mmask16 candidates = check_input_filter_test(filter, declarations, named);
+    uint32_t uses = 0;
+    if (candidates != 0)
     {
-        const __m512i declarations = _mm512_maskz_loadu_epi32((__mmask16)lanes, input->declarations + first);
-        const __mmask16 named = _mm512_mask_cmplt_epu32_mask((__mmask16)lanes, declarations, _mm512_set1_epi32((int32_t)input->token_count));
-        const __mmask16 candidates = check_input_filter_test(filter, declarations, named);
-        lanes = 0;
-        if (candidates != 0)
-        {
-            const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(declarations, 5), declared, 4);
-            const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(declarations, _mm512_set1_epi32(31)));
-            lanes = _mm512_mask_test_epi32_mask(candidates, bits, _mm512_set1_epi32(1));
-        }
+        const __m512i words = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), candidates, _mm512_srli_epi32(declarations, 5), declared, 4);
+        const __m512i bits = _mm512_srlv_epi32(words, _mm512_and_si512(declarations, _mm512_set1_epi32(31)));
+        uses = _mm512_mask_test_epi32_mask(candidates, bits, _mm512_set1_epi32(1));
     }
-    return lanes;
+    return uses;
 }
 
 // The asm labels' checks (GCC's and clang's rules for a declaration's linkage label), then register variables' labels'
@@ -948,8 +956,6 @@ static uint32_t check_input_asm_labelled_uses(const CheckInput* input, const uin
 static void check_input_asm_labels(CheckInputReader* reader)
 {
     CheckInput* input = reader->output;
-    input->asm_warnings_prepared = true;
-    const bool scalar = BUSTER_SCALAR_PATH(reader->parser->options.scalar);
     const uint64_t mark = reader->scratch->length;
     const uint64_t slots = (uint64_t)input->token_count + 1;
     const uint64_t words = (slots + 31) / 32;
@@ -957,7 +963,7 @@ static void check_input_asm_labels(CheckInputReader* reader)
     // A label needs an asm keyword: without one, no token has a label to check.
     uint32_t* attributed = input->asm_capacity != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)limit + 1) : NULL;
     input->resource |= input->asm_capacity != 0 && attributed == NULL;
-    const uint32_t attributed_count = attributed != NULL ? check_input_asm_attributed_tokens(input, limit, attributed, scalar) : 0;
+    const uint32_t attributed_count = attributed != NULL ? check_input_asm_attributed_tokens(input, limit, attributed) : 0;
     bool present = false;
     for (uint32_t a = 0; !present && a < attributed_count; a += 1)
     {
@@ -970,7 +976,9 @@ static void check_input_asm_labels(CheckInputReader* reader)
     }
     const CheckInputAttribute** labels = present ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, const CheckInputAttribute*, slots) : NULL;
     uint8_t* states = labels != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, slots) : NULL;
-    uint32_t* labelled = states != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, words) : NULL;
+    // A labelled object's first definition, which a later label's warning notes (#2936), valid where its state has bit 2.
+    uint32_t* definitions = states != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, slots) : NULL;
+    uint32_t* labelled = definitions != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, words) : NULL;
     uint32_t* declared = labelled != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, words) : NULL;
     input->resource |= present && declared == NULL;
     if (declared != NULL)
@@ -994,16 +1002,17 @@ static void check_input_asm_labels(CheckInputReader* reader)
                         labelled[object / 32] |= UINT32_C(1) << (object % 32);
                         states[object] = 0;
                         labels[object] = NULL;
+                        definitions[object] = BUSTER_CHECK_NONE;
                     }
                     states[object] |= 1;
                 }
             }
         }
-        check_input_asm_labelled_tokens(input, labelled, declared, scalar);
-        const CheckInputFilter filter = !scalar ? check_input_filter_bits(declared, (uint32_t)((input->token_count + 31) / 32)) : (CheckInputFilter){ 0 };
+        check_input_asm_labelled_tokens(input, labelled, declared);
+        const CheckInputFilter filter = check_input_filter_bits(declared, (uint32_t)((input->token_count + 31) / 32));
         for (uint32_t first = 0; first < limit && !input->resource; first += 16)
         {
-            const uint32_t uses = check_input_asm_labelled_uses(input, declared, &filter, first, limit, scalar);
+            const uint32_t uses = check_input_asm_labelled_uses(input, declared, &filter, first, limit);
             for (uint32_t selected = uses; selected != 0 && !input->resource; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
@@ -1041,14 +1050,48 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                         input->recovered_reports[r].repeated |= input->recovered_reports[r].token == token;
                                     }
                                 }
+                                else if (previous == NULL && (states[object] & 4) != 0)
+                                {
+                                    // A first label after the definition (#2936): clang's checkNewAttributesAfterDef drops it
+                                    // with "attribute declaration must precede definition" at its string, noted at the
+                                    // definition, before it would look at an earlier use. The warning its merge reserved
+                                    // (check_input_attribute_late) is published, or else one at the label is made.
+                                    attribute->ignored = true;
+                                    CheckWarningBuffer* events = &reader->warning_events;
+                                    const uint32_t reserved = attribute->warning;
+                                    CheckWarningEvent* held = reserved != 0 && reserved <= events->count ? events->events + reserved - 1 : NULL;
+                                    held = held != NULL && held->kind == CHECK_WARNING_EVENT_LATE_ATTRIBUTE && held->token == attribute->argument_first &&
+                                           held->note_count == 1 && held->note_first < events->note_count ? held : NULL;
+                                    if (held != NULL)
+                                    {
+                                        held->flags &= ~BUSTER_CHECK_WARNING_SUPPRESSED;
+                                        events->notes[held->note_first].token = definitions[object];
+                                    }
+                                    else
+                                    {
+                                        const CheckWarningEvent event =
+                                        {
+                                            .id = CHECK_WARNING_ID_IGNORED_ATTRIBUTES,
+                                            .kind = CHECK_WARNING_EVENT_LATE_ATTRIBUTE,
+                                            .token = attribute->argument_first,
+                                            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                                            .completion = attribute->end,
+                                            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                                        };
+                                        const CheckWarningNote note =
+                                        {
+                                            .kind = CHECK_WARNING_NOTE_PREVIOUS_DEFINITION,
+                                            .token = definitions[object],
+                                            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                                            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                                        };
+                                        check_input_warning_event(reader, &event, &note, 1);
+                                    }
+                                }
                                 else if (previous == NULL && (states[object] & 2) != 0)
                                 {
                                     check_input_report(reader, token, CHECK_INPUT_DECLARATION);
-                                }
-                                else if (previous == NULL && (states[object] & 4) != 0)
-                                {
-                                    attribute->ignored = true;
-                                    input->ignored_asm_count += 1;
                                 }
                                 else
                                 {
@@ -1056,7 +1099,9 @@ static void check_input_asm_labels(CheckInputReader* reader)
                                 }
                             }
                         }
-                        states[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? 4 : 0;
+                        const bool defined = check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED);
+                        definitions[object] = defined && (states[object] & 4) == 0 ? token : definitions[object];
+                        states[object] |= defined ? 4 : 0;
                     }
                     else if (reader->parser->tree.roles[token] == PARSE_ROLE_OPERAND && check_input_asm_label_use(reader, token))
                     {

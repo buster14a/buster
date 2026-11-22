@@ -6,7 +6,8 @@
 // symbol/stack addresses qualify: a symbol's address computed from rip, or read from its GOT slot where the consumer
 // certifies that access (BUSTER_TIER1_REMAT_GOT: the loader writes the slot before the program runs, and nothing
 // changes it after). Other loads, TLS recipes, dynamic stack addresses, floating operations, and mutable operands do
-// not. tier1_rematerialization_marks produces the allocator's byte column; tier1_rematerialize emits one copy;
+// not. tier1_rematerialization_marks produces the allocator's byte column; tier1_rematerialize emits one copy (a frame
+// address a lea from the frame base, or at the base itself from rsp, rbp, r12 or r13 the base's 3-byte register copy);
 // tier1_rematerialization_model_costs fills the optional cost columns from the Zen 5 model where it has measured them.
 // The caller supplies actual flags liveness at each copy and the final stable frame-base displacement. Every symbol
 // copy carries a distinct encoder FIXUP flag and its own returned symbol/addend for link_add_code_fixups, a PC32
@@ -238,9 +239,12 @@ static __attribute__((unused)) bool tier1_rematerialize(const Tier1Rematerializa
         }
         else
         {
+            // A lea from the frame base, or, at a zero displacement from rsp, rbp, r12 or r13, whose lea needs a SIB byte
+            // or a zero disp8, the base's register copy: `mov r64, base`, 3 bytes for 4 (#3149). Neither writes the flags.
+            const bool copied = value == 0 && ((frame_base & 7) == X86_REGISTER_RSP || (frame_base & 7) == X86_REGISTER_RBP);
             valid = frame_base < 16;
-            candidate.instruction.form = X86_FORM_LEA_R64_M;
-            candidate.instruction.mode = BUSTER_X86_MEMORY_BASE;
+            candidate.instruction.form = copied ? X86_FORM_MOV_R64_RM64 : X86_FORM_LEA_R64_M;
+            candidate.instruction.mode = copied ? BUSTER_X86_REGISTER_DIRECT : BUSTER_X86_MEMORY_BASE;
             candidate.instruction.rm = frame_base;
             candidate.instruction.reg = destination;
             candidate.instruction.displacement = (int32_t)value;

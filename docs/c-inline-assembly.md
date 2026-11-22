@@ -1148,7 +1148,10 @@ Each refusal names its feature, as the driver prints it ("unsupported: ..."):
   refer to it; and vectors of 32 bytes without AVX or 64 without AVX-512F, or
   in XMM16 up or YMM16 up of 16 or 32 bytes without AVX-512VL (the checker
   gives clang's Sema error for the sizes first, "invalid input size for
-  constraint", #2231, so only a `v` operand's register class reaches this);
+  constraint", #2231, so only a `v` operand's register class reaches this,
+  and a `target_clones` copy whose version lacks the feature, as Sema checks
+  the first version's, which clang's code generation can't place either,
+  #2247);
 - bit-fields;
 - explicit register variables in registers the helper doesn't place one in
   (APX's r16 to r31, st(2) to st(7)), in rsp in a statement

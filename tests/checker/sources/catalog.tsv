@@ -22,6 +22,11 @@ buster-fixtures v1 checker-sources
 0020	0020.c	rejected	bool of an address named by pragma weak
 0021	0021.c	-	bool of an address an ignored pragma weak names
 0022	0022.c	-	bool of an address a pragma weak after it names
+pointer-constant-equality	pointer-constant-equality.c	-	constant address equality in initializers, assertions and declarations (#2994)
+pointer-constant-equality-weak	pointer-constant-equality-weak.c	rejected	a weak object may resolve to null (#2994)
+pointer-constant-equality-adjacent	pointer-constant-equality-adjacent.c	rejected	one past one object may equal another object’s beginning (#2994)
+pointer-constant-equality-literals	pointer-constant-equality-literals.c	rejected	a string literal and a matching suffix may share storage (#2994)
+pointer-constant-equality-absolute	pointer-constant-equality-absolute.c	rejected	a nonzero absolute address may equal a symbolic address (#2994)
 0023	0023.c	-	global array initializer
 0024	0024.c	-	address cancels void pointer indirection
 0025	0025.c	-	address cancels null pointer indirection
@@ -420,3 +425,10 @@ buster-fixtures v1 checker-sources
 0418	0418.c	rejected	multiversioning: no_builtin on a declaration still reports the conflict
 auto-type-x86-statement	auto-type-x86-statement.c	-	__auto_type keeps x86 builtin callees in statement expressions (#2717)
 auto-type-x86-statement-ice	auto-type-x86-statement-ice.c	rejected	__auto_type statement expressions still require an x86 builtin's immediate (#2717)
+quadratic-attribute-runs	quadratic-attribute-runs.c	-	runs of GNU attribute groups, with and without a body after them (#2995)
+quadratic-case-runs	quadratic-case-runs.c	-	runs of case labels on one statement, nested and in nested switches (#2995)
+quadratic-generic-chains	quadratic-generic-chains.c	-	_Generic selections nested in their last association, and 40 associations (#2995)
+quadratic-generic-duplicate	quadratic-generic-duplicate.c	rejected	a duplicate type after 40 associations (#2995)
+quadratic-typeof-chains	quadratic-typeof-chains.c	-	typeof queries nested as the whole type name of the one around them (#2995)
+quadratic-statement-expressions	quadratic-statement-expressions.c	-	statement expressions nested 100 deep, in loops and switches with GNU break and continue, and many under deep blocks (#2995; the program tests run it, against GCC, and count its walks)
+quadratic-vla-bounds	quadratic-vla-bounds.c	-	a variable-length array of 100 bounds, a declaration of 100 such declarators, and arrays of several in nested blocks (#2995; the program tests run it and count its walks)

@@ -277,7 +277,7 @@ static __attribute__((noinline)) void check_test_fresh_output(CheckTest* test)
             untouched[layout] = arena_untouched(&arenas[layout]);
             checked[layout] = check_test_types_open(&types[layout]) &&
                               check_input_compile(&inputs[layout], &parser, &pp, &types[layout].table, &arenas[layout], &scratch, true, parser.tokens.count, NULL) &&
-                              check_graph_run(&types[layout].table, &inputs[layout].graph, &outputs[layout], &scratch, &(const CheckOptions){ .scalar = path == 0 },
+                              check_graph_run(&types[layout].table, &inputs[layout].graph, &outputs[layout], &scratch, &(const CheckOptions){ 0 },
                                               &streams[layout]);
         }
         char description[160];

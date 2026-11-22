@@ -527,8 +527,9 @@ computes from the registers it is given: `tier1_emit_cfg_kernel`,
 `tier1_select_fixed`, and a machine row's template, the front end's records
 that `tier0_operation_valid` admits, by the roles they name), the ABI's
 argument registers and its records of by-value aggregates, the
-rematerialization recipes, the frame's displacements from its base register,
-the CFG and its phis, and `x86_semantics.c`'s effects of each record.
+rematerialization recipes and `tier1_rematerialize`'s copy of each, the frame's
+displacements from its base register, the CFG and its phis, and
+`x86_semantics.c`'s effects of each record.
 
 **Untrusted:** the allocation, every emitted record, and the emitter's
 account of them: each record's origin (`Tier1Origin`, marked by
@@ -567,7 +568,16 @@ The decoding:
   which name registers below 16 alone: a vector's `vmovdqa` and `vmovdqu` of 16
   and 32 bytes, and a carrier's VEX `vmovq` and `vinsertps`. A recomputation is a constant's edit only where
   `tier1_rematerialize` writes exactly that record, with its reference, for the
-  value its origin names.
+  value its origin names. A frame address at the frame base register itself is
+  that register's 64-bit copy (`mov r64, rsp` where rsp is the base, `mov r64,
+  rbp` where rbp is, #3149), which is tried as a recomputation first
+  (`tier1_cert_emitted_recomputed`); only otherwise is it a move, of a register
+  no value is in, which the check then refuses. The recipes are trusted, and so
+  is `tier1_rematerialize`'s copy of one: the check proves that the record is
+  the copy that function writes, as the emitter does, not what it computes.
+  `test-tier1-allocation` checks that: every frame base's copy into every
+  register at displacements 0, 8, -32 and 128 against the encoder's lea, and
+  rsp's copies at 0 and -32 run natively.
 - **Nodes.** Each node's records are regenerated from the allocation's
   registers at its use phase and must equal the emitted ones byte for byte. They
   are one instruction: its operands read where the allocation has them, every
@@ -643,12 +653,20 @@ The decoding:
   cover, is left uncertified (`TIER1_CERT_EMITTED_VECTOR`).
 - **By-value aggregates** (#789, #1284). A parameter's copy at entry, from its
   registers and incoming slots (a SPLIT location's, a STACK one's high or low
-  eightbyte alone); a call's argument copies into staging slots below rsp or
+  eightbyte alone, a PAYLOAD one's slot whole through the vector scratch
+  register, #2798); a call's argument copies into staging slots below rsp or
   the reserved frame object when they exceed the red zone's capacity (#1450),
-  zmm16 and on for 64-byte parts, stack slots or the outgoing area whole; its
+  zmm16 and on for zmm parts, stack slots or the outgoing area whole; its
   parts' loads, the hidden pointer's `lea`, the result parts' stores; and the
   function's own result, staged then loaded or copied through the hidden
-  pointer, are regenerated as the emitter writes them and compared. Each part
+  pointer, are regenerated as the emitter writes them and compared. A record's
+  payload no register is as wide as (#2798) is a value of its register's
+  width; its loads and stores in pieces (`tier0_payload_load`,
+  `tier0_payload_store`) are one instruction, the selection's sequence. A
+  call's result parts' stores must also write inside the call's result object,
+  by the IR's size of it (`tier1_cert_emitted_inside`), whatever sequence the
+  selection gives a part: a payload's register stored whole would run past the
+  record. Each part
   is a value of the certificate, defined where its copy puts it and read where
   it is consumed: a part loaded from the wrong slot, or a copy's address
   overwritten before its last piece, fails.
