@@ -956,7 +956,7 @@ static const char node_objects_test_labels[] =
     "    return object + tentative + twice + (int)kept;\n"
     "}\n";
 
-// - A rename pragma (with an asm label in the unit, without which the program reads no label at all: #3208). The
+// - A rename pragma in a unit without an asm keyword (#3208). The
 //   declarations it labels are chosen when the reader is done, so T refuses every library builtin's call of the unit,
 //   the one before the pragma and memmove's too, and asks no label; the two objects it labels are counted apart.
 static const char node_objects_test_renames[] =
@@ -964,7 +964,7 @@ static const char node_objects_test_renames[] =
     "void* memcpy(void* destination, const void* source, size_t count);\n"
     "void* memmove(void* destination, const void* source, size_t count);\n"
     "int plain(int n);\n"
-    "extern int other asm(\"other_name\");\n"
+    "extern int other;\n"
     "int before(char* to, const char* from) { memcpy(to, from, 8); return plain(1); }\n"
     "#pragma redefine_extname memcpy renamed_copy\n"
     "int after(char* to, const char* from) { memcpy(to, from, 8); memmove(to, from, 8); return plain(2) + other; }\n"

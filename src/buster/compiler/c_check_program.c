@@ -707,6 +707,8 @@ struct CheckProgram
     // earlier emitted reference had already fixed that object's original spelling. The selection owns this cold
     // view; the input's asm-label facts remain unchanged for syntax and type checks.
     uint8_t* symbol_pragma_originals;
+    // Per object, the index plus one of a function rename after a use in the source.
+    uint32_t* late_function_renames;
     // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
     // GNU's weak attribute and `#pragma weak` after a use (#1849): the weak declarations of the objects none of whose
     // weak declarations is its first declaration's own (a `#pragma weak` after the declaration it attaches to being
@@ -3822,15 +3824,15 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
     return constant;
 }
 
-// CheckProgram.object_labelled: the objects of the declarations with an asm label not ignored (check_input_attribute_of's),
-// by one scan of the tokens
-// with attributes (CheckInput.attributes), in a unit with an asm keyword alone; false where the column has no room.
+// Collect accepted asm labels from declaration attributes. Both an asm keyword and an applied
+// #pragma redefine_extname can supply one. Allocate the column on the first label.
 static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
+    const bool may_have_labels = input->asm_capacity != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->has_asm_label);
     bool room = true;
-    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
+    for (uint32_t first = may_have_labels ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
          first = check_input_attributed_next(input->attributes, first + 16, count))
     {
         const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
@@ -3857,6 +3859,8 @@ static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
     }
     return room;
 }
+
+static uint32_t check_program_token_body(const CheckProgram* program, uint32_t token);
 
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
 // cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
@@ -3885,7 +3889,21 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
     }
     const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
-    const bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
+    bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
+    const uint32_t rename = labelled && program->late_function_renames != NULL ? program->late_function_renames[object] : 0;
+    if (rename != 0)
+    {
+        const CheckInputSymbolPragma* pragma = program->input->symbol_pragmas->records + rename - 1;
+        const uint32_t token = graph->tokens[node];
+        if (token < pragma->token)
+        {
+            // An earlier call can see the label only if it saw the labelled declaration and its
+            // body is emitted after the pragma (at its closing brace, or at the end of the unit).
+            const uint32_t body = check_program_token_body(program, token);
+            labelled = token >= pragma->declaration && (body == 0 || (program->body_eager != NULL && !program->body_eager[body - 1]) ||
+                                                        program->parser->tree.parents[program->bodies[body - 1].opening] >= pragma->token);
+        }
+    }
     return marked && !labelled ? index : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
 }
 

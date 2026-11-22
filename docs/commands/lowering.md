@@ -2663,8 +2663,10 @@ reader settles after the bodies.
   (`node_machine_renames`), T refuses every call the reader marked for a
   library builtin, at both times, and asks no label. The shadow leaves the
   label of such an object out of its comparison and counts the object.
-  (In a unit with no `asm` token the program reads no label at all:
-  [#3208](https://github.com/buster14a/buster/issues/3208).)
+  Lowering reads the applied pragma's label even in units without an
+  `asm` token. A call before the directive can use its label if the call
+  saw the labelled declaration and Clang emits its body after the pragma.
+  [#3208](https://github.com/buster14a/buster/issues/3208)
 - **A weak name** is the name's from a token on, not a declaration's: the
   reader notes it at a `weak`, `weakref` or `weak_import` attribute on any
   declaration of the name (`CheckInput.weak_names`) and at a `#pragma

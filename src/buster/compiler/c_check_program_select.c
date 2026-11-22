@@ -682,13 +682,31 @@ static bool check_program_symbol_pragmas(CheckProgram* program, const CheckDataP
                 first[target] = point < first[target] ? point : first[target];
             }
         }
+        // Each accepted rename is its object's only one. Reuse the watched objects' slots once
+        // their first use has decided the spelling, to retain the late function pragmas for lowering.
+        bool late_function = false;
         for (uint32_t i = 0; valid && i < history->count; i += 1)
         {
             const CheckInputSymbolPragma* record = history->records + i;
             if (record->after_use && record->declaration < input->token_count)
             {
                 const uint32_t object = input->objects[record->declaration];
-                program->symbol_pragma_originals[i] = object != 0 && object < program->object_count && first[object] != 0 && first[object] <= record->token;
+                if (object != 0 && object < program->object_count)
+                {
+                    program->symbol_pragma_originals[i] = first[object] != 0 && first[object] <= record->token;
+                    const bool function = input->declaration_kinds[record->declaration] == C_BINDING_FUNCTION;
+                    first[object] = function ? i + 1 : 0;
+                    late_function |= function;
+                }
+            }
+        }
+        if (valid && late_function)
+        {
+            program->late_function_renames = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->object_count);
+            valid = program->late_function_renames != NULL;
+            if (valid)
+            {
+                memcpy(program->late_function_renames, first, (uint64_t)program->object_count * sizeof(uint32_t));
             }
         }
     }
