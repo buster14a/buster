@@ -118,6 +118,9 @@ struct CheckBoundaryUnit
     uint32_t* runtime_marks;
     CheckBoundaryRow* rows;
     uint32_t row_count;
+    // The census, per body of the program: the expression ops its nodes have (a bit an op, two words) and their count.
+    uint64_t* op_masks;
+    uint32_t* node_counts;
 };
 
 static CheckBoundaryUnit check_boundary_unit;
@@ -152,6 +155,8 @@ static void check_boundary_unit_reset(void)
     free(check_boundary_unit.string_bodies);
     free(check_boundary_unit.runtime_marks);
     free(check_boundary_unit.rows);
+    free(check_boundary_unit.op_masks);
+    free(check_boundary_unit.node_counts);
     check_boundary_unit = (CheckBoundaryUnit){ 0 };
     if (check_boundary_names != NULL)
     {
@@ -192,6 +197,18 @@ static void check_boundary_unit_prepare(const CheckProgram* program)
         {
             const uint32_t body = check_boundary_body_of(program, input->strings[s].token);
             check_boundary_unit.string_bodies[s] = body != BUSTER_CHECK_NONE ? body + 1 : 0;
+        }
+        check_boundary_unit.op_masks = calloc(2 * ((uint64_t)program->body_count + 1), sizeof(uint64_t));
+        check_boundary_unit.node_counts = calloc((uint64_t)program->body_count + 1, sizeof(uint32_t));
+        for (uint32_t node = 0; check_boundary_unit.op_masks != NULL && check_boundary_unit.node_counts != NULL && node < input->graph.count; node += 1)
+        {
+            const uint32_t body = check_boundary_body_of(program, input->graph.tokens[node]);
+            const uint32_t op = (uint32_t)input->graph.ops[node];
+            if (body != BUSTER_CHECK_NONE && op < 128)
+            {
+                check_boundary_unit.op_masks[2 * (uint64_t)body + (op >> 6)] |= UINT64_C(1) << (op & 63);
+                check_boundary_unit.node_counts[body] += 1;
+            }
         }
     }
 }
@@ -421,8 +438,15 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
             const uint32_t identifier = program->parser->tokens.names[body.declaration];
             const char* spelling = program->identifiers != NULL && identifier != 0 && identifier < program->identifiers->count ?
                                    (const char*)intern_bytes(program->identifiers, identifier) : "?";
-            fprintf(check_boundary_names, "%u\t%u\t%s\t%u\t%s\n", check_boundary_origin(program, body.opening), check_boundary_origin(program, closing),
-                    check_boundary_refusal_names[refusal], function->count, spelling);
+            uint32_t control_kinds = 0;
+            for (uint32_t i = 0; i < body.count; i += 1)
+            {
+                control_kinds |= 1u << (program->controls[body.first + i].kind & 31);
+            }
+            fprintf(check_boundary_names, "%u\t%u\t%s\t%u\t%s\t%x\t%llx\t%llx\t%u\t%u\n", check_boundary_origin(program, body.opening),
+                    check_boundary_origin(program, closing), check_boundary_refusal_names[refusal], function->count, spelling, control_kinds,
+                    unit->op_masks != NULL ? (unsigned long long)unit->op_masks[2 * (uint64_t)b] : 0,
+                    unit->op_masks != NULL ? (unsigned long long)unit->op_masks[2 * (uint64_t)b + 1] : 0, unit->node_counts != NULL ? unit->node_counts[b] : 0, body.count);
         }
         unit->rows[unit->row_count++] = (CheckBoundaryRow){
             .opening = check_boundary_origin(program, body.opening),
