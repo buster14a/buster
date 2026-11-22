@@ -2248,7 +2248,10 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     const CheckInput* input = reader->output;
     const uint32_t count = reader->parser->tokens.count;
     // Every token's expression ends by the count, so that within these limits none is past them.
-    const bool coded = input->diagnostic_limits == NULL && input->deferred_tokens == NULL && reader->expression_limit >= count && input->token_count >= count;
+    // A lazily deferred body's tokens are ignored (check_input_run copies the mask), so their classes don't act and the
+    // compaction leaves them out; #113's are read later by their own walk, which the mask alone holds off.
+    const bool masked = input->deferred_tokens != NULL && reader->deferred != NULL;
+    const bool coded = input->diagnostic_limits == NULL && !masked && reader->expression_limit >= count && input->token_count >= count;
     const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
