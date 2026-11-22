@@ -532,43 +532,70 @@ static void presplit_readable_readers(PresplitPlan* plan)
     const uint64_t code = (UINT64_C(1) << plan->parts) - 1;
     uint32_t capacity = 64;
     LLVMValueRef* stack = presplit_allocate(capacity, sizeof(LLVMValueRef));
-    bool changed = true;
-    while (changed)
+    const uint64_t slots = (uint64_t)plan->global_count + 1;
+    uint32_t* queue = presplit_allocate(slots, sizeof(*queue));
+    uint64_t* pending = presplit_allocate(plan->global_count, sizeof(*pending));
+    uint64_t head = 0;
+    uint64_t tail = 0;
+    for (uint32_t i = 0; i < plan->global_count; i += 1)
     {
-        changed = false;
-        for (uint32_t i = 0; i < plan->global_count; i += 1)
+        const PresplitGlobal* entry = &plan->globals[i];
+        const uint64_t readers = entry->readers & code;
+        if (readers != 0 && presplit_readable(entry->global))
         {
-            const PresplitGlobal* entry = &plan->globals[i];
-            const uint64_t readers = entry->readers & code;
-            uint32_t depth = 0;
-            if (entry->defined && readers != 0 && presplit_readable(entry->global))
+            pending[i] = readers;
+            queue[tail] = i;
+            tail += 1;
+        }
+    }
+    // A nonzero pending mask owns one queue slot. New readers coalesce until that global is visited, even on a cycle.
+    while (head != tail)
+    {
+        const uint32_t i = queue[head];
+        head = head + 1 == slots ? 0 : head + 1;
+        const uint64_t readers = pending[i];
+        pending[i] = 0;
+        uint32_t depth = 0;
+        presplit_push(&stack, &depth, &capacity, LLVMGetInitializer(plan->globals[i].global));
+        while (depth != 0)
+        {
+            depth -= 1;
+            LLVMValueRef value = stack[depth];
+            if (LLVMIsAGlobalVariable(value))
             {
-                presplit_push(&stack, &depth, &capacity, LLVMGetInitializer(entry->global));
-            }
-            while (depth != 0)
-            {
-                depth -= 1;
-                LLVMValueRef value = stack[depth];
-                if (LLVMIsAGlobalVariable(value))
+                const uint32_t index = presplit_map_get(&plan->global_indices, value);
+                if (index != UINT32_MAX)
                 {
-                    const uint32_t index = presplit_map_get(&plan->global_indices, value);
-                    if (index != UINT32_MAX && (readers & ~plan->globals[index].readers) != 0)
+                    PresplitGlobal* target = &plan->globals[index];
+                    const uint64_t added = readers & ~target->readers;
+                    if (added != 0)
                     {
-                        plan->globals[index].readers |= readers;
-                        changed = true;
+                        // Every named global gains the readers. Only a readable definition has more to propagate.
+                        target->readers |= added;
+                        if (presplit_readable(target->global))
+                        {
+                            if (pending[index] == 0)
+                            {
+                                queue[tail] = index;
+                                tail = tail + 1 == slots ? 0 : tail + 1;
+                            }
+                            pending[index] |= added;
+                        }
                     }
                 }
-                else if (!LLVMIsAGlobalValue(value) && LLVMIsAConstant(value))
+            }
+            else if (!LLVMIsAGlobalValue(value) && LLVMIsAConstant(value))
+            {
+                const int operands = LLVMGetNumOperands(value);
+                for (int o = 0; o < operands; o += 1)
                 {
-                    const int operands = LLVMGetNumOperands(value);
-                    for (int o = 0; o < operands; o += 1)
-                    {
-                        presplit_push(&stack, &depth, &capacity, LLVMGetOperand(value, (unsigned)o));
-                    }
+                    presplit_push(&stack, &depth, &capacity, LLVMGetOperand(value, (unsigned)o));
                 }
             }
         }
     }
+    free(pending);
+    free(queue);
     free(stack);
 }
 

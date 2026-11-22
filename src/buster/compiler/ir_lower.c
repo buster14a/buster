@@ -11,6 +11,11 @@
 // Layout: IrTypedPlan/ir_typed_plan; ir_typed_classify; IrTypedSink and count/fill replay in ir_lower_emit.c;
 // ir_lower_typed_target_path.
 
+// Build the Tier 1 private-value experiment with BUSTER_BUILD_DEFINES=-DBUSTER_TIER1_PRIVATE_VALUES=1.
+#ifndef BUSTER_TIER1_PRIVATE_VALUES
+#define BUSTER_TIER1_PRIVATE_VALUES 0
+#endif
+
 // Preserve the typed validator's width-qualified stack classes. The byte classifier remains unchanged for scalar
 // entries; only VECTOR entries need this sparse metadata lookup. DUP and control-only entries inherit their stack.
 static uint32_t ir_typed_vector_bytes(const Tier0Function* input, uint32_t entry)
@@ -120,6 +125,8 @@ struct IrTypedPlan
     // so the stores at a block's end and its successors' loads agree on each depth's type.
     uint32_t* depth_slots;
     uint32_t depth_slot_count;
+    const uint8_t* direct_local;
+    uint32_t* direct_value;
     const IrSimdTypedOperation* operations;
     // The goto *s (the JUMP_INDIRECT entries no jump table has, #785), which all go through the function's one dispatch
     // block (the emitter's last); a jump table's goes to its table's labels from its own block.
@@ -3095,10 +3102,78 @@ static bool ir_typed_debug_scalars(const Tier0Function* input, const IrTypedPlan
     return ok;
 }
 
+// A read throughout a function can use the preheader's
+// parameter definition if nothing rebinds it. A mutable slot can travel as
+// values when every read has an earlier write in the same basic block and
+// lifetime. All its stores are then private to the construction of those values.
+static bool ir_typed_direct_plan(const Tier0Function* input, IrTypedPlan* plan, Arena* scratch)
+{
+    const uint32_t count = input->local_count;
+    uint8_t* eligible = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+    uint8_t* assigned = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+    uint8_t* exposed = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
+    uint32_t* written = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+    uint32_t* versions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
+    const bool ok = eligible && assigned && exposed && written && versions;
+    if (ok)
+    {
+        memset(assigned, 0, count);
+        memset(exposed, 0, count);
+        memset(written, 0, (size_t)count * sizeof(*written));
+        for (uint32_t local = 0; local < count; ++local)
+        {
+            const uint8_t cls = input->local_classes[local];
+            eligible[local] = input->local_flags[local] == 0 && cls >= BUSTER_TYPED_CLASS_I8 &&
+                              cls <= BUSTER_TYPED_CLASS_F64;
+        }
+        uint32_t life = 0;
+        for (uint32_t i = 0; i < input->count; ++i)
+        {
+            while (life < input->lifetime_count && input->lifetime_entries[life] == i)
+            {
+                const uint32_t local = input->lifetime_locals[life++] & ~BUSTER_TIER0_LIFETIME_END;
+                written[local] = 0;
+                assigned[local] = 1;
+            }
+            const uint8_t kind = input->kinds[i];
+            if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_SET_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL ||
+                kind == BUSTER_TYPED_LOCAL_ADDRESS)
+            {
+                const uint32_t local = (uint32_t)input->values[i];
+                const uint32_t block = plan->entry_blocks[i] + 1;
+                if (kind == BUSTER_TYPED_LOCAL_ADDRESS || input->classes[i] != input->local_classes[local])
+                {
+                    eligible[local] = 0;
+                }
+                else if (kind == BUSTER_TYPED_LOCAL)
+                {
+                    exposed[local] |= written[local] != block;
+                }
+                else
+                {
+                    written[local] = block;
+                    assigned[local] = 1;
+                }
+            }
+            else if (kind == BUSTER_TYPED_ATOMIC_CAS)
+            {
+                eligible[input->values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT] = 0;
+            }
+        }
+        for (uint32_t local = 0; local < count; ++local)
+        {
+            eligible[local] &= !exposed[local] || (local < input->parameter_count && !assigned[local]);
+        }
+        plan->direct_local = eligible;
+        plan->direct_value = versions;
+    }
+    return ok;
+}
+
 // `pieces`: a vector wider than the target moves whole (ir_typed_vector_piece) is taken as its pieces' moves would be, for
 // a caller that splits it into them before selection (#1624, ir_vector_split.c); otherwise it is refused.
 static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result, uint64_t target_features,
-                                          bool pieces, bool sources)
+                                          bool pieces, bool sources, bool direct_input)
 {
 
     const uint64_t output_mark = output->length;
@@ -3297,6 +3372,15 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     IrFunction candidate = {0};
     if (check.error == IR_OK)
     {
+        if (BUSTER_TIER1_PRIVATE_VALUES && direct_input && !sources && input->local_count != 0 && input->hidden_size == 0 &&
+            input->result_size == 0 && input->result.kind != BUSTER_ABI_RESULT_MEMORY && input->incoming_variadic == NULL && input->asm_body_count == 0)
+        {
+            const uint64_t mark = scratch->length;
+            if (!ir_typed_direct_plan(input, &plan, scratch))
+            {
+                arena_pop_to(scratch, mark);
+            }
+        }
         ir_typed_classify(input, ops, types);
         if (input->vectors)
         {
@@ -3364,7 +3448,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
 // scratch. Output, scratch, and input storage must be disjoint.
 static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input, IrType result_type, uint32_t symbol_count, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, 0, false, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, 0, false, false, false);
 }
 
 // Output features are explicit. The old entry points intentionally grant none: a vector producer must retain its
@@ -3372,7 +3456,7 @@ static __attribute__((unused)) IrCheck ir_lower_typed(const Tier0Function* input
 // unsupported forms from missing target features on IR_ERROR_UNSUPPORTED.
 static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, false, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, false, false, false);
 }
 
 // ir_lower_typed_target's replay with source identity columns: #2541 step 3's summaries under -g, whose expansions
@@ -3380,7 +3464,7 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target(const Tier0Function
 static __attribute__((unused)) IrCheck ir_lower_typed_target_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
                                                                      IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, false, true);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, false, true, false);
 }
 
 // The C driver's --tier1 (#1624): ir_lower_typed_target, but a vector wider than the target moves whole is taken, for
@@ -3388,7 +3472,7 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target_sources(const Tier0
 static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
                                                                     IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, true, false);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, true, false, false);
 }
 
 // The same code-producing replay, with optional source identity columns. The ordinary entry points keep their
@@ -3396,5 +3480,5 @@ static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces(const Tier0F
 static __attribute__((unused)) IrCheck ir_lower_typed_target_pieces_sources(const Tier0Function* input, IrType result_type, uint32_t symbol_count, uint64_t target_features, Arena* output, Arena* scratch,
                                                                             IrFunction* result)
 {
-    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, true, true);
+    return ir_lower_typed_target_path(input, result_type, symbol_count, output, scratch, result, target_features, true, true, false);
 }

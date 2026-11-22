@@ -97,12 +97,14 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
         }
     }
     uint32_t wide_count = 0;
+    uint32_t pointer_count = 0;
     for (uint32_t node = 0; result.status == IR_SIMD_EXECUTION_OK && node < function->instruction_count; node += 1)
     {
         const uint8_t op = function->op[node];
         const uint8_t type = function->type[node];
         const bool wide = type >= IR_V4I32;
         wide_count += wide;
+        pointer_count += type == IR_PTR;
         bool supported = op == IR_RET || (op == IR_PARAM && (wide || type == IR_PTR)) || (op == IR_CONST && type == IR_PTR);
         if (wide && op != IR_PARAM)
         {
@@ -120,21 +122,16 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
     }
     const uint32_t count = result.status == IR_SIMD_EXECUTION_OK ? function->instruction_count : 0;
     uint32_t* indices = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
-    uint64_t* offsets = indices != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count) : NULL;
-    IrSimdValue* values = offsets != NULL && wide_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, IrSimdValue, wide_count) : NULL;
-    if (result.status == IR_SIMD_EXECUTION_OK && (indices == NULL || offsets == NULL || (wide_count != 0 && values == NULL)))
+    uint64_t* offsets = indices != NULL && pointer_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, pointer_count) : NULL;
+    const bool have_indices = indices != NULL && (pointer_count == 0 || offsets != NULL);
+    IrSimdValue* values = have_indices && wide_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, IrSimdValue, wide_count) : NULL;
+    if (result.status == IR_SIMD_EXECUTION_OK && (!have_indices || (wide_count != 0 && values == NULL)))
     {
         result.status = IR_SIMD_EXECUTION_RESOURCE;
     }
-    if (result.status == IR_SIMD_EXECUTION_OK)
-    {
-        uint32_t next = 0;
-        for (uint32_t node = 0; node < count; node += 1)
-        {
-            indices[node] = function->type[node] >= IR_V4I32 ? next++ : BUSTER_IR_NONE;
-            offsets[node] = 0;
-        }
-    }
+    // A verified use follows its definition in this single block. Its type selects the indexed storage.
+    uint32_t next_wide = 0;
+    uint32_t next_pointer = 0;
     for (uint32_t node = 0; result.status == IR_SIMD_EXECUTION_OK && node < count; node += 1)
     {
         const uint8_t op = function->op[node];
@@ -143,20 +140,18 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
         const uint32_t b = function->b[node];
         const uint32_t c = function->c[node];
         result.instruction = node;
-        if (op == IR_PARAM)
+        if (type >= IR_V4I32)
         {
-            if (type == IR_PTR)
-            {
-                offsets[node] = arguments[a].offset;
-            }
-            else
-            {
-                values[indices[node]] = *arguments[a].value;
-            }
+            indices[node] = next_wide++;
         }
-        else if (op == IR_CONST && type == IR_PTR)
+        if (type == IR_PTR)
         {
-            offsets[node] = function->constants[a].low;
+            indices[node] = next_pointer;
+            offsets[next_pointer++] = op == IR_PARAM ? arguments[a].offset : function->constants[a].low;
+        }
+        else if (op == IR_PARAM)
+        {
+            values[indices[node]] = *arguments[a].value;
         }
         else if (op == IR_RET)
         {
@@ -203,7 +198,7 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
                 action.operands[1] = IR_SIMD_NONE;
             }
             IrSimdValue staged = { 0 };
-            const uint64_t offset = op == IR_LOAD || op == IR_STORE ? offsets[a] : 0;
+            const uint64_t offset = op == IR_LOAD || op == IR_STORE ? offsets[indices[a]] : 0;
             const uint64_t alignment = UINT64_C(1) << function->alignment_log2[node];
             const bool aligned = (offset & (alignment - 1)) == 0;
             const bool executed = aligned && ir_simd_evaluate(&action, operands, constant, memory, offset, &staged);
@@ -211,7 +206,7 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
             {
                 result.status = op == IR_LOAD || op == IR_STORE ? IR_SIMD_EXECUTION_ACCESS : IR_SIMD_EXECUTION_INVALID;
             }
-            else if (indices[node] != BUSTER_IR_NONE)
+            else if (type >= IR_V4I32)
             {
                 values[indices[node]] = staged;
             }

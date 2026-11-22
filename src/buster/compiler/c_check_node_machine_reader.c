@@ -380,10 +380,7 @@ static TypeId node_machine_reader_target(const NodeMachine* machine, TypeId to)
         const uint8_t to_facts = (uint8_t)(to_word >> 8);
         const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)from_word;
         const uint8_t class = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)to_word;
-        const bool empty = source == class && source < BUSTER_TYPED_CLASSES &&
-                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
-                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
-                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        const bool empty = check_lower_conversion_empty_by_class(source, from_facts, class, to_facts);
         target = empty ? 0 : to;
     }
     return target;

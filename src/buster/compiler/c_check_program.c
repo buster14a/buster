@@ -150,6 +150,27 @@ struct CheckProgramBody
     uint8_t return_warning;
 };
 
+// An inline-only always_inline function whose direct calls the lowering expands in its callers (#2983,
+// check_program_select_wrappers): clang's AlwaysInliner expands every call of a body it has, an `extern inline`
+// gnu_inline one too (glibc's __fortify_function wrappers), where the unit emits none of its own. Its body is one
+// statement: `return E;` (`node` E with its conversion to the result) or, in a void function, `E;`; E's nodes are
+// `first` to `node`. Its parameters' objects are CheckProgram.wrapper_parameters' `parameter_count` from
+// `parameter_first`, 0 for an unnamed one, and their pass_object_size attributes `sizes` (CheckInputAttributes'
+// object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
+// A wrapper's parameters at most: glibc's take five.
+#define BUSTER_CHECK_WRAPPER_PARAMETERS 8u
+
+typedef struct CheckProgramWrapper CheckProgramWrapper;
+struct CheckProgramWrapper
+{
+    uint32_t object;
+    uint32_t node;
+    uint32_t first;
+    uint32_t parameter_first;
+    uint32_t parameter_count;
+    uint8_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS];
+};
+
 typedef struct CheckProgramRegion CheckProgramRegion;
 struct CheckProgramRegion
 {
@@ -617,6 +638,11 @@ struct CheckProgram
     // groups' labels, each group's `label_count` from its `label_first`, by token. Null in a unit without them.
     SymbolId* clone_label_symbols;
     uint32_t* clone_label_tokens;
+    // A selection's inline-only always_inline functions whose direct calls the lowering expands (#2983,
+    // CheckProgramWrapper), by object, and their parameters' objects; null in a unit without one, the usual one.
+    CheckProgramWrapper* wrappers;
+    uint32_t* wrapper_parameters;
+    uint32_t wrapper_count;
     // The exits through cleanups' chains (#1370, CHECK_CONTROL_EXIT's), each record's plan (by its CheckInput.cleanups
     // index, of a body with such an exit) and the destinations of the records' dispatches; null in a unit without cleanups.
     CheckProgramExit* exits;
@@ -707,6 +733,8 @@ struct CheckProgram
     // earlier emitted reference had already fixed that object's original spelling. The selection owns this cold
     // view; the input's asm-label facts remain unchanged for syntax and type checks.
     uint8_t* symbol_pragma_originals;
+    // Per object, the index plus one of a function rename after a use in the source.
+    uint32_t* late_function_renames;
     // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
     // GNU's weak attribute and `#pragma weak` after a use (#1849): the weak declarations of the objects none of whose
     // weak declarations is its first declaration's own (a `#pragma weak` after the declaration it attaches to being
@@ -784,6 +812,9 @@ struct CheckControlTask
     uint32_t token;
     uint32_t stop;
     uint32_t repeat;
+    // 1 when the statement is reached only through a label or case inside it (#2987). A block then starts with no
+    // insertion point, so statements before that label are left out. 0, the ordinary push, enters at the start.
+    uint8_t unentered;
 };
 
 typedef struct CheckControlWriter CheckControlWriter;
@@ -1648,12 +1679,18 @@ static bool check_control_static_chain(const CheckInput* input, uint32_t node)
     return value < graph->count && graph->ops[value] == CHECK_OP_BUILTIN_MISC && graph->members[value] == CBUILTIN_CALL_WITH_STATIC_CHAIN;
 }
 
-static void check_control_statement(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat)
+static void check_control_statement_at(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat, bool entered)
 {
     if (token != BUSTER_CHECK_NONE)
     {
-        check_control_push(writer, (CheckControlTask){ .kind = CHECK_CONTROL_TASK_STATEMENT, .token = token, .stop = stop, .repeat = repeat });
+        check_control_push(writer, (CheckControlTask){ .kind = CHECK_CONTROL_TASK_STATEMENT, .token = token, .stop = stop, .repeat = repeat,
+                                                       .unentered = entered ? 0 : 1 });
     }
+}
+
+static void check_control_statement(CheckControlWriter* writer, uint32_t token, uint32_t stop, uint32_t repeat)
+{
+    check_control_statement_at(writer, token, stop, repeat, true);
 }
 
 static void check_control_token(CheckControlWriter* writer, uint32_t token)
@@ -2330,6 +2367,7 @@ static void check_control_drop(CheckControlWriter* writer, uint32_t low, uint32_
 }
 
 #include "c_check_program_switch.c"
+#include "c_check_program_reach.c"
 
 // Appends a source label's number, a writer's label, to the writer's CheckProgram.label_positions, which the bodies'
 // loop turns into its place once the label's body is written: a label is a token, so the column has room.
@@ -2370,13 +2408,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
         {
             check_control_cleanups(writer, token, BUSTER_CHECK_NONE, block);
         }
-        for (uint32_t child = writer->last[token]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
-        {
-            if (parser->tree.roles[child] != PARSE_ROLE_OPEN_BODY && parser->tree.roles[child] != PARSE_ROLE_OPEN_BLOCK)
-            {
-                check_control_statement(writer, child, task.stop, task.repeat);
-            }
-        }
+        // Statements after a return, break, continue, goto or __builtin_unreachable() are left out (#2987).
+        check_control_emit_sequence(writer, token, task.stop, task.repeat, task.unentered == 0, writer->opening, false);
         if (lifetimes)
         {
             check_control_entry(writer, CHECK_CONTROL_LIFETIME, token, 0, token);
@@ -2656,13 +2689,8 @@ static void check_control_expand(CheckControlWriter* writer, CheckControlTask ta
     }
     else if (role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE)
     {
-        for (uint32_t child = writer->last[token]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
-        {
-            if (child > token && child != writer->region_final)
-            {
-                check_control_statement(writer, child, task.stop, task.repeat);
-            }
-        }
+        // The statements after the colon are this label's children. A return among them leaves out the rest (#2987).
+        check_control_emit_sequence(writer, token, task.stop, task.repeat, true, token, true);
         if (role == PARSE_ROLE_LABEL && writer->addressed != 0 && writer->addressed[token] != 0)
         {
             check_control_entry(writer, CHECK_CONTROL_LABEL, token, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
@@ -2784,13 +2812,7 @@ static void check_control_begin(CheckControlWriter* writer, uint32_t opening)
     writer->cleanup_count = end - first;
     // A body has its function declarator as an earlier sibling of its opening brace. Only body statements enter
     // this worklist; this also avoids interpreting a function's parameter/declarator expressions as executable.
-    for (uint32_t child = writer->last[closing]; child != BUSTER_CHECK_NONE; child = writer->previous[child])
-    {
-        if (child > opening)
-        {
-            check_control_statement(writer, child, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE);
-        }
-    }
+    check_control_emit_sequence(writer, closing, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, true, opening, false);
     if (writer->variable && writer->vla_first[opening] != BUSTER_CHECK_NONE)
     {
         check_control_token(writer, opening);
@@ -2808,11 +2830,22 @@ static void check_control_drain(CheckControlWriter* writer)
         }
         else if (task.kind == CHECK_CONTROL_TASK_ENTRY)
         {
-            if (writer->count < writer->capacity)
+            // A cleanup whose declaration was left out (#2987) does not run and does not select its function.
+            const CheckInput* input = writer->program->input;
+            const uint32_t record = task.entry.kind == CHECK_CONTROL_CLEANUP ? task.entry.target : BUSTER_CHECK_NONE;
+            const uint32_t declaration = record < input->cleanup_count ? input->cleanups[record].declaration : BUSTER_CHECK_NONE;
+            bool dropped = false;
+            for (uint32_t i = 0; !dropped && declaration != BUSTER_CHECK_NONE && i < writer->dropped_range_count; i += 1)
+            {
+                const uint32_t low = (uint32_t)(writer->dropped_ranges[i] >> 32);
+                const uint32_t high = (uint32_t)writer->dropped_ranges[i];
+                dropped = declaration >= low && declaration <= high;
+            }
+            if (!dropped && writer->count < writer->capacity)
             {
                 writer->entries[writer->count++] = task.entry;
             }
-            else
+            else if (!dropped)
             {
                 check_program_fail(writer->program, CHECK_PROGRAM_RESOURCE, task.token);
             }
@@ -3817,15 +3850,15 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
     return constant;
 }
 
-// CheckProgram.object_labelled: the objects of the declarations with an asm label not ignored (check_input_attribute_of's),
-// by one scan of the tokens
-// with attributes (CheckInput.attributes), in a unit with an asm keyword alone; false where the column has no room.
+// Collect accepted asm labels from declaration attributes. Both an asm keyword and an applied
+// #pragma redefine_extname can supply one. Allocate the column on the first label.
 static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
+    const bool may_have_labels = input->asm_capacity != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->has_asm_label);
     bool room = true;
-    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
+    for (uint32_t first = may_have_labels ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
          first = check_input_attributed_next(input->attributes, first + 16, count))
     {
         const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
@@ -3852,6 +3885,8 @@ static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
     }
     return room;
 }
+
+static uint32_t check_program_token_body(const CheckProgram* program, uint32_t token);
 
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
 // cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
@@ -3880,7 +3915,21 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
     }
     const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
-    const bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
+    bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
+    const uint32_t rename = labelled && program->late_function_renames != NULL ? program->late_function_renames[object] : 0;
+    if (rename != 0)
+    {
+        const CheckInputSymbolPragma* pragma = program->input->symbol_pragmas->records + rename - 1;
+        const uint32_t token = graph->tokens[node];
+        if (token < pragma->token)
+        {
+            // An earlier call can see the label only if it saw the labelled declaration and its
+            // body is emitted after the pragma (at its closing brace, or at the end of the unit).
+            const uint32_t body = check_program_token_body(program, token);
+            labelled = token >= pragma->declaration && (body == 0 || (program->body_eager != NULL && !program->body_eager[body - 1]) ||
+                                                        program->parser->tree.parents[program->bodies[body - 1].opening] >= pragma->token);
+        }
+    }
     return marked && !labelled ? index : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
 }
 

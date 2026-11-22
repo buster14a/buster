@@ -3834,6 +3834,7 @@ static void check_join_unreferenced(void)
                "int unreferenced_entry(int x) { return kept(x) + live(x); }\n",
                0644);
     write_file("unreferenced_b.c",
+               "const char same_name __attribute__((section(\".rodata.twice\"))) = 1;\n"
                "__attribute__((noinline)) static int orphan(int x) { return x - 4; }\n"
                "__attribute__((visibility(\"hidden\"))) int dead_too(int x) __asm__(\"dead_too.buster_split\");\n"
                "__attribute__((visibility(\"hidden\"))) int chained(int x) __asm__(\"chained.buster_split\");\n"
@@ -3842,17 +3843,27 @@ static void check_join_unreferenced(void)
                "int dead_too(int x) { return orphan(x) + chained(x); }\n"
                "int live(int x) { return x ^ 3; }\n",
                0644);
+    // File-qualified script entries affect every section with that spelling in the part.
+    write_file("unreferenced_names.s",
+               ".section .rodata.twice,\"a\",@progbits,unique,1\n.byte 1\n"
+               ".section .rodata.twice,\"a\",@progbits,unique,2\n.byte 2\n"
+               ".section .rodata.shared,\"a\",@progbits,unique,3\n.byte 3\n"
+               ".section .rodata.shared,\"a\",@progbits,unique,4\n.globl shared\nshared: .byte 4\n",
+               0644);
     // The fixture's units split after the optimizer, whose join doesn't run the tool: its target builds it.
     char* tools[] = { "cmake", "--build", "out", "--config", "Release", "--target", "buster_codegen_splitter", 0 };
     char* compile_a[] = { "clang", "-O2", "-ffunction-sections", "-c", "unreferenced_a.c", "-o", "unreferenced_a.o", 0 };
     char* compile_b[] = { "clang", "-O2", "-ffunction-sections", "-c", "unreferenced_b.c", "-o", "unreferenced_b.o", 0 };
-    char* find[] = { "out/codegen-tools/unreferenced", "unreferenced.lines", "unreferenced_a.o", "unreferenced_b.o", 0 };
+    char* compile_names[] = { "clang", "-c", "unreferenced_names.s", "-o", "unreferenced_names.o", 0 };
+    char* find[] = { "out/codegen-tools/unreferenced", "unreferenced.lines", "unreferenced_a.o", "unreferenced_b.o", "unreferenced_names.o", 0 };
     char* sections[] = { "readelf", "-SW", "unreferenced_a.o", 0 };
     Text log = capture(tools);
     free(log.data);
     log = capture(compile_a);
     free(log.data);
     log = capture(compile_b);
+    free(log.data);
+    log = capture(compile_names);
     free(log.data);
     log = capture(find);
     free(log.data);
@@ -3864,7 +3875,11 @@ static void check_join_unreferenced(void)
         "\"unreferenced_b.o\"(.text.orphan)",
         "\"unreferenced_b.o\"(.text.chained.buster_split)",
     };
-    const char* const kept[] = { "(.text.kept)", "(.text.live.buster_split)", "(.text.unreferenced_entry)" };
+    const char* const kept[] = { "(.text.kept)", "(.text.live.buster_split)", "(.text.unreferenced_entry)", "(.rodata.shared)", "\"unreferenced_b.o\"(.rodata.twice)" };
+    if (occurrences("unreferenced.lines", "\"unreferenced_names.o\"(.rodata.twice)") != 2)
+    {
+        fail("the join must emit one line per dead section sharing a spelling in its part: %s", lines.data);
+    }
     for (uint32_t i = 0; i < sizeof(gone) / sizeof(gone[0]); i += 1)
     {
         if (strstr(lines.data, gone[i]) == 0)

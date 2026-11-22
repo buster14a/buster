@@ -19,7 +19,12 @@ is never written, as clang -O0 doesn't emit it (#1108, the lowering guide's
 "Constant `if`s"): what only it reaches, a block-scope static it declares
 among them, is neither selected nor checked for target features, so
 `main.c`'s units emit no other unit's commands and a baseline build no
-`BUSTER_VECTOR_PATH` kernel. `c_lowering_symbols.c`
+`BUSTER_VECTOR_PATH` kernel. A statement after a `return`, `break`,
+`continue`, `goto` or `__builtin_unreachable()` is left out the same way
+(#2987, "Statements no control reaches"), so `return 0; missing();` does not
+select `missing`; but an automatic local that statement declares still has a
+place when an emitted statement names it, and a block-scope static it declares
+is still emitted, as clang emits it. `c_lowering_symbols.c`
 compares an object's functions and objects with `clang -O0 -c`'s: `test-checker`
 on fixtures of each kind of definition (functions, objects and string literals),
 `test-c-testsuite --cross-check` on c-testsuite and `test-checker-corpus
@@ -2658,8 +2663,10 @@ reader settles after the bodies.
   (`node_machine_renames`), T refuses every call the reader marked for a
   library builtin, at both times, and asks no label. The shadow leaves the
   label of such an object out of its comparison and counts the object.
-  (In a unit with no `asm` token the program reads no label at all:
-  [#3208](https://github.com/buster14a/buster/issues/3208).)
+  Lowering reads the applied pragma's label even in units without an
+  `asm` token. A call before the directive can use its label if the call
+  saw the labelled declaration and Clang emits its body after the pragma.
+  [#3208](https://github.com/buster14a/buster/issues/3208)
 - **A weak name** is the name's from a token on, not a declaration's: the
   reader notes it at a `weak`, `weakref` or `weak_import` attribute on any
   declaration of the name (`CheckInput.weak_names`) and at a `#pragma

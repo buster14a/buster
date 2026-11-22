@@ -82,6 +82,9 @@
 //   - Resolution and archive members: the tables (foreign_entry, foreign_group_entry), foreign_touch, foreign_fold,
 //     foreign_resolve_records, foreign_probe_archives, foreign_probe_libraries, foreign_member_defines_data,
 //     foreign_needed_library, foreign_common_member, foreign_decide, foreign_resolve and foreign_load.
+//   - Shared libraries' references and versions (#1590, #2910): foreign_library_exports_at, foreign_library_export_at,
+//     foreign_library_name, foreign_library_named, foreign_library_lists, foreign_retain_providers,
+//     foreign_retain_unversioned, foreign_keep_libraries and foreign_check_versions.
 //   - COMDAT groups and the winners: foreign_groups, foreign_win and foreign_winners.
 //   - Running: foreign_lane_main, foreign_run, foreign_release and the accessors.
 
@@ -128,6 +131,14 @@ typedef enum ForeignError
     FOREIGN_ERROR_MEMORY,
     // The lanes couldn't be started.
     FOREIGN_ERROR_LANES,
+    // With ForeignCommand.library_versions (#1590, #2910): a needed shared library's strong reference that no library
+    // exports at its required version, or, without a version, no library or visible executable definition satisfies
+    // (ForeignFailure.library and .reference), as GNU ld and lld refuse it.
+    FOREIGN_ERROR_LIBRARY_UNDEFINED,
+    // With ForeignCommand.library_versions (#1590): a version need of a shared library the program loads that the
+    // library its entry names doesn't define (ForeignFailure.library, .reference the need, and .provider), as glibc's
+    // loader refuses the program at startup.
+    FOREIGN_ERROR_LIBRARY_VERSION,
 } ForeignError;
 
 // Which way each phase runs (docs/object-writer-and-linker.md, "Step 5's phases, data-parallel"): its vector path, or
@@ -212,6 +223,9 @@ struct ForeignCommand
     // the others take each first and start the next phase: the tests' check that the lanes still decide alike when a
     // failure comes meanwhile. 0 for none.
     uint32_t slow_lane;
+    // Whether shared libraries' references and version needs are checked as the direct path checks its -l libraries'
+    // (#1590, #2910), as the source driver's mixed links ask. link-foreign keeps its raw-link contract.
+    bool library_versions;
 };
 
 // A file by its identity (st_dev and st_ino), or 0 and 0 for none.
@@ -282,8 +296,21 @@ struct ForeignLibrary
     uint32_t input;
     bool as_needed;
     bool needed;
+    // A root of library retention: without --as-needed, or kept for a regular object's reference. Provider-only
+    // retention is rebuilt from these roots after the executable's final definitions are known.
+    bool root;
+    // With ForeignCommand.library_versions: whether its strong references' providers have been found, and its
+    // versioned references followed (foreign_retain_providers).
+    bool followed;
     uint32_t object;
     ImportLibrary library;
+    // With ForeignCommand.library_versions: what its file says beside its import, its DT_NEEDED names, its references'
+    // versions, its exports at other versions than their names' defaults and its version needs (foreign_read_library),
+    // with an index of those exports by their names' hashes; and once followed, each reference's first provider,
+    // UINT32_MAX for none or a weak reference. Unversioned references use default exports.
+    RuntimeLibraryVersions versions;
+    ImportNameIndex hidden;
+    uint32_t* providers;
 };
 
 // A loaded object: a command-line object, or an archive's member the link loads. Its position (see "Positions"), its
@@ -473,6 +500,7 @@ struct ForeignNames
     uint8_t* visibility;
     uint8_t* flags;
     uint32_t count;
+    uint32_t capacity;
 };
 
 #define BUSTER_FOREIGN_NAME_REFERENCED 0x01
@@ -533,6 +561,11 @@ struct ForeignFailure
     // mapping (which foreign_release unmaps), detail_length bytes. Empty otherwise.
     char detail[BUSTER_FOREIGN_FAILURE_DETAIL_BYTES];
     uint8_t detail_length;
+    // What FOREIGN_ERROR_LIBRARY_UNDEFINED and FOREIGN_ERROR_LIBRARY_VERSION are about: the library, its reference or
+    // its version need, and the library that need's entry names.
+    uint32_t library;
+    uint32_t reference;
+    uint32_t provider;
 };
 
 // What each lane owns: its arena (the partitions' tables, its lists), its first failure, the members its partitions
@@ -1427,7 +1460,22 @@ static void foreign_read_library(Foreign* foreign, uint32_t l, ForeignLane* lane
 {
     ForeignLibrary* library = &foreign->libraries[l];
     const ForeignInput* input = &foreign->inputs[library->input];
-    const ImportResult read = foreign->path == FOREIGN_PATH_VECTOR ? import_library(&library->library, input->bytes, &lane->arena) : import_library_scalar(&library->library, input->bytes, &lane->arena);
+    ImportResult read = foreign->path == FOREIGN_PATH_VECTOR ? import_library(&library->library, input->bytes, &lane->arena) : import_library_scalar(&library->library, input->bytes, &lane->arena);
+    // With ForeignCommand.library_versions, what the import leaves out of the library's versions, read as the direct
+    // path reads its -l libraries' (runtime_library_dependencies and runtime_library_versions, a walk of the section
+    // headers, the few DT_NEEDED entries and version needs, and the references' and hidden exports' columns, shared by
+    // both paths), and the hidden exports indexed by hash, as the exports are (import_library_index): version needs that
+    // don't read, or a reference's index that names nothing, are malformed, as the direct path refuses them. The
+    // library's version indices are its own, moved past nothing.
+    if (read.error == IMPORT_ERROR_NONE && foreign->command->library_versions)
+    {
+        ImportResult versions = import_fail(IMPORT_ERROR_BOUNDS, 0);
+        RuntimeError error = runtime_library_dependencies(input->bytes, &lane->arena, &library->versions);
+        error = error == RUNTIME_ERROR_NONE ? runtime_library_versions(&library->library, input->bytes, 0, &lane->arena, &library->versions, &versions) : error;
+        const RuntimeHiddenExports* hidden = &library->versions.hidden;
+        error = error == RUNTIME_ERROR_NONE && !import_index_build(&library->hidden, hidden->hash, hidden->count, &lane->arena) ? RUNTIME_ERROR_MEMORY : error;
+        read = error == RUNTIME_ERROR_NONE ? read : error == RUNTIME_ERROR_MEMORY ? import_fail(IMPORT_ERROR_MEMORY, 0) : versions;
+    }
     if (read.error != IMPORT_ERROR_NONE)
     {
         foreign_fail(lane, foreign_import_failure(read, foreign_position(library->input, 0), library->input, 0));
@@ -1544,6 +1592,7 @@ static bool foreign_first_round(Foreign* foreign, ForeignLane* lane)
             if (library != 0 && !library->as_needed)
             {
                 library->needed = true;
+                library->root = true;
             }
             if (library != 0 && library->needed && library->library.references.count != 0)
             {
@@ -3280,6 +3329,383 @@ static void foreign_resolve(Foreign* foreign, uint32_t index, ForeignLane* lane)
     lane_sync();
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Shared libraries' references and versions (#1590, #2910)
+//
+// With ForeignCommand.library_versions, which the source driver's mixed links ask for, the shared libraries' references
+// and version needs are checked as the direct path checks its -l libraries' (bind_needed_libraries and bind_library_versions),
+// so that a mixed link refuses what the direct link of the same libraries refuses, and writes no program that the loader
+// refuses at startup. Each library's file is read beside its import (foreign_read_library): its DT_NEEDED names, each
+// reference's version and the file it requires it of, its exports at versions other than their names' defaults, and
+// its version needs. Then:
+//   - A needed library's strong reference that requires a version binds, as GNU ld and lld bind it, only to an export
+//     at that version, its name's default or not (foreign_library_exports_at), of the first library on the line that
+//     has one, before the referring library or after it, as bind_library_edges counts them. A library under
+//     --as-needed is needed for it, unless the referring library's own DT_NEEDED names it, which the loader then loads
+//     for it, as GNU ld keeps it (foreign_retain_providers): each round, lane 0 follows the references of the libraries
+//     needed so far, once each, and the libraries they need join the next round as a needed library's do.
+//   - An unversioned strong reference uses a default export, or a surviving executable definition of default or
+//     protected visibility. Its providers wait until archive resolution, COMDAT selection and the winners finish
+//     (foreign_retain_unversioned): retaining them earlier could pull in an unnecessary provider's archive members.
+//     Newly needed providers append reference objects and resume the rounds, one frontier at a time. A provider's
+//     own references wait for its archive definitions before retaining further unversioned providers.
+//   - With the final winners, retention is rebuilt from the regular roots (foreign_keep_libraries), suppressing
+//     executable-satisfied edges. Archive extraction stays monotone, as elsewhere in this resolver. Then an unmatched
+//     strong reference is refused (FOREIGN_ERROR_LIBRARY_UNDEFINED), unless the library's DT_NEEDED names a library
+//     the link doesn't have, whose exports it can't see (foreign_check_versions). Executable definitions satisfy no
+//     versioned reference. Each version need of a loaded library, including the DT_NEEDED closure, is checked against
+//     the library its file names, which must define it by name and vd_hash, unless it defines no versions or the need
+//     is weak (VER_FLG_WEAK), both of which the loader only warns about (FOREIGN_ERROR_LIBRARY_VERSION).
+// The resolution's names stay unversioned, and a library's versioned reference loads no archive member by its bare
+// name (foreign_fold, #2911). These decisions share the scalar index probes of both paths: each needed library's strong
+// reference finds its provider once, cached across frontiers and final validation. The existing partitioned winners
+// supply executable definitions; no second index of the executable is built. Raw link-foreign leaves library_versions
+// off and keeps its old behavior.
+
+// Whether `version` is the name of `library`'s version definition at `index`.
+static bool foreign_library_version_is(const ImportLibrary* library, uint16_t index, String8 version)
+{
+    const String8 at = runtime_library_version_name(library, index);
+    return at.length != 0 && at.length == version.length && memcmp(at.pointer, version.pointer, version.length) == 0;
+}
+
+// Whether `library` exports the name at `version`: its name's default export, at that version if one is required, or
+// with a version, an export at it that isn't its name's default (ImportLibrary.hidden, indexed by hash), as
+// runtime_libraries_export_at finds one. Two probes of an index, and a version's name compared only for an export of
+// the name: on a C program's mixed link, a lookup scanned libc.so.6's version definitions and 537 hidden exports, and
+// the lookups were most of the 307,000 instructions the checks first added to it.
+static bool foreign_library_exports_at(const ForeignLibrary* library, const uint8_t* name, uint32_t length, uint64_t hash, String8 version)
+{
+    const ImportLibrary* imported = &library->library;
+    const uint32_t found = import_library_find(imported, name, length, hash);
+    bool exported = found != 0 && (version.length == 0 || foreign_library_version_is(imported, imported->exports.version[found - 1], version));
+    const RuntimeHiddenExports* others = &library->versions.hidden;
+    uint32_t begin = 0;
+    uint32_t end = 0;
+    if (!exported && version.length != 0)
+    {
+        import_index_bucket(&library->hidden, hash, &begin, &end);
+    }
+    for (uint32_t place = begin; !exported && place < end; place += 1)
+    {
+        const uint32_t h = library->hidden.order[place];
+        const bool same = library->hidden.hash[place] == hash && others->length[h] == length && memcmp(others->name[h], name, length) == 0;
+        exported = same && foreign_library_version_is(imported, others->version[h], version);
+    }
+    return exported;
+}
+
+// The first library on the line that exports the name at `version` (foreign_library_exports_at), or UINT32_MAX.
+static uint32_t foreign_library_export_at(const Foreign* foreign, const uint8_t* name, uint32_t length, uint64_t hash, String8 version)
+{
+    uint32_t result = UINT32_MAX;
+    const uint32_t count = foreign->library_count;
+    for (uint32_t m = 0; result == UINT32_MAX && m < count; m += 1)
+    {
+        result = foreign_library_exports_at(&foreign->libraries[m], name, length, hash, version) ? m : UINT32_MAX;
+    }
+    return result;
+}
+
+// The name a DT_NEEDED entry gives `library` by, the output's (foreign_link_libraries) and another library's: its
+// soname, or without one the basename of a -l search's path and the full path of a positional input, as GNU ld and lld
+// name it. A searched library must remain relocatable through the loader's search directories.
+static String8 foreign_library_name(const Foreign* foreign, const ForeignLibrary* library)
+{
+    const ForeignInput* input = &foreign->inputs[library->input];
+    String8 name = library->library.soname.length != 0 ? library->library.soname : input->path;
+    if (library->library.soname.length == 0 && (input->flags & BUSTER_FOREIGN_INPUT_LIBRARY) != 0)
+    {
+        for (uint64_t i = name.length; i != 0; i -= 1)
+        {
+            if (name.pointer[i - 1] == '/')
+            {
+                name.pointer += i;
+                name.length -= i;
+                break;
+            }
+        }
+    }
+    return name;
+}
+
+// The first library on the line by the name `name` (foreign_library_name), or UINT32_MAX.
+static uint32_t foreign_library_named(const Foreign* foreign, String8 name)
+{
+    uint32_t result = UINT32_MAX;
+    for (uint32_t m = 0; result == UINT32_MAX && m < foreign->library_count; m += 1)
+    {
+        const String8 other = foreign_library_name(foreign, &foreign->libraries[m]);
+        result = other.length == name.length && memcmp(other.pointer, name.pointer, name.length) == 0 ? m : UINT32_MAX;
+    }
+    return result;
+}
+
+// Whether `library`'s DT_NEEDED entries name `name`.
+static bool foreign_library_lists(const ForeignLibrary* library, String8 name)
+{
+    bool listed = false;
+    for (uint32_t d = 0; !listed && d < library->versions.dependency_count; d += 1)
+    {
+        const String8 dependency = library->versions.dependencies[d];
+        listed = dependency.length == name.length && memcmp(dependency.pointer, name.pointer, name.length) == 0;
+    }
+    return listed;
+}
+
+// Lane 0, each round: the versioned strong references of the libraries needed before the round or made needed by it
+// (`needed`, a byte each), each library's once, followed to the first library that exports them at their versions
+// (foreign_library_export_at); a library under --as-needed that isn't needed yet is made needed in `needed`, unless the
+// referring library's own DT_NEEDED names it, and its references are followed in turn. Cache every strong reference's
+// provider once, including unversioned references, whose retention waits for the executable's winners.
+static void foreign_retain_providers(Foreign* foreign, uint8_t* needed, ForeignLane* lane)
+{
+    const uint32_t count = foreign->library_count;
+    bool more = true;
+    while (more)
+    {
+        more = false;
+        for (uint32_t l = 0; l < count; l += 1)
+        {
+            ForeignLibrary* library = &foreign->libraries[l];
+            const bool follow = !library->followed && (library->needed || needed[l] != 0);
+            const ImportReferences* references = &library->library.references;
+            const uint32_t reference_count = references->count;
+            if (follow)
+            {
+                library->providers = BUSTER_ARENA_PUSH_ARRAY(&foreign->arena, uint32_t, (uint64_t)reference_count + 1);
+                if (library->providers == 0)
+                {
+                    foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
+                }
+            }
+            for (uint32_t r = 0; follow && library->providers != 0 && r < reference_count; r += 1)
+            {
+                const String8 version = library->versions.reference_versions[r];
+                const uint32_t m = references->weak[r] == 0 ?
+                                       foreign_library_export_at(foreign, references->name[r], references->length[r], references->hash[r], version) :
+                                       UINT32_MAX;
+                library->providers[r] = m;
+                const bool provided = version.length != 0 && m != UINT32_MAX && m != l;
+                const ForeignLibrary* provider = &foreign->libraries[provided ? m : l];
+                const bool retained = provided && !provider->needed && needed[m] == 0 && !foreign_library_lists(library, foreign_library_name(foreign, provider));
+                if (retained)
+                {
+                    needed[m] = 1;
+                    more = true;
+                }
+            }
+            library->followed = library->followed || (follow && library->providers != 0);
+        }
+    }
+}
+
+// After foreign_winners: only a surviving definition visible to the loader satisfies an unversioned reference.
+// Hidden/internal definitions and non-default versions cannot interpose on it; a versioned reference needs its version.
+static bool foreign_library_satisfied(const Foreign* foreign, const ForeignLibrary* library, uint32_t reference)
+{
+    const ImportReferences* references = &library->library.references;
+    const bool unversioned = library->versions.reference_versions[reference].length == 0;
+    const uint32_t found = unversioned ? foreign_find_name(foreign, references->name[reference], references->length[reference], references->hash[reference]) : 0;
+    const ForeignNames* names = &foreign->names;
+    const uint8_t resolution = found != 0 ? names->resolution[found - 1] : FOREIGN_RESOLUTION_UNDEFINED;
+    const bool defined = resolution == FOREIGN_RESOLUTION_STRONG || resolution == FOREIGN_RESOLUTION_COMMON || resolution == FOREIGN_RESOLUTION_WEAK;
+    const uint8_t visibility = found != 0 ? names->visibility[found - 1] : STV_HIDDEN;
+    return defined && (visibility == STV_DEFAULT || visibility == STV_PROTECTED);
+}
+
+// Lane 0: retain a previously unneeded library and append its reference object, if any, to the next frontier.
+static uint32_t foreign_load_library(Foreign* foreign, uint32_t index)
+{
+    ForeignLibrary* library = &foreign->libraries[index];
+    library->needed = true;
+    foreign->as_needed_waiting -= 1;
+    const uint32_t added = library->library.references.count != 0 ? 1 : 0;
+    if (added != 0)
+    {
+        const uint32_t id = foreign->object_count;
+        const uint64_t position = foreign_position(library->input, 0);
+        library->object = id + 1;
+        foreign->objects[id] = (ForeignObject){
+            .position = position,
+            .input = library->input,
+            .library = index + 1,
+        };
+        foreign->positions[id] = position;
+        foreign->object_count += 1;
+    }
+    return added;
+}
+
+// Lane 0, after archive resolution and the winners: one frontier of unversioned providers. A newly retained
+// library is not followed here: its references must first resolve and load any archive definitions, which may make
+// another provider unnecessary. Looking before these winners could load an unnecessary provider's archive members.
+static uint32_t foreign_retain_unversioned(Foreign* foreign)
+{
+    const uint32_t count = foreign->library_count;
+    uint32_t added = 0;
+    for (uint32_t l = 0; l < count; l += 1)
+    {
+        const ForeignLibrary* library = &foreign->libraries[l];
+        const ImportReferences* references = &library->library.references;
+        const uint32_t reference_count = library->needed && library->followed ? references->count : 0;
+        for (uint32_t r = 0; r < reference_count; r += 1)
+        {
+            const uint32_t m = library->providers[r];
+            const bool candidate = references->weak[r] == 0 && library->versions.reference_versions[r].length == 0 && m != UINT32_MAX && m != l;
+            const ForeignLibrary* provider = candidate ? &foreign->libraries[m] : 0;
+            if (provider != 0 && !provider->needed && !foreign_library_satisfied(foreign, library, r) && !foreign_library_lists(library, foreign_library_name(foreign, provider)))
+            {
+                added += foreign_load_library(foreign, m);
+            }
+        }
+    }
+    foreign->rounds[foreign->round_count].end_object = foreign->object_count;
+    return added;
+}
+
+// Lane 0, with the final winners: rebuild provider retention from the original regular roots, suppressing edges
+// satisfied by the executable. An archive member loaded by a provider may define an earlier library's reference.
+// Archive extraction stays monotone, but that reference no longer needs the provider or its otherwise unused closure.
+static void foreign_keep_libraries(Foreign* foreign, ForeignLane* lane)
+{
+    const uint32_t count = foreign->library_count;
+    bool candidates = false;
+    for (uint32_t l = 0; l < count; l += 1)
+    {
+        candidates = candidates || (foreign->libraries[l].needed && !foreign->libraries[l].root);
+    }
+    if (candidates)
+    {
+        // A provider that was already needed emitted no new need when a later archive's regular reference used it.
+        const ForeignNames* names = &foreign->names;
+        const uint32_t name_count = names->count;
+        for (uint32_t n = 0; n < name_count; n += 1)
+        {
+            if (names->resolution[n] == FOREIGN_RESOLUTION_SHARED && (names->flags[n] & BUSTER_FOREIGN_NAME_REGULAR_REFERENCED) != 0)
+            {
+                ForeignLibrary* library = &foreign->libraries[names->library[n]];
+                library->root = library->root || library->needed;
+            }
+        }
+        Scratch scratch = scratch_begin(&lane->arena);
+        // 0: absent, 1: to follow, 2: followed. Each reachable library's cached edges are read once.
+        uint8_t* needed = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 1);
+        if (needed == 0)
+        {
+            foreign_fail(lane, foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0));
+        }
+        for (uint32_t l = 0; needed != 0 && l < count; l += 1)
+        {
+            needed[l] = foreign->libraries[l].root ? 1 : 0;
+        }
+        bool more = needed != 0;
+        while (more)
+        {
+            more = false;
+            for (uint32_t l = 0; l < count; l += 1)
+            {
+                const ForeignLibrary* library = &foreign->libraries[l];
+                const uint32_t reference_count = needed[l] == 1 ? library->library.references.count : 0;
+                needed[l] = needed[l] == 1 ? 2 : needed[l];
+                for (uint32_t r = 0; r < reference_count; r += 1)
+                {
+                    const uint32_t m = library->providers[r];
+                    if (m != UINT32_MAX && needed[m] == 0 && !foreign_library_satisfied(foreign, library, r) &&
+                        !foreign_library_lists(library, foreign_library_name(foreign, &foreign->libraries[m])))
+                    {
+                        needed[m] = 1;
+                        more = true;
+                    }
+                }
+            }
+        }
+        for (uint32_t l = 0; needed != 0 && l < count; l += 1)
+        {
+            ForeignLibrary* library = &foreign->libraries[l];
+            foreign->as_needed_waiting += library->needed && needed[l] == 0 ? 1 : 0;
+            library->needed = needed[l] != 0;
+        }
+        scratch_end(scratch);
+    }
+}
+
+// Lane 0, after the final winners and retention: the needed libraries' strong references that no library exports at
+// their versions and no visible executable definition satisfies, then the loaded libraries' version needs. Check
+// every reference: an executable-satisfied one must not hide another missing name in the same library.
+static void foreign_check_versions(Foreign* foreign, ForeignLane* lane)
+{
+    Scratch scratch = scratch_begin(&lane->arena);
+    // The libraries the program loads: the needed ones, and those their DT_NEEDED entries name, to the closure.
+    uint8_t* loaded = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)foreign->library_count + 1);
+    ForeignFailure failure = { 0 };
+    if (loaded == 0)
+    {
+        failure = foreign_failure(FOREIGN_ERROR_MEMORY, 0, 0, 0);
+    }
+    for (uint32_t l = 0; loaded != 0 && l < foreign->library_count; l += 1)
+    {
+        loaded[l] = foreign->libraries[l].needed ? 1 : 0;
+    }
+    bool more = loaded != 0;
+    while (more)
+    {
+        more = false;
+        for (uint32_t l = 0; l < foreign->library_count; l += 1)
+        {
+            const RuntimeLibraryVersions* versions = &foreign->libraries[l].versions;
+            for (uint32_t d = 0; loaded[l] != 0 && d < versions->dependency_count; d += 1)
+            {
+                const uint32_t m = foreign_library_named(foreign, versions->dependencies[d]);
+                more = more || (m != UINT32_MAX && loaded[m] == 0);
+                if (m != UINT32_MAX)
+                {
+                    loaded[m] = 1;
+                }
+            }
+        }
+    }
+    for (uint32_t l = 0; loaded != 0 && failure.error == FOREIGN_ERROR_NONE && l < foreign->library_count; l += 1)
+    {
+        const ForeignLibrary* library = &foreign->libraries[l];
+        const RuntimeLibraryVersions* versions = &library->versions;
+        bool known = library->needed;
+        for (uint32_t d = 0; known && d < versions->dependency_count; d += 1)
+        {
+            known = foreign_library_named(foreign, versions->dependencies[d]) != UINT32_MAX;
+        }
+        const ImportReferences* references = &library->library.references;
+        const uint32_t reference_count = references->count;
+        for (uint32_t r = 0; known && failure.error == FOREIGN_ERROR_NONE && r < reference_count; r += 1)
+        {
+            if (references->weak[r] == 0 && library->providers[r] == UINT32_MAX && !foreign_library_satisfied(foreign, library, r))
+            {
+                failure = foreign_failure(FOREIGN_ERROR_LIBRARY_UNDEFINED, foreign_position(library->input, 0), library->input, 0);
+                failure.library = l;
+                failure.reference = r;
+            }
+        }
+    }
+    for (uint32_t l = 0; loaded != 0 && failure.error == FOREIGN_ERROR_NONE && l < foreign->library_count; l += 1)
+    {
+        const ForeignLibrary* library = &foreign->libraries[l];
+        const RuntimeVersionNeeds* needs = &library->versions.needs;
+        for (uint32_t n = 0; loaded[l] != 0 && failure.error == FOREIGN_ERROR_NONE && n < needs->count; n += 1)
+        {
+            const uint32_t provider = needs->weak[n] ? UINT32_MAX : foreign_library_named(foreign, needs->file[n]);
+            if (provider != UINT32_MAX && !runtime_library_defines_version(&foreign->libraries[provider].library, needs->name[n], needs->hash[n]))
+            {
+                failure = foreign_failure(FOREIGN_ERROR_LIBRARY_VERSION, foreign_position(library->input, 0), library->input, 0);
+                failure.library = l;
+                failure.reference = n;
+                failure.provider = provider;
+            }
+        }
+    }
+    scratch_end(scratch);
+    foreign_fail(lane, failure);
+}
+
 // Lane 0, after a round's resolution: every lane's needs marked in the archives' bitsets; those not loaded before become
 // the next round's objects, in position order (archive by archive, member by member). Returns how many. When none, the
 // rounds are over, and the names' columns are pushed: every partition's entries are final.
@@ -3317,6 +3743,7 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
                 if (a == BUSTER_FOREIGN_LIBRARY_NEED)
                 {
                     needed[m] = foreign->libraries[m].needed ? 0 : 1;
+                    foreign->libraries[m].root = true;
                 }
                 else if (!foreign_member_loaded(&foreign->archives[a], m))
                 {
@@ -3325,6 +3752,11 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
                     pending[bases[a] + m / 64] |= 1ull << (m % 64);
                 }
             }
+        }
+        // And the libraries that the needed libraries' versioned references need (#1590).
+        if (foreign->command->library_versions)
+        {
+            foreign_retain_providers(foreign, needed, lane);
         }
         // Input by input, so that the objects come in position order: an archive's pending members, a library's
         // object of references.
@@ -3350,24 +3782,9 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
                     added += 1;
                 }
             }
-            ForeignLibrary* library = input->kind == FOREIGN_KIND_LIBRARY && needed[input->item] != 0 ? &foreign->libraries[input->item] : 0;
-            if (library != 0)
+            if (input->kind == FOREIGN_KIND_LIBRARY && needed[input->item] != 0)
             {
-                library->needed = true;
-                foreign->as_needed_waiting -= 1;
-            }
-            if (library != 0 && library->library.references.count != 0)
-            {
-                const uint32_t id = foreign->object_count;
-                library->object = id + 1;
-                foreign->objects[id] = (ForeignObject){
-                    .position = foreign_position(i, 0),
-                    .input = i,
-                    .library = input->item + 1,
-                };
-                foreign->positions[id] = foreign->objects[id].position;
-                foreign->object_count += 1;
-                added += 1;
+                added += foreign_load_library(foreign, input->item);
             }
         }
     }
@@ -3385,21 +3802,29 @@ static uint32_t foreign_load(Foreign* foreign, uint32_t index, ForeignLane* lane
             names += foreign->tables[p].count;
         }
         ForeignNames* columns = &foreign->names;
-        Arena* arena = &foreign->arena;
         columns->count = (uint32_t)names;
-        columns->order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, names + 1);
-        columns->bytes = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, names + 1);
-        columns->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, names + 1);
-        columns->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, names + 1);
-        columns->resolution = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, names + 1);
-        columns->symbol = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, names + 1);
-        columns->library = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, names + 1);
-        columns->definitions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, names + 1);
-        columns->second = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, names + 1);
-        columns->common_size = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, names + 1);
-        columns->common_alignment = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, names + 1);
-        columns->visibility = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, names + 1);
-        columns->flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, names + 1);
+        // A newly retained unversioned provider may resume the rounds. Reuse these output columns until they need
+        // to grow; geometrically growing them bounds arena use across a chain of provider frontiers.
+        if (names > columns->capacity || columns->order == 0)
+        {
+            const uint64_t grown = (uint64_t)columns->capacity * 2;
+            const uint64_t capacity = names > grown || grown >= UINT32_MAX ? names : grown;
+            Arena* arena = &foreign->arena;
+            columns->order = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, capacity + 1);
+            columns->bytes = BUSTER_ARENA_PUSH_ARRAY(arena, const uint8_t*, capacity + 1);
+            columns->length = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity + 1);
+            columns->hash = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, capacity + 1);
+            columns->resolution = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, capacity + 1);
+            columns->symbol = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity + 1);
+            columns->library = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity + 1);
+            columns->definitions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity + 1);
+            columns->second = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, capacity + 1);
+            columns->common_size = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, capacity + 1);
+            columns->common_alignment = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, capacity + 1);
+            columns->visibility = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, capacity + 1);
+            columns->flags = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, capacity + 1);
+            columns->capacity = (uint32_t)capacity;
+        }
         const bool pushed = names < UINT32_MAX && columns->order != 0 && columns->bytes != 0 && columns->length != 0 && columns->hash != 0 && columns->resolution != 0 && columns->symbol != 0 &&
                             columns->library != 0 && columns->definitions != 0 && columns->second != 0 && columns->common_size != 0 && columns->common_alignment != 0 &&
                             columns->visibility != 0 && columns->flags != 0;
@@ -3725,36 +4150,63 @@ static void foreign_lane_main(void* argument)
         lane_sync();
     }
     bool more = foreign_proceed(foreign, lane);
-    for (uint32_t round = 0; more; round += 1)
+    while (more)
     {
-        foreign_parse(foreign, round, lane);
-        more = foreign_proceed(foreign, lane);
-        if (more)
+        for (uint32_t round = foreign->round_count; more; round += 1)
         {
-            foreign_exchange(foreign, round, lane);
+            foreign_parse(foreign, round, lane);
             more = foreign_proceed(foreign, lane);
+            if (more)
+            {
+                foreign_exchange(foreign, round, lane);
+                more = foreign_proceed(foreign, lane);
+            }
+            if (more)
+            {
+                foreign_resolve(foreign, round, lane);
+                more = foreign_proceed(foreign, lane);
+            }
+            uint32_t added = 0;
+            if (more && lane_index() == 0)
+            {
+                added = foreign_load(foreign, round, lane);
+            }
+            added = (uint32_t)lane_broadcast(added, 0);
+            more = foreign_proceed(foreign, lane) && added != 0;
         }
-        if (more)
+        if (foreign_proceed(foreign, lane))
         {
-            foreign_resolve(foreign, round, lane);
-            more = foreign_proceed(foreign, lane);
+            foreign_groups(foreign, lane);
         }
+        if (foreign_proceed(foreign, lane))
+        {
+            foreign_winners(foreign, lane);
+        }
+        // Unversioned providers depend on these winners, including definitions loaded from archives and COMDAT
+        // selection. Their reference objects extend the empty next round prepared by foreign_load.
         uint32_t added = 0;
-        if (more && lane_index() == 0)
+        if (foreign_proceed(foreign, lane) && foreign->command->library_versions && lane_index() == 0)
         {
-            added = foreign_load(foreign, round, lane);
+            uint64_t start = foreign_now();
+            added = foreign_retain_unversioned(foreign);
+            start = foreign_time(lane, FOREIGN_PHASE_LOAD, start);
+            (void)start;
         }
         added = (uint32_t)lane_broadcast(added, 0);
         more = foreign_proceed(foreign, lane) && added != 0;
     }
-    if (foreign_proceed(foreign, lane))
+    if (foreign_proceed(foreign, lane) && foreign->command->library_versions && lane_index() == 0)
     {
-        foreign_groups(foreign, lane);
+        uint64_t start = foreign_now();
+        foreign_keep_libraries(foreign, lane);
+        if (!foreign_failed(foreign))
+        {
+            foreign_check_versions(foreign, lane);
+        }
+        start = foreign_time(lane, FOREIGN_PHASE_LOAD, start);
+        (void)start;
     }
-    if (foreign_proceed(foreign, lane))
-    {
-        foreign_winners(foreign, lane);
-    }
+    lane_sync();
 }
 
 static bool foreign_begin(Foreign* foreign, const ForeignCommand* command, ForeignPath path, uint32_t capacity)

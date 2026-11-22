@@ -234,6 +234,27 @@ definition. Its flags and edges:
   keep normal dispatch. Complete retained blocks keep their scope exits;
   terminal breaks use the ordinary cleanup, VLA-restore and lifetime machinery.
   Dropped regions and block-scope statics introduce no selection roots.
+- **Statements no control reaches (#2987):** a block's statements are walked
+  in source order (`c_check_program_reach.c`). One that follows a `return`,
+  `break`, `continue`, `goto` or `__builtin_unreachable()`, and that holds no
+  label and no `case` of a switch outside it, is left out with the same
+  dropped ranges. An `if` whose arms both end that way ends the same way,
+  including a constant `if (1)` folded onto a `return`. A `while` whose
+  condition is constantly true, and a `for (;;)` that no `break` of its own
+  leaves, does too, so `for (;;) {}` drops the statement after it. A `for`
+  that has a condition does not: clang still branches to its exit, including
+  `for (; 1;)`. `__builtin_trap()` does not, and neither does the statement
+  after a `do`: clang -O0 still names a function only that statement calls. A
+  `switch` jumps to a case, so a statement before its first case is left out,
+  and a body no case or label can enter is left out whole. An automatic local
+  that dropped statement declares still has a place when a statement that is
+  emitted names it: a later case, or a label after a `goto`. Clang allocates
+  that local and does not emit its initializer. A local nothing emitted names
+  stays dropped, so its cleanup is not run. A block-scope static the dropped
+  statement declares is still emitted: clang emits that declaration with no
+  insertion point, and its initializer with it. What only the dropped
+  statement reaches is not selected and is not checked for target features. A
+  cleanup whose declaration was dropped does not run.
 - **Bound sections (#1122):** a `__start_NAME`/`__stop_NAME` reference names a
   section, not a member, so no edge reaches the members nothing else does — a
   static registry entry first — but GNU ld's bounds still cover them. After
@@ -1717,7 +1738,7 @@ checked program, never from a name, and fails on any other:
 | --- | --- | --- |
 | folded | ours only: an object that a selected body reads, a const and not volatile scalar with an initializer | Reads its value as a constant (`CodeGenFunction::tryEmitAsConstant`), so nothing needs the object. musl's `math` constants (`pS0`, `pio2_hi`) and Lua's `HOOKKEY` and `CLIBS`. |
 | unselected | clang only: a definition the selection reaches when it also counts the operands that a constant condition never evaluates (`CheckProgramOptions.unselected_operands`) | Emits a `?:` in a branch's condition as branches without folding a constant condition (`CodeGenFunction::EmitBranchOnBoolExpr`), so the dead arm's calls stay. musl's `isnan` and `signbit` call `__FLOAT_BITS` in the dead arm for a `double`. |
-| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 splices such calls too (#1398) and leaves out a callee it spliced at every call (step 3); the object still defines one whose call it keeps (a cycle's, one the splice refuses: two returns, a result in memory), and every one under `--tier0-no-inline`. |
+| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 splices such calls too (#1398) and leaves out a callee it spliced at every call (step 3); the object still defines one whose call it keeps (a cycle's, one the splice refuses: two returns, a result in memory), and every one under `--tier0-no-inline`. An inline-only one of one statement (glibc's `__fortify_function` wrappers) is expanded at its calls by the lowering itself, with its callers' object sizes ([#2983](c-builtins-fortify.md#the-wrappers-bounds-2983)). |
 
 Until #1108 there was a fourth, dropped: a definition only ours had, which
 clang's model left out because only a constant `if`'s dead arm reached it

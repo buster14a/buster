@@ -427,7 +427,7 @@ static void foreign_link_lane(void* argument)
         if (state->debug)
         {
             build->output->debug = (ExecutableDebugSections){ 0 };
-            build->result = foreign_debug_plan(&state->debug_plan, build->output, build->foreign, build->order, build->arena);
+            build->result = foreign_debug_plan(&state->debug_plan, build->output, build->foreign, build->order, true, build->arena);
         }
     }
     if (foreign_link_lanes_proceed(state) && state->debug)

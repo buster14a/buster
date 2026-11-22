@@ -330,12 +330,38 @@ static uint32_t ir_inline_symbol(const IrInlineUnit* unit, uint32_t symbol)
     return first < unit->count && unit->symbols[first] == symbol ? first : BUSTER_IR_NONE;
 }
 
-// Whether `node` is a call site: a call of a callee, direct or indirect, but not a row call (#141) or a body call (#1839),
-// which run their machine records in place of a callee and stay as they are.
-static bool ir_inline_site(const IrFunction* function, uint32_t node)
+// Count the direct and indirect call sites, or write their source nodes and unit callees in that same order.
+// Row and asm calls have no callee. Only a lane holding IR_CALL needs its descriptor checked.
+static uint32_t ir_inline_sites(const IrInlineUnit* unit, const IrFunction* function, uint32_t* nodes, uint32_t* callees)
 {
-    const uint32_t op = function->op[node];
-    return op == IR_CALL_INDIRECT || (op == IR_CALL && function->calls[function->b[node]].row == 0 && function->calls[function->b[node]].body == 0);
+    uint32_t count = 0;
+    for (uint32_t first = 0; function->call_count != 0 && first < function->instruction_count;)
+    {
+        const uint32_t left = function->instruction_count - first;
+        const uint32_t length = left < 64 ? left : 64;
+        const __mmask64 lanes = length == 64 ? ~(__mmask64)0 : (((__mmask64)1 << length) - 1);
+        const __m512i ops = _mm512_maskz_loadu_epi8(lanes, function->op + first);
+        const __mmask64 direct = _mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_CALL));
+        uint64_t sites = direct | _mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_CALL_INDIRECT));
+        for (; sites != 0; sites &= sites - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(sites);
+            const uint32_t node = first + lane;
+            const bool named = ((direct >> lane) & 1) != 0;
+            const IrCall* call = named ? &function->calls[function->b[node]] : NULL;
+            if (call == NULL || (call->row == 0 && call->body == 0))
+            {
+                if (nodes != NULL)
+                {
+                    nodes[count] = node;
+                    callees[count] = named ? ir_inline_symbol(unit, function->a[node]) : BUSTER_IR_NONE;
+                }
+                count += 1;
+            }
+        }
+        first += length;
+    }
+    return count;
 }
 
 // Whether a direct call is its callee's to expand by signature (#2721): of the callee's variadic status, result type and
@@ -429,10 +455,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
                 check.error = IR_ERROR_LIMIT;
             }
             result->call_offsets[f] = result->call_count;
-            for (uint32_t node = 0; node < function->instruction_count; node += 1)
-            {
-                result->call_count += ir_inline_site(function, node);
-            }
+            result->call_count += ir_inline_sites(unit, function, NULL, NULL);
         }
     }
     if (check.error == IR_OK)
@@ -457,14 +480,10 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
     for (uint32_t f = 0; check.error == IR_OK && f < unit->count; f += 1)
     {
         const IrFunction* function = &unit->functions[f];
-        uint32_t call = result->call_offsets[f];
-        for (uint32_t node = 0; node < function->instruction_count; node += 1)
+        const uint32_t first = result->call_offsets[f];
+        if (first < result->call_offsets[f + 1])
         {
-            if (ir_inline_site(function, node))
-            {
-                result->call_nodes[call] = node;
-                result->callees[call++] = function->op[node] == IR_CALL ? ir_inline_symbol(unit, function->a[node]) : BUSTER_IR_NONE;
-            }
+            ir_inline_sites(unit, function, result->call_nodes + first, result->callees + first);
         }
     }
     return check;
@@ -1753,6 +1772,17 @@ static void ir_inline_describe(const IrFunction* source, uint32_t node, const Ir
     }
 }
 
+// The chosen calls in source-node order. A kept call is copied in its block's ordinary run along with row
+// and asm calls. The end of this caller's audit slice also handles a body with no calls.
+static uint32_t ir_inline_selected_node(const IrInlineResult* result, uint32_t* call, uint32_t end)
+{
+    while (*call < end && result->decisions[*call] != IR_INLINE_SELECTED)
+    {
+        *call += 1;
+    }
+    return *call < end ? result->call_nodes[*call] : BUSTER_IR_NONE;
+}
+
 // The caller's nodes [first, end) of one block, between its expanded calls, copied to the cursor (#2541's design, "The
 // splice's columns"): each operand column rebased by its kind from the IR's operand tables (IrInlineKinds), a value to
 // its new place (`values`), a branch's block to its target's first part (`block_first`) and any other row kept, the
@@ -1891,6 +1921,8 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         .asm_body_count = source->asm_body_count,
     };
     uint32_t call = result->call_offsets[function];
+    const uint32_t call_end = result->call_offsets[function + 1];
+    uint32_t selected = ir_inline_selected_node(result, &call, call_end);
     // The caller's expanded sites (IrInlineSites), while they fit the add form's bound; one more and the gathers take it.
     IrInlineSites expanded = { 0 };
     uint32_t site_count = 0;
@@ -1909,9 +1941,7 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
         for (uint32_t node = source->block_offsets[block]; node < source->block_offsets[block + 1]; node += 1)
         {
             const uint32_t op = source->op[node];
-            const bool site = ir_inline_site(source, node);
-            const bool selected = site && result->decisions[call] == IR_INLINE_SELECTED;
-            if (selected)
+            if (node == selected)
             {
                 const IrFunction* callee = &result->functions[result->callees[call]];
                 const IrInlineBody* shape = &shapes[result->callees[call]];
@@ -1963,6 +1993,8 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                 sizes.passed_count += rows.passed;
                 maximum_callee = callee->instruction_count > maximum_callee ? callee->instruction_count : maximum_callee;
                 maximum_parameters = callee->parameter_count > maximum_parameters ? callee->parameter_count : maximum_parameters;
+                call += 1;
+                selected = ir_inline_selected_node(result, &call, call_end);
             }
             else
             {
@@ -1991,7 +2023,6 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                     sizes.extra_count += ir_extra_value_count(source, node);
                 }
             }
-            call += site;
         }
         block_last[block] = (uint32_t)sizes.block_count - 1;
     }
@@ -2137,14 +2168,14 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
             .slots = source->slot_count,
         };
         call = result->call_offsets[function];
+        selected = ir_inline_selected_node(result, &call, call_end);
         uint32_t new_block = 0;
         for (uint32_t block = 0; block < source->block_count; block += 1)
         {
             rewritten.block_offsets[new_block++] = cursor.node;
             for (uint32_t node = source->block_offsets[block]; node < source->block_offsets[block + 1]; node += 1)
             {
-                const bool site = ir_inline_site(source, node);
-                if (site && result->decisions[call] == IR_INLINE_SELECTED)
+                if (node == selected)
                 {
                     const IrFunction* callee = &result->functions[result->callees[call]];
                     const IrInlineBody* shape = &shapes[result->callees[call]];
@@ -2206,23 +2237,18 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
                     bases.vectors += callee->vector_constant_count;
                     bases.rows += callee->row_count;
                     bases.bodies += callee->asm_body_count;
+                    call += 1;
+                    selected = ir_inline_selected_node(result, &call, call_end);
                 }
                 else
                 {
-                    // The caller's nodes up to its block's next expanded call, a run copied whole (ir_inline_copy_run).
-                    uint32_t last = node + 1;
-                    uint32_t sites = site;
-                    while (last < source->block_offsets[block + 1] && !(ir_inline_site(source, last) && result->decisions[call + sites] == IR_INLINE_SELECTED))
-                    {
-                        sites += ir_inline_site(source, last);
-                        last += 1;
-                    }
+                    // The chosen node bounds the copied run, or the end of this block when the next site is later.
+                    const uint32_t block_end = source->block_offsets[block + 1];
+                    const uint32_t last = selected < block_end ? selected : block_end;
                     ir_inline_copy_run(source, node, last, kinds, values, block_first, block_last, site_count <= options.add_sites && site_count <= 16 ? &expanded : NULL, &rewritten,
                                        &cursor);
                     node = last - 1;
-                    call += sites - site;
                 }
-                call += site;
             }
         }
         rewritten.block_offsets[rewritten.block_count] = cursor.node;
@@ -2232,7 +2258,8 @@ static IrError ir_inline_rewrite(const IrInlineUnit* unit, uint32_t function, Ar
     return error;
 }
 
-static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* unit, Arena* output, Arena* scratch, IrInlineOptions options, IrInlineResult* result, uint32_t* error_function)
+static IrCheck ir_inline_with_shapes(const IrInlineUnit* unit, Arena* output, Arena* scratch, IrInlineOptions options,
+                                     const IrInlineBody* const* known, IrInlineResult* result, uint32_t* error_function)
 {
     const bool arenas = output && scratch && output->base && scratch->base && output->length <= output->capacity && scratch->length <= scratch->capacity;
     const bool error_storage = error_function == 0 || (arenas && !ir_inline_tail_conflict(error_function, sizeof(*error_function), output, scratch) && !ir_inline_overlap(error_function, sizeof(*error_function), result, sizeof(*result)));
@@ -2302,10 +2329,18 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
         arena_pop_to(scratch, function_mark);
         // A shape is read only when choosing what to inline into a later caller. In single-caller mode the
         // rewritten body is that caller, and its expanded rows and slot lifetimes need no callee summary.
-        if (check.error == IR_OK && (unit->only == 0 || !rewritten) &&
-            !ir_inline_shape(&inlined.functions[failed_function], options.control_flow, scratch, &shapes[failed_function]))
+        if (check.error == IR_OK && (unit->only == 0 || !rewritten))
         {
-            check.error = IR_ERROR_MEMORY;
+            // The emission's single-caller unit borrows finished callee bodies from immutable summaries. Its
+            // saved shapes describe those very bodies, including any slot lifetime marks, for every caller.
+            if (!rewritten && known != NULL && known[failed_function] != NULL)
+            {
+                shapes[failed_function] = *known[failed_function];
+            }
+            else if (!ir_inline_shape(&inlined.functions[failed_function], options.control_flow, scratch, &shapes[failed_function]))
+            {
+                check.error = IR_ERROR_MEMORY;
+            }
         }
     }
     if (arguments)
@@ -2327,4 +2362,9 @@ static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* un
         *error_function = failed_function;
     }
     return check;
+}
+
+static __attribute__((unused)) IrCheck ir_optimize_inline(const IrInlineUnit* unit, Arena* output, Arena* scratch, IrInlineOptions options, IrInlineResult* result, uint32_t* error_function)
+{
+    return ir_inline_with_shapes(unit, output, scratch, options, NULL, result, error_function);
 }

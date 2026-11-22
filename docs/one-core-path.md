@@ -3069,9 +3069,9 @@ The 9700X, medians of 7 runs, musl's of 3, TSC ticks at 3,792.9 MHz:
   record; and a T that read the front's records would write no graph (4.8 ms).
 - **It retires the specification's forecast for the compile that takes bodies.** That forecast (5.6 to 8.5 ms at 53%
   of the tokens taken) was built on 141 to 178 ticks a token. At 270 a token swept and 295 a token taken, every
-  token of `sqlite3.c`'s bodies taken would give 3.7 ms, under that step's gate of 4. So cost comes before coverage.
-  And a refusal before the sweeps has to come before the front: the compaction, the entries and the front are 55
-  ticks a position by themselves, where that step's gate was 20.
+  token of `sqlite3.c`'s bodies taken would give 3.7 ms, under that step's gate of 4. And a refusal before the sweeps
+  has to come before the front: the compaction, the entries and the front are 55 ticks a position by themselves, where
+  that step's gate was 20 ("A scan of a body's tokens before its reading", below).
 
 ### The machine's run by sweep
 
@@ -3092,14 +3092,15 @@ postorder position):
 
 - **The tests are half the machine's run on each corpus,** and a third of the piece whole: 89 of `sqlite3.c`'s 270
   ticks a position, where T is 41, the front 37 and the graph's writing 32.
-- **So the tests' cheaper form goes first.** The census's code on T's records is the only form of them that runs
-  without the window today: the pass over T's columns that read half of it ("The tests in the machine's own form")
-  became the window's loop, which reads a fifth and needs the window's front and kernel. Either is the next piece,
-  with this machine as what it is compared with before the walk.
-- **No figure follows for the piece with them.** The window's tests need the window's front and kernel to run, whose
-  cost before the walk is not read; and a forecast of a compile has to carry what the bodies refused after their
-  sweeps cost (the bodies T, the tests or C and X stop hold 15.4% of `sqlite3.c`'s body tokens), which the forecast
-  this piece retired left out.
+- **Their cheaper forms do not run without T today.** The census's code on T's records is the only form of the tests
+  that runs without the window: the pass over T's columns that read half of it ("The tests in the machine's own form")
+  became the window's loop, which reads a fifth, needs the window's front and kernel, and sends every listed
+  expression (an initialization's root always is) back to T's records.
+- **No figure follows for the piece with them.** Their cost before the walk is not read; and a forecast of a compile
+  has to carry what the bodies refused after their sweeps cost (the bodies T, the tests or C and X stop hold 15.4% of
+  `sqlite3.c`'s body tokens), which the forecast this piece retired left out.
+- **The order of the pieces after this one is on the issue,** in
+  [one comment](https://github.com/buster14a/buster/issues/2850#issuecomment-7083506418), and nowhere on this page.
 
 ### Its ticks by a body's verdict
 
@@ -3150,6 +3151,16 @@ scan finds a lost root in, with its own ticks.
 - It is not a rule of the language: a body it passes may still lose a root (the front's own stack, a constant out of
   range), and is then read and refused as today. What it must not do is find one in a body the machine takes, which
   the fixture and the four corpora count.
+
+### Whether its cost is its place's
+
+Two readings on the 9700X
+([the record](https://github.com/buster14a/buster-performance/tree/132739984/docs/measurements/takeover-2850-2026-11-22#is-the-references-cost-its-places-every-body-first-and-its-memory-touched-first-machine-alone9700x-first-9700x-touch)).
+With every body read before the walk's first chunk (below) the machine costs 273.6 ticks a position on `sqlite3.c`
+against 271.5 in turn in the same job: reading the bodies in a row, with no walk between them, changes nothing. With
+every page the piece reserves touched before its first body (an experiment's patch, not here) it costs 261.9 against
+272.5: first touches of its own memory are 1.4 ms of its graph's writing and 0.3 of the tests. So the reference costs
+about 262 ticks a position it sweeps, where a taken token is worth 295.
 
 ### Every body read before the walk's first chunk
 

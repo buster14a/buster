@@ -50,14 +50,26 @@ are, and the body may be a chain of blocks. Its own verification is therefore
 structural; the optimizer that follows verifies dominance once it has removed
 the stubs, and `test-ir-vectorize` runs that optimizer on every result.
 
+The C typed stream still loses volatility on indirect loads. With `+vectorize`,
+the driver conservatively skips a function containing a volatile-qualified
+expression and carries that decision through calls it actually inlines.
+Other functions in the same translation unit remain eligible.
+
 **What it takes.** An innermost, reducible loop with one preheader whose only
 successor is the header; a header of phis, its exit test and dead rows; a body
-that is a chain of blocks back to the header. The induction is an `i32` or
+that leads back to the header through a chain of blocks, optionally containing
+a min/max reduction diamond. The induction is an `i32` or
 `i64` phi from an invariant start, `+ 1` on the back edge; the exit test is
 `iv < n` or `iv + k < n` (unsigned or signed, either operand order and either
 branch sense) against an invariant `n`. Every other header phi must be an
 integer reduction: one wrapping `add`, `mul`, `and`, `or` or `xor` of the phi
-and another value, at `i32` or `i64`, whose partial value nothing else reads.
+and another value at `i32` or `i64`, or a signed or unsigned `i32` min/max.
+The reduction's partial value must be private to its update. For min/max, the
+vectorizer matches the two operands of an ordered comparison to the values
+selected by a scalar `select` or the join of a one- or two-armed conditional.
+An arm may reload the element already compared when its address and the
+absence of an intervening write prove it reads the same value. Volatile
+accesses and conditional stores refuse the loop.
 Each needed row of the body is then, in order:
 
 - **uniform:** no lane depends on the induction. It is cloned once, in the guard
@@ -77,8 +89,8 @@ Each needed row of the body is then, in order:
   `zext`, `sext` and `trunc` between integer lanes (`extend`, `truncate`);
   `popcnt` of each lane (`lane_unary`).
 
-Anything else refuses the loop, counted by reason: `shape` (control flow in the
-body, no dedicated preheader, an outer loop), `induction`, `phi` (a recurrence
+Anything else refuses the loop, counted by reason: `shape` (unmatched control
+flow in the body, no dedicated preheader, an outer loop), `induction`, `phi` (a recurrence
 that isn't a reduction, a float sum), `operation` (a call, a division, a fence,
 a volatile or atomic access), `address` (a strided or gathered
 access), `use` (the induction as data, a reduction's partial value),
@@ -96,8 +108,11 @@ than eight pairs refuse.
 **The rewrite** appends three blocks per loop and leaves every original row in
 place: the guard (G), reached from the preheader instead of the header; the
 vector loop (VB); and its exit (VX), which reduces each accumulator (`reduce`,
-then `lane_extract` of lane 0), combines it with the initial value and enters
-the original header, whose phis take G's start or VX's results. The original
+then `lane_extract` of lane 0) and enters
+the original header, whose phis take G's start or VX's results. Min/max
+broadcasts the incoming accumulator into every lane in G and uses `lane_op`
+in VB. The other reductions start at their identity and combine their scalar
+result with the incoming value in VX. The original
 loop is the remainder and the fallback. The vector loop's induction is lane
 0's, the original's type, stepping by the lanes to `start + vector_n` by the
 original's predicate.
@@ -122,7 +137,9 @@ appends G, P, VB, T, TM and TX:
 - TM makes the mask, `(1 << remainder) - 1` at the mask's type. Under it come
   masked loads (zeros in the inactive lanes) and masked stores, and each
   reduction's update is selected by the mask, so that its inactive lanes keep
-  the accumulator.
+  the accumulator. A min/max's `lane_op` reads those zeros too, and the select
+  drops its result there: an inactive lane keeps the broadcast incoming value
+  or VB's partial result, which the reduction includes anyway.
 - TX joins the accumulators, reduces as VX does and enters the original header
   at the trip's end, whose exit test fails at once.
 
@@ -151,11 +168,12 @@ iterative depth-first walk over the blocks' terminators marks the reachable
 blocks, counts each block's reachable predecessors and collects each back edge's
 header once. The admitted shape needs nothing more: a header (not the entry)
 with exactly two reachable predecessors, one of its branch's targets starting a
-chain of blocks each reached from the previous one alone and ending in a `br` to
-the next, back to the header, and the other predecessor ending in a `br` to it.
+chain back to the header, and the other predecessor ending in a `br` to it.
+An internal conditional must reconverge at a private two-predecessor join,
+directly or through one single-entry block on each side.
 That loop is natural, reducible and innermost by construction: the only way into
-the chain is from the header, and no chain block, having one predecessor, can
-head a loop. On sqlite3.c the CFG and the dominators were 84% of the pass's time
+the chain is from the header, including at a matched join. On sqlite3.c the CFG
+and the dominators were 84% of the pass's time
 by in-process cycle counters in a local build (890 of 2,602 functions have a
 candidate phi); with the walk, the measured kernels' objects are byte for byte
 the same. The report's `loops` count is every back edge's header, outer loops

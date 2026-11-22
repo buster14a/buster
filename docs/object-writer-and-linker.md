@@ -2731,7 +2731,7 @@ find libB without `V1`: "version `V1' not found"), and against one whose `foo` h
 unversioned reference binds only to a default export. `import_library` keeps each reference's `.gnu.version` index and
 the exports at versions other than their names' defaults, which its vector path compresses beside the exports, and the
 import walks `.gnu.version_r`'s few entries, by `vn_next` and `vna_next` as the loader does, into a table by index,
-which gives each reference its version and the file it requires it of in one load (`runtime_libraries_versions`). A
+which gives each reference its version and the file it requires it of in one load (`runtime_library_versions`). A
 first version of the reader made a second pass over `.dynsym` for them, which took libm's import from 183,603 to
 443,241 instructions (86.2 to 97.7 µs) on the 9700X; this one takes it to 213,478 (89.1 µs, the 9700X job of
 [run 40116992018](https://github.com/buster14a/buster/actions/runs/40116992018)), the reader's own work being a walk
@@ -4264,8 +4264,9 @@ The pass does not modify the input or its borrowed bytes. Map entry zero
 and every discarded entry are zero; retained IDs follow original order.
 
 Root classification, frontier seeding and map emission have scalar and
-AVX-512 paths. Two atom queues and mark-before-append bound the irregular
-walk to one visit per atom. Target lookup and live-bit updates remain
+AVX-512 paths. The walk uses the output atom map as a queue until map
+emission. Marking before each append bounds the queue to one slot per live
+atom. Target lookup and live-bit updates remain
 scalar. This is a single-lane closure, not the planned per-lane frontier
 exchange; representative scaling and complete-link measurements remain
 separate acceptance work.
@@ -4722,6 +4723,68 @@ it. It writes every kind the direct path writes: static executables (with
   visibilities; and lld's regular symbol table. A dynamic PIE's own IFUNCs get
   stubs beside its imports' and `IRELATIVE` relocations, last in `.rela.dyn`,
   as lld's `.iplt` entries have them.
+- **The libraries' versions in mixed source links (#1590).** The source
+  driver's mixed links (a positional object, assembly or a selected archive
+  beside its C) go through this resolver, which by itself, as GNU ld and lld,
+  checks no library's versions: the direct path's refusals of a versioned
+  reference no library exports and of a version need the loader refuses
+  linked there, and a program with a weak need of a version that only an
+  `--as-needed` library exported failed to load (exit 127). With
+  `ForeignCommand.library_versions`, which the driver sets, each library's
+  file is read beside its import by the direct path's own readers
+  (`runtime_library_dependencies`, `runtime_library_versions`, which no
+  longer take `RuntimeLibraries`' fixed slots), and the resolution does what
+  `bind_needed_libraries` and `bind_library_versions` do for the direct path,
+  with no limit on the libraries: each round, lane 0 follows the newly needed
+  libraries' versioned strong references to the first library that exports
+  each at its version (default or not), and keeps an `--as-needed` one for it
+  unless the referring library's `DT_NEEDED` names it; after the last round,
+  such a reference that no library exports is refused, unless the library's
+  `DT_NEEDED` names a library the link doesn't have, and then the version
+  needs of the libraries the program loads, each against the library its
+  entry's file names. Unversioned references also retain providers and are
+  checked as described below (#2910). The names stay unversioned in the
+  resolution, and a library's versioned reference loads no archive member by
+  its bare name (`foreign_fold`, #2911): GNU ld and lld key it as
+  `name@VERSION`, which no unversioned definition, an archive member's or the
+  executable's, satisfies.
+  Both passes are scalar on lane 0, shared by both paths, over the needed
+  libraries' versioned references and the loaded libraries' needs: a lookup is
+  two probes of an index per library before its provider (the exports' and
+  the hidden exports', which each library's read indexes on the lanes), and
+  each reference is looked up once. Before #2910's unversioned extension,
+  on the 9700X a C program's mixed link with `-lm` (21 and
+  26 references of `libc.so.6` and `libm.so.6`, 9 needs) takes 104,000 more
+  instructions than main's (26.24 to 26.35 million, +0.40%) and 1.5 to 1.9%
+  more user cycles (main again: -0.05 to +0.75%); the first version, which
+  scanned each library's version definitions and hidden exports for every
+  lookup (`libc.so.6` has 537) and looked every reference up twice, took
+  307,000 more ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/library-versions-1590-2026-11-17)).
+  The direct link of the same program is unchanged.
+- **Unversioned library references in mixed source links (#2910).** Under
+  the same source-driver flag, a needed library's strong unversioned
+  reference binds to a default library export or a surviving strong, common
+  or weak executable definition with default/protected visibility. A hidden
+  or internal definition cannot satisfy the loader. The provider lookup
+  accepts a default version but never a non-default-only export.
+  Provider IDs are cached beside the existing library metadata, one lookup
+  per strong reference. Unversioned retention waits for the ordinary
+  archive rounds and COMDAT/winner selection, then adds one frontier of
+  needed providers and resumes resolution. This prevents an unnecessary
+  provider from pulling in archive members before an executable definition
+  is known. After the last frontier, retention is rebuilt from regular
+  roots, excluding executable-satisfied edges; a provider already kept for
+  a library can also become a root through a later regular reference.
+  Extracted archive members remain, as in the resolver's existing monotone
+  loading rule. Output name columns grow geometrically across frontiers.
+  A library's own `DT_NEEDED` suppresses direct retention of that provider.
+  Every unmatched strong reference of a finally needed library is refused,
+  unless its dependencies include a library absent from the link; weak
+  references are ignored. These checks follow the final winners and precede
+  conversion, so refusal leaves an existing output untouched. Both paths
+  share the index probes and closure decisions; raw `link-foreign` leaves
+  the flag off. The #1590 measurements above predate this extension; they
+  do not measure its additional work.
 - **The static kinds and shared libraries (#394).** A static executable and a
   static PIE get what `dynamic.c` gives the direct path's: the start file's
   ABI note and the link's `__tls_get_addr`, which `libc.a` doesn't define and
