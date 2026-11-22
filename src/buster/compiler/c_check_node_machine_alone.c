@@ -326,6 +326,16 @@ static __attribute__((noinline)) void node_alone_bodies(struct NodeAlone* alone,
 static void node_alone_finish(struct NodeAlone* alone, const CheckInputReader* reader)
 {
     const uint8_t* declined = reader->expression_declined;
+    // The marks the walk left in the bodies read here: how many tokens.
+    for (uint32_t body = 0; declined != NULL && body < alone->body_count; body += 1)
+    {
+        const uint32_t opening = alone->body_openings[body];
+        const uint32_t closing = reader->parser->tree.parents[opening];
+        for (uint32_t token = opening; token <= closing && token < reader->parser->tokens.count; token += 1)
+        {
+            alone->shadow->alone_declined_tokens += declined[token] != 0;
+        }
+    }
     const NodeFrontTypes* results = alone->types;
     const CheckGraph* view = &alone->view;
     const uint32_t tokens = reader->parser->tokens.count;

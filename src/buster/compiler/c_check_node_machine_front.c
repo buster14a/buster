@@ -693,6 +693,9 @@ struct NodeFrontShadow
     // expression with one has no root, and the walk's visit is where its own warnings are).
     uint64_t alone_taken_checked;
     uint64_t alone_taken_declined;
+    // The tokens of the bodies it read that the walk's class actions left to its visit, as the walk marked them: what
+    // the count above is read against (none marked would say nothing).
+    uint64_t alone_declined_tokens;
     uint64_t alone_prepare_ticks;
     uint64_t alone_front_ticks;
     uint64_t alone_write_ticks;

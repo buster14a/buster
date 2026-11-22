@@ -5003,6 +5003,8 @@ struct NodeShadow
     // those with one among their expression's tokens.
     uint64_t alone_taken_checked;
     uint64_t alone_taken_declined;
+    // The tokens of the bodies it read that the walk marked as left by its class actions.
+    uint64_t alone_declined_tokens;
     uint64_t alone_listed;
     // Its verdicts of the bodies the lowering lowered, by what stops it (BUSTER_NODE_ALONE_BODY_*), in bodies and in their
     // tokens; and against the machine on the walk's nodes, for which a body is whole where every root the lowering popped
@@ -7348,9 +7350,9 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
             }
         }
         printf(" roots-of-the-walk's-nodes-alone=%" PRIu64 " (outside a body %" PRIu64 ") roots-of-its-own-alone=%" PRIu64 " taken-before-an-event-of-the-walk's=%" PRIu64
-               " taken-with-a-token-the-walk's-actions-left=%" PRIu64 " (of %" PRIu64 " checked)\n",
+               " taken-with-a-token-the-walk's-actions-left=%" PRIu64 " (of %" PRIu64 " checked; the bodies hold %" PRIu64 " such tokens)\n",
                shadow->alone_walk_only, shadow->alone_walk_only_outside, shadow->alone_own_only, shadow->alone_events_after, shadow->alone_taken_declined,
-               shadow->alone_taken_checked);
+               shadow->alone_taken_checked, shadow->alone_declined_tokens);
         static const char* const verdict_names[BUSTER_NODE_ALONE_BODY_VERDICTS] = { "whole", "a-token-left", "a-root-not-run", "T", "the-tests", "C-or-X", "no-room" };
         printf("node-shadow: alone lowered-bodies' verdicts before the walk (their tokens %" PRIu64 "):", shadow->alone_body_tokens);
         for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
@@ -7600,6 +7602,7 @@ static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, 
     shadow->alone_resets += front->alone_resets;
     shadow->alone_taken_checked += front->alone_taken_checked;
     shadow->alone_taken_declined += front->alone_taken_declined;
+    shadow->alone_declined_tokens += front->alone_declined_tokens;
     shadow->alone_prepare_ticks += front->alone_prepare_ticks;
     shadow->alone_front_ticks += front->alone_front_ticks;
     shadow->alone_write_ticks += front->alone_write_ticks;

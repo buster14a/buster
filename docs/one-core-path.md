@@ -3092,9 +3092,10 @@ postorder position):
   without the window today: the pass over T's columns that read half of it ("The tests in the machine's own form")
   became the window's loop, which reads a fifth and needs the window's front and kernel. Either is the next piece,
   with this machine as what it is compared with before the walk.
-- **With the tests at a fifth and no graph written, the piece would read about 170 ticks a position** on
-  `sqlite3.c` (270 less 71 and 32): under its gate, and 125 a taken token under what one is worth. That is a sum of
-  readings from different pieces, not a measurement.
+- **No figure follows for the piece with them.** The window's tests need the window's front and kernel to run, whose
+  cost before the walk is not read; and a forecast of a compile has to carry what the bodies refused after their
+  sweeps cost (the bodies T, the tests or C and X stop hold 15.4% of `sqlite3.c`'s body tokens), which the forecast
+  this piece retired left out.
 
 ## Step 4's first piece: a census of Tier 0's row
 

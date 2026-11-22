@@ -2744,7 +2744,8 @@ It reports three lines a run:
   the bodies alone); the roots it took at whose tokens the walk then raised
   a warning's event; and the roots it took with, among their expression's
   tokens, one the walk's class actions left to its visit (the option asks
-  the walk to mark them, as its numbering's check does).
+  the walk to mark them, as its numbering's check does), with how many such
+  tokens the bodies hold.
 - `alone lowered-bodies' verdicts before the walk` and `alone bodies whole`:
   what it said of each body the lowering lowered, before the walk acted at
   it (every root taken; or a root the front lost, a root not run, T's

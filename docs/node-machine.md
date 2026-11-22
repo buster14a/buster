@@ -7657,7 +7657,8 @@ every token the walk's actions leave is counted, not read: the walk marks
 each token its class actions leave to its visit
 (`CheckInputReader.expression_declined`), and after its last chunk the piece
 looks for one among the tokens of each expression it took. None has one, on
-the corpora and in the fixture. The fixture has a floating constant out of
+the corpora and in the fixture, whose bodies hold such tokens (the command
+reports how many, and the fixture asserts its own). The fixture has a floating constant out of
 range, a character constant of two characters and `_Alignof` of an
 expression, each in a body whose verdict is a root lost; and a string with
 an unknown escape, which the resolution warns of before any body is read
@@ -7687,6 +7688,10 @@ statements, whose condition waits through several chunks; and a table of
 - a literal with a warning's event made a record, and a character constant of
   several characters made one: the walk then warns at a taken root;
 - a fault's node digested as the graph's number.
+
+Fourteen fail it by its counts or by a root that differs; the tests reading
+the reader's graph make the run fault, since that graph's node columns are
+null while the machine runs.
 
 **What it does not do.** It makes no function: a body's statements, its
 locals' table and its calls' rows are other pieces', with the recorded
