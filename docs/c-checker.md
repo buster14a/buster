@@ -229,6 +229,9 @@ are still checked. This mode intentionally accepts a system header whose only
 semantic error is in a deferred body; it departs from standard C diagnostics
 and from Clang's default behavior, as authorized in
 [#155](https://github.com/buster14a/buster/issues/155).
+The unit's end has its warnings in both modes: an internal function used and
+never defined is reported from the tokens that were read, so that a use only a
+deferred body has reports nothing, as that body's errors don't.
 `-fno-lazy-system-headers` restores the default, and the last option wins.
 Both modes use the same checked-reference selection for object publication;
 tests require equal objects for valid inputs. Performance comparisons use the
