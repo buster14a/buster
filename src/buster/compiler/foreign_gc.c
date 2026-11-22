@@ -21,9 +21,9 @@
 // 64-byte aligned and padded to complete vectors; map columns and root lists need no padding or special alignment.
 // Masked loads/stores respect logical tails. Root classification, queue seeding and stable map emission have exact
 // scalar twins. Irregular edge target loads, live-bit insertions and queue appends are scalar, without AVX-512
-// gathers/scatters. Two compact atom queues hold the current and next frontiers; mark-before-append enqueues each
-// atom once. This bounds traversal to O(atoms + fixups), including a chain, at the cost of two u32 queues with
-// atoms.count slots apiece. The single-lane walk precedes the planned per-lane frontier exchange.
+// gathers/scatters. The output atom map holds the queue until map emission: root compaction inserts each root once,
+// and marking before appending a target enqueues each other live atom once. Each round consumes the preceding
+// round's frontier. The single-lane walk precedes the planned per-lane frontier exchange.
 //
 // This base marker does not decode unwind records. Nonempty EH_FRAME atoms fail explicitly: a
 // whole .eh_frame section roots otherwise dead functions, while dropping it loses unwind information. Integration
@@ -226,7 +226,7 @@ static void foreign_gc_root_classes(const Link* link, ForeignPath path, uint64_t
 
 // Compact the initial roots once. live has zero padding beyond count; queue needs popcount(live) writable u32 slots,
 // without padding. The mask on each packed store writes only the popcount of its source mask. The caller reserves
-// count slots for the walk's maximum frontier, but this kernel also permits an exactly sized output at a page edge.
+// count slots for the walk's entire queue, but this kernel also permits an exactly sized output at a page edge.
 static uint32_t foreign_gc_queue(const uint64_t* live, uint32_t count, ForeignPath path, AtomId* queue)
 {
     uint32_t next = 0;
@@ -293,16 +293,17 @@ static uint32_t foreign_gc_map(const uint64_t* live, uint32_t count, ForeignPath
     return next;
 }
 
-static void foreign_gc_walk(const Link* link, const ForeignGcEdges* edges, uint32_t count, uint64_t* live, AtomId* current, AtomId* next,
-                            uint64_t* symbols, uint64_t* fixups, ForeignGc* result)
+static void foreign_gc_walk(const Link* link, const ForeignGcEdges* edges, uint32_t end, uint64_t* live, uint64_t* symbols, uint64_t* fixups, ForeignGc* result)
 {
-    while (count != 0)
+    AtomId* queue = result->atoms;
+    uint32_t begin_round = 0;
+    while (begin_round < end)
     {
         result->rounds += 1;
-        uint32_t next_count = 0;
-        for (uint32_t at = 0; at < count; at += 1)
+        const uint32_t end_round = end;
+        for (uint32_t at = begin_round; at < end_round; at += 1)
         {
-            const AtomId atom = current[at];
+            const AtomId atom = queue[at];
             const FixupId begin = link->atoms.fixup_begin[atom];
             const uint32_t fixup_count = link->atoms.fixup_count[atom];
             for (uint32_t i = 0; i < fixup_count; i += 1)
@@ -315,8 +316,8 @@ static void foreign_gc_walk(const Link* link, const ForeignGcEdges* edges, uint3
                 if (target_atom != 0 && !foreign_gc_bit(live, target_atom))
                 {
                     foreign_gc_set(live, target_atom);
-                    next[next_count] = target_atom;
-                    next_count += 1;
+                    queue[end] = target_atom;
+                    end += 1;
                 }
             }
             if (edges != 0)
@@ -327,16 +328,13 @@ static void foreign_gc_walk(const Link* link, const ForeignGcEdges* edges, uint3
                     if (!foreign_gc_bit(live, target))
                     {
                         foreign_gc_set(live, target);
-                        next[next_count] = target;
-                        next_count += 1;
+                        queue[end] = target;
+                        end += 1;
                     }
                 }
             }
         }
-        AtomId* swap = current;
-        current = next;
-        next = swap;
-        count = next_count;
+        begin_round = end_round;
     }
 }
 
@@ -367,18 +365,14 @@ static ForeignGcError foreign_gc_mark_edges(const Link* link, const ForeignGcRoo
     const uint64_t symbol_words = foreign_gc_words(link->symbols.count);
     const uint64_t fixup_words = foreign_gc_words(link->fixups.count);
     uint64_t* live = 0;
-    AtomId* current = 0;
-    AtomId* next = 0;
     uint64_t* symbols = 0;
     uint64_t* fixups = 0;
     if (error == FOREIGN_GC_ERROR_NONE)
     {
         live = arena_push(arena, atom_words * sizeof(uint64_t), BUSTER_FOREIGN_GC_VECTOR_BYTES);
-        current = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, link->atoms.count);
-        next = BUSTER_ARENA_PUSH_ARRAY(arena, AtomId, link->atoms.count);
         symbols = arena_push(arena, symbol_words * sizeof(uint64_t), BUSTER_FOREIGN_GC_VECTOR_BYTES);
         fixups = arena_push(arena, fixup_words * sizeof(uint64_t), BUSTER_FOREIGN_GC_VECTOR_BYTES);
-        error = live != 0 && current != 0 && next != 0 && symbols != 0 && fixups != 0 ? FOREIGN_GC_ERROR_NONE : FOREIGN_GC_ERROR_MEMORY;
+        error = live != 0 && symbols != 0 && fixups != 0 ? FOREIGN_GC_ERROR_NONE : FOREIGN_GC_ERROR_MEMORY;
     }
     if (error == FOREIGN_GC_ERROR_NONE)
     {
@@ -400,8 +394,8 @@ static ForeignGcError foreign_gc_mark_edges(const Link* link, const ForeignGcRoo
         {
             foreign_gc_set(live, roots->retained[i]);
         }
-        const uint32_t count = foreign_gc_queue(live, link->atoms.count, path, current);
-        foreign_gc_walk(link, edges, count, live, current, next, symbols, fixups, &result);
+        const uint32_t count = foreign_gc_queue(live, link->atoms.count, path, result.atoms);
+        foreign_gc_walk(link, edges, count, live, symbols, fixups, &result);
         for (SymbolId symbol = 1; symbol < link->symbols.count; symbol += 1)
         {
             const AtomId atom = link->symbols.atom[symbol];
