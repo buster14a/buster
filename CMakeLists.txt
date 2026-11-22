@@ -406,6 +406,10 @@ if(buster_pgo)
         VERBATIM)
     set(trained "")
     set(trained_directories "")
+    # The training's compiles are the compiler's own, with the flags its sources are built with but the one that is the
+    # host compiler's alone: a static build's -ffunction-sections (the start's code order), which the compiler refuses.
+    set(train_flags ${buster_flags})
+    list(REMOVE_ITEM train_flags -ffunction-sections)
     if(buster_pgo_train STREQUAL "")
         foreach(name IN LISTS unit_names)
             list(FIND unit_names "${name}" index)
@@ -415,9 +419,9 @@ if(buster_pgo)
             add_custom_command(OUTPUT "${pgo}/train/${name}.stamp"
                 COMMAND "${CMAKE_COMMAND}" -E rm -rf "${profiles}"
                 COMMAND "${CMAKE_COMMAND}" -E make_directory "${profiles}" "${pgo}/train"
-                COMMAND ${run} -E -P "${source}" ${buster_flags} ${buster_defines} -o /dev/null
-                COMMAND ${run} -fsyntax-only "${source}" ${buster_flags} ${buster_defines}
-                COMMAND ${run} -c "${source}" ${buster_flags} ${buster_defines} -o "${pgo}/train/${name}.o"
+                COMMAND ${run} -E -P "${source}" ${train_flags} ${buster_defines} -o /dev/null
+                COMMAND ${run} -fsyntax-only "${source}" ${train_flags} ${buster_defines}
+                COMMAND ${run} -c "${source}" ${train_flags} ${buster_defines} -o "${pgo}/train/${name}.o"
                 COMMAND "${CMAKE_COMMAND}" -E touch "${pgo}/train/${name}.stamp"
                 DEPENDS "${pgo}/compiler" "${CMAKE_SOURCE_DIR}/${source}"
                 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
