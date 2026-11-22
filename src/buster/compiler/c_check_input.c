@@ -6915,7 +6915,7 @@ static __attribute__((noinline, cold)) void check_input_bit_int_suffix(CheckInpu
         .token = token,
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-        .completion = token + 1,
+        .completion = token,
         .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
     };
     check_input_warning_once(reader, &event);

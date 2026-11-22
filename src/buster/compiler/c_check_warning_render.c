@@ -3016,8 +3016,9 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         check_driver_publication_position(publication_parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
-                    if (event->kind == CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE)
+                    if (event->kind == CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE || event->kind == CHECK_WARNING_EVENT_BIT_INT_SUFFIX)
                     {
+                        // A literal suffix is diagnosed before its enclosing semantic action at the same boundary.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
