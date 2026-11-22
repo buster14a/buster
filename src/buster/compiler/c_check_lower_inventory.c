@@ -621,6 +621,10 @@ static uint8_t lower_source_node_front;
 // PPOptions.node_reader for them (measure-node-machine --shadow --front-tests); 0 for none.
 static uint16_t lower_source_node_reader;
 
+// Whether the program's return flow runs for them (measure-node-machine --shadow --bodies reads each body's verdict of
+// it, CheckProgramBody.return_warning; nothing is reported).
+static bool lower_source_return_flow;
+
 #define BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS 4u
 #define BUSTER_LOWER_SOURCE_WINDOW_CONSTANTS 8u
 
@@ -672,6 +676,8 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
         .initializer_reference_count = source->data.reference_count,
         .target = source->pp.options.target,
         .predefines = &source->pp.options.predefines,
+        .return_warnings = lower_source_return_flow,
+        .noreturn_warnings = lower_source_return_flow,
     };
     prepared = prepared && check_program(&source->program, &source->parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
     prepared = prepared && check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE, false, false, &path->output_arena, &path->scratch);

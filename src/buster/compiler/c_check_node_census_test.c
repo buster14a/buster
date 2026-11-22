@@ -1811,9 +1811,12 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
     // the program dropped a range; and nothing of either without it.
     bool kept = shadow.bodies_different[1] == 0 && shadow.bodies_same[1] == shadow.bodies_attempted[1] && shadow.bodies_dropped_attempted == 0 && shadow.twin_different == 0 &&
                 shadow.twin_same == shadow.twin_reasons[NODE_TWIN_ATTEMPTED];
+    // The return flow's silence by the twin's controls: proved for every body the twin attempts but the one that falls off
+    // its end, which the program's own return flow has a warning for, and for none it warns of.
     kept = kept && (before ? shadow.bodies_whole[1] == expected->kept_whole && shadow.bodies_attempted[1] == expected->kept_attempted && shadow.bodies_dropped == 1 &&
-                             shadow.twin_controls != 0 :
-                             shadow.bodies_lowered[1] == 0 && shadow.twin_controls == 0);
+                             shadow.twin_controls != 0 && shadow.twin_loud == 1 && shadow.twin_unsound == 0 &&
+                             shadow.twin_silent + 1 == shadow.twin_reasons[NODE_TWIN_ATTEMPTED] :
+                             shadow.bodies_lowered[1] == 0 && shadow.twin_controls == 0 && shadow.twin_silent == 0);
     for (uint32_t reason = NODE_BODIES_ATTEMPTED + 1; before && reason < NODE_BODIES_REASONS; reason += 1)
     {
         kept = kept && shadow.bodies_reasons[1][reason] == expected->kept_reasons[reason];
@@ -1832,7 +1835,9 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
         {
             fprintf(stderr, " %s %" PRIu64 " (%u)", node_bodies_reason_names[reason], shadow.bodies_reasons[1][reason], expected->kept_reasons[reason]);
         }
-        fprintf(stderr, "; the controls' twin: the program's %" PRIu64 ", differ %" PRIu64 ", controls %" PRIu64 ";", shadow.twin_same, shadow.twin_different, shadow.twin_controls);
+        fprintf(stderr, "; the controls' twin: the program's %" PRIu64 ", differ %" PRIu64 ", controls %" PRIu64 "; the return flow's silence proved for %" PRIu64
+                ", the program warns of %" PRIu64 " (1), of them proved silent %" PRIu64 ";",
+                shadow.twin_same, shadow.twin_different, shadow.twin_controls, shadow.twin_silent, shadow.twin_loud, shadow.twin_unsound);
         for (uint32_t reason = 0; reason < NODE_TWIN_REASONS; reason += 1)
         {
             fprintf(stderr, " %s %" PRIu64 " (%u)", node_twin_reason_names[reason], shadow.twin_reasons[reason], expected->twin_reasons[reason]);

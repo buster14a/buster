@@ -7888,6 +7888,23 @@ differing.
 - **So what a producer could make today** is the bodies both attempt: about
   a third of `sqlite3.c`'s body tokens, a fifth of Lua's and musl's.
 
+**The return flow's silence, from the twin's controls.** A body no stage
+after the reader sees is owed a proof that those stages would have said
+nothing of it. The first such report enabled by default is the return
+flow's (`check_program_return_flow`: a function with a result that may not
+return one, a `noreturn` function that may return), which reads only the
+body's controls, a branch's truth where it is known and whether an
+expression never returns, and warns where the body's END is reached. So the
+twin's controls prove it silent: the function is `main`; or it has no result
+and is not `noreturn`; or END is out of reach from the first control with
+every branch taken both ways, which is every edge the program's walk can take
+and more. The shadow's pipeline runs the program's return flow for this, and
+each body's own verdict is read beside the proof: of the bodies the twin
+attempts, 1,790 of `sqlite3.c`'s 1,791 are proved silent, 557 of Lua's 572,
+the compiler's own 205 and 1,301 of musl's 1,308, and the program warns of
+none of them. The corpora have no body it warns of; the fixture's body that
+falls off its end is one, which the proof leaves unproved.
+
 **Its fixture's faults.** Twenty single changes, each built and run against
 the fixture: to what the machine keeps beside a tape (a label's place, the
 temporaries, the root's two facts, a call's callee, whether it is variadic,

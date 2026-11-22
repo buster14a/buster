@@ -5081,6 +5081,13 @@ struct NodeShadow
     uint64_t twin_same;
     uint64_t twin_different;
     uint64_t twin_listed;
+    // The return flow's silence by the twin's controls (node_twin_silent), on the bodies the twin attempts: those it
+    // proves silent, and their tokens; those the program's own return flow has a warning for; and those it proved silent
+    // of them, which must be none.
+    uint64_t twin_silent;
+    uint64_t twin_silent_tokens;
+    uint64_t twin_loud;
+    uint64_t twin_unsound;
     uint64_t alone_body_tokens;
     uint64_t alone_whole_both;
     uint64_t alone_whole_both_tokens;
@@ -7694,6 +7701,10 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                 }
             }
             printf("\n");
+            printf("node-shadow: controls from the tokens, the return flow: its silence proved for=%" PRIu64 " (tokens %" PRIu64 ", %.2f%%) of %" PRIu64 " attempted; the program warns of=%" PRIu64
+                   " proved-silent-and-warned-of=%" PRIu64 "\n",
+                   shadow->twin_silent, shadow->twin_silent_tokens, node_census_share(shadow->twin_silent_tokens, shadow->bodies_tokens[source]),
+                   shadow->twin_reasons[NODE_TWIN_ATTEMPTED], shadow->twin_loud, shadow->twin_unsound);
         }
     }
     printf("node-shadow: fusion evaluated=%" PRIu64 " unevaluated=%" PRIu64 " (under an unevaluated consumer %" PRIu64 ") inherited-context=%" PRIu64 " (not a value %" PRIu64
@@ -8055,6 +8066,9 @@ struct NodeTwin
     NodeTwinTask* tasks;
     uint32_t* labels;
     NodeTwinControl* entries;
+    // The return flow's walk of the twin's controls (node_twin_silent): each one reached, and those to visit.
+    uint8_t* seen;
+    uint32_t* queue;
     uint32_t capacity;
     uint32_t depth;
     uint32_t label_count;
@@ -8531,6 +8545,45 @@ static bool node_twin_build(NodeTwin* twin, const CheckProgramBody* body)
     return twin->reason == NODE_TWIN_ATTEMPTED;
 }
 
+// Whether the program's return flow says nothing of `body` (check_program_return_flow: a function with a result that
+// may not return one, a noreturn function that may return), by the twin's controls alone: the function is main; or it
+// has no result and is not noreturn; or its END is not reached from its first control with every branch taken both
+// ways. The program's walk folds the branches it knows and stops at an expression that never returns, so what it
+// reaches is among what this one reaches: where END is out of reach here it is there, and the program reports nothing.
+static bool node_twin_silent(NodeTwin* twin, const CheckProgramBody* body)
+{
+    const CheckProgram* program = twin->program;
+    const TypeId result = type_conversion_operand(program->types, type_return(program->types, program->input->declared_types[body->declaration]));
+    const bool noreturn = program->input->function_flags != NULL && (program->input->function_flags[body->declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0;
+    bool silent = body->is_main || (!noreturn && (result == 0 || type_kind(program->types, result) == BUSTER_TYPE_KIND_VOID));
+    if (!silent && twin->count != 0)
+    {
+        memset(twin->seen, 0, twin->count);
+        uint32_t head = 0;
+        uint32_t tail = 1;
+        twin->queue[0] = 0;
+        twin->seen[0] = 1;
+        while (head < tail)
+        {
+            const uint32_t index = twin->queue[head++];
+            const NodeTwinControl* entry = twin->entries + index;
+            const bool jump = entry->kind == CHECK_CONTROL_JUMP;
+            const uint32_t targets[2] = { entry->kind >= CHECK_CONTROL_BRANCH_FALSE ? entry->target : BUSTER_CHECK_NONE,
+                                          !jump && entry->kind != CHECK_CONTROL_RETURN && entry->kind != CHECK_CONTROL_END ? index + 1 : BUSTER_CHECK_NONE };
+            for (uint32_t t = 0; t < 2; t += 1)
+            {
+                if (targets[t] < twin->count && twin->seen[targets[t]] == 0)
+                {
+                    twin->seen[targets[t]] = 1;
+                    twin->queue[tail++] = targets[t];
+                }
+            }
+        }
+        silent = twin->seen[twin->count - 1] == 0;
+    }
+    return silent;
+}
+
 // The twin's controls of `body` against the program's, where the machine took the body whole before the walk
 // (`verdict`): their count and each one's kind, token, target and whether it has an expression. `tokens` are the body's.
 static void node_twin_compare(NodeTwin* twin, NodeShadow* shadow, const NodeCensusScratch* s, const CheckProgramBody* body, uint8_t verdict, uint64_t tokens)
@@ -8564,6 +8617,12 @@ static void node_twin_compare(NodeTwin* twin, NodeShadow* shadow, const NodeCens
         shadow->twin_controls += twin->count;
         shadow->twin_same += field == NULL;
         shadow->twin_different += field != NULL;
+        // The return flow's silence by the twin's controls, against the program's own verdict of the body.
+        const bool silent = node_twin_silent(twin, body);
+        shadow->twin_silent += silent;
+        shadow->twin_silent_tokens += silent ? tokens : 0;
+        shadow->twin_loud += body->return_warning != 0;
+        shadow->twin_unsound += silent && body->return_warning != 0;
         if (field != NULL && shadow->twin_listed < node_census_list)
         {
             shadow->twin_listed += 1;
@@ -9107,9 +9166,11 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
     static LowerSource source;
     lower_source_node_front = census->shadow != NULL ? census->shadow->front : 0;
     lower_source_node_reader = census->shadow != NULL ? census->shadow->reader : 0;
+    lower_source_return_flow = census->shadow != NULL && census->shadow->bodies;
     const bool valid = lower_source_open(&source, file, options, option_count, false);
     lower_source_node_front = 0;
     lower_source_node_reader = 0;
+    lower_source_return_flow = false;
     const bool prepared = source.prepared;
     CheckCorpusPath* path = &source.path;
     CheckProgramSelection selected = source.selected;
@@ -9253,7 +9314,9 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                     }
                     twin->tasks = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeTwinTask, token_room) : NULL;
                     twin->entries = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, NodeTwinControl, token_room) : NULL;
-                    room = room && twin->tasks != NULL && twin->entries != NULL;
+                    twin->seen = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, token_room) : NULL;
+                    twin->queue = room ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint32_t, token_room) : NULL;
+                    room = room && twin->tasks != NULL && twin->entries != NULL && twin->seen != NULL && twin->queue != NULL;
                     s.twin = room ? twin : NULL;
                 }
             }
@@ -9689,7 +9752,7 @@ static void node_census_report(const NodeCensus* census)
 static bool node_shadow_differs(const NodeShadow* shadow)
 {
     return shadow->value_differences != 0 || shadow->entry_differences != 0 || shadow->twin_differences != 0 || shadow->fused_differences != 0 ||
-           shadow->bodies_different[0] != 0 || shadow->bodies_different[1] != 0 || shadow->bodies_dropped_attempted != 0 || shadow->twin_different != 0 ||
+           shadow->bodies_different[0] != 0 || shadow->bodies_different[1] != 0 || shadow->bodies_dropped_attempted != 0 || shadow->twin_different != 0 || shadow->twin_unsound != 0 ||
            shadow->facts_differences != 0 || shadow->facts_list_differences != 0 || shadow->facts_failures != 0 ||
            shadow->facts_conversions != shadow->facts_conversions_derived || shadow->reads.same_differences != 0 || shadow->reads.misplaced != 0 ||
            shadow->front_differences != 0 || shadow->typed_differences != 0 || shadow->typed_object_differences != 0 || shadow->typed_library_differences != 0 ||

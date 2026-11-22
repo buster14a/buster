@@ -3267,8 +3267,11 @@ With `-g` the same, and with `-Wall -Wextra` fewer bodies and none differing: 11
 - **A control's token is enough to find its tape,** and the tape with what is kept beside it is enough to splice it.
 - **The program's controls are its tokens' for these bodies,** but for the constant `if`, which only a root's value
   says: a producer refuses on any constant condition of an `if`, which is wider than what the program folds.
+- **The first report a taken body would lose is proved absent from the same controls:** the return flow's, for all
+  but one of the 1,791 bodies the twin attempts on `sqlite3.c` (their END is out of reach with every branch taken both
+  ways), where a test of the tokens alone held for two thirds.
 - **What a producer still does not have** is the locals' table, the calls' rows' locations, the references and the
-  silence of what the program would have said of the body.
+  silence of the other reports the program would have made of the body.
 
 ## Step 4's first piece: a census of Tier 0's row
 

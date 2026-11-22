@@ -2842,8 +2842,16 @@ and the run has these lines more:
   `typeof`, a cleanup, a jump of another kind, a block's static or extern
   declaration, a statement expression, a shape it does not know, no room).
 
-A body that differs in either, or one attempted where the program dropped a
-range, makes the command exit 1; `--list N` prints the first N of each
+- `controls from the tokens, the return flow: its silence proved for=...
+  the program warns of=... proved-silent-and-warned-of=...`: of the bodies
+  the twin attempts, those whose END its controls cannot reach (or whose
+  function is `main`, or has no result and is not `noreturn`), those the
+  program's own return flow has a warning for, and those of them the proof
+  called silent, which must be none.
+
+A body that differs in either, one attempted where the program dropped a
+range, or one proved silent that the program warns of makes the command exit
+1; `--list N` prints the first N of each
 (`bodies before the walk difference ...`, `controls from the tokens
 difference file=... line=... field=... control=...`).
 
