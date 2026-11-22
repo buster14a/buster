@@ -354,6 +354,113 @@ static CheckInputSymbolNamed check_input_symbol_named(const CheckInputReader* re
     return result;
 }
 
+// Clang's lookup of a file-scope name among whose declarations are `#pragma weak A = T` clones (#2449, #2934): its
+// identifier chain, newest first, through LookupResult::resolveKind's filter. Each of `order`'s `count` keys is an
+// entry's place in the chain (where it entered it) << 32, then BUSTER_CHECK_SYMBOL_INVALID for a declaration a
+// redeclaration error made invalid, then the caller's index in the low 31 bits. The keys are sorted descending (the
+// chain's order); resolveKind marks each invalid entry while more than one entry is left unmarked, then fills the
+// marked places from the list's end, the last marked first. Returns the count kept, `order` holding them in clang's
+// order: its first is the representative declaration a redeclaration's note names, and all are an ambiguous
+// reference's candidates.
+#define BUSTER_CHECK_SYMBOL_INVALID (UINT64_C(1) << 31)
+#define BUSTER_CHECK_SYMBOL_REMOVED (UINT64_C(1) << 63)
+static uint32_t check_input_symbol_lookup_order(uint64_t* order, uint32_t count)
+{
+    for (uint32_t c = 1; c < count; c += 1)
+    {
+        const uint64_t key = order[c];
+        uint32_t place = c;
+        while (place != 0 && order[place - 1] < key)
+        {
+            order[place] = order[place - 1];
+            place -= 1;
+        }
+        order[place] = key;
+    }
+    uint32_t marked = 0;
+    for (uint32_t c = 0; c < count; c += 1)
+    {
+        const bool removed = (order[c] & BUSTER_CHECK_SYMBOL_INVALID) != 0 && count - marked > 1;
+        marked += removed ? 1u : 0u;
+        order[c] |= removed ? BUSTER_CHECK_SYMBOL_REMOVED : 0;
+    }
+    uint32_t kept = count;
+    for (uint32_t c = count; c != 0; c -= 1)
+    {
+        if ((order[c - 1] & BUSTER_CHECK_SYMBOL_REMOVED) != 0)
+        {
+            kept -= 1;
+            order[c - 1] = order[kept];
+        }
+    }
+    return kept;
+}
+
+// Whether report `report` is a redeclaration error at a file-scope declaration of `name` before `token`, other than
+// `except`: a declaration clang marks invalid, which stays in the identifier chain (check_input_symbol_lookup_order).
+static bool check_input_symbol_invalid_redeclaration(const CheckInput* input, const Parser* parser, const CheckInputReport* report, uint32_t name,
+                                                     uint32_t token, uint32_t except)
+{
+    const uint32_t at = report->token;
+    const bool result = report->message == CHECK_INPUT_REDECLARATION && at < token && at < input->token_count && at != except &&
+                        parser->tokens.names[at] == name && input->declarations[at] == at &&
+                        check_sparse_get(input->declaration_bodies, at) == BUSTER_CHECK_NONE;
+    return result;
+}
+
+// The record whose clone, or else the declaration, clang's redeclaration at `token` of an object lookup set's name names
+// as its previous one (#2934): the representative of the lookup at `token` (check_input_symbol_lookup_order) among the
+// clones made before it, A's earlier declaration `earlier` and the invalid redeclarations before it, which the reader
+// has recovered so far. Returns the record's index, or history->count for `earlier`, or UINT32_MAX where the entries
+// have no room.
+static uint32_t check_input_symbol_representative(CheckInputReader* reader, uint32_t name, uint32_t token, uint32_t earlier)
+{
+    const CheckInput* input = reader->output;
+    const CheckInputSymbolPragmas* history = input->symbol_pragmas;
+    const uint32_t records = history->count;
+    const uint64_t mark = reader->scratch->length;
+    uint64_t capacity = (uint64_t)records + 1;
+    for (uint32_t r = 0; r < input->recovered_count; r += 1)
+    {
+        capacity += check_input_symbol_invalid_redeclaration(input, reader->parser, input->recovered_reports + r, name, token, earlier);
+    }
+    for (uint32_t r = 0; r < input->report_count; r += 1)
+    {
+        capacity += check_input_symbol_invalid_redeclaration(input, reader->parser, input->reports + r, name, token, earlier);
+    }
+    uint64_t* order = capacity < BUSTER_CHECK_SYMBOL_INVALID ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint64_t, capacity) : NULL;
+    uint32_t count = 0;
+    uint32_t result = UINT32_MAX;
+    if (order != NULL)
+    {
+        for (uint32_t i = 0; i < records; i += 1)
+        {
+            const CheckInputSymbolPragma* record = history->records + i;
+            const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
+            if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < input->token_count && made < token)
+            {
+                order[count++] = (uint64_t)made << 32 | i;
+            }
+        }
+        order[count++] = (uint64_t)earlier << 32 | records;
+        // (The invalid ones' indices are past the records' and `earlier`'s: no caller reads them.)
+        for (uint32_t r = 0; r < input->recovered_count + input->report_count; r += 1)
+        {
+            const CheckInputReport* report = r < input->recovered_count ? input->recovered_reports + r : input->reports + r - input->recovered_count;
+            if (check_input_symbol_invalid_redeclaration(input, reader->parser, report, name, token, earlier))
+            {
+                order[count++] = (uint64_t)report->token << 32 | BUSTER_CHECK_SYMBOL_INVALID | (records + 1);
+            }
+        }
+        const uint32_t kept = check_input_symbol_lookup_order(order, count);
+        result = kept != 0 ? (uint32_t)(order[0] & (BUSTER_CHECK_SYMBOL_INVALID - 1)) : records;
+        // (An invalid one left alone is clang's representative; its note is A's earlier declaration's place here.)
+        result = result > records ? records : result;
+    }
+    arena_pop_to(reader->scratch, mark);
+    return result;
+}
+
 typedef struct CheckInputSymbolClone CheckInputSymbolClone;
 struct CheckInputSymbolClone
 {
@@ -742,7 +849,6 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                 }
             }
         }
-        uint32_t conflicts = 0;
         for (uint32_t token = clone; token < input->token_count; token += 1)
         {
             const uint8_t declared_kind = input->declaration_kinds[token];
@@ -778,8 +884,14 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                 }
                 if (detail != CHECK_REDECLARATION_GENERIC)
                 {
-                    const uint32_t previous = object_set && conflicts != 0 ? alias.previous : selected;
-                    check_input_symbol_redeclaration(reader, record, token, previous, detail, previous == selected);
+                    // An object lookup set's redeclaration names the representative of the lookup at it, which
+                    // the invalid redeclarations before it change (#2934); another names the clone.
+                    const uint32_t representative = object_set ? check_input_symbol_representative(reader, record->name, token, alias.previous) : index;
+                    input->resource |= representative == UINT32_MAX;
+                    const CheckInputSymbolPragma* named = representative < reader->output->symbol_pragmas->count ?
+                                                          reader->output->symbol_pragmas->records + representative : record;
+                    const uint32_t previous = representative < reader->output->symbol_pragmas->count ? named->alias_declaration : alias.previous;
+                    check_input_symbol_redeclaration(reader, named, token, previous, detail, representative < reader->output->symbol_pragmas->count);
                     if (detail == CHECK_REDECLARATION_STATIC && kind == C_BINDING_OBJECT)
                     {
                         const uint32_t before = input->report_count;
@@ -796,7 +908,6 @@ static bool check_input_symbol_alias(CheckInputReader* reader, CheckInputSymbolP
                         }
                     }
                     diagnosed = true;
-                    conflicts += 1;
                 }
             }
         }
