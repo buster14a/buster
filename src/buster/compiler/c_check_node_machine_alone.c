@@ -157,6 +157,10 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     // the times it lost its waiting values. A token left below a declarator or a label reaches no root, and loses none.
     const uint64_t lost = node_alone_lost(alone->report);
     uint8_t verdict = BUSTER_NODE_ALONE_BODY_WHOLE;
+    // Its ticks: the reading's and the machine's first run's, and those spent when it is first stopped.
+    const uint64_t reading_before = alone->shadow->alone_prepare_ticks + alone->shadow->alone_front_ticks + alone->shadow->alone_write_ticks;
+    const uint64_t machine_before = alone->types->ticks;
+    uint64_t stopped_at = UINT64_MAX;
     // No value waits at a body's opening brace: the front begins it with nothing held, its ordinals going on.
     front->count = 0;
     front->pending = 0;
@@ -284,10 +288,36 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
                 }
             }
         }
+        if (stopped_at == UINT64_MAX && (verdict != BUSTER_NODE_ALONE_BODY_WHOLE || node_alone_lost(alone->report) != lost))
+        {
+            // The body is stopped in this chunk: what it has cost by the chunk's end.
+            stopped_at = alone->shadow->alone_prepare_ticks + alone->shadow->alone_front_ticks + alone->shadow->alone_write_ticks - reading_before +
+                         alone->types->ticks - machine_before;
+        }
     }
     alone->shadow->alone_bodies += room;
     alone->shadow->alone_bodies_left += !room;
     alone->shadow->alone_positions += end - first;
+    {
+        const uint64_t reading = alone->shadow->alone_prepare_ticks + alone->shadow->alone_front_ticks + alone->shadow->alone_write_ticks - reading_before;
+        const uint64_t machine = alone->types->ticks - machine_before;
+        const uint32_t slot = alone->shadow->alone_body_count;
+        // What a scan of the tokens alone would find, before any compaction: a `sizeof` or `_Alignof` by its kind, a token
+        // of the walk's own visit by its class.
+        const Parser* parser = reader->parser;
+        const uint32_t closing = parser->tree.parents[opening];
+        bool scanned = false;
+        for (uint32_t token = opening; !scanned && token <= closing && token < parser->tokens.count; token += 1)
+        {
+            const uint8_t visit = reader->visits[token];
+            scanned = parser->tokens.kinds[token] == PARSE_KIND_SIZEOF ||
+                      ((visit & BUSTER_CHECK_EXPRESSION_ACTS) != 0 && (visit & BUSTER_CHECK_EXPRESSION_CODE_MASK) >> BUSTER_CHECK_EXPRESSION_CODE_SHIFT == CHECK_INPUT_CODE_SCALAR);
+        }
+        alone->shadow->alone_body_reading[slot] = reading;
+        alone->shadow->alone_body_machine[slot] = machine;
+        alone->shadow->alone_body_before[slot] = stopped_at != UINT64_MAX ? stopped_at : reading + machine;
+        alone->shadow->alone_body_scanned[slot] = scanned;
+    }
     // The verdict, as it stands before the walk acts at the body's first token: a root the front lost comes before any
     // root's refusal, since its expression has no root at all.
     verdict = !room ? BUSTER_NODE_ALONE_BODY_ROOM : node_alone_lost(alone->report) != lost ? BUSTER_NODE_ALONE_BODY_LEFT : verdict;
@@ -446,7 +476,9 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint32_t* openings = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* verdict_openings = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint8_t* verdicts = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
-    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL &&
+    uint64_t* body_ticks = arena_push_array(reader->arena, 3 * ((uint64_t)bodies + 1), sizeof(uint64_t), _Alignof(uint64_t));
+    uint8_t* body_scanned = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
+    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL && body_ticks != NULL && body_scanned != NULL &&
                 typer != NULL && typer->types != NULL && typer->tests != NULL && typer->types->sweep_refusals != NULL && typer->facts == NULL &&
                 reader->postorder != NULL && reader->postorder_positions != NULL;
     if (room)
@@ -544,6 +576,10 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         alone->body_openings = openings;
         shadow->alone_body_openings = verdict_openings;
         shadow->alone_body_verdicts = verdicts;
+        shadow->alone_body_reading = body_ticks;
+        shadow->alone_body_machine = body_ticks + bodies + 1;
+        shadow->alone_body_before = body_ticks + 2 * ((uint64_t)bodies + 1);
+        shadow->alone_body_scanned = body_scanned;
         shadow->alone_body_count = 0;
         // What the shadow reads after the pipeline is the walk's front's report.
         shadow->alone_types = types;

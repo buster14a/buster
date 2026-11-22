@@ -675,6 +675,14 @@ struct NodeFrontShadow
     uint32_t* alone_body_openings;
     uint8_t* alone_body_verdicts;
     uint32_t alone_body_count;
+    // By body, beside its verdict: its reading's ticks and its machine's first run's; those of the two spent by the end
+    // of the chunk in which the body is first stopped (a root lost or refused: all of them for a body that is whole);
+    // and whether a scan of its tokens' kinds and classes alone finds a `sizeof` or `_Alignof`, or a token of the
+    // walk's own visit: what could refuse it before its compaction.
+    uint64_t* alone_body_reading;
+    uint64_t* alone_body_machine;
+    uint64_t* alone_body_before;
+    uint8_t* alone_body_scanned;
     // What it read: the bodies it read whole and those it left (a body whose tokens are no run of the postorder, or past
     // its graph's room), their postorder positions, the records it made of them, and its ticks, all of it (the
     // compaction, the entries, the front, the records' copy and the machine's runs).

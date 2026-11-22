@@ -5014,6 +5014,14 @@ struct NodeShadow
     // machine's roots allow, and the statements are another piece's.
     uint64_t alone_verdicts[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_verdict_tokens[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    // By verdict too: its bodies' reading's ticks, their machine's first run's, those spent by the end of the chunk in
+    // which each is first stopped, and the bodies (and their tokens) a scan of the tokens' kinds and classes alone
+    // would refuse.
+    uint64_t alone_verdict_reading[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_machine[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_before[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint64_t alone_verdict_scanned_tokens[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_body_tokens;
     uint64_t alone_whole_both;
     uint64_t alone_whole_both_tokens;
@@ -7364,6 +7372,18 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
             }
         }
         printf(" not-read=%" PRIu64 " waiting-values-lost=%" PRIu64 "\n", shadow->alone_bodies_unread, shadow->alone_resets);
+        for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
+        {
+            if (shadow->alone_verdicts[verdict] != 0)
+            {
+                // A verdict's bodies' ticks, and what a scan of the tokens alone would have refused.
+                printf("node-shadow: alone verdict=%s bodies=%" PRIu64 " tokens=%" PRIu64 " ticks: reading=%" PRIu64 " the-machine's-first-run=%" PRIu64
+                       " by-the-chunk-that-stops-them=%" PRIu64 " a-scan-of-the-tokens-refuses: bodies=%" PRIu64 " tokens=%" PRIu64 "\n",
+                       verdict_names[verdict], shadow->alone_verdicts[verdict], shadow->alone_verdict_tokens[verdict], shadow->alone_verdict_reading[verdict],
+                       shadow->alone_verdict_machine[verdict], shadow->alone_verdict_before[verdict], shadow->alone_verdict_scanned[verdict],
+                       shadow->alone_verdict_scanned_tokens[verdict]);
+            }
+        }
         printf("node-shadow: alone bodies whole for it and for the walk's nodes' machine=%" PRIu64 " (tokens %" PRIu64 ") for-it-alone=%" PRIu64 " for-the-walk's-nodes'-alone=%" PRIu64
                " (and with a block's static or extern declaration %" PRIu64 ")\n",
                shadow->alone_whole_both, shadow->alone_whole_both_tokens, shadow->alone_whole_own, shadow->alone_whole_walk, shadow->alone_whole_walk_static);
@@ -7502,6 +7522,11 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             const bool own = verdict == BUSTER_NODE_ALONE_BODY_WHOLE;
             shadow->alone_verdicts[verdict] += 1;
             shadow->alone_verdict_tokens[verdict] += tokens;
+            shadow->alone_verdict_reading[verdict] += fronted->alone_body_reading[low];
+            shadow->alone_verdict_machine[verdict] += fronted->alone_body_machine[low];
+            shadow->alone_verdict_before[verdict] += fronted->alone_body_before[low];
+            shadow->alone_verdict_scanned[verdict] += fronted->alone_body_scanned[low] != 0;
+            shadow->alone_verdict_scanned_tokens[verdict] += fronted->alone_body_scanned[low] != 0 ? tokens : 0;
             shadow->alone_whole_both += own && reader_whole;
             shadow->alone_whole_both_tokens += own && reader_whole ? tokens : 0;
             shadow->alone_whole_own += own && !reader_whole;
