@@ -847,6 +847,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,
+            // The optimized function's dominator tree (#2611), current for the planned revision (ir_verified_current).
+            .dominators = &analysis.dominators,
             .certify = certify,
             .sources = sources,
         };

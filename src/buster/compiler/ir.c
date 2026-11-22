@@ -864,26 +864,32 @@ static const uint16_t ir_type_bits[IR_TYPE_COUNT] = {
     [IR_M32] = 32,
     [IR_M64] = 64,
 };
-static const char* const ir_type_names[IR_TYPE_COUNT] = {
-    "void",
-    "i1",
-    "i8",
-    "i16",
-    "i32",
-    "i64",
-    "i128",
-    "f32",
-    "f64",
-    "f80",
-    "ptr",
-    "v4i32",
-    "v8i32",
-    "v16i32",
-    "m8",
-    "m16",
-    "m32",
-    "m64",
-};
+// The printer's spellings and the text reader's length column have the same enum order.
+#define BUSTER_IR_NAME_TEXT(word) word,
+#define BUSTER_IR_NAME_LENGTH(word) (sizeof(word) - 1),
+
+#define BUSTER_IR_TYPE_SPELLINGS(X) \
+    X("void") \
+    X("i1") \
+    X("i8") \
+    X("i16") \
+    X("i32") \
+    X("i64") \
+    X("i128") \
+    X("f32") \
+    X("f64") \
+    X("f80") \
+    X("ptr") \
+    X("v4i32") \
+    X("v8i32") \
+    X("v16i32") \
+    X("m8") \
+    X("m16") \
+    X("m32") \
+    X("m64")
+static const char* const ir_type_names[IR_TYPE_COUNT] = { BUSTER_IR_TYPE_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_type_name_lengths[IR_TYPE_COUNT] = { BUSTER_IR_TYPE_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_TYPE_SPELLINGS
 // A vector operation's lanes' names (#141's element types), by IrSimdLane, and its vector type's, by its width (16, 32 or
 // 64 bytes) and lanes: `add.v16i8` is an add of v4i32's 16 bytes as 8-bit lanes, its flags I8.
 static const char* const ir_lane_names[IR_SIMD_LANE_COUNT] = { "i32", "i8", "i16", "i64", "f32", "f64" };
@@ -892,78 +898,80 @@ static const char* const ir_lane_type_names[3][IR_SIMD_LANE_COUNT] = {
     { "v8i32", "v32i8", "v16i16", "v4i64", "v8f32", "v4f64" },
     { "v16i32", "v64i8", "v32i16", "v8i64", "v16f32", "v8f64" },
 };
-static const char* const ir_op_names[IR_OP_COUNT] = {
-    "invalid",
-    "const",
-    "undef",
-    "param",
-    "copy",
-    "add",
-    "sub",
-    "mul",
-    "sdiv",
-    "udiv",
-    "srem",
-    "urem",
-    "and",
-    "or",
-    "xor",
-    "shl",
-    "lshr",
-    "ashr",
-    "neg",
-    "not",
-    "fadd",
-    "fsub",
-    "fmul",
-    "fdiv",
-    "fneg",
-    "icmp",
-    "fcmp",
-    "select",
-    "trunc",
-    "zext",
-    "sext",
-    "ftrunc",
-    "fext",
-    "sitofp",
-    "uitofp",
-    "fptosi",
-    "fptoui",
-    "inttoptr",
-    "ptrtoint",
-    "bitcast",
-    "stack_addr",
-    "symbol_addr",
-    "address",
-    "load",
-    "store",
-    "call",
-    "call_indirect",
-    "phi",
-    "br",
-    "cbr",
-    "switch",
-    "ret",
-    "unreachable",
-    "alloca",
-    "stack_save",
-    "stack_restore",
-    "br_indirect",
-    "vconst",
-    "vcmp",
-    "vselect",
-    "lifetime",
-    "fence",
-    "intrinsic",
-    "rmw",
-    "masked_load",
-    "masked_store",
-    "compress_store",
-    "gather",
-    "fma",
-    "scatter",
-};
+#define BUSTER_IR_OP_SPELLINGS(X) \
+    X("invalid") \
+    X("const") \
+    X("undef") \
+    X("param") \
+    X("copy") \
+    X("add") \
+    X("sub") \
+    X("mul") \
+    X("sdiv") \
+    X("udiv") \
+    X("srem") \
+    X("urem") \
+    X("and") \
+    X("or") \
+    X("xor") \
+    X("shl") \
+    X("lshr") \
+    X("ashr") \
+    X("neg") \
+    X("not") \
+    X("fadd") \
+    X("fsub") \
+    X("fmul") \
+    X("fdiv") \
+    X("fneg") \
+    X("icmp") \
+    X("fcmp") \
+    X("select") \
+    X("trunc") \
+    X("zext") \
+    X("sext") \
+    X("ftrunc") \
+    X("fext") \
+    X("sitofp") \
+    X("uitofp") \
+    X("fptosi") \
+    X("fptoui") \
+    X("inttoptr") \
+    X("ptrtoint") \
+    X("bitcast") \
+    X("stack_addr") \
+    X("symbol_addr") \
+    X("address") \
+    X("load") \
+    X("store") \
+    X("call") \
+    X("call_indirect") \
+    X("phi") \
+    X("br") \
+    X("cbr") \
+    X("switch") \
+    X("ret") \
+    X("unreachable") \
+    X("alloca") \
+    X("stack_save") \
+    X("stack_restore") \
+    X("br_indirect") \
+    X("vconst") \
+    X("vcmp") \
+    X("vselect") \
+    X("lifetime") \
+    X("fence") \
+    X("intrinsic") \
+    X("rmw") \
+    X("masked_load") \
+    X("masked_store") \
+    X("compress_store") \
+    X("gather") \
+    X("fma") \
+    X("scatter")
+static const char* const ir_op_names[IR_OP_COUNT] = { BUSTER_IR_OP_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_op_name_lengths[IR_OP_COUNT] = { BUSTER_IR_OP_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_OP_SPELLINGS
 
 // The text form's names of a machine row's classes (#141, IrFunction.rows): the typed stream's, a vector's and a mask's
 // followed by their bytes (vector64, mask8).
@@ -994,51 +1002,55 @@ static const char* const ir_form_names[X86_FORM_COUNT] = { BUSTER_X86_FORMS(BUST
 
 // An intrinsic's operations' names in the text form (BUSTER_IR_INTRINSIC_*), after its operands as a comparison's
 // predicate is.
-static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = {
-    "mulhu",
-    "pdep",
-    "pext",
-    "bzhi",
-    "bextr",
-    "splat",
-    "tzcnt",
-    "bsf",
-    "lzcnt",
-    "bsr",
-    "popcnt",
-    "bswap",
-    "saddo",
-    "ssubo",
-    "smulo",
-    "extract",
-    "widen",
-    "insert",
-    "permute",
-    "shuffle",
-    "align",
-    "shuffle_lanes",
-    "extend",
-    "truncate",
-    "shift",
-    "lane_op",
-    "permute2",
-    "ternlog",
-    "compress",
-    "expand",
-    "funnel",
-    "dot",
-    "aes",
-    "lane_extract",
-    "lane_insert",
-    "movemask",
-    "reduce",
-    "lane_unary",
-    "fround",
-    "cvtt",
-    "bitshuffle",
-    "quadword_op",
-    "pairwise",
-};
+#define BUSTER_IR_INTRINSIC_SPELLINGS(X) \
+    X("mulhu") \
+    X("pdep") \
+    X("pext") \
+    X("bzhi") \
+    X("bextr") \
+    X("splat") \
+    X("tzcnt") \
+    X("bsf") \
+    X("lzcnt") \
+    X("bsr") \
+    X("popcnt") \
+    X("bswap") \
+    X("saddo") \
+    X("ssubo") \
+    X("smulo") \
+    X("extract") \
+    X("widen") \
+    X("insert") \
+    X("permute") \
+    X("shuffle") \
+    X("align") \
+    X("shuffle_lanes") \
+    X("extend") \
+    X("truncate") \
+    X("shift") \
+    X("lane_op") \
+    X("permute2") \
+    X("ternlog") \
+    X("compress") \
+    X("expand") \
+    X("funnel") \
+    X("dot") \
+    X("aes") \
+    X("lane_extract") \
+    X("lane_insert") \
+    X("movemask") \
+    X("reduce") \
+    X("lane_unary") \
+    X("fround") \
+    X("cvtt") \
+    X("bitshuffle") \
+    X("quadword_op") \
+    X("pairwise")
+static const char* const ir_intrinsic_names[BUSTER_IR_INTRINSIC_COUNT] = { BUSTER_IR_INTRINSIC_SPELLINGS(BUSTER_IR_NAME_TEXT) };
+static const uint8_t ir_intrinsic_name_lengths[BUSTER_IR_INTRINSIC_COUNT] = { BUSTER_IR_INTRINSIC_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
+#undef BUSTER_IR_INTRINSIC_SPELLINGS
+#undef BUSTER_IR_NAME_LENGTH
+#undef BUSTER_IR_NAME_TEXT
 
 // A fence's orders' names in the text form, C's memory_order's (BUSTER_IR_FENCE_ORDER), and its signal scope's word.
 static const char* const ir_fence_orders[BUSTER_IR_FENCE_SEQ_CST + 1] = {
@@ -1449,10 +1461,10 @@ typedef enum IrRule
     X(IR_SEXT,          1, 1, BUSTER_IR_INTS, IR_RULE_EXTEND, 0) \
     X(IR_FTRUNC,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FTRUNC, 0) \
     X(IR_FEXT,          1, 1, BUSTER_IR_FLOATS, IR_RULE_FEXTEND, 0) \
-    X(IR_SITOFP,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FROM_INT, 0) \
-    X(IR_UITOFP,        1, 1, BUSTER_IR_FLOATS, IR_RULE_FROM_INT, 0) \
-    X(IR_FPTOSI,        1, 1, BUSTER_IR_INTS, IR_RULE_FROM_FLOAT, 0) \
-    X(IR_FPTOUI,        1, 1, BUSTER_IR_INTS, IR_RULE_FROM_FLOAT, 0) \
+    X(IR_SITOFP,        1, 1, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_FROM_INT, 0) \
+    X(IR_UITOFP,        1, 1, BUSTER_IR_FLOATS | BUSTER_IR_VECTORS, IR_RULE_FROM_INT, 0) \
+    X(IR_FPTOSI,        1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_FROM_FLOAT, 0) \
+    X(IR_FPTOUI,        1, 1, BUSTER_IR_INTS | BUSTER_IR_VECTORS, IR_RULE_FROM_FLOAT, 0) \
     X(IR_INTTOPTR,      1, 1, 1u << IR_PTR, IR_RULE_FROM_INT, 0) \
     X(IR_PTRTOINT,      1, 1, BUSTER_IR_INTS, IR_RULE_FROM_POINTER, 0) \
     X(IR_BITCAST,       1, 1, BUSTER_IR_VALUES, IR_RULE_BITCAST, 0) \
@@ -1484,7 +1496,7 @@ typedef enum IrRule
     X(IR_MASKED_STORE,  7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_COMPRESS_STORE, 7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0) \
-    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64), IR_RULE_FMA, 0) \
+    X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64) | BUSTER_IR_VECTORS, IR_RULE_FMA, 0) \
     X(IR_SCATTER,       3, 7, 1u << IR_VOID, IR_RULE_SCATTER, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
@@ -1612,6 +1624,11 @@ static IrSimdOperation ir_lane_operation(uint32_t op)
         case IR_FSUB: result = IR_SIMD_FSUB; break;
         case IR_FMUL: result = IR_SIMD_FMUL; break;
         case IR_FDIV: result = IR_SIMD_FDIV; break;
+        case IR_FMA: result = IR_SIMD_FMA; break;
+        case IR_SITOFP: result = IR_SIMD_SITOFP; break;
+        case IR_UITOFP: result = IR_SIMD_UITOFP; break;
+        case IR_FPTOSI: result = IR_SIMD_FPTOSI; break;
+        case IR_FPTOUI: result = IR_SIMD_FPTOUI; break;
         case IR_VCMP: result = IR_SIMD_COMPARE; break;
         case IR_VSELECT: result = IR_SIMD_SELECT; break;
         default: break;
@@ -1764,55 +1781,7 @@ static bool ir_gather_index_valid(uint32_t type, uint32_t lane, uint32_t index)
 // (an invalid operation of numbers), the default NaN.
 static uint64_t ir_fma_bits(uint32_t type, uint64_t a, uint64_t b, uint64_t c)
 {
-    const bool d = type == IR_F64;
-    const uint64_t exponent = d ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
-    const uint64_t mantissa = d ? UINT64_C(0x000fffffffffffff) : UINT64_C(0x007fffff);
-    const uint64_t quiet = d ? UINT64_C(0x0008000000000000) : UINT64_C(0x00400000);
-    const uint64_t operands[3] = {
-        a,
-        b,
-        c,
-    };
-    uint64_t result = 0;
-    bool found = false;
-    for (uint32_t k = 0; k < 3; k += 1)
-    {
-        const bool nan = (operands[k] & exponent) == exponent && (operands[k] & mantissa) != 0;
-        result = !found && nan ? (operands[k] & (exponent | mantissa | (d ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000)))) | quiet : result;
-        found = found || nan;
-    }
-    if (!found && d)
-    {
-        double x = 0;
-        double y = 0;
-        double z = 0;
-        memcpy(&x, &a, sizeof(x));
-        memcpy(&y, &b, sizeof(y));
-        memcpy(&z, &c, sizeof(z));
-        const double r = __builtin_fma(x, y, z);
-        memcpy(&result, &r, sizeof(r));
-    }
-    else if (!found)
-    {
-        const uint32_t bits[3] = {
-            (uint32_t)a,
-            (uint32_t)b,
-            (uint32_t)c,
-        };
-        float x = 0;
-        float y = 0;
-        float z = 0;
-        memcpy(&x, &bits[0], sizeof(x));
-        memcpy(&y, &bits[1], sizeof(y));
-        memcpy(&z, &bits[2], sizeof(z));
-        const float r = __builtin_fmaf(x, y, z);
-        uint32_t word = 0;
-        memcpy(&word, &r, sizeof(word));
-        result = word;
-    }
-    const bool invalid = !found && (result & exponent) == exponent && (result & mantissa) != 0;
-    result = invalid ? (d ? UINT64_C(0xfff8000000000000) : UINT64_C(0xffc00000)) : result;
-    return result;
+    return ir_simd_fma_bits(type == IR_F64, a, b, c);
 }
 
 #endif
@@ -2334,8 +2303,16 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_EXTEND: valid = ir_integer(ta) && ir_type_bits[ta] < ir_type_bits[type]; break;
             case IR_RULE_FTRUNC: valid = ir_floating(ta) && ir_type_bits[ta] > ir_type_bits[type]; break;
             case IR_RULE_FEXTEND: valid = ir_floating(ta) && ir_type_bits[ta] < ir_type_bits[type]; break;
-            case IR_RULE_FROM_INT: valid = ir_integer(ta); break;
-            case IR_RULE_FROM_FLOAT: valid = ir_floating(ta); break;
+            // A vector conversion (#2806) is one lane at a time, i32 with f32 or i64 with f64, the float lane in the
+            // flags. A scalar conversion's flags stay clear. inttoptr and ptrtoint stay scalar.
+            case IR_RULE_FROM_INT:
+                valid = ir_vector_type(type) ? (op == IR_SITOFP || op == IR_UITOFP) && ta == type && ir_lane_valid(op, f->flags[i]) :
+                        ir_integer(ta) && f->flags[i] == 0;
+                break;
+            case IR_RULE_FROM_FLOAT:
+                valid = ir_vector_type(type) ? (op == IR_FPTOSI || op == IR_FPTOUI) && ta == type && ir_lane_valid(op, f->flags[i]) :
+                        ir_floating(ta) && f->flags[i] == 0;
+                break;
             case IR_RULE_FROM_POINTER: valid = ta == IR_PTR; break;
             // Bits for bits of the same width; a mask (#179) only to or from an integer of its width (i8 to i64, the
             // boundary an opmask's kmov to and from a general register is), or to itself.
@@ -2552,8 +2529,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && operand_types[2] == ir_lane_mask(tb, f->flags[i]); break;
             // A gather's index of an element per lane, of 32 or 64 bits, and its mask at its lanes (#1840).
             case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && operand_types[2] == ir_lane_mask(type, f->flags[i]); break;
-            // A fused multiply-add's three operands are its result's type (#1840).
-            case IR_RULE_FMA: valid = ta == type && tb == type && operand_types[2] == type; break;
+            // A fused multiply-add's three operands are its result's type (#1840). A vector's lanes are floats or
+            // doubles (#2806); a scalar's flags stay clear.
+            case IR_RULE_FMA:
+                valid = ta == type && tb == type && operand_types[2] == type &&
+                        (ir_vector_type(type) ? ir_lane_valid(op, f->flags[i]) : f->flags[i] == 0);
+                break;
             // A scatter's (#1840) `c` is its two extra values' index, no kind's: its stored vector's lanes, a dword's or a
             // qword's, take b's index elements, and its mask is of those lanes.
             case IR_RULE_SCATTER:

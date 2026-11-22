@@ -540,33 +540,38 @@ static void asm_object_options(AsmParser* parser)
 // Fragment identities remain source identities; grouping never changes the order within a section.
 static void asm_partition_fragments(AsmParser* parser)
 {
-    parser->fragment_order = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->fragment_count + 1);
-    parser->fragment_begin = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, parser->section_count + 1);
-    Scratch scratch = scratch_begin(parser->arena);
-    uint32_t* cursors = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, parser->section_count);
-    if (parser->fragment_order == 0 || parser->fragment_begin == 0 || cursors == 0)
+    const uint32_t fragment_count = parser->fragment_count;
+    const uint32_t section_count = parser->section_count;
+    uint32_t* order = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, fragment_count + 1);
+    uint32_t* begin = BUSTER_ARENA_PUSH_ARRAY(parser->arena, uint32_t, section_count + 1);
+    parser->fragment_order = order;
+    parser->fragment_begin = begin;
+    if (order == 0 || begin == 0)
     {
         asm_fail(parser, 0, "arena exhausted partitioning section fragments");
     }
     else
     {
-        uint32_t* begin = parser->fragment_begin;
-        memset(begin, 0, (parser->section_count + 1) * sizeof(uint32_t));
-        for (uint32_t i = 0; i < parser->fragment_count; i += 1)
+        const AsmFragment* fragments = parser->fragments;
+        // Slot s + 1 holds section s's count, then its write cursor. Scatter advances it to the final end.
+        uint32_t* next = begin + 1;
+        memset(begin, 0, (section_count + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < fragment_count; i += 1)
         {
-            begin[parser->fragments[i].section + 1] += 1;
+            next[fragments[i].section] += 1;
         }
-        for (uint32_t i = 0; i < parser->section_count; i += 1)
+        uint32_t start = 0;
+        for (uint32_t i = 0; i < section_count; i += 1)
         {
-            begin[i + 1] += begin[i];
+            const uint32_t count = next[i];
+            next[i] = start;
+            start += count;
         }
-        memcpy(cursors, begin, parser->section_count * sizeof(uint32_t));
-        for (uint32_t i = 0; i < parser->fragment_count; i += 1)
+        for (uint32_t i = 0; i < fragment_count; i += 1)
         {
-            parser->fragment_order[cursors[parser->fragments[i].section]++] = i;
+            order[next[fragments[i].section]++] = i;
         }
     }
-    scratch_end(scratch);
 }
 
 static void asm_partition_append(AsmParser* parser, uint32_t id)

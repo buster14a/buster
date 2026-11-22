@@ -1,0 +1,1070 @@
+# test-checker's source fixtures: each case's reader graph and enumerations (check_test_source_digest), keyed by the case's
+# name and its source's hash, recorded where the reader's vector path and its scalar twin agreed (#2924). Record again
+# with BUSTER_CHECK_RECORD_DIGESTS=FILE (every part), the lines sorted and unique.
+sources/128 bit provisional negative values retain sign@29aeb4fe	b0de43413f6e1e9e
+sources/128 bit provisional positive values retain upper bits@92f724a9	4e1b52ff5ee18d32
+sources/128 bit unsigned successor retains provisional width@22117a87	25c6c22e78c47a97
+sources/128-bit operands of the overflow builtins@9691e6a4	811fee7e1d93d294
+sources/8192 repeated nonnull indices@8b26cd81	d6c8b18bb743f4ed
+sources/C integer literal types@b75aa875	de9506f897c3bbfd
+sources/C23 auto: file scope, a loop's, a parenthesized declarator and the storage class with a type@1c61109c	ca378280584f0d0e
+sources/C23 auto: lvalue conversion, decay, pointer declarators and later declarators@8e058550	5c95693088f9e50b
+sources/C23 constexpr: a discarded constant still initializes@fba204c3	9faf2aaf1be2a075
+sources/C23 constexpr: objects in constant expressions@d500bfff	b78713fc09717e6c
+sources/C23 generic intrinsic controls preserve declared types@362f0a19	e74173e8a7618d48
+sources/C23 raw attribute arithmetic@480bd27c	ec029f00b7ce6aa2
+sources/C23 raw attribute cast and conditional@6ef51bfd	6eb54275ae4e7414
+sources/C23 raw attribute enum binding@5540eac7	fea69ae1be1b6d6c
+sources/C23 raw attribute integer builtin@0d1c3921	72498f0ca1fc4e64
+sources/C23 raw attribute nested query@48dc0168	fdd3fb10a3510daa
+sources/C23 raw attribute object alignment@5b49e629	097e65c4f27af14c
+sources/C23 raw attribute typedef query@9dac4a1a	a6db1ed3e7f08f16
+sources/C23 raw attribute typeof query@c9ec51ae	823a1feaa7cfff7c
+sources/C23 typeof accepts compound arrays@01c71387	9796d8abfefa1fd8
+sources/C23 typeof_unqual removes compound scalar const@1a904126	037dea02b2033194
+sources/FILE builtins: a local object named FILE leaves the file scope's@8eadfda1	e917319077efd2f8
+sources/FILE builtins: the unit's FILE at file scope@67193dc5	674e90875a0c085f
+sources/FP_CONTRACT at file scope and a compound's start@8e3b643e	ad4b4bc951cf665b
+sources/GCC unroll without a count@d6ee0ccc	cc49c45288ce217b
+sources/GNU attribute ICE integration@2c6a32dc	8fb9f7d704214679
+sources/GNU choose exact selected array@2b7e0206	33987c62f167d765
+sources/GNU choose exact selected lvalue@ebd0c13d	d98efe6460ae4ccb
+sources/GNU complex integer product wraps its components@d97806a1	ae64a5a5b1b91381
+sources/GNU constant array bound and raw attribute@648b130f	ff67e5a5e93892e6
+sources/GNU discarded void indirection@c4c8e95b	f72dea92f11094cf
+sources/GNU extension prefix preserves operand category@29a2ecfa	e425413b4008375c
+sources/GNU fallthrough null statement@1e7e87b0	2358063ffaf20a51
+sources/GNU folded-constant extension@72058c43	f44a6deb0553a18c
+sources/GNU full-width overflow and shift constants@6b391340	c37da935f93bc3b6
+sources/GNU negative shifts and bit-precise type width@81b5abe7	1dd3c03cab65cacf
+sources/GNU overflow enumeration retains target arithmetic@b439bb7c	d67d18ad1f841488
+sources/GNU real expression folds in integer constant context@e0f2d638	005c220dda49b2e8
+sources/GNU scoped standard fallthrough null statement@43466f88	6ab2b90ea5dd4c3d
+sources/GNU statement expression folds in integer constant context@7d7c5a65	1e9a3da37d826c07
+sources/GNU wrapped ICE zero remains a null pointer constant@6284ea3e	2dcf0135130d53dd
+sources/GNU17 prototype after parameterless definition@28f33ba5	3d29f45f40bc5acc
+sources/K&R all implicit parameters in C89@30cd8949	b2cf6f820a9159e4
+sources/K&R anonymous record parameter types remain complete@23e6550c	66868d1d9d4739d7
+sources/K&R atomic aggregate retains its complete type@876006e8	e714e49ef6a6ebe4
+sources/K&R direct and addressed calls warn about arity without rejecting@409860d7	9fe069bc12332270
+sources/K&R enumerators are visible in later header array bounds@008dc388	8fac84ffefd52b35
+sources/K&R header enumerators restore outer ordinary names before the body@f722139f	a85140b3f7963269
+sources/K&R header tag completes an earlier header reference@0ef4b26c	8e53a9da92a4c663
+sources/K&R header tag is complete in later parameter declarations@7683c248	33575033819fd4e3
+sources/K&R header tags restore the outer tag before the body@3db5c1dc	b587eb41a1b49c72
+sources/K&R indirect designators retain no prototype@6cbd4f39	88c704e342bc712e
+sources/K&R missing declarations default to int in C89@4fc65a37	8afec616921558e9
+sources/K&R mixed tag and atomic declarations retain their header scope@c8a0bf9b	ceae142d3c982575
+sources/K&R nested atomic type names retain typedef and typeof lookup@e5934106	3c2972d608f60917
+sources/K&R nested member tags share the declaration list scope@5db0c7d8	ea94b2b2244660d3
+sources/K&R parameter retains register and ignored noreturn attributes@13bd4608	e901f7a3857567bf
+sources/K&R parenthesized atomic type starts its declaration list@fc9808ba	ff01eeac28806bef
+sources/K&R prior prototype does not turn its definition into a prototype@f752d87b	0d1a2ee92e2e47b2
+sources/K&R repeated header tag definitions retain separate parameter types@4b5b9647	fa06316b14241921
+sources/K&R tag preparation after an invalid header starts with fresh scope@e14dda53	93162de2f1bd4886
+sources/K&R typeof observes the no-prototype expression type@dbc73f0e	0b1a7d8e059242f9
+sources/__auto_type keeps x86 builtin callees in statement expressions (#2717)@a925500f	0dec4c5c04c579f6
+sources/__auto_type: a linked name declared before@6de337cb	f522be7321f77f40
+sources/__auto_type: a statement expression's maximum@3aa322b4	dda70592305b4c61
+sources/__auto_type: an _Alignas the deduced type allows@15e08c91	7bbed9c51e772a7f
+sources/__auto_type: file scope, static, a loop's, structures and compound literals@1be6cdb7	4d39165e457bb526
+sources/__auto_type: later declarators@96041d51	d015338928ebe5f2
+sources/__auto_type: lvalue conversion and decay@6634b095	21812455a35d66ef
+sources/__auto_type: pointer declarators@b17cae08	7641f2ffa0d26489
+sources/__auto_type: the specifiers' qualifiers@361ec9ba	4e35184bad5c0e47
+sources/a completed later array declaration supplies its actual bound@eeafc2c1	8ca47dff9a9860d1
+sources/a conditional's arms in an inferred array@c0f631ac	d39b67e455329986
+sources/a discarded comma operand cannot taint the selected pointer path@c0db7a4e	89d6a62a1faa9409
+sources/a discarded flexible decay cannot taint the selected pointer path@161add76	eb9a9618165fef85
+sources/a discarded inactive-member address cannot taint the selected array path@af6025a7	83a894ce67237815
+sources/a discarded inactive-member address cannot taint the selected pointer path@ce5ebeda	34a60357ecaf439b
+sources/a discarded index operand cannot taint the selected array path@5752ea83	58214e1e72a2248c
+sources/a dropped clang loop pragma's arguments and hints unchecked@77d9c306	18523db812eb81d1
+sources/a flexible member's symbolic address remains a static initializer@a2e95141	22d9e0f58749b920
+sources/a loop hint's bit-precise counts accepted@6d54aa91	18523db812eb81d1
+sources/a pack pragma's bit-precise values: small ones apply, past 64 and past 128 bits ignored@055a947e	4922552bd4d89931
+sources/a record of many members@0754a397	4cd1774928c791c7
+sources/a record of many members@9f800247	002fe7db23ca8ab9
+sources/a record of many members@b5855a23	a6a79546d195f419
+sources/a same-type pointer cast permits the actual const integer member read@04957256	baee51ba91cd3ae1
+sources/a scoped atomic IEEE maximum_num@ee3d52d6	182f22a21968c1fe
+sources/a specifier's cleanup on a function and a variable@33052eeb	a1027367ff715725
+sources/a struct element after nested ?:'s@0605cd82	944e2f3296c57650
+sources/a struct element after nested ?:'s@8fc0b878	012b3c608cc48c6f
+sources/a struct element after nested ?:'s@c750892f	4a73837947c476bd
+sources/a struct element after nested ?:'s@d5d524d2	29a8772a8e0f7b4d
+sources/a struct element in nested parentheses@2c5dce91	b27787d7ec8f4688
+sources/a struct element in nested parentheses@506bea66	3c6017ecd49457db
+sources/a struct element in nested parentheses@8c76afda	66e1be8e53868f77
+sources/a struct element in nested parentheses@f21001a3	1599c89c0d01c03c
+sources/a typedef of an unsigned _BitInt keeps it unsigned@0aa78dff	0c9af5a9e664cb52
+sources/a vector condition's ?: in an inferred array@2ea4bfa7	a7b621c9bc4a3502
+sources/a whole aggregate replacement makes an earlier aggregate call dead@84d7de0c	9061dfffc073f91f
+sources/a whole replacement discards an effectful aggregate rvalue retaining an object ID@be0f5e98	9754de38a2663639
+sources/abstract callback array@2064251a	a20b56e72e6c11da
+sources/abstract function ABI prefix and grouped attributes@80b7564e	a4f1c056e3af42ed
+sources/abstract function ABI raw cast context@3a2aaba8	61610ededf605eba
+sources/added vector builtin source 0@35ce0b09	bd3e00e65faf821e
+sources/added vector builtin source 11@5792e160	e1ea944ced50afdf
+sources/added vector builtin source 15@c4a7489a	037b921d48ab06a0
+sources/added vector builtin source 16@3152461b	3887ac5ddd2da850
+sources/added vector builtin source 18@129ed094	e2264d8856344a90
+sources/added vector builtin source 1@954f048e	c33e4ea31c7f194b
+sources/added vector builtin source 25@0dbdae5f	76f4c457ce8987be
+sources/added vector builtin source 2@45248d2b	ec7e62ad975546fa
+sources/added vector builtin source 33@7232eac2	8006e1a39c95e735
+sources/address cancels absolute pointer indirection@4ad4ff2a	cf7e6a2e0f31678b
+sources/address cancels null pointer indirection@879f05a0	a33f503f66eb7895
+sources/address cancels void pointer indirection@ed722dcf	def5f72e0e419dcd
+sources/address of predefined array retains array extent@fbfea40f	92430e5a74f806f8
+sources/aggregate subobject copies clip implicit zero coverage@ed605d52	42c441180665e3d9
+sources/alias followed by a declaration accepted@f501668a	92a33ed02a172784
+sources/alias function declaration accepted@96974369	9bf5580517f6dadc
+sources/align: a wide source's alignments@0ff2946e	5e29e6936889ca30
+sources/align: alignments the evaluator doesn't read@33a06395	48ef2c584670f842
+sources/align: an enumeration alignment@eddfc174	341db8ca574d431a
+sources/align: an unknown alignment@6e3d5992	fb1877019662ac93
+sources/align: const objects folded in constant contexts@f4cb7583	005fd6df946e6773
+sources/align: folds in constant contexts@2e53d87b	880bbaff0750b42f
+sources/align: folds past 128 bits@3c75adf2	18d77b22bb75edb0
+sources/align: modifications the evaluator doesn't evaluate@c16223a8	6ccff6522eac3e90
+sources/align: result types@df499cfb	63c2d0216b1faceb
+sources/align: the largest alignment of an int and of a pointer@b9206372	569af222a3a7a044
+sources/aligned enum layout and wide constant types@9dfe9009	817c57fda60ebebf
+sources/aligned packed member integration@0fc4f3a1	f3be0eba8c94b928
+sources/alignment type-name integration@db1c0100	4d2ab9e0339d5d85
+sources/all completed enumerators share signed common type@b6a8557d	8fc967993ad46d64
+sources/all compound operators@ddbbbcb5	297eaf2cb8854334
+sources/an atomic IEEE maximum of a _Complex float@7f551de6	d18a310cdc8d756c
+sources/an atomic IEEE maximum of a _Complex long double@e43400c3	fc67f72f9f212fce
+sources/an atomic IEEE maximum of a _Float16@fde66256	eea9790f85d91499
+sources/an atomic IEEE maximum of a double by an int@d385f4d3	1405b5af41964853
+sources/an atomic IEEE maximum of a float by an int@1ce4e019	43565015e067b84b
+sources/an atomic IEEE maximum of an over-aligned float@2299087b	c1bc31de5bd0375d
+sources/an atomic IEEE maximum with its order known at run time@0f975538	d18c30e28ab04881
+sources/an atomic IEEE maximum_num of a __float128@6a78ac73	510341b2052d2894
+sources/an atomic IEEE minimum of a __bf16@78a0fe83	e84bc750da17c8ef
+sources/an atomic IEEE minimum of a volatile double by a float@3d7dba4f	4f8dce3c150a33e9
+sources/an atomic IEEE minimum_num of a _Complex double@865c822c	4720c061267a0dc7
+sources/an atomic IEEE minimum_num with an order past seq_cst@72ea4820	df2d414bdfe33f51
+sources/an atomic minimum of a _Complex long double@278aff2e	bb7a0c04bfb1e410
+sources/an automatic address can be consumed by a direct constant read@d6e84704	635013fc30a213c3
+sources/an earlier symbolic array pointer can read a subsequently completed target@51dbc4b9	5efd348108a715f0
+sources/an enumerator resets const-object provenance to an ordinary ICE zero@e7715ccc	01cae46584519418
+sources/an extended vector's lanes through a pointer@77f0eaa1	6873af281bd7c179
+sources/an extension vector's logic and swizzles in an inferred array@eb50ae60	6a79d47f9ddb3bf4
+sources/an inactive union member's address remains a valid symbolic pointer@eaa0d9c5	ab27c866ab8c3880
+sources/an inferred array of compound literals, calls and conditionals@78e5ad26	95061bf36646ad15
+sources/an inferred array with braces elided@a25a796b	60127456467a7632
+sources/anonymous member lookup@0564cbbe	20a48b679b22a942
+sources/anonymous member supports flexible successor@41be89c3	acf4bbce710a399e
+sources/anonymous names grow beyond the direct member count@36cd37cf	296fea4216c0b4cf
+sources/array compound literal keeps its array type@e37578c8	9796d8abfefa1fd8
+sources/array of callbacks@0b60281d	44c2c894c4bdb058
+sources/array pointer binding@bea95b07	e24cb91d2a9edd1b
+sources/asm goto beside another function label's address@fa114488	053777cc31bb6925
+sources/asm goto out of an array's scope@a85b4a3f	3ec04f3ad7d5d458
+sources/asm goto within a cleanup's scope@3ab43150	da4c683776913d3a
+sources/asm weak visibility declaration integration@3f52b190	c3e6c0332cbe8f95
+sources/atomic min and max@caa0e1fb	b2da320138a2eaf8
+sources/atomic read-modify-write builtins and their result types@8a1db8c8	ed4922ecfcf682d3
+sources/atomic vector initializers keep the declared destination@637d0313	c0485dc3754be969
+sources/attribute inside grouped abstract declarator@924ce4c2	1e25044637264bf1
+sources/attribute prefixed cast type@d7fbbe60	1e25044637264bf1
+sources/attributes after a bit-field's width@f3235548	29a353fc859e7fcc
+sources/attributes after a tag's name: a reference@aedb4f34	0f223683526a51e6
+sources/automatic array addresses can be consumed without publishing a pointer value@383fcc49	bbd6f5c9c45ca2d4
+sources/automatic const array retains a source-only address path@96ebf19c	c2b14b3cae7fa892
+sources/automatic const scalar folds a case label@79083ede	9d1cf338fed74d0a
+sources/automatic variable array@8758cdb5	d71323883f69ff63
+sources/bit-precise constants past 128 bits@aec4108a	8153b3fc96dd8214
+sources/bit-precise constants@96adae01	5a4e4f380902d3a0
+sources/bitcast declaration integer representation@69c88948	9184b435ea4bcf0a
+sources/bitcast destination nested type job@cfd76ae2	d56f40e65ad7ddff
+sources/bitcast half operand is not promoted@5a58c94e	4338e682f70c202b
+sources/bitcast raw array operand is not decayed@cf08ef6e	53433f301203d28f
+sources/bitfield update@1fe1b3f4	bccd0dfc73aa6754
+sources/bits: a carry of a const pointee@60c7f84f	e2092968420f987b
+sources/bits: a carry of the other signedness@755607b8	f8f52be67e562a96
+sources/bits: bitreverse32 of a double@cfd7d092	62c579bc5452acca
+sources/bits: clzg's fallback of a 31-bit unsigned bit-field@7b262779	1a9386fd0807344a
+sources/bits: clzg's fallback of an enumeration of int@80a403f1	42d562e3427f89ee
+sources/bits: folds in constant contexts@f7d5af65	d90e5eba02d5ef7d
+sources/bits: folds past 128 bits@8140716f	14590da211f6afbf
+sources/bits: folds through const objects (#990)@8ee9beba	7d80a30c3257cae7
+sources/bits: popcountg of plain char where it is unsigned@dd3bbfce	ab7d0209a7ebd623
+sources/bits: result types@bc27ce3e	6af3fe02a0c6bead
+sources/block extern before file definition@880eae79	870f332b9ccfac1b
+sources/block extern uses file object@42b9991a	4f9a027c54fab7a1
+sources/block-scope builtin calls of const objects in other families@50b182ae	ace16c46beee9d47
+sources/body expression named callback type@1ce96aff	baa4bac8c272812d
+sources/body's definition completes its parameter-list tag@f58d1587	68bf9bfb734e6d90
+sources/body's forward declaration keeps its parameter-list tag@354abc8f	4a8439867c476c19
+sources/body's prototype names its parameter-list tag@8ec2b5f7	e561a273ecbf1745
+sources/bool of a defined object's address@70131b72	69e8a5957381bd91
+sources/bool of a strong external address@5cbca5f3	bc81a65762807e92
+sources/bool of a wrapped address@84ea6190	4d577fcab1bb25d7
+sources/bool of an address a pragma weak after it names@ae849c9a	bc81a65762807e92
+sources/bool of an address an ignored pragma weak names@6ff70b69	bc81a65762807e92
+sources/bool of an automatic address in a static initializer@7d7c01ca	644803e3a5c55a3e
+sources/bound's definition after a statement expression@7ceca237	f94cd066ba2c5178
+sources/bound's definition before a statement expression@b37a160e	5e47354fa962d28f
+sources/bound's definition between statement expressions@12c820b9	5b9c0af49f8e8d5c
+sources/bound's nested prototype's constant doesn't conflict with a parameter@8f235b55	e5a7c91c65d9572f
+sources/bound's nested prototype's definition beside the list's@c34190c2	860e7244b52d3a4c
+sources/builtin Microsoft variadic list type@8126daba	cc49930250476809
+sources/builtin System V variadic list type@1d6a3672	24a918f3d18b05d7
+sources/builtin expect retains its own ICE contract after a const read@f1a697e3	b12c8d73a3df9e79
+sources/builtin expect source constant evaluation@f957615e	916b8e3c4c6aedd5
+sources/builtin graph source integration 0@10fc5dab	ac56c9dde7fa359d
+sources/builtin graph source integration 2@e799ccf8	6cfe58e9fb216cee
+sources/builtin graph source integration 3@d68ca15b	bb41641ec40c06a3
+sources/builtin graph source integration 8@c5db8cff	f77534c1cdf4b3cb
+sources/builtin graph source integration 9@a39bdd3e	bfd69a9b994651d4
+sources/builtin integer typedefs@56539880	f11b1b8b10e4049e
+sources/builtin operands' prototype tags are each their own@df72b8eb	c1764ec88fb87464
+sources/builtin string and object witnesses@c9fe6c84	d7df6da87d1834fa
+sources/cached typeof queries preserve call identities across a closed shadowing scope@54ee81f4	5fda83d0872d1075
+sources/call arguments@fb4fc4f7	105dc8b56b060aef
+sources/callback parameter@cdf9518c	c6813b2d5db1378f
+sources/callback static initializer@a43e536b	1fc533a21972ecbd
+sources/calling convention between pointer and name@dbd09e4c	d58dd168388c1f64
+sources/case in a block of a cleanup@17d7c949	088561601adac413
+sources/casts and operands of no type in an inferred array@dca51b79	95458553d2824ac3
+sources/chains of 15, 16 and 17 steps in an inferred array@1bdd3fb3	7dd3bb6cef90f1ee
+sources/classify: folds in constant expressions@878c768b	a3082a7b9b66a193
+sources/classify: isfpclass of a vector@bda569f3	cbef4cdea8b61a62
+sources/classify: masks of other integer types@1f6d3f6a	e65f7bdd03705fb5
+sources/classify: result types@6339484e	6860536686dabf34
+sources/cleanup function of a result@5261f30b	a300fe9957e63c39
+sources/cleanup function through a typedef@483843af	361bab172b0dfead
+sources/cleanup ignored on a file-scope variable@85be0ca2	3693f526cadd1255
+sources/cleanup ignored on a function@7f208f61	361bab172b0dfead
+sources/cleanup ignored on a parameter@fd5ba07e	502a4ca6016106c1
+sources/cleanup ignored on a static local@7567a6f4	6985ec73a9293435
+sources/cleanup ignored on a typedef@a75b514d	6985ec73a9293435
+sources/cleanup ignored on an extern local@fda8e0f5	6985ec73a9293435
+sources/cleanup in a for statement@b4b984a0	5599235a4873a7a1
+sources/cleanup in a statement expression@2192961e	611eb73d09fbb132
+sources/cleanup of a const variable discards its qualifier@948a6b42	7fcfd3d8114d56b8
+sources/cleanup of a pointer variable@76cace05	4448a9774b248d19
+sources/cleanup of a struct variable@0f466693	29d0c6349ebbad91
+sources/cleanup of a variable-length array@10e8cb50	97967dfde37b4913
+sources/cleanup of an __auto_type decayed array@38730a87	de5934d8f1ac1a42
+sources/cleanup of an __auto_type double by its specifiers@0feaa326	45276795eeeaa23a
+sources/cleanup of an __auto_type double@df61baa9	dab9d8a19d9fec67
+sources/cleanup of an __auto_type structure through void@f6a71bf9	595eee85c11e3682
+sources/cleanup on a register variable@7fb79549	9abc6258cbbe95f9
+sources/cleanup on an automatic variable@090aba8e	a300fe9957e63c39
+sources/cleanup taking a pointer to void@d8218db1	a300fe9957e63c39
+sources/cleanup taking a qualified pointer@a844a07e	17f600105ca9e9b1
+sources/cleanup's function named like its variable@55809565	a300fe9957e63c39
+sources/cleanups of a specifier's declarators@945f4e48	17f600105ca9e9b1
+sources/comma condition@38e31163	fd29877895aa0157
+sources/comma for condition@2a61e165	c120377f4739b3cf
+sources/comma subscript@abe864fb	9dfda446265335bd
+sources/compatible block function redeclaration@29b0951d	b35f66b66d45b144
+sources/compatible disjoint block prototypes@db9ef4d0	080671dc3cf8826e
+sources/completed GCC warning does not reject the translation unit@cc8aaf11	78aa81df4ae12259
+sources/completed const initializer chains retain converted values@7f843c1c	e60614945280e244
+sources/completed ident record is accepted@bdf5ce34	78aa81df4ae12259
+sources/completed message after the last declaration is accepted@d6f5a741	78aa81df4ae12259
+sources/completed message does not reject the translation unit@46cfbda9	78aa81df4ae12259
+sources/completed typedef transparent union attribute permits later calls@ff44f68a	e175f8a048675e10
+sources/complex range permission restores lexical state@bce3f7cf	719c0a71ebaafabe
+sources/compound array extent@028dd12c	33a48a45b68bc2b1
+sources/compound literals in static initializers@b9a098b7	bf78fa0ebbd1974b
+sources/compound scalar lvalue@d9e0ffab	d29eb605ea09c379
+sources/computed goto inside a cleanup's scope@d37898e4	5db1d92a28c09d22
+sources/concatenated and wide strings@3495148a	7e1ebcae540b2e1e
+sources/conditional constant@5812583a	8c28114fd5702403
+sources/conditional middle operand comma@a03f7b9c	682c8472d1848a7f
+sources/const atomic scalar may be read during explicit constant evaluation@4ed0c5a6	62fd4e29c3c7aefb
+sources/const atomic scalar supplies a static initializer without becoming a runtime load@feadd8d7	92b075350fad3e5b
+sources/const floating object converts in a static initializer@372f49fc	42aab87d6bed7504
+sources/const initialization@cbc6487d	3c635ef438fe982c
+sources/const nested array member folds a selected element@ee5aa201	01893a270ea32615
+sources/const nonbyte bit-field values retain their stored bits@31329f03	d714b8801df25898
+sources/const pointer object can designate another completed const object@41a2eb0c	9695c0a0f448be6a
+sources/const pointer object retains a symbolic target in a static initializer@f15b84f3	f4e26ade1536e339
+sources/const pointer retains string-literal bytes for a constant element read@2cfcdf35	c8d10c875acac68a
+sources/const record atomic member may be read during explicit constant evaluation@ec0c87ae	0c8e28dbcd207981
+sources/const record member folds an enumerator@d8c919df	48c9700f0e2352d2
+sources/const record value copy preserves explicit and implicit subobjects@df6e8b8e	edef4589d7955c69
+sources/const scalar becomes a GNU enumerator value@5e2cc86b	519af23779ac67fa
+sources/const scalar folds a file-scope array bound@faf791b4	38741caf8209275d
+sources/const scalar folds a static assertion@589ebeb5	044e08c5ee25f62c
+sources/const scalar supplies a static initializer@61f12258	132fd85d07a67752
+sources/const union folds its active member@6bbde82e	bd168a0e6734c3bc
+sources/const unsigned scalar folds a bit-field width@25ea85a7	01366ed3855fda54
+sources/constant query saturates floating casts only in proof@2c8cc70b	383ed95ac32472ec
+sources/constant static initializer@4e26537f	8851eacb02bffcc9
+sources/constant type names retain repeated modifier semantics@6c868298	541e835ab14fb58d
+sources/constructor after the definition ignored@b31ddfd2	b2bfa7d042693e59
+sources/constructor priorities@7f62f47c	2c09afc6e955fdd1
+sources/context: inactive union address is not a read@2ae9d0dc	f876179578f425e4
+sources/context: qualifier-only pointer path retains receipt evidence@fe0fbb00	835482faa848f864
+sources/context: unselected arithmetic fault is deferred@ac7811d5	6ab9ba3593304547
+sources/context: unselected discarded read is not evaluated@10384a30	6b99ae079b6483aa
+sources/declaration GNU choose expression@4cbc9ce9	aa06986a23665098
+sources/declaration GNU choose full-width truth oracle divergence@4216c3de	3fd2f0921fdeb279
+sources/declaration GNU choose retains wrapped ICE form@c48ecbf1	47c4ab01146d6fab
+sources/declaration GNU choose wide integer condition@92a3fa4e	0b6fda3b5b05b783
+sources/declaration GNU omitted conditional@68c364ca	5219e09270218d49
+sources/declaration GNU void and function queries@4ea3b4e0	5dbbbeaa259f891c
+sources/declaration ICE bounds@3eeab98b	1e9499432d912a3d
+sources/declaration ICE unevaluated fault@0337ad7c	4cee1207029df4d9
+sources/declaration alignof callback array@75c34761	32f02c8e3a7c16f3
+sources/declaration atomic lock-free query of const objects@624ccd03	781bb1bb80a99e16
+sources/declaration atomic type names@68c02ff6	ea95fa686c825280
+sources/declaration bit integer type name@340151bf	e1413b5b4d4106dd
+sources/declaration builtin array bound@4a4029a5	74fd5d356d32fbb1
+sources/declaration builtin calls of a const integer object@4f8ab943	e6713ebf00c86482
+sources/declaration builtin calls of const integer objects across families@b4c0ba28	6c11c9370c3906d0
+sources/declaration builtin calls of const member, element and floating objects@ca1ad433	18d20e7018ed521e
+sources/declaration builtin converted constants@6b5e32f8	2bf735c561ff56b6
+sources/declaration builtin invalid zero unevaluated@bf2cf0d9	d0eeb0aecc98a02f
+sources/declaration complex type names@aecee083	6367a91a97d1a344
+sources/declaration conditional@2a2970d1	e961e269bd7c6295
+sources/declaration const object folds as a GNU enumerator value@2abade11	c52832b9f1d4d9cb
+sources/declaration generic incomplete association@8df0c11c	8c548af8afef5bf6
+sources/declaration generic selection@3b8b50a7	89a55738faccb3ec
+sources/declaration integer builtin constant@cf8141e1	b1a5f128860ba16b
+sources/declaration iterative nested type queries@667ece9a	edc3f487cc8f15cb
+sources/declaration member offset@d4a9ed6a	9e5bfb7c7249cbbd
+sources/declaration named callback type@ffb28f51	24c2226d3843e3fa
+sources/declaration nested builtin constant@342de15f	9f00f9fe5bd060af
+sources/declaration nested generic selection@5800b715	ef3c33b096fc11e8
+sources/declaration nested member offset@24596371	4bb8f69509104fcb
+sources/declaration nested typeof@cb5906e8	b4c1a26c2c15cf83
+sources/declaration object alignment@54609fb3	9a04429e0d94b5ae
+sources/declaration object shadow@5a7ba84c	e349bd43f6fe2f3c
+sources/declaration overflow builtin sizeof@2ba34243	6738269e85317cdd
+sources/declaration prior enumerator@4dcd675d	ee9d1f22c3f9a8a5
+sources/declaration short circuit@738decfa	4128e085ec91aefb
+sources/declaration sizeof arithmetic@13bd8eba	6cce41082e04a47a
+sources/declaration sizeof comma expression@6789229e	11cae776d18b7b8d
+sources/declaration sizeof object expressions@e7e6a39a	259696177a44ac37
+sources/declaration sizeof pointer member@a60b55ea	6c70762befa9f583
+sources/declaration string query@1537e5ea	a6e615f3c6f769c4
+sources/declaration type compatibility@bf5ed1d3	ec001adab4af3876
+sources/declaration typedef and object source order@3f257117	9570ecc19c5f8908
+sources/declaration typeof compound literal immediate queries@165be622	a910583bb08830b5
+sources/declaration typeof compound literal member query@e5654e62	9b02d29f2a20bea4
+sources/declaration typeof nested in a compound literal type@7dfc4b2a	27372ec41c204eef
+sources/declaration typeof preserves array@91cfdebb	9126a8e282aae154
+sources/declaration vector builtin arbitrary argument slice@22493d6f	ac98cdbd9eda5994
+sources/declaration vector builtin exact type queries@dcbf3699	f7561dfd2cc1642c
+sources/declaration vector conversion attributed abstract destination@d52d9f26	de9214d133362e40
+sources/declaration vector conversion nested destination query@c9ca0746	2ee188f1dc4b78dd
+sources/declaration vector memory builtin type query@2a97eb1b	0f7b1894c4aa0a42
+sources/declaration vector shuffle GNU lexical index@7743d853	55fb3b26b99b2c69
+sources/deep enum and record source jobs use explicit frames@3760d7be	a6b316fc397bcde5
+sources/deep named stack and repeated unmatched pop remain bounded@da2cf36d	f858113c080912c6
+sources/deep selected choose expressions@c01b84fb	fe406656efe69b7f
+sources/deep selected generic expressions@2951d437	a6193928cdc8b338
+sources/deep unselected choose expressions@734e0a4b	97aead721e4f879b
+sources/deep unselected generic expressions@573c4eeb	fa0f1a011dd70985
+sources/deeply nested tag attribute queries@fb9778cd	a4f0c1cc4f771324
+sources/definition in a sizeof in a parameter's array bound, its tag in later parameters and the body@e634831f	2b9c911c61a0f2f6
+sources/definition static qualified bound@f876ebdf	4361e77a3f71add8
+sources/definition variable parameter bound@2ff5925a	7f9dafe9c4670740
+sources/definition's parameter-list tag in its body@79b6db67	2dec608740efc866
+sources/definitions in a member's parameters and array bound@e96dc0d2	b86ab1a433169d71
+sources/definitions in a type name's parameters and a variable bound@d9b8fed1	e222d695b7c4ec22
+sources/definitions in array bounds at file and block scope@1c168334	55ea10d7884a0e74
+sources/designated compound array bound is complete before typeof resumes@d23ad156	4b97a51eb6ecdbca
+sources/diagnostic and nonnull histories coexist@2a6e8520	93ce9ef67ff9c4d5
+sources/double evaluation widens expressions and preserves conversion barriers@65a47916	b117655cbcfbcc4d
+sources/duplicate declaration modifiers retain warning-only semantics@1fd3dc91	712f6300588a1b3f
+sources/empty attributed null statements outside switch@f4c51b80	88826aee4b980d95
+sources/empty for condition@25d4caf2	58a888a16f8af4ed
+sources/empty record member declarations retain layout@75f6839e	e10e8208032ddf36
+sources/empty translation unit@4fd0bfc1	0c8210784d8af5a5
+sources/end-of-switch fallthrough placement is deferred without warning analysis@fc40b933	25a8220561935de6
+sources/enum arithmetic and bounds@03b0714f	160bb12be6d4e993
+sources/enum completion distinguishes small value in a wide set@88f78810	25c7593a251ed3b3
+sources/enum defined in a definition's parameter list, its constants in the body@c9dbee05	8e6a2f9f79959605
+sources/enum expression completes anonymous record@1ea512da	9b8c46947079fda1
+sources/enum inline nested enumerator visible after its declaration@8dcc2bfb	0618dec82a9c6913
+sources/enum inline record keeps earlier operand event order@3688e358	e4d331c692507567
+sources/enum inline record nested inside outer tag attribute@4925394c	4313890dc46d768e
+sources/enum inline record resolves header attributes before body@7b9d9df4	d569ae241d998240
+sources/enum inline tag identity survives subsequent expression use@e648ab6d	0b8d9c73f60aec4d
+sources/enum of a fixed underlying type defined in a parameter list@a19d40b1	54a8affa23e7050f
+sources/enum scope restoration@8db6a12e	f225a943e5d011d5
+sources/enum with a fixed underlying type@53489e24	97572f3209553c39
+sources/enumerator aligned attribute preserves declared alignment@5357ac4a	600fd406e694ce85
+sources/enumerator attributes preserve declaration identity@8eb9c06d	de2f2c1650e3b846
+sources/enumerator ext vector attribute is ignored@46115f3b	73f3b709e43c2ffa
+sources/enumerator ignored layout attributes preserve scalar type@da4fad77	d82506e4fa6ccd9e
+sources/enumerator shadowing restores completed outer value@1d701055	8923da4aab5374c5
+sources/enumerator value's nested prototype's constant doesn't conflict@7a0afd80	2a7cf0de1b34b452
+sources/evaluation method restores nested compounds and float control stack@dfc3893d	39116c35965ac24d
+sources/exact intrinsic prototypes preserve distinct result and argument types@deac30e4	d7a7eadff66eded3
+sources/expect: a folded first argument's effects in constant contexts@8fabc5fc	0cf25a6d6c69fd56
+sources/expired prototype does not strengthen later declaration@c0b82baf	2b96e3af79b55c3d
+sources/explicit record alignment composes with packing@5f49dea3	0433399dbc185988
+sources/explicit void roundtrips still publish legal symbolic addresses@0cbac6a1	461c68827b3a1535
+sources/explicit wide expression retains its provisional type@fd565361	118379a7d844992f
+sources/extended evaluation widens scalar and complex operands without changing vector elements@2f9c1019	7ca77aa5fb92c9a5
+sources/fallthrough placement checking is disabled by the oracle warning profile@4524e87a	581643de6cdab0e2
+sources/fallthrough through a closing compound statement@a9bfec28	d869c6ca9980e45b
+sources/file alignof variable array and pointer remains constant@21b65eab	6b06edf82843f5fc
+sources/file and record computed bounds fold with GNU array policy@9278b410	904217c73df08ebb
+sources/file scope cache survives intervening function@e15a954a	ed7db58aa9dd8c93
+sources/file scope predefined array lengths@b1661238	8b5748c1f5b93002
+sources/file sizeof and alignof leave nested runtime array queries unevaluated@6582125e	4f1226ed72935297
+sources/file sizeof pointer to variable array is constant@8c10843f	df0851ad60752213
+sources/file-scope scalar compound literal in typeof@1b094e91	6686218f26893f8f
+sources/final record member without semicolon@4627fc9f	6010376326f1e5e5
+sources/first-member pointer casts still publish legal symbolic addresses@037c77af	41bae82a51126a36
+sources/fixed enum aligned after its body@65270b0e	809c776396ef6193
+sources/fixed enum: aligned after a body that asks its layout@a83943bc	64f73843e179b395
+sources/fixed enum: aligned after a body that names a pointer to it@a58a3bc6	c19484602846219d
+sources/fixed enum: aligned after its body@46d96ad4	7c5b1fb4d3365942
+sources/fixed enum: attributes in its base, and references without it@33911762	db626b9f7b081b46
+sources/fixed enum: enumerators of the base's type before C23@93a7444e	88f4b8a5d7bd2460
+sources/fixed enum: enumerators of the enum's type after its list in C23@05c0edb8	c69e04ea6d54d20e
+sources/fixed outer variable inner dimension@36b77365	4dc3636b691e9846
+sources/flexible member after named field and unnamed padding@f5caba4a	acf4bbce710a399e
+sources/flexible member@420a289b	59dcdc6f2de3071e
+sources/float constants: exact __float128 initializers@2b56d0ed	c7ce6d8c2e41d4ca
+sources/float constants: folds in constant expressions@17a80aa2	210fbc1a20e47a82
+sources/float constants: result types@9076a171	2dc3ed37b783f69d
+sources/float constants: static initializers@b37346f1	c561daf6972f20e8
+sources/floating builtin constants and classify@67c3c9a4	ff285bb71900bc92
+sources/floating comparison builtin inherits GNU const-read evidence@53d259de	c984e42dab5ac6ac
+sources/floating environment lexical scopes@91dcf6f9	d1b64cdcd08592f2
+sources/floating immediate ICE cast@2c903d11	89665d13569ac3c2
+sources/floating pack operands are warning-only no-ops@05fc4d49	6cb4b68372139f7b
+sources/floating return conversion@c562d618	dd71006436d90799
+sources/for declaration scope@97975b2f	6721899bc14e782d
+sources/forward declaration does not sample later definition packing@8edeb8ae	baed495718f92ae8
+sources/frozen CRT packing spelling receives its source-time macro value@6cdeea64	03576469e81799a2
+sources/fully overridden scalar GNU range expressions are dead@c51ba1da	67565bb88073fd07
+sources/function labels separate from objects@a553ee7c	939bdd05cf9a9d25
+sources/function parameter adjustment@2e4806d0	4c7031e692a7c923
+sources/function pointer call supplies function argument target@c953cf01	5dff621b24970094
+sources/function returning callback@115bd7cf	66cd42bf5b023aa7
+sources/function-like action and alignment macros normalize before pack grammar@5b1f2b16	445e4d2b6fc4fba8
+sources/generated 257-association generic family@36a30ed4	499f87c31ec8d731
+sources/generated 257-association generic family@442903d5	e9d44145d4746102
+sources/generated 257-association generic family@a0ecbede	2eea40b520b5790f
+sources/generated 257-association generic family@f158c4bf	926b4d6b3334c9fe
+sources/generated 257-association generic stable-leaf family@1af1f123	34c0ed64ffe9b1be
+sources/generated 257-association generic stable-leaf family@23c4ddc4	a3a0e4e0c9bff2ea
+sources/generated 257-association generic stable-leaf family@84aa0d5d	cecde5fd9cea5a60
+sources/generated 257-association generic stable-leaf family@874c31cb	668fb7352937caa3
+sources/generated 257-association generic stable-leaf family@c7772881	9215a5e58ac1eb56
+sources/generated 257-association generic stable-leaf family@fef2b81a	fa2d1922e779b5f1
+sources/generated constant expression@0f64f711	fdd825fb33464da5
+sources/generated constant expression@20bacac1	2045a99938d2cb2d
+sources/generated constant expression@245c47dc	1348a647f32889c7
+sources/generated constant expression@2ad11059	fe4f2cedb30560af
+sources/generated constant expression@2c2888b2	b5dc41d5eb646c42
+sources/generated constant expression@391d0cad	c13907e98951df22
+sources/generated constant expression@3b436469	36f6d76a57800062
+sources/generated constant expression@3ecd379a	3201f4bad13466e1
+sources/generated constant expression@41a1303a	ddec88defe646a9d
+sources/generated constant expression@51b354d7	728c6fa3694b4282
+sources/generated constant expression@564e9465	a70783de87b4d93f
+sources/generated constant expression@58010468	4e0ae5e065cbfbab
+sources/generated constant expression@6384c5d5	1b56c71a87bbc249
+sources/generated constant expression@664bda91	2cb2979b0d7871b2
+sources/generated constant expression@678af463	30c8e606609eecec
+sources/generated constant expression@75956d50	008ee96dfc540a83
+sources/generated constant expression@75e87a6f	a434cdbb2cab0798
+sources/generated constant expression@788a74e8	37a622e8a546c260
+sources/generated constant expression@7ba64edf	9626565885f6cfbe
+sources/generated constant expression@9f33e159	5760fc3bd609e550
+sources/generated constant expression@a8e80a8f	fe6f86a68ac96e51
+sources/generated constant expression@ac5581af	8eafb384f23b0238
+sources/generated constant expression@ac72f223	af15835c62045078
+sources/generated constant expression@af7f4712	5aaa093074f48103
+sources/generated constant expression@afde715c	82b4bbcfe537bf4d
+sources/generated constant expression@c5570fc2	e7a9b83d4fe3e286
+sources/generated constant expression@ce3ca0f8	bbc1897beff06f4c
+sources/generated constant expression@cedbf9c7	16d1fa96752f335c
+sources/generated constant expression@d3fded12	3f6baf4cd5a5142f
+sources/generated constant expression@d56c210f	3b533a941e32214e
+sources/generated constant expression@e7beaac8	af3bcd8b167cd10a
+sources/generated constant expression@eb99b5d1	0cb9ee3b36aa20e4
+sources/generated prototype parameter names@0d2dcd64	231f7a328dbd9a8f
+sources/generated prototype parameter names@182ce13d	4a4c0ae158aa3103
+sources/generated prototype parameter names@1cd39421	d211bb69b13fb94f
+sources/generated prototype parameter names@1e1d267f	290ada6520a6af6d
+sources/generated prototype parameter names@1ff85d48	ef0ace3395ff47a3
+sources/generated prototype parameter names@245b919a	bcf8f84859349b14
+sources/generated prototype parameter names@4125f6c7	2ca6aeea5537ad1e
+sources/generated prototype parameter names@4306a4cc	49b26f2ba3afc184
+sources/generated prototype parameter names@611df8f8	994c4842b4087dd0
+sources/generated prototype parameter names@7398eba2	170f9f17a34f912f
+sources/generated prototype parameter names@7f6e1528	89f231f86dc11dee
+sources/generated prototype parameter names@8b4e65f3	5e011282457da29d
+sources/generated prototype parameter names@8e54112a	9d0f1a756cc869ed
+sources/generated prototype parameter names@9f468b05	85544a6cb0c858be
+sources/generated prototype parameter names@cb4c24e2	4631975f55ea444d
+sources/generated prototype parameter names@cc9731b3	aaa02446390e0d7d
+sources/generated prototype parameter names@d1c566ce	662b36d3fae7dac3
+sources/generated prototype parameter names@ecc09c83	375e457c3f53abad
+sources/generated prototype parameter names@f763a5a7	4a4c0ae158aa3103
+sources/generic array and function conversion@93bd0e7a	9a7ff9b682ae8029
+sources/generic atomics of records, arrays and long double@6c46b12a	390cef00627f1994
+sources/generic controls use intrinsic result types@a6ef74bf	9e5bd6e5a589f012
+sources/generic distinct pointer shapes share a nominal key@1d81289c	51d834f209c095a8
+sources/generic exact binding after scopes close@da1e75f1	e090af2db586cb2b
+sources/generic exact selected lvalue@c20266ff	0dd981f421c3497c
+sources/generic intrinsic controls retain narrow types and nested calls@ad9dbb64	5b0d05c7d689bd93
+sources/generic intrinsic controls select vector and void results@22fdb3b1	a17c65f50d78a554
+sources/generic later transparent attribute is inactive@afb88086	2e2cc15cbabf751c
+sources/generic nominal qualifiers retain exact checks@0a27ed22	9fcfa76165eec426
+sources/generic qualifier conversion@057fe7f9	d7cc2fa99c7bc962
+sources/generic source incomplete association@27e92066	f370662c7ce97bbb
+sources/generic unselected fault@1b566b05	f573c7b1e92971b7
+sources/generic: Microsoft and z/OS lists@a43bee1f	39b45f71aec827e1
+sources/generic: NSString of no literal in static initializers@b7fb9a5a	44b5a461b0b4947c
+sources/generic: a builtin's name in parentheses@bca6a0d5	cedd97a92449bd33
+sources/generic: assume_dereferenceable of a variable size@1efebd45	3d29cb1ca86fb885
+sources/generic: available@7fcec10b	08264638275cf0c0
+sources/generic: call_with_static_chain@bb220e06	ce1515e8e2140b89
+sources/generic: classify_type's classes@849eae23	8f4a347e00127022
+sources/generic: clear_padding@33cc9c0e	03ed72a76dce846f
+sources/generic: complex in a static assertion@9b8b6e72	520c436c40dc28d1
+sources/generic: complex of a const object in static data@cc8166b2	08ac423661211d75
+sources/generic: complex of qualified and aligned operands@52db81ff	6f0c5aea3a7def9e
+sources/generic: constant strings in static initializers@9d3136ee	d7d1ccb30f65b61d
+sources/generic: counted_by@c458a58d	0923b334047f1915
+sources/generic: cpu_supports of an unknown feature@f051459e	28cae5da06da64ee
+sources/generic: dump_struct@300d29fe	7df2b4abd7cd4a6b
+sources/generic: eh_return and constant strings@18583e03	c9383b7f62e28f58
+sources/generic: eh_return_data_regno's registers@e49736c6	98dd055661eb739f
+sources/generic: fence in constant contexts@77dee43d	236ef96b64b316e7
+sources/generic: fence of float vectors and complex values@1bee5145	d3a19d00c1f148e0
+sources/generic: function_start of a function's address@d6c0ff8a	82097b64dfe935c0
+sources/generic: function_start of folded addresses@d97b6ba1	215ac017bcc611ac
+sources/generic: hlsl resource pointer@bf3eb0bc	bbfe705d036f9fe5
+sources/generic: infer_alloc_token@5e0f38dd	5e3f276aa17f663b
+sources/generic: invoke@ffed4668	479d862e32e7f113
+sources/generic: launder's and dwarf_cfa's types@363ebfcd	e187f7f305f5cc12
+sources/generic: literal-only arguments in parentheses@1210416d	68e30848a9dff910
+sources/generic: omp_required_simd_align of complete types@ab6da21b	0613f1bff0588cf9
+sources/generic: os_log of 255 data arguments@d2838131	081d412356b7c2fc
+sources/generic: os_log@35124dfa	e055505ea60902cb
+sources/generic: preserve_access_index@2db354be	91986373d2b95246
+sources/generic: relocate of enums, arrays and vectors@fdca857f	1162ee0858ea1a36
+sources/generic: setjmp and longjmp@6a368146	4137cb0a7066e4d1
+sources/generic: the alloca variants', checks' and addresses' types@9c4c528a	0799a0f98d932d3b
+sources/generic: the leaves' prototypes@0f1cbc34	d03a5979afb73f13
+sources/generic: the unwinder's, the rounding mode's, the pointer's and the trap's leaves@b1d4f164	fbaf8a2bb56f0fce
+sources/generic: type traits' values and contexts@71df8703	e06d8ee906fd9c05
+sources/generic: vectorelements of a comma expression@d95345ca	c48b38edd56f183b
+sources/generic: verbose_trap of a const array through char pointers@c1267692	2a642fa27f70abee
+sources/generic: verbose_trap of a const array@39b30fa3	b598540b97fb38a0
+sources/generic: verbose_trap of a const pointer's value@415538b3	5908e4c7e79c50c2
+sources/generic: verbose_trap of a literal through void *@62538445	3415c03fab1cc0ea
+sources/generic: verbose_trap of a member array@c540ef4d	e2f6b13c71c062fb
+sources/generic: verbose_trap of an automatic const array@bfa55d04	fec4e16616b69770
+sources/glibc complex mode reaches sizeof@38360ce0	c22172209d06265c
+sources/glibc function attribute integration@46aa92a1	d66441256453348d
+sources/global address initializer@6764f643	b13653303ddfd3f5
+sources/global array initializer@4504e851	3eb606d62ac099a5
+sources/global declaration@8563b630	ac33df986c7a0c99
+sources/goto out of a cleanup's scope@45611631	c4e1dbd98c77f043
+sources/goto out of variable scope@47cf57c4	3bfaf683095f314b
+sources/goto past constant logical bounds@42d5a47c	5686508002fa0874
+sources/goto within a cleanup's scope@19bdae97	52970f0c5ddb19e3
+sources/goto within and out of nested statement expressions@2d927f8e	6d242d2d9884ed4b
+sources/goto within variable scope@b1bfd795	74eee6cf07047574
+sources/grouped attribute expressions with brackets@409bbe61	5406ca21ff41e6a1
+sources/grouped comma expression@d9c97c4e	a5937248e94e7dd8
+sources/half arithmetic in required constant expressions@988d878b	4cc4fe4fb32d438b
+sources/half constants round each operation before the next@80dafa63	378d697fe4e7a13f
+sources/half invalid constant arithmetic has Clang NaN signs@bd20cd69	ae1c94c9872c632d
+sources/half storage type in declaration query@9f431e28	099995244c00b702
+sources/implicit const array elements retain initialization zeros@f3cdfd35	d18d9c1b628450ca
+sources/implicit const record members retain initialization zeros@e76cd5cd	147505814c47bee0
+sources/implicit float zero uses the selected member's actual type@541cb385	36501abff0a382dd
+sources/implicit integer zero uses the selected member's actual type@b0dff5a1	12e97ab3b9bc2c04
+sources/implicit translation evaluation permits default-method-only typedef uses@fe4126a6	f808b4aa5cb8689a
+sources/implicit void roundtrips still publish legal symbolic addresses@c4b0be76	6179cea9a3d79bb2
+sources/independent builtin semantic mutation 0 agrees in -std=gnu17@59b21a32	4aea05c35c01d240
+sources/independent builtin semantic mutation 12 agrees in -std=gnu17@d92d3cd2	2929c729bbadb6b9
+sources/independent builtin semantic mutation 14 agrees in -std=gnu17@fe88af99	1a88455b1bf76b8f
+sources/independent builtin semantic mutation 15 agrees in -std=gnu17@9cf3dfb0	26c5b3d24ff85309
+sources/independent builtin semantic mutation 16 agrees in -std=gnu17@d465dd41	1bcfd01619a99121
+sources/independent builtin semantic mutation 18 agrees in -std=gnu17@3316f921	78f7211873c02931
+sources/independent builtin semantic mutation 2 agrees in -std=gnu17@1f8eabd5	63fd84622c6b7778
+sources/independent builtin semantic mutation 3 agrees in -std=gnu17@7dc07504	76dc2345a97a7211
+sources/independent builtin semantic mutation 5 agrees in -std=gnu17@63a3e9f9	7b5e995bc471382a
+sources/independent builtin semantic mutation 7 agrees in -std=gnu17@263faf4b	bd7bc6c15949656e
+sources/independent builtin semantic mutation 8 agrees in -std=gnu17@688d631b	b168731120893ca8
+sources/independent complex mutation 0 agrees in -std=gnu17@80b02480	6ced0989b2295325
+sources/independent complex mutation 10 agrees in -std=gnu17@4f50970d	4ba635fb87c782f3
+sources/independent complex mutation 11 agrees in -std=gnu17@83d3cc2d	e2635625624a0710
+sources/independent complex mutation 13 agrees in -std=gnu17@b1150f1f	397203c21aac6c46
+sources/independent complex mutation 15 agrees in -std=gnu17@5fd5f8b9	805aa573c6e2b67d
+sources/independent complex mutation 16 agrees in -std=gnu17@3640fbc2	1a188648da932fc5
+sources/independent complex mutation 17 agrees in -std=gnu17@06145ea6	61cfa93d5d8058dd
+sources/independent complex mutation 19 agrees in -std=gnu17@5dba8d23	c1b7a1e338b0006f
+sources/independent complex mutation 2 agrees in -std=gnu17@0bdb5905	d1c467ce663a6d19
+sources/independent complex mutation 3 agrees in -std=gnu17@2952ddc2	b8e34bf968b5b1bd
+sources/independent complex mutation 5 agrees in -std=gnu17@a4e2869d	28b6036e5dc032f7
+sources/independent complex mutation 6 agrees in -std=gnu17@31564238	4b3f69259b9b587b
+sources/indexed ABI inherited across sibling scopes@e9e34310	7a5c7128efeb301c
+sources/indexed aligned parameter redeclaration@0d261b52	a5169d7837dfe75b
+sources/indexed sibling scopes share linkage and restore outer set@6574c2a4	500d0872799738f5
+sources/inferred compound array bound is complete before typeof resumes@0fb6f6bf	bcc731eddb46f73d
+sources/initializer designator bindings remain source ordered@afb3ce36	5546bc4f8ff55390
+sources/inline sizeof variable array bound@32fd95d6	535e44de73c223ac
+sources/inline variable array sizeof@3f6fdbe3	f6d362b70974031e
+sources/inner prototype does not strengthen outer declaration@45884c22	0e4b3e70aa0d36b6
+sources/integer bases and suffixes are literal pack operands@d3d79675	7f07245eb0392c66
+sources/integer mode type reaches sizeof@2dd0ab8e	72db65773ffc2653
+sources/integer rank and cast in array bound@6df19ad1	5a0ca0eb4f9d17bd
+sources/intrinsic generic types are available in declaration bounds@8f5272e8	41012bfc3dae4e4d
+sources/intrinsic generic types are available in raw attribute queries@9cc730f8	9b2f34803cff99fc
+sources/intrinsic generic types respect an ordinary shadowing declaration@a388742f	eb3895235cbf8910
+sources/intrinsic immediate boundary accepts its maximum@06654a35	ccd8439d5f4563b1
+sources/intrinsic immediate range error remains a suppressible deferred diagnostic@98b0104f	a43fd9c6656d43dd
+sources/intrinsic immediate retains its source constant evaluation proof@ce583180	c7690777a920776b
+sources/intrinsic rounding argument accepts its defined encoding@4dfdc1c8	1b3680df36c13eab
+sources/intrinsics' results in an inferred array@1d9d4b2c	92816df9b1835adc
+sources/invalid expanded pack alignment remains a warning-only no-op@ffa44556	6cb4b68372139f7b
+sources/invalid pack values and trailing tokens preserve prior alignment@692f272b	6cb4b68372139f7b
+sources/labels as values: a computed goto's whole expression@3bf5b81e	cfe7df14d6827a79
+sources/labels as values@1b2bbeaf	9bca0f3daf25903a
+sources/later enum can use completed earlier common type@aa76bbc3	bb91bcaa52b2050c
+sources/leading GNU attribute declaration@e18d6c32	54e42133311a8c75
+sources/leading numeric alignment declaration@23371e59	a0ea396f58821789
+sources/leading standard attribute declaration@94c70751	4d2ab9e0339d5d85
+sources/library folds: comparisons and lengths in constant contexts@98834020	f02f76cce3a2a096
+sources/library folds: integers and floating values@82f7fc48	c8dabbcb7dcbf1f2
+sources/library folds: ordinary declarations beside overloads in constant contexts@f387ae9c	092fe7cbda8f916d
+sources/library folds: plain declarations of the builtins@bbc2888c	a28c963100cc7946
+sources/library folds: strings at offsets and in const arrays@3507e993	dcdd9c6171609caa
+sources/library folds: the selected ordinary declaration follows its overload@399467e2	48ac8f370f51f3cf
+sources/library folds: the selected ordinary declaration precedes its overload@b138514c	af711c7ea4f89f37
+sources/licm and vectorize_predicate's assume_safety@f5c3b17f	18523db812eb81d1
+sources/literal bytes retain their actual plain char element type@1d92eefc	0521581a4243749d
+sources/literal initialization gives an unsigned char array its declared type@d7e7e61d	7ab6011f27297cb8
+sources/local initialization@8db96195	61ff23e4b49d9b1c
+sources/local labels: a statement expression's, expanded twice@5548226e	5bba3199430a623f
+sources/local labels: an address of one@66f90c6b	16aaae356786a152
+sources/local labels: nested blocks' and the function's@11862488	7521752b610add00
+sources/local scope shadowing@713e06e0	43c4fbf50b4fe1b1
+sources/local static address initializer@ad259b2b	6e1d99046515f5a0
+sources/long concatenated string attribute list@d7327d43	1bfcfa4136b13ce1
+sources/long provisional enum chain retains exact high bits until completion@acd0c51f	b3036ac28c08d77e
+sources/loop hint counts and widths@711cb63a	5d815cc761bf2169
+sources/loop hints before each kind of loop@c5713116	82536088802540bc
+sources/loop pragmas clang drops, at file scope and before a statement@d2e97fd5	ecf15da36fee2a3f
+sources/macro message inside a function is already complete@fde2c9de	78aa81df4ae12259
+sources/macro nonnull regions retain begin and end@4ff89c15	4b6ff3522e9c9c95
+sources/macro pragma expansion retains diagnostic positions@ae5928f1	c6ab12f04798fb0d
+sources/macro replacement may supply the complete pack argument list@b1c67079	6cb4b68372139f7b
+sources/malformed options align directives are warning-only no-ops@dde5723e	f858113c080912c6
+sources/malformed pack creates no parser annotation@143a5a9e	5f4c9114fc79ac95
+sources/many records' members after a large type table@011976bc	53e162dcf527aab0
+sources/many records' members after a large type table@10914397	ec9cd1a7155b607e
+sources/many records' members after a large type table@60be844a	a7206238941b3ee0
+sources/member of a compound literal supplies its own type@a34ca103	0eccd1385bd62833
+sources/mixed compound assignment@4a3766af	a00a923d2c09d556
+sources/mixed unsigned maximum and negative enum values@9441bb4d	f9f4d5f5267856d3
+sources/mode attribute: the base's signedness kept@2a246563	5fa45ec278d460e8
+sources/multidimensional runtime sizeof@8ea61d70	85b57d737ae514b0
+sources/multiple compound literals participate in operand conversions@74c17b58	e05a78f9932f5e0c
+sources/multiple declarators retain separate attributes@83522d03	2f4258eb6e780b8c
+sources/multiversioning: C23-only attributes are ignored in gnu17@8e65753c	aa883c165f1c10e1
+sources/multiversioning: C23-only attributes are ignored in gnu23@5364151f	2c09afc6e955fdd1
+sources/multiversioning: a cpu_specific declaration alone is accepted (#1447)@d18f9b8d	a76deb0bacbab569
+sources/multiversioning: cpu_specific versions and their dispatcher (#1447)@bbe36b90	b7db024b6a0adeb9
+sources/multiversioning: inline nonnull beside target default@a81bbb1a	bf1578d3db0dccd8
+sources/multiversioning: nothrow beside target default@36b3e01a	a545c39b33b94bf2
+sources/multiversioning: used beside target default@b0891195	a545c39b33b94bf2
+sources/musttail: GNU's noreturn and C11's _Noreturn callees@076492f9	7fbf75c93d7d2d23
+sources/musttail: GNU's other spelling@fd05112f	c6f0a9a8fc2d76e5
+sources/musttail: _Generic's call@ce0664a1	dc1e99a22b815f8d
+sources/musttail: __extension__'s call@9b1bc428	4c7bc9afaac48110
+sources/musttail: a K&R definition's promoted parameters@047b9025	3250a59379dbfc52
+sources/musttail: a [[noreturn]] clang drops after the definition, in C23@818f1dc3	aadce35bb41a6e2f
+sources/musttail: a [[noreturn]] clang drops after the definition@818f1dc3	aadce35bb41a6e2f
+sources/musttail: a [[noreturn]] declared after the call@42bb324f	59915df23775c9b9
+sources/musttail: a call in a loop, a switch and a nested block@994cc19a	110c25c4bdfdb4ee
+sources/musttail: a call through a dereference@2eec362f	b6ab78eef6bb779e
+sources/musttail: a cleanup's scope ended before it@67973c4d	679fc1091c4cb397
+sources/musttail: a direct tail call@0aaac4c4	c6f0a9a8fc2d76e5
+sources/musttail: a leaf's qualifiers beneath 63 pointers@b1644a50	432f7e31523a0507
+sources/musttail: a leaf's qualifiers beneath 64 pointers@e059398c	72ef8869294e1490
+sources/musttail: a leaf's qualifiers beneath 65 pointers@284be81a	d14f1068d0076e54
+sources/musttail: a parenthesized call@a3f142ba	bce369ffc872f3c3
+sources/musttail: a pointer's call@a399a924	24b7d95bfcb45286
+sources/musttail: a qualified parameter and a pointer's qualifiers@ca14c046	01c2637eaf07cb2a
+sources/musttail: a selection's call@f5dd5b33	a54bf8d4dd29342b
+sources/musttail: a static chain's call@dbd31aff	2b576b29de209cac
+sources/musttail: a static chain's function chain@ee945edd	f947ba2c43cb7927
+sources/musttail: a void function@e5aa27c8	7bfa3c5e57bfc30d
+sources/musttail: after a label@5e929744	1c72cf960f4403c1
+sources/musttail: clang's C23 spelling@70e3334a	280594e398d69f4b
+sources/musttail: in a statement expression@7d8dccb9	d122b4cfa8fa4741
+sources/musttail: pointers' qualifiers beneath arrays of no bound@bbab94a7	02e99b13f5dc6eb4
+sources/musttail: pointers' qualifiers beneath arrays of the same bound@8d1dbd2b	19f49304429e7f96
+sources/musttail: structs, long double, complex and __int128@8de9dccc	fbe83315ebf14220
+sources/musttail: twice@15731b53	280594e398d69f4b
+sources/named nested records keep independent namespaces and layout@474145b6	9db8b27ef43c4cf2
+sources/named pack stack restores exact layouts@5ddf5c24	81e56e60c64212f7
+sources/narrow compound assignment@2f1f5bc0	92384887b77559ff
+sources/negative provisional successor keeps wide expression type@51f93661	f211efebe1ae169f
+sources/nested prototype's constant in its own later bound@fc61d9ca	7b0bf197ff35e437
+sources/nested record enum chains remain separate@ff01cb9c	7c7e34c1f8ab9b99
+sources/nested record layout@c0345d0e	dff29cdf6ac8e1c7
+sources/nested selections retain prefix, infix and comma roots@d62f56de	2c2b59632ba49bad
+sources/nested selections retain vector values and lvalues@c7c9105e	bb533560ee1418df
+sources/nested shared diagnostic stack@2987deba	ed6207534a5276e6
+sources/nested statement expression type query@f1ba1d6a	f15a2eb5308b2c15
+sources/nested switch does not leak expression values@c3fe198c	d020777dd23992a1
+sources/nested type array bound@1e75f6b5	41316f53f613945e
+sources/nested type name parameter does not hide outer typedef@63fab25a	e853be46c368b4c0
+sources/no diagnostic pragma allocates no history@f84133e4	a40853018604d378
+sources/no_builtin on definitions@6f92721e	95709a3f0d4b7179
+sources/nonnull trailing tokens are already canonicalized@94e001b6	32f69f5426ac7afc
+sources/null pointer assignment@9ee6729c	465efaac4aa1db9d
+sources/operators' values in an inferred array@abf8a29f	d6b0dd4592bc0ab3
+sources/options align packs, pushes and resets on the pack stack@42bdbec9	43d011324a8809e8
+sources/ordered initializer declarators@b9513aaa	189a7b201abeb8cf
+sources/ordered typedef declarators@9f10b892	5499a86f7c63e7bd
+sources/ordinary call supplies function argument target@78af62e8	23e789ce6a557808
+sources/original vector source fixture 0@c2831f61	b4452759a1f05071
+sources/original vector source fixture 100@e9960a8a	c2530f1329e9442b
+sources/original vector source fixture 101@75a4a5fe	c2530f1329e9442b
+sources/original vector source fixture 102@1aabb3aa	bb2070bd4a63f20b
+sources/original vector source fixture 105@1528cce1	ca8220baff710fa3
+sources/original vector source fixture 10@67375db6	c0b4b637385626ef
+sources/original vector source fixture 110@953b5ed8	50bc254971595542
+sources/original vector source fixture 111@5cbe0682	50bc254971595542
+sources/original vector source fixture 112@f5615b06	50bc254971595542
+sources/original vector source fixture 113@0d7a1bec	50bc254971595542
+sources/original vector source fixture 114@0bca1266	50bc254971595542
+sources/original vector source fixture 115@4f4ec323	50bc254971595542
+sources/original vector source fixture 11@23517f71	c0b4b637385626ef
+sources/original vector source fixture 124@8505561a	5f7724fc6693ffba
+sources/original vector source fixture 125@3705cb2a	7bbdd6d5c199788b
+sources/original vector source fixture 126@d31184f6	2823460e0edab4d9
+sources/original vector source fixture 127@c0c3220d	3ef202e397870331
+sources/original vector source fixture 128@4351ba2f	9f1927aec6f0e03b
+sources/original vector source fixture 129@bd9950e4	dae14400a6a8c289
+sources/original vector source fixture 12@65055508	c0b4b637385626ef
+sources/original vector source fixture 130@794c6068	d927195891e6fd0a
+sources/original vector source fixture 131@f90a068a	8f35523cc8c4865d
+sources/original vector source fixture 132@4084ec70	399eb864b4e78763
+sources/original vector source fixture 133@04b04d92	6fd999c8ae11e7b0
+sources/original vector source fixture 13@b1721c3e	c0b4b637385626ef
+sources/original vector source fixture 144@bd06ed12	40b9dbf807abfeca
+sources/original vector source fixture 14@4ebb9854	c0b4b637385626ef
+sources/original vector source fixture 15@cc1fe79c	82f8481aad035426
+sources/original vector source fixture 16@c3f4037f	8f614354fdc384cb
+sources/original vector source fixture 1@6faadc4b	946a44399a339ae7
+sources/original vector source fixture 21@c10f21af	b01238db5de35d5d
+sources/original vector source fixture 22@b6fcb23c	c2f0875b8f18418d
+sources/original vector source fixture 24@156f58f9	b8c059b70f4ae9fb
+sources/original vector source fixture 25@526a8a88	eb89f766a42e41d3
+sources/original vector source fixture 28@87c3bece	158a5970c2156f15
+sources/original vector source fixture 29@031288b6	5abb52c31c7be0a9
+sources/original vector source fixture 2@8188cfc1	946a44399a339ae7
+sources/original vector source fixture 30@42bc464b	508543ed047d4c19
+sources/original vector source fixture 31@d4d2bba8	000b7020220bf12b
+sources/original vector source fixture 32@448fd70b	e72fd0fb43c16b61
+sources/original vector source fixture 34@fa437428	b72b0773fe20c84e
+sources/original vector source fixture 36@31aef40e	a9912f4f76f76047
+sources/original vector source fixture 38@d148e24c	4faf3656e2ad85f7
+sources/original vector source fixture 39@b46cdecd	94760c9f95282807
+sources/original vector source fixture 3@95b6ff5f	bd51833dd25c9c37
+sources/original vector source fixture 41@34c117ef	a55fea68bbb28c78
+sources/original vector source fixture 42@98b9c5e4	1db455f360379d0d
+sources/original vector source fixture 44@eee1ab3e	4ba09d1ac05e2b2f
+sources/original vector source fixture 46@840e0690	ffe95a582b8420b7
+sources/original vector source fixture 4@20dc285b	bd51833dd25c9c37
+sources/original vector source fixture 50@0e84dbfb	78be6b23c9554212
+sources/original vector source fixture 53@7b2260e1	2efc0a7a7b18ecf4
+sources/original vector source fixture 54@0386f9ee	529d0194d95c5ad0
+sources/original vector source fixture 56@c4a5b41a	a341b072df76976f
+sources/original vector source fixture 57@25d618e9	fcf4ee5dcf95ee71
+sources/original vector source fixture 58@2643f939	52a7a444beb7fa48
+sources/original vector source fixture 59@0398f7df	45a36771d69a343a
+sources/original vector source fixture 5@0e487de9	0be7268f94833697
+sources/original vector source fixture 6@ac14cb1e	0be7268f94833697
+sources/original vector source fixture 72@fc8e17e5	52441addfcfcaa31
+sources/original vector source fixture 73@f87418bd	e50f096be9593560
+sources/original vector source fixture 74@9c59fbc6	26016e68911c0378
+sources/original vector source fixture 76@84e74a9f	2abfc297cbe3d978
+sources/original vector source fixture 77@ba3e398a	f99be662fe8af386
+sources/original vector source fixture 7@4b4d65a0	c0b4b637385626ef
+sources/original vector source fixture 81@8dae51ab	4fd050c099bae820
+sources/original vector source fixture 83@f5fecf0a	de01327ef7cc391a
+sources/original vector source fixture 84@5aea5a12	5fa395a60bb197a0
+sources/original vector source fixture 86@f8dd6963	884d7fe4ca96b5b8
+sources/original vector source fixture 88@acbff5ce	bfa43027b9c77cda
+sources/original vector source fixture 89@c215a0e4	21e8353d7d03d701
+sources/original vector source fixture 8@65317f45	c0b4b637385626ef
+sources/original vector source fixture 90@fd53682a	e73c67af4ea1ce42
+sources/original vector source fixture 92@08938819	296ead08f6350f8f
+sources/original vector source fixture 96@ba860185	2e95ed8e08518cdf
+sources/original vector source fixture 97@93b92304	f85d3e8ef773ba40
+sources/original vector source fixture 98@99044ded	0c5c74f410612d48
+sources/original vector source fixture 99@ab38f606	c2530f1329e9442b
+sources/original vector source fixture 9@1195b4e8	c0b4b637385626ef
+sources/outer overload supplies unique function argument target@02338b17	ea16ac1ea9fd6068
+sources/outer-switch fallthrough placement is deferred without warning analysis@54a8d822	b910f5751569a6a8
+sources/overload attribute after another in its list@cca8d14a	8cbae2a173d44570
+sources/overload attribute with empty arguments@f5ef51c5	157402a2024becf9
+sources/overload call in raw attribute@bd37a362	cd1ce521b1588b76
+sources/overload common parameter redeclaration@6af41109	8e57f2f952ef2ab4
+sources/overload deep pointer qualification@5e56ffbf	f95a483309ce2469
+sources/overload exact source visibility@47afd61a	1a6949b9391d2385
+sources/overload lexical hiding@9e9af6e3	5ebe5baf785547f7
+sources/overload names outside attribute lists make no tables@3ecf01a0	bac1945ad10d9399
+sources/overload nested calls use selected type@cea305cb	5d9cf8bd1fab0a8d
+sources/overload one unmarked signature@81dda6e4	4fc2581f66cc2a1e
+sources/overload parenthesized callee@7ed6e6df	d69b9983f3851903
+sources/overload selects ordinary unmarked definition@33df8e46	f4f1902b5db524c4
+sources/overload standard attribute in clang's namespace@3effea2e	13a056f4b8a27f8a
+sources/overload tgmath selection and unavailable fallback@8a0a2fe8	97f392cb13f05913
+sources/overload typeof uses selected type@0c9e2a5b	a7e5f4c113ffb7dc
+sources/overload zero argument call in raw attribute@cf0c519d	3c559de7c8a296a0
+sources/overridden effectful initializer is absent from the final value@4ae5735b	6e3f00b2f170b555
+sources/overridden effects do not poison another surviving aggregate member@091c12b2	1b313df3fd35b1a9
+sources/overridden file-scope nonconstant writes do not poison final const value@6da8c4a0	cf23232c886b82eb
+sources/pack after alignment specifier@c995a5a1	a0ea396f58821789
+sources/pack after atomic type@566d6dbb	c6ab12f04798fb0d
+sources/pack after declaration qualifier@e288799c	fa09129f1934d614
+sources/pack after for declaration type@1a7c0765	46294fe830c6d837
+sources/pack after forward tag@174215e9	ac33df986c7a0c99
+sources/pack after generic association type@01e3404c	7f00a5c82f23cf15
+sources/pack after parameter comma@b4ecc072	e19e69851f678dfd
+sources/pack after prefix attribute@02714829	00941fc0a4d0b301
+sources/pack after record type@4accc16b	00941fc0a4d0b301
+sources/pack after sizeof type@6fec9f77	05bcfd11be473408
+sources/pack after tag reference@aaaa5ad3	54e42133311a8c75
+sources/pack after typedef type@34c7c974	a0ea396f58821789
+sources/pack after typeof specifier@cdb4926a	c6ab12f04798fb0d
+sources/pack after typeof type@e4dc9d43	c6ab12f04798fb0d
+sources/pack at parameter start@dda509f0	a0ea396f58821789
+sources/pack before pointer declarator@a42d8974	4b6ff3522e9c9c95
+sources/pack before record close@fdc14009	4d2ab9e0339d5d85
+sources/pack before record member@b4cab11e	1eb4e478f39b1879
+sources/pack between declaration specifier and name is accepted@4ea7b8ee	ac33df986c7a0c99
+sources/pack between parameter specifier and name is accepted@3f6af123	a0ea396f58821789
+sources/pack macros expand actions labels and alignment at the original source point@9400e965	03576469e81799a2
+sources/packed enum layout preserves int enumerator types@22da9485	aa0a68e2c3cdc6b5
+sources/packed record layout integration@d4d396e8	212e6fe7e868d236
+sources/packing outlives C function scope@5d6dc640	0d8b0ef0336bcac3
+sources/parameter array pointer qualifiers@60248eac	c28f83f9d1b6c6fd
+sources/parameter list's redefinition of a tag only warns@33bba1c4	5999c8b80387b2a1
+sources/parameter promotions@a706c4df	e597b2616ca8a64e
+sources/parameter-list constant in a later parameter's bound@9cbcb8a3	db09b0f5fbe12431
+sources/parameter-list constant shadows the file scope's in the body alone@83b69145	47a142d1802434b9
+sources/parameter-list definitions' nested tags and constants in the body@98f6fe7f	c536cf932043a67a
+sources/parameter-list tags of a bound and a typeof in the body@ab0fa720	05be72016d9dd914
+sources/parenthesized declarator@942d836e	b2e13614528d9426
+sources/pointer arithmetic after a void roundtrip still publishes an address@e25d42ae	79bc36d2dfaa5f45
+sources/pointer array strings infer object count@145fd5f6	3cac30035a89d344
+sources/pointer comparison before record completion@609bb25b	4424f875b272e46f
+sources/pointer index that wraps in 64 bits@c329535a	0307d2894322e9fe
+sources/pointer qualification@d756c0b5	d636086d234ff584
+sources/pointer qualifier removal does not change the actual member type@275b890c	213b644bc6a033a2
+sources/pointer read@60498cda	2123de3f4e303ff8
+sources/pointer subscript@6b7feec2	f8c090dd433730cc
+sources/pointer updates@a819ca95	d77c214efb949b90
+sources/postfix packed record layout integration@7699a266	3d6f1d2bfe3f284f
+sources/pragma operator packing retains expansion coordinates@54169334	6cb4b68372139f7b
+sources/pragma operator stringization preserves macro packing history@e6c98a13	03576469e81799a2
+sources/predefined arrays participate in sizeof and typeof queries@6d67ad66	219aa374ab2a2ce6
+sources/predefined function names retain static array types@59d17301	ade4684268792450
+sources/predefined static array addresses initialize static pointers@04eefadb	b4fa353bb944fceb
+sources/prefix and postfix updates@2725e3ad	50b39c0677cdde4d
+sources/preprocessor canonicalizes warning-only no-ops and strings@eb9c448d	a40853018604d378
+sources/pretty alias size is evaluated at declaration position@d363c555	1fb339ab1774afe6
+sources/probability: accepted forms@6708be39	f22c7d0a965b5e17
+sources/probability: const objects in its expression@477558e9	2fe36482f185598c
+sources/probability: discarded operands the evaluator evaluates@5b22bb01	227fbbe3e85ca952
+sources/prototype star bound@e0eece08	6fe15f46983f3df1
+sources/prototype variable bound@9b50581b	1933bde794266b2b
+sources/prototype's list is a scope of its own@88bec4af	c7dd2206d0913a21
+sources/qualifier-only pointer storage and arithmetic retain readable array provenance@27bb0608	2e7caeab71d06bd3
+sources/raw abstract function pointer query@d5b95a6d	b3f7fa09095fc0f4
+sources/raw abstract function query@689c055d	e3f1e8ded92efff3
+sources/raw attribute nested tag query jobs@ef978e0f	e6ea98eb1622a1ac
+sources/raw attribute nested vector builtin destination type@6f0b403a	bce67e898ec447d4
+sources/raw attribute vector builtin arbitrary argument slice@06a5d0ef	0942e3e7db84c12e
+sources/raw attribute vector builtin destination type@7a7c3393	1290b70c5e18d9d4
+sources/raw cast selects exact function address@f1630f99	988bc4f537d30fd2
+sources/raw constant query proof propagates saturated conversion@b3a2e86f	542931c7360700a2
+sources/raw constant-reader attribute list@82b02da3	a9f091c81d75ee57
+sources/raw outer call supplies function argument target@37b99993	35cdfa098939c5ed
+sources/rdtsc, pause and xgetbv@ba83809b	041b90e958a3ce3f
+sources/real invalid constant arithmetic has Clang NaN signs@9beccf2d	1435af44ef5d07c1
+sources/real literal immediate integer cast@88a800b5	7f12a3a5ac3a199d
+sources/record assignment and return@60390c2a	9550fb79918bb132
+sources/record captures packing at its opening brace@90520ea8	c15b64222225d9a1
+sources/record compound literal in a typeof declaration@032d7d8f	35383996977b19f5
+sources/record declaration@645c7a68	54e42133311a8c75
+sources/record forward completion@4d540e35	ee789bbd2620870d
+sources/record member access@5cfe89c0	695449821289ccb1
+sources/record opening samples pack before nested directive@55498cb9	a60f34e8197e3ea8
+sources/record recursion@4f4f3df3	fdc9bf216ac88e1a
+sources/record tag shadow@51a3fc77	60407b6f5b98206c
+sources/record transparent union annotation accepts each compatible pointer member@509f6597	1a11476285c13ca4
+sources/register parameter's prototype tag ends with the prototype@47f366f8	55d117a93c7cd621
+sources/register pointer does not make its pointee register@ed2de19b	3790b7f0e698ce81
+sources/repeated block extern@6796da9c	cfb595d6b34d1d81
+sources/repeated deep variable array size queries@40fb96a0	d22a7bb37acbdef7
+sources/retained packing pragma changes record layout@54b6dd90	6cb4b68372139f7b
+sources/retained pragma follows prepared attributed declarations@87ffd291	215edce62139c1bf
+sources/return integer arithmetic@37d2f8bd	6af828f4b1ec8766
+sources/reversed subscripts in an inferred array@265fac70	5195d07f0adfc8df
+sources/same-type pointer storage and arithmetic retain readable array provenance@e08dd3a2	8c44d5ddb08fa6cd
+sources/scalar compound literal in a typeof declaration@9e0bdf2f	a9dcb1a21268ab1e
+sources/sccs is a completed canonical ident record@db652550	78aa81df4ae12259
+sources/scoped, HIP and OpenCL atomics@751cd53c	7b151f648d63727a
+sources/semantic context: object 0, use 0@668c3056	5993d65b21118a2f
+sources/semantic context: object 0, use 1@dc418513	ae5b67f913dd5897
+sources/semantic context: object 0, use 2@8ee3cc95	5c01001c9cf3feb5
+sources/semantic context: object 0, use 3@e0f933b1	ed0b1150b71db21f
+sources/semantic context: object 0, use 4@787e65cf	fbe94d4f8091aa8e
+sources/semantic context: object 0, use 5@182218bb	641e91ab13964cd2
+sources/semantic context: object 0, use 6@36558f88	90e36bf6c5b2d9d5
+sources/semantic context: object 0, use 7@dc5170e7	b025bf9a3b2ab707
+sources/semantic context: object 0, use 8@30b371b7	a8a7b64fc0d663e0
+sources/semantic context: object 1, use 7@62132b68	1becad4590af2f94
+sources/semantic context: object 1, use 8@a499f1aa	8a7c3461bc97c5f4
+sources/semantic context: object 2, use 7@bcd2d811	5c0ec2d561cd2f69
+sources/semantic context: object 2, use 8@be221cd7	8c8184a329b0208a
+sources/separate assume_nonnull regions retain pointer declarations@a1b425d3	b86dbd2826e45089
+sources/separate type names reuse prototype names@a8c6ceeb	cd1bcb6ddefd2d64
+sources/short-circuit constant@b2942ada	4ca2ddba719db2f1
+sources/signed bit precise successor widens by value width@c26dd700	f694a8b0cca02b71
+sources/signed int successor has provisional long and completed unsigned int@4527fe28	bf555f92ae67c785
+sources/signed largest successor wraps without host overflow@ec439d71	a8ec4716a6e855b1
+sources/sized legacy atomics, the legacy minimum and maximum, and their result types@af5f7b6b	ea81abef6525221a
+sources/sizeof constant array@8393f9b0	bd2d5b36404cfe42
+sources/sizeof evaluated variable array operand@0be2d7d2	30c6cb338b7b40bb
+sources/sizeof expression@3e89e4e6	764d949d2890273d
+sources/small explicit expression enumerators all become int@0bb9c6f5	2d8a0b96cbf4d69f
+sources/sole flexible member GNU extension@5854bacf	98e28baead84b65c
+sources/source anonymous record offset retains member typedef identity@a6f34e35	6b8735b54f14efa3
+sources/source anonymous record offset retains nested layout@6d6e5bcd	5e96f58a887add9f
+sources/source member offset binding identity@f97d6b37	90cfefc64d9ae60d
+sources/source member offset builtin@0d6e70c7	5693d08fbe4c552c
+sources/source type compatibility builtin@69a9be72	744e878e58893ebd
+sources/sparse const arrays do not materialize their declared extent@81021ca6	273aa5fbaec2841b
+sources/sparse local inferred array@58f6b628	ec152c000d7b1343
+sources/specifier alignment applies to completed typedef@1f041471	6175cb4983ee7d7f
+sources/standard attribute ICE integration@a2477179	ec029f00b7ce6aa2
+sources/standard fallthrough null statement@b50d618c	dbd07969c459b9bb
+sources/statement expression aggregate declaration type query@0952e71e	abb7854fb44e15b2
+sources/statement expression control type query@7ffb2a21	64d94eaf1be65aa5
+sources/statement expression local declaration type query@e581fa97	0ab781648bfe815c
+sources/statement expression loop type query@e3d6f9a7	02b80e909fa7205e
+sources/statement expression multiple declarator type query@582b9f50	bcf00f2c9f68b024
+sources/statement expression nested block type query@816bf2f9	883116a660227e70
+sources/statement expression nested declaration type query@c45272dc	1b353729335bdb00
+sources/statement expression pure folded assertion@185554d2	85a5a40b49e19c04
+sources/statement expression size is constant@de6564c8	ff9c64aaeec155f7
+sources/static pointer to variable array@7caa9dd8	61c2d25b48dd2c06
+sources/stdc library: C17's declaration is called@66b41ba7	0974ace757e2499c
+sources/stdc library: a block's declaration and a const parameter@cf2fd2b1	21978e6701322ecc
+sources/stdc library: another prototype's declaration is called@0c8e863c	f3f2730b5b3a7dc3
+sources/stdc library: result types and folds@291fc906	d1916b7752b38861
+sources/string subobject bounds are source constants@f1bed688	35699fca3e052c91
+sources/struct defined in a definition's parameter list@ec3487ef	212995d02cc2483e
+sources/struct whose only named member is a flexible array member@b95fa6f9	d42f12c23aaa0473
+sources/struct-valued elements of an inferred array@fb16a546	75ea2747c54e7656
+sources/suspended enum query retains an intrinsic captured before a shadow@0374a0ce	5a1f1e0042de9bef
+sources/suspended typeof retains nested VLA owner@f27cb806	c29c91e8a9a7eaf5
+sources/switch inside statement expression owns its own cases@eef6bf48	64b926aab0c44314
+sources/tag attribute nested new identity@89666b7b	5a7eb885559cb2c9
+sources/tag attribute source ordered identity@efe4c0df	acc9f9ab64d210a7
+sources/the build's immediates of the x86 builtins in range@7ed9fd0c	0f4ac239231df397
+sources/the last of two cleanups@6c62a9a6	970b0d170b318705
+sources/the lock-free queries of a function's pointee and of a tag completed after them@1aa3d80c	432f3d3cf33a954e
+sources/the rotates, unpredictable and assume@5406d538	2b5e3e6059bef839
+sources/the unroll pragmas clang drops, and one it reads a literal from@c7f2c79f	8a6196af88daa163
+sources/the unroll pragmas@54de0175	9eb3adc6f43b3735
+sources/thread local declaration identity@beda0cb1	a5711c7796313626
+sources/thread local pointer to variable array@5f430f55	440247a8b90e5405
+sources/transparent arithmetic member uses assignment conversions@2f8e087a	a0d71017a4118c6a
+sources/transparent array candidate does not decay@879d3677	7e8eb6c2ce3dd850
+sources/transparent atomic candidate remains distinct@5e0d59a7	f849a75521a2a526
+sources/transparent atomic member uses value conversion@085b7595	30489d3b03b22b7c
+sources/transparent attribute source activation permits later call@fc37a65a	e175f8a048675e10
+sources/transparent first atomic floating member is allowed@c3c2f900	f482dd4aed6e3e15
+sources/transparent function first member both declaration orders@e9eb3f04	1c93c8abaa58eaa4
+sources/transparent function pointer after activation is compatible@c3f53e9c	eaa3dd4496e0121b
+sources/transparent function pointer and ordinary nominal identity@6377632a	f757a3e3dc0cae40
+sources/transparent function second member both declaration orders@41aa4e14	5d52ea1445691fdc
+sources/transparent later floating member is allowed@e62472fe	361bab172b0dfead
+sources/transparent member declaration alignment does not change validation@f649d5a4	a8729d0beb911b09
+sources/transparent pointer and null arguments@337075b0	cdaff735e54978a4
+sources/transparent recursive callback relation terminates@de1371ea	ee964efe4e1383de
+sources/transparent top qualifier matching@41cbdc34	0c143b5809f4e716
+sources/transparent union composite declaration preserves the visible pointer parameter@f0fdb086	8fb18ca17fedc3bf
+sources/transparent union composite in reverse order preserves the visible pointer parameter@955bd3e0	937ca8faaf358517
+sources/transparent union converts scalar arguments through its first member@c3944e05	9697eedd07a926fc
+sources/transparent union definition retains its written local parameter type@0a900f7a	b51b0b302d1569fa
+sources/transparent union history permits a later compatible function pointer initializer@dc7a7570	eaa3dd4496e0121b
+sources/transparent union remains a distinct ordinary type@044c5638	c0a8bd2668a01548
+sources/transparent unrelated union parameters remain incompatible@86f2de2f	25f2753575332d88
+sources/type name nested prototypes reuse outer names@6c1f6aa7	4313890dc46d768e
+sources/type name sibling prototypes reuse names@e19757f1	5a07438a837499fb
+sources/type name unnamed parameters do not collide@e4ce9ebd	d822836e80da44b5
+sources/type-changing pointer roundtrips still publish legal symbolic addresses@f3b47278	461c68827b3a1535
+sources/typedef alignment reaches alignof@b48f07aa	7410eef074fd24b4
+sources/typedef canonical identity ignores nested alignment attributes@80bf09b8	361bab172b0dfead
+sources/typedef declaration@3561b0f5	231800e390640363
+sources/typeof cast supplies exact overload context@76f6020b	5773f47d76a764fc
+sources/typeof pointer to variable array runtime sizeof@475ded8d	c7cba345e651f45a
+sources/typeof preserves pointed qualifiers@b9461841	6dd6e6df2b280495
+sources/typeof statement expression effects are unevaluated@0bce3143	cc22bb729b5f6b04
+sources/typeof statement expression local declarations@2a77fb51	2f49c87826252605
+sources/typeof variable array runtime sizeof@ea45b4e8	4c1f5ed43b64f919
+sources/typeof variable typedef retains original extent@b25fe474	ce619c3d63b628a7
+sources/typeof's prototype names the visible tag@cf2a3fc7	c7c2e22b146ef019
+sources/unavailable selected address from a set remains usable@b9cb6fc1	03bcf910b2fc51d0
+sources/union flexible members, GNU's extension@ae2f0546	bdf7e044576fe928
+sources/union layout@9459726c	f858113c080912c6
+sources/union packing does not change enum alignment@44e146c7	f29ca554cec4f079
+sources/unknown floating pragma states warn and leave the setting unchanged@5da0bc8c	1f1879b1ec1d3eb1
+sources/unmatched final push and remark groups are retained@13295851	ac33df986c7a0c99
+sources/unmatched named pop leaves stack but explicit alignment still applies@9900184a	47b81679eb65477e
+sources/unnamed bitfield before a sole flexible member@97b34c8b	d7752f44e648d09c
+sources/unnamed zero-width field before a sole flexible member@e99e1ba7	53e652f4e163687c
+sources/unsigned bit precise declaration@e1c3e6fa	20b5a1c20f04fbc5
+sources/unsigned bit precise successor widens by value width@671a27d2	3719059202d75dba
+sources/unsigned int successor widens to unsigned long@dfdb2ba4	5eae56f31d557f12
+sources/unsigned largest successor wraps without host overflow@20360703	d26ec38c78672667
+sources/unsigned one-bit _BitInt@d36a06f0	cc2c3744a0857f60
+sources/unsigned plain char: a char-based enum and u8 constants in C23@08c3e09f	ac477eeede8e0ef1
+sources/unsigned plain char: character constants@91bc41a3	7539f17d17992d3d
+sources/unsigned plain char: values@bab35584	b450438b362c04a2
+sources/varargs list and type operands@d49b689f	2404096d37fd9b2f
+sources/variable array runtime sizeof@d996ce65	9211e6d1b52ad949
+sources/variable array sizeof bound@0356b21f	ec5ee7010403ef8e
+sources/variable array typedef reuse@f56ed1c1	a5b77ada6a8f1c36
+sources/variadic cleanup of one named parameter@e0b0409f	17f600105ca9e9b1
+sources/vector compound literal preserves its typedef type@d0754be8	fa750e8650b2b950
+sources/vector lanes in an inferred array@1a6f054a	d6c3dde854b8f176
+sources/vector type reaches sizeof@3ea91a9f	15e108cd6fe50329
+sources/void intrinsic result can be returned from a void function@371e259f	05851a54431fd55f
+sources/warning state is not C block scope@7530e626	a40853018604d378
+sources/weak after static function definition ignored@a564e6f3	63dddc6a7ee136bd
+sources/weak after static object definition ignored@b065172a	f7c3b3a724507aad
+sources/weak after the definition ignored@1b998696	f1e53866a7158d34
+sources/weak block-scope extern@322cdd0f	aa883c165f1c10e1
+sources/weak block-scope function@2e3a3aa9	b2bfa7d042693e59
+sources/weak declarators after one's definition@c65a6a27	41150b8f9c56416c
+sources/weak typedef ignored@b38fff3c	e19e69851f678dfd
+sources/what follows a loop hint's argument ignored@cc40c664	05c4e69933dbd1e5
+sources/while and do controls@4704e89d	bfc2bb237f0f0131
+sources/wide unsigned enumerator used after completion@1d067a3f	0cbbcb3f18a288b7
+sources/wrapping atomics, the byte flag and the lock-free queries@840ff108	521035d80c0c8caa
+sources/wrong access types still publish legal symbolic addresses@71a518d1	bf7f0c2007dc197d

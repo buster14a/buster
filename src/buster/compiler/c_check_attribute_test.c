@@ -460,7 +460,7 @@ static void check_test_attribute_fixture(CheckTest* test, const CheckAttributeFi
             {
                 // The authored offending names/numbers/punctuators above fit this buffer. Identifier spellings
                 // are returned from the intern table; pp_spelling writes at most 24 bytes for generated integers.
-                const uint32_t source = parser.tokens.sources[place];
+                const uint32_t source = parse_source_index(&parser.tokens, place);
                 length = pp_spelling(&pp, pp.output.kinds[source], pp.output.values[source], pp.output.locations[source], buffer, &bytes);
                 spelled = length < sizeof(buffer);
             }

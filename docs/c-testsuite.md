@@ -58,11 +58,19 @@ With `--tier1 --code-size`, the harness also reports
 [#1116](https://github.com/buster14a/buster/issues/1116)'s code-size comparison.
 `--code-size` requires `--tier1`, implies `--cross-check`, and cannot be
 combined with `--self-test`. `--check-code-size` enables the same measurement
-and also enforces its size bound. The object compile additionally requests
-`--tier1-function-sizes`; its `object-compile.txt` remains separate from the
-cross-check's `readelf` and linker logs. Both modes validate that report
-against the emitted object and the cross-check's existing Clang `-O0` object,
-so both comparisons inspect the same objects.
+and also enforces its size bound. After a passing cross-check, the harness
+compiles the test to an object once more, `object-sizes.o`, with
+`--tier1-no-inline` and `--tier1-function-sizes` (#2646); its report,
+`object-sizes.txt`, remains separate from the cross-check's `readelf` and
+linker logs. The bound compares each function with Clang's same function, as
+`measure-tier1-programs` measures SQLite and Lua: since #2541 step 2,
+`--tier1` inlines, and the cross-check's object, whose callers hold their
+callees' bodies and whose dead callees have none, compared other code (62,350
+bytes against 45,748 at `d876a5e0`, where the same functions not inlined took
+48,365 against 47,293). The size object must link with `cc` and run with the
+expected output too, and both modes validate its report against it and the
+cross-check's existing Clang `-O0` object. The cross-check's own object keeps
+the driver's inlining, which its symbol comparison allows for.
 
 The final `tier1-code-size` row for `corpus=c-testsuite` reports each count and
 byte sum. The gate compares the **sum of the sizes of all emitted Tier 1
@@ -86,12 +94,11 @@ result above the bound does not fail the command. With `--check-code-size`,
 it records `enforced=1`, and that result makes the command exit 1. Missing or
 invalid evidence fails both modes. Every failure retains its files.
 
-Hosted and native correctness use `--code-size` for c-testsuite. Its observed
-aggregate exceeds the bound and remains visible as `gate=fail` with
-`enforced=0`; CI does not claim it passed that bound. #1116's enforced corpus
-is the original Lua corpus, all 34 source files including `luac.c`, through
-`measure-tier1-programs --check-code-size=lua`. The strict c-testsuite flag
-remains available for checking its own bound explicitly.
+Hosted and native correctness use `--check-code-size` for c-testsuite
+(#2646): 45,227 bytes against Clang's 47,293 when it was enabled, where #2643
+had measured 2.65% above the bound. `measure-tier1-programs --check-code-size`
+enforces the same bound on SQLite's `sqlite3.c` and on #1116's original Lua
+corpus, all 34 source files including `luac.c`.
 
 Failed hosted shards upload the retained Buster and Clang objects, body-size
 reports and oracle logs in

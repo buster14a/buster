@@ -301,6 +301,22 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "struct S b[2];struct S d[2][2];A a;memset(b,0xff,sizeof b);memset(d,0xff,sizeof d);memset(a,0xff,sizeof a);param(&b,d,&a);bytes(b,sizeof b);bytes(d,sizeof d);bytes(a,sizeof a);\n"
         "return (int)(h^(h>>32));}\n",
         "generic-clear-padding-sugar", clang);
+    // __builtin_clear_padding of arrays reached through a cast's type name, a call's result and a member (#1842's 1b): an
+    // array a pointer of a type name or a return type points to is written with sugar (a declarator's parentheses, a
+    // typedef, typeof), and clang keeps it; an element subscripted out of one, and a pointer to a record, it clears; a
+    // member's own declarator decides, through `.` and `->`, and a member pointer's too.
+    check_test_program_source(test,
+        "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "struct S{char c;int i;};typedef struct S A[2];struct M{A a;struct S b[2];struct S (*p)[2];char t;};\n"
+        "static struct S g2[2];static struct S g23[2][3];static struct M m;\n"
+        "static struct S (*ret(void))[2]{return &g2;}static A *reta(void){return &g2;}static struct S *rets(void){return g2;}\n"
+        "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
+        "#define T(arg,obj) do{memset((void*)&(obj),0xff,sizeof(obj));__builtin_clear_padding(arg);bytes((const void*)&(obj),sizeof(obj));}while(0)\n"
+        "int tested(int n){h=(unsigned)n;void* v=g2;void* w=g23;struct M* pm=&m;T((struct S (*)[2])v,g2);T((A *)v,g2);T((__typeof__(g2) *)v,g2);\n"
+        "T(&(*(struct S (*)[2][3])w)[1],g23);T(&((struct S (*)[2][3])w)[0][1],g23);T((struct S *)v,g2);T(&m.a,m);T(&m.b,m);T(&m.a[1],m);\n"
+        "T(&pm->a,m);T(&pm->b,m);m.p=&g2;T(m.p,g2);T(pm->p,g2);T(ret(),g2);T(reta(),g2);T(rets(),g2);T(&ret()[0][1],g2);\n"
+        "return (int)(h^(h>>32));}\n",
+        "generic-clear-padding-sugar-reached", clang);
     // __builtin_clear_padding of a type nested 90 levels (#1842), past the walk's first room, whose stack grows: before, past
     // 64 levels it was refused, and its frame written past the stack.
     check_test_program_source(test,
@@ -338,6 +354,68 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "static struct L89 deep;int tested(int n){h=(unsigned)n;memset(&deep,0xff,sizeof deep);__builtin_clear_padding(&deep);\n"
         "for(unsigned long i=0;i<sizeof deep;i++)mix(((const unsigned char*)&deep)[i]);return (int)(h^(h>>32));}\n",
         "generic-clear-padding-deep", clang);
+    // __builtin_clear_padding's repeats in each of their forms (#1842), against clang's build: two inner arrays in place,
+    // each a nest of loops of its stores; an array of four levels, the nest's most; one of six, past them, in the table's
+    // loop; and an array of a record of 50 runs, too many to make in place, its repeats the table's too; each alone and as
+    // an array's element.
+    check_test_program_source(test,
+        "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
+        "#define T(decl) do{decl;memset((void*)&v,0xff,sizeof v);__builtin_clear_padding(&v);bytes((const void*)&v,sizeof v);}while(0)\n"
+        "#define F(n) char a##n;int b##n;\n#define F10(n) F(n##0)F(n##1)F(n##2)F(n##3)F(n##4)F(n##5)F(n##6)F(n##7)F(n##8)F(n##9)\n"
+        "struct P{char c;int i;};struct E{F10(1)F10(2)F10(3)F10(4)F10(5)};struct L{char c;struct E e[20];short t;};\n"
+        "struct N4{char c;struct P p[2][3][2][5];char d;};struct N6{char c;struct P p[2][2][2][2][2][3];char d;};\n"
+        "struct G2{char c;struct P p[30];short s;struct{char x;long y;}q[30];char z;};\n"
+        "int tested(int n){h=(unsigned)n;T(struct G2 v);T(struct N4 v);T(struct N6 v);T(struct L v);\n"
+        "T(struct G2 v[2]);T(struct N4 v[3]);T(struct N6 v[2]);T(struct L v[2]);return (int)(h^(h>>32));}\n",
+        "generic-clear-padding-loops", clang);
+    // __builtin_clear_padding past what the plan once refused (#1842): an element of 2.2 million runs (an array of 1.1
+    // million records inside one), arrays inside the arrays of a record's member, a union's array, whose members' bits
+    // overlap, and an element past 4 GiB (each mmap'd, the last's ends alone touched). Clang's walk takes every element of
+    // every array, which takes it too long, so its build is of the expected bytes, cleared by the predicates the check reads.
+    check_test_program_against(test,
+        "#define CLEAR(p,pad) __builtin_clear_padding(p)\n"
+        "void *memset(void *, int, unsigned long);void *mmap(void *, unsigned long, int, int, int, long);int munmap(void *, unsigned long);\n"
+        "struct P{char c;int i;};struct W{char h;struct P a[1100000];char z;};struct Q{char c;struct{short s;struct P p[3];}in[400000];};\n"
+        "union V{struct P a[100000];char b[5];};struct Big{char c;long x[536870912];char t;};\n"
+        "static int pad_p(unsigned long k){return k%8>=1&&k%8<=3;}\n"
+        "static int pad_w(unsigned long i){unsigned long a=__builtin_offsetof(struct W,a);\n"
+        "return i>=a&&i<a+sizeof(struct P)*1100000?pad_p(i-a):i!=0&&i!=__builtin_offsetof(struct W,z);}\n"
+        "static int pad_q(unsigned long i){unsigned long a=__builtin_offsetof(struct Q,in);unsigned long e=(i-a)%28;return i<a?i!=0:e<2?0:e<4?1:pad_p(e-4);}\n"
+        "static int pad_u(unsigned long i){return i>=5&&pad_p(i);}\n"
+        "static int pad_big(unsigned long i){return (i>=1&&i<8)||i>sizeof(struct Big)-8;}\n"
+        "static int bad;static void check(const unsigned char* p,unsigned long first,unsigned long end,int (*pad)(unsigned long))\n"
+        "{for(unsigned long i=first;i<end;i++)bad+=p[i]!=(pad(i)?0:0xff);}\n"
+        "static void* map(unsigned long n){return mmap(0,n,3,0x4022,-1,0);}\n"
+        "int tested(int n){bad=0;struct W* w=map(sizeof *w);struct Q* q=map(sizeof *q);union V* u=map(sizeof *u);struct Big* g=map(sizeof *g);\n"
+        "if(w==(void*)-1||q==(void*)-1||u==(void*)-1||g==(void*)-1)return -1;unsigned char* gb=(unsigned char*)g;\n"
+        "memset(w,0xff,sizeof *w);memset(q,0xff,sizeof *q);memset(u,0xff,sizeof *u);memset(gb,0xff,4096);memset(gb+sizeof *g-4096,0xff,4096);\n"
+        "CLEAR(w,pad_w);CLEAR(q,pad_q);CLEAR(u,pad_u);CLEAR(g,pad_big);\n"
+        "check((const unsigned char*)w,0,sizeof *w,pad_w);check((const unsigned char*)q,0,sizeof *q,pad_q);check((const unsigned char*)u,0,sizeof *u,pad_u);\n"
+        "check(gb,0,4096,pad_big);check(gb,sizeof *g-4096,sizeof *g,pad_big);\n"
+        "munmap(w,sizeof *w);munmap(q,sizeof *q);munmap(u,sizeof *u);munmap(g,sizeof *g);return bad*1000+(n&7);}\n",
+        "#define CLEAR(p,pad) do{unsigned char* b_=(unsigned char*)(p);unsigned long n_=sizeof *(p);\\\n"
+        "for(unsigned long i_=0;i_<n_;i_=n_>(1ul<<32)&&i_+1==4096?n_-4096:i_+1)if(pad(i_))b_[i_]=0;}while(0)\n"
+        "void *memset(void *, int, unsigned long);void *mmap(void *, unsigned long, int, int, int, long);int munmap(void *, unsigned long);\n"
+        "struct P{char c;int i;};struct W{char h;struct P a[1100000];char z;};struct Q{char c;struct{short s;struct P p[3];}in[400000];};\n"
+        "union V{struct P a[100000];char b[5];};struct Big{char c;long x[536870912];char t;};\n"
+        "static int pad_p(unsigned long k){return k%8>=1&&k%8<=3;}\n"
+        "static int pad_w(unsigned long i){unsigned long a=__builtin_offsetof(struct W,a);\n"
+        "return i>=a&&i<a+sizeof(struct P)*1100000?pad_p(i-a):i!=0&&i!=__builtin_offsetof(struct W,z);}\n"
+        "static int pad_q(unsigned long i){unsigned long a=__builtin_offsetof(struct Q,in);unsigned long e=(i-a)%28;return i<a?i!=0:e<2?0:e<4?1:pad_p(e-4);}\n"
+        "static int pad_u(unsigned long i){return i>=5&&pad_p(i);}\n"
+        "static int pad_big(unsigned long i){return (i>=1&&i<8)||i>sizeof(struct Big)-8;}\n"
+        "static int bad;static void check(const unsigned char* p,unsigned long first,unsigned long end,int (*pad)(unsigned long))\n"
+        "{for(unsigned long i=first;i<end;i++)bad+=p[i]!=(pad(i)?0:0xff);}\n"
+        "static void* map(unsigned long n){return mmap(0,n,3,0x4022,-1,0);}\n"
+        "int tested(int n){bad=0;struct W* w=map(sizeof *w);struct Q* q=map(sizeof *q);union V* u=map(sizeof *u);struct Big* g=map(sizeof *g);\n"
+        "if(w==(void*)-1||q==(void*)-1||u==(void*)-1||g==(void*)-1)return -1;unsigned char* gb=(unsigned char*)g;\n"
+        "memset(w,0xff,sizeof *w);memset(q,0xff,sizeof *q);memset(u,0xff,sizeof *u);memset(gb,0xff,4096);memset(gb+sizeof *g-4096,0xff,4096);\n"
+        "CLEAR(w,pad_w);CLEAR(q,pad_q);CLEAR(u,pad_u);CLEAR(g,pad_big);\n"
+        "check((const unsigned char*)w,0,sizeof *w,pad_w);check((const unsigned char*)q,0,sizeof *q,pad_q);check((const unsigned char*)u,0,sizeof *u,pad_u);\n"
+        "check(gb,0,4096,pad_big);check(gb,sizeof *g-4096,sizeof *g,pad_big);\n"
+        "munmap(w,sizeof *w);munmap(q,sizeof *q);munmap(u,sizeof *u);munmap(g,sizeof *g);return bad*1000+(n&7);}\n",
+        false, "generic-clear-padding-repeats", clang);
     // va_arg of a Microsoft list (#148, clang's EmitMSVAArg) against clang's build: 8-byte slots built by hand, read as an
     // int, a float and a double, structs of 3, 4, 8 and 16 bytes (the 3- and 16-byte ones through their slots' pointers),
     // a long double, a _Complex double and an __int128 through theirs, then __builtin_ms_va_copy into a list through a
@@ -624,8 +702,56 @@ static __attribute__((noinline)) void check_test_generic_cpu_programs(CheckTest*
         "generic-cpu-init", clang);
 }
 
+// __builtin_clear_padding's repeats (#1842, c_check_program_padding.c): unrolled (check_lower_padding_unroll), a table of
+// a plain entry and a repeated one, three instances of 8 bytes in each of four combinations of two outer pairs, comes out
+// as 13 plain entries sorted by offset, the table loop's offsets; with 100 instances (past the inline cost) and with no
+// repeats, it stays as it is; an unrolled run of zeros joins the next. In place (check_lower_padding_cost), each shared
+// repeat costs one nest of loops, and a repeat past the nest's levels is left to the table.
+static __attribute__((noinline)) void check_test_generic_clear_padding_unroll(CheckTest* test)
+{
+    _Alignas(64) static uint8_t buffer[4096];
+    Arena scratch = { .base = buffer, .length = 0, .capacity = sizeof(buffer) };
+    const uint64_t r = BUSTER_CBUILTIN_PADDING_REPEATED;
+    uint64_t table[] = { 1, 0, 1, 0, 0, 0, 40, 3 << 8, 4 | r, 2 << 8, 3, 8, 4, 16, 2, 0, 2, 100, 2, 1000 };
+    static const uint64_t offsets[] = { 4, 12, 20, 40, 104, 112, 120, 1004, 1012, 1020, 1104, 1112, 1120 };
+    uint64_t* result = NULL;
+    uint32_t count = 0;
+    const bool unrolled = check_lower_padding_unroll(table, 2, &scratch, &result, &count);
+    bool exact = unrolled && count == sizeof(offsets) / sizeof(offsets[0]) && memcmp(result, table, BUSTER_CBUILTIN_PADDING_HEADER * sizeof(*table)) == 0;
+    for (uint32_t i = 0; exact && i < count; i += 1)
+    {
+        const uint64_t* entry = result + BUSTER_CBUILTIN_PADDING_HEADER + i * BUSTER_CBUILTIN_PADDING_PLAIN;
+        exact = entry[0] == offsets[i] && entry[1] == (offsets[i] == 40 ? 3u << 8 : 2u << 8);
+    }
+    check_test_expect(test, exact, "clear_padding: a table's few repeats unroll into plain entries, sorted, at the loop's offsets");
+    table[10] = 100;
+    uint64_t* untouched = NULL;
+    const bool large = check_lower_padding_unroll(table, 2, &scratch, &untouched, &count);
+    const bool plain = check_lower_padding_unroll(table, 1, &scratch, &untouched, &count);
+    check_test_expect(test, !large && !plain && untouched == NULL, "clear_padding: many repeats, or none, keep the table");
+    // An inner array's last run of zeros and its parent's after it, joined: 2 instances of 2 bytes at 6, by 8, then 4 at 16.
+    uint64_t joined[] = { 1, 0, 1, 0, 0, 0, 6 | r, 2 << 8, 2, 8, 1, 0, 0, 0, 16, 4 << 8 };
+    const bool unrolled_joined = check_lower_padding_unroll(joined, 2, &scratch, &result, &count);
+    check_test_expect(test, unrolled_joined && count == 2 && result[6] == 6 && result[7] == 2 << 8 && result[8] == 14 && result[9] == 6 << 8,
+                      "clear_padding: an unrolled repeat's last run of zeros joins the run after it");
+    // In place, a run of 3 bytes costs 12 typed entries, of 2 bytes 6, and a repeat's nest of loops
+    // BUSTER_CBUILTIN_PADDING_LOOP a level: the table's plain entry and its repeat of three levels; two entries sharing a
+    // repeat of one level, one nest; not sharing it, two; a repeat past the nest's levels, the table's alone.
+    const uint64_t levels = check_lower_padding_cost(table, 2);
+    uint64_t pair_of[] = { 1, 0, 1, 0, 0, 0, 1 | r, 3 << 8, 64, 12, 1, 0, 0, 0, 10 | r, 2 << 8, 64, 12, 1, 0, 0, 0 };
+    const uint64_t shared = check_lower_padding_cost(pair_of, 2);
+    pair_of[16] = 32;
+    const uint64_t apart = check_lower_padding_cost(pair_of, 2);
+    table[14] = BUSTER_CBUILTIN_PADDING_LEVELS;
+    const uint64_t deep = check_lower_padding_cost(table, 2);
+    check_test_expect(test, levels == 12 + 6 + 3 * BUSTER_CBUILTIN_PADDING_LOOP && shared == 12 + 6 + BUSTER_CBUILTIN_PADDING_LOOP &&
+                           apart == 12 + 6 + 2 * BUSTER_CBUILTIN_PADDING_LOOP && deep == UINT64_MAX,
+                      "clear_padding: in place, a shared repeat's loops cost one nest, and a repeat past its levels can't be");
+}
+
 static __attribute__((noinline)) void check_test_generic_builtins(CheckTest* test, const char* clang)
 {
+    check_test_generic_clear_padding_unroll(test);
     check_test_generic_builtin_sources(test, clang);
     check_test_generic_builtin_programs(test, clang);
     check_test_generic_cpu_programs(test, clang);

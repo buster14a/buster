@@ -1335,7 +1335,9 @@ as clang's is.
 
 `SOURCE_DATE_EPOCH` must contain only decimal digits and fit a nonnegative
 signed 64-bit value; signs, whitespace, empty values and suffixes are fatal
-errors. Its time is UTC. All three macros require a successful libc calendar
+errors, a unit's only error at `-c` and `-fsyntax-only` too, where the checker
+reports no memory failure after a preprocessor that refused to start (#2996).
+Its time is UTC. All three macros require a successful libc calendar
 conversion and a year from 0000 through 9999, so their fixed spellings fit
 without truncation. Unrepresentable `time_t` values, a failed current-time read,
 failed calendar conversions and out-of-range calendar fields produce fatal
@@ -1957,8 +1959,14 @@ shows the parameter it passed through, matching Clang. Generated spellings get
 an additional scratch-space note. Per-file physical line tables are built only
 when a diagnostic needs them, 64 bytes at a time; `#line` remains
 scoped to each inclusion. Source bytes, definition locations and scratch
-spellings remain alive for the whole unit. Source excerpts and carets are not
-implemented.
+spellings remain alive for the whole unit. Under each located line, the
+primary's and each note's, the renderer writes clang's caret display
+(`pp_diagnostic_snippet`, #2376): the source line with its gutter of presumed
+line numbers and a caret under the column ([the preprocessor
+guide](commands/preprocessor.md#caret-display-2376)), with the highlighted
+ranges a diagnostic's producer gives it, mapped through the expansion history
+as clang maps them. Fix-its and scratch-space excerpts are #2376's later
+pieces.
 
 The renderer assembles one diagnostic, its include stack and all expansion or
 definition notes in a 2 KiB stack buffer, growing into temporary scratch only
@@ -3424,7 +3432,9 @@ spellings alone would miss this change (#272).
   #109's comparison prints our stream with clang's spacing
   ([the fuzzing](preprocessor-fuzz.md), "Clang's `-P` printer, emulated").
 - Diagnostics include presumed locations, include stacks and macro backtraces
-  (#108, above). Source excerpts and carets remain unimplemented.
+  (#108, above), and clang's source lines, carets and, for the diagnostics
+  that give them so far, highlighted ranges (#2376); not yet fix-it lines or
+  scratch space's lines.
 - C++ (`-x c++`), dependency output (`-M`) aren't supported.
 - `-E`'s line markers for the pragma lines that a `_Pragma` without its `(`
   reads past (a directive's among a macro's arguments, another `_Pragma`'s):

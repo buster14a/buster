@@ -8,6 +8,17 @@
 static const CheckDriverDefaultWarningFixture check_driver_unused_local_typedef_fixtures[] =
 {
     {
+        .name = "source enables unused binding warnings with default command-line policy",
+        .source = "#pragma clang diagnostic push\n"
+                  "#pragma clang diagnostic warning \"-Wunused-variable\"\n"
+                  "int in_scope(void) { int unused; return 1; }\n"
+                  "#pragma clang diagnostic pop\n"
+                  "int outside(void) { int unused; return 2; }\n"
+                  "#pragma clang diagnostic warning \"-Wunused-local-typedef\"\n"
+                  "int local_type(void) { typedef int T; return 3; }\n",
+        .warnings = 2,
+    },
+    {
         // Unused block typedefs, a variable array's with a comma bound and a pointer to one among them, and one a
         // declaration's specifiers use.
         .name = "a block's unused typedefs, a variable array's among them",

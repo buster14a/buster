@@ -383,9 +383,9 @@ static uint32_t check_input_external_source_parse(CheckInputReader* reader, Chec
 // with its index in the preprocessor's output).
 static bool check_input_double_colon(const Parser* parser, uint32_t token)
 {
-    const bool before = token > 0 && parser->tokens.kinds[token - 1] == PARSE_KIND_COLON && parser->tokens.sources[token - 1] == parser->tokens.sources[token];
+    const bool before = token > 0 && parser->tokens.kinds[token - 1] == PARSE_KIND_COLON && parse_source_index(&parser->tokens, token - 1) == parse_source_index(&parser->tokens, token);
     const bool after = token + 1 < parser->tokens.count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON &&
-                       parser->tokens.sources[token + 1] == parser->tokens.sources[token];
+                       parse_source_index(&parser->tokens, token + 1) == parse_source_index(&parser->tokens, token);
     return parser->tokens.kinds[token] == PARSE_KIND_COLON && (before || after);
 }
 
@@ -741,14 +741,13 @@ static bool check_input_availability_handle(CheckInputReader* reader, CheckInput
 static void check_input_availability_redeclaration(CheckInputReader* reader, uint32_t token, uint32_t object, bool visible, uint32_t point)
 {
     const uint64_t mark = reader->scratch->length;
-    const bool scalar = reader->parser->options.scalar;
     const CheckSparseWide all = reader->output->attributes;
     const CheckInputAttributes* own = check_input_attributes_at(reader->output, token);
     // Room for every record of the declarations, twice: the earlier list and the one being made.
     uint64_t room = own != NULL ? own->count + 1u : 1u;
-    for (uint32_t first = check_input_attributed_next(all, 0, token, scalar); first < token; first = check_input_attributed_next(all, first + 16, token, scalar))
+    for (uint32_t first = check_input_attributed_next(all, 0, token); first < token; first = check_input_attributed_next(all, first + 16, token))
     {
-        for (uint32_t selected = check_input_attributed_group(all, first, token, scalar); selected != 0; selected &= selected - 1)
+        for (uint32_t selected = check_input_attributed_group(all, first, token); selected != 0; selected &= selected - 1)
         {
             const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
             const bool seen = reader->objects[d] == object && (!visible || check_input_declaration_visible(reader, d, token));
@@ -760,10 +759,10 @@ static void check_input_availability_redeclaration(CheckInputReader* reader, uin
     CheckAvailabilityEntry* made = earlier != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckAvailabilityEntry, room) : NULL;
     reader->output->resource |= made == NULL;
     uint32_t earlier_count = 0;
-    for (uint32_t first = made != NULL ? check_input_attributed_next(all, 0, token, scalar) : token; first < token;
-         first = check_input_attributed_next(all, first + 16, token, scalar))
+    for (uint32_t first = made != NULL ? check_input_attributed_next(all, 0, token) : token; first < token;
+         first = check_input_attributed_next(all, first + 16, token))
     {
-        for (uint32_t selected = check_input_attributed_group(all, first, token, scalar); selected != 0; selected &= selected - 1)
+        for (uint32_t selected = check_input_attributed_group(all, first, token); selected != 0; selected &= selected - 1)
         {
             const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
             const bool seen = reader->objects[d] == object && (!visible || check_input_declaration_visible(reader, d, token));
@@ -1180,12 +1179,11 @@ static void check_input_attribute_merge_checks(CheckInputReader* reader, uint32_
     }
     checked |= modular != NULL;
     bool reported = false;
-    const bool scalar = reader->parser->options.scalar;
     const CheckSparseWide all = reader->output->attributes;
-    for (uint32_t first = checked && !reader->lane && object != 0 ? check_input_attributed_next(all, 0, token, scalar) : token; !reported && first < token;
-         first = check_input_attributed_next(all, first + 16, token, scalar))
+    for (uint32_t first = checked && !reader->lane && object != 0 ? check_input_attributed_next(all, 0, token) : token; !reported && first < token;
+         first = check_input_attributed_next(all, first + 16, token))
     {
-        const uint32_t lanes = check_input_attributed_group(all, first, token, scalar);
+        const uint32_t lanes = check_input_attributed_group(all, first, token);
         for (uint32_t selected = lanes; !reported && selected != 0; selected &= selected - 1)
         {
             const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -1235,13 +1233,12 @@ static void check_input_attribute_merge_checks(CheckInputReader* reader, uint32_
 static uint32_t check_input_tcb_collect(CheckInputReader* reader, uint32_t declaration, bool leaves, const CheckInputAttribute** list, uint32_t capacity)
 {
     const uint32_t object = reader->objects[declaration];
-    const bool scalar = reader->parser->options.scalar;
     const CheckSparseWide all = reader->output->attributes;
     uint32_t total = 0;
-    for (uint32_t first = object != 0 ? check_input_attributed_next(all, 0, declaration + 1, scalar) : declaration + 1; first <= declaration;
-         first = check_input_attributed_next(all, first + 16, declaration + 1, scalar))
+    for (uint32_t first = object != 0 ? check_input_attributed_next(all, 0, declaration + 1) : declaration + 1; first <= declaration;
+         first = check_input_attributed_next(all, first + 16, declaration + 1))
     {
-        const uint32_t lanes = check_input_attributed_group(all, first, declaration + 1, scalar);
+        const uint32_t lanes = check_input_attributed_group(all, first, declaration + 1);
         for (uint32_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t d = first + (uint32_t)__builtin_ctz(selected);
@@ -1309,10 +1306,9 @@ static void check_input_tcb_calls(CheckInputReader* reader)
     const Parser* parser = reader->parser;
     CheckInput* input = reader->output;
     const uint32_t count = parser->tokens.count;
-    const bool vector = BUSTER_VECTOR_PATH(!parser->options.scalar);
     const uint64_t mark = reader->scratch->length;
-    for (uint32_t opening = check_sparse_present(input->body_declarations) ? check_sparse_next(input->body_declarations, 0, count, vector) : count; opening < count;
-         opening = check_sparse_next(input->body_declarations, opening + 1, count, vector))
+    for (uint32_t opening = check_sparse_present(input->body_declarations) ? check_sparse_next(input->body_declarations, 0, count) : count; opening < count;
+         opening = check_sparse_next(input->body_declarations, opening + 1, count))
     {
         const uint32_t function = check_sparse_get(input->body_declarations, opening);
         const uint32_t closer = parser->tree.parents[opening];

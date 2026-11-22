@@ -17,7 +17,13 @@ requirements. [Command index](README.md).
   register claims and stored-value continuations. `benchmark-tier1-allocation`
   measures full preparation and allocation (`--after-scalar MS` runs scalar
   integer work before each sample); `test-checker-driver`'s Tier 1
-  fixture runs every recipe through `--tier1` against clang.
+  fixture runs every recipe through `--tier1` against clang. A frame address
+  at offset 0 from rsp, rbp, r12 or r13 is the base's register copy, `mov r64,
+  base`, a byte shorter than its lea (#3149): `test-tier1-allocation` checks
+  every base's copies against the encoder and the Zen 5 model's price of them,
+  and runs one natively, and `test-checker-driver`'s frame fixture
+  (`check_test_driver_tier1_frame`) compiles four functions that recompute one
+  after a call by `--tier1 --verify`, against clang.
   [The allocation guide](../../docs/tier1-allocation.md)
   records producer constraints and the corpora's spills with and without
   rematerialization. Its clobbers (#2574), where a call evicts a recomputable
@@ -28,13 +34,18 @@ requirements. [Command index](README.md).
   use (#2768) but not where its hint names another value's range (#2784), and a
   victim that continues in its slot and a range following an interval evicted
   where it starts (#2774: `continuation_intervals`, which the random inputs take
-  with required uses too) have their traces in
+  with required uses too) and a range of its own value named to another value's
+  recipe, which takes the recipe's register only (#2834) have their traces in
   `tier1_allocate_hints_test.c`, as does a range's alternate (#2734:
   `alternate_intervals`, taken where its interval's value still holds the
   register and it is free), which the random inputs and their reference model
   too; avoided registers (#2767: `avoided_registers`, a range live across a fixed
   register's sequence) have their traces on the scan and the common path and their
-  random properties in `tier1_allocate_avoided_test.c`; `test-tier1-emit` checks
+  random properties in `tier1_allocate_avoided_test.c`, and a leaf's callee-saved
+  registers, which every range of a looping leaf that spills avoids in its second
+  allocation (#2819: `Tier1CfgInput.avoided_general`, `tier1_emit_cfg_leaf`), have
+  `test-checker-driver`'s leaf fixture and `test-tier1-pipeline`'s loop past five
+  registers; `test-tier1-emit` checks
   which values the CFG consumer finds read on every iteration of their loops
   (`tier1_hot_recipes_test.c`). Use the shared 9700X lock per build/test/measurement and
   CPU 2 for timing.

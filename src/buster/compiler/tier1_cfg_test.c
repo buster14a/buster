@@ -46,6 +46,9 @@ struct Tier1CfgTestBuilder
     uint8_t use_required[BUSTER_TIER1_CFG_TEST_USES];
     // 1 for the definition's own use, at its value's definition position: a required one asks for a register there.
     uint8_t use_definition[BUSTER_TIER1_CFG_TEST_USES];
+    // The register a use reads its value in (#2646), UINT8_MAX for none, given to the input where use_registers asks.
+    uint8_t use_register[BUSTER_TIER1_CFG_TEST_USES];
+    bool use_registers;
     uint32_t phi_count;
     uint32_t phi_value[BUSTER_TIER1_CFG_TEST_PHIS];
     // A phi's operand for each of its block's predecessors, in the order the edges list them.
@@ -91,6 +94,10 @@ struct Tier1CfgTestTally
     uint64_t carried_mutants;
     uint64_t carried_killed;
     uint64_t carried_refused;
+    // #2611: CFGs whose anchors and chosen predecessors were compared with those read from a given dominator tree, as is
+    // and with an entry added before it, and their blocks with a latch among their predecessors.
+    uint64_t given_trees;
+    uint64_t given_latches;
     // #2767: general ranges that avoid a fixed sequence's registers, and ranges of a sequence's reader across it, which
     // don't avoid that sequence's.
     uint64_t avoiding_ranges;
@@ -199,6 +206,7 @@ static void tier1_cfg_test_use(Tier1CfgTestBuilder* builder, uint32_t value, uin
     builder->use_instruction[u] = instruction;
     builder->use_required[u] = required;
     builder->use_definition[u] = 0;
+    builder->use_register[u] = UINT8_MAX;
     builder->use_count += 1;
 }
 
@@ -251,6 +259,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* use_offsets = arena_push_array(arena, builder->value_count + 1, sizeof(uint32_t), 4);
     uint32_t* use_positions = arena_push_array(arena, builder->use_count + 1, sizeof(uint32_t), 4);
     uint8_t* use_required = arena_push(arena, builder->use_count + 1, 1);
+    uint8_t* use_registers = builder->use_registers ? arena_push(arena, builder->use_count + 1, 1) : 0;
     uint32_t* phi_offsets = arena_push_array(arena, blocks + 1, sizeof(uint32_t), 4);
     uint32_t* phi_values = arena_push_array(arena, builder->phi_count + 1, sizeof(uint32_t), 4);
     uint32_t* phi_operand_offsets = arena_push_array(arena, builder->phi_count + 1, sizeof(uint32_t), 4);
@@ -265,7 +274,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
     uint32_t* sequence_readers = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
     uint32_t* sequence_operands = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
     uint32_t* sequence_results = arena_push_array(arena, builder->sequence_count + 1, sizeof(uint32_t), 4);
-    const bool built = (!builder->share_slots || slot_widths != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && sequence_operands != 0 && sequence_results != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
+    const bool built = (!builder->share_slots || slot_widths != 0) && (!builder->use_registers || use_registers != 0) && sequences != 0 && sequence_registers != 0 && sequence_readers != 0 && sequence_operands != 0 && sequence_results != 0 && block_starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && remat != 0 && use_offsets != 0 && use_positions != 0 && use_required != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0 && fixed_starts != 0 && fixed_ends != 0 && fixed_registers != 0 && fixed_classes != 0;
     if (built)
     {
         block_starts[0] = 0;
@@ -318,10 +327,18 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
                     {
                         use_positions[at] = use_positions[at - 1];
                         use_required[at] = use_required[at - 1];
+                        if (use_registers != 0)
+                        {
+                            use_registers[at] = use_registers[at - 1];
+                        }
                         at -= 1;
                     }
                     use_positions[at] = position;
                     use_required[at] = builder->use_required[u];
+                    if (use_registers != 0)
+                    {
+                        use_registers[at] = builder->use_register[u];
+                    }
                     use += 1;
                 }
             }
@@ -377,6 +394,7 @@ static bool tier1_cfg_test_build(const Tier1CfgTestBuilder* builder, Arena* aren
             .use_offsets = use_offsets,
             .use_positions = use_positions,
             .use_required = use_required,
+            .use_registers = use_registers,
             .phi_offsets = phi_offsets,
             .phi_values = phi_values,
             .phi_operand_offsets = phi_operand_offsets,
@@ -810,7 +828,9 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
     uint32_t* offsets = arena_push_array(arena, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* positions = arena_push_array(arena, (uint64_t)input->use_count + values + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint8_t* required = arena_push(arena, (uint64_t)input->use_count + values + 1, 1);
-    const bool ready = phi != 0 && offsets != 0 && positions != 0 && required != 0;
+    // The uses' registers (#2646) follow their uses; a definition's own use names none.
+    uint8_t* registers = input->use_registers != 0 ? arena_push(arena, (uint64_t)input->use_count + values + 1, 1) : 0;
+    const bool ready = phi != 0 && offsets != 0 && positions != 0 && required != 0 && (input->use_registers == 0 || registers != 0);
     if (ready)
     {
         memset(phi, 0, (uint64_t)values + 1);
@@ -830,6 +850,10 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
                 {
                     positions[count] = input->definitions[v];
                     required[count] = 1;
+                    if (registers != 0)
+                    {
+                        registers[count] = UINT8_MAX;
+                    }
                     count += 1;
                     added = true;
                 }
@@ -837,6 +861,10 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
                 {
                     positions[count] = input->use_positions[u];
                     required[count] = input->use_required != 0 ? input->use_required[u] : 0;
+                    if (registers != 0)
+                    {
+                        registers[count] = input->use_registers[u];
+                    }
                     count += 1;
                 }
             }
@@ -846,6 +874,7 @@ static bool tier1_cfg_test_definition_uses(const Tier1CfgInput* input, Arena* ar
         result->use_offsets = offsets;
         result->use_positions = positions;
         result->use_required = required;
+        result->use_registers = registers;
         result->use_count = count;
     }
     return ready;
@@ -2165,6 +2194,135 @@ static void tier1_cfg_test_anchors(Tier1CfgTestTally* tally, const Tier1CfgInput
     arena_pop_to(scratch, scratch_mark);
 }
 
+// #2611: tier1_cfg_anchors reads a given dominator tree as it reads its own analysis. The input's CFG's tree, given with no
+// shift, and that tree given to the CFG with an entry added before it (shift 1, as the CFG consumer's machine CFG is the
+// IR's with an added entry), each give the anchors and chosen predecessors the analysis of that CFG gives.
+static void tier1_cfg_test_given_tree(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const uint32_t blocks = input->block_count;
+    const uint32_t edges = input->edge_count;
+    const DominatorCfg graph = {
+        .block_count = blocks,
+        .edge_count = edges,
+        .entry = 0,
+        .successor_offsets = input->successor_offsets,
+        .successors = input->successors,
+        .predecessor_offsets = input->predecessor_offsets,
+        .predecessors = input->predecessors,
+    };
+    DominatorOptions options = dominators_options();
+    options.outputs = 0;
+    Dominators tree = { 0 };
+    bool same = dominators_analyze(output, scratch, &graph, options, &tree) == DOMINATOR_OK;
+    // The CFG with an added entry, block 0, whose one successor is the input's entry.
+    uint32_t* successor_offsets = arena_push_array(output, (uint64_t)blocks + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* successors = arena_push_array(output, (uint64_t)edges + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* predecessor_offsets = arena_push_array(output, (uint64_t)blocks + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* predecessors = arena_push_array(output, (uint64_t)edges + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* anchors = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* chosen = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* given_anchors = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* given_chosen = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    same = same && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && anchors != 0 && chosen != 0 && given_anchors != 0 && given_chosen != 0;
+    if (same)
+    {
+        successor_offsets[0] = 0;
+        successors[0] = 1;
+        predecessor_offsets[0] = 0;
+        predecessor_offsets[1] = 0;
+        predecessors[0] = 0;
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            successor_offsets[b + 1] = input->successor_offsets[b] + 1;
+            predecessor_offsets[b + 2] = input->predecessor_offsets[b + 1] + 1;
+        }
+        successor_offsets[blocks + 1] = edges + 1;
+        for (uint32_t e = 0; e < edges; e += 1)
+        {
+            successors[e + 1] = input->successors[e] + 1;
+            predecessors[e + 1] = input->predecessors[e] + 1;
+        }
+    }
+    for (uint32_t shift = 0; same && shift < 2; shift += 1)
+    {
+        Tier1CfgInput plain = *input;
+        plain.dominators = 0;
+        plain.dominator_shift = 0;
+        if (shift != 0)
+        {
+            plain.block_count = blocks + 1;
+            plain.edge_count = edges + 1;
+            plain.successor_offsets = successor_offsets;
+            plain.successors = successors;
+            plain.predecessor_offsets = predecessor_offsets;
+            plain.predecessors = predecessors;
+        }
+        Tier1CfgInput given = plain;
+        given.dominators = &tree;
+        given.dominator_shift = shift;
+        same = tier1_cfg_anchors(&plain, output, scratch, anchors, chosen) && tier1_cfg_anchors(&given, output, scratch, given_anchors, given_chosen);
+        for (uint32_t b = 0; same && b < plain.block_count; b += 1)
+        {
+            same = anchors[b] == given_anchors[b] && chosen[b] == given_chosen[b];
+            // A chosen predecessor laid out before its block that the block dominates: a latch, which the tree's dominance
+            // test chose.
+            const uint32_t j = chosen[b];
+            const uint32_t p = j != BUSTER_TIER1_CFG_NONE ? plain.predecessors[plain.predecessor_offsets[b] + j] : BUSTER_TIER1_CFG_NONE;
+            tally->given_latches += shift == 0 && p != BUSTER_TIER1_CFG_NONE && p < b && dominators_dominates(&tree, b, p) ? 1 : 0;
+        }
+    }
+    tally->given_trees += same ? 1 : 0;
+    tier1_cfg_test_expect(tally, same, "anchors and chosen predecessors read from a given dominator tree, with and without an added entry, are the analysis's (#2611)");
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+}
+
+// #2611: the given tree is the one tier1_cfg_anchors reads. The join's CFG (0 -> 1, 0 -> 2, 1 -> 2) given the tree of a
+// chain 0 -> 1 -> 2, in which 1 dominates 2, anchors 2 at 1, its nearest predecessor; given the tree of a longer chain
+// 0 -> 1 -> 2 -> 3, of another size, the anchors are the analysis's, 2 anchored at its dominator 0.
+static void tier1_cfg_test_tree_read(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    // The chain's views, and the longer chain's.
+    static const uint32_t chain_successor_offsets[2][5] = { { 0, 1, 2, 2, 0 }, { 0, 1, 2, 3, 3 } };
+    static const uint32_t chain_successors[] = { 1, 2, 3 };
+    static const uint32_t chain_predecessor_offsets[2][5] = { { 0, 0, 1, 2, 0 }, { 0, 0, 1, 2, 3 } };
+    static const uint32_t chain_predecessors[] = { 0, 1, 2 };
+    DominatorOptions options = dominators_options();
+    options.outputs = 0;
+    Dominators trees[2] = { { 0 } };
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        // The chain, and the longer one (another size).
+        const DominatorCfg chain = {
+            .block_count = 3 + t,
+            .edge_count = 2 + t,
+            .entry = 0,
+            .successor_offsets = chain_successor_offsets[t],
+            .successors = chain_successors,
+            .predecessor_offsets = chain_predecessor_offsets[t],
+            .predecessors = chain_predecessors,
+        };
+        const bool analyzed = dominators_analyze(output, scratch, &chain, options, &trees[t]) == DOMINATOR_OK;
+        tier1_cfg_test_expect(tally, analyzed, "the chain's dominator tree");
+    }
+    uint32_t anchors[3] = { 0 };
+    uint32_t chosen[3] = { 0 };
+    Tier1CfgInput given = *input;
+    given.dominators = &trees[0];
+    given.dominator_shift = 0;
+    const bool read = given.block_count == 3 && tier1_cfg_anchors(&given, output, scratch, anchors, chosen) && anchors[2] == 1 && anchors[1] == 0;
+    tier1_cfg_test_expect(tally, read, "the anchors read the given tree (#2611)");
+    given.dominators = &trees[1];
+    const bool other = given.block_count == 3 && tier1_cfg_anchors(&given, output, scratch, anchors, chosen) && anchors[2] == 0 && anchors[1] == 0;
+    tier1_cfg_test_expect(tally, other, "a given tree of another size leaves the anchors to the analysis (#2611)");
+    arena_pop_to(output, output_mark);
+    arena_pop_to(scratch, scratch_mark);
+}
+
 static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     static Tier1CfgTestBuilder builders[3];
@@ -2272,6 +2430,11 @@ static void tier1_cfg_test_dominance(Tier1CfgTestTally* tally, Arena* output, Ar
         if (built)
         {
             tier1_cfg_test_anchors(tally, &input, output, scratch, anchors_expected[f], chosen_expected[f], names[f]);
+            tier1_cfg_test_given_tree(tally, &input, output, scratch);
+        }
+        if (built && f == 0)
+        {
+            tier1_cfg_test_tree_read(tally, &input, output, scratch);
         }
         if (built && f < 2)
         {
@@ -2373,6 +2536,230 @@ static void tier1_cfg_test_body_hints(Tier1CfgTestTally* tally, Arena* output, A
     if (built)
     {
         tier1_cfg_test_case(tally, &input, output, scratch, "a loop's body before its header", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
+// #2834's fixture, tests/driver/tier1_patterns.c's patterns_gsub in small: 0 -> 5, 1 -> 3, 2 -> 3, 7 -> 3, 3 -> 5,
+// 3 -> 4, 5 -> 6, 6 -> 1, 6 -> 8, 8 -> 2, 8 -> 7. The header 5 takes n = phi(s, j) and l = phi(t, k) from the entry 0,
+// which defines s and t, and from the latch 3, where j = phi(n, n, m) and k = phi(l, l, e) join the paths 1 for a
+// character, 2 for a failed match and 7 for a match. 6 defines e, which 8 tests against l; 7 defines m = n + 1 and reads
+// e; 1 defines a character; 8 defines y, which 2 reads. n's and l's ranges in 1 and in 2 are laid out before their
+// header, without an anchor or a sibling: the chain of their phis' hints at 5 leads to j's and k's at 3, laid out after
+// them, whose chosen predecessor is 2, so that it names no other value's range before them (tier1_cfg_body_hints' first
+// loop). Their first ranges, in 1, took the lowest free registers, crossed against s's and t's, and the edge into the
+// loop swapped the two through the scratch register. Each now takes its operand's register at the entry's exit, and
+// neither moves on any edge. Their ranges in 2 keep their values' own places from 1 rather than name the entry's
+// (sqlite3VdbeExec's handlers).
+static void tier1_cfg_test_latch_chain(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 9;
+    const uint32_t instructions[] = { 2, 1, 1, 1, 1, 1, 1, 1, 2 };
+    for (uint32_t b = 0; b < builder.block_count; b += 1)
+    {
+        builder.instructions[b] = instructions[b];
+    }
+    builder.registers[0] = 0x000f;
+    builder.scratch[0] = 11;
+    const uint32_t edges[][2] = {
+        { 0, 5 },
+        { 1, 3 },
+        { 2, 3 },
+        { 7, 3 },
+        { 3, 5 },
+        { 3, 4 },
+        { 5, 6 },
+        { 6, 1 },
+        { 6, 8 },
+        { 8, 2 },
+        { 8, 7 },
+    };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(edges); k += 1)
+    {
+        tier1_cfg_test_edge(&builder, edges[k][0], edges[k][1]);
+    }
+    const uint32_t s = tier1_cfg_test_value(&builder, 0, 0, 0, 0x000f);
+    const uint32_t t = tier1_cfg_test_value(&builder, 0, 1, 0, 0x000f);
+    const uint32_t x = tier1_cfg_test_value(&builder, 1, 0, 0, 0x000f);
+    const uint32_t e = tier1_cfg_test_value(&builder, 6, 0, 0, 0x000f);
+    const uint32_t m = tier1_cfg_test_value(&builder, 7, 0, 0, 0x000f);
+    tier1_cfg_test_definition_use(&builder, s);
+    tier1_cfg_test_definition_use(&builder, t);
+    tier1_cfg_test_definition_use(&builder, x);
+    tier1_cfg_test_definition_use(&builder, e);
+    tier1_cfg_test_definition_use(&builder, m);
+    // Block 3's predecessors are 1, 2 and 7, block 5's 0 and 3, in the edges' order; n and l follow j and k.
+    const uint32_t n = builder.value_count + 2;
+    const uint32_t l = builder.value_count + 3;
+    const uint32_t join_n[] = {
+        n,
+        n,
+        m,
+    };
+    const uint32_t j = tier1_cfg_test_phi(&builder, 3, 0, join_n);
+    const uint32_t join_l[] = {
+        l,
+        l,
+        e,
+    };
+    const uint32_t k = tier1_cfg_test_phi(&builder, 3, 0, join_l);
+    const uint32_t header_n[] = {
+        s,
+        j,
+    };
+    const uint32_t header_l[] = {
+        t,
+        k,
+    };
+    const bool numbered = tier1_cfg_test_phi(&builder, 5, 0, header_n) == n && tier1_cfg_test_phi(&builder, 5, 0, header_l) == l;
+    tier1_cfg_test_expect(tally, numbered, "a latch between a loop's body and its header: phis numbered");
+    // y after the phis: its range in 2 starts with theirs and, unhinted, takes what they leave.
+    const uint32_t y = tier1_cfg_test_value(&builder, 8, 1, 0, 0x000f);
+    tier1_cfg_test_definition_use(&builder, y);
+    tier1_cfg_test_use(&builder, n, 5, 0, true);
+    tier1_cfg_test_use(&builder, l, 8, 0, true);
+    tier1_cfg_test_use(&builder, e, 8, 0, true);
+    tier1_cfg_test_use(&builder, e, 7, 0, true);
+    tier1_cfg_test_use(&builder, n, 7, 0, true);
+    tier1_cfg_test_use(&builder, y, 2, 0, true);
+    tier1_cfg_test_use(&builder, j, 4, 0, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input;
+    const bool built = numbered && tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "a latch between a loop's body and its header: built");
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "a latch between a loop's body and its header: allocated");
+        // The edges n and l take into the loop and around its paths that leave them as they are; 7 -> 3 moves m and
+        // 8 -> 2 y.
+        const uint32_t quiet_edges[][2] = {
+            { 0, 5 },
+            { 6, 1 },
+            { 1, 3 },
+            { 2, 3 },
+            { 3, 5 },
+        };
+        uint32_t moved = 0;
+        for (uint32_t edge = 0; allocated && edge < BUSTER_ARRAY_LENGTH(quiet_edges); edge += 1)
+        {
+            moved += tier1_cfg_test_edge_moves(&input, &result, quiet_edges[edge][0], quiet_edges[edge][1]);
+        }
+        tier1_cfg_test_expect(tally, allocated && moved == 0, "a loop's body before its latch takes its entry's registers: n and l move on no edge");
+        // n's and l's ranges in 2, their second in layout, name no other value's range.
+        uint32_t later_ranges = 0;
+        bool kept = allocated;
+        for (uint32_t i = 0; allocated && i < result.intervals.count; i += 1)
+        {
+            const uint32_t value = result.intervals.values[i];
+            const uint32_t named = result.intervals.hint_intervals[i];
+            const bool later = (value == n || value == l) && result.intervals.starts[i] >= input.block_starts[2] && result.intervals.starts[i] < input.block_starts[3];
+            kept = kept && (!later || named == UINT32_MAX || result.intervals.values[named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT] == value);
+            later_ranges += later;
+        }
+        tier1_cfg_test_expect(tally, kept && later_ranges == 2, "a loop's body's later ranges keep their values' own places, not the entry's");
+        arena_pop_to(output, mark);
+    }
+    if (built)
+    {
+        tier1_cfg_test_case(tally, &input, output, scratch, "a latch between a loop's body and its header", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
+// The registers a call reads its arguments in (#2646, Tier1CfgInput.use_registers). Block 0 defines p (a recipe), w and,
+// with `held`, q, then a, b and v; a call at its instruction 3 reads a in r4, b in r0, which p holds until its use at
+// instruction 5, and w in r4, though w lives on into block 1; block 1, whose phi of p keeps it from continuing block 0's
+// ranges, reads v in r3 at a call. a takes r4, where the lowest free register is r2. b doesn't take r0 from p, which the
+// scan would evict for a value hint (#2618): a register hint evicts nothing. w, which lives past the call, takes no hint
+// from it: the lowest free register at its definition, r1. v enters block 1 in the register it had in block 0, which its
+// value hint names, rather than its register hint's r3. With `held`, q holds r3 through block 0 (its only allowed
+// register), so that v's block 0 register isn't r3 and the classes' masks aren't full, which the scan allocates; without
+// it, the coloring path does.
+static void tier1_cfg_test_use_registers(Tier1CfgTestTally* tally, Arena* output, Arena* scratch, bool held)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 2;
+    builder.instructions[0] = 6;
+    builder.instructions[1] = 3;
+    builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x001f;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    builder.use_registers = true;
+    tier1_cfg_test_edge(&builder, 0, 1);
+    const uint32_t all = builder.registers[BUSTER_TIER1_ALLOCATE_GPR];
+    const uint32_t p = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, all);
+    builder.remat[p] = 1;
+    const uint32_t q = held ? tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1u << 3) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t w = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t a = tier1_cfg_test_value(&builder, 0, 1, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t b = tier1_cfg_test_value(&builder, 0, 2, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t v = tier1_cfg_test_value(&builder, 0, 4, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t phi_operands[] = {
+        p,
+    };
+    const uint32_t phi = tier1_cfg_test_phi(&builder, 1, BUSTER_TIER1_ALLOCATE_GPR, phi_operands);
+    tier1_cfg_test_definition_use(&builder, p);
+    if (held)
+    {
+        tier1_cfg_test_definition_use(&builder, q);
+        tier1_cfg_test_use(&builder, q, 0, 5, true);
+    }
+    tier1_cfg_test_definition_use(&builder, w);
+    tier1_cfg_test_definition_use(&builder, a);
+    tier1_cfg_test_definition_use(&builder, b);
+    tier1_cfg_test_definition_use(&builder, v);
+    tier1_cfg_test_use(&builder, a, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 4;
+    tier1_cfg_test_use(&builder, b, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 0;
+    tier1_cfg_test_use(&builder, w, 0, 3, true);
+    builder.use_register[builder.use_count - 1] = 4;
+    tier1_cfg_test_use(&builder, p, 0, 5, true);
+    tier1_cfg_test_use(&builder, phi, 1, 0, true);
+    tier1_cfg_test_use(&builder, v, 1, 1, true);
+    builder.use_register[builder.use_count - 1] = 3;
+    tier1_cfg_test_use(&builder, w, 1, 2, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input = { 0 };
+    const bool built = tier1_cfg_test_build(&builder, output, &input);
+    tier1_cfg_test_expect(tally, built, "use registers: built");
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "use registers: allocated");
+        const uint32_t call = input.block_starts[0] + 2 * 3;
+        uint32_t locations[6] = { 0 };
+        uint8_t kinds[6] = { 0 };
+        const bool found = allocated && tier1_cfg_location(&result, a, call, &locations[0], &kinds[0]) && tier1_cfg_location(&result, b, call, &locations[1], &kinds[1]) &&
+                           tier1_cfg_location(&result, p, input.block_starts[0] + 2 * 5, &locations[2], &kinds[2]) &&
+                           tier1_cfg_location(&result, v, input.block_starts[1] - 1, &locations[3], &kinds[3]) &&
+                           tier1_cfg_location(&result, v, input.block_starts[1] + 2 * 1, &locations[4], &kinds[4]) && tier1_cfg_location(&result, w, call, &locations[5], &kinds[5]);
+        bool registers = found;
+        for (uint32_t k = 0; k < 6; k += 1)
+        {
+            registers &= kinds[k] == BUSTER_TIER1_ALLOCATE_REGISTER;
+        }
+        tier1_cfg_test_expect(tally, registers && locations[0] == 4, "use registers: a call's argument takes the register the call reads it in");
+        tier1_cfg_test_expect(tally, registers && locations[1] != 0 && locations[2] == 0, "use registers: a register hint evicts nothing");
+        tier1_cfg_test_expect(tally, registers && locations[3] == locations[4] && (!held || locations[4] != 3), "use registers: a value hint outranks a register hint");
+        tier1_cfg_test_expect(tally, registers && locations[5] == 1, "use registers: a value that lives past the call takes no hint from it");
+        tier1_cfg_test_expect(tally, allocated && tier1_cfg_test_edge_moves(&input, &result, 0, 1) == 0, "use registers: the edge moves nothing");
+        arena_pop_to(output, mark);
+    }
+    if (built)
+    {
+        tier1_cfg_test_case(tally, &input, output, scratch, held ? "use registers, held" : "use registers", true, 0, 0, true);
     }
     arena_pop_to(output, saved);
 }
@@ -2834,8 +3221,11 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_undefined(&tally, &output, &scratch);
             tier1_cfg_test_dominance(&tally, &output, &scratch);
             tier1_cfg_test_body_hints(&tally, &output, &scratch);
+            tier1_cfg_test_latch_chain(&tally, &output, &scratch);
             tier1_cfg_test_local_phis(&tally, &output, &scratch);
             tier1_cfg_test_dispatch_entry(&tally, &output, &scratch);
+            tier1_cfg_test_use_registers(&tally, &output, &scratch, false);
+            tier1_cfg_test_use_registers(&tally, &output, &scratch, true);
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
@@ -2857,6 +3247,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
                     tally.oracle = sample % oracle_every == 0;
                     tally.oracle_mutants = sample % (oracle_every * 4) == 0;
                     tier1_cfg_test_case(&tally, &input, &output, &scratch, "generated case", sample % 8 == 0, 0, 0, false);
+                    tier1_cfg_test_given_tree(&tally, &input, &output, &scratch);
                 }
                 arena_pop_to(&output, output_saved);
                 arena_pop_to(&work, work_saved);
@@ -2892,6 +3283,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
         printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
+        printf("test-tier1-cfg: given dominator trees (#2611): %" PRIu64 " CFGs' anchors the same with and without an added entry, %" PRIu64 " blocks anchored at a latch\n", tally.given_trees, tally.given_latches);
+        tier1_cfg_test_expect(&tally, tally.given_latches != 0, "some given tree's block takes a latch laid out before it (#2611)");
         printf("test-tier1-cfg: fixed sequences (#2767): %" PRIu64 " ranges avoid their registers, %" PRIu64 " readers' ranges across their own\n", tally.avoiding_ranges, tally.reading_ranges);
         printf("test-tier1-cfg: two problems in one call and in two: %" PRIu64 " cases, %" PRIu64 " preferred allocations taken, %" PRIu64 " refused, %" PRIu64 " freed of their definitions' registers; %" PRIu64 " with fixed ranges refused another column; %" PRIu64 " values' column sets probed, at most %u in one problem\n", tally.two_cases, tally.two_taken, tally.two_refused, tally.two_freed, tally.two_fixed, tally.column_values, tally.column_widest);
         result = tally.failures == 0 ? 0 : 1;

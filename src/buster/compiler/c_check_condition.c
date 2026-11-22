@@ -17,11 +17,14 @@
 // Each function declaration where some condition holds (its own or one of an earlier redeclaration that it inherits) has
 // its list, the conditions in the order clang reads them: the redeclarations' in source order (CheckInput.
 // condition_declarations, by the declaration's name token, which is what a use's lookup finds). A use of the name reads
-// that list. clang checks diagnose_if's conditions that name no parameter at each use of the name (DiagnoseUseOfDecl,
-// check_input_condition_uses) and the others at each call (c_check_condition_graph.c); an error among those that hold is
+// that list. Every diagnose_if is inherited; an enable_if only by a redeclaration without one of its own, and then only
+// the previous declaration's first, as clang's attribute merge has it (#2464). clang checks diagnose_if's conditions that
+// name no parameter at each use of the name (DiagnoseUseOfDecl, check_input_condition_uses) and the others at each call
+// (c_check_condition_graph.c), each with the parameters of the declaration that wrote it; an error among those that hold is
 // the only one given, the first, else every warning. An enable_if whose condition doesn't hold makes the call "no matching
-// function", naming the first in the order clang checks them: the latest declaration's first, each declaration's in source
-// order. A use of a function with an enable_if that isn't always true, other than a call's callee, is clang's "cannot take
+// function", naming the first in source order; an inherited one names the parameters of the declaration that wrote it,
+// not those of the one the call found, which clang binds the arguments to, so each parameter it reads is unknown (#2464).
+// A use of a function with an enable_if that isn't always true, other than a call's callee, is clang's "cannot take
 // address" error. An overloadable function's conditions take part in its overload resolution (c_check_overload.c): an
 // enable_if that doesn't admit a call makes its candidate not viable, more of them rank it better, and ones that differ
 // make two overloads of one signature (check_condition_same, clang's profile of the expression); a call reads its
@@ -814,7 +817,7 @@ static uint32_t check_condition_overload_prior(CheckInputReader* reader, uint32_
     signature_hash = object_size ? type_hash_mix(signature_hash, 1) : signature_hash;
     reader->output->resource |= reader->overload_candidates != NULL && !hashed;
     const uint64_t key = check_overload_index_key(signature_hash, name, UINT32_MAX);
-    const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
+    const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, UINT32_MAX) : UINT32_MAX;
     const CheckConditionTable table = check_condition_table(reader->output);
     uint32_t prior = BUSTER_CHECK_NONE;
     for (uint32_t linked = hashed ? check_overload_index_head(&reader->overload_index, slot) : UINT32_MAX; prior == BUSTER_CHECK_NONE && linked != UINT32_MAX;
@@ -900,10 +903,24 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
     previous = valid && overloadable && !sized ? check_condition_overload_prior(reader, name, type, &own_entry) : previous;
     const CheckConditionDeclaration* inherited = valid && !sized && previous < parser->tokens.count && input->condition_declaration_count != 0 ?
                                                  check_condition_declaration(input, previous) : NULL;
+    // Every diagnose_if is inherited, but clang's redeclaration takes an enable_if only where it has none of its own, and
+    // then only the previous declaration's first, as its attribute merge skips a kind the declaration already has (#2464):
+    // a list's enable_ifs are one declaration's, its own or the one it inherits.
+    bool own_enable = false;
+    for (uint32_t i = 0; i < own_count; i += 1)
+    {
+        own_enable |= input->conditions[own_indices[i]].kind == CHECK_CONDITION_ENABLE;
+    }
+    uint32_t first_enable = BUSTER_CHECK_NONE;
+    for (uint32_t i = 0; inherited != NULL && first_enable == BUSTER_CHECK_NONE && i < inherited->count; i += 1)
+    {
+        first_enable = input->conditions[inherited->conditions[i]].kind == CHECK_CONDITION_ENABLE ? i : BUSTER_CHECK_NONE;
+    }
+    const uint32_t enable_inherited = !overloadable && !own_enable ? first_enable : BUSTER_CHECK_NONE;
     uint32_t inherited_count = 0;
     for (uint32_t i = 0; inherited != NULL && i < inherited->count; i += 1)
     {
-        inherited_count += !overloadable || input->conditions[inherited->conditions[i]].kind != CHECK_CONDITION_ENABLE ? 1u : 0u;
+        inherited_count += input->conditions[inherited->conditions[i]].kind != CHECK_CONDITION_ENABLE || i == enable_inherited ? 1u : 0u;
     }
     uint32_t* list_indices = inherited_count == 0 ? own_indices :
                              valid ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint32_t, (uint64_t)inherited_count + own_count) : NULL;
@@ -913,7 +930,7 @@ static bool check_input_conditions(CheckInputReader* reader, CheckInputAttribute
     for (uint32_t i = 0; valid && inherited_count != 0 && i < inherited->count; i += 1)
     {
         list_indices[count] = inherited->conditions[i];
-        count += !overloadable || input->conditions[inherited->conditions[i]].kind != CHECK_CONDITION_ENABLE ? 1u : 0u;
+        count += input->conditions[inherited->conditions[i]].kind != CHECK_CONDITION_ENABLE || i == enable_inherited ? 1u : 0u;
     }
     for (uint32_t i = 0; valid && inherited_count != 0 && i < own_count; i += 1)
     {

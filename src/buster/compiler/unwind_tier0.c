@@ -469,27 +469,23 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
         events[count++] = 1;
     }
     uint32_t at = pointer ? 2 : 0;
-    for (uint32_t r = 0; records != 0 && error == UNWIND_OK && r < BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); r += 1)
+    // Each kept register's push, in its bit's order, the set bits alone: `saved` is under 64, its bits
+    // unwind_tier0_saved_registers' six, and `preserved` within UNWIND_TIER0_PRESERVABLE, both checked above.
+    for (uint32_t bits = records != 0 ? saved : 0; error == UNWIND_OK && bits != 0; bits &= bits - 1)
     {
-        if ((saved & (1u << r)) != 0)
-        {
-            error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, unwind_tier0_saved_registers[r]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
-            events[count++] = at;
-            at += 1;
-        }
+        error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, unwind_tier0_saved_registers[__builtin_ctz(bits)]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        events[count++] = at;
+        at += 1;
     }
     if (records != 0 && error == UNWIND_OK && eh)
     {
         error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, X86_REGISTER_RDX) && unwind_tier0_stack(&records[at + 1], X86_FORM_PUSH_R64, X86_REGISTER_RAX) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
         at += 2;
     }
-    for (uint32_t r = 0; records != 0 && error == UNWIND_OK && r < 16; r += 1)
+    for (uint32_t bits = records != 0 ? preserved : 0; error == UNWIND_OK && bits != 0; bits &= bits - 1)
     {
-        if ((preserved & (1u << r)) != 0)
-        {
-            error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, (uint8_t)r) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
-            at += 1;
-        }
+        error = unwind_tier0_stack(&records[at], X86_FORM_PUSH_R64, (uint8_t)__builtin_ctz(bits)) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        at += 1;
     }
     if (records != 0 && error == UNWIND_OK && block != 0)
     {
@@ -540,22 +536,17 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
         }
         at += 1;
     }
-    for (uint32_t r = 16; records != 0 && error == UNWIND_OK && r > 0; r -= 1)
+    // The pops, in the pushes' reverse order: each kept register's highest bit first.
+    for (uint32_t bits = records != 0 ? preserved : 0; error == UNWIND_OK && bits != 0; bits &= ~(1u << (31 - __builtin_clz(bits))))
     {
-        if ((preserved & (1u << (r - 1))) != 0)
-        {
-            error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, (uint8_t)(r - 1)) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
-            at += 1;
-        }
+        error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, (uint8_t)(31 - __builtin_clz(bits))) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        at += 1;
     }
-    for (uint32_t r = BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); records != 0 && error == UNWIND_OK && !open && r > 0; r -= 1)
+    for (uint32_t bits = records != 0 && !open ? saved : 0; error == UNWIND_OK && bits != 0; bits &= ~(1u << (31 - __builtin_clz(bits))))
     {
-        if ((saved & (1u << (r - 1))) != 0)
-        {
-            error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, unwind_tier0_saved_registers[r - 1]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
-            events[count++] = at;
-            at += 1;
-        }
+        error = unwind_tier0_stack(&records[at], X86_FORM_POP_R64, unwind_tier0_saved_registers[31 - __builtin_clz(bits)]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+        events[count++] = at;
+        at += 1;
     }
     if (records != 0 && error == UNWIND_OK && !open && pointer)
     {
@@ -628,14 +619,11 @@ static UnwindError unwind_tier0_frame_tails(const Tier0Code* code, const uint32_
                         ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
             record += 2;
         }
-        for (uint32_t r = BUSTER_ARRAY_LENGTH(unwind_tier0_saved_registers); error == UNWIND_OK && r > 0; r -= 1)
+        for (uint32_t bits = saved; error == UNWIND_OK && bits != 0; bits &= ~(1u << (31 - __builtin_clz(bits))))
         {
-            if ((saved & (1u << (r - 1))) != 0)
-            {
-                error = unwind_tier0_stack(&records[record], X86_FORM_POP_R64, unwind_tier0_saved_registers[r - 1]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
-                ends[ended++] = record;
-                record += 1;
-            }
+            error = unwind_tier0_stack(&records[record], X86_FORM_POP_R64, unwind_tier0_saved_registers[31 - __builtin_clz(bits)]) ? UNWIND_OK : UNWIND_ERROR_UNSUPPORTED;
+            ends[ended++] = record;
+            record += 1;
         }
         if (error == UNWIND_OK && pointer)
         {

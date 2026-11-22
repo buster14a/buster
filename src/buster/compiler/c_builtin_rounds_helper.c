@@ -3,8 +3,8 @@
 //
 // #148's original baseline-x86 __builtin_flt_rounds leaf. Include after c_builtin_catalog.c and tier0.c. Clang
 // 23.1.1 lowers this builtin to llvm.get.rounding, whose x86 implementation observes x87 CW[11:10], not MXCSR.
-// RC 00/01/10/11 means nearest/down/up/toward-zero and returns FLT_ROUNDS 1/3/2/0. Our independent realization
-// increments RC modulo four, then computes the two-bit Gray code t XOR (t >> 1). Other CW bits are masked away.
+// RC 00/01/10/11 means nearest/down/up/toward-zero and returns FLT_ROUNDS 1/3/2/0. Rotate the masked high byte
+// so RC's low bit is at bit 7 and its high bit at bit 0. Adding 127 in AL gives 127/255/128/0: take the top two bits.
 // References consulted for behavior only; no implementation was imported:
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/clang/lib/CodeGen/CGBuiltin.cpp
 // https://github.com/llvm/llvm-project/blob/llvmorg-23.1.1/llvm/lib/Target/X86/X86ISelLowering.cpp
@@ -13,7 +13,7 @@
 // It must retain the compiler barrier and floating-environment read: the call cannot be folded, hoisted over an
 // environment change, merged with another read or marked pure/readnone. The x87 control word/register stack and
 // MXCSR remain unchanged; FNSTCW's x87 condition-code status bits are architecturally undefined.
-// The eight-byte stack reservation is restored before return; general-register clobbers are RAX/RCX plus flags.
+// The eight-byte stack reservation is restored before return; only RAX and flags are clobbered.
 // U32 result bits map exactly to source INT values 0..3; there are no parameters, branches or symbolic references.
 //
 // Output owns exactly count instruction records, without readable tail padding. One arena push precedes publication;
@@ -48,36 +48,26 @@ static const X86Instruction cbuiltin_rounds_helper_records[] =
         .reg = X86_REGISTER_RAX,
         .rm = X86_REGISTER_RSP,
         .mode = BUSTER_X86_MEMORY_BASE,
-        .form = X86_FORM_MOVZX_R32_RM16,
+        .displacement = 1,
+        .form = X86_FORM_MOVZX_R32_RM8,
     },
     {
-        .immediate = 10,
-        .rm = X86_REGISTER_RAX,
-        .form = X86_FORM_SHR_RM32_IMM8,
-    },
-    {
-        .immediate = 1,
-        .rm = X86_REGISTER_RAX,
-        .form = X86_FORM_ADD_RM32_IMM8,
+        .immediate = 0x0c,
+        .form = X86_FORM_AND_AL_IMM8,
     },
     {
         .immediate = 3,
         .rm = X86_REGISTER_RAX,
-        .form = X86_FORM_AND_RM32_IMM8,
+        .form = X86_FORM_ROR_RM8_IMM8,
     },
     {
-        .reg = X86_REGISTER_RCX,
+        .immediate = 127,
+        .form = X86_FORM_ADD_AL_IMM8,
+    },
+    {
+        .immediate = 6,
         .rm = X86_REGISTER_RAX,
-        .form = X86_FORM_MOV_R32_RM32,
-    },
-    {
-        .rm = X86_REGISTER_RCX,
-        .form = X86_FORM_SHR_RM32_1,
-    },
-    {
-        .reg = X86_REGISTER_RCX,
-        .rm = X86_REGISTER_RAX,
-        .form = X86_FORM_XOR_RM32_R32,
+        .form = X86_FORM_SHR_RM32_IMM8,
     },
     {
         .immediate = 8,

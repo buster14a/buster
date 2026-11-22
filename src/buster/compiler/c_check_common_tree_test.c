@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The common warnings' walks over trees (#1340). check_common_parents by both paths against its definition: random graphs
-// in node order (operands and arguments before their nodes, each read once) of every size around the vector path's 16
-// nodes, and the same with one edge broken (a node read twice, by two nodes or one, or an operand past its node), each
-// column ending at a PROT_NONE page. The cached roots agree with that definition even on broken graphs, their masks'
-// tails are zero, and cached/uncached scans give the same roots while the scalar scan still gives every node.
+// The common warnings' walks over trees (#1340). check_common_parents against its definition: random graphs in node order
+// (operands and arguments before their nodes, each read once) of every size around its 16-node blocks, and the same with
+// one edge broken (a node read twice, by two nodes or one, or an operand past its node), each column ending at a
+// PROT_NONE page. The cached roots agree with that definition even on broken graphs, their masks' tails are zero, and
+// cached and uncached scans give the same roots.
 // check_common_emission_subtree_start against each token's subtree's first token, on
 // random trees whose subtrees are runs of tokens, with parents as deep as their children now and then. The reach walk's
 // per-body lists of statement expressions (check_common_body_regions, #1360) against their definition and its scan, and
@@ -125,8 +125,8 @@ static bool check_test_tree_parents(const CheckGraph* graph, uint32_t* parents)
     return tree;
 }
 
-// Root membership comes from the independent edge walk, even where the graph is not a tree. Both vector scans must
-// enumerate those roots in node order; either scalar scan still gives every node for its consumer to test.
+// Root membership comes from the independent edge walk, even where the graph is not a tree. Both scans, by the root bits
+// and by the parents, must enumerate those roots in node order.
 static bool check_test_tree_roots_case(const uint32_t* expected, const uint32_t* parents, const uint64_t* roots, uint32_t count)
 {
     bool same = true;
@@ -140,46 +140,72 @@ static bool check_test_tree_roots_case(const uint32_t* expected, const uint32_t*
     }
     for (uint32_t cached = 0; same && cached < 2; cached += 1)
     {
-        for (uint32_t vector = 0; same && vector < 2; vector += 1)
+        CheckCommonScan scan = { 0 };
+        for (uint32_t node = 0; same && node < count; node += 1)
         {
-            CheckCommonScan scan = { 0 };
-            for (uint32_t node = 0; same && node < count; node += 1)
+            if (expected[node] == BUSTER_CHECK_NONE)
             {
-                if (vector == 0 || expected[node] == BUSTER_CHECK_NONE)
-                {
-                    same = check_common_next_root(parents, cached != 0 ? roots : NULL, count, &scan, vector != 0) == node;
-                }
+                same = check_common_next_root(parents, cached != 0 ? roots : NULL, count, &scan) == node;
             }
-            same &= check_common_next_root(parents, cached != 0 ? roots : NULL, count, &scan, vector != 0) == count;
-            same &= check_common_next_root(parents, cached != 0 ? roots : NULL, count, &scan, vector != 0) == count;
         }
+        same &= check_common_next_root(parents, cached != 0 ? roots : NULL, count, &scan) == count;
+        same &= check_common_next_root(parents, cached != 0 ? roots : NULL, count, &scan) == count;
     }
     return same;
 }
 
-// One graph by both paths against the definition: the same answer and root membership, and where it's a tree, the
-// same parents. The output roots and parents end at protected pages as the input columns do.
+// Independently propagate arbitrary root marks down the verified parents. Only each root's mark
+// determines the evaluation of its tree, even when its children started with other marks.
+static bool check_test_tree_evaluated_roots(const CheckGraph* graph, const uint32_t* parents, const uint64_t* roots)
+{
+    CheckTestSelectionColumn column = { 0 };
+    uint8_t* actual = check_test_selection_column(&column, graph->count);
+    uint8_t* expected = malloc((uint64_t)graph->count + 1);
+    uint32_t* stack = malloc(((uint64_t)graph->count + 1) * sizeof(uint32_t));
+    bool same = actual != NULL && expected != NULL && stack != NULL;
+    uint64_t random = UINT64_C(2850);
+    for (uint32_t pattern = 0; same && pattern < 3; pattern += 1)
+    {
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            actual[node] = pattern < 2 ? (uint8_t)pattern : (uint8_t)(check_test_tree_random(&random) & 1);
+        }
+        for (uint32_t node = graph->count; node-- != 0;)
+        {
+            expected[node] = parents[node] < graph->count ? expected[parents[node]] : actual[node];
+        }
+        check_common_mark_subtrees(graph, roots, actual, 1, stack);
+        same = memcmp(actual, expected, graph->count) == 0;
+    }
+    free(stack);
+    free(expected);
+    check_test_selection_unmap(&column);
+    return same;
+}
+
+// One graph against the definition: the same answer and root membership, and where it's a tree, the same parents. The
+// output roots and parents end at protected pages as the input columns do.
 static bool check_test_tree_parents_case(const CheckGraph* graph, uint32_t* expected, uint32_t* actual, uint64_t* roots, bool* tree)
 {
     *tree = check_test_tree_parents(graph, expected);
-    bool same = true;
-    for (uint32_t path = 0; same && path < 2; path += 1)
+    const uint64_t words = ((uint64_t)graph->count + 63) / 64;
+    memset(roots, 0xa5, words * sizeof(uint64_t));
+    const bool answer = check_common_parents(graph, actual, roots);
+    bool same = answer == *tree && check_test_tree_roots_case(expected, actual, roots, graph->count);
+    for (uint32_t node = 0; same && answer && node < graph->count; node += 1)
     {
-        const uint64_t words = ((uint64_t)graph->count + 63) / 64;
-        memset(roots, 0xa5, words * sizeof(uint64_t));
-        const bool answer = check_common_parents(graph, actual, roots, path == 0);
-        same = answer == *tree && check_test_tree_roots_case(expected, actual, roots, graph->count);
-        for (uint32_t node = 0; same && answer && node < graph->count; node += 1)
-        {
-            same = actual[node] == expected[node];
-        }
-        const bool uncached = check_common_parents(graph, actual, NULL, path == 0);
-        same &= uncached == *tree;
-        for (uint32_t node = 0; same && node < graph->count; node += 1)
-        {
-            same = (actual[node] == BUSTER_CHECK_NONE) == (expected[node] == BUSTER_CHECK_NONE) &&
-                   (!uncached || actual[node] == expected[node]);
-        }
+        same = actual[node] == expected[node];
+    }
+    if (same && answer)
+    {
+        same = check_test_tree_evaluated_roots(graph, expected, roots);
+    }
+    const bool uncached = check_common_parents(graph, actual, NULL);
+    same &= uncached == *tree;
+    for (uint32_t node = 0; same && node < graph->count; node += 1)
+    {
+        same = (actual[node] == BUSTER_CHECK_NONE) == (expected[node] == BUSTER_CHECK_NONE) &&
+               (!uncached || actual[node] == expected[node]);
     }
     return same;
 }
@@ -263,7 +289,7 @@ static void check_test_driver_common_parents(CheckTest* test)
         check_test_tree_release(&input);
     }
     check_test_expect(test, same && trees != 0 && broken != 0,
-                      "common parents and cached roots: guarded random trees and broken graphs by both paths against the definition");
+                      "common parents and cached roots: guarded random trees and broken graphs against the definition");
 }
 
 // A random tree of `count` tokens whose subtrees are runs: a run's root is any of its tokens, the tokens before it and
@@ -458,6 +484,38 @@ static void check_test_driver_body_regions(CheckTest* test)
     check_test_expect(test, same && listed > 500, "common body regions: each body's statement expressions listed, and its reach with them as with the scan");
 }
 
+// Compare the optimized tree's complete byte column with the ordinary edge propagation, before
+// and after adding query suppression to the roots. Each valid tree has unique operand and argument parents.
+static bool check_test_literal_tree_marks(CheckGraph* graph, const Parser* parser, const uint32_t* parents, uint8_t* expected,
+                                          uint32_t* stack, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    uint64_t* roots = arena_push_array(scratch, ((uint64_t)graph->count + 63) / 64, sizeof(uint64_t), _Alignof(uint64_t));
+    uint8_t* flags = arena_push_array(scratch, graph->count, 1, 1);
+    uint8_t* actual = arena_push_array(scratch, graph->count, 1, 1);
+    bool same = roots != NULL && flags != NULL && actual != NULL;
+    if (same)
+    {
+        memset(roots, 0, (((uint64_t)graph->count + 63) / 64) * sizeof(uint64_t));
+        uint64_t random = UINT64_C(2851);
+        for (uint32_t node = 0; node < graph->count; node += 1)
+        {
+            roots[node >> 6] |= (uint64_t)(parents[node] == BUSTER_CHECK_NONE) << (node & 63);
+            flags[node] = (uint8_t)check_test_tree_random(&random);
+        }
+        const CheckCommonFacts facts = { .roots = roots };
+        same = check_common_literal_contexts_tree(graph, parser, &facts, actual, stack, scratch) &&
+               memcmp(actual, expected, graph->count) == 0;
+        graph->warning_suppressed = flags;
+        same = same && check_common_literal_contexts(graph, parser, parents, expected, scratch) &&
+               check_common_literal_contexts_tree(graph, parser, &facts, actual, stack, scratch) &&
+               memcmp(actual, expected, graph->count) == 0;
+        graph->warning_suppressed = NULL;
+    }
+    arena_pop_to(scratch, mark);
+    return same;
+}
+
 // check_common_literal_blocked against check_common_literal_contexts' marks (#1360): on random tree graphs
 // (check_test_tree_generate) whose nodes without arguments are now and then a sizeof, an alignof or a variable length
 // array's bound or extent, with every root eligible (no node suppressed, no selection), a node is blocked exactly where
@@ -490,7 +548,7 @@ static void check_test_driver_literal_blocked(CheckTest* test)
                 const uint32_t r = check_test_tree_random(&state);
                 // (One node in 32, so that most chains to a root hold no query and some hold one or more.)
                 const bool plain = !check_graph_has_arguments(input.graph.ops[node]) && (r & 31) == 0;
-                input.graph.ops[node] = plain ? queries[(r >> 2) % BUSTER_ARRAY_LENGTH(queries)] : input.graph.ops[node];
+                input.graph.ops[node] = plain ? queries[(r >> 5) % BUSTER_ARRAY_LENGTH(queries)] : input.graph.ops[node];
                 // (No token: no selection is a static one.)
                 tokens[node] = BUSTER_CHECK_NONE;
             }
@@ -506,6 +564,7 @@ static void check_test_driver_literal_blocked(CheckTest* test)
                 blocked += !marked;
                 reached += marked && parents[node] != BUSTER_CHECK_NONE;
             }
+            same = same && check_test_literal_tree_marks(&input.graph, &parser, parents, marks, open, &scratch);
         }
         free(open);
         free(parents);

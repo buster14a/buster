@@ -74,9 +74,61 @@ static void ir_interpreter_test_splats(IrInterpreterTestTally* tally, Arena* mem
     }
 }
 
+static void ir_interpreter_test_simd_permute(IrInterpreterTestTally* tally, Arena* memory)
+{
+    const uint64_t mark = memory->length;
+    IrFunction function = {0};
+    const IrSizes sizes = { .instruction_count = 4, .block_count = 1, .extra_count = 1 };
+    const bool created = ir_create(memory, &sizes, &function) == IR_OK;
+    ir_interpreter_test_expect(tally, created, "SIMD permute fixture allocation");
+    if (created)
+    {
+        // %0 is a scalar. The two tables of permute2 name the same vector, whose first half reads its
+        // second half and vice versa. Even placing the result in that table must use its original bytes.
+        uint32_t slots[] = { BUSTER_IR_NONE, 0, 1, 2 };
+        IrSimdValue vectors[3] = {0};
+        IrInterpreterFrame frame = { .function = &function, .vector_indices = slots, .vector_values = vectors };
+        function.type[0] = IR_I32;
+        function.extra[0] = 1;
+        for (uint32_t width = 0; width < 3; width += 1)
+        {
+            const IrType type = (IrType)(IR_V4I32 + width);
+            const IrSimdShape shape = ir_simd_shape(type);
+            const uint32_t bytes = 16u << width;
+            IrSimdValue table = {0};
+            IrSimdValue indices = {0};
+            for (uint32_t byte = 0; byte < bytes; byte += 1)
+            {
+                ((uint8_t*)table.words)[byte] = (uint8_t)(3 * byte + 1);
+                ((uint8_t*)indices.words)[byte] = (uint8_t)(bytes - 1 - byte + (byte & 1) * bytes);
+            }
+            const IrSimdValue* operands[] = { &table, &indices, &table };
+            IrSimdAction action = { .operation = IR_SIMD_PERMUTE2, .result = shape, .operands = { shape, shape, shape } };
+            function.type[1] = type;
+            function.type[2] = type;
+            ir_interpreter_test_instruction(&function, 3, IR_INTRINSIC, type, 1, 2, ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, 0));
+            for (uint32_t part = 0; part <= 4; part += 1)
+            {
+                action.index = (uint8_t)part;
+                function.flags[3] = (uint8_t)part;
+                vectors[0] = table;
+                vectors[1] = indices;
+                IrSimdValue expected = table;
+                const bool valid = ir_simd_evaluate(&action, operands, NULL, NULL, 0, &expected);
+                const InterpreterStatus status = ir_interpreter_simd_operation(&frame, 3, &vectors[0]);
+                ir_interpreter_test_expect(tally, valid == (part < 4) && status == (valid ? INTERPRETER_OK : INTERPRETER_UNSUPPORTED) &&
+                                           memcmp(vectors, &expected, sizeof(expected)) == 0 && memcmp(vectors + 1, &indices, sizeof(indices)) == 0,
+                                           "in-place permute matches the lane model and an unsupported size leaves the table untouched");
+            }
+        }
+    }
+    arena_pop_to(memory, mark);
+}
+
 static void ir_interpreter_test_simd(IrInterpreterTestTally* tally, Arena* memory, Arena* execution)
 {
     ir_interpreter_test_splats(tally, memory, execution);
+    ir_interpreter_test_simd_permute(tally, memory);
     const uint64_t mark = memory->length;
     for (uint32_t width = 0; width < 3; width += 1)
     {
@@ -186,7 +238,7 @@ static void ir_interpreter_test_simd(IrInterpreterTestTally* tally, Arena* memor
         .instruction_count = 6,
         .block_count = 1,
         .constant_count = 1,
-        .vector_constant_count = 1,
+        .vector_constant_count = 2,
     };
     const bool created = ir_create(memory, &sizes, &select) == IR_OK;
     ir_interpreter_test_expect(tally, created, "SIMD select fixture allocation");
@@ -213,8 +265,38 @@ static void ir_interpreter_test_simd(IrInterpreterTestTally* tally, Arena* memor
         ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_OK, expected, "v4 select ignores high mask bits and unselected undef lanes");
         select.constants[0].low = 1;
         ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, INTERPRETER_UNDEFINED, (InterpreterValue){0}, "one selected undef lane is a semantic use");
+        // Each operand can be undefined independently. Only the low four mask bits select i32 lanes.
+        select.b[3] = 1;
+        select.c[3] = 2;
+        select.vector_constants[1].words[0] = ~select.vector_constants[0].words[0];
+        select.vector_constants[1].words[1] = ~select.vector_constants[0].words[1];
+        const uint8_t masks[] = { 0xf0, 0xa5, 0xff };
+        for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(masks); m += 1)
+        {
+            select.constants[0].low = masks[m];
+            const IrSimdValue bits = { .words = { masks[m] } };
+            const IrSimdValue* operands[] = { &bits, select.vector_constants, select.vector_constants + 1 };
+            const IrSimdAction action = { .operation = IR_SIMD_SELECT, .result = IR_SIMD_V4I32, .operands = { IR_SIMD_M8, IR_SIMD_V4I32, IR_SIMD_V4I32 } };
+            IrSimdValue lanes = {0};
+            ir_interpreter_test_expect(tally, ir_simd_evaluate(&action, operands, NULL, NULL, 0, &lanes), "select lane model");
+            const uint32_t used = 1u | ((masks[m] & 15) != 0 ? 2u : 0u) | ((masks[m] & 15) != 15 ? 4u : 0u);
+            for (uint32_t undef = 0; undef < 8; undef += 1)
+            {
+                for (uint32_t p = 0; p < 3; p += 1)
+                {
+                    const bool missing = (undef & (1u << p)) != 0;
+                    select.op[p] = missing ? IR_UNDEF : p == 0 ? IR_CONST : IR_VCONST;
+                    select.a[p] = missing ? BUSTER_IR_NONE : (uint32_t)(p == 2);
+                }
+                const InterpreterStatus status = (used & undef) != 0 ? INTERPRETER_UNDEFINED : INTERPRETER_OK;
+                ir_interpreter_test_run(tally, &program, 71, 0, 0, 0, execution, status, (InterpreterValue){ .low = lanes.words[0], .high = lanes.words[1] },
+                                        "select reads the mask and only the definedness of its active alternatives");
+            }
+        }
+        ir_interpreter_test_instruction(&select, 0, IR_CONST, IR_M8, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         select.op[1] = IR_CONST;
         select.type[1] = IR_I128;
+        select.a[1] = 0;
         select.op[2] = IR_BITCAST;
         select.a[2] = 1;
         select.constants[0] = (IrConstant){ .low = 1 };
