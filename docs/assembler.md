@@ -233,7 +233,7 @@ forms, and AVX-512 F, BW, DQ, CD and VBMI forms), and an index for every feature
 (the C lowering's) holds about 4,200 forms. The extensions the table has no
 feature for (AVX512-FP16, AVX10.2, AMX, XOP, FMA4, TBM, LWP, Key Locker, APX's
 EVEX promotions and the others) stay out on every target. Other unsupported
-syntax is diagnosed: rounding/SAE, explicit pseudo-prefixes (`{vex}`, `{load}`),
+syntax is diagnosed: rounding/SAE, pseudo-prefixes outside the subset below,
 far branches, 16/32-bit execution modes and 32-bit addresses (but a string
 instruction's, below), other segment registers (but a string instruction's
 source's), relocation modifiers other than `@PLT`,
@@ -243,6 +243,16 @@ macro-assembler directives. An unsupported form never reaches the trusted
 encoder. FFREEP (`ffreep %st(i)`, DF C0+i), which every x86-64 processor runs,
 is baseline in the target table with the x87's other stack-register forms
 (#1115).
+
+In AT&T and Intel syntax the assembler reads the encoding choices that
+`-S` writes. `{load}` selects the form with the destination in ModRM.reg
+and `{store}` selects the reverse form for register moves and arithmetic.
+`{vex}` and `{evex}` select the encoding family within the target's enabled
+forms. A direction and a family can appear together in either order.
+`{disp32}` selects a direct branch's rel32 form even when its target is
+within rel8 reach. Forcing a ModRM memory displacement to 32 bits is outside
+this subset. The assembly writer's explicit `.section .eh_frame,"a",@unwind`
+produces an ELF section of type `SHT_X86_64_UNWIND`.
 
 An AT&T size suffix is the matcher's to check, by each form's suffix width
 (`x86_match_suffix_width`), when the full mnemonic isn't a name of the index:

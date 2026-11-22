@@ -630,13 +630,14 @@ with its expected spellings, and a small unit compared whole; each refusal and
 invalid view by its reason; output arenas short of the text at lengths across
 it, and scratch arenas short of the tables up to the first that holds them,
 which must print the same text; and the data rows' kernel against libc's
-formatting of random rows. With `--cross-check`, GNU as assembles each printed
+formatting of random rows. Buster's assembler reads the program fixture's
+printed source back and compares its ELF sections, symbols and relocations
+with the object writer's. With `--cross-check`, GNU as assembles each printed
 unit, and its object must be `object_build`'s object of the unit by the
-assembler tests' comparator (`object_test_same_as`) after two normalizations of
-the form contract: an assembler resolves a PC-relative reference to a local
-symbol of the field's own section itself (`call helper@PLT` to a static
-function), where the object writer leaves a relocation, so the comparison applies
-those relocations to our object first; and GNU as lists an undefined
+assembler tests' comparator (`object_test_same_as`). An assembler can resolve a
+PC-relative reference to a local symbol in the same section, such as
+`call helper@PLT` to a static function. The comparator applies those
+relocations in both objects before checking the bytes. GNU as also lists an undefined
 `_GLOBAL_OFFSET_TABLE_` in an object with a GOT reference, which the comparison
 skips. Then the form sweep: every form the matcher admits for a target of every
 feature but the branches (whose targets are labels, the program fixture's), two

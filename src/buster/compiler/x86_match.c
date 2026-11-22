@@ -50,6 +50,8 @@ struct X86MatchRequest
 {
     String8 mnemonic;
     X86Operand operands[BUSTER_X86_MATCH_OPERANDS];
+    // Encoding attributes requested by GNU pseudo-prefixes, in the index's attribute bits.
+    uint32_t encoding;
     uint8_t count;
     uint8_t width;
     uint8_t decorations;
@@ -95,6 +97,10 @@ struct X86MatchIndex
 #define BUSTER_X86_MATCH_PUSHW_NAME (1u << 13)
 // A VEX form chosen only where no EVEX form of its mnemonic matches (x86_match_yields).
 #define BUSTER_X86_MATCH_YIELDS (1u << 14)
+#define BUSTER_X86_MATCH_VEX (1u << 15)
+#define BUSTER_X86_MATCH_LOAD (1u << 16)
+#define BUSTER_X86_MATCH_STORE (1u << 17)
+#define BUSTER_X86_MATCH_REL32 (1u << 18)
 #define BUSTER_X86_MATCH_EXCLUDED_TARGET 1
 #define BUSTER_X86_MATCH_EXCLUDED_UNCLASSIFIED 2
 
@@ -515,6 +521,10 @@ static void x86_match_initialize(X86MatchIndex* index, const X86Target* target)
                 (strcmp(form->mnemonic, "pushw") == 0 ? BUSTER_X86_MATCH_PUSHW_NAME : 0) |
                 (form->operand_bytes == 2 && (strcmp(form->mnemonic, "pushw") == 0 || strcmp(form->mnemonic, "push") == 0) ? BUSTER_X86_MATCH_PUSH_WORD : 0) |
                 (form->family == BUSTER_X86_FAMILY_EVEX ? BUSTER_X86_MATCH_EVEX : 0) |
+                (form->family == BUSTER_X86_FAMILY_VEX ? BUSTER_X86_MATCH_VEX : 0) |
+                (form->syntax == X86_SYNTAX_REG_RM || form->syntax == X86_SYNTAX_REG_VVVV_RM ? BUSTER_X86_MATCH_LOAD : 0) |
+                (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_RM_VVVV_REG ? BUSTER_X86_MATCH_STORE : 0) |
+                (form->relative_bytes == 4 ? BUSTER_X86_MATCH_REL32 : 0) |
                 ((form->evex & BUSTER_X86_EVEX_ROUNDING) != 0 ? BUSTER_X86_MATCH_ROUNDING : 0) |
                 ((form->evex & (BUSTER_X86_EVEX_SAE | BUSTER_X86_EVEX_ND | BUSTER_X86_EVEX_NF | BUSTER_X86_EVEX_SOURCE_CONDITION)) != 0 ? BUSTER_X86_MATCH_FORBIDDEN : 0) |
                 (x86_match_yields(f) ? BUSTER_X86_MATCH_YIELDS : 0);
@@ -597,7 +607,7 @@ static uint32_t x86_match_candidates_vector(const X86MatchIndex* index, const X8
         mask &= _mm512_cmpeq_epi32_mask(_mm512_and_epi32(attributes, _mm512_set1_epi32(255)), _mm512_set1_epi32(request->width));
     }
     const uint32_t spelling = x86_match_name(request->mnemonic, "movabs") ? BUSTER_X86_MATCH_MOVABS : x86_match_name(request->mnemonic, "pushw") ? BUSTER_X86_MATCH_PUSH_WORD : 0;
-    const uint32_t required = spelling | (request->decorations != 0 ? BUSTER_X86_MATCH_EVEX : 0) | (request->rounding ? BUSTER_X86_MATCH_ROUNDING : 0);
+    const uint32_t required = request->encoding | spelling | (request->decorations != 0 ? BUSTER_X86_MATCH_EVEX : 0) | (request->rounding ? BUSTER_X86_MATCH_ROUNDING : 0);
     const uint32_t checked = required | BUSTER_X86_MATCH_ROUNDING | BUSTER_X86_MATCH_FORBIDDEN | (spelling == BUSTER_X86_MATCH_PUSH_WORD ? 0 : BUSTER_X86_MATCH_PUSHW_NAME);
     mask &= _mm512_cmpeq_epi32_mask(_mm512_and_epi32(attributes, _mm512_set1_epi32(checked)), _mm512_set1_epi32(required));
     for (uint32_t operand = 0; mask != 0 && operand < request->count; operand += 1)
