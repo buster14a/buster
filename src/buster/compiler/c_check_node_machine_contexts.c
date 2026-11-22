@@ -138,11 +138,7 @@ static __attribute__((noinline)) bool node_machine_sinks(const NodeMachine* mach
         const uint8_t to_facts = node_machine_facts(machine, to);
         const uint8_t source = node_machine_record_class(machine, r);
         const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
-        // node_machine_convert's (check_lower_conversion_empty's) empty conversion, which no task converts by.
-        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
-                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
-                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
-                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        const bool empty = check_lower_conversion_empty_by_class(source, from_facts, target, to_facts);
         for (uint32_t k = 0; k < 2; k += 1)
         {
             const uint32_t arm = k == 0 ? b : c;

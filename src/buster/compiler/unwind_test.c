@@ -796,6 +796,61 @@ static bool unwind_test_guards(void)
     return valid;
 }
 
+static bool unwind_test_terminal_rows(void)
+{
+    const EmissionFrameRow input[] = {
+        { .offset = 0, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 8 },
+        { .offset = 1, .kind = EMISSION_FRAME_REMEMBER_STATE },
+        { .offset = 1, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 },
+        { .offset = 2, .kind = EMISSION_FRAME_REMEMBER_STATE },
+        { .offset = 2, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 24 },
+        { .offset = 2, .kind = EMISSION_FRAME_RESTORE_STATE },
+        { .offset = 2, .kind = EMISSION_FRAME_REMEMBER_STATE },
+        { .offset = 2, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 32 },
+        { .offset = 3, .kind = EMISSION_FRAME_RESTORE_STATE },
+        { .offset = 3, .kind = EMISSION_FRAME_REMEMBER_STATE },
+        { .offset = 4, .kind = EMISSION_FRAME_RESTORE_STATE },
+    };
+    const uint32_t count = BUSTER_ARRAY_LENGTH(input);
+    EmissionFrameRow rows[BUSTER_ARRAY_LENGTH(input)];
+    memcpy(rows, input, sizeof(input));
+    bool valid = unwind_rows_canonical(0, 0, 0) == 0 && unwind_rows_canonical(rows, count, 0) == 0;
+    memcpy(rows, input, sizeof(input));
+    valid &= unwind_rows_canonical(rows, count, 5) == count && memcmp(rows, input, sizeof(rows)) == 0;
+
+    // At size 3 both terminal restores count, even with a terminal remember between them. The inner pair at PC 2
+    // survives. At size 4 the final restore removes only row 9, leaving the earlier unpaired remember in place.
+    const uint8_t survivors[] = { 0, 2, 3, 4, 5, 7 };
+    memcpy(rows, input, sizeof(input));
+    valid &= unwind_rows_canonical(rows, count, 3) == BUSTER_ARRAY_LENGTH(survivors);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(survivors); i += 1)
+    {
+        valid &= memcmp(rows + i, input + survivors[i], sizeof(*rows)) == 0;
+    }
+    memcpy(rows, input, sizeof(input));
+    valid &= unwind_rows_canonical(rows, count, 4) == 9 && memcmp(rows, input, 9 * sizeof(*rows)) == 0;
+
+    // A restore without a prior remember is discarded at the end, but still reaches validation inside the function.
+    memcpy(rows, input, sizeof(input));
+    rows[1].kind = EMISSION_FRAME_RESTORE_STATE;
+    const uint32_t kept = unwind_rows_canonical(rows, count, 3);
+    UnwindFunction function;
+    valid &= kept == 7 && rows[1].kind == EMISSION_FRAME_RESTORE_STATE && unwind_rows_function(rows, kept, 3, &function) == UNWIND_ERROR_INVALID;
+
+    // The depth limit applies to the program that survives. All these adjacent remembers have terminal restores.
+    const uint32_t depth = BUSTER_UNWIND_ROW_STATES + 1;
+    EmissionFrameRow nested[2 * (BUSTER_UNWIND_ROW_STATES + 1) + 1];
+    for (uint32_t i = 0; i < depth; i += 1)
+    {
+        nested[i] = (EmissionFrameRow){ .kind = EMISSION_FRAME_REMEMBER_STATE };
+        nested[depth + 1 + i] = (EmissionFrameRow){ .offset = 1, .kind = EMISSION_FRAME_RESTORE_STATE };
+    }
+    nested[depth] = input[0];
+    valid &= unwind_rows_canonical(nested, BUSTER_ARRAY_LENGTH(nested), 1) == 1 && memcmp(nested, input, sizeof(*nested)) == 0;
+    printf("unwind terminal rows: nested states, tied offsets and unmatched restores: %s\n", valid ? "pass" : "FAIL");
+    return valid;
+}
+
 static bool unwind_test_consumers(bool keep, const TestTool* perf);
 static bool unwind_native_oracle_tests(void);
 
@@ -824,6 +879,7 @@ static int run_unwind_tests(int argc, char** argv)
     {
         valid &= unwind_test_emitters();
         valid &= unwind_test_compact();
+        valid &= unwind_test_terminal_rows();
         valid &= unwind_test_diagnostics();
         valid &= unwind_test_guards();
         valid &= unwind_tier0_test();

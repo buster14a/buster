@@ -4,6 +4,13 @@
 // Include after the checker driver's spawn, count and file-comparison helpers. Initializer-only families have
 // separate fixtures. These cases compare complete no-caret diagnostics through both kernels and lane requests.
 
+typedef struct CheckDriverWarningSpelling CheckDriverWarningSpelling;
+struct CheckDriverWarningSpelling
+{
+    const char* clang;
+    const char* baseline;
+};
+
 typedef struct CheckDriverDefaultWarningFixture CheckDriverDefaultWarningFixture;
 struct CheckDriverDefaultWarningFixture
 {
@@ -17,6 +24,9 @@ struct CheckDriverDefaultWarningFixture
     bool compare_warning_text;
     bool compare_node_window;
     bool syntax_only;
+    // An opt-in, NULL-terminated list of exact primary diagnostic spellings retained by a separate existing gap.
+    // Every location, warning, note and diagnostic order still compares byte for byte. No ordinary fixture uses it.
+    const CheckDriverWarningSpelling* baseline_spellings;
 };
 
 static const char check_driver_format_plain_source[] =
@@ -25,6 +35,62 @@ static const char check_driver_format_plain_source[] =
     "int sprintf(char*,const char*,...);\nint snprintf(char*,unsigned long,const char*,...);\n"
     "void f(FILE*p,char*b){printf(\"%d\",\"str\");fprintf(p,\"%d\",\"str\");"
     "sprintf(b,\"%d\",\"str\");snprintf(b,16,\"%d\",\"str\");snprintf(b,16,\"%s.mo\\0\",\"x\");}\n";
+
+// Attributes a header chooses by feature tests (#3306): each __has_attribute answers 1 where the checker consumes the
+// attribute, so the unit gets clang's -Wformat, -Wunused-result, -Wdeprecated-declarations with the message, the const
+// and pure calls' -Wunused-value, no -Wreturn-type after a noreturn call and no -Wunused-variable for an unused static.
+static const char check_driver_feature_tested_attributes_source[] =
+    "#if __has_attribute(format)\n"
+    "#define PRINTF_LIKE(f, a) __attribute__((format(printf, f, a)))\n"
+    "#else\n"
+    "#define PRINTF_LIKE(f, a)\n"
+    "#endif\n"
+    "#if __has_attribute(__warn_unused_result__)\n"
+    "#define MUST_USE __attribute__((warn_unused_result))\n"
+    "#else\n"
+    "#define MUST_USE\n"
+    "#endif\n"
+    "#if __has_attribute(deprecated) && __has_extension(attribute_deprecated_with_message)\n"
+    "#define OLD(m) __attribute__((deprecated(m)))\n"
+    "#elif __has_attribute(deprecated)\n"
+    "#define OLD(m) __attribute__((deprecated))\n"
+    "#else\n"
+    "#define OLD(m)\n"
+    "#endif\n"
+    "#if __has_attribute(const) && __has_attribute(pure)\n"
+    "#define CONST __attribute__((const))\n"
+    "#define PURE __attribute__((pure))\n"
+    "#else\n"
+    "#define CONST\n"
+    "#define PURE\n"
+    "#endif\n"
+    "#if __has_attribute(noreturn)\n"
+    "#define NORETURN __attribute__((noreturn))\n"
+    "#else\n"
+    "#define NORETURN\n"
+    "#endif\n"
+    "#if __has_attribute(unused)\n"
+    "#define MAYBE __attribute__((unused))\n"
+    "#else\n"
+    "#define MAYBE\n"
+    "#endif\n"
+    "int log_line(const char*, ...) PRINTF_LIKE(1, 2);\n"
+    "MUST_USE int take(int);\n"
+    "OLD(\"use take\") int give(int);\n"
+    "CONST int square(int);\n"
+    "PURE int peek(const int*);\n"
+    "NORETURN void die(void);\n"
+    "static int helper MAYBE;\n"
+    "int f(int n, const int* p)\n"
+    "{\n"
+    "    log_line(\"%d\", 1.5);\n"
+    "    take(n);\n"
+    "    square(n);\n"
+    "    peek(p);\n"
+    "    if (n)\n"
+    "        return give(n);\n"
+    "    die();\n"
+    "}\n";
 
 // The first attribute survives a bare redeclaration; the second is attached after a bare declaration.
 // A non-library name with a different format index keeps its source contract under the same options.
@@ -83,6 +149,19 @@ static const char check_driver_atomic_access_valid_source[] =
 
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
+    {
+        .name = "attributes chosen by __has_attribute",
+        .source = check_driver_feature_tested_attributes_source,
+        .warnings = 5,
+        .notes = 2,
+    },
+    {
+        .name = "attributes chosen by __has_attribute under -Wall -Wextra",
+        .source = check_driver_feature_tested_attributes_source,
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 5,
+        .notes = 2,
+    },
     {
         .name = "atomic record accesses default to errors after the body's structural errors",
         .source = check_driver_atomic_access_source,
@@ -3002,6 +3081,39 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
     },
 };
 
+// Exact output comparison with a fixture's explicitly frozen primary error spellings. A map includes the complete
+// ": error: ..." primary text through its unique assertion message, so no source spelling or note is normalized.
+static bool check_test_driver_warning_text_matches(const char* actual, const char* expected, const CheckDriverWarningSpelling* spellings)
+{
+    bool match = actual != NULL && expected != NULL && (spellings != NULL || strcmp(actual, expected) == 0);
+    while (spellings != NULL && match && (*actual != 0 || *expected != 0))
+    {
+        bool replaced = false;
+        for (uint32_t i = 0; spellings != NULL && spellings[i].clang != NULL && !replaced; i += 1)
+        {
+            const size_t length = strlen(spellings[i].clang);
+            if (length != 0 && strncmp(expected, spellings[i].clang, length) == 0)
+            {
+                const size_t baseline_length = strlen(spellings[i].baseline);
+                match = strncmp(actual, spellings[i].baseline, baseline_length) == 0;
+                if (match)
+                {
+                    actual += baseline_length;
+                    expected += length;
+                }
+                replaced = true;
+            }
+        }
+        if (!replaced)
+        {
+            match = *actual == *expected;
+            actual += match;
+            expected += match;
+        }
+    }
+    return match;
+}
+
 // A warning sweep of `fixtures`. With `deal`, it is a long sweep (test-checker-driver --part, check_test_driver_takes):
 // each fixture is a unit of its own, which the caller doesn't deal; without it, the sweep is its caller's unit.
 static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char* clang, const char* executable, const char* directory,
@@ -3089,8 +3201,9 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                         expected_text = fixture->compare_warning_text && expected_text == NULL ? strstr(expected, "error: ") : expected_text;
                         const char* actual_text = fixture->compare_warning_text && expected_text != NULL ?
                                                   strstr(actual != NULL ? actual : "", policy == 1 ? "error: " : "warning: ") : NULL;
-                        const bool diagnostics_match = expected_text != NULL ? actual_text != NULL && strcmp(actual_text, expected_text) == 0 :
-                                                       actual != NULL && strcmp(actual, expected) == 0;
+                        const bool diagnostics_match = check_test_driver_warning_text_matches(expected_text != NULL ? actual_text : actual,
+                                                                                               expected_text != NULL ? expected_text : expected,
+                                                                                               fixture->baseline_spellings);
                         const bool same = status == oracle && diagnostics_match;
                         check_test_expect(test, same, description);
                         if (!same && !mismatch_printed)

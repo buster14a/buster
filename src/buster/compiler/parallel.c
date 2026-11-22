@@ -413,6 +413,74 @@ static uint64_t parallel_mebibytes_read(String8 line, uint64_t* mebibytes)
     return valid ? i : 0;
 }
 
+typedef struct ParallelTitleIndex ParallelTitleIndex;
+struct ParallelTitleIndex
+{
+    uint32_t* buckets;
+    uint64_t scan_budget;
+};
+
+// Use the spelling hash already used for interned names. Scaling its full range gives one bucket per command.
+static uint32_t parallel_title_bucket(String8 title, uint64_t count)
+{
+    const uint64_t hash = intern_hash_bytes((const uint8_t*)title.pointer, title.length);
+    return (uint32_t)(((__uint128_t)hash * count) >> 64);
+}
+
+static uint64_t parallel_find_title(Arena* arena, ParallelTitleIndex* index, const ParallelCommand* commands, uint64_t count, String8 title)
+{
+    if (index->scan_budget == 0)
+    {
+        // The optional index is attempted once. The ordinary scan still works when only the result arrays fit.
+        index->scan_budget = UINT64_MAX;
+        const ArenaFailure previous_failure = arena_failure;
+        index->buckets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 2 * count);
+        if (index->buckets != 0)
+        {
+            uint32_t* const heads = index->buckets;
+            uint32_t* const next = heads + count;
+            memset(heads, 0, count * sizeof(*heads));
+            // Prepending in reverse list order keeps the first match for equal titles.
+            for (uint64_t end = count; end != 0; end -= 1)
+            {
+                const uint32_t bucket = parallel_title_bucket(commands[end - 1].title, count);
+                next[end - 1] = heads[bucket];
+                heads[bucket] = (uint32_t)end;
+            }
+        }
+        else
+        {
+            arena_failure = previous_failure;
+        }
+    }
+    uint64_t found = count;
+    if (index->buckets != 0)
+    {
+        const uint32_t* const next = index->buckets + count;
+        uint32_t entry = index->buckets[parallel_title_bucket(title, count)];
+        while (entry != 0 && !parallel_equal(commands[entry - 1].title, title))
+        {
+            entry = next[entry - 1];
+        }
+        found = entry != 0 ? entry - 1 : count;
+    }
+    else
+    {
+        uint64_t i = 0;
+        while (i < count && !parallel_equal(commands[i].title, title))
+        {
+            i += 1;
+        }
+        found = i;
+        if (index->scan_budget != UINT64_MAX)
+        {
+            const uint64_t visited = i + (i < count);
+            index->scan_budget -= visited < index->scan_budget ? visited : index->scan_budget;
+        }
+    }
+    return found;
+}
+
 // Reads `text`'s costs for the list's commands: each line not blank nor a comment is `SECONDS TITLE`, a command's cost in
 // seconds of the CPUs it holds (its time, times its CPUs), then blanks, then its title as its heading has it. A title the
 // list doesn't have is left out (a command since removed); a command without a line costs its CPUs times 10 s. One
@@ -427,6 +495,9 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
     const ParallelCommand* const commands = list->commands;
     ParallelCosts result = { .milliseconds = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1), .peaks = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, count + 1) };
     bool* given = BUSTER_ARENA_PUSH_ARRAY(arena, bool, count + 1);
+    const uint64_t scratch_mark = arena->length;
+    // Pay to hash the list only after lookups have compared the equivalent of four full scans.
+    ParallelTitleIndex titles = { .scan_budget = count >= 32 && count <= UINT32_MAX ? 4 * count : UINT64_MAX };
     if (result.milliseconds == 0 || result.peaks == 0 || given == 0)
     {
         result.error = "out of memory for the costs";
@@ -534,11 +605,7 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
                 end -= 1;
             }
             const String8 title = { .pointer = rest.pointer + start, .length = end - start };
-            uint64_t found = count;
-            for (uint64_t i = 0; i < count; i += 1)
-            {
-                found = found == count && parallel_equal(commands[i].title, title) ? i : found;
-            }
+            const uint64_t found = parallel_find_title(arena, &titles, commands, count, title);
             if (read == 0 || start == read || title.length == 0)
             {
                 result.error = "a peak that isn't MIB TITLE";
@@ -568,11 +635,7 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
                 end -= 1;
             }
             const String8 title = { .pointer = line.pointer + start, .length = end - start };
-            uint64_t found = count;
-            for (uint64_t i = 0; i < count; i += 1)
-            {
-                found = found == count && parallel_equal(commands[i].title, title) ? i : found;
-            }
+            const uint64_t found = parallel_find_title(arena, &titles, commands, count, title);
             if (length == 0 || start == length || title.length == 0)
             {
                 result.error = "a cost that isn't SECONDS TITLE";
@@ -590,6 +653,7 @@ static ParallelCosts parallel_costs_parse(Arena* arena, const ParallelList* list
             }
         }
     }
+    arena_pop_to(arena, scratch_mark);
     return result;
 }
 

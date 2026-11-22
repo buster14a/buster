@@ -635,6 +635,10 @@ typedef enum CheckInputNoteKind
     CHECK_INPUT_NOTE_MATCH_PAREN,
     // A declaration before the one a message is about (#147): "previous declaration is here".
     CHECK_INPUT_NOTE_PREVIOUS_DECLARATION,
+    // A pragma clone's note uses attribute as a preprocessor-source token; note_token still carries its type's
+    // declaration for diagnostic spelling.
+    CHECK_INPUT_NOTE_PRAGMA_DEFINITION,
+    CHECK_INPUT_NOTE_PRAGMA_DECLARATION,
     // A statement's earlier attribute of the same kind (#147, code_align's): "previous attribute is here".
     CHECK_INPUT_NOTE_PREVIOUS_ATTRIBUTE,
     // An incomplete tag's declaration (#147, preferred_type's type): "forward declaration of 'struct S'", the report's type.
@@ -730,7 +734,8 @@ struct CheckInputReport
 
 static __attribute__((unused)) uint32_t check_input_report_source(const Parser* parser, const CheckInputReport* report)
 {
-    return report->pragma != 0 ? (report->pragma <= parser->tokens.pragma_count ? parser->tokens.pragma_sources[report->pragma - 1] + 1 : BUSTER_CHECK_NONE) :
+    return report->message == CHECK_INPUT_WEAK_LINKAGE && report->pragma != 0 ? report->attribute :
+           report->pragma != 0 ? (report->pragma <= parser->tokens.pragma_count ? parser->tokens.pragma_sources[report->pragma - 1] + 1 : BUSTER_CHECK_NONE) :
            report->token < parser->tokens.count ? parse_source_index(&parser->tokens, report->token) : BUSTER_CHECK_NONE;
 }
 
@@ -2106,6 +2111,16 @@ struct CheckInputReader
     TypeId enum_types[64];
     CheckOverloadCandidate* overload_candidates;
     uint32_t overload_capacity;
+    // The sizes check_input_run plans for the tables of overloads, its candidates' and its calls': a unit without an
+    // overloadable function makes them only for a `#pragma weak A = T` function clone (#2449,
+    // check_input_symbol_overload_original). overload_capacity stays 0 until a table exists, where target
+    // multiversioning's calls grow theirs from.
+    uint32_t overload_planned_capacity;
+    uint32_t overload_call_capacity;
+    // Whether resolving a name has work past its builtin (check_input_resolve_name): the tables of overloads exist, or
+    // the unit has a `#pragma weak A = T`, whose function clone may make them (#2449). One flag keeps a common unit's
+    // test of each name one load.
+    bool name_hooks;
     CheckOverloadIndex overload_index;
     bool declarator_overloadable;
     uint16_t* builtins;
@@ -2366,6 +2381,9 @@ struct CheckInputReader
     bool deprecated_attributes;
     // Whether a diagnose_if or enable_if attribute was read, for its conditions (#1447, c_check_condition.c).
     bool condition_attributes;
+    // Whether an alias or ifunc attribute named a function or variable declared before it (#3300,
+    // CheckInputAttribute.alias_target): only then are the unused facts' targets looked for (check_input_alias_used).
+    bool alias_targets;
     // Whether an enforce_tcb or enforce_tcb_leaf attribute was read, for its calls' warnings (#1447, check_input_tcb_calls),
     // and whether one of them or a modular_format was, for its redeclarations' checks (check_input_attribute_merge_checks).
     bool tcb_attributes;
@@ -6713,6 +6731,9 @@ static inline __attribute__((always_inline)) bool check_input_spelling(CheckInpu
 #include "c_check_ignored_pragma.c"
 #include "c_check_pack_input.c"
 #include "c_check_visibility_input.c"
+static uint32_t check_input_overload_flags(const CheckInputAttributes* attributes);
+static bool check_input_overload_initialize(CheckInputReader* reader, bool present, uint32_t capacity, uint32_t calls, Arena* index_arena);
+static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration);
 #include "c_check_symbol_pragma_input.c"
 #include "c_check_ms_struct_input.c"
 #include "c_check_fp_eval_input.c"
@@ -6915,7 +6936,7 @@ static __attribute__((noinline, cold)) void check_input_bit_int_suffix(CheckInpu
         .token = token,
         .source = BUSTER_CHECK_WARNING_NO_SOURCE,
         .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-        .completion = token + 1,
+        .completion = token,
         .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
     };
     check_input_warning_once(reader, &event);
@@ -7164,7 +7185,6 @@ static void check_input_alloc_token_evidence(CheckInputReader* reader, uint32_t 
 #include "c_check_generic.c"
 static void check_input_implicit_function(CheckInputReader* reader, uint32_t token);
 // The plain library builtins' calls that clang folds (#148), defined after the implicit declarations below.
-static inline __attribute__((always_inline)) uint32_t check_input_library_declaration(CheckInputReader* reader, uint32_t declaration);
 static inline __attribute__((always_inline)) uint32_t check_input_library_call(CheckInputReader* reader, uint32_t use);
 
 // A constexpr object's value (#793), if its initializer's finish has read it: an integer, floating or null pointer
@@ -14423,10 +14443,17 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
 {
     const Parser* parser = reader->parser;
     const uint32_t identifier = parser->tokens.names[i];
-    if (__builtin_expect(reader->output->overload_heads != 0, 0))
+    if (__builtin_expect(reader->name_hooks, 0))
     {
         const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
-        reader->output->overload_heads[i] = handle != 0 ? reader->output->overload_heads[reader->bindings.declaration[handle - 1]] : 0;
+        if (reader->output->overload_heads != 0)
+        {
+            reader->output->overload_heads[i] = handle != 0 ? reader->output->overload_heads[reader->bindings.declaration[handle - 1]] : 0;
+        }
+        if (__builtin_expect(reader->output->symbol_pragmas != NULL, 0))
+        {
+            check_input_symbol_overload_use(reader, i, handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE);
+        }
     }
     const uint16_t builtin = check_input_builtin_id(reader, i);
     const uint32_t bound = __builtin_expect(builtin != CBUILTIN_NONE, 0) ? c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier) : 0;
@@ -14543,6 +14570,61 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
     }
 }
 
+typedef struct CheckInputJumpContext CheckInputJumpContext;
+struct CheckInputJumpContext
+{
+    uint32_t next;
+    uint32_t loop_limit;
+    uint32_t switch_limit;
+};
+
+// Jumps arrive in source order. A for, while or switch body starts after its head's closing parenthesis,
+// so a jump in a GNU statement expression in the head can use only an enclosing body. A do body starts
+// at the do and its subtree ends before the trailing while. Only membership is needed: the furthest end
+// seen for each kind covers nested bodies without a stack.
+static bool check_input_jump_enclosed(const CheckInputReader* reader, CheckInputJumpContext* context, uint32_t jump, bool is_break)
+{
+    if (jump >= context->loop_limit && (!is_break || jump >= context->switch_limit))
+    {
+        const Parser* parser = reader->parser;
+        uint32_t first = context->next;
+        if (reader->function_body < jump && first < reader->function_body)
+        {
+            first = reader->function_body;
+        }
+        while (first < jump)
+        {
+            uint64_t heads = check_input_scan_equal(parser->tree.roles, first, jump, PARSE_ROLE_DO) |
+                             check_input_scan_equal(parser->tree.roles, first, jump, PARSE_ROLE_CLOSE_FOR) |
+                             check_input_scan_equal(parser->tree.roles, first, jump, PARSE_ROLE_CLOSE_CONDITION);
+            while (heads != 0)
+            {
+                const uint32_t head = first + (uint32_t)__builtin_ctzll(heads);
+                heads &= heads - 1;
+                const uint32_t limit = reader->ends[head] + 1;
+                if (jump < limit)
+                {
+                    const bool condition = parser->tree.roles[head] == PARSE_ROLE_CLOSE_CONDITION;
+                    const uint32_t keyword = condition ? check_input_statement_keyword(reader, head) : head;
+                    const uint8_t kind = keyword < parser->tokens.count ? parser->tokens.kinds[keyword] : PARSE_KIND_UNKNOWN;
+                    if (!condition || kind == PARSE_KIND_WHILE)
+                    {
+                        context->loop_limit = limit > context->loop_limit ? limit : context->loop_limit;
+                    }
+                    else if (kind == PARSE_KIND_SWITCH)
+                    {
+                        context->switch_limit = limit > context->switch_limit ? limit : context->switch_limit;
+                    }
+                }
+            }
+            first += jump - first < 64 ? jump - first : 64;
+        }
+        // Both jumps are valid throughout a loop. Any body starting inside it ends there or earlier.
+        context->next = context->loop_limit > jump ? context->loop_limit : jump + 1;
+    }
+    return jump < context->loop_limit || (is_break && jump < context->switch_limit);
+}
+
 // The walk from token `begin` to `end`, where it stops (the unit's count, for the whole unit). A lane's walk of a body
 // (CheckInputReader.lane) starts at its opening brace, whose activations the top level made, and ends at the token
 // after its closing brace, where its scopes end and nothing else of the token is its. It visits only the
@@ -14559,6 +14641,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     // C89's implicit declarations start at a name (check_input_starts_implicit_declaration), which a plain name's visit
     // leaves to the general one.
     const bool modern = parser->language.standard >= 1999;
+    CheckInputJumpContext jumps = { .next = begin };
     uint32_t visits = 0;
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
@@ -14897,16 +14980,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             }
             else if (kind == PARSE_KIND_BREAK || kind == PARSE_KIND_CONTINUE)
             {
-                bool loop = false;
-                for (uint32_t ancestor = parser->tree.parents[i]; ancestor < parser->tokens.count && !loop; ancestor = parser->tree.parents[ancestor])
-                {
-                    const uint8_t ancestor_role = parser->tree.roles[ancestor];
-                    const uint32_t keyword = check_input_statement_keyword(reader, ancestor);
-                    loop = (i > ancestor || ancestor_role == PARSE_ROLE_DO) && (ancestor_role == PARSE_ROLE_CLOSE_FOR || ancestor_role == PARSE_ROLE_DO ||
-                           (ancestor_role == PARSE_ROLE_CLOSE_CONDITION && keyword < parser->tokens.count &&
-                            (parser->tokens.kinds[keyword] == PARSE_KIND_WHILE || (kind == PARSE_KIND_BREAK && parser->tokens.kinds[keyword] == PARSE_KIND_SWITCH))));
-                }
-                if (!loop)
+                if (!check_input_jump_enclosed(reader, &jumps, i, kind == PARSE_KIND_BREAK))
                 {
                     const uint32_t first = reader->output->report_count;
                     check_input_report(reader, i, kind == PARSE_KIND_BREAK ? CHECK_INPUT_BREAK : CHECK_INPUT_CONTINUE);
@@ -17637,7 +17711,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
     input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
-    if (pp->options.statement_controls && valid && fresh_output && complete_translation_unit && deferred == NULL && attested == NULL && count >= 8192)
+    if (pp->options.statement_controls && valid && (fresh_output || pp->options.statement_controls_anywhere) && complete_translation_unit && deferred == NULL &&
+        attested == NULL && count >= 8192)
     {
         const uint64_t words = (graph_capacity + 63) / 64;
         input->discard_roots = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);
@@ -18065,7 +18140,14 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             }
         }
         check_input_intrinsic_initialize(&reader);
-        check_input_overload_initialize(&reader, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] != 0, counts.operands, counts.calls);
+        const uint32_t pragma_aliases = check_input_symbol_alias_count(input->symbol_pragmas);
+        const bool overload_capacity = pragma_aliases <= UINT32_MAX - counts.operands;
+        input->resource |= !overload_capacity;
+        if (overload_capacity)
+        {
+            check_input_overload_initialize(&reader, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] != 0, counts.operands + pragma_aliases, counts.calls,
+                                            reader.scratch);
+        }
         if (!check_input_target_supported(&pp->options))
         {
             check_input_report(&reader, 0, CHECK_INPUT_TARGET);

@@ -22,17 +22,7 @@ struct LinkerOptions
     bool resource;
 };
 
-static bool linker_options_initialize(LinkerOptions* options, uint32_t capacity, Arena* arena)
-{
-    *options = (LinkerOptions){
-        .paths = arena_push_array(arena, capacity, sizeof(String8), _Alignof(String8)),
-        .path_capacity = capacity,
-    };
-    options->resource = options->paths == NULL;
-    return !options->resource;
-}
-
-static bool linker_options_parse(LinkerOptions* options, int count, char** arguments, int* index)
+static bool linker_options_parse(LinkerOptions* options, int count, char** arguments, int* index, Arena* arena)
 {
     const char* argument = arguments[*index];
     // lld's -R is --rpath. GNU ld's -R FILE is --just-symbols, and only a directory argument is --rpath. Detect the
@@ -73,16 +63,23 @@ static bool linker_options_parse(LinkerOptions* options, int count, char** argum
                 options->error = argument;
                 options->error_value = joined ? NULL : value;
             }
-            else if (options->path_count < options->path_capacity)
-            {
-                options->paths[options->path_count++] = (String8){
-                    .pointer = (char*)value,
-                    .length = strlen(value),
-                };
-            }
             else
             {
-                options->resource = true;
+                if (options->paths == NULL && options->path_capacity != 0)
+                {
+                    options->paths = BUSTER_ARENA_PUSH_ARRAY(arena, String8, options->path_capacity);
+                }
+                if (options->paths != NULL && options->path_count < options->path_capacity)
+                {
+                    options->paths[options->path_count++] = (String8){
+                        .pointer = (char*)value,
+                        .length = strlen(value),
+                    };
+                }
+                else
+                {
+                    options->resource = true;
+                }
             }
         }
         else if (entry)

@@ -1,0 +1,28 @@
+buster-fixtures v1 checker-sources
+undefined-function	undefined-function.c	rejected	a declared undefined function target is a code-generation error
+undefined-object	undefined-object.c	rejected	a declared undefined object target is a code-generation error
+undefined-implicit	undefined-implicit.c	rejected	a pragma-only function clone still diagnoses an undefined target
+undefined-later	undefined-later.c	rejected	a target first declared after its pragma still needs a definition for emission
+undefined-used	undefined-used.c	rejected	a referenced undefined target retains the mangled-name suggestion
+undefined-inline	undefined-inline.c	rejected	an inline-only definition does not supply an alias target symbol
+undefined-multiple	undefined-multiple.c	rejected	ordinary aliases precede pragma clones in code-generation diagnostics
+undefined-macro	undefined-macro.c	rejected	an expanded weak pragma keeps its alias coordinate and macro backtrace
+undefined-delayed-order	undefined-delayed-order.c	rejected	code-generation errors follow clone creation order rather than directive order
+missing-target	missing-target.c	-	a never-declared target remains a warning without emitting a clone
+defined-later	defined-later.c	-	a target defined later supplies both declared and implicit weak aliases
+undefined-renamed	undefined-renamed.c	rejected	a renamed target suggests its emitted symbol name
+undefined-renamed-attribute	undefined-renamed-attribute.c	rejected	an ordinary alias suggests the label of the target's earlier declaration
+undefined-duplicate	undefined-duplicate.c	rejected	identical pragma clones report one undefined-target error
+undefined-duplicate-other	undefined-duplicate-other.c	rejected	the first clone keeps its undefined target when a later clone has a definition
+defined-duplicate	defined-duplicate.c	-	a later undefined clone cannot replace an already defined alias
+defined-duplicate-later	defined-duplicate-later.c	-	a delayed forward clone does not replace the earlier-created clone
+defined-duplicate-declared-later	defined-duplicate-declared-later.c	-	a declared alias keeps its first-created clone when a forward target appears undefined later
+undefined-self	undefined-self.c	rejected	a pragma alias naming itself reports the immediate cycle at the pragma
+undefined-self-order	undefined-self-order.c	rejected	an ordinary self alias precedes an earlier written pragma self alias
+defined-ifunc	defined-ifunc.c	-	an ifunc target supplies a defined indirect function alias
+defined-later-alias	defined-later-alias.c	-	a target assigned an alias after the pragma follows its final definition
+undefined-later-alias	undefined-later-alias.c	rejected	an undefined later alias chain reports the ordinary alias before its pragma clone
+defined-later-weak-alias	defined-later-weak-alias.c	-	an alias of a later weak alias warns at the pragma with source warning policy
+undefined-later-weakref	undefined-later-weakref.c	rejected	a target subsequently made weakref supplies no symbol under its identifier
+undefined-ifunc	undefined-ifunc.c	rejected	an invalid ifunc resolver reports its own error without a second pragma alias error
+defined-later-weak-alias-ignored	defined-later-weak-alias-ignored.c	-	a weak-chain warning follows the pragma source policy after that policy is popped

@@ -9,14 +9,18 @@
 // https://github.com/actions/toolkit/blob/0c3a9c332b678ff1e776f93d728a4ad279803abe/packages/artifact/src/internal/shared/artifact-twirp-client.ts
 // https://github.com/actions/toolkit/blob/0c3a9c332b678ff1e776f93d728a4ad279803abe/packages/artifact/src/generated/results/api/v1/artifact.twirp-client.ts
 // https://github.com/actions/toolkit/blob/0c3a9c332b678ff1e776f93d728a4ad279803abe/packages/artifact/src/internal/find/list-artifacts.ts
+// https://github.com/actions/toolkit/blob/0c3a9c332b678ff1e776f93d728a4ad279803abe/packages/artifact/src/internal/find/get-artifact.ts
 // ListArtifacts has no attempt filter or pagination; keep duplicate names and every attempt (latest=false).
+// `find NAME` sends the request download-artifact makes for one name (getArtifactInternal: ListArtifacts with
+// name_filter, "Artifact not found" when it lists none). The unfiltered listing can name an artifact before that
+// lookup serves it (#3301), so an item confirms its product through the lookup itself before downloading it.
 'use strict';
 
 const {spawnSync} = require('node:child_process');
 
 class RuntimeError extends Error {}
 
-function runtime_request(env)
+function runtime_request(env, name)
 {
     const token = env.ACTIONS_RUNTIME_TOKEN;
     let endpoint;
@@ -52,16 +56,32 @@ function runtime_request(env)
         throw new RuntimeError('The Actions runtime token has no unambiguous Results run and job binding.');
     }
     // These are the proto field names, not the toolkit's camelCase TypeScript properties. The server verifies the JWT.
+    // A google.protobuf.StringValue's JSON form is its bare string, as the toolkit's generated client sends it.
+    const body = {workflow_run_backend_id: binding[1], workflow_job_run_backend_id: binding[2]};
+    if (name !== undefined)
+    {
+        body.name_filter = name;
+    }
     return {
         url: new URL('/twirp/github.actions.results.api.v1.ArtifactService/ListArtifacts', endpoint.origin).href,
         headers: {'Content-Type': 'application/json', Authorization: `Bearer ${token}`},
-        body: JSON.stringify({workflow_run_backend_id: binding[1], workflow_job_run_backend_id: binding[2]})
+        body: JSON.stringify(body)
     };
 }
 
-async function list_artifacts(env = process.env, fetch_request = globalThis.fetch, timeout_signal = AbortSignal.timeout)
+function valid_name(name)
 {
-    const request = runtime_request(env);
+    return typeof name === 'string' && name.length !== 0 && !/[\0\r\n]/.test(name);
+}
+
+// Every name in the run's artifact listing, or, with `name`, the artifacts the download's lookup serves by that name.
+async function list_artifacts(env = process.env, fetch_request = globalThis.fetch, timeout_signal = AbortSignal.timeout, name = undefined)
+{
+    if (name !== undefined && !valid_name(name))
+    {
+        throw new RuntimeError('The vector runtime helper needs one valid artifact name to find.');
+    }
+    const request = runtime_request(env, name);
     let response;
     try
     {
@@ -110,9 +130,13 @@ async function list_artifacts(env = process.env, fetch_request = globalThis.fetc
     const names = [];
     for (const artifact of artifacts)
     {
-        if (artifact === null || typeof artifact !== 'object' || Array.isArray(artifact) || typeof artifact.name !== 'string' || artifact.name.length === 0 || /[\0\r\n]/.test(artifact.name))
+        if (artifact === null || typeof artifact !== 'object' || Array.isArray(artifact) || !valid_name(artifact.name))
         {
             throw new RuntimeError('Results artifact listing contains an invalid artifact name.');
+        }
+        if (name !== undefined && artifact.name !== name)
+        {
+            throw new RuntimeError('Results artifact lookup returned an artifact of another name.');
         }
         names.push(artifact.name);
     }
@@ -141,9 +165,10 @@ if (require.main === module)
 {
     (async () =>
     {
-        if (process.argv.length === 3 && process.argv[2] === 'list')
+        const command = process.argv[2];
+        if ((process.argv.length === 3 && command === 'list') || (process.argv.length === 4 && command === 'find'))
         {
-            const names = await list_artifacts();
+            const names = await list_artifacts(process.env, globalThis.fetch, AbortSignal.timeout, process.argv[3]);
             // Write only after the complete response validates: command substitution must never receive a partial list.
             process.stdout.write(names.length === 0 ? '' : `${names.join('\n')}\n`);
         }
@@ -153,7 +178,7 @@ if (require.main === module)
         }
         else
         {
-            throw new RuntimeError('The vector runtime helper accepts only the list command.');
+            throw new RuntimeError('The vector runtime helper accepts only the list and find NAME commands.');
         }
     })().catch(error =>
     {

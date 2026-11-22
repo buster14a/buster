@@ -2629,12 +2629,32 @@ static void foreign_driver_test_tls_definition(ForeignTestTally* tally, const ch
     arena_pop_to(arena, saved);
 }
 
+// A command with no path can finish even when it has fewer bytes than the path table would need.
+static void foreign_driver_test_runpath_storage(ForeignTestTally* tally)
+{
+    String8 storage[2];
+    Arena arena = { .base = (uint8_t*)storage, .capacity = sizeof(storage) - 1 };
+    LinkerOptions options = { .path_capacity = BUSTER_ARRAY_LENGTH(storage) };
+    char* arguments[] = { (char*)"--disable-new-dtags", (char*)"-rpath", (char*)"" };
+    int index = 0;
+    const bool flags = linker_options_parse(&options, BUSTER_ARRAY_LENGTH(arguments), arguments, &index, &arena);
+    const bool empty = flags && linker_options_finish(&options, &arena);
+    foreign_test_expect(tally, empty && options.old_dtags && options.runpath.pointer == NULL && arena.length == 0,
+                        "no RUNPATH uses no path storage", 0);
+
+    index = 1;
+    const bool path = linker_options_parse(&options, BUSTER_ARRAY_LENGTH(arguments), arguments, &index, &arena);
+    foreign_test_expect(tally, path && index == 2 && options.resource && options.paths == NULL && options.path_count == 0 &&
+                        arena.length == 0 && !linker_options_finish(&options, &arena), "first empty RUNPATH requires the component table", 0);
+}
+
 static bool foreign_driver_test(const char* directory, Arena* arena, bool cross_check, ForeignTestSystem* system)
 {
     const uint64_t saved = arena->length;
     ForeignTestTally tally = {
         .check = "foreign command driver",
     };
+    foreign_driver_test_runpath_storage(&tally);
     ForeignDriverTestFiles files = { 0 };
     Runtime runtime;
     const bool found = runtime_import(&runtime) == RUNTIME_ERROR_NONE && runtime.loader_path.length != 0;

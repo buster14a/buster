@@ -81,10 +81,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
-  [--lazy-system-headers | --cpu-dispatch-only | --target-versions-only | --type-sugar-only |
+  [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only |
-  --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
+  --query-bool-only | --unused-comparison-only | --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
@@ -134,7 +134,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   limit, and the children's wall and CPU time, each in total and per run. CI
   runs the driver's parts in these modes, with `--differential` in the native
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
-  `cpu_dispatch` section alone, #1447; `--target-versions-only` runs GNU multiversioning's `target` and
+  `cpu_dispatch` section alone, #1447; `--pic-only` runs `-fPIC`'s, `-fpic`'s
+  and `-shared`'s section alone (#2101, `c_check_pic_driver_test.c`: its shared
+  libraries against clang's, run by the same programs); `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838 (inline assembly in `target_clones` copies at both tiers among it, #2247); `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
   the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
@@ -171,6 +173,22 @@ unused-warning fixtures also check exact scope-completion tokens.
   shared warning-policy, reader and requested-lane matrix. A separate safety
   fixture checks assertion errors, diagnostic counts and preserved output for
   complex attributed forms that deliberately retain their source spelling.
+  `--query-bool-only` runs the original `tests/driver/query_bool_*.c` sources for
+  boolean conversions in erased query/type expressions and successful selections
+  (#2899). Complete Clang diagnostics cover integer and floating conditions,
+  nested construction order, GNU omitted-middle and explicit-cast controls,
+  logical unevaluated suppression, source pragmas and macro expansion notes.
+  Both GNU17 and C23 run the shared warning-policy, reader, lane and output
+  preservation matrix; linked execution controls ensure erased operands and
+  unselected associations retain their lack of side effects.
+  The two original failed-type-query sources also expose an existing assertion
+  requirement-spelling gap. Their five exact primary error texts are checked
+  against frozen Buster spellings; all locations, warnings, notes, ordering,
+  counts and other text remain complete Clang comparisons. This does not claim
+  canonical assertion requirement spelling or normalize arbitrary diagnostic text.
+  Repaired declaration views and missing-label recovery retain the warning facts.
+  A stray `case` outside a switch still triggers the existing whole-body rejection
+  before expression checking; recovery of that body's later queries is separate.
   `--record-extensions-only` runs the existing GNU empty-record checks plus the runtime
   `tests/driver/record-extensions/` catalogue for zero-size-record C++ compatibility and
   zero-length-array warnings (#2409). Complete GNU17/C23 diagnostics cover explicit and
@@ -198,7 +216,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   catalogue from `c_check_unused_result_driver_test.c`, the whole output and status
   of semantic error recovery's fixtures against clang's on the vector, scalar
   and two-lane deferred paths, and `-c`'s refusal of each: `docs/c-checker.md`'s
-  "Semantic error recovery", #1447. Its GNU17 initializer catalogue includes the
+  "Semantic error recovery", #1447. The weak-alias catalogues also compare GNU17/GNU23,
+  warning policies, error limits and one/three requested deferred lanes, with separate
+  syntax and object oracles for emission-only undefined-target errors (#2449).
+  They retain macro columns and notes while normalizing scratch-space line numbers,
+  preserve rejected outputs, and require ELF output for accepted controls. The full
+  weak-alias section additionally checks common-target refusal and defined alias
+  symbols under `-fcommon`/`-fno-common`, plus linked programs on both readers and
+  requested deferred lanes. Its GNU17 initializer catalogue includes the
   former compound-literal boundary as a complete Clang comparison; the focused
   initializer option above also runs that catalogue in C23. Its runtime `suppress_label_order.c`
   cases compare parser errors before label-subject errors under both language
@@ -366,28 +391,42 @@ unused-warning fixtures also check exact scope-completion tokens.
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
-  `-Wsign-compare` retains the original unsignedness of both operands before narrow integer promotion (#1391).
-  An `unsigned char` or `unsigned short` promoted to `int` cannot become negative. An ordinary conditional's
-  result is also nonnegative when both arms are nonnegative integer constant expressions, unsigned values, boolean results or
-  nested such conditionals (`check_common_conditional_nonnegative`). An integer constant expression's condition
-  selects only its taken arm; a folded assignment or statement expression alone does not. The bounded walk
-  borrows only the emission worklist's unused node slots and preserves every live warning frame; exhausted
-  space or work budget keeps the warning. Explicit signed casts, GNU shared-middle conditionals, arithmetic
-  results and genuine signed operands keep their existing diagnostics. `c_check_sign_compare_driver_test.c`
-  compares independent counts, severity and complete Clang diagnostic lines through default/scalar compilation
-  and a deferred route that requires two admitted reader lanes. Run `test-checker-driver --sign-compare-only`
-  with `--executable build/compiler` under a two-CPU grant; the shared correctness inventory
-  supplies that grant. `tests/driver/sign_compare_conditional.c` covers both operand orientations, every comparison,
-  nested/selected arms, casts, side-effecting conditions, GNU controls, a balanced 128-leaf tree and live sibling
-  diagnostics. A fully folded signed conditional such as `((y = 0) ? -1 : 3) < u` uses its folded result only when
-  evaluating it has no side effects or unevaluable discarded operand; otherwise the two-arm range proof runs.
-  A folded operand's strictly decreasing unary chain exposes a conditional inside a selection, unary `+` or
-  explicit cast. Selections and unary `+` preserve the arm proof; an explicit cast keeps its target type's range.
-  Harmless GNU constant conditions, assignments and commas retain their existing range rules, as do equality
-  with representable unsigned constants and the zero-unsigned relational controls. The fixture checks all six
-  comparisons in both operand orientations, nested and statement-expression conditions, wrappers and quiet controls.
-  General arithmetic and bitfield ranges, assignment/comma result wrappers and folded unsigned-operand shortcuts
-  remain separate; global evaluation facts are unchanged.
+  `-Wsign-compare` retains both operands' source signs and reads the checked comparison conversion, including
+  narrow integers, bit-fields and `_BitInt` promotions (#1391). `c_check_sign_range.c` computes diagnostic ranges
+  as a width and a nonnegative flag: constants, implicit conversions, assignment/comma results, ordinary
+  conditional arms, arithmetic, masks, shifts, division and bit-fields. These follow Clang's approximate warning
+  rules; they are not optimizer facts. Explicit casts retain their target type's range unless the whole cast is
+  evaluable, and GNU shared-middle conditionals remain opaque unless evaluable. A modifying condition's folded
+  payload cannot select its source arm: both possible arms contribute to the range. Assignment conversions are
+  applied before their result's range is used, so narrowing cannot inherit an invalid nonnegative proof.
+  Equality is quiet when the unsigned operand's range is narrower than the comparison type; `UINT_MAX` fills
+  that type and keeps the warning. The unsigned-zero relational exception requires a source integer constant
+  expression. The nonrecursive postorder walk borrows only unused emission frames and preserves every live
+  warning frame. Exhausted space or a repeated-DAG work budget returns the operand's opaque type range.
+  `c_check_sign_compare_driver_test.c` compares independent counts, severity and complete Clang diagnostic lines
+  through default/scalar compilation and a deferred route that requires two admitted reader lanes. Run
+  `test-checker-driver --sign-compare-only --executable build/compiler` under a two-CPU grant; the shared correctness
+  inventory supplies it. `tests/driver/sign_compare_conditional.c` retains both operand orientations, every
+  comparison, nested/selected arms, casts, side-effecting conditions, GNU controls, a balanced 128-leaf tree
+  and live sibling diagnostics. The range fixtures extend those controls across assignment/comma wrappers,
+  narrowing, arithmetic and equality boundaries without changing the shared constant-evaluation facts.
+  `-Wuninitialized`'s graph-order candidates receive a definite-write proof in `c_check_uninitialized_flow.c`
+  (#1391). Up to 64 candidate objects share expression read/write masks over their owning body's graph slice.
+  Commas and conditions sequence writes; short-circuit and conditional alternatives certify only writes that
+  every completion performs. The retained controls supply execution order, including body-to-increment and
+  `continue` edges. A monotone worklist joins possibly uninitialized objects by union across predecessors and
+  resets objects outside their lexical scope, so a previous block lifetime cannot initialize a later one.
+  A reverse expression pass identifies an actual unsafe read, including a post-loop read reached after zero
+  iterations. The existing diagnostic publisher retains its warning family, spelling, notes and policy; the
+  analysis does not add a general `-Wsometimes-uninitialized` diagnostic engine. Missing control coverage,
+  detached statement-expression regions or cleanup chains keep the original warning conservatively. A native
+  window summary (#2850) has no operand nodes; its rows are its reads and writes in evaluation order.
+  `c_check_uninitialized_driver_test.c` reads the original `tests/driver/uninitialized-for/` fixtures. Quiet and
+  definitely uninitialized cases compare complete Clang lines; unsafe joins independently pin Buster's existing
+  diagnostic to a marked read. Normal driver parts cover the default, scalar and `--node-window-assignments`
+  readers. Run
+  `test-checker-driver --uninitialized-only --executable build/compiler` under a two-CPU grant for the additional
+  admitted deferred-reader checks; it shares the existing two-CPU diagnostic inventory group with sign comparisons.
   `c_check_noderef_driver_test.c`, in the attribute-effects driver section,
   compares original GNU `noderef` placement, propagation, conversion,
   address-cancellation and unevaluated-expression fixtures with pinned Clang
@@ -721,6 +760,10 @@ suite also checks current glibc's Clang fortify wrappers at `_FORTIFY_SOURCE=2/3
 including ordinary function addresses and scalar/vector, eager/lazy headers.
 The object-size attributes currently use conservative unknown bounds, without
 Clang's hidden-parameter ABI ([fortify compatibility](../c-builtins-fortify.md#current-glibcs-clang-wrappers-1361)).
+Its real-header overflows (a local array, an element's offset, a static array, a
+structure, `bzero`, `read`) must abort at `--tier1` too, as clang's build does where
+glibc's version lets it, since the lowering expands the wrappers with their
+callers' bounds ([the wrappers' bounds](../c-builtins-fortify.md#the-wrappers-bounds-2983), #2983).
 
 ## Runtime fixtures
 

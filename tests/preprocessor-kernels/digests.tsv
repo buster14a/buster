@@ -117,6 +117,13 @@ case/'$' before a prefixed literal across a line splice in assembly #34271759b5c
 case/'$' before prefixed literals and pp-numbers #bee978f6a46ac2f7	c150e0a760458388
 case/'$' before prefixed literals in C23 #d2d6504a53dad6fc	80e64d163db41fac
 case/'$' before prefixed literals in assembly #0fdab3d114496c3b	eea4be62f9372944
+case/-C (#1380): a comment before #endif in a skipped group leaves the group open #1e7be3f17a1db557	095e52f2db8b1e6a
+case/-C (#1380): comments are tokens outside directives, not in a macro's arguments, and a comment before '#' makes text #69527c19da45798f	5d07eb3afb4c741f
+case/-CC (#1380): replacement lists' and arguments' comments, a // one a block comment there, stringized and pasted #c406b0ce84dd0977	0c07e806fa610dd2
+case/-dD (#1380): each #define and #undef on its line, defined or not, a redefinition too #40fe521ed598e451	eee4207a3137bad6
+case/-dD -dI -CC (#1380): directives, comments and the replacement lists' comments together #4e982eefd4f5927d	55700d6da83317ae
+case/-dI (#1380): each include before what it enters, a guarded one, a computed one and #include_next #0116664481edafae	31c95ec5d93e84ec
+case/-dN (#1380): taken, and reported unused, as clang's driver does #b832683e9ca6559d	5c23b0f3cf007534
 case/-fasm in c89 #9f5a8a8e4c20ec1d	066c04194fb05a2a
 case/-fdigraphs in c89 #199c92f8529a2a4c	02b65023d5da335f
 case/-fdollars-in-identifiers in assembly #f5fb35f55ce5b3b8	1f2786499529f790
@@ -597,6 +604,13 @@ compile/'$' before a prefixed literal across a line splice in assembly #34271759
 compile/'$' before prefixed literals and pp-numbers #bee978f6a46ac2f7	2421a9d25e388248
 compile/'$' before prefixed literals in C23 #d2d6504a53dad6fc	d436f062a64a066c
 compile/'$' before prefixed literals in assembly #0fdab3d114496c3b	8cfbba80cee69584
+compile/-C (#1380): a comment before #endif in a skipped group leaves the group open #1e7be3f17a1db557	095e52f2db8b1e6a
+compile/-C (#1380): comments are tokens outside directives, not in a macro's arguments, and a comment before '#' makes text #69527c19da45798f	2c06359a1e15935f
+compile/-CC (#1380): replacement lists' and arguments' comments, a // one a block comment there, stringized and pasted #c406b0ce84dd0977	9656b6a9815c2a12
+compile/-dD (#1380): each #define and #undef on its line, defined or not, a redefinition too #40fe521ed598e451	eee4207a3137bad6
+compile/-dD -dI -CC (#1380): directives, comments and the replacement lists' comments together #4e982eefd4f5927d	55700d6da83317ae
+compile/-dI (#1380): each include before what it enters, a guarded one, a computed one and #include_next #0116664481edafae	31c95ec5d93e84ec
+compile/-dN (#1380): taken, and reported unused, as clang's driver does #b832683e9ca6559d	5c23b0f3cf007534
 compile/-fasm in c89 #9f5a8a8e4c20ec1d	3553cf7a0efa66ea
 compile/-fdigraphs in c89 #199c92f8529a2a4c	28d5b8c45cfa2f9f
 compile/-fdollars-in-identifiers in assembly #f5fb35f55ce5b3b8	1f2786499529f790
@@ -1153,6 +1167,13 @@ print/'$' before a prefixed literal across a line splice in assembly #34271759b5
 print/'$' before prefixed literals and pp-numbers #bee978f6a46ac2f7	79225e992f4987b6
 print/'$' before prefixed literals in C23 #d2d6504a53dad6fc	ea8a6341a8e7b77d
 print/'$' before prefixed literals in assembly #0fdab3d114496c3b	79225e992f4987b6
+print/-C (#1380): a comment before #endif in a skipped group leaves the group open #1e7be3f17a1db557	b75ea2d9b66ebeb1
+print/-C (#1380): comments are tokens outside directives, not in a macro's arguments, and a comment before '#' makes text #69527c19da45798f	b6c51df3683850f4
+print/-CC (#1380): replacement lists' and arguments' comments, a // one a block comment there, stringized and pasted #c406b0ce84dd0977	3bfa6dd4f1a6c378
+print/-dD (#1380): each #define and #undef on its line, defined or not, a redefinition too #40fe521ed598e451	87da7be3a52e03d2
+print/-dD -dI -CC (#1380): directives, comments and the replacement lists' comments together #4e982eefd4f5927d	a1cf180f9926437d
+print/-dI (#1380): each include before what it enters, a guarded one, a computed one and #include_next #0116664481edafae	77dab505f2d324c8
+print/-dN (#1380): taken, and reported unused, as clang's driver does #b832683e9ca6559d	08f0de07b58d2b17
 print/-fasm in c89 #9f5a8a8e4c20ec1d	8e2e48ec12f592cf
 print/-fdigraphs in c89 #199c92f8529a2a4c	4a8090ed39071d83
 print/-fdollars-in-identifiers in assembly #f5fb35f55ce5b3b8	1e94ab8e30035e95
