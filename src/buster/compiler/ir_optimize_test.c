@@ -34,8 +34,8 @@ struct IrOptimizeTest
 };
 
 #define BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
-#define BUSTER_IR_OPTIMIZE_TEST_IF_CONVERT_DIGEST UINT64_C(0x08b48b9d3a2b7413)
-#define BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST UINT64_C(0xdf6ed6b7ef142f23)
+#define BUSTER_IR_OPTIMIZE_TEST_IF_CONVERT_DIGEST UINT64_C(0x75253a506ea076dd)
+#define BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST UINT64_C(0xb3cb1a793dad0e42)
 #define BUSTER_IR_OPTIMIZE_TEST_SINK_DIGEST UINT64_C(0x9f4d956b5e0b38fc)
 #define BUSTER_IR_OPTIMIZE_TEST_UNROLL_DIGEST UINT64_C(0xc92a6941c51cf4e2)
 #define BUSTER_IR_OPTIMIZE_TEST_SEED UINT64_C(139)
@@ -502,6 +502,8 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                 case IR_UREM: operation = IROPT_FOLD_UREM; break;
                 case IR_NEG: value = -values[a]; break;
                 case IR_NOT: value = ~values[a]; break;
+                // A floating negation's sign bit (#2842's if-conversion moves it): the IR's values are bits.
+                case IR_FNEG: value = values[a] ^ (UINT64_C(1) << (ir_type_bits[f->type[i]] - 1)); break;
                 case IR_TRUNC:
                 case IR_ZEXT:
                 case IR_BITCAST:
@@ -2001,6 +2003,8 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test);
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 
+#include "tier1_schedule_ir_test.c"
+
 static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
 {
     IrOptimizeTest test = {
@@ -2045,6 +2049,8 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_simd(&test);
         ir_if_convert_tests(&test);
         ir_thread_tests(&test);
+        tier1_schedule_ir_test_empty_segments(&test);
+        tier1_schedule_ir_test_segment(&test);
         tier1_sink_ir_tests(&test);
         const bool digests = test.if_convert_digest == BUSTER_IR_OPTIMIZE_TEST_IF_CONVERT_DIGEST && test.thread_digest == BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST &&
                              test.sink_digest == BUSTER_IR_OPTIMIZE_TEST_SINK_DIGEST;

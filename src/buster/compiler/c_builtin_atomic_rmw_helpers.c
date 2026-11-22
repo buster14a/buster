@@ -24,10 +24,10 @@
 // No assumption permits an eight-byte store to a narrow object. GNU CAS loads expected once and writes observed bits
 // only on failure, preserving success aliases and read-only expected values. No volatile access is elided by the body.
 //
-// All RMW uses LOCK CMPXCHG, strengthening every valid order to seq_cst. Legacy release remains a store, using an
-// exact-width MOV of zero followed by MFENCE; it never acquires a source-object read or joins a release sequence as
-// an RMW merely to strengthen ordering. Retried arithmetic uses the latest observed
-// value returned in RAX, and op_fetch returns its successful desired register without reloading shared memory.
+// Exchanges use an implicitly locked memory XCHG. The other RMWs use LOCK CMPXCHG. Both strengthen every valid order
+// to seq_cst. Legacy release uses an exact-width MOV of zero followed by MFENCE. It never acquires a source-object
+// read or joins a release sequence as an RMW merely to strengthen ordering. Retried arithmetic uses the latest
+// observed value returned in RAX, and op_fetch returns its successful desired register without reloading shared memory.
 // Arithmetic is raw modular integer/pointer arithmetic; the source producer supplies GNU's unscaled pointer delta.
 // clang's min and max (fetch_min, max_fetch, ...) keep the smaller or the larger of the object and the operand, in the
 // object's width: unsigned for INTEGER_BITS and BOOL_BITS, signed for SIGNED_BITS, which no other operation takes.
@@ -47,7 +47,7 @@
 // saved RAX/RDX/R8 and status flags, the IEEE maximum and minimum XMM0 to XMM2 too and MXCSR's exception flags as
 // clang's code does (its DAZ read), preserve callee-saved registers/RSP/FP controls, and need no stack.
 // CAS branches consume ZF before it can be overwritten. Branch records have displacement zero and explicit record
-// index targets, for normal branch sizing before either encoder. No HLE, CX16, XCHG or XADD form is required.
+// index targets, for normal branch sizing before either encoder. No HLE, CX16 or XADD form is required.
 //
 // Unsupported id/width/format and allocation exhaustion publish no records, metadata or arena-length change. One
 // allocation holds records and branch columns; inputs and output arena storage must not overlap. Capacity is at most
@@ -116,7 +116,7 @@ struct CBuiltinAtomicRmwRecipe
 {
     X86Instruction records[BUSTER_CBUILTIN_ATOMIC_RMW_RECORDS];
     uint32_t count;
-    uint32_t branch;
+    uint32_t branch; // UINT32_MAX for a straight-line leaf.
     uint32_t target;
     bool full;
 };
@@ -216,6 +216,27 @@ static uint16_t cbuiltin_atomic_rmw_load_form(uint32_t bytes)
 static void cbuiltin_atomic_rmw_memory(CBuiltinAtomicRmwRecipe* recipe, uint16_t form, uint8_t reg, uint8_t address)
 {
     cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = form, .reg = reg, .rm = address, .mode = BUSTER_X86_MEMORY_BASE });
+}
+
+static void cbuiltin_atomic_rmw_exchange(CBuiltinAtomicRmwRecipe* recipe, uint32_t bytes, bool test_and_set)
+{
+    // A narrow XCHG replaces only AL or AX. Zero the upper result bits while preparing the desired value.
+    if (test_and_set)
+    {
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RAX, .immediate = 1 });
+    }
+    else
+    {
+        cbuiltin_atomic_rmw_register(recipe, cbuiltin_atomic_rmw_load_form(bytes), X86_REGISTER_RAX, X86_REGISTER_RSI);
+    }
+    const uint16_t form = bytes == 1 ? X86_FORM_XCHG_RM8_R8 : bytes == 2 ? X86_FORM_XCHG_RM16_R16 :
+                          bytes == 4 ? X86_FORM_XCHG_RM32_R32 : X86_FORM_XCHG_RM64_R64;
+    cbuiltin_atomic_rmw_memory(recipe, form, X86_REGISTER_RAX, X86_REGISTER_RDI);
+    if (test_and_set)
+    {
+        cbuiltin_atomic_rmw_register(recipe, X86_FORM_TEST_RM8_R8, X86_REGISTER_RAX, X86_REGISTER_RAX);
+        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_SETNE_RM8, .rm = X86_REGISTER_RAX });
+    }
 }
 
 static void cbuiltin_atomic_rmw_compare(CBuiltinAtomicRmwRecipe* recipe, uint32_t bytes)
@@ -419,10 +440,6 @@ static void cbuiltin_atomic_rmw_loop(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId
     {
         cbuiltin_atomic_rmw_ieee_body(recipe, operation, bytes);
     }
-    else if (operation == CBUILTIN_ATOMIC_RMW_EXCHANGE)
-    {
-        cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RSI);
-    }
     else if (operation == CBUILTIN_ATOMIC_RMW_MIN || operation == CBUILTIN_ATOMIC_RMW_MAX)
     {
         // The operand replaces the object's value where it is smaller (min) or larger (max), compared in the object's width.
@@ -433,11 +450,6 @@ static void cbuiltin_atomic_rmw_loop(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId
         cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOV_R64_RM64, X86_REGISTER_RDX, X86_REGISTER_RAX);
         cbuiltin_atomic_rmw_register(recipe, compare, X86_REGISTER_RSI, X86_REGISTER_RDX);
         cbuiltin_atomic_rmw_register(recipe, move, X86_REGISTER_RDX, X86_REGISTER_RSI);
-    }
-    else if (operation == CBUILTIN_ATOMIC_RMW_TEST_AND_SET)
-    {
-        // 1 exchanged into the byte.
-        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RDX, .immediate = 1 });
     }
     else if (operation == CBUILTIN_ATOMIC_RMW_UINC || operation == CBUILTIN_ATOMIC_RMW_UDEC)
     {
@@ -496,13 +508,6 @@ static void cbuiltin_atomic_rmw_loop(CBuiltinAtomicRmwRecipe* recipe, CBuiltinId
     {
         cbuiltin_atomic_rmw_register(recipe, cbuiltin_atomic_rmw_load_form(bytes), X86_REGISTER_RAX, X86_REGISTER_RDX);
     }
-    else if (operation == CBUILTIN_ATOMIC_RMW_TEST_AND_SET)
-    {
-        // Whether the byte was set: its old value isn't 0.
-        cbuiltin_atomic_rmw_register(recipe, X86_FORM_TEST_RM8_R8, X86_REGISTER_RAX, X86_REGISTER_RAX);
-        cbuiltin_atomic_rmw_append(recipe, (X86Instruction){ .form = X86_FORM_SETNE_RM8, .rm = X86_REGISTER_RAX });
-        cbuiltin_atomic_rmw_register(recipe, X86_FORM_MOVZX_R32_RM8, X86_REGISTER_RAX, X86_REGISTER_RAX);
-    }
 }
 
 static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helper_emit(CBuiltinId id, uint32_t bytes, CBuiltinAtomicRmwFormat format, Arena* output)
@@ -525,7 +530,7 @@ static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helpe
     const bool store = operation == CBUILTIN_ATOMIC_RMW_RELEASE || operation == CBUILTIN_ATOMIC_RMW_CLEAR;
     if (operation != CBUILTIN_ATOMIC_RMW_NONE && width && (integer || boolean || floating) && (!byte || bytes == 1))
     {
-        CBuiltinAtomicRmwRecipe recipe = { 0 };
+        CBuiltinAtomicRmwRecipe recipe = { .branch = UINT32_MAX };
         if (store)
         {
             cbuiltin_atomic_rmw_register(&recipe, X86_FORM_XOR_RM32_R32, X86_REGISTER_RDX, X86_REGISTER_RDX);
@@ -533,6 +538,10 @@ static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helpe
                                    bytes == 4 ? X86_FORM_MOV_RM32_R32 : X86_FORM_MOV_RM64_R64;
             cbuiltin_atomic_rmw_memory(&recipe, store, X86_REGISTER_RDX, X86_REGISTER_RDI);
             cbuiltin_atomic_rmw_append(&recipe, (X86Instruction){ .form = X86_FORM_MFENCE });
+        }
+        else if (operation == CBUILTIN_ATOMIC_RMW_EXCHANGE || operation == CBUILTIN_ATOMIC_RMW_TEST_AND_SET)
+        {
+            cbuiltin_atomic_rmw_exchange(&recipe, bytes, operation == CBUILTIN_ATOMIC_RMW_TEST_AND_SET);
         }
         else if (operation == CBUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE)
         {
@@ -549,7 +558,7 @@ static __attribute__((unused)) CBuiltinAtomicRmwHelper cbuiltin_atomic_rmw_helpe
         }
         else
         {
-            const bool branched = !store && (operation != CBUILTIN_ATOMIC_RMW_COMPARE_EXCHANGE || id == CBUILTIN_ATOMIC_COMPARE_EXCHANGE_N);
+            const bool branched = recipe.branch != UINT32_MAX;
             const uint64_t record_bytes = (uint64_t)recipe.count * sizeof(X86Instruction);
             const uint64_t branch_bytes = branched ? sizeof(uint32_t) : 0;
             uint8_t* storage = output != NULL ? arena_push_array(output, record_bytes + 2 * branch_bytes, 1, _Alignof(X86Instruction)) : NULL;

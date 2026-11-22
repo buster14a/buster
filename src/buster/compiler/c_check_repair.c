@@ -143,7 +143,7 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
     {
         const uint8_t kind = original->tokens.kinds[token];
         if (kind == PARSE_KIND_END || kind >= PARSE_KIND_COUNT || original->tokens.names[token] >= original->meanings.capacity ||
-            original->tokens.sources[token] >= pp->output.count)
+            parse_source_index(&original->tokens, token) >= pp->output.count)
         {
             repair->status = CHECK_REPAIR_INVALID;
         }
@@ -268,6 +268,7 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
         view->tokens.capacity = total;
         view->tokens.kinds = check_prefix_column(output, total, 1);
         view->tokens.names = check_prefix_column(output, total, sizeof(uint32_t));
+        view->tokens.identity_sources = false;
         view->tokens.sources = check_prefix_column(output, total, sizeof(uint32_t));
         view->tokens.flags = check_prefix_column(output, total, 1);
         view->tree.roles = check_prefix_column(output, total, 1);
@@ -291,7 +292,7 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
     {
         memcpy(view->tokens.kinds, original->tokens.kinds, cut);
         memcpy(view->tokens.names, original->tokens.names, (uint64_t)cut * sizeof(uint32_t));
-        memcpy(view->tokens.sources, original->tokens.sources, (uint64_t)cut * sizeof(uint32_t));
+        parse_copy_sources(view->tokens.sources, &original->tokens, 0, cut);
         memcpy(view->tokens.flags, original->tokens.flags, cut);
         memset(view->meanings.meanings, PARSE_MEANING_ORDINARY, view->meanings.capacity);
         for (uint32_t i = 0; i < BUSTER_PARSE_PREDECLARED_TYPEDEFS; i += 1)

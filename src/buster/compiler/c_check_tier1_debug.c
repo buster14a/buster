@@ -662,6 +662,44 @@ static uint32_t check_tier1_debug_instance_of(const IrDebugInfo* debug, uint32_t
     return found != BUSTER_IR_NONE && origin - debug->inlines[found].first < debug->inlines[found].count ? found : BUSTER_IR_NONE;
 }
 
+typedef struct CheckTier1DebugOrigin
+{
+    uint32_t instance;
+    uint32_t entry;
+} CheckTier1DebugOrigin;
+
+// The record's immediate instance and its call in the outer function. All entries of one instance share
+// that call, and successive machine records often belong to the same expansion.
+static CheckTier1DebugOrigin check_tier1_debug_origin(const IrDebugInfo* debug, uint32_t origin, CheckTier1DebugOrigin* previous)
+{
+    if (origin < debug->entry_count || origin == BUSTER_EMISSION_NO_ORIGIN)
+    {
+        return (CheckTier1DebugOrigin){ .instance = BUSTER_IR_NONE, .entry = origin };
+    }
+    if (previous->instance != BUSTER_IR_NONE)
+    {
+        const IrDebugInline* last = &debug->inlines[previous->instance];
+        if (origin >= last->first && origin - last->first < last->count)
+        {
+            return *previous;
+        }
+    }
+    const uint32_t instance = check_tier1_debug_instance_of(debug, origin);
+    if (instance == BUSTER_IR_NONE)
+    {
+        return (CheckTier1DebugOrigin){ .instance = BUSTER_IR_NONE, .entry = BUSTER_EMISSION_NO_ORIGIN };
+    }
+    // ir_verify proves each parent precedes its child and contains the child's call site.
+    uint32_t outer = instance;
+    while (debug->inlines[outer].parent < outer)
+    {
+        outer = debug->inlines[outer].parent;
+    }
+    const uint32_t entry = debug->inlines[outer].parent == BUSTER_IR_NONE ? debug->inlines[outer].call : origin;
+    *previous = (CheckTier1DebugOrigin){ .instance = instance, .entry = entry };
+    return *previous;
+}
+
 static bool check_tier1_debug(const Tier0Function* function, const IrFunction* ir, const Tier1EmitResult* emitted, const uint32_t* record_order, uint32_t epilogue,
                              Arena* output, Arena* scratch, CheckTier1Debug* result)
 {
@@ -704,6 +742,7 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     {
         memset(seen, 0, (uint64_t)count + 1);
     }
+    CheckTier1DebugOrigin previous = { .instance = BUSTER_IR_NONE };
     const uint32_t position_base = valid && emitted->general ? 2 * (emitted->cfg_input.block_count - ir->block_count) : 0;
     for (uint32_t r = 0; valid && r < count; r += 1)
     {
@@ -724,18 +763,14 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
             const uint32_t origin_entry = node < nodes ? debug->origins[node] : BUSTER_EMISSION_NO_ORIGIN;
             const uint32_t control = x86_effects_control(x86_effects(emitted->code.records[old].form));
             valid = kind <= TIER1_ORIGIN_OTHER && (!own || node < nodes) && (origin_entry == BUSTER_EMISSION_NO_ORIGIN || origin_entry < ir_debug_origin_limit(debug));
-            uint32_t entry = origin_entry;
-            for (uint32_t depth = 0; valid && entry != BUSTER_EMISSION_NO_ORIGIN && entry >= function->count && depth <= debug->inline_count; depth += 1)
-            {
-                const uint32_t instance = ir_debug_instance(debug, entry);
-                entry = instance != BUSTER_IR_NONE ? debug->inlines[instance].call : BUSTER_EMISSION_NO_ORIGIN;
-            }
+            const CheckTier1DebugOrigin resolved = check_tier1_debug_origin(debug, origin_entry, &previous);
+            const uint32_t entry = resolved.entry;
             valid = valid && (entry == BUSTER_EMISSION_NO_ORIGIN || entry < function->count);
             raw[r] = entry != BUSTER_EMISSION_NO_ORIGIN ? origin_entry : BUSTER_EMISSION_NO_ORIGIN;
             entries[r] = entry;
             if (instances != NULL)
             {
-                instances[r] = raw[r] != BUSTER_EMISSION_NO_ORIGIN ? check_tier1_debug_instance_of(debug, raw[r]) : BUSTER_IR_NONE;
+                instances[r] = resolved.instance;
             }
             safe[r] = entry != BUSTER_EMISSION_NO_ORIGIN && old >= body && r >= body && r < epilogue && kind != TIER1_ORIGIN_FRAME && kind != TIER1_ORIGIN_ENTRY && control != BUSTER_X86_CONTROL_RETURN;
         }
@@ -814,9 +849,8 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
     valid = valid && (bindings || check_tier1_debug_constants(debug, scratch, &constants));
     const uint64_t parameter_ranges = valid && !bindings ? check_tier1_debug_parameter_ranges(&parameters, NULL) : 0;
     const uint64_t constant_ranges = valid && !bindings ? check_tier1_debug_constant_ranges(&constants, entries, safe, body, epilogue, NULL) : 0;
-    const uint64_t value_ranges = valid && bindings ? check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, NULL) : 0;
     const uint64_t object_ranges = valid ? check_tier1_debug_object_ranges(homes, local_slots, locals, spans, span_count, object_clips, NULL) : 0;
-    const uint64_t ranges = object_ranges + parameter_ranges + constant_ranges + value_ranges;
+    const uint64_t ranges = object_ranges + parameter_ranges + constant_ranges;
     valid = valid && ranges <= UINT32_MAX;
     if (valid)
     {
@@ -854,10 +888,10 @@ static bool check_tier1_debug(const Tier0Function* function, const IrFunction* i
         {
             candidate.local_range_count += (uint32_t)check_tier1_debug_constant_ranges(&constants, entries, safe, body, epilogue, candidate.local_ranges + candidate.local_range_count);
         }
-        if (value_ranges != 0)
-        {
-            candidate.local_range_count += (uint32_t)check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, candidate.local_ranges + candidate.local_range_count);
-        }
+        valid = !bindings || check_tier1_debug_value_ranges(&values, entries, safe, body, epilogue, output, &candidate);
+    }
+    if (valid)
+    {
         *result = candidate;
     }
     else

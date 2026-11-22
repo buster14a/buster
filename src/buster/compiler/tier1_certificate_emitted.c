@@ -15,15 +15,17 @@
 // - Trusted, as the source: the IR and its selection (each node's rule, and what its sequence computes from the
 //   registers it is given: tier1_emit_cfg_kernel, tier1_select_fixed, and a machine row's template, the front end's
 //   records that tier0_operation_valid admits, by the roles they name), the ABI's argument registers and its records of
-//   by-value aggregates, the rematerialization recipes, the frame's layout of the frame base register's offsets, the
-//   CFG with its phis, and x86 semantics' effects of each record (which registers and memory it writes).
+//   by-value aggregates, the rematerialization recipes and tier1_rematerialize's copy of each (a recomputation is checked
+//   to be that copy, not for what it computes), the frame's layout of the frame base register's offsets, the CFG with its
+//   phis, and x86 semantics' effects of each record (which registers and memory it writes).
 // - Untrusted: the allocation, every emitted record and the emitter's account of them: each record's origin
 //   (Tier1Origin), each block's and stub's first record, the references, and each machine row's placement
 //   (Tier1RowPlacement). An origin only says which decoding applies, and a placement only how to place a row's
 //   template; every record is decoded by its own bytes.
 // - A move's record (mov, movss, movsd, movaps, kmov, between registers and the frame base's displacements) is the edit
 //   its bytes say, at the width its form has; a recomputation is a constant's edit only where tier1_rematerialize writes
-//   exactly that record (and its reference) for the value its origin names. A node's records are one ORIGINAL: its
+//   exactly that record (and its reference) for the value its origin names, a 64-bit copy of the frame base register
+//   (a frame address at the base itself, #3149) tried as one before as a move. A node's records are one ORIGINAL: its
 //   operands read where the allocation has them at its use phase, every register and frame byte its records write
 //   killed, its definition where the allocation's interval starts. A call's sequence is checked against what the IR says
 //   it is (its target, al, the result's extension into its register), its arguments read in their ABI registers.
@@ -560,8 +562,45 @@ static const Tier1CertEmittedVectorMove* tier1_cert_emitted_vector_move(uint16_t
     return result;
 }
 
+// Record `r` as a recomputation into a general register: the copy tier1_rematerialize writes, into the register the
+// record writes, of the recipe of `node`'s value (its origin's), exactly the record, with its reference. A constant's
+// edit into *edit. A record that is no such copy changes nothing; one whose reference differs is refused.
+static bool tier1_cert_emitted_recomputed(Tier1CertEmittedBuild* build, uint32_t r, uint32_t node, Tier1CertInstruction* edit)
+{
+    const Tier1EmitResult* emitted = build->emitted;
+    const X86Instruction record = emitted->code.records[r];
+    const uint32_t value = node < build->plan->function->instruction_count ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
+    const bool recipe = value != BUSTER_TIER1_CFG_NONE && emitted->cfg_input.rematerializable != 0 && emitted->cfg_input.rematerializable[value] != 0 && emitted->cfg_input.classes[value] == BUSTER_TIER1_ALLOCATE_GPR;
+    const uint8_t candidates[2] = { record.reg, record.rm };
+    bool valid = false;
+    for (uint32_t k = 0; recipe && !valid && k < 2; k += 1)
+    {
+        Tier1Rematerialized copy = { 0 };
+        if (candidates[k] < 16 && tier1_rematerialize(&emitted->prepared.recipes, node, candidates[k], build->base, BUSTER_TIER1_EMIT_BOUNDARY_FLAGS, &copy) && memcmp(&copy.instruction, &record, sizeof(record)) == 0)
+        {
+            const LinkReference expected = {
+                .field = X86_FIXUP_DISPLACEMENT,
+                .kind = copy.got ? BUSTER_LINK_FIXUP_LOAD_GOT : BUSTER_LINK_FIXUP_PC32,
+                .target = copy.symbol,
+                .addend = copy.addend,
+            };
+            valid = tier1_cert_emitted_take_reference(build, r, copy.symbol != BUSTER_TIER1_REMAT_NO_SYMBOL ? &expected : 0);
+            *edit = (Tier1CertInstruction){
+                .immediate = value,
+                .a = tier1_cert_emitted_gpr(candidates[k], tier1_cert_emitted_width(emitted, value)),
+                .value = value,
+                .op = TIER1_CERT_CONSTANT,
+            };
+        }
+    }
+    return valid;
+}
+
 // Record `r`'s move, as an edit: its form's width, between its registers and frame bytes. A recomputation is decoded
-// where `node` (its origin's value) has a recipe whose copy is exactly the record.
+// where `node` (its origin's value) has a recipe whose copy is exactly the record (tier1_cert_emitted_recomputed): first
+// for a 64-bit copy of the frame base register, a frame address's at a zero displacement (`mov r64, base`, #3149), which
+// would otherwise decode as a move of the base register, a location no value of the certificate's is in; for any other
+// record after the moves.
 static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, uint32_t node, Tier1CertInstruction* edit)
 {
     const Tier1EmitResult* emitted = build->emitted;
@@ -631,8 +670,12 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
     // A move's fields but its registers, its mode and a memory operand's displacement are zero (but a carrier's vinsertps'
     // immediate and vvvv, checked above).
     const bool exact = (insert || (record.immediate == 0 && record.vvvv == 0)) && record.index == 0 && record.decorations == 0 && (!direct || record.displacement == 0);
-    bool valid = a != BUSTER_CERT_NONE && b != BUSTER_CERT_NONE && exact;
-    if (valid)
+    const bool moved = a != BUSTER_CERT_NONE && b != BUSTER_CERT_NONE && exact;
+    // A copy of the frame base register is a recomputed frame address's where it is one (#3149).
+    const bool based = load64 && direct && record.rm == build->base;
+    const bool recomputed = based && tier1_cert_emitted_recomputed(build, r, node, edit);
+    bool valid = recomputed;
+    if (!recomputed && moved)
     {
         *edit = (Tier1CertInstruction){
             .a = a,
@@ -641,33 +684,9 @@ static bool tier1_cert_emitted_move(Tier1CertEmittedBuild* build, uint32_t r, ui
         };
         valid = tier1_cert_emitted_take_reference(build, r, 0);
     }
-    else
+    else if (!recomputed)
     {
-        // A recomputation into a general register: the recipe's copy of the value its origin names, into the register the
-        // record writes.
-        const uint32_t value = node < build->plan->function->instruction_count ? emitted->node_values[node] : BUSTER_TIER1_CFG_NONE;
-        const bool recipe = value != BUSTER_TIER1_CFG_NONE && emitted->cfg_input.rematerializable != 0 && emitted->cfg_input.rematerializable[value] != 0 && emitted->cfg_input.classes[value] == BUSTER_TIER1_ALLOCATE_GPR;
-        const uint8_t candidates[2] = { record.reg, record.rm };
-        for (uint32_t k = 0; recipe && !valid && k < 2; k += 1)
-        {
-            Tier1Rematerialized copy = { 0 };
-            if (candidates[k] < 16 && tier1_rematerialize(&emitted->prepared.recipes, node, candidates[k], build->base, BUSTER_TIER1_EMIT_BOUNDARY_FLAGS, &copy) && memcmp(&copy.instruction, &record, sizeof(record)) == 0)
-            {
-                const LinkReference expected = {
-                    .field = X86_FIXUP_DISPLACEMENT,
-                    .kind = copy.got ? BUSTER_LINK_FIXUP_LOAD_GOT : BUSTER_LINK_FIXUP_PC32,
-                    .target = copy.symbol,
-                    .addend = copy.addend,
-                };
-                valid = tier1_cert_emitted_take_reference(build, r, copy.symbol != BUSTER_TIER1_REMAT_NO_SYMBOL ? &expected : 0);
-                *edit = (Tier1CertInstruction){
-                    .immediate = value,
-                    .a = tier1_cert_emitted_gpr(candidates[k], tier1_cert_emitted_width(emitted, value)),
-                    .value = value,
-                    .op = TIER1_CERT_CONSTANT,
-                };
-            }
-        }
+        valid = tier1_cert_emitted_recomputed(build, r, node, edit);
         if (!valid && build->stats->reason == TIER1_CERT_EMITTED_OK)
         {
             tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_DECODE, r);
@@ -702,7 +721,8 @@ static uint32_t tier1_cert_emitted_definition(const Tier1EmitResult* emitted, ui
 }
 
 // A node's uses at most: a call's arguments and its callee, and its by-value aggregates' parts (#789): its register and
-// stack slots' parts and the hidden pointer (a whole aggregate's bytes are read by an ORIGINAL of their own,
+// stack slots' parts and the hidden pointer, or its destination's pointer value (#2820) in its place (a whole
+// aggregate's bytes are read by an ORIGINAL of their own,
 // tier1_cert_emitted_wholes); a return's protocol values and result parts.
 #define BUSTER_CERT_EMITTED_USES (BUSTER_TIER1_SELECT_MAX_ARGUMENTS + 2 + BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS + 1)
 
@@ -956,12 +976,14 @@ static bool tier1_cert_emitted_call_steps(const Tier1CertEmittedBuild* build, ui
         steps[valid ? n : 0] = loads[k];
         n += valid;
     }
+    // A destination that is a pointer value (#2820) is no step: the call reads it in rdi (tier1_cert_emitted_call).
     const bool hidden = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_MEMORY;
     const bool returned = abi != 0 && abi->result_size != 0 && abi->call.result.kind == BUSTER_ABI_RESULT_REGISTERS;
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
     int32_t into = 0;
     uint64_t into_bytes = 0;
-    valid = valid && ((!hidden && !returned) || tier1_cert_emitted_into(build, node, &into, &into_bytes));
-    if (valid && hidden)
+    valid = valid && ((!hidden && !returned) || (hidden && pointer) || tier1_cert_emitted_into(build, node, &into, &into_bytes));
+    if (valid && hidden && !pointer)
     {
         valid = n < BUSTER_CERT_EMITTED_STEPS;
         steps[valid ? n : 0] = (Tier1CertEmittedStep){
@@ -1293,7 +1315,7 @@ static bool tier1_cert_emitted_wholes(Tier1CertEmittedBuild* build, uint32_t nod
 // A call's expected sequence (tier1_emit_call's, for a call without aggregates or stack arguments): a variadic call's
 // al, the call, and its result into its register, extended to its canonical form; its register arguments read in their
 // ABI registers (a static chain's in r10, #148), an indirect call's callee in r10, or with a chain in rax
-// (tier1_select_callee_register).
+// (tier1_select_callee_register), and a destination that is a pointer value (#2820) in rdi.
 static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node, uint32_t destination, Tier1CertEmittedKernel* kernel)
 {
     const IrFunction* function = build->plan->function;
@@ -1301,8 +1323,9 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     const IrCall* call = &function->calls[function->b[node]];
     const IrAbiCall* abi = call->abi != 0 ? &function->abi_calls[call->abi - 1] : 0;
     const bool indirect = function->op[node] == IR_CALL_INDIRECT;
+    const bool pointer = tier1_select_call_destination(function, node) != BUSTER_IR_NONE;
     const uint32_t offset = build->plan->effective_use_offsets[node];
-    bool valid = build->plan->effective_use_offsets[node + 1] - offset == call->argument_count + (indirect ? 1u : 0u);
+    bool valid = build->plan->effective_use_offsets[node + 1] - offset == call->argument_count + (indirect ? 1u : 0u) + (pointer ? 1u : 0u);
     Tier1SelectPlaces places = { 0 };
     uint32_t vectors = 0;
     for (uint32_t argument = 0; valid && argument < call->argument_count; argument += 1)
@@ -1347,6 +1370,11 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     {
         const uint32_t value = emitted->node_values[build->plan->effective_use_values[offset + call->argument_count]];
         valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_add_use(kernel, value, tier1_cert_emitted_register(build, value, tier1_select_callee_register(function, call)));
+    }
+    if (valid && pointer)
+    {
+        const uint32_t value = emitted->node_values[build->plan->effective_use_values[offset + call->argument_count + (indirect ? 1u : 0u)]];
+        valid = value != BUSTER_TIER1_CFG_NONE && tier1_cert_emitted_add_use(kernel, value, tier1_cert_emitted_register(build, value, X86_REGISTER_RDI));
     }
     const uint32_t vector_count = abi != 0 ? abi->call.vector_registers : vectors;
     kernel->outgoing = tier1_select_call_stack_bytes(function, call);

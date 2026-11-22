@@ -8,6 +8,7 @@
 // Temporary arrays have one record per token in the requested bounded slice, with no padding assumption.
 
 #define BUSTER_CHECK_CONSTANT_BOUND_CONTEXT 2u
+#define BUSTER_CHECK_CONSTANT_ASSERTION_CONTEXT 4u
 
 #include "c_check_warning_input.c"
 
@@ -226,7 +227,7 @@ static uint32_t check_constant_overload_token(const CheckConstantInput* input, u
             result = root + 1;
             break;
         }
-        const uint32_t chosen = reader->selected_tokens != NULL ? reader->selected_tokens[root] : BUSTER_CHECK_NONE;
+        const uint32_t chosen = check_input_selection_at(reader, root);
         const uint32_t selected = chosen & ~CHECK_INPUT_SOURCE_SELECTION;
         if (chosen != BUSTER_CHECK_NONE && selected >= input->first && selected < input->end && selected != root)
         {
@@ -2024,6 +2025,9 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
     {
         check_constant_mark_type(input, input->first, input->end);
     }
+    // The last type query's type name that this walk marked, [specifier_first, specifier_end), or none.
+    uint32_t specifier_first = 0;
+    uint32_t specifier_end = 0;
     for (uint32_t token = input->bind_cursor; valid && token < input->end; token += 1)
     {
         const uint32_t index = token - input->first;
@@ -2134,7 +2138,17 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                 if (check_constant_type_start(parser, next))
                 {
                     input->type_begin[close - input->first] = next;
-                    check_constant_mark_type(input, next, close);
+                    // A query at the start of the one around it (`typeof(typeof(...))`, `typeof(typeof(...) *)`) has its
+                    // tokens marked by that one's mark, which reached its `(` a token at a time and marked them as its own
+                    // mark would, and the `typeof` between the two writes none: marking them again made a chain of n
+                    // queries mark n^2/2 tokens (#2995).
+                    const bool marked = token == specifier_first + 1 && close < specifier_end && parser->tokens.kinds[token - 1] == PARSE_KIND_TYPEOF;
+                    if (!marked)
+                    {
+                        check_constant_mark_type(input, next, close);
+                    }
+                    specifier_first = next;
+                    specifier_end = close;
                 }
                 else
                 {
@@ -2320,9 +2334,9 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint32_t root = check_constant_range_root(input, condition ? separator + 1 : next + 1, condition ? next : token);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
                 check_input_noderef_set(reader->output, token, check_input_noderef_at(reader->output, root));
-                if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
+                if ((check_input_selection_at(reader, token) & CHECK_INPUT_SOURCE_SELECTION) != 0)
                 {
-                    reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
+                    check_input_selection_set(reader, token, root | CHECK_INPUT_SOURCE_SELECTION);
                 }
             }
             if (valid && input->proof_values != 0)
@@ -2339,7 +2353,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         const uint64_t mark = reader->scratch->length;
         const TypeId control_type = check_constant_control_type(reader, &control);
         CheckGenericSet seen;
-        valid = control_type != 0 && check_generic_initialize(reader, &seen, token - separator, control_type, token + 1);
+        valid = control_type != 0 && check_generic_initialize(reader, &seen, check_generic_associations(parser, separator + 1, token), control_type, token + 1);
         uint32_t chosen_first = BUSTER_CHECK_NONE;
         uint32_t chosen_end = 0;
         uint32_t default_first = BUSTER_CHECK_NONE;
@@ -2395,9 +2409,9 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 const uint32_t root = check_constant_range_root(input, chosen_first, chosen_end);
                 input->abi_origins[token - input->first] = input->abi_origins[root - input->first];
                 check_input_noderef_set(reader->output, token, check_input_noderef_at(reader->output, root));
-                if (reader->selected_tokens != NULL && (reader->selected_tokens[token] & CHECK_INPUT_SOURCE_SELECTION) != 0)
+                if ((check_input_selection_at(reader, token) & CHECK_INPUT_SOURCE_SELECTION) != 0)
                 {
-                    reader->selected_tokens[token] = root | CHECK_INPUT_SOURCE_SELECTION;
+                    check_input_selection_set(reader, token, root | CHECK_INPUT_SOURCE_SELECTION);
                 }
             }
             if (valid && input->proof_values != 0)

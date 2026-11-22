@@ -25,6 +25,11 @@ static IrSimdOperation ir_interpreter_simd_opcode(uint8_t op)
         case IR_FSUB: operation = IR_SIMD_FSUB; break;
         case IR_FMUL: operation = IR_SIMD_FMUL; break;
         case IR_FDIV: operation = IR_SIMD_FDIV; break;
+        case IR_FMA: operation = IR_SIMD_FMA; break;
+        case IR_SITOFP: operation = IR_SIMD_SITOFP; break;
+        case IR_UITOFP: operation = IR_SIMD_UITOFP; break;
+        case IR_FPTOSI: operation = IR_SIMD_FPTOSI; break;
+        case IR_FPTOUI: operation = IR_SIMD_FPTOUI; break;
         case IR_VCMP: operation = IR_SIMD_COMPARE; break;
         case IR_VSELECT: operation = IR_SIMD_SELECT; break;
         default: break;

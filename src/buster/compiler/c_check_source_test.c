@@ -363,7 +363,7 @@ static void check_test_source_transparent_history(CheckTest* test)
             assert(arena_commit(&scratch, scratch.capacity));
             memset(scratch.base + scratch.length, 0xa5, scratch.capacity - scratch.length);
             CheckStream stream = { 0 };
-            const CheckOptions check_options = { .scalar = scalar != 0 };
+            const CheckOptions check_options = { 0 };
             const bool checked = check_graph_run(&types.table, &input.graph, &output, &scratch, &check_options, &stream);
             check_test_expect(test, checked && stream.report_count == 1 && stream.reports[0].node == calls[0] &&
                               input.graph.transparent_unions[tag] == activation,
@@ -400,7 +400,7 @@ static void check_test_source_intrinsic_range(CheckTest* test)
         Arena output = arena_reserve(UINT64_C(1) << 24);
         Arena scratch = arena_reserve(UINT64_C(1) << 24);
         const ParseOptions parse_options = { .scalar = scalar != 0 };
-        const CheckOptions check_options = { .scalar = scalar != 0 };
+        const CheckOptions check_options = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         const bool parsed = check_test_types_open(&types) && arena.base != 0 && output.base != 0 && scratch.base != 0 &&

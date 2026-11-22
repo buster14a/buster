@@ -22,6 +22,8 @@ struct CheckDriverInput
 {
     CheckDriverInputKind kind;
     uint32_t argument;
+    uint64_t size;
+    bool probed;
     bool unknown;
     // .i, and no explicit -x: the text is already preprocessed.
     bool preprocessed;

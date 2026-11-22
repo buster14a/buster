@@ -76,8 +76,8 @@ rows.
 Then only the rows the join's phis need, through their represented operands,
 move to the head's end, before its branch. Each needed row must be total:
 constants, copies, wrapping integer arithmetic, bitwise operations, integer
-comparisons, selects, integer and pointer conversions, addresses, and shifts by
-an in-range constant. A plain load is speculated where the head made a plain
+comparisons, selects, integer and pointer conversions, addresses, shifts by
+an in-range constant, and floating negations (#2842, below). A plain load is speculated where the head made a plain
 load or store of the same address, of at least its size, after its last
 release. A call, a stack restore or a lifetime marker counts as a release,
 since it could unmap or reuse the memory. Nothing else proves an address.
@@ -93,7 +93,7 @@ Each phi takes a new select row in the head for the region's two entries, which
 become one entry from the head. That is the shape of LLVM SimplifyCFG's
 `FoldTwoEntryPHINode` and `SpeculativelyExecuteBB`, for the C lowering's
 nested `?:`. The head then branches to the join. Rows are permuted, and the
-only new rows are the folded selects and the sunk accumulations' zeros (below).
+only new rows are the folded selects and the sunk accumulations' identity constants (below).
 
 Two cost rules keep a branch or move a select:
 
@@ -108,15 +108,18 @@ Two cost rules keep a branch or move a select:
   selection, and clang -O2 keeps branches there.
 - **An accumulation's select sinks below its operation.** An in-place phi may
   take `s op x` on one edge and `s` on the other: an addition, a subtraction
-  from `s`, an or or a xor of integers, which nothing else reads. The
-  operation's row then selects `x` or zero instead, and the phi becomes
-  `s op select`, as InstCombine folds a select of a binary operation. A
-  conditional sum's accumulator then waits for one addition per element, not
-  for the `cmov` as well, and a predictable condition costs no more than its
-  branch did. The zero is a new constant row in the head that names a zero the
-  constant table already has; a function whose table has none keeps the select
-  outside. A variable binding of the operation's row, whose value changed,
-  becomes unavailable.
+  from `s`, an or or a xor of integers, which nothing else reads. For these
+  operations the arm row selects `x` or zero, and the phi becomes `s op select`.
+  They need a zero already in the constant table. A one-arm AND of i8, i16,
+  i32 or i64 instead selects `x` or all ones at that width. It admits a boolean
+  parameter or a direct integer comparison and requires a region without
+  reused or speculated arm loads. Copies and extensions in a comparison can
+  hide a floating truth test, so this fold leaves them alone. A saved value in the head can feed the AND. A C arm
+  reload can arrive without its volatile flag ([the IR guide](ir.md)), so the
+  AND fold skips it. The pass reuses each required mask in the constant table
+  or appends a missing width once to a private copy. In both orientations the
+  accumulator waits only for the operation. A binding of the repurposed arm
+  row becomes unavailable.
 
 A converted head whose single-predecessor chain climbs to a conditional branch
 may now be an outer region's arm (a nested `?:`, `||` inside `&&`). In that
@@ -132,11 +135,26 @@ integer result is one, and the outer region would otherwise stay a branch. Tier 
 32-bit operations (#2677), as clang does. A truth value used as an integer
 rather than tested, `select c, (zext x), 0` itself, is Tier 1's `and` of the
 condition and the value too, or #2676's `cmp` and `cmovCC` where the condition
-is a comparison only the select reads ([the selection guide](tier1-selection.md)). The
+is a comparison only the select reads ([the selection guide](tier1-selection.md)).
+A test of a floating comparison, which no integer comparison can take the place
+of, becomes its `i1` copy, which Tier 1's selects and branches read through to
+an ordered comparison's `ucomis` and `cmovCC` or `jcc` (#2791), and a select
+of `==` or `!=` to `ucomis`, `cmovne` and `cmovp` where its values don't recur
+through it (#2922). The
 earlier truth pass, before threading, keeps its comparison rules alone.
 
 The admissible values are `i1`, `i8`, `i16`, `i32`, `i64` and pointers, matching
-the scalar select consumer. Each arm moves at most four non-constant rows, and
+the scalar select consumer, and since #2842 `f32` and `f64`, which Tier 1 selects
+without a branch (`TIER1_RULE_FLOAT_BLEND`, [the selection
+guide](tier1-selection.md)). A floating row moves only where it raises no
+floating exception, so that a moved row sets no status flag C's code wouldn't
+have (the optimizer keeps the floating operations as roots for the same
+reason): of the total operations a copy, a select, a bitcast and a negation
+(C's `-x` and IEC 60559's negate are quiet) make one, besides a constant and a
+proven load. Floating arithmetic, comparisons and conversions have no cost:
+they stay in their arm, which then refuses the region, so `x < 0 ? -x : x` and
+`s += p[i] > 0 ? 3.0 : 1.0` convert, and `c ? a / b : 1.0` or the outer test of
+`x < 0 ? 0 : x > 1 ? 1 : x` (its arm's comparison) stay branches. Each arm moves at most four non-constant rows, and
 its blocks hold at most 32 rows in all, needed or not. Each join takes at most
 four selects. The moved rows' cost plus two per select is at most eight: a
 constant costs nothing, an integer multiply three, a select two, and other
@@ -151,7 +169,7 @@ unchanged.
 SSA and distinct output/scratch arenas; scratch must own none of the input.
 The output arena may already contain the input. A changed result owns fresh
 row columns, block offsets, extra words and call records for each round,
-borrowing immutable tables from the input until the ordinary optimizer
+borrowing immutable tables (apart from an extended constant table) from the input until the ordinary optimizer
 materializes its output. Both lifetimes must cover that consumption. Shared or
 overlapping `extra` slices are never remapped in place: original switch/label
 words stay intact, and surviving phi/call occurrences get appended value
@@ -229,10 +247,10 @@ changed SSA users and instructions affected by newly executable edges, phis in a
 queue of their own (below). Integer
 operations support all IR integer widths, including scalar i128 handling.
 Copies, phis, selects, integer/pointer conversions, bitcasts and floating sign
-negation preserve exact constant bits. Scalar floating arithmetic, floating
-comparisons and numeric floating conversions remain overdefined because their
-results can depend on the runtime floating environment; SIMD floating lanes fold
-where they can't (below). Unknown values remaining in an executable region are
+negation preserve exact constant bits. Floating arithmetic, comparisons and
+numeric conversions fold only where the runtime floating environment can't
+change their bits: SIMD lanes as below, scalar operations under a stricter rule
+of their own (below). Unknown values remaining in an executable region are
 promoted to overdefined and propagated before rewriting.
 
 A join of n arms (a long `?:` chain's, nested ifs') is queued again by each
@@ -304,6 +322,36 @@ compiler's MXCSR set to an unusual value that must come back unchanged. A
 one-off run of 409,600 pairs also passed. Tier 1's existing native MXCSR fixture
 (`test-tier1-masks`) still sees round-upward, FTZ and DAZ results after SCCP.
 
+### Scalar floating operations (#2720)
+
+Scalar `fadd`, `fsub`, `fmul`, `fdiv` and `fcmp` of `f32` and `f64` fold as a
+one-lane vector of the transfer above, so a result folds only where every
+floating environment gives the same bits. A folded scalar row is a kind-2 root
+(`ir_optimize_roots`): its constant discharges it and the row goes, so nothing
+is left to raise a flag. A scalar operation therefore folds only where it raises
+no exception flag at all: beyond the lanes' rule (an exact, normal result of
+normal operands), no operand may be a NaN (a signaling one raises invalid, and
+two quiet ones' payload would follow the operands' order in the emitted
+instruction), the result may not be one (an invalid operation's default NaN),
+and no division may be by zero. Those operations stay at run time, unfolded.
+
+The numeric conversions fold under the same rule. `sitofp` and `uitofp` of an
+8- to 64-bit integer fold where the format holds the value exactly; `fptosi`
+and `fptoui` where the floating value is an integer the target holds, or a zero
+of either sign; `fext` (`f32` to `f64`) and `ftrunc` (`f64` to `f32`) where the
+operand is a zero, an infinity or a normal value that the target holds exactly
+as a normal value. A NaN or a subnormal operand stays unfolded. `f80` and the
+x87 are left alone.
+
+`test-ir-optimize`'s oracle for these is the hardware: each random operation
+runs by its own instruction (`addsd`, `comiss`, `cvttsd2si`, `vcvtusi2sd` and
+the rest) in one asm statement that loads MXCSR, runs it, stores MXCSR and
+restores it, under round to nearest, down, up and toward zero and under FTZ with
+DAZ. An operation must fold exactly where all five give the same bits and raise
+no flag and no operand is a NaN, to those bits, and the interpreter must give
+the same result before and after: 22,000 random cases over the eleven
+operations, each of which both folds and refuses.
+
 The fold boundary receives complete `IrSimdValue` cells with all 64 bytes
 readable, independently of logical vector width. No function column needs
 padding; per-lane batches use bounded masks. Inputs are immutable during a
@@ -316,8 +364,9 @@ Dead-code removal classifies roots by a vector opcode-table lookup, skips
 empty liveness batches, and propagates dependencies backwards. A separate
 worklist implementation supplies the exact scalar result and completes a
 bounded sweep. It skips dependencies of folded values and removed conditional
-branches, and follows only executable phi edges. Floating operations stay
-roots, folded or not, so their dependencies stay live.
+branches, and follows only executable phi edges. Vector floating operations
+stay roots, folded or not, so their dependencies stay live; a scalar one stays
+a root until it folds, which it does only where it raises no flag (#2720).
 
 CFG cleanup compacts unreachable blocks, collapses single-successor
 conditionals, and threads transparent jumps. Pointer jumping and propagated
@@ -673,8 +722,6 @@ an issue of its own:
   #2718 ([its guide](ir-memory-value-numbering.md)).
 - **A policy under which LICM and the solver pay** (register pressure, values
   Tier 1 recomputes kept at their users): #2719.
-- **Scalar floating folding** under #1450's floating-environment contract:
-  #2720.
 - **Inlining callees with control flow, its classes and budgets:** #2541 and its
   steps. A variadic or unprototyped call is the call's decision, not the unit's
   error (#2721).

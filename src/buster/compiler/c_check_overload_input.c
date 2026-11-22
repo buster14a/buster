@@ -72,7 +72,7 @@ static const CheckOverloadCandidate* check_input_overload_prior(CheckInputReader
     signature_hash = object_size ? type_hash_mix(signature_hash, 1) : signature_hash;
     reader->output->resource |= !hashed;
     const uint64_t key = check_overload_index_key(signature_hash, name, scope);
-    const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, scope, reader->parser->options.scalar) : UINT32_MAX;
+    const uint32_t slot = hashed ? check_overload_index_find(&reader->overload_index, key, name, scope) : UINT32_MAX;
     const uint32_t* next = scope == UINT32_MAX ? reader->overload_index.linked_next : reader->overload_index.lexical_next;
     const CheckOverloadCandidate* prior = NULL;
     for (uint32_t linked = check_overload_index_head(&reader->overload_index, slot); prior == NULL && linked != UINT32_MAX; linked = next[linked])
@@ -118,8 +118,8 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
         signature_hash = candidate.object_sizes != NULL ? type_hash_mix(signature_hash, 1) : signature_hash;
         const uint64_t lexical_key = check_overload_index_key(signature_hash, name, scope);
         const uint64_t linked_key = check_overload_index_key(signature_hash, name, UINT32_MAX);
-        const uint32_t lexical_slot = hashed ? check_overload_index_find(index, lexical_key, name, scope, reader->parser->options.scalar) : UINT32_MAX;
-        const uint32_t linked_slot = hashed ? check_overload_index_find(index, linked_key, name, UINT32_MAX, reader->parser->options.scalar) : UINT32_MAX;
+        const uint32_t lexical_slot = hashed ? check_overload_index_find(index, lexical_key, name, scope) : UINT32_MAX;
+        const uint32_t linked_slot = hashed ? check_overload_index_find(index, linked_key, name, UINT32_MAX) : UINT32_MAX;
         const uint32_t lexical_head = check_overload_index_head(index, lexical_slot);
         const uint32_t linked_head = check_overload_index_head(index, linked_slot);
         const uint32_t unmarked = head != BUSTER_CHECK_NONE ? index->unmarked[head] : BUSTER_CHECK_NONE;
@@ -208,7 +208,7 @@ static void check_input_overload_declare(CheckInputReader* reader, uint32_t toke
             index->active[name] |= (candidate.flags & BUSTER_CHECK_OVERLOADABLE) != 0;
             check_overload_index_publish(index, lexical_slot, lexical_key, name, scope, current);
             // Both lookups can choose the same empty slot before either key is published.
-            const uint32_t publish_linked = check_overload_index_find(index, linked_key, name, UINT32_MAX, reader->parser->options.scalar);
+            const uint32_t publish_linked = check_overload_index_find(index, linked_key, name, UINT32_MAX);
             check_overload_index_publish(index, publish_linked, linked_key, name, UINT32_MAX, current);
             if (active)
             {

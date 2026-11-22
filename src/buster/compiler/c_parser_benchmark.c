@@ -497,7 +497,7 @@ static bool parse_benchmark_check_handoff(ParseBenchmark* bench)
             const ParseTokens* got = &bench->converted;
             same = memcmp(file->output.kinds, resolved, file->output.count) == 0 && got->count == tokens->count && got->pragma_count == tokens->pragma_count &&
                    memcmp(got->kinds, tokens->kinds, tokens->count) == 0 && memcmp(got->names, tokens->names, (uint64_t)tokens->count * 4) == 0 &&
-                   memcmp(got->sources, tokens->sources, (uint64_t)tokens->count * 4) == 0 && parse_benchmark_same_flags(got->flags, tokens->flags, tokens->count) &&
+                   parse_sources_equal(got, tokens, tokens->count) && parse_benchmark_same_flags(got->flags, tokens->flags, tokens->count) &&
                    memcmp(got->pragma_sources, tokens->pragma_sources, (uint64_t)tokens->pragma_count * 4) == 0 &&
                    memcmp(got->pragma_positions, tokens->pragma_positions, (uint64_t)tokens->pragma_count * 4) == 0;
             if (!same)
@@ -539,7 +539,7 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
     switch (which)
     {
         case PARSE_TIMED_VECTOR_K1:
-            k->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, k->depths, k->enclosing, buffers->open_stack, k->bracket_blocks);
+            k->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, k->enclosing, buffers->open_stack, k->bracket_blocks);
             break;
         case PARSE_TIMED_VECTOR_K3_PASS:
             parse_typedefs_clear(k);
@@ -559,7 +559,7 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
             break;
         // K4's three loops alone, in turn; a file too deep for them gets the token-at-a-time K4 in the first.
         case PARSE_TIMED_VECTOR_K4_PREPARE:
-            bench->deep = parse_deepest(k, count) > BUSTER_PARSE_MAX_VECTOR_DEPTH;
+            bench->deep = k->deep_node_depths;
             if (bench->deep)
             {
                 parse_parents_scalar(k, count);

@@ -752,7 +752,7 @@ static inline __attribute__((always_inline)) void node_flat_unaries(NodeFlat* fl
                     break;
                 }
                 default:
-                    op = reader->return_types[token] != 0 ? CHECK_OP_CONVERT : CHECK_OP_COUNT;
+                    op = reader->query_types[token] != 0 ? CHECK_OP_CONVERT : CHECK_OP_COUNT;
                     break;
             }
             if (__builtin_expect(op != CHECK_OP_COUNT && taken == 1 && node_flat_usable(flat, place, values[0]), 1))
