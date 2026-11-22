@@ -7985,11 +7985,15 @@ tokens, three in ten of what it sweeps, are in bodies it then leaves to the
 walk.
 
 **Its fixtures.** The bodies' fixture has a call the program folds away, an
-address taken and discarded, a volatile local and a `sizeof` (which the scan
-refuses); and a second one is a unit of 8,192 tokens and more, read with the
-path and without. Eleven single changes (to the taken address's rule, the
-volatile local's, a temporary's class, the named objects, each of the
-producer's conditions, and the path's two switches) each fail them.
+address taken and discarded, a volatile local, a `sizeof` (which the scan
+refuses) and an `if` of a constant the program does not fold (`if (1.5)`,
+which the twin attempts and the kept tapes refuse); and a second one is a
+unit of 8,192 tokens and more, read with the path and without. Eleven single
+changes (to the taken address's rule, the volatile local's, a temporary's
+class, the named objects, each of the producer's conditions, and the path's
+two switches) each fail them. The first run of them found the fixture
+without a body that only the kept tapes' comparison leaves out, which it has
+since.
 
 ### What it says of step 2
 

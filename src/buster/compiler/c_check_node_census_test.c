@@ -1852,9 +1852,10 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
                                "static void discards(int x) { (void)&g; g = h(x); }\n"
                                "static int keeps(int x) { volatile int v = x; int w = v + 1; return w; }\n"
                                "static int sized(int x) { return x + (int)sizeof(x); }\n"
+                               "static int floated(int x) { if (1.5) { x += 1; } return x; }\n"
                                "int main(void)\n{\n    struct S s;\n    int n = 4;\n    s.a = 1;\n    s.c = 3;\n    nothing(n);\n    early(n);\n"
                                "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s) + twice(n) +\n"
-                               "        values(n, 2) + folded(n) + counted(n) + folds(n) + keeps(n) + sized(n);\n    discards(n);\n}\n";
+                               "        values(n, 2) + folded(n) + counted(n) + folds(n) + keeps(n) + sized(n) + floated(n);\n    discards(n);\n}\n";
     char path[512];
     snprintf(path, sizeof(path), "%s/bodies.c", directory);
     bool valid = parse_test_write(path, text, sizeof(text) - 1);
@@ -7625,31 +7626,31 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &alone_expected),
                       "node-alone by sweep: the same results, and each sweep's ticks within the run's");
     const NodeBodiesExpected bodies_quiet = {
-        .lowered = 23,
-        .whole = 21,
-        .attempted = 19,
+        .lowered = 24,
+        .whole = 22,
+        .attempted = 20,
         .reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
-        .kept_whole = 21,
+        .kept_whole = 22,
         .kept_attempted = 17,
-        .kept_reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 1 },
-        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 18, [NODE_TWIN_UNWHOLE] = 2, [NODE_TWIN_DROPPED] = 1, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1 },
-        .locals = { 37, 35 },
+        .kept_reasons = { [NODE_BODIES_ROOT] = 2, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 2 },
+        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 19, [NODE_TWIN_UNWHOLE] = 2, [NODE_TWIN_DROPPED] = 1, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1 },
+        .locals = { 38, 35 },
         .addressed = { 1, 1 },
-        .swept = 18,
+        .swept = 19,
         .taken = 15,
     };
     const NodeBodiesExpected bodies_loud = {
-        .lowered = 23,
-        .whole = 20,
-        .attempted = 18,
+        .lowered = 24,
+        .whole = 21,
+        .attempted = 19,
         .reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1 },
-        .kept_whole = 20,
+        .kept_whole = 21,
         .kept_attempted = 16,
-        .kept_reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 1 },
-        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 17, [NODE_TWIN_UNWHOLE] = 3, [NODE_TWIN_DROPPED] = 1, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1 },
-        .locals = { 34, 32 },
+        .kept_reasons = { [NODE_BODIES_ROOT] = 3, [NODE_BODIES_RESULT] = 1, [NODE_BODIES_CONTROL] = 1, [NODE_BODIES_INITIALIZER] = 1, [NODE_BODIES_CONSTANT] = 2 },
+        .twin_reasons = { [NODE_TWIN_ATTEMPTED] = 18, [NODE_TWIN_UNWHOLE] = 3, [NODE_TWIN_DROPPED] = 1, [NODE_TWIN_SWITCH] = 1, [NODE_TWIN_STATIC] = 1 },
+        .locals = { 35, 32 },
         .addressed = { 1, 1 },
-        .swept = 18,
+        .swept = 19,
         .taken = 14,
     };
     check_test_expect(test, ready && node_bodies_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), false, &bodies_quiet),
