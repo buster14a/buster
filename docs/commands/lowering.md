@@ -366,7 +366,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone|--front-alone-split] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -2751,6 +2751,12 @@ It reports three lines a run:
   refusal, the tests', C's or X's, no room), in bodies and in their tokens;
   the times its front lost its waiting values; and its whole bodies against
   those whose every popped root the machine on the walk's nodes takes.
+
+`--front-alone-split` is the same run with the clock read before each of the
+machine's sweeps and after the last, in its first run, and one line more:
+`alone the machine's first run by sweep: T=... the-tests=... C=... X=...`, the
+reads it took, and what is left of the run (its loop, the roots' ranges, the
+settling of the types made since the last chunk).
 
 A difference, a root only one of the two ran on in a body, a root taken
 before an event of the walk's or with a token its actions left, or a lowered

@@ -3065,10 +3065,36 @@ The 9700X, medians of 7 runs, musl's of 3, TSC ticks at 3,792.9 MHz:
   record; and a T that read the front's records would write no graph (4.8 ms).
 - **It retires the specification's forecast for the compile that takes bodies.** That forecast (5.6 to 8.5 ms at 53%
   of the tokens taken) was built on 141 to 178 ticks a token. At 270 a token swept and 295 a token taken, every
-  token of `sqlite3.c`'s bodies taken would give 3.7 ms, under that step's gate of 4. So cost comes before coverage:
-  the next reading is the machine's 26.6 ms split by sweep, in place, which is not split today and decides which
-  cheaper form goes first. And a refusal before the sweeps has to come before the front: the compaction, the
-  entries and the front are 55 ticks a position by themselves, where that step's gate was 20.
+  token of `sqlite3.c`'s bodies taken would give 3.7 ms, under that step's gate of 4. So cost comes before coverage.
+  And a refusal before the sweeps has to come before the front: the compaction, the entries and the front are 55
+  ticks a position by themselves, where that step's gate was 20.
+
+### The machine's run by sweep
+
+`measure-node-machine --shadow --front-alone-split` reads the clock before each of the machine's sweeps and after the
+last, in its first run (five reads a root; the run's whole reads the same with them, 100.8 M ticks on `sqlite3.c`).
+[The record](https://github.com/buster14a/buster-performance/tree/b9f4f4de7/docs/measurements/takeover-2850-2026-11-22#the-machines-run-by-sweep-machine-alone9700x-split-branch-claude2850-alone-split-at-2aeb81306)
+(`b9f4f4de7`; the 9700X, CPU 2, Release, under the lock; medians of 7 runs, musl's of 3; ms, and ticks a body's
+postorder position):
+
+| | `sqlite3.c` | | Lua | | musl | |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| T | 6.20 | 41.3 | 2.04 | 38.1 | 9.79 | 26.1 |
+| the census's tests | 13.37 | 89.2 | 3.65 | 68.1 | 15.44 | 41.1 |
+| C | 2.90 | 19.3 | 0.78 | 14.5 | 3.69 | 9.8 |
+| X | 2.44 | 16.3 | 0.59 | 11.0 | 2.90 | 7.7 |
+| the rest of the run (its loop, the roots' ranges, the settling) | 1.67 | 11.2 | 0.40 | 7.5 | 2.04 | 5.4 |
+| the machine's first run | 26.56 | 177.3 | 7.48 | 139.9 | 34.01 | 90.6 |
+
+- **The tests are half the machine's run on each corpus,** and a third of the piece whole: 89 of `sqlite3.c`'s 270
+  ticks a position, where T is 41, the front 37 and the graph's writing 32.
+- **So the tests' cheaper form goes first.** The census's code on T's records is the only form of them that runs
+  without the window today: the pass over T's columns that read half of it ("The tests in the machine's own form")
+  became the window's loop, which reads a fifth and needs the window's front and kernel. Either is the next piece,
+  with this machine as what it is compared with before the walk.
+- **With the tests at a fifth and no graph written, the piece would read about 170 ticks a position** on
+  `sqlite3.c` (270 less 71 and 32): under its gate, and 125 a taken token under what one is worth. That is a sum of
+  readings from different pieces, not a measurement.
 
 ## Step 4's first piece: a census of Tier 0's row
 
