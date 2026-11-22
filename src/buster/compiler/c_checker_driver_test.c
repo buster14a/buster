@@ -7584,8 +7584,9 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
             }
         }
     }
-    // A unit past the statement heads' 8,192 tokens with a body masked (#2524): the reader's coded walk, its packed
-    // declarations and its statement heads run under the mask, and the lazy object is still the eager one.
+    // A unit past the statement heads' 8,192 tokens with a body masked (#2524): with whichever of the reader's paths a
+    // lazy mask leaves on (its coded walk's class actions, its packed declarations and its statement heads), the lazy
+    // object is still the eager one. That the class actions do run under a mask is c_check_lazy_test.c's to require.
     static char generated[65536];
     static const char* const masked_header = "#pragma GCC system_header\n"
                                              "static int unused(int x) { int t = x * 2; while (t > 9) { t -= 3; } return t; }\n"
