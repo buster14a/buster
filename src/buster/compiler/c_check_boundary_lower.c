@@ -430,6 +430,12 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
             }
             check_boundary_write(called, end - first, sizeof(uint32_t));
             check_boundary_write(fixups, fixup_count, sizeof(CheckBoundaryFixup));
+            // Its uses of the declarations outside it, as the reader's unused analysis met them (none where it didn't run).
+            const uint32_t use_count = check_boundary_body_uses(check_boundary_origin(program, body.opening), NULL, 0);
+            CheckBoundaryUse* body_uses = malloc(((uint64_t)use_count + 1) * sizeof(CheckBoundaryUse));
+            const uint32_t use_written = body_uses != NULL ? check_boundary_body_uses(check_boundary_origin(program, body.opening), body_uses, use_count) : 0;
+            check_boundary_write(body_uses, body_uses != NULL ? use_written : 0, sizeof(CheckBoundaryUse));
+            free(body_uses);
             CheckBoundaryTable* tables = malloc(((uint64_t)table_count + 1) * sizeof(CheckBoundaryTable));
             uint32_t* table_entries = malloc((table_values + 1) * sizeof(uint32_t));
             uint64_t value = 0;
@@ -496,14 +502,32 @@ static int check_boundary_row_order(const void* left, const void* right)
     return a < b ? -1 : a > b;
 }
 
-// A body with a diagnostic in it is refused: `token` is the diagnostic's. Before the recording's end.
+// A body with a diagnostic in it is refused: `token` is the diagnostic's. So is the body after a diagnostic between two
+// bodies, whose declarator it may be at (an unused parameter's warning is the body's to give, at the body's end).
+// Before the recording's end.
 static void check_boundary_record_diagnostic(uint32_t token)
 {
     CheckBoundaryUnit* unit = &check_boundary_unit;
-    for (uint32_t r = 0; check_boundary_recording() && r < unit->row_count; r += 1)
+    // The first body of the parse that ends at the token or after it.
+    uint32_t low = 0;
+    uint32_t high = check_boundary.range_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (check_boundary.ranges[middle].closing < token)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    const uint32_t opening = low < check_boundary.range_count ? check_boundary.ranges[low].opening : UINT32_MAX;
+    for (uint32_t r = 0; check_boundary_recording() && opening != UINT32_MAX && r < unit->row_count; r += 1)
     {
         CheckBoundaryRow* row = &unit->rows[r];
-        if (token >= row->opening && token <= row->closing && row->refusal == CHECK_BOUNDARY_SUPPLIED)
+        if (row->opening == opening && row->refusal == CHECK_BOUNDARY_SUPPLIED)
         {
             row->refusal = CHECK_BOUNDARY_DIAGNOSTIC;
         }
@@ -515,6 +539,10 @@ static void check_boundary_record_finish(void)
     CheckBoundaryUnit* unit = &check_boundary_unit;
     if (check_boundary_recording())
     {
+        for (uint32_t k = 0; k < check_boundary.refused_token_count; k += 1)
+        {
+            check_boundary_record_diagnostic(check_boundary.refused_tokens[k]);
+        }
         if (unit->rows != NULL)
         {
             qsort(unit->rows, unit->row_count, sizeof(CheckBoundaryRow), check_boundary_row_order);
@@ -589,6 +617,8 @@ static void check_boundary_load(void)
             body->runtime_count = (uint32_t)count;
             body->fixups = check_boundary_read(&cursor, sizeof(CheckBoundaryFixup), &count);
             body->fixup_count = (uint32_t)count;
+            body->uses = check_boundary_read(&cursor, sizeof(CheckBoundaryUse), &count);
+            body->use_count = (uint32_t)count;
             body->tables = check_boundary_read(&cursor, sizeof(CheckBoundaryTable), &count);
             body->table_count = (uint32_t)count;
             body->table_entries = check_boundary_read(&cursor, sizeof(uint32_t), &count);

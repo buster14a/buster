@@ -385,6 +385,11 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
         {
             const CheckWarningUndefinedFunction* function = functions + (uint32_t)ordered[i];
             const uint32_t declaration = function->object - 1;
+            // SCAFFOLD (c_check_boundary.c): the use this warning notes must be read again for the warning to be the same.
+            if (__builtin_expect(check_boundary_recording(), 0) && function->use < count)
+            {
+                check_boundary_refuse(parse_origin(parser, function->use));
+            }
             const CheckWarningEvent event = {
                 .id = CHECK_WARNING_ID_UNDEFINED_INTERNAL,
                 .kind = CHECK_WARNING_EVENT_UNDEFINED_INTERNAL,

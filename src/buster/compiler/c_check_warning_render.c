@@ -2917,6 +2917,24 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
     {
         return valid;
     }
+    // SCAFFOLD (c_check_boundary.c): a recording refuses the body a warning or one of its notes is in. A warning's place
+    // among the diagnostics may be the unit's end, so its event's token says where it is.
+    for (uint32_t i = 0; __builtin_expect(check_boundary_recording(), 0) && i < view->count; i += 1)
+    {
+        const CheckWarningEvent* event = view->events + i;
+        if (event->token < parser->tokens.count)
+        {
+            check_boundary_refuse(parse_origin(parser, event->token));
+        }
+        for (uint32_t n = 0; n < event->note_count && event->note_first + n < view->note_count; n += 1)
+        {
+            const uint32_t note_token = view->notes[event->note_first + n].token;
+            if (note_token < parser->tokens.count)
+            {
+                check_boundary_refuse(parse_origin(parser, note_token));
+            }
+        }
+    }
     // Only these facts render a type (#992, and #147's function-type attributes); a pass of typeless messages, pragmas or
     // notes needs no spelling rows at all.
     bool renders = false;

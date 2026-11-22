@@ -12716,6 +12716,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 check_boundary.token_count = checking->tokens.count;
             }
+            if (check_boundary.mode != CHECK_BOUNDARY_OFF && !prefix_only)
+            {
+                check_boundary_ranges(checking->tree.roles, checking->tree.parents, checking->tokens.count, PARSE_ROLE_OPEN_BODY);
+            }
             if (check_boundary_supplying() && !prefix_only && selected == NULL)
             {
                 check_boundary_load();

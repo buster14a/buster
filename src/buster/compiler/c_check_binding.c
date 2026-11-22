@@ -696,6 +696,14 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                     if (handle != 0 && handle <= events->count && events->operation[handle - 1] == C_BINDING_DECLARE)
                     {
                         const uint32_t target = events->declaration[handle - 1];
+                        // SCAFFOLD (c_check_boundary.c): a recording keeps each use a body has of a declaration outside it.
+                        if (__builtin_expect(check_boundary_recording(), 0) && target < count && events->declaration[event] < count)
+                        {
+                            const TypeId recorded_type = reader->declared_types != NULL ? reader->declared_types[target] : 0;
+                            const bool recorded_volatile = recorded_type != 0 && (type_qualifiers(type_strip_aligned(reader->types, recorded_type)) & BUSTER_TYPE_VOLATILE) != 0;
+                            check_boundary_record_use(parse_origin(parser, events->declaration[event]), parse_origin(parser, target),
+                                                      !check_input_discarded_set(parser, events->declaration[event], recorded_volatile));
+                        }
                         if (target < count && read_tokens[target] == 0)
                         {
                             const TypeId declared = reader->declared_types != NULL ? reader->declared_types[target] : 0;
@@ -734,6 +742,63 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
                             depth = events->depth[declaration];
                             last = token;
                             at = events->previous[declaration];
+                        }
+                    }
+                }
+            }
+            // SCAFFOLD (c_check_boundary.c): a supplied body's uses of the declarations outside it, the recording's, each
+            // marking its declaration's chain as a use the reader met would.
+            if (__builtin_expect(check_boundary_supplying(), 0) && check_boundary.taken != 0)
+            {
+                uint32_t* declare_events = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
+                if (declare_events != NULL)
+                {
+                    memset(declare_events, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+                    for (uint32_t at_declare = 0; at_declare < declare_count; at_declare += 1)
+                    {
+                        const uint32_t declared_event = declares != NULL ? declares[at_declare] : at_declare;
+                        const uint32_t token = events->declaration[declared_event];
+                        if (events->operation[declared_event] == C_BINDING_DECLARE && token < count && declare_events[token] == BUSTER_CHECK_NONE)
+                        {
+                            declare_events[token] = declared_event;
+                        }
+                    }
+                    for (uint32_t b = 0; b < check_boundary.body_count; b += 1)
+                    {
+                        const CheckBoundaryBody* body = &check_boundary.bodies[b];
+                        for (uint32_t u = 0; body->taken && u < body->use_count; u += 1)
+                        {
+                            const uint32_t target = body->uses[u].target;
+                            const uint32_t handle = target < count && declare_events[target] != BUSTER_CHECK_NONE ? declare_events[target] + 1 : 0;
+                            if (handle != 0)
+                            {
+                                read_tokens[target] |= body->uses[u].read != 0;
+                                uint32_t at = handle;
+                                uint32_t depth = events->depth[handle - 1];
+                                uint32_t last = BUSTER_CHECK_NONE;
+                                for (uint32_t steps = 0; at != 0 && steps < events->count; steps += 1)
+                                {
+                                    const uint32_t declaration = at - 1;
+                                    const uint32_t token = events->declaration[declaration];
+                                    const bool crossing = events->depth[declaration] != depth;
+                                    const bool outward = crossing && events->depth[declaration] < depth && last < count && token < count &&
+                                                         check_input_linkage(output->declaration_bits, last) != 0 &&
+                                                         check_input_linkage(output->declaration_bits, token) != 0;
+                                    if (events->operation[declaration] != C_BINDING_DECLARE || events->key[declaration] != events->key[handle - 1] ||
+                                        (crossing && !outward) || used[declaration] != 0)
+                                    {
+                                        break;
+                                    }
+                                    used[declaration] = 1;
+                                    if (token < count)
+                                    {
+                                        used_tokens[token] = 1;
+                                    }
+                                    depth = events->depth[declaration];
+                                    last = token;
+                                    at = events->previous[declaration];
+                                }
+                            }
                         }
                     }
                 }

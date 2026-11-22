@@ -100,6 +100,32 @@ struct CheckBoundaryString
     uint32_t index;
 };
 
+// A use, in a body, of a declaration outside it (a parameter of its function's, a file-scope declaration): the
+// declaration's token, and whether the use reads it (not only sets it). The reader's unused analysis has these of a
+// body it reads from its binding events; of a supplied body, from the supplier.
+typedef struct CheckBoundaryUse CheckBoundaryUse;
+struct CheckBoundaryUse
+{
+    uint32_t target;
+    uint32_t read;
+};
+
+// A recording's use as the reader meets it: its body's place among the unit's bodies too.
+typedef struct CheckBoundaryMetUse CheckBoundaryMetUse;
+struct CheckBoundaryMetUse
+{
+    uint32_t body;
+    uint32_t target;
+    uint32_t read;
+};
+
+typedef struct CheckBoundaryRange CheckBoundaryRange;
+struct CheckBoundaryRange
+{
+    uint32_t opening;
+    uint32_t closing;
+};
+
 typedef struct CheckBoundaryBody CheckBoundaryBody;
 struct CheckBoundaryBody
 {
@@ -123,6 +149,9 @@ struct CheckBoundaryBody
     uint32_t table_count;
     const CheckBoundaryTable* tables;
     const uint32_t* table_entries;
+    // Its uses of declarations outside it, each once.
+    uint32_t use_count;
+    const CheckBoundaryUse* uses;
     // Its Tier0Function and its columns (c_check_boundary_lower.c), in the recording's bytes.
     void* function;
 };
@@ -159,6 +188,19 @@ struct CheckBoundary
     uint32_t taken;
     uint64_t taken_tokens;
     uint64_t load_ticks;
+    // Every body of the unit's parse, by its tokens, in their order (check_boundary_ranges): what a use or a diagnostic
+    // is in.
+    CheckBoundaryRange* ranges;
+    uint32_t range_count;
+    // A recording's uses as the reader met them, and the tokens whose bodies a diagnostic that isn't at them refuses
+    // (the first use an undefined internal function's warning notes).
+    CheckBoundaryMetUse* met_uses;
+    uint32_t met_use_count;
+    uint32_t met_use_capacity;
+    bool met_uses_sorted;
+    uint32_t* refused_tokens;
+    uint32_t refused_token_count;
+    uint32_t refused_token_capacity;
 };
 
 static CheckBoundary check_boundary;
@@ -283,12 +325,152 @@ static void check_boundary_unit_path(const char* directory, const char* source)
 
 static void check_boundary_unit_reset(void);
 
+// The body of the unit that holds token `token` (an index in the unit's own parse), or BUSTER_CHECK_NONE.
+static uint32_t check_boundary_range_of(uint32_t token)
+{
+    uint32_t low = 0;
+    uint32_t high = check_boundary.range_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (check_boundary.ranges[middle].opening <= token)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low != 0 && token <= check_boundary.ranges[low - 1].closing ? low - 1 : UINT32_MAX;
+}
+
+// The unit's bodies' ranges, from its parse's roles and parents (`count` tokens): each OPEN_BODY to its closing brace.
+static void check_boundary_ranges(const uint8_t* roles, const uint32_t* parents, uint32_t count, uint8_t open_body)
+{
+    uint32_t bodies = 0;
+    for (uint32_t t = 0; t < count; t += 1)
+    {
+        if (roles[t] == open_body && parents[t] > t && parents[t] < count)
+        {
+            bodies += 1;
+            t = parents[t];
+        }
+    }
+    free(check_boundary.ranges);
+    check_boundary.ranges = malloc(((uint64_t)bodies + 1) * sizeof(CheckBoundaryRange));
+    check_boundary.range_count = 0;
+    for (uint32_t t = 0; check_boundary.ranges != NULL && t < count; t += 1)
+    {
+        if (roles[t] == open_body && parents[t] > t && parents[t] < count)
+        {
+            check_boundary.ranges[check_boundary.range_count++] = (CheckBoundaryRange){ .opening = t, .closing = parents[t] };
+            t = parents[t];
+        }
+    }
+}
+
+// A recording's use (the reader's unused analysis): of the declaration at `target` by the token `use`, both indexes in
+// the unit's own parse. Kept where the use is in a body and the declaration outside it.
+static void check_boundary_record_use(uint32_t use, uint32_t target, bool read)
+{
+    const uint32_t body = check_boundary_range_of(use);
+    if (body != UINT32_MAX && (target < check_boundary.ranges[body].opening || target > check_boundary.ranges[body].closing))
+    {
+        if (check_boundary.met_use_count == check_boundary.met_use_capacity)
+        {
+            const uint32_t capacity = check_boundary.met_use_capacity != 0 ? check_boundary.met_use_capacity * 2 : 1u << 14;
+            CheckBoundaryMetUse* grown = realloc(check_boundary.met_uses, (uint64_t)capacity * sizeof(CheckBoundaryMetUse));
+            if (grown != NULL)
+            {
+                check_boundary.met_uses = grown;
+                check_boundary.met_use_capacity = capacity;
+            }
+        }
+        if (check_boundary.met_use_count < check_boundary.met_use_capacity)
+        {
+            check_boundary.met_uses[check_boundary.met_use_count++] = (CheckBoundaryMetUse){ .body = body, .target = target, .read = read ? 1u : 0u };
+            check_boundary.met_uses_sorted = false;
+        }
+    }
+}
+
+// A recording's token whose body is refused though no diagnostic is at it.
+static void check_boundary_refuse(uint32_t token)
+{
+    if (check_boundary.refused_token_count == check_boundary.refused_token_capacity)
+    {
+        const uint32_t capacity = check_boundary.refused_token_capacity != 0 ? check_boundary.refused_token_capacity * 2 : 64;
+        uint32_t* grown = realloc(check_boundary.refused_tokens, (uint64_t)capacity * sizeof(uint32_t));
+        if (grown != NULL)
+        {
+            check_boundary.refused_tokens = grown;
+            check_boundary.refused_token_capacity = capacity;
+        }
+    }
+    if (check_boundary.refused_token_count < check_boundary.refused_token_capacity)
+    {
+        check_boundary.refused_tokens[check_boundary.refused_token_count++] = token;
+    }
+}
+
+static int check_boundary_met_use_order(const void* left, const void* right)
+{
+    const CheckBoundaryMetUse* a = left;
+    const CheckBoundaryMetUse* b = right;
+    return a->body != b->body ? (a->body < b->body ? -1 : 1) : a->target != b->target ? (a->target < b->target ? -1 : 1) : (a->read > b->read ? -1 : a->read < b->read);
+}
+
+// The recording's uses of the body at `opening`, each declaration once (read if any use of it reads): written into
+// `uses`, of room for `capacity`; their count.
+static uint32_t check_boundary_body_uses(uint32_t opening, CheckBoundaryUse* uses, uint32_t capacity)
+{
+    if (!check_boundary.met_uses_sorted && check_boundary.met_use_count != 0)
+    {
+        qsort(check_boundary.met_uses, check_boundary.met_use_count, sizeof(CheckBoundaryMetUse), check_boundary_met_use_order);
+        check_boundary.met_uses_sorted = true;
+    }
+    const uint32_t body = check_boundary_range_of(opening);
+    uint32_t low = 0;
+    uint32_t high = check_boundary.met_use_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (check_boundary.met_uses[middle].body < body)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    // (A declaration's uses are together, a reading one first.)
+    uint32_t count = 0;
+    for (uint32_t k = low; body != UINT32_MAX && k < check_boundary.met_use_count && check_boundary.met_uses[k].body == body; k += 1)
+    {
+        const CheckBoundaryMetUse met = check_boundary.met_uses[k];
+        if (k == low || check_boundary.met_uses[k - 1].target != met.target)
+        {
+            if (uses != NULL && count < capacity)
+            {
+                uses[count] = (CheckBoundaryUse){ .target = met.target, .read = met.read };
+            }
+            count += 1;
+        }
+    }
+    return count;
+}
+
 // A unit's start: what the environment asks of it. A recording starts empty; a supplying compile reads the unit's
 // recording, and supplies nothing where there is none.
 static void check_boundary_begin(const char* source)
 {
     free(check_boundary.bytes);
     free(check_boundary.bodies);
+    free(check_boundary.ranges);
+    free(check_boundary.met_uses);
+    free(check_boundary.refused_tokens);
     check_boundary = (CheckBoundary){ 0 };
     check_boundary_unit_reset();
     const char* record = getenv("BUSTER_BOUNDARY_RECORD");
