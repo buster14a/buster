@@ -91,7 +91,6 @@ static void check_test_mangling_enable_if(CheckTest* test)
             .identifiers = &identifiers,
             .types = &types.table,
             .output = &output,
-            .scalar = path == 0,
         };
         uint32_t i = 0;
         for (uint32_t c = 0; checked && c < input.graph.overload_candidate_count && i < BUSTER_ARRAY_LENGTH(expected); c += 1)
@@ -192,7 +191,6 @@ static void check_test_mangling(CheckTest* test)
             .identifiers = &identifiers,
             .types = &types.table,
             .output = &output,
-            .scalar = path == 0,
         };
         for (uint32_t i = 0; checked && i < input.graph.overload_candidate_count && i < BUSTER_ARRAY_LENGTH(expected); i += 1)
         {

@@ -39,6 +39,138 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
     static const CheckDriverAssertFile failed[] =
     {
         {
+            .path = "tests/driver/assert_bool_comma.c",
+            .fixture =
+            {
+                .name = "failed assertions retain comma warnings in source and deferred order",
+                .options = { "-ferror-limit=0" },
+                .warnings = 23,
+                .errors = 20,
+                .notes = 5,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_comma.c",
+            .fixture =
+            {
+                .name = "failed assertion comma warnings retain C23 behavior",
+                .options = { "-ferror-limit=0" },
+                .warnings = 23,
+                .errors = 20,
+                .notes = 5,
+                .c23 = true,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_comma.c",
+            .fixture =
+            {
+                .name = "failed assertion comma warnings precede the error limit",
+                .options = { "-ferror-limit=1" },
+                .warnings = 3,
+                .errors = 2,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_comma.c",
+            .fixture =
+            {
+                .name = "failed assertion comma warnings precede fatal errors",
+                .options = { "-Wfatal-errors" },
+                .warnings = 1,
+                .errors = 1,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_comma_block.c",
+            .fixture =
+            {
+                .name = "failed assertion comma warnings keep lexical and function-end phases",
+                .warnings = 3,
+                .errors = 3,
+                .notes = 1,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_comma_block.c",
+            .fixture =
+            {
+                .name = "fatal assertion errors suppress later deferred comma warnings",
+                .options = { "-Wfatal-errors" },
+                .errors = 1,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_comma_policy.c",
+            .fixture =
+            {
+                .name = "failed assertion comma warnings retain pragma and macro policy",
+                .warnings = 2,
+                .errors = 4,
+                .notes = 6,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_detached.c",
+            .fixture =
+            {
+                .name = "failed assertions retain detached selection condition warnings",
+                .warnings = 9,
+                .errors = 14,
+                .notes = 4,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_detached.c",
+            .fixture =
+            {
+                .name = "failed detached condition warnings retain C23 behavior",
+                .warnings = 9,
+                .errors = 14,
+                .notes = 4,
+                .c23 = true,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_detached.c",
+            .fixture =
+            {
+                .name = "detached condition warnings precede the assertion error limit",
+                .options = { "-ferror-limit=1" },
+                .warnings = 2,
+                .errors = 2,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_detached.c",
+            .fixture =
+            {
+                .name = "detached condition warnings precede a fatal assertion error",
+                .options = { "-Wfatal-errors" },
+                .warnings = 1,
+                .errors = 1,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_detached_nested.c",
+            .fixture =
+            {
+                .name = "a nested failed assertion owns its condition and comma warnings",
+                .warnings = 2,
+                .errors = 4,
+            },
+        },
+        {
+            .path = "tests/driver/assert_bool_detached_policy.c",
+            .fixture =
+            {
+                .name = "detached condition warnings retain pragma and macro policy",
+                .warnings = 2,
+                .errors = 3,
+                .notes = 2,
+            },
+        },
+        {
             .path = "tests/driver/assert_bool_nested.c",
             .fixture =
             {

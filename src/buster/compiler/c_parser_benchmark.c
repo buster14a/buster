@@ -3,29 +3,27 @@
 // Counter/timing/sort helpers adapted through c_lexer_benchmark.c (by way of #186's parse spike) retain MIT and the
 // upstream notice: Copyright (c) 2023 Niles Salter. See THIRD_PARTY_NOTICES.md and LICENSES/Accelerated-Zig-Parser.txt.
 //
-// benchmark-parser: the parser (c_parser.c) on translation units preprocessed beforehand, the scalar parser, the
-// kernels' scalar twins and the vector path, as a whole and kernel by kernel.
+// benchmark-parser: the parser (c_parser.c) on translation units preprocessed beforehand, the vector path as a whole and
+// kernel by kernel.
 //
 // Usage: build/compiler benchmark-parser [--passes N] [--only NAME|stages] [--repeat N] [--counters pipeline|branches|memory|stalls]
 //                                        [-E's options] file...
 //
 // Each file is preprocessed with -E's options and its tokens are turned into the parser's (ParseTokens), outside what
-// is timed, as a compile finds them; the predefines for -march=native come from --predefines, as for -E. Then the
-// paths are checked to agree (the vector path's outcome and tree against the scalar parser's), and timed: --passes
-// interleaved passes (21 by default) after a warm-up one, of the whole paths over every file (the input's conversion
-// from the preprocessor's output and its twin; the scalar parser; the twins; the vector path), then of each stage,
+// is timed, as a compile finds them; the predefines for -march=native come from --predefines, as for -E. Then they are
+// timed: --passes interleaved passes (21 by default) after a warm-up one, of the whole paths over every file (the
+// input's conversion from the preprocessor's output; the keyword pass with it; the vector path), then of each stage,
 // timed per file on the shared arrays in parse_benchmark_stage_order, each after the stages before it. It reports
 // medians per token, of time, cycles (with the fastest and slowest pass) and instructions, and the events of the
 // --counters set; and the share of top-level declarations and tokens the vector path's fallback took. --only times
 // one path or stage ("stages" for every stage); a stage named alone runs --repeat times per file and the stages after
 // it don't run, so that perf sees mostly that stage. Run it pinned to one CPU, on the 9700X under its lock
 // (`EXCLUSIVE_OWNER=<name> ~/buster-fast-bench/exclusive.sh taskset -c 2 build/compiler benchmark-parser ...`). The
-// exit status is 1 if the arguments are invalid, a file doesn't preprocess, or the paths disagree.
+// exit status is 1 if the arguments are invalid, a file doesn't preprocess, or the handoff's rows differ from the drivers' tokens.
 //
 // Layout: the counters and the report; the files; the paths and the stages; run_parser_benchmark, called by main.c.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -360,26 +358,13 @@ struct ParseBenchmarkFile
 // ---------------------------------------------------------------------------------------------------------------------
 // The paths and the stages
 
-// What is timed: the whole paths over every file; then the stages, each kernel's twin's and AVX-512's, in
-// parse_benchmark_stage_order, timed per file on the shared arrays.
+// What is timed: the whole paths over every file; then the stages, each kernel's, in parse_benchmark_stage_order, timed
+// per file on the shared arrays.
 typedef enum ParseBenchmarkTimed
 {
-    PARSE_TIMED_INPUT_TWIN,
     PARSE_TIMED_INPUT,
-    PARSE_TIMED_HANDOFF_TWIN,
     PARSE_TIMED_HANDOFF,
-    PARSE_TIMED_SCALAR_PARSER,
-    PARSE_TIMED_TWINS,
     PARSE_TIMED_VECTOR,
-    PARSE_TIMED_TWIN_K1,
-    PARSE_TIMED_TWIN_K3_PASS,
-    PARSE_TIMED_TWIN_K3,
-    PARSE_TIMED_TWIN_K2,
-    PARSE_TIMED_TWIN_SECONDARY,
-    PARSE_TIMED_TWIN_K4,
-    PARSE_TIMED_TWIN_K5,
-    PARSE_TIMED_TWIN_K6,
-    PARSE_TIMED_TWIN_FALLBACK,
     PARSE_TIMED_VECTOR_K1,
     PARSE_TIMED_VECTOR_K3_PASS,
     PARSE_TIMED_VECTOR_K3,
@@ -401,22 +386,9 @@ typedef enum ParseBenchmarkTimed
 
 static const char* const parse_benchmark_timed_names[PARSE_TIMED_COUNT] =
 {
-    "input-twin",
     "input",
-    "handoff-twin",
     "handoff",
-    "scalar-parser",
-    "twins",
     "vector",
-    "twin-k1",
-    "twin-k3-pass",
-    "twin-k3",
-    "twin-k2",
-    "twin-k1-secondary",
-    "twin-k4",
-    "twin-k5",
-    "twin-k6",
-    "twin-fallback",
     "vector-k1",
     "vector-k3-pass",
     "vector-k3",
@@ -438,15 +410,6 @@ static const char* const parse_benchmark_timed_names[PARSE_TIMED_COUNT] =
 // The stages run in this order, so that each finds its inputs; K4's loops come alone before the whole K4.
 static const ParseBenchmarkTimed parse_benchmark_stage_order[] =
 {
-    PARSE_TIMED_TWIN_K1,
-    PARSE_TIMED_TWIN_K3_PASS,
-    PARSE_TIMED_TWIN_K3,
-    PARSE_TIMED_TWIN_K2,
-    PARSE_TIMED_TWIN_SECONDARY,
-    PARSE_TIMED_TWIN_K4,
-    PARSE_TIMED_TWIN_K5,
-    PARSE_TIMED_TWIN_K6,
-    PARSE_TIMED_TWIN_FALLBACK,
     PARSE_TIMED_VECTOR_K1,
     PARSE_TIMED_VECTOR_K3_PASS,
     PARSE_TIMED_VECTOR_K3,
@@ -471,13 +434,10 @@ struct ParseBenchmark
     ParseBenchmarkFile* files;
     uint32_t file_count;
     uint64_t token_count;
-    // The shared arrays, for the largest file: the kernels', the vector path's, the scalar parser's tree, and the twins'
-    // typed states and statements; and the tokens the input's conversion writes.
+    // The shared arrays, for the largest file: the kernels' and the vector path's; and the tokens the input's conversion
+    // writes.
     ParseKernels kernels;
     ParseVectorBuffers buffers;
-    ParseTree tree;
-    uint8_t* typed;
-    ParseStatement* statements;
     ParseDiagnostic* diagnostics;
     uint32_t diagnostic_capacity;
     ParseTokens converted;
@@ -504,29 +464,19 @@ static ParseInput parse_benchmark_input(ParseBenchmark* bench, ParseBenchmarkFil
     };
 }
 
-// One file's handoff by `which` (#335), from its output's kinds as pp_run_file leaves them: the keyword pass then the
-// conversion, as the drivers run them (PARSE_TIMED_HANDOFF), or their scalar twins. The output's kinds end resolved.
-static void parse_benchmark_handoff(ParseBenchmark* bench, ParseBenchmarkFile* file, ParseBenchmarkTimed which)
+// One file's handoff (#335), from its output's kinds as pp_run_file leaves them: the keyword pass then the conversion,
+// as the drivers run them. The output's kinds end resolved.
+static void parse_benchmark_handoff(ParseBenchmark* bench, ParseBenchmarkFile* file)
 {
     static Preprocessor pp;
     pp.output = file->output;
     memcpy(pp.keyword_kinds, bench->keyword_kinds, sizeof(pp.keyword_kinds));
-    switch (which)
-    {
-        case PARSE_TIMED_HANDOFF_TWIN:
-            pp_resolve_keywords_scalar(&pp);
-            parse_tokens_from_output_scalar(&pp.output, &bench->converted);
-            break;
-        case PARSE_TIMED_HANDOFF:
-            pp_resolve_keywords_vector(&pp);
-            parse_tokens_from_output(&pp.output, &bench->converted);
-            break;
-        default: break;
-    }
+    pp_resolve_keywords_range(&pp, 0, pp.output.count);
+    parse_tokens_from_output(&pp.output, &bench->converted);
 }
 
-// Whether every handoff row gives every file the drivers' tokens (the parser's, from pp_run's resolved output) and
-// leaves the output's kinds resolved as pp_run did.
+// Whether the handoff row gives every file the drivers' tokens (the parser's, from pp_run's resolved output) and leaves
+// the output's kinds resolved as pp_run did.
 static bool parse_benchmark_check_handoff(ParseBenchmark* bench)
 {
     bool same = true;
@@ -540,19 +490,19 @@ static bool parse_benchmark_check_handoff(ParseBenchmark* bench)
         {
             memcpy(resolved, file->output.kinds, file->output.count);
         }
-        for (uint32_t which = PARSE_TIMED_HANDOFF_TWIN; same && which <= PARSE_TIMED_HANDOFF; which += 1)
+        if (same)
         {
             memcpy(file->output.kinds, file->raw_kinds, file->output.count);
-            parse_benchmark_handoff(bench, file, (ParseBenchmarkTimed)which);
+            parse_benchmark_handoff(bench, file);
             const ParseTokens* got = &bench->converted;
             same = memcmp(file->output.kinds, resolved, file->output.count) == 0 && got->count == tokens->count && got->pragma_count == tokens->pragma_count &&
                    memcmp(got->kinds, tokens->kinds, tokens->count) == 0 && memcmp(got->names, tokens->names, (uint64_t)tokens->count * 4) == 0 &&
-                   memcmp(got->sources, tokens->sources, (uint64_t)tokens->count * 4) == 0 && parse_benchmark_same_flags(got->flags, tokens->flags, tokens->count) &&
+                   parse_sources_equal(got, tokens, tokens->count) && parse_benchmark_same_flags(got->flags, tokens->flags, tokens->count) &&
                    memcmp(got->pragma_sources, tokens->pragma_sources, (uint64_t)tokens->pragma_count * 4) == 0 &&
                    memcmp(got->pragma_positions, tokens->pragma_positions, (uint64_t)tokens->pragma_count * 4) == 0;
             if (!same)
             {
-                fprintf(stderr, "%s: the handoff's %s row differs from the drivers' tokens\n", file->path, parse_benchmark_timed_names[which]);
+                fprintf(stderr, "%s: the handoff's row differs from the drivers' tokens\n", file->path);
             }
         }
         free(resolved);
@@ -567,16 +517,9 @@ static void parse_benchmark_run_path(ParseBenchmark* bench, ParseBenchmarkTimed 
     {
         ParseBenchmarkFile* file = &bench->files[f];
         const ParseInput input = parse_benchmark_input(bench, file);
-        uint32_t diagnostic_count = 0;
         switch (which)
         {
-            case PARSE_TIMED_INPUT_TWIN: parse_tokens_from_output_scalar(&file->output, &bench->converted); break;
             case PARSE_TIMED_INPUT: parse_tokens_from_output(&file->output, &bench->converted); break;
-            case PARSE_TIMED_SCALAR_PARSER:
-                parse_scalar(input.kinds, input.names, input.flags, input.count, input.language, input.meanings, &bench->tree, &bench->scratch, bench->diagnostics,
-                             bench->diagnostic_capacity, &diagnostic_count);
-                break;
-            case PARSE_TIMED_TWINS: parse_twins(&bench->kernels, &input, file->parser.predeclared, bench->typed, bench->statements); break;
             case PARSE_TIMED_VECTOR: file->fallback = parse_vector(&bench->kernels, &input, file->parser.predeclared, &bench->buffers).fallback; break;
             default: break;
         }
@@ -595,11 +538,9 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
     ParseKernels* k = &bench->kernels;
     switch (which)
     {
-        case PARSE_TIMED_TWIN_K1: k->unbalanced = !parse_brackets_scalar(kinds, parse_kind_deltas, count, k->depths, k->enclosing, k->stack); break;
         case PARSE_TIMED_VECTOR_K1:
-            k->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, k->depths, k->enclosing, buffers->open_stack, k->bracket_blocks);
+            k->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, k->enclosing, buffers->open_stack, k->bracket_blocks);
             break;
-        case PARSE_TIMED_TWIN_K3_PASS:
         case PARSE_TIMED_VECTOR_K3_PASS:
             parse_typedefs_clear(k);
             k->unsupported = false;
@@ -610,22 +551,15 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
                 parse_typedefs(k, kinds, names, count);
             }
             break;
-        case PARSE_TIMED_TWIN_K3: parse_classify_scalar(k, kinds, names, count); break;
         case PARSE_TIMED_VECTOR_K3: parse_classify_mask_avx512(k, kinds, names, count); break;
-        case PARSE_TIMED_TWIN_K2: parse_roles_scalar(k, count, bench->typed); break;
         case PARSE_TIMED_VECTOR_K2: parse_roles_avx512(k, count, buffers->typed, &buffers->groups, buffers->contexts, buffers->rounds); break;
-        case PARSE_TIMED_TWIN_SECONDARY:
-            parse_secondary_scalar(k, count, k->stack);
-            parse_after_colons(k, count);
-            break;
         case PARSE_TIMED_VECTOR_SECONDARY:
             parse_secondary_avx512(k, count, buffers->secondary);
             parse_after_colons_avx512(k, count);
             break;
-        case PARSE_TIMED_TWIN_K4: parse_parents_scalar(k, count); break;
-        // K4's three loops alone, in turn; a file too deep for them gets the twin in the first.
+        // K4's three loops alone, in turn; a file too deep for them gets the token-at-a-time K4 in the first.
         case PARSE_TIMED_VECTOR_K4_PREPARE:
-            bench->deep = parse_deepest(k, count) > BUSTER_PARSE_MAX_VECTOR_DEPTH;
+            bench->deep = k->deep_node_depths;
             if (bench->deep)
             {
                 parse_parents_scalar(k, count);
@@ -648,23 +582,15 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
             }
             break;
         case PARSE_TIMED_VECTOR_K4: parse_parents_vector(k, count, buffers); break;
-        case PARSE_TIMED_TWIN_K5: bench->statements_ok = parse_statements(k, count, bench->statements); break;
         case PARSE_TIMED_VECTOR_K5: bench->statements_ok = parse_statements_vector(k, count, buffers); break;
-        case PARSE_TIMED_TWIN_K6:
-        {
-            const ParseCheckFrames frames = parse_check_frames(k);
-            parse_check_scalar(k, names, input.flags, count, bench->typed, &frames, k->check_classes, 0, 0);
-            break;
-        }
         case PARSE_TIMED_VECTOR_K6: parse_check_avx512(k, names, input.flags, count, buffers->typed, &buffers->check_twins); break;
-        case PARSE_TIMED_TWIN_FALLBACK:
         case PARSE_TIMED_VECTOR_FALLBACK:
         {
             const bool everything = k->unbalanced || k->unsupported || !bench->statements_ok;
             parse_fallback(k, &input, everything);
             break;
         }
-        // The tree's columns as the parser derives them, then with the subtree sizes, then the twin from that postorder, as
+        // The tree's columns as the parser derives them, then with the subtree sizes, then the links from that postorder, as
         // the checker's reader derived them before the parser published them.
         case PARSE_TIMED_TREE:
             parse_tree_columns(k->parents, count, buffers->last_children, buffers->before, buffers->postorder, buffers->positions, buffers->subtree_ends,
@@ -712,14 +638,14 @@ static void parse_benchmark_time(ParseBenchmark* bench, uint32_t passes, int32_t
     }
     const ParseBenchmarkSample overhead = parse_benchmark_overhead(&counters);
     const ParseBenchmarkSample none = { 0 };
-    const bool stages = only < 0 || only >= PARSE_TIMED_TWIN_K1;
+    const bool stages = only < 0 || only >= PARSE_TIMED_VECTOR_K1;
     static ParseBenchmarkSample samples[PARSE_TIMED_COUNT][BUSTER_PARSE_BENCHMARK_MAX_PASSES];
     volatile uint32_t sink = 0;
     for (uint32_t pass = 0; pass <= passes; pass += 1)
     {
-        for (uint32_t which = PARSE_TIMED_INPUT_TWIN; which <= PARSE_TIMED_VECTOR; which += 1)
+        for (uint32_t which = PARSE_TIMED_INPUT; which <= PARSE_TIMED_VECTOR; which += 1)
         {
-            const bool handoff = which >= PARSE_TIMED_HANDOFF_TWIN && which <= PARSE_TIMED_HANDOFF;
+            const bool handoff = which == PARSE_TIMED_HANDOFF;
             if (handoff && (only < 0 || only == (int32_t)which))
             {
                 // Per file, from the kinds pp_run_file leaves, put back outside the time.
@@ -729,7 +655,7 @@ static void parse_benchmark_time(ParseBenchmark* bench, uint32_t passes, int32_t
                     ParseBenchmarkFile* file = &bench->files[f];
                     memcpy(file->output.kinds, file->raw_kinds, file->output.count);
                     const ParseBenchmarkSample before = parse_benchmark_sample(&counters);
-                    parse_benchmark_handoff(bench, file, (ParseBenchmarkTimed)which);
+                    parse_benchmark_handoff(bench, file);
                     parse_benchmark_accumulate(&total, before, parse_benchmark_sample(&counters), &overhead);
                 }
                 samples[which][pass == 0 ? 0 : pass - 1] = total;
@@ -768,7 +694,7 @@ static void parse_benchmark_time(ParseBenchmark* bench, uint32_t passes, int32_t
                 parse_typedefs_clear(&bench->kernels);
                 parse_kernels_predeclared(&bench->kernels, bench->files[f].parser.predeclared, false);
             }
-            for (uint32_t which = PARSE_TIMED_TWIN_K1; which < PARSE_TIMED_COUNT; which += 1)
+            for (uint32_t which = PARSE_TIMED_VECTOR_K1; which < PARSE_TIMED_COUNT; which += 1)
             {
                 samples[which][pass == 0 ? 0 : pass - 1] = totals[which];
             }
@@ -885,7 +811,7 @@ int run_parser_benchmark(int argc, char** argv)
     }
     else
     {
-        // Each file preprocessed, and parsed once by each path, which must agree.
+        // Each file preprocessed and parsed once.
         uint32_t largest = 0;
         uint32_t largest_pragmas = 0;
         bool loaded = true;
@@ -896,7 +822,7 @@ int run_parser_benchmark(int argc, char** argv)
             static InternTable table;
             static Preprocessor pp;
             ParseBenchmarkFile* file = &bench.files[f];
-            const ParseOptions parse_options = { .scalar = false };
+            const ParseOptions parse_options = { 0 };
             file->path = paths[f];
             loaded = intern_initialize(&table) && pp_initialize(&pp, &options, &table) && parse_initialize(&file->parser, &parse_options, options.language) &&
                      pp_run(&pp, file->path);
@@ -906,20 +832,10 @@ int run_parser_benchmark(int argc, char** argv)
             }
             else
             {
-                static Parser scalar;
-                const ParseOptions scalar_options = { .scalar = true };
                 const bool vector_ok = parse_translation_unit(&file->parser, &pp);
-                const bool scalar_ready = parse_initialize(&scalar, &scalar_options, options.language);
-                const bool scalar_ok = scalar_ready && parse_translation_unit(&scalar, &pp);
-                bool same = scalar_ready && file->parser.fatal == PARSE_MESSAGE_NONE && scalar.fatal == PARSE_MESSAGE_NONE &&
-                            vector_ok == scalar_ok && file->parser.tokens.count == scalar.tokens.count;
-                for (uint32_t t = 0; same && vector_ok && t < scalar.tokens.count; t += 1)
+                if (file->parser.fatal != PARSE_MESSAGE_NONE)
                 {
-                    same = file->parser.tree.parents[t] == scalar.tree.parents[t] && file->parser.tree.depths[t] == scalar.tree.depths[t];
-                }
-                if (!same)
-                {
-                    fprintf(stderr, "%s: the parser paths disagree or could not prepare complete benchmark input\n", file->path);
+                    fprintf(stderr, "%s: the parser could not prepare complete benchmark input\n", file->path);
                     loaded = false;
                 }
                 printf("%s: %u tokens%s; the fallback took %llu top-level declarations, %llu tokens (%.3f%%)%s\n", file->path, file->parser.tokens.count,
@@ -927,7 +843,6 @@ int run_parser_benchmark(int argc, char** argv)
                        (unsigned long long)file->parser.statistics.fallback_tokens,
                        file->parser.tokens.count != 0 ? 100.0 * (double)file->parser.statistics.fallback_tokens / (double)file->parser.tokens.count : 0.0,
                        file->parser.statistics.whole ? ", the whole unit" : "");
-                parse_release(&scalar);
                 bench.token_count += file->parser.tokens.count;
                 largest = file->parser.tokens.count > largest ? file->parser.tokens.count : largest;
                 largest_pragmas = file->parser.tokens.pragma_count > largest_pragmas ? file->parser.tokens.pragma_count : largest_pragmas;
@@ -964,11 +879,6 @@ int run_parser_benchmark(int argc, char** argv)
         if (loaded)
         {
             const uint64_t capacity = 2 * (uint64_t)largest + 64;
-            bench.tree.roles = BUSTER_ARENA_PUSH_ARRAY(&shared, uint8_t, slots);
-            bench.tree.depths = BUSTER_ARENA_PUSH_ARRAY(&shared, uint32_t, slots);
-            bench.tree.parents = BUSTER_ARENA_PUSH_ARRAY(&shared, uint32_t, slots);
-            bench.typed = BUSTER_ARENA_PUSH_ARRAY(&shared, uint8_t, slots);
-            bench.statements = BUSTER_ARENA_PUSH_ARRAY(&shared, ParseStatement, slots);
             bench.diagnostics = BUSTER_ARENA_PUSH_ARRAY(&shared, ParseDiagnostic, bench.diagnostic_capacity);
             uint8_t* kinds = BUSTER_ARENA_PUSH_ARRAY(&shared, uint8_t, capacity + 2 * BUSTER_PARSE_TOKEN_PADDING);
             uint32_t* token_names = BUSTER_ARENA_PUSH_ARRAY(&shared, uint32_t, capacity + 2 * BUSTER_PARSE_TOKEN_PADDING);
@@ -987,13 +897,10 @@ int run_parser_benchmark(int argc, char** argv)
                 .pragma_positions = pragma_positions,
                 .pragma_count = 0,
             };
-            loaded = bench.tree.roles != 0 && bench.tree.depths != 0 && bench.tree.parents != 0 && bench.typed != 0 && bench.statements != 0 && bench.diagnostics != 0 &&
+            loaded = bench.diagnostics != 0 &&
                      kinds != 0 && token_names != 0 && sources != 0 && flags != 0 && pragma_sources != 0 && pragma_positions != 0 &&
                      parse_kernels_reserve(&bench.kernels, &shared, largest, names) && parse_vector_buffers_reserve(&bench.buffers, &shared, largest) &&
                      parse_vector_postorder_reserve(&bench.buffers, &shared, largest);
-            bench.tree.roles = bench.tree.roles != 0 ? bench.tree.roles + BUSTER_PARSE_TOKEN_PADDING : 0;
-            bench.tree.depths = bench.tree.depths != 0 ? bench.tree.depths + BUSTER_PARSE_TOKEN_PADDING : 0;
-            bench.tree.parents = bench.tree.parents != 0 ? bench.tree.parents + BUSTER_PARSE_TOKEN_PADDING : 0;
         }
         loaded = loaded && parse_benchmark_check_handoff(&bench);
         if (loaded)
@@ -1017,11 +924,3 @@ int run_parser_benchmark(int argc, char** argv)
     return result;
 }
 
-#else
-int run_parser_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

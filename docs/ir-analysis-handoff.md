@@ -20,13 +20,12 @@ Final verification still uses the shared IR verifier's implementation:
 3. Construct dominators from that CFG.
 4. Check the graph with full dominance, including cross-block uses.
 
-The scalar/vector verifier path and dominance path follow the resolved optimizer
-choice. No weaker validation predicate, trusted boolean or skipped final check
+The dominance path follows the resolved optimizer choice. No weaker validation predicate, trusted boolean or skipped final check
 is introduced. `check_tier1_compile` consumes those exact dominance intervals;
 it no longer immediately builds another CFG and dominator analysis.
 
-The ordinary `ir_optimize`, `ir_build_cfg`, `ir_verify` and `ir_verify_scalar`
-entry points are unchanged and remain independently validating. The ordinary
+The ordinary `ir_optimize`, `ir_build_cfg` and `ir_verify` entry points are
+unchanged and remain independently validating. The ordinary
 optimizer is also the rebuild comparison control in the new regression tests.
 The two optimizer entry points currently mirror only orchestration; they share
 all transformation kernels. Consolidating that orchestration after qualification

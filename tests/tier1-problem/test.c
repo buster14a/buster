@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Original #938 interchange and current-allocator adapter tests.
 // The default build exercises the codec alone. BUSTER_TP_INTEGRATION additionally
-// uses the real lane arena, production allocator and its scalar twin; no stubs.
+// uses the real lane arena and production allocator; no stubs.
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
@@ -322,22 +322,17 @@ static void integration_tests(void)
         expect(memcmp(input.use_offsets, offsets, sizeof(offsets)) == 0 && memcmp(input.use_positions, positions, sizeof(positions)) == 0, "definitions and uses are register-required events");
         expect(stats.original_instructions == 4 && stats.original_operands == 7 && stats.retained_bytes == arena.length - 17 && stats.scratch_bytes != 0, "adapter reports original denominators and memory");
         Tier1Allocation vector = { 0 };
-        Tier1Allocation scalar = { 0 };
         expect(tier1_allocate(&input, &arena, &vector) == TIER1_ALLOCATION_OK, "real allocator accepts imported input");
-        expect(tier1_allocate_scalar(&input, &arena, &scalar) == TIER1_ALLOCATION_OK, "real scalar twin accepts imported input");
-        expect(tier1_allocation_verify(&input, &vector) && tier1_allocation_verify(&input, &scalar), "occupancy smoke only, NOT a #939 certificate");
-        expect(vector.spill_count == 0 && scalar.spill_count == 0, "fixture fits identical register bank");
-        // #939's gate: both paths' allocations proved by the fragment certificate, a forged one refused, its scratch
-        // popped either way, and a scratch that doesn't fit a capacity outcome rather than a pass.
+        expect(tier1_allocation_verify(&input, &vector), "occupancy smoke only, NOT a #939 certificate");
+        expect(vector.spill_count == 0, "fixture fits identical register bank");
+        // #939's gate: the allocation proved by the fragment certificate, a forged one refused, its scratch popped
+        // either way, and a scratch that doesn't fit a capacity outcome rather than a pass.
         Tier1ProblemTally gate = { 0 };
         Tier1IntervalReport report = { 0 };
         const uint64_t before = arena.length;
         Tier1ProblemReason certified = tier1_problem_certify(&input, &vector, &arena, &report);
         tier1_problem_tally(&gate, certified);
         expect(certified == TIER1_PROBLEM_OK && report.error == TIER1_CERT_OK && report.fragments == vector.fragment_count && arena.length == before, "the vector allocation passes #939's certificate");
-        certified = tier1_problem_certify(&input, &scalar, &arena, &report);
-        tier1_problem_tally(&gate, certified);
-        expect(certified == TIER1_PROBLEM_OK && arena.length == before, "the scalar allocation passes #939's certificate");
         // Intervals 0 and 1 overlap at [7, 9): one register for both is two live values in it.
         uint32_t forged = UINT32_MAX;
         for (uint32_t f = vector.fragment_offsets[1]; forged == UINT32_MAX && f < vector.fragment_offsets[2]; f += 1)
@@ -360,7 +355,7 @@ static void integration_tests(void)
         tier1_problem_tally(&gate, certified);
         expect(certified == TIER1_PROBLEM_CAPACITY && small.length == before, "a certificate without room for its scratch is a capacity outcome, not a pass");
         expect(tier1_problem_certify(&input, 0, &arena, &report) == TIER1_PROBLEM_ARGUMENT, "the gate refuses a missing allocation");
-        expect(gate.functions == 4 && gate.accepted == 2 && gate.reasons[TIER1_PROBLEM_CERTIFICATE_REJECTED] == 1 && gate.reasons[TIER1_PROBLEM_CAPACITY] == 1, "the gate's outcomes reconcile in the tally");
+        expect(gate.functions == 3 && gate.accepted == 1 && gate.reasons[TIER1_PROBLEM_CERTIFICATE_REJECTED] == 1 && gate.reasons[TIER1_PROBLEM_CAPACITY] == 1, "the gate's outcomes reconcile in the tally");
         expect(strcmp(tier1_problem_reason_name(TIER1_PROBLEM_CERTIFICATE_REJECTED), "certificate-rejected") == 0, "the rejection is named");
     }
     uint8_t wire[8192];
@@ -619,8 +614,8 @@ static void generated_problem(GeneratedProblem* g, uint64_t* state)
     }
 }
 
-// #938's harness's allocations (#939, tier1_problem_allocate): every problem the adapter takes is allocated by both of
-// buster's allocator paths, and reported only past each allocation's certificate. Each attempt is one tally outcome.
+// #938's harness's allocations (#939, tier1_problem_allocate): every problem the adapter takes is allocated by buster's
+// allocator, and reported only past the allocation's certificate. Each attempt is one tally outcome.
 static void harness_tests(void)
 {
     static _Alignas(64) uint8_t memory[1u << 20];
@@ -640,13 +635,13 @@ static void harness_tests(void)
         Tier1ProblemAllocation made = { 0 };
         const Tier1ProblemReason reason = tier1_problem_allocate(&f.problem, &arena, &made);
         tier1_problem_tally(&tally, reason);
-        expect(reason == TIER1_PROBLEM_OK && made.reports[0].error == TIER1_CERT_OK && made.reports[1].error == TIER1_CERT_OK, "both paths' allocations of an import pass the certificate");
-        expect(reason != TIER1_PROBLEM_OK || (made.reports[0].fragments == made.allocations[0].fragment_count && made.reports[1].fragments == made.allocations[1].fragment_count), "each certificate covers its allocation's fragments");
+        expect(reason == TIER1_PROBLEM_OK && made.report.error == TIER1_CERT_OK, "an import's allocation passes the certificate");
+        expect(reason != TIER1_PROBLEM_OK || made.report.fragments == made.allocation.fragment_count, "the certificate covers the allocation's fragments");
         const uint64_t retained = arena.length;
         // The harness's allocations are the allocator's own, as a direct call makes them.
         Tier1Allocation direct = { 0 };
-        const bool same = reason == TIER1_PROBLEM_OK && tier1_allocate(&made.input, &arena, &direct) == TIER1_ALLOCATION_OK && direct.fragment_count == made.allocations[0].fragment_count &&
-                          memcmp(direct.registers, made.allocations[0].registers, direct.fragment_count) == 0 && memcmp(direct.kinds, made.allocations[0].kinds, direct.fragment_count) == 0;
+        const bool same = reason == TIER1_PROBLEM_OK && tier1_allocate(&made.input, &arena, &direct) == TIER1_ALLOCATION_OK && direct.fragment_count == made.allocation.fragment_count &&
+                          memcmp(direct.registers, made.allocation.registers, direct.fragment_count) == 0 && memcmp(direct.kinds, made.allocation.kinds, direct.fragment_count) == 0;
         expect(same, "the harness reports the allocator's own allocation");
         // Every arena too small for the import, its allocations or their checks: a capacity outcome, the arena as it
         // was and nothing published; then the first that fits gives the same allocation.
@@ -660,7 +655,7 @@ static void harness_tests(void)
             Tier1ProblemAllocation again = untouched;
             fitted = tier1_problem_allocate(&f.problem, &small, &again);
             expect(fitted == TIER1_PROBLEM_OK || (fitted == TIER1_PROBLEM_CAPACITY && small.length == 17 && memcmp(&again, &untouched, sizeof(again)) == 0), "a short arena is a capacity outcome, restored and unpublished");
-            expect(fitted != TIER1_PROBLEM_OK || (again.allocations[0].fragment_count == made.allocations[0].fragment_count && again.reports[1].error == TIER1_CERT_OK), "the first arena that fits allocates and certifies alike");
+            expect(fitted != TIER1_PROBLEM_OK || (again.allocation.fragment_count == made.allocation.fragment_count && again.report.error == TIER1_CERT_OK), "the first arena that fits allocates and certifies alike");
             capacity += 8;
         }
         expect(fitted == TIER1_PROBLEM_OK, "some arena below the retained bytes and a check's scratch fits");
@@ -681,7 +676,7 @@ static void harness_tests(void)
         Tier1ProblemAllocation made = { 0 };
         const Tier1ProblemReason reason = tier1_problem_allocate(&f.problem, &arena, &made);
         tier1_problem_tally(&tally, reason);
-        expect(reason == refused[r].reason && arena.length == 17 && made.allocations[0].fragment_count == 0, "an adapter's refusal keeps its reason through the harness");
+        expect(reason == refused[r].reason && arena.length == 17 && made.allocation.fragment_count == 0, "an adapter's refusal keeps its reason through the harness");
     }
     // One allocatable register for two values a node reads at once: the allocator refuses the import.
     problem_fixture(&f);
@@ -694,8 +689,8 @@ static void harness_tests(void)
         expect(reason == TIER1_PROBLEM_ALLOCATION_REFUSED && arena.length == 17, "an import the allocator can't allocate is allocation-refused");
         expect(tier1_problem_allocate(&f.problem, &arena, 0) == TIER1_PROBLEM_ARGUMENT && arena.length == 17, "the harness refuses a missing result");
     }
-    // Generated imports through the wire, as the harness reads them: every one allocated by both paths and certified, some
-    // spilling, under pressure from fewer registers than values.
+    // Generated imports through the wire, as the harness reads them: every one allocated and certified, some spilling,
+    // under pressure from fewer registers than values.
     static uint8_t wire[UINT32_C(1) << 16];
     static GeneratedProblem g;
     uint64_t state = 939;
@@ -711,14 +706,14 @@ static void harness_tests(void)
         Arena arena = { .base = memory, .length = 0, .capacity = sizeof(memory) };
         Tier1ProblemAllocation made = { 0 };
         const Tier1ProblemReason reason = read ? tier1_problem_allocate(&decoded, &arena, &made) : TIER1_PROBLEM_ARGUMENT;
-        expect(reason == TIER1_PROBLEM_OK && made.reports[0].error == TIER1_CERT_OK && made.reports[1].error == TIER1_CERT_OK, "every generated import's allocations pass the certificate");
+        expect(reason == TIER1_PROBLEM_OK && made.report.error == TIER1_CERT_OK, "every generated import's allocation passes the certificate");
         certified += reason == TIER1_PROBLEM_OK;
-        spilled += reason == TIER1_PROBLEM_OK && made.allocations[0].spill_count != 0;
+        spilled += reason == TIER1_PROBLEM_OK && made.allocation.spill_count != 0;
     }
     expect(certified == 400 && spilled != 0, "the generated imports allocate, some of them spilling, and all certify");
     expect(tally.functions == 5 && tally.accepted == 2 && tally.reasons[TIER1_PROBLEM_PHI] == 1 && tally.reasons[TIER1_PROBLEM_FORM] == 1 && tally.reasons[TIER1_PROBLEM_ALLOCATION_REFUSED] == 1, "the harness's outcomes reconcile in the tally");
     expect(strcmp(tier1_problem_reason_name(TIER1_PROBLEM_ALLOCATION_REFUSED), "allocation-refused") == 0, "the allocator's refusal is named");
-    printf("tier1-problem: harness: %" PRIu64 " generated imports allocated by both paths and certified, %" PRIu64 " of them spilling\n", certified, spilled);
+    printf("tier1-problem: harness: %" PRIu64 " generated imports allocated and certified, %" PRIu64 " of them spilling\n", certified, spilled);
 }
 #endif
 

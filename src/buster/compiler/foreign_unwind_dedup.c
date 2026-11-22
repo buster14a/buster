@@ -183,6 +183,7 @@ static ForeignUnwindResult foreign_unwind_dedup_records(ForeignUnwindDedupAtom* 
     }
     uint64_t cursor = 0;
     uint32_t fdes = 0;
+    uint32_t cie = UINT32_MAX;
     map->eligible = length != 0 && length <= BUSTER_EXECUTABLE_MAX_ATOM_BYTES;
     for (uint32_t r = 0; result.error == FOREIGN_UNWIND_ERROR_NONE && r < map->record_count; r += 1)
     {
@@ -199,7 +200,11 @@ static ForeignUnwindResult foreign_unwind_dedup_records(ForeignUnwindDedupAtom* 
         }
         else if (record.kind == FOREIGN_UNWIND_FDE)
         {
-            const uint32_t cie = foreign_unwind_record_at(frame, record.cie_offset);
+            // The frame is immutable, and only a validated index survives to the next FDE.
+            if (cie == UINT32_MAX || frame->records[cie].old_offset != record.cie_offset)
+            {
+                cie = foreign_unwind_record_at(frame, record.cie_offset);
+            }
             if (record.length < 17 || id > cursor + 4 || cursor + 4 - id != record.cie_offset || cie >= r ||
                 frame->records[cie].kind != FOREIGN_UNWIND_CIE || frame->records[cie].old_offset != record.cie_offset)
             {

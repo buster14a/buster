@@ -1,0 +1,39 @@
+function (f64, f64, f32, f32, i32, i32, i64, i64) -> i64 {
+b0:
+  %0 = param.f64 0
+  %1 = param.f64 1
+  %2 = param.f32 2
+  %3 = param.f32 3
+  %4 = param.i32 4
+  %5 = param.i32 5
+  %6 = param.i64 6
+  %7 = param.i64 7
+  %8 = fcmp.i1 %0, %1 lt
+  %9 = select.i32 %8, %4, %5
+  %10 = fcmp.i1 %0, %1 ge
+  %11 = copy.i1 %10
+  %12 = select.i64 %11, %6, %7
+  %13 = fcmp.i1 %2, %3 gt
+  %14 = zext.i32 %13
+  %15 = const.i32 0x00000000000000000000000000000000
+  %16 = icmp.i1 %14, %15 eq
+  %17 = select.i32 %16, %4, %5
+  %18 = fcmp.i1 %2, %3 eq
+  %19 = select.i64 %18, %6, %7
+  %20 = fcmp.i1 %0, %1 ne
+  %21 = copy.i1 %20
+  %22 = select.i32 %21, %4, %5
+  %23 = fcmp.i1 %0, %1 le
+  %24 = const.i64 0x00000000000000000000000000000007
+  %25 = copy.i1 %23
+  %26 = select.i64 %25, %6, %24
+  %27 = zext.i64 %9
+  %28 = zext.i64 %17
+  %29 = zext.i64 %22
+  %30 = add.i64 %27, %12
+  %31 = add.i64 %30, %28
+  %32 = add.i64 %31, %19
+  %33 = add.i64 %32, %29
+  %34 = add.i64 %33, %26
+  %35 = ret.void %34
+}

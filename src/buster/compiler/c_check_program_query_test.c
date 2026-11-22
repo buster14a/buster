@@ -24,7 +24,7 @@ static void check_test_program_queries(CheckTest* test, const char* clang)
         Arena bytes = arena_reserve(UINT64_C(1) << 22);
         Arena scratch = arena_reserve(UINT64_C(1) << 24);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         CheckInitializers initializers = { 0 };

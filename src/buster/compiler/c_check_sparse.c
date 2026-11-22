@@ -301,53 +301,42 @@ static __attribute__((unused)) CheckSparseColumn check_sparse_from_values(Arena*
 }
 
 // The tokens from `begin` to `end` - 1 whose values in `column` aren't NONE, in order into `positions`, which has room
-// for `end` - `begin`: how many. The vector path skips each 16 tokens without a block with one load, and tests the
-// others' values 16 at a time; the scalar path reads every token's value.
-static __attribute__((unused)) uint32_t check_sparse_entries(CheckSparseColumn column, uint32_t begin, uint32_t end, bool vector, uint32_t* positions)
+// for `end` - `begin`: how many. It skips each 16 tokens without a block with one load, and tests the others' values 16
+// at a time.
+static __attribute__((unused)) uint32_t check_sparse_entries(CheckSparseColumn column, uint32_t begin, uint32_t end, uint32_t* positions)
 {
     uint32_t total = 0;
-    if (vector)
+    for (uint32_t first = begin; first < end; first = (first | (BUSTER_CHECK_SPARSE_TOKENS - 1)) + 1)
     {
-        for (uint32_t first = begin; first < end; first = (first | (BUSTER_CHECK_SPARSE_TOKENS - 1)) + 1)
+        const uint32_t slot = first >> BUSTER_CHECK_SPARSE_SHIFT;
+        const uint32_t block = __atomic_load_n(column.directory + slot, __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
+        if (block != 0)
         {
-            const uint32_t slot = first >> BUSTER_CHECK_SPARSE_SHIFT;
-            const uint32_t block = __atomic_load_n(column.directory + slot, __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
-            if (block != 0)
+            const uint32_t start = slot << BUSTER_CHECK_SPARSE_SHIFT;
+            const uint32_t stop = end - start < BUSTER_CHECK_SPARSE_TOKENS ? end - start : BUSTER_CHECK_SPARSE_TOKENS;
+            const uint32_t lanes = ((stop == BUSTER_CHECK_SPARSE_TOKENS ? 0x10000u : 1u << stop) - 1) & ~((1u << (first - start)) - 1);
+            // The block's values in the range alone: a lane of the deferred merge writes the others of a block that
+            // straddles its range's ends.
+            const __m512i values = _mm512_maskz_load_epi32((__mmask16)lanes, column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
+            for (uint32_t set = _mm512_mask_cmpneq_epu32_mask((__mmask16)lanes, values, _mm512_set1_epi32((int)BUSTER_CHECK_NONE)); set != 0; set &= set - 1)
             {
-                const uint32_t start = slot << BUSTER_CHECK_SPARSE_SHIFT;
-                const uint32_t stop = end - start < BUSTER_CHECK_SPARSE_TOKENS ? end - start : BUSTER_CHECK_SPARSE_TOKENS;
-                const uint32_t lanes = ((stop == BUSTER_CHECK_SPARSE_TOKENS ? 0x10000u : 1u << stop) - 1) & ~((1u << (first - start)) - 1);
-                // The block's values in the range alone: a lane of the deferred merge writes the others of a block that
-                // straddles its range's ends.
-                const __m512i values = _mm512_maskz_load_epi32((__mmask16)lanes, column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
-                for (uint32_t set = _mm512_mask_cmpneq_epu32_mask((__mmask16)lanes, values, _mm512_set1_epi32((int)BUSTER_CHECK_NONE)); set != 0; set &= set - 1)
-                {
-                    positions[total] = start + (uint32_t)__builtin_ctz(set);
-                    total += 1;
-                }
+                positions[total] = start + (uint32_t)__builtin_ctz(set);
+                total += 1;
             }
-        }
-    }
-    else
-    {
-        for (uint32_t token = begin; token < end; token += 1)
-        {
-            positions[total] = token;
-            total += check_sparse_get(column, token) != BUSTER_CHECK_NONE;
         }
     }
     return total;
 }
 
 // The first token from `token` below `count`, which is at most the unit's count, whose value in `column` isn't NONE, or
-// `count` where none is: the vector path tests 16 tokens' values at a time where their 16 have a block, and past a 16
-// without one, 16 directory entries, 256 tokens, at a time for the next that has. The scalar path, its twin, returns
-// `token`, so that its caller tests every token. For the scans after the lanes have written their tokens.
-static __attribute__((unused)) uint32_t check_sparse_next(CheckSparseColumn column, uint32_t token, uint32_t count, bool vector)
+// `count` where none is: it tests 16 tokens' values at a time where their 16 have a block, and past a 16 without one,
+// 16 directory entries, 256 tokens, at a time for the next that has. For the scans after the lanes have written their
+// tokens.
+static __attribute__((unused)) uint32_t check_sparse_next(CheckSparseColumn column, uint32_t token, uint32_t count)
 {
     const uint32_t last = (uint32_t)(((uint64_t)count + BUSTER_CHECK_SPARSE_TOKENS - 1) >> BUSTER_CHECK_SPARSE_SHIFT);
     uint32_t result = token;
-    bool found = !vector;
+    bool found = false;
     while (!found && result < count)
     {
         uint32_t slot = result >> BUSTER_CHECK_SPARSE_SHIFT;
@@ -382,14 +371,13 @@ static __attribute__((unused)) uint32_t check_sparse_next(CheckSparseColumn colu
 }
 
 // The first token from `first`, a multiple of 16, at which 16 tokens below `end` have a block in the wide `column`, or
-// a token at or past `end` where none has: the vector path tests 16 directory entries, 256 tokens, at a time. The
-// scalar path, the twin of check_sparse_wide_group's, returns `first`, so that its caller visits every 16. For the scans
-// on the reading's own thread: a lane may be writing the directory at once.
-static __attribute__((unused)) uint32_t check_sparse_wide_next(CheckSparseWide column, uint32_t first, uint32_t end, bool vector)
+// a token at or past `end` where none has: it tests 16 directory entries, 256 tokens, at a time. For the scans on the
+// reading's own thread: a lane may be writing the directory at once.
+static __attribute__((unused)) uint32_t check_sparse_wide_next(CheckSparseWide column, uint32_t first, uint32_t end)
 {
     uint32_t slot = first >> BUSTER_CHECK_SPARSE_SHIFT;
     const uint32_t last = (uint32_t)(((uint64_t)end + BUSTER_CHECK_SPARSE_TOKENS - 1) >> BUSTER_CHECK_SPARSE_SHIFT);
-    bool found = !vector;
+    bool found = false;
     while (!found && slot < last)
     {
         const uint32_t entries = last - slot < 16 ? last - slot : 16;
@@ -403,40 +391,27 @@ static __attribute__((unused)) uint32_t check_sparse_wide_next(CheckSparseWide c
 }
 
 // Of the 16 tokens from `first`, a multiple of 16, below `end`, those whose values in the wide `column` aren't NONE, a
-// bit each: the vector path tests their block pair's values 8 at a time, block 0's where they have none; the scalar
-// path, its twin, reads each token's value.
-static __attribute__((unused)) uint32_t check_sparse_wide_group(CheckSparseWide column, uint32_t first, uint32_t end, bool vector)
+// bit each: it tests their block pair's values 8 at a time, block 0's where they have none.
+static __attribute__((unused)) uint32_t check_sparse_wide_group(CheckSparseWide column, uint32_t first, uint32_t end)
 {
     const uint32_t stop = end - first < BUSTER_CHECK_SPARSE_TOKENS ? end - first : BUSTER_CHECK_SPARSE_TOKENS;
     const uint32_t lanes = (stop == BUSTER_CHECK_SPARSE_TOKENS ? 0x10000u : 1u << stop) - 1;
-    uint32_t set = 0;
-    if (vector)
-    {
-        const __m512i none = _mm512_set1_epi64((long long)BUSTER_CHECK_SPARSE_WIDE_NONE);
-        const uint32_t block = __atomic_load_n(column.directory + (first >> BUSTER_CHECK_SPARSE_SHIFT), __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
-        const uint64_t* values = (const uint64_t*)(column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
-        const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)lanes, values);
-        const __m512i high = _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), values + 8);
-        set = (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)lanes, low, none) | (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)(lanes >> 8), high, none) << 8;
-    }
-    else
-    {
-        for (uint32_t t = 0; t < stop; t += 1)
-        {
-            set |= (uint32_t)(check_sparse_wide_get(column, first + t) != BUSTER_CHECK_SPARSE_WIDE_NONE) << t;
-        }
-    }
-    return set;
+    const __m512i none = _mm512_set1_epi64((long long)BUSTER_CHECK_SPARSE_WIDE_NONE);
+    const uint32_t block = __atomic_load_n(column.directory + (first >> BUSTER_CHECK_SPARSE_SHIFT), __ATOMIC_ACQUIRE) & ~BUSTER_CHECK_SPARSE_CLAIMED;
+    const uint64_t* values = (const uint64_t*)(column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT));
+    const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)lanes, values);
+    const __m512i high = _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 8), values + 8);
+    return (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)lanes, low, none) | (uint32_t)_mm512_mask_cmpneq_epu64_mask((__mmask8)(lanes >> 8), high, none) << 8;
 }
 
 // The tokens below `end` whose values in the wide `column` aren't NONE, in order into `positions`, which has room for
-// `end`: how many, by check_sparse_wide_next's and check_sparse_wide_group's paths.
-static __attribute__((unused)) uint32_t check_sparse_wide_entries(CheckSparseWide column, uint32_t end, bool vector, uint32_t* positions)
+// `end`: how many, by check_sparse_wide_next and check_sparse_wide_group.
+static __attribute__((unused)) uint32_t check_sparse_wide_entries(CheckSparseWide column, uint32_t end, uint32_t* positions)
 {
     uint32_t total = 0;
-    for (uint32_t first = check_sparse_wide_next(column, 0, end, vector); first < end; first = check_sparse_wide_next(column, first + BUSTER_CHECK_SPARSE_TOKENS, end, vector))
+    for (uint32_t first = check_sparse_wide_next(column, 0, end); first < end; first = check_sparse_wide_next(column, first + BUSTER_CHECK_SPARSE_TOKENS, end))
     {
-        for (uint32_t set = check_sparse_wide_group(column, first, end, vector); set != 0; set &= set - 1)
+        for (uint32_t set = check_sparse_wide_group(column, first, end); set != 0; set &= set - 1)
         {
             positions[total] = first + (uint32_t)__builtin_ctz(set);
             total += 1;

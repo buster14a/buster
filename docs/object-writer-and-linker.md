@@ -2470,6 +2470,68 @@ copying its code as a compiler's link does:
   decimal program's; and in a static executable, the non-PIC immediates for
   `test` and binops through the GOT, 5 slots in the decimal program.
 
+#### The position-dependent dynamic executable (`-no-pie`)
+
+#1503: `-no-pie` asks for a dynamically linked executable that isn't a PIE,
+which Clang's and GCC's drivers link with `crt1.o`, `crtbegin.o` and
+`crtend.o` around the program, with the dynamic loader and the shared libc,
+and GNU ld writes as an `ET_EXEC` at `0x400000`. Neither driver changes the
+code it generates for it: Clang's `-no-pie` objects are `-fPIE` objects. The
+runtime has a kind of its own (`RUNTIME_KIND_NO_PIE`: those crt objects with
+the dynamic PIE's libraries) and a snapshot of its own
+(`runtime-no-pie.snapshot`), and `dynamic_inputs` gives the writer a dynamic
+PIE's `ExecutableDynamic` with `position_dependent` and without RELR.
+
+The writer keeps two things apart that a PIE has together: whether the image
+has dynamic metadata (`ExecutableLayout.dynamic`: `.interp`, `.dynamic`,
+`.dynsym`, the stubs and the libraries) and whether it is position independent
+(`ExecutableLayout.pie`, `ExecutableShared.pie`: base 0, `ET_DYN`, `DF_1_PIE`,
+and the image's own symbols relocated by the loader). A position-dependent
+image is laid out at `BUSTER_EXECUTABLE_BASE` as a static executable is, so its
+own symbols' addresses are the link's: the symbols' classes stay the PIE's
+(the RELATIVE bitset is the image's symbols, which the GOT's relaxation and the
+filters read), and only the relocations change, `executable_slots_of_class`
+and `executable_abs64_class` giving the RELATIVE class none, so no slot or
+`ABS64` field has a `RELATIVE` relocation, `.relr.dyn` is empty and
+`GLIBC_ABI_DT_RELR` isn't needed. The fields a PIE refuses because the loader
+moves the image (an `ABS32` or `ABS32S` to it, which `crt1.o` and
+`crtbegin.o` have, a text `ABS64` to it, a `PC32` or `PC64` to address 0, and
+a call, `PC32` or `PC64` to an absolute symbol) take their values as a static
+executable's do, the absolute symbols' references joining the patch's range
+proof. What needs the loader is refused as a PIE refuses it: a fixup to an
+import other than through the GOT, a call or an `ABS64` in an atom the loader
+writes (the foreign path makes copies first; the direct path's code reaches
+imports through the GOT).
+
+A weak reference to nothing of default visibility stays a dynamic symbol, as
+lld keeps it (GNU ld makes it dynamic only for a GOT or PLT reference), with a
+`GLOB_DAT` slot for its loads through the GOT and a stub for its calls, as in a
+PIE. A field the loader doesn't relocate takes it at address 0, as both
+linkers resolve it there: `crtbegin.o`'s `ABS32`s to `_ITM_deregisterTMCloneTable`
+and `_ITM_registerTMCloneTable`, GCC's `-fno-pie` `mov $f, %eax` of a weak
+function and clang's `-O0` `movabs $f`. A stub would stand for the symbol's
+address in an `ABS32`, `PC32` or `PC64` field, so a symbol that one of those
+takes (`executable_check_direct` marks it in `zero_marks`) loses its stub, and
+its slot unless a GOT kind reads it (`executable_reduce_got` marks a dynamic
+symbol's slot for each stub that stays): its calls reach address 0, as GNU ld's
+do. An `ABS64` field to a dynamic symbol is patched with address 0
+(`ExecutablePatch.zero_abs64`): the loader's `R_X86_64_64` fills one in an
+atom it writes whatever it holds, and one elsewhere is a weak reference's,
+which keeps its stub for its calls, as lld links clang's `-O0` code. Only an
+`ABS64` to a dynamic symbol outside the written atoms sends lane 0 through
+the refusal walk: the count tests the `ABS64` targets against the filter 16 at
+a time and compares their dynamic ones with those `executable_classify` found
+in the written atoms.
+
+The driver takes `-no-pie` as Clang's does (`-static-pie` over `-static`,
+either over `-pie` and `-no-pie`, the last of those two between them, and
+`-no-pie` with `-static-pie` refused), and the mixed path and `link-foreign`
+(`-no-pie`, `--no-pie`, `--no-pic-executable`) write the same image from
+foreign objects, copies included. `test-checker-driver`'s compatibility cases
+compare the compiler's `-no-pie` links with clang and GNU ld's as `readelf
+-hlrd` shows them, and `test-dynamic` checks the writer's own cases
+(`dynamic_no_pie_test.c`).
+
 #### The shared library
 
 `executable_write` writes a shared library when `ExecutableDynamic.shared` is
@@ -4487,7 +4549,14 @@ are the later parts.
     GNU ld decides it left to right (`foreign_needed_library`). Lane 0 marks
     the needs, and the members not loaded before and the newly needed
     libraries' objects of references are the next round's objects, in
-    position order.
+    position order. A needed library's versioned reference does not establish
+    the bare name's earliest strong-reference position (#2911): `foo@V1`
+    cannot extract an archive member defining only `foo`. `foreign_fold`
+    reads the existing `ImportReferences.version` index for library records
+    on both paths, without adding columns or changing the record format.
+    It keeps their bare names and reference classes for winner accounting
+    and exports, so `foreign_link_dynamic_finish` still exports a definition
+    already loaded when a needed library refers to its name.
 - **COMDAT groups** (step 5). A group's record goes through the exchange with
   the symbols', and its partition's group table keeps each signature's
   earliest group by position. After the last round each object's sections in

@@ -7,8 +7,10 @@ The C driver's emission (`check_program_emit`) consumes one tier-neutral result,
 branch columns, symbolic references, labels, optional source events and the
 frame's events. Tier 0's code (its functions, its helpers and the assembly
 templates' code) adapts to it (`emitted_from_tier0`), and Tier 1's publishes it
-itself (`check_tier1_compile`): the emission's code, rows and unwind path no
-longer consume a `Tier0Code` (`--verify`'s comparison with Tier 0's fixed-frame
+itself (`check_tier1_compile`): the emission's code and rows no longer consume a
+`Tier0Code`, nor does its unwind path but for a Tier 0 frame of the fixed shape
+alone, which it describes from the frame Tier 0 published, with no events
+(#2874, "Producers" below; `--verify`'s comparison with Tier 0's fixed-frame
 analyzer, `unwind_tier0`, still reads the records as one, and Tier 0's helpers
 carry theirs to the adapter), and Tier 1 no longer describes its frame as Tier
 0's prologue/epilogue protocol. The frame's
@@ -134,9 +136,8 @@ Layout validation has a contiguous 16-record AVX-512 path and an exact scalar
 path. Masked loads cover only the valid tail; a shifted end vector checks each
 record against its predecessor, including across batch boundaries. The module is
 included by `emission_metadata_test.c`, and by `main.c` (before `emitted_code.c`,
-`c_check_program.c` and `c_check_debug.c`), after the host ISA is selected. The standalone wrapper's
-vector command enables `BUSTER_HOST_VECTOR` through
-`BUSTER_EMISSION_METADATA_TEST_VECTOR`.
+`c_check_program.c` and `c_check_debug.c`), after the host ISA is selected. The standalone wrapper
+builds the module alone for any AVX-512F target, without `host_isa.h`.
 
 Sparse event resolution and frame-state protocol checking currently use scalar
 code, and this prerequisite makes no speedup claim. The integrated path's total
@@ -168,7 +169,11 @@ its entries' first records as source events; with unwind tables its frame's
 events from the frame it published (`Tier0Code.frame_*` and its tail calls'
 records), which `unwind_tier0_frame_tails` checks are the records' (each
 transition at its record's boundary: the reader takes no final offsets for
-this), in the fixed writer's order (`unwind_function_rows`). Events and resolved
+this), in the fixed writer's order (`unwind_function_rows`). A frame of the
+fixed shape alone (`emitted_tier0_frame_direct`: no probe loop, eh_return,
+preserved registers or tail calls, each of which adds rows to that shape) has
+no events (`EmittedCode.frame_direct`, #2874): the consumer describes it from
+the published frame at the final offsets instead. Events and resolved
 rows carry signed 64-bit values (#1149): every fixed imm32 allocation plus its
 return address and callee-saved pushes is representable, including CFA offsets
 above `INT32_MAX`. Resolved rows remain padding-free for fixed-shape comparison.
@@ -197,7 +202,10 @@ record where the frame is closed.
 
 `check_program_emit_frame` (`c_check_program_emit.c`), for each function after
 branch sizing, with `offsets` each record's start and `offsets[count]` the
-length: `emitted_unwind` resolves the events through that layout
+length: a direct frame's descriptor is `unwind_tier0_frame_tails`'s at those
+offsets (each transition the end of its prologue's or epilogue's record, which
+it checks are the published frame's, as it does where it makes the events); for
+any other function, `emitted_unwind` resolves the events through that layout
 (`emission_metadata_resolve`, which checks the protocol and the layout, the
 record ends `offsets + 1`), puts the rows in canonical form
 (`unwind_rows_canonical`: rows at the function's end describe no instruction,
@@ -213,7 +221,8 @@ there are those in force since the last row), and a CFA's register or offset alo
 `DW_CFA_def_cfa_register` or `DW_CFA_def_cfa_offset`. With `--verify`, the
 events are proved (`emitted_verify_frames`), and where Tier 0's fixed-frame
 analyzer (`unwind_tier0`, which reads the records alone) takes the function,
-its frame must be the same CFI (`emitted_unwind_same`; a scratch arena without
+its frame must be the same CFI, a direct frame's too, which has no events to
+prove (`emitted_unwind_same`; a scratch arena without
 room for a fixed shape's rows is a resource failure, which the lanes retry on
 one, not a mismatch). A row program's rows live
 on the lane's scratch (a helper's in the emission's output arena), which the
@@ -363,28 +372,17 @@ commands below compile the protocol's tests without the compiler, which is
 useful for bisecting a protocol change; the vector ones require an
 AVX-512F-capable host. These are correctness tests, not performance measurements.
 
-Baseline:
+Vector and scalar-twin comparisons (the baseline `-march=x86-64` build went with
+the scalar host, #2924):
 
 ```sh
-clang -std=c17 -O2 -g -march=x86-64 -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-scalar && /tmp/buster-emission-scalar
+clang -std=c17 -O2 -g -mavx512f -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-vector && /tmp/buster-emission-vector
 ```
 
-Vector and scalar-twin comparisons:
+Address and undefined-behavior sanitizers:
 
 ```sh
-clang -std=c17 -O2 -g -mavx512f -DBUSTER_EMISSION_METADATA_TEST_VECTOR -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char tests/emission-metadata/test.c -o /tmp/buster-emission-vector && /tmp/buster-emission-vector
-```
-
-Address and undefined-behavior sanitizers, baseline:
-
-```sh
-clang -std=c17 -O1 -g -march=x86-64 -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-scalar-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-scalar-sanitize
-```
-
-The same sanitizers with the vector checker enabled:
-
-```sh
-clang -std=c17 -O1 -g -mavx512f -DBUSTER_EMISSION_METADATA_TEST_VECTOR -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-vector-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-vector-sanitize
+clang -std=c17 -O1 -g -mavx512f -Wall -Wextra -Werror -fno-strict-aliasing -fwrapv -funsigned-char -fsanitize=address,undefined -fno-sanitize-recover=all tests/emission-metadata/test.c -o /tmp/buster-emission-vector-sanitize && ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 UBSAN_OPTIONS=halt_on_error=1 /tmp/buster-emission-vector-sanitize
 ```
 
 Each run prints its check and failure counts; the correctness inventory records
@@ -427,7 +425,17 @@ are the same bytes, and:
 
 A fast path that writes a Tier 0 frame's fixed descriptor without its events
 would buy the 0.5 ms back, at the price of a second path the verifier and the
-row writer don't see.
+row writer don't see. #2874 takes it for a Tier 0 frame of the fixed shape alone
+(`EmittedCode.frame_direct`, "Producers" and "Consumer" above), which every
+function of `sqlite3.c` is. On the 9700X ([the
+record](https://github.com/buster14a/buster-performance/tree/ba315237/docs/measurements/tier0-unwind-direct-2874-2026-11-21),
+six runs of each executable on CPU 2) the objects are main's bytes, and the
+adapter's and the unwind stage's work for a body is 403 cycles where main's is
+1,512: 2.89 million cycles less on `sqlite3.c`, where `--time-stages` reads
+`tier0` 0.300 ms and `unwind` 0.254 ms lower. The verifier has no events to
+prove for those frames: `--verify` compares their descriptor with Tier 0's
+fixed-frame analyzer, and still proves every frame that has events (probe
+loops, preserved registers, tail calls, Tier 1's).
 
 Remaining beyond this change:
 

@@ -124,9 +124,9 @@ static uint32_t check_program_select_bounds(const CheckProgram* full, uint32_t o
     for (uint32_t pass = 0; valid && pass < 2; pass += 1)
     {
         label_count = 0;
-        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens, scalar); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens, scalar))
+        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
         {
-            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens, scalar); selected != 0; selected &= selected - 1)
+            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
             {
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
                 const uint32_t object = input->objects[token];
@@ -366,9 +366,6 @@ static uint32_t check_program_declaring_scalar(const uint32_t* declarations, con
 // stored whole (vpcompressd to memory is 8 µops on Zen 5, the register form 2).
 static uint32_t check_program_declaring_vector(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
 {
-#if !BUSTER_HOST_VECTOR
-    return check_program_declaring_scalar(declarations, nodes, limit, count, tokens);
-#else
     uint32_t written = 0;
     const __m512i bound = _mm512_set1_epi32((int)limit);
     __m512i index = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -385,7 +382,6 @@ static uint32_t check_program_declaring_vector(const uint32_t* declarations, con
         index = _mm512_add_epi32(index, _mm512_set1_epi32(16));
     }
     return written;
-#endif
 }
 
 static uint32_t check_program_declaring(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens, bool scalar)
@@ -410,9 +406,6 @@ static uint32_t check_program_needed_count_scalar(const uint8_t* needed, uint32_
 // The same, 64 objects at a time, the loads masked to the column.
 static uint32_t check_program_needed_count_vector(const uint8_t* needed, uint32_t objects)
 {
-#if !BUSTER_HOST_VECTOR
-    return check_program_needed_count_scalar(needed, objects);
-#else
     uint32_t count = 0;
     for (uint32_t object = 0; object < objects; object += 64)
     {
@@ -421,7 +414,6 @@ static uint32_t check_program_needed_count_vector(const uint8_t* needed, uint32_
         count += (uint32_t)__builtin_popcountll(_mm512_mask_test_epi8_mask(live, bytes, bytes));
     }
     return count;
-#endif
 }
 
 // Numbers the needed objects 1 to `objects` - 1 in object order: object_symbols[object] the object's symbol (from 1;
@@ -442,9 +434,6 @@ static void check_program_needed_number_scalar(const uint8_t* needed, uint32_t o
 // The same, finding the needed objects 64 at a time: few objects of a unit are needed, so a block of none is the rule.
 static void check_program_needed_number_vector(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects)
 {
-#if !BUSTER_HOST_VECTOR
-    check_program_needed_number_scalar(needed, objects, object_symbols, symbol_objects);
-#else
     SymbolId symbol = 0;
     for (uint32_t object = 0; object < objects; object += 64)
     {
@@ -459,7 +448,6 @@ static void check_program_needed_number_vector(const uint8_t* needed, uint32_t o
             found &= found - 1;
         }
     }
-#endif
 }
 
 static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar)
@@ -517,7 +505,8 @@ struct CheckProgramBodyCursor
     uint32_t opened;
 };
 
-static uint32_t check_program_token_body_next(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
+// Count bodies opening at or before token. Selected target clones each count as one body.
+static uint32_t check_program_opened_through(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
 {
     uint32_t opened = 0;
     if (token >= last->token)
@@ -545,6 +534,12 @@ static uint32_t check_program_token_body_next(const CheckProgram* program, uint3
         }
     }
     *last = (CheckProgramBodyCursor){ .token = token, .opened = opened };
+    return opened;
+}
+
+static uint32_t check_program_token_body_next(const CheckProgram* program, uint32_t token, CheckProgramBodyCursor* last)
+{
+    const uint32_t opened = check_program_opened_through(program, token, last);
     const uint32_t body = opened != 0 && token <= program->parser->tree.parents[program->bodies[opened - 1].opening] ? opened : 0;
     return body;
 }

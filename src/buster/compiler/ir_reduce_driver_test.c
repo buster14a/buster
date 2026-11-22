@@ -165,8 +165,7 @@ static bool ir_reduce_test_driver_reparse(const char* directory, IrReduceInjecti
         {
             const IrParseResult result = ir_parse_scalar(artifacts[i], &functions, &scratch, parsed + i);
             valid = result.error == IR_PARSE_OK && result.consumed == artifacts[i].length &&
-                    ir_verify_complete(parsed + i, &scratch, true).error == IR_OK &&
-                    ir_verify_complete(parsed + i, &scratch, false).error == IR_OK;
+                    ir_verify_complete(parsed + i, &scratch).error == IR_OK;
         }
     }
     if (valid)

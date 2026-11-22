@@ -11,6 +11,13 @@
 // reload the element the head compared
 // (a conditional sum and a select of it or its negation), whose only conditional branch is the loop's. A running max,
 // whose condition reads the maximum its select would carry, and a reload after a call keep their branches.
+// #2842's floating selects follow, at x86-64, x86-64-v3 and x86-64-v4: the issue's kernels (a sum of two constants by an
+// integer comparison, of a reused load or another array's, and a float by an int), selects of each floating comparison
+// and its negation, a triangle, a sequential clamp, a negated arm, a reused load's and a select of selects: their blends
+// (under k1 at x86-64-v4 for an integer condition, but in a function with a mask value) and no conditional branch but a
+// loop's, and no copy of a loop's values that end at its select; a nested clamp keeps its outer test, whose arm's
+// comparison would be speculated, and a load nothing proves and a division keep their branches. Clang -O0 is the
+// oracle, on NaNs (a payload's too), signed zeros, infinities and both conditions.
 
 static const char check_test_tier1_if_convert_header[] =
     "long if_max(long a, long b);\n"
@@ -112,6 +119,387 @@ struct CheckTestIfConvertShape
     bool truth;
     uint32_t branches;
 };
+
+static const char check_test_tier1_float_select_header[] =
+    "double fsel_count(const int* p, long n);\n"
+    "double fsel_values(const double* p, const double* q, long n);\n"
+    "float fsel_int(float a, float b, int c);\n"
+    "double fsel_less(double a, double b, double x, double y);\n"
+    "double fsel_greater(double a, double b, double x, double y);\n"
+    "double fsel_at_most(double a, double b, double x, double y);\n"
+    "double fsel_at_least(double a, double b, double x, double y);\n"
+    "double fsel_equal(double a, double b, double x, double y);\n"
+    "double fsel_unequal(double a, double b, double x, double y);\n"
+    "double fsel_not_less(double a, double b, double x, double y);\n"
+    "double fsel_not_equal(double a, double b, double x, double y);\n"
+    "float fsel_float_less(float a, float b, float x, float y);\n"
+    "float fsel_float_not_greater(float a, float b, float x, float y);\n"
+    "float fsel_float_unequal(float a, float b, float x, float y);\n"
+    "double fsel_mixed(float a, float b, double x, double y);\n"
+    "double fsel_triangle(double s, double x, int c);\n"
+    "double fsel_clamp(double x);\n"
+    "double fsel_nested(double x);\n"
+    "double fsel_magnitude(double x);\n"
+    "double fsel_reused(const double* p, long n);\n"
+    "double fsel_guarded(int c, const double* p);\n"
+    "double fsel_divided(double a, double b, int c);\n"
+    "double fsel_choice(int a, int b, double x, double y, double z);\n"
+    "#ifdef __AVX512F__\n"
+    "double fsel_masked(const int* p, const int* q, int c, double x, double y, unsigned* out);\n"
+    "#endif\n";
+
+static const char check_test_tier1_float_select_source[] =
+    "#include \"tier1-float-select.h\"\n"
+    "double fsel_count(const int* p, long n) { double s = 0; for (long i = 0; i < n; i++) s += p[i] > 0 ? 3.0 : 1.0; return s; }\n"
+    "double fsel_values(const double* p, const double* q, long n) { double s = 0; for (long i = 0; i < n; i++) s += p[i] > 0 ? p[i] : q[i]; return s; }\n"
+    "float fsel_int(float a, float b, int c) { return c ? a : b; }\n"
+    "double fsel_less(double a, double b, double x, double y) { return a < b ? x : y; }\n"
+    "double fsel_greater(double a, double b, double x, double y) { return a > b ? x : y; }\n"
+    "double fsel_at_most(double a, double b, double x, double y) { return a <= b ? x : y; }\n"
+    "double fsel_at_least(double a, double b, double x, double y) { return a >= b ? x : y; }\n"
+    "double fsel_equal(double a, double b, double x, double y) { return a == b ? x : y; }\n"
+    "double fsel_unequal(double a, double b, double x, double y) { return a != b ? x : y; }\n"
+    "double fsel_not_less(double a, double b, double x, double y) { return !(a < b) ? x : y; }\n"
+    "double fsel_not_equal(double a, double b, double x, double y) { return !(a == b) ? x : y; }\n"
+    "float fsel_float_less(float a, float b, float x, float y) { return a < b ? x : y; }\n"
+    "float fsel_float_not_greater(float a, float b, float x, float y) { return !(a > b) ? x : y; }\n"
+    "float fsel_float_unequal(float a, float b, float x, float y) { return a != b ? x : y; }\n"
+    "double fsel_mixed(float a, float b, double x, double y) { return a < b ? x : y; }\n"
+    "double fsel_triangle(double s, double x, int c) { if (c) s = x; return s; }\n"
+    "double fsel_clamp(double x) { double y = x < 0.0 ? 0.0 : x; return y > 1.0 ? 1.0 : y; }\n"
+    "double fsel_nested(double x) { return x < 0.0 ? 0.0 : x > 1.0 ? 1.0 : x; }\n"
+    "double fsel_magnitude(double x) { return x < 0.0 ? -x : x; }\n"
+    "double fsel_reused(const double* p, long n) { double s = 0; for (long i = 0; i < n; i++) s += p[i] > 0.25 ? p[i] : 0.5; return s; }\n"
+    "double fsel_guarded(int c, const double* p) { return c ? *p : 2.0; }\n"
+    "double fsel_divided(double a, double b, int c) { return c ? a / b : 1.0; }\n"
+    "double fsel_choice(int a, int b, double x, double y, double z) { return a ? (b ? x : y) : z; }\n"
+    "#ifdef __AVX512F__\n"
+    "#include <immintrin.h>\n"
+    "double fsel_masked(const int* p, const int* q, int c, double x, double y, unsigned* out)\n"
+    "{\n"
+    "    const __mmask16 m = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(p), _mm512_loadu_si512(q));\n"
+    "    const double r = c ? x : y;\n"
+    "    *out = _cvtmask16_u32(m) * 2 + (r > 0.0);\n"
+    "    return r;\n"
+    "}\n"
+    "#endif\n";
+
+static const char check_test_tier1_float_select_other[] =
+    "#include <stdio.h>\n"
+    "#include <string.h>\n"
+    "#include \"tier1-float-select.h\"\n"
+    "static unsigned long bits(double x) { unsigned long b; memcpy(&b, &x, sizeof(b)); return b; }\n"
+    "static unsigned long fbits(float x) { unsigned b; memcpy(&b, &x, sizeof(b)); return b; }\n"
+    "static double make(unsigned long b) { double x; memcpy(&x, &b, sizeof(x)); return x; }\n"
+    "int main(void)\n"
+    "{\n"
+    "    double edges[11];\n"
+    "    const unsigned long patterns[11] = { 0x7ff8000000000000UL, 0xfff8000000000123UL, 0x8000000000000000UL, 0UL, 0x7ff0000000000000UL, 0xfff0000000000000UL,\n"
+    "                                         0x3ff8000000000000UL, 0xc002000000000000UL, 0x0000000000000001UL, 0x3ff0000000000000UL, 0x3fd0000000000000UL };\n"
+    "    for (unsigned i = 0; i < 11; i += 1) edges[i] = make(patterns[i]);\n"
+    "    const int conditions[4] = { 0, 1, -1, -2147483647 - 1 };\n"
+    "    unsigned long h = 0;\n"
+    "    for (unsigned i = 0; i < 11; i += 1) for (unsigned j = 0; j < 11; j += 1)\n"
+    "    {\n"
+    "        const double a = edges[i];\n"
+    "        const double b = edges[j];\n"
+    "        const double x = edges[(i + 3) % 11];\n"
+    "        const double y = edges[(j + 5) % 11];\n"
+    "        h = h * 31 + bits(fsel_less(a, b, x, y));\n"
+    "        h = h * 31 + bits(fsel_greater(a, b, x, y));\n"
+    "        h = h * 31 + bits(fsel_at_most(a, b, x, y));\n"
+    "        h = h * 31 + bits(fsel_at_least(a, b, x, y));\n"
+    "        h = h * 31 + bits(fsel_equal(a, b, x, y));\n"
+    "        h = h * 31 + bits(fsel_unequal(a, b, x, y));\n"
+    "        h = h * 31 + bits(fsel_not_less(a, b, x, y));\n"
+    "        h = h * 31 + bits(fsel_not_equal(a, b, x, y));\n"
+    "        h = h * 31 + fbits(fsel_float_less((float)a, (float)b, (float)x, (float)y));\n"
+    "        h = h * 31 + fbits(fsel_float_not_greater((float)a, (float)b, (float)x, (float)y));\n"
+    "        h = h * 31 + fbits(fsel_float_unequal((float)a, (float)b, (float)x, (float)y));\n"
+    "        h = h * 31 + bits(fsel_mixed((float)a, (float)b, x, y));\n"
+    "        h = h * 31 + fbits(fsel_int((float)a, (float)b, conditions[j % 4]));\n"
+    "        h = h * 31 + bits(fsel_triangle(a, b, conditions[i % 4]));\n"
+    "    }\n"
+    "    for (unsigned i = 0; i < 11; i += 1) h = h * 31 + bits(fsel_clamp(edges[i])) + bits(fsel_nested(edges[i])) * 3 + bits(fsel_magnitude(edges[i])) * 7;\n"
+    "    for (int k = -8; k <= 24; k += 1) h = h * 31 + bits(fsel_clamp(k / 16.0)) + bits(fsel_nested(k / 16.0)) * 3 + bits(fsel_magnitude(k / -16.0)) * 7;\n"
+    "    int ints[64];\n"
+    "    double reals[64];\n"
+    "    double others[64];\n"
+    "    unsigned long state = 2842;\n"
+    "    for (unsigned i = 0; i < 64; i += 1)\n"
+    "    {\n"
+    "        state = state * 6364136223846793005UL + 1;\n"
+    "        ints[i] = (int)(state >> 61) - 3;\n"
+    "        reals[i] = (i % 7) == 3 ? edges[(state >> 40) % 11] : (double)((long)(state >> 50) - 8192) / 4096.0;\n"
+    "        others[i] = (double)(i % 13) - 6.0;\n"
+    "    }\n"
+    "    for (long n = 0; n <= 64; n += 1) h = h * 31 + bits(fsel_count(ints, n)) + bits(fsel_values(reals, others, n)) * 3 + bits(fsel_reused(reals, n)) * 5;\n"
+    "    for (unsigned i = 0; i < 64; i += 1)\n"
+    "    {\n"
+    "        const int take = conditions[i % 4];\n"
+    "        h = h * 31 + bits(fsel_guarded(take, take ? &reals[i] : (const double*)0));\n"
+    "        h = h * 31 + bits(fsel_divided(reals[i], others[i], take));\n"
+    "        h = h * 31 + bits(fsel_choice(take, conditions[(i / 4) % 4], reals[i], others[i], edges[i % 11]));\n"
+    "    }\n"
+    "#ifdef __AVX512F__\n"
+    "    for (unsigned i = 0; i + 16 <= 64; i += 1)\n"
+    "    {\n"
+    "        unsigned out = 0;\n"
+    "        h = h * 31 + bits(fsel_masked(ints + i, ints + (i * 7) % 48, conditions[i % 4], reals[i], others[i], &out));\n"
+    "        h = h * 31 + out;\n"
+    "    }\n"
+    "#endif\n"
+    "    printf(\"%lu\\n\", h);\n"
+    "    return 0;\n"
+    "}\n";
+
+// A floating select's expected shape (#2842): its selects, how many of them by a comparison's lane mask, and its
+// conditional branches: none, its loop's alone, or a kept one (UINT32_MAX).
+typedef struct CheckTestFloatSelectShape CheckTestFloatSelectShape;
+struct CheckTestFloatSelectShape
+{
+    const char* name;
+    uint32_t selects;
+    uint32_t lanes;
+    uint32_t branches;
+    // A loop's select of values that end at it: its blend's destination takes one's register, so no xmm register is
+    // copied into another but xmm15, the comparison's (tier1_select_ties).
+    bool tied;
+    // A function with a mask value, defined at x86-64-v4 alone: its select takes the lane mask there, since k1 may hold
+    // the mask (Tier1SelectHoles.opmask).
+    bool masks;
+};
+
+// The floating selects' fixture at each target (#2842): clang -O0's run is the oracle of the unit's Tier 1 code (by both
+// paths, rematerializing or not, and by --verify, its code certified), and each function's decoded code has its blends:
+// at x86-64-v4, kmovw and vpblendmq of an integer condition's select, at either width, pxor, pand and pxor of the lane
+// mask elsewhere and of a comparison's cmps.
+static void check_test_driver_tier1_float_select(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const targets[] = {
+        "-march=x86-64",
+        "-march=x86-64-v3",
+        "-march=x86-64-v4",
+    };
+    static const CheckTestFloatSelectShape shapes[] = {
+        {
+            .name = "fsel_count",
+            .selects = 1,
+            .lanes = 0,
+            .branches = 1,
+            .tied = true,
+        },
+        {
+            .name = "fsel_int",
+            .selects = 1,
+            .lanes = 0,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_less",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_greater",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_at_most",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_at_least",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_equal",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_unequal",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_not_less",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_not_equal",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_float_less",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_float_not_greater",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_float_unequal",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_mixed",
+            .selects = 1,
+            .lanes = 0,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_triangle",
+            .selects = 1,
+            .lanes = 0,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_clamp",
+            .selects = 2,
+            .lanes = 2,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_nested",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 1,
+        },
+        {
+            .name = "fsel_magnitude",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_reused",
+            .selects = 1,
+            .lanes = 1,
+            .branches = 1,
+            .tied = true,
+        },
+        {
+            .name = "fsel_choice",
+            .selects = 2,
+            .lanes = 0,
+            .branches = 0,
+        },
+        {
+            .name = "fsel_masked",
+            .selects = 1,
+            .lanes = 0,
+            .branches = 0,
+            .masks = true,
+        },
+        {
+            .name = "fsel_values",
+            .selects = 0,
+            .lanes = 0,
+            .branches = UINT32_MAX,
+        },
+        {
+            .name = "fsel_guarded",
+            .selects = 0,
+            .lanes = 0,
+            .branches = UINT32_MAX,
+        },
+        {
+            .name = "fsel_divided",
+            .selects = 0,
+            .lanes = 0,
+            .branches = UINT32_MAX,
+        },
+    };
+    char header[512];
+    char source[512];
+    snprintf(header, sizeof(header), "%s/tier1-float-select.h", directory);
+    snprintf(source, sizeof(source), "%s/tier1-float-select.c", directory);
+    enum
+    {
+        CHECK_TEST_FLOAT_SELECT_RECORDS = 512,
+    };
+    X86Decoded* records = calloc(CHECK_TEST_FLOAT_SELECT_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_FLOAT_SELECT_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_FLOAT_SELECT_RECORDS, sizeof(uint32_t));
+    const bool ready = records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
+    check_test_expect(test, ready, "floating selects' native code-shape fixture prepares");
+    for (uint32_t target = 0; ready && target < BUSTER_ARRAY_LENGTH(targets); target += 1)
+    {
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-float-select", "floating selects'", check_test_tier1_float_select_header,
+                                      check_test_tier1_float_select_source, check_test_tier1_float_select_other, targets[target], true, 0);
+        const bool masked = target == 2;
+        const bool written = parse_test_write(header, check_test_tier1_float_select_header, sizeof(check_test_tier1_float_select_header) - 1) &&
+                             parse_test_write(source, check_test_tier1_float_select_source, sizeof(check_test_tier1_float_select_source) - 1);
+        for (uint32_t path = 0; written && path < 2; path += 1)
+        {
+            char object[512];
+            snprintf(object, sizeof(object), "%s/tier1-float-select-shape-%u-%u.o", directory, target, path);
+            CheckTestTier1Build build;
+            const bool compiled = check_test_tier1_build(executable, source, "", object, false, path != 0, true, false, targets[target], &build);
+            char message[256];
+            snprintf(message, sizeof(message), "floating selects' shape unit compiles entirely by Tier 1 (%s, path %u)", targets[target], path);
+            check_test_expect(test, compiled, message);
+            for (uint32_t function = 0; compiled && function < BUSTER_ARRAY_LENGTH(shapes); function += 1)
+            {
+                const CheckTestFloatSelectShape* shape = &shapes[function];
+                uint32_t relocations = 0;
+                const uint32_t count = !shape->masks || masked ? check_test_tier1_function(object, shape->name, records, CHECK_TEST_FLOAT_SELECT_RECORDS, offsets, types, &relocations) : 0;
+                uint32_t blends = 0;
+                uint32_t opmasks = 0;
+                uint32_t lanes = 0;
+                uint32_t branches = 0;
+                uint32_t copies = 0;
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    const X86Instruction* instruction = &records[i].instruction;
+                    const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+                    const bool masked_blend = form == X86_FORM_VPBLENDMQ_X_X_XM128 && instruction->decorations != 0;
+                    blends += form == X86_FORM_PAND_X_XM128 || masked_blend;
+                    opmasks += masked_blend && instruction->decorations == 1;
+                    lanes += form == X86_FORM_CMPSD_X_XM64_IMM8 || form == X86_FORM_CMPSS_X_XM32_IMM8;
+                    branches += (x86_effects(form)->kinds >> 4) == BUSTER_X86_CONTROL_BRANCH;
+                    copies += form == X86_FORM_MOVAPS_X_XM && instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->reg != 15;
+                }
+                const bool guarded = shape->branches == UINT32_MAX;
+                // At x86-64-v4 an integer condition's selects are under k1, but in a function with a mask value, and a
+                // comparison's by its lanes.
+                const uint32_t under = masked && !shape->masks ? shape->selects - shape->lanes : 0;
+                const bool shaped = guarded ? branches != 0 && blends == 0 :
+                                              blends == shape->selects && lanes == shape->lanes && opmasks == under && branches == shape->branches && (!shape->tied || copies == 0);
+                snprintf(message, sizeof(message), "floating select %s has %u blends (%u by lanes, %u under k1) and %s (%s, path %u): %u blends, %u lanes, %u masked, %u branches, %u copies",
+                         shape->name, shape->selects, shape->lanes, under, guarded ? "a kept branch" : shape->branches == 0 ? "no conditional branch" : "its loop's alone",
+                         targets[target], path, blends, lanes, opmasks, branches, copies);
+                check_test_expect(test, (shape->masks && !masked) || (count != 0 && shaped), message);
+            }
+            unlink(object);
+        }
+        unlink(header);
+        unlink(source);
+    }
+    free(records);
+    free(offsets);
+    free(types);
+}
 
 static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -263,4 +651,5 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
     free(types);
     unlink(header);
     unlink(source);
+    check_test_driver_tier1_float_select(test, clang, executable, directory);
 }
