@@ -328,6 +328,13 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
                                   (flags & BUSTER_NODE_FRONT_TYPED_SWEPT) == 0 || results->sweep_refusals[root] != NODE_MACHINE_TAKEN ? BUSTER_NODE_ALONE_BODY_SWEEP :
                                                                                                                                        BUSTER_NODE_ALONE_BODY_WHOLE;
                     }
+                    if (root < alone->view.count && alone->shadow->alone_root_tokens != NULL)
+                    {
+                        // Its control's token, as the tokens alone give it: an initialization's is its declaration's.
+                        const uint32_t own = front->tokens[record];
+                        const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE && own < reader->parser->tokens.count;
+                        alone->shadow->alone_root_tokens[root] = initialization ? reader->initializer_declarations[own] : own;
+                    }
                     if (root < alone->view.count && alone->view.tokens[root] < reader->parser->tokens.count)
                     {
                         // The roots of one token (a table's values, each discarded at its declaration's `;`, that the
@@ -514,6 +521,7 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint64_t* past = arena_push_array(reader->scratch, words, sizeof(uint64_t), _Alignof(uint64_t));
     uint32_t* roots = arena_push_array(reader->arena, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* chains = arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* root_tokens = arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
     // A body an opening brace at most: the room for every one.
     uint32_t bodies = 0;
     for (uint32_t token = 0; token < count; token += 1)
@@ -527,7 +535,7 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint8_t* verdicts = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
     uint64_t* body_ticks = arena_push_array(reader->arena, 3 * ((uint64_t)bodies + 1), sizeof(uint64_t), _Alignof(uint64_t));
     uint8_t* body_scanned = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
-    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL && body_ticks != NULL && body_scanned != NULL &&
+    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && root_tokens != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL && body_ticks != NULL && body_scanned != NULL &&
                 typer != NULL && typer->types != NULL && typer->tests != NULL && typer->types->sweep_refusals != NULL && typer->facts == NULL &&
                 reader->postorder != NULL && reader->postorder_positions != NULL;
     if (room)
@@ -553,6 +561,7 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         memset(past, 0, (uint64_t)words * sizeof(uint64_t));
         memset(roots, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(chains, 0, (uint64_t)capacity * sizeof(uint32_t));
+        memset(root_tokens, 0xff, (uint64_t)capacity * sizeof(uint32_t));
         report->nodes = bits;
         report->past = past;
         // The front marks a node's context unknown where a left token takes its value: in the graph's own column.
@@ -634,6 +643,7 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         shadow->alone_types = types;
         shadow->alone_roots = roots;
         shadow->alone_chains = chains;
+        shadow->alone_root_tokens = root_tokens;
     }
     return room ? alone : NULL;
 }

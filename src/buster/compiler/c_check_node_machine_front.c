@@ -687,6 +687,9 @@ struct NodeFrontShadow
     uint64_t* alone_body_machine;
     uint64_t* alone_body_before;
     uint8_t* alone_body_scanned;
+    // By its root's node there: the token of the control a root is the expression of, as the reader has it before the walk
+    // (its root's record's own: a statement's terminator, a condition's, a return's; an initialization's declaration).
+    uint32_t* alone_root_tokens;
     // What it read: the bodies it read whole and those it left (a body whose tokens are no run of the postorder, or past
     // its graph's room), their postorder positions, the records it made of them, and its ticks, all of it (the
     // compaction, the entries, the front, the records' copy and the machine's runs).

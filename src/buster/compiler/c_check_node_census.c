@@ -5029,6 +5029,20 @@ struct NodeShadow
     uint64_t alone_verdict_scanned[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_verdict_scanned_tokens[BUSTER_NODE_ALONE_BODY_VERDICTS];
     uint64_t alone_scans_listed;
+    // Its roots against the program's controls, in the lowered bodies (node_census_body). By the control's kind
+    // (0: an EVALUATE, 1: a branch, 2: a RETURN with a value, 3: an INITIALIZE's part that is a value, 4: another with an
+    // expression, a SWITCH's, a variable-length array's bound, an indirect jump's, a kept result's): the controls;
+    // those whose expression's root's token has one root of its, none, or several; and those whose one root's control's
+    // token, as the reader had it before the walk, is the control's. Then the roots the machine ran on there in those
+    // bodies, and those some control's expression's token has.
+    uint64_t alone_pair_controls[5];
+    uint64_t alone_pair_one[5];
+    uint64_t alone_pair_none[5];
+    uint64_t alone_pair_several[5];
+    uint64_t alone_pair_token[5];
+    uint64_t alone_pair_roots;
+    uint64_t alone_pair_claimed;
+    uint64_t alone_pair_listed;
     // --bodies (node_bodies_begin): a body's entries made from the program's controls and its roots' tapes, compared with
     // the lowered function's. The lowered bodies; those the machine takes every popped root of; those the piece attempts,
     // their tokens and the entries it made; those whose entries are the function's and those that differ; and the bodies
@@ -7829,6 +7843,14 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
                        shadow->alone_verdict_scanned_tokens[verdict]);
             }
         }
+        static const char* const pair_names[5] = { "evaluate", "branch", "return", "initialize", "another" };
+        printf("node-shadow: alone roots against the program's controls with an expression, in the lowered bodies:");
+        for (uint32_t slot = 0; slot < 5; slot += 1)
+        {
+            printf(" %s=%" PRIu64 " (one root %" PRIu64 ", none %" PRIu64 ", several %" PRIu64 "; its control's token the control's %" PRIu64 ")", pair_names[slot],
+                   shadow->alone_pair_controls[slot], shadow->alone_pair_one[slot], shadow->alone_pair_none[slot], shadow->alone_pair_several[slot], shadow->alone_pair_token[slot]);
+        }
+        printf(" roots-it-ran-on-there=%" PRIu64 " of-them-some-control's=%" PRIu64 "\n", shadow->alone_pair_roots, shadow->alone_pair_claimed);
         printf("node-shadow: alone a scan of every body's tokens for a root the front would lose: tokens-read=%" PRIu64 " ticks=%" PRIu64 " a-token-read=%.2f\n",
                shadow->alone_scan_tokens, shadow->alone_scan_ticks, shadow->alone_scan_tokens != 0 ? (double)shadow->alone_scan_ticks / (double)shadow->alone_scan_tokens : 0.0);
         printf("node-shadow: alone bodies whole for it and for the walk's nodes' machine=%" PRIu64 " (tokens %" PRIu64 ") for-it-alone=%" PRIu64 " for-the-walk's-nodes'-alone=%" PRIu64
@@ -7996,6 +8018,63 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             }
             shadow->alone_whole_walk += !own && reader_whole && !statics;
             shadow->alone_whole_walk_static += !own && reader_whole && statics;
+            if (fronted->alone_root_tokens != NULL && fronted->alone_roots != NULL)
+            {
+                // Its roots against the body's controls: each control's expression's root's token, and the roots there.
+                const CheckGraph* graph = &program->input->graph;
+                const NodeFrontTypes* alone = fronted->alone_types;
+                const uint32_t token_count = program->parser->tokens.count;
+                for (uint32_t c = body->first; c < body->first + body->count; c += 1)
+                {
+                    const CheckControl* control = program->controls + c;
+                    const CheckControlKind kind = control->kind;
+                    const uint32_t slot = kind == CHECK_CONTROL_EVALUATE ? 0 : kind == CHECK_CONTROL_BRANCH_FALSE || kind == CHECK_CONTROL_BRANCH_TRUE ? 1 :
+                                          kind == CHECK_CONTROL_RETURN ? 2 : kind == CHECK_CONTROL_INITIALIZE ? 3 : 4;
+                    const CheckInitializer* plan = kind == CHECK_CONTROL_INITIALIZE && program->initializers != NULL && control->target < program->initializers->count ?
+                                                   program->initializers->plans + control->target : NULL;
+                    const uint32_t parts = plan != NULL ? plan->count : 1;
+                    for (uint32_t part = 0; part < parts; part += 1)
+                    {
+                        const uint32_t node = plan != NULL ? (plan->parts[part].kind == CHECK_INIT_VALUE ? plan->parts[part].node : BUSTER_CHECK_NONE) :
+                                              check_control_expression_node(control);
+                        if (node < graph->count && graph->tokens[node] < token_count)
+                        {
+                            uint32_t found = 0;
+                            uint32_t ran = 0;
+                            uint32_t root = BUSTER_CHECK_NONE;
+                            for (uint32_t link = fronted->alone_roots[graph->tokens[node]]; link != 0; link = fronted->alone_chains[link - 1])
+                            {
+                                found += 1;
+                                const bool run = link - 1 < alone->node_capacity && alone->counts[link - 1] != 0;
+                                ran += run;
+                                root = run ? link - 1 : root;
+                            }
+                            const bool one = ran == 1;
+                            const bool tokened = one && root < fronted->node_capacity && fronted->alone_root_tokens[root] == control->token;
+                            shadow->alone_pair_controls[slot] += 1;
+                            shadow->alone_pair_one[slot] += one;
+                            shadow->alone_pair_none[slot] += ran == 0;
+                            shadow->alone_pair_several[slot] += ran > 1;
+                            shadow->alone_pair_token[slot] += tokened;
+                            shadow->alone_pair_claimed += ran;
+                            if ((!one || !tokened) && verdict == BUSTER_NODE_ALONE_BODY_WHOLE && shadow->alone_pair_listed < node_census_list)
+                            {
+                                shadow->alone_pair_listed += 1;
+                                printf("node-shadow: alone a control of a whole body without its one root file=%s line=%u kind=%u roots=%u ran=%u its-token=%u the-control's=%u\n", s->file,
+                                       node_census_line(s->pp, program->parser, control->token), (unsigned)kind, found, ran,
+                                       root < fronted->node_capacity ? fronted->alone_root_tokens[root] : BUSTER_CHECK_NONE, control->token);
+                            }
+                        }
+                    }
+                }
+                for (uint32_t token = body->opening; token < closing && token < token_count; token += 1)
+                {
+                    for (uint32_t link = fronted->alone_roots[token]; link != 0; link = fronted->alone_chains[link - 1])
+                    {
+                        shadow->alone_pair_roots += link - 1 < alone->node_capacity && alone->counts[link - 1] != 0;
+                    }
+                }
+            }
             const bool unscanned = verdict == BUSTER_NODE_ALONE_BODY_LEFT && fronted->alone_body_scanned[low] == 0;
             const bool misscanned = verdict != BUSTER_NODE_ALONE_BODY_LEFT && fronted->alone_body_scanned[low] != 0;
             if ((unscanned || misscanned) && shadow->alone_scans_listed < node_census_list)
