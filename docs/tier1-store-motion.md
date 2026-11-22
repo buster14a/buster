@@ -125,9 +125,12 @@ instructions inside the loop (the lowering makes a `symbol_addr` at each
 access, and a field's `inttoptr`, `address`, `ptrtoint` chain) are copied into
 the preheader; those outside it dominate the preheader, since they dominate an
 access in the loop and aren't in it. The result is a new view of the function
-with new instruction columns, block offsets, extra slices, calls and slots,
-which borrows the input's other tables; the input isn't changed. A function
-nothing moves in is returned as it was given, with nothing written.
+with new instruction columns, block offsets, extra words, calls and slots,
+which borrows the input's other tables; the input isn't changed. The input's
+extra words keep their places in the new array, where a switch's and an
+indirect branch's lists are read, and the phis', calls' and extra values'
+operands get slices after them. A function nothing moves in is returned as it
+was given, with nothing written.
 
 Promotion checks the result as it does any input that isn't known verified
 (`c_check_tier1.c`). A result it refuses or finds past its limits is dropped
@@ -180,7 +183,7 @@ callee's, by the guard the loop vectorizer uses
 
 ## Data-parallel parts
 
-Two scans read every instruction, and both are vector code:
+The parts that read every instruction are vector code:
 
 - **The symbols' filter** (`ir_store_motion_symbols`): the `symbol_addr`s found
   64 opcodes at a time, each one's symbol looked up in the list. A function
@@ -190,13 +193,21 @@ Two scans read every instruction, and both are vector code:
   table's `vpermi2b` lookup, an observable access a barrier by its flags, and
   the plain accesses' and the barriers' indices compressed into two lists
   (`vpcompressd`), 64 instructions at a time.
+- **The rewrite** (`ir_store_motion_rewrite`), for a function that changed.
+  The instructions an added one comes beside are few: the preheaders'
+  terminators and the taken keys' stores. Between two of them the input's
+  instructions move by one distance, so each such run's new indices are
+  filled 16 at a step, and its columns copied and its operands remapped by
+  the unroller's remap (`ir_unroll_remap`: a gather through the index map, 16
+  instructions at a step). The operands the extra array holds (a phi's, a
+  call's, an instruction's extra values) are remapped an instruction at a
+  time, as the unroller's are (`ir_unroll_extras`).
 
 A function with no store to a listed symbol's constant offset builds no CFG.
-What follows reads the lists and is scalar: the addresses' chains (dependent
-walks of a few steps; [#2718's guide](ir-memory-value-numbering.md#simd-what-pays)
+What reads the lists is scalar: the addresses' chains (dependent walks of a
+few steps; [#2718's guide](ir-memory-value-numbering.md#simd-what-pays)
 measured a gathered version of the same walk at 3.5 times the scalar one's
-time), a loop's keys (its accesses of listed symbols, a few), and the rewrite
-of a function that changed.
+time) and a loop's keys (its accesses of listed symbols, a few).
 
 ## What it leaves
 

@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Loop store motion (#3309). Include after ir.c and dominators.c. A loop that updates a global keeps it in memory: each
-// iteration loads what the last one stored, so the loop runs at the store's forwarding latency, whatever its arithmetic
-// costs (`g_a += i; g_b ^= g_a;` took 5.8 cycles an iteration by either tier). This pass runs on the lowered function,
-// before SSA promotion, and gives each such global's bytes (a key: a symbol, a constant offset and a scalar type) a
-// private stack slot of the function for the loop:
+// Loop store motion (#3309). Include after ir.c, dominators.c and ir_optimize_unroll.c.
+//
+// A loop that updates a global keeps it in memory: each iteration loads what the last one stored, so the loop runs at
+// the store's forwarding latency, whatever its arithmetic costs (`g_a += i; g_b ^= g_a;` took 5.8 cycles an iteration
+// by either tier). This pass runs on the lowered function, before SSA promotion, and gives each such global's bytes (a
+// key: a symbol, a constant offset and a scalar type) a private stack slot of the function for the loop:
 // - the loop's preheader loads the key and stores the value in the slot;
 // - each of the loop's loads of the key reads the slot instead;
 // - each of the loop's stores of the key stays as it is, and the value is stored in the slot too.
@@ -41,7 +42,9 @@
 // symbol go after one pass over its opcodes, and the classification, which compresses the loads, stores and barriers
 // into lists 64 instructions at a time. A function with no store to a listed symbol builds no CFG. What follows reads
 // the lists: the addresses' chains (dependent walks of a few steps, as ir_optimize_memory.c's, whose guide has the
-// measurement), the loops' keys (a loop's accesses of listed symbols, few) and the rewrite of a function that changed.
+// measurement) and the loops' keys (a loop's accesses of listed symbols, few). The rewrite of a function that changed
+// copies its instructions and remaps their operands 16 at a step, by the unroller's remap (ir_unroll_remap), in the
+// runs between the few instructions an added one comes beside.
 //
 // Entry point: ir_store_motion. The input is never mutated. A function nothing moves in is returned as it was given
 // (IrStoreMotionResult.changed false, its function the input's, nothing written to the output). A changed result borrows
@@ -688,21 +691,70 @@ static IrError ir_store_motion_loops(IrStoreMotionWork* work, Arena* scratch)
     return ok ? IR_OK : IR_ERROR_MEMORY;
 }
 
+// map[first..end) = first + delta, ..., end - 1 + delta: a run of instructions that no added instruction parts moves by
+// one distance, 16 indices at a time.
+static void ir_store_motion_run(uint32_t* map, uint32_t first, uint32_t end, uint32_t delta)
+{
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    for (uint64_t at = first; at < end; at += 16)
+    {
+        const uint64_t count = end - at < 16 ? end - at : 16;
+        const __mmask16 active = (__mmask16)((UINT32_C(1) << count) - 1);
+        _mm512_mask_storeu_epi32(map + at, active, _mm512_add_epi32(_mm512_set1_epi32((int)((uint32_t)at + delta)), lanes));
+    }
+}
+
+// How many of `f`'s instructions are calls: 64 opcodes at a time.
+static uint64_t ir_store_motion_calls(const IrFunction* f)
+{
+    const uint32_t n = f->instruction_count;
+    uint64_t calls = 0;
+    for (uint64_t first = 0; first < n; first += 64)
+    {
+        const uint64_t count = n - first < 64 ? n - first : 64;
+        const __mmask64 valid = count == 64 ? ~UINT64_C(0) : (UINT64_C(1) << count) - 1;
+        const __m512i op = _mm512_maskz_loadu_epi8(valid, f->op + first);
+        const __mmask64 direct = _mm512_mask_cmpeq_epi8_mask(valid, op, _mm512_set1_epi8(IR_CALL));
+        const __mmask64 indirect = _mm512_mask_cmpeq_epi8_mask(valid, op, _mm512_set1_epi8(IR_CALL_INDIRECT));
+        calls += (uint64_t)__builtin_popcountll(direct | indirect);
+    }
+    return calls;
+}
+
+// Instructions [first, end) of `f`, which keep their order and move by one distance, into the view at map[first]: their
+// columns and fixed operands 16 at a step (ir_unroll_remap), and their phis', calls' and extra values' operands in new
+// slices of the extra array (ir_unroll_extras).
+static void ir_store_motion_copy(IrUnrollEmit* emit, const IrFunction* f, uint32_t first, uint32_t end, const uint32_t* map)
+{
+    if (end > first)
+    {
+        ir_unroll_remap(f, first, end - first, map, emit->view, map[first]);
+        ir_unroll_extras(emit, f, first, end, map[first], map, NULL);
+    }
+}
+
 // The function with the moves made: a private view that borrows the input's immutable tables, with new instruction
-// columns, block offsets, extra slices, calls and slots in `output`. Every instruction keeps its order; the preheaders'
-// instructions come before their terminators, and a slot's store after the store whose value it takes.
+// columns, block offsets, extra words, calls and slots in `output`. Every instruction keeps its order; the preheaders'
+// instructions come before their terminators, and a slot's store after the store whose value it takes. The instructions
+// an added one comes before or after are few (a bit each in `marks`). Between two of them the input's instructions move
+// by one distance: their new indices are filled a run at a time (ir_store_motion_run), and so are their columns copied
+// and their operands remapped (ir_store_motion_copy). The input's extra words keep their places, where a switch's and an
+// indirect branch's lists are read.
 static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, Arena* scratch, IrFunction* result)
 {
     const IrFunction* f = work->function;
     const uint32_t n = f->instruction_count;
     const uint64_t mark = output->length;
+    const uint64_t words = ((uint64_t)n + 63) / 64;
     bool ok = true;
-    // By instruction: the instructions put before it and after it, its new index, and (a chain's) its preheader's copy.
+    // By instruction: the instructions put before it and after it, how many of those before it are placed, its new
+    // index, and (a chain's) its preheader's copy; and a bit where an instruction is put before it or after it.
     uint32_t* before = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
     uint32_t* after = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
     uint32_t* used = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
     uint32_t* map = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
     uint32_t* copies = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+    uint64_t* marks = ir_allocate(scratch, words, sizeof(uint64_t), &ok);
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     uint64_t extras = 0;
     uint64_t calls = 0;
@@ -712,39 +764,35 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
         memset(copies, 0xff, (uint64_t)n * sizeof(uint32_t));
         for (uint32_t m = 0; m < work->move_count; m += 1)
         {
-            before[work->moves[m].terminator] += work->moves[m].chain_count + 3;
+            const uint32_t i = work->moves[m].terminator;
+            before[i] += work->moves[m].chain_count + 3;
+            marks[i / 64] |= UINT64_C(1) << (i % 64);
         }
         for (uint32_t k = 0; k < work->access_count; k += 1)
         {
-            after[work->accesses[k]] = work->owners[k] != 0 && f->op[work->accesses[k]] == IR_STORE ? 1u : 0u;
+            const uint32_t i = work->accesses[k];
+            if (work->owners[k] != 0 && f->op[i] == IR_STORE)
+            {
+                after[i] = 1;
+                marks[i / 64] |= UINT64_C(1) << (i % 64);
+            }
         }
-        for (uint32_t i = 0; i < n; i += 1)
+        uint32_t first = 0;
+        for (uint64_t word = 0; word < words; word += 1)
         {
-            total += before[i];
-            map[i] = (uint32_t)(total - n + i);
-            total += after[i];
-            if (f->op[i] == IR_PHI)
+            for (uint64_t bits = marks[word]; bits != 0; bits &= bits - 1)
             {
-                extras += (uint64_t)f->b[i] * 2;
-            }
-            else if (f->op[i] == IR_SWITCH)
-            {
-                extras += (uint64_t)f->c[i] * 2 + 1;
-            }
-            else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
-            {
-                extras += f->c[i];
-            }
-            else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
-            {
-                extras += f->calls[f->b[i]].argument_count;
-                calls += 1;
-            }
-            else
-            {
-                extras += ir_extra_value_count(f, i);
+                const uint32_t i = (uint32_t)(word * 64) + (uint32_t)__builtin_ctzll(bits);
+                ir_store_motion_run(map, first, i, (uint32_t)(total - n));
+                total += before[i];
+                map[i] = (uint32_t)(total - n) + i;
+                total += after[i];
+                first = i + 1;
             }
         }
+        ir_store_motion_run(map, first, n, (uint32_t)(total - n));
+        extras = (uint64_t)f->extra_count + ir_unroll_extra_words(f, 0, n);
+        calls = ir_store_motion_calls(f);
         if (total > UINT32_MAX || extras > UINT32_MAX || (uint64_t)f->slot_count + work->move_count > UINT32_MAX)
         {
             error = IR_ERROR_LIMIT;
@@ -783,12 +831,38 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
         {
             memcpy(view.slots, f->slots, (uint64_t)f->slot_count * sizeof(IrSlot));
         }
+        if (f->extra_count != 0)
+        {
+            memcpy(view.extra, f->extra, (uint64_t)f->extra_count * sizeof(uint32_t));
+        }
         for (uint32_t b = 0; b < f->block_count; b += 1)
         {
             const uint32_t first = f->block_offsets[b];
             view.block_offsets[b] = map[first] - before[first];
         }
         view.block_offsets[f->block_count] = (uint32_t)total;
+        // The input's instructions, a run at a time: one ends before an instruction that others are put before, and with
+        // one that another is put after.
+        IrUnrollEmit emit = { .view = &view, .extra = f->extra_count };
+        uint32_t first = 0;
+        for (uint64_t word = 0; word < words; word += 1)
+        {
+            for (uint64_t bits = marks[word]; bits != 0; bits &= bits - 1)
+            {
+                const uint32_t i = (uint32_t)(word * 64) + (uint32_t)__builtin_ctzll(bits);
+                if (before[i] != 0)
+                {
+                    ir_store_motion_copy(&emit, f, first, i, map);
+                    first = i;
+                }
+                if (after[i] != 0)
+                {
+                    ir_store_motion_copy(&emit, f, first, i + 1, map);
+                    first = i + 1;
+                }
+            }
+        }
+        ir_store_motion_copy(&emit, f, first, n, map);
         // Each move's preheader instructions: the chain's copies, the load, the slot's address and the slot's store.
         for (uint32_t m = 0; m < work->move_count; m += 1)
         {
@@ -834,68 +908,13 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
             view.b[load + 2] = load;
         }
         ir_debug_remap(f, &view, map, NULL, NULL);
-        uint32_t extra = 0;
-        uint32_t call = 0;
-        uint32_t k = 0;
-        for (uint32_t i = 0; i < n; i += 1)
+        // The taken keys' accesses: a load reads the slot; a store's value goes to the slot too, after it.
+        for (uint32_t k = 0; k < work->access_count; k += 1)
         {
-            const uint32_t out = map[i];
-            const uint32_t mask = ir_value_mask(f, i);
-            view.op[out] = f->op[i];
-            view.type[out] = f->type[i];
-            view.flags[out] = f->flags[i];
-            view.alignment_log2[out] = f->alignment_log2[i];
-            view.a[out] = (mask & 1) != 0 ? map[f->a[i]] : f->a[i];
-            view.b[out] = (mask & 2) != 0 ? map[f->b[i]] : f->b[i];
-            view.c[out] = (mask & 4) != 0 ? map[f->c[i]] : f->c[i];
-            if (f->op[i] == IR_PHI)
+            if (work->owners[k] != 0)
             {
-                view.a[out] = extra;
-                for (uint32_t incoming = 0; incoming < f->b[i]; incoming += 1)
-                {
-                    view.extra[extra++] = f->extra[f->a[i] + incoming * 2];
-                    view.extra[extra++] = map[f->extra[f->a[i] + incoming * 2 + 1]];
-                }
-            }
-            else if (f->op[i] == IR_SWITCH)
-            {
-                view.b[out] = extra;
-                const uint64_t switch_words = (uint64_t)f->c[i] * 2 + 1;
-                memcpy(view.extra + extra, f->extra + f->b[i], switch_words * 4);
-                extra += (uint32_t)switch_words;
-            }
-            else if (f->op[i] == IR_BR_INDIRECT && f->b[i] != BUSTER_IR_NONE)
-            {
-                view.b[out] = extra;
-                memcpy(view.extra + extra, f->extra + f->b[i], (uint64_t)f->c[i] * 4);
-                extra += f->c[i];
-            }
-            else if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
-            {
-                view.b[out] = call;
-                view.calls[call] = f->calls[f->b[i]];
-                view.calls[call].argument_first = extra;
-                for (uint32_t argument = 0; argument < view.calls[call].argument_count; argument += 1)
-                {
-                    view.extra[extra++] = map[f->extra[f->calls[f->b[i]].argument_first + argument]];
-                }
-                call += 1;
-            }
-            else if (ir_extra_value_count(f, i) != 0)
-            {
-                view.c[out] = ir_intrinsic_ternary_c(f->c[i], extra);
-                for (uint32_t value = 0, extra_values = ir_extra_value_count(f, i); value < extra_values; value += 1)
-                {
-                    view.extra[extra++] = map[ir_extra_value(f, i, value)];
-                }
-            }
-            // A taken key's access: a load reads the slot; a store's value goes to the slot too, after it.
-            while (k < work->access_count && work->accesses[k] < i)
-            {
-                k += 1;
-            }
-            if (k < work->access_count && work->accesses[k] == i && work->owners[k] != 0)
-            {
+                const uint32_t i = work->accesses[k];
+                const uint32_t out = map[i];
                 const IrStoreMotionMove* move = &work->moves[work->owners[k] - 1];
                 const uint32_t slot_address = move->position + move->chain_count + 1;
                 const uint8_t slot_alignment = (uint8_t)__builtin_ctz(ir_store_motion_bytes(move->type));

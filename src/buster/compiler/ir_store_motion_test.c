@@ -27,7 +27,7 @@
 #define BUSTER_IR_STORE_MOTION_TEST_CALLEE 9u
 #define BUSTER_IR_STORE_MOTION_TEST_BUFFER_SYMBOL 10u
 #define BUSTER_IR_STORE_MOTION_TEST_MUTANTS 6u
-#define BUSTER_IR_STORE_MOTION_TEST_DIGEST UINT64_C(0x864d31ed771649b7)
+#define BUSTER_IR_STORE_MOTION_TEST_DIGEST UINT64_C(0x201413c5e9423416)
 
 // The options' list: the bytes of the test's distinct objects, by symbol.
 static const uint32_t ir_store_motion_test_bytes[BUSTER_IR_STORE_MOTION_TEST_SYMBOLS] = { 0, 8, 8, 64, 0, 0, 4, 16 };
