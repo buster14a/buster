@@ -453,18 +453,6 @@ struct PPOptions
     uint32_t caret_lines;
     // -dM: -E prints the macros defined at the end (pp_print_macros) instead of the tokens.
     bool dump_macros;
-    // -dD and -dI (#1380): -E also prints each #define and #undef where it runs, and each #include-like directive before
-    // what it includes, as clang's printer's callbacks do (PPOutputEvent). -dM overrides them, as it does in clang.
-    bool dump_defines;
-    bool dump_includes;
-    // -C and -CC (#1380), -E's alone: the files' comments are tokens (C_TOKEN_UNKNOWN tokens whose first byte is '/',
-    // pp_comment_token) outside the directives' lines, as clang's lexer returns them; -CC keeps them in #define's
-    // replacement lists and in macros' arguments too, which -C drops (PPOptions.keep_macro_comments implies
-    // keep_comments).
-    bool keep_comments;
-    bool keep_macro_comments;
-    // How many -dN options the command line has: clang's driver takes them and reports each as unused.
-    uint32_t unused_dn_count;
     // -H (#1380): each header the unit enters, as clang prints it (pp_show_include). It records the history as the
     // unit runs (no defer_history), so that the headers' lines and the diagnostics come out in the order clang's do.
     bool show_includes;
@@ -494,11 +482,25 @@ struct PPOptions
     // The bytes of the windows a large file is lexed and refined in (pp_prepare_windows): 0 for BUSTER_PP_WINDOW_BYTES.
     // Tests make them small, so that small files take the windows too.
     uint32_t window_bytes;
+    // How many -dN options the command line has: clang's driver takes them and reports each as unused (#1380). It and
+    // the output modes' flags below fill what were holes and padding, so that the other fields keep their places, which
+    // -E's default runs read (#2925).
+    uint32_t unused_dn_count;
     // Null means stderr. Tests use a memory stream for the same renderer as the command line.
     FILE* diagnostics;
     // Source checking collects complete groups before applying the publication budget in expansion order. Other
     // consumers keep immediate publication. Storage is taken only when a visible diagnostic is collected.
     bool collect_diagnostics;
+    // -dD and -dI (#1380): -E also prints each #define and #undef where it runs, and each #include-like directive before
+    // what it includes, as clang's printer's callbacks do (PPOutputEvent). -dM overrides them, as it does in clang.
+    bool dump_defines;
+    bool dump_includes;
+    // -C and -CC (#1380), -E's alone: the files' comments are tokens (C_TOKEN_UNKNOWN tokens whose first byte is '/',
+    // pp_comment_token) outside the directives' lines, as clang's lexer returns them; -CC keeps them in #define's
+    // replacement lists and in macros' arguments too, which -C drops (PPOptions.keep_macro_comments implies
+    // keep_comments).
+    bool keep_comments;
+    bool keep_macro_comments;
 };
 
 // Is '$' punctuation with these options (PPDollars)? The lexer takes it into identifiers and pp-numbers, and
@@ -871,11 +873,11 @@ struct PPPrepare
     uint32_t refine_flags;
     uint64_t split_kinds;
     bool dollar_punctuation;
-    uint32_t window_bytes;
     // -C's and -CC's comments as tokens (PPOptions.keep_comments): 0 none, 1 outside the directives' lines (-C), 2 in
     // #define's replacement lists too (-CC). Files prepared so are prepared whole by the scalar lexer
     // (C_TOKENIZER_KEEP_COMMENTS), as for C_TOKENIZER_NO_DOLLARS (pp_drop_directive_comments).
     uint8_t comments;
+    uint32_t window_bytes;
 };
 
 struct FileCache
@@ -1698,12 +1700,10 @@ struct Preprocessor
     // #embed's tokens that come before any other output start a line (pp_embed_line).
     uint32_t file_change_token;
     uint32_t file_change_location;
+    // How many include exits there are (#1380: -dD's and -dI's directives go after those recorded before them).
+    uint32_t include_exit_count;
     PPIncludeExit* include_exits;
     PPIncludeExit* last_include_exit;
-    uint32_t include_exit_count;
-    // -dD's and -dI's directives, in order (PPOutputEvent).
-    PPOutputEvent* output_events;
-    PPOutputEvent* last_output_event;
     PPExpansion* history;
     uint32_t history_count;
     uint32_t history_capacity;
@@ -1902,6 +1902,10 @@ struct Preprocessor
     // The output kind of each identifier id below BUSTER_PP_KEYWORD_TABLE: its keyword's in this language mode, or an
     // identifier's.
     uint8_t keyword_kinds[BUSTER_PP_KEYWORD_TABLE] __attribute__((aligned(64)));
+    // -dD's and -dI's directives, in order (PPOutputEvent, #1380), at the end, where they move no field -E's default
+    // runs read (#2925).
+    PPOutputEvent* output_events;
+    PPOutputEvent* last_output_event;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2148,15 +2152,22 @@ static uint32_t pp_remove_splices(const uint8_t* bytes, uint32_t length, uint32_
 
 // `length` bytes of a token of kind `kind` without the line splices in them (pp_remove_splices), unless they are a
 // clean scratch spelling (in its arena: pp_scratch_clean), which is final and is the bytes themselves.
+// Whether a token whose bytes are [bytes, bytes + length) is a comment (-C, -CC) spelled as written, splices and
+// trigraphs and all, as clang's lexer skips one without marking it for cleaning (Lexer::SkipBlockComment,
+// SkipLineComment), but where a splice splits its opener or, in a `//` one, escapes a newline (any line break in it is
+// one), which clang's lexer reads by getAndAdvanceChar, which marks it. Out of line, so that pp_without_splices, which
+// -E's default runs inline, only tests the option (#2925).
+static __attribute__((noinline, cold)) bool pp_comment_as_written(uint8_t kind, const uint8_t* bytes, uint32_t length)
+{
+    return kind == C_TOKEN_UNKNOWN && length >= 2 && bytes[0] == '/' &&
+           (bytes[1] == '*' || (bytes[1] == '/' && memchr(bytes, '\n', length) == 0 && memchr(bytes, '\r', length) == 0));
+}
+
 static uint32_t pp_without_splices(const Preprocessor* pp, uint8_t kind, const uint8_t* bytes, uint32_t length, uint8_t* buffer, const uint8_t** spelling)
 {
     const Arena* clean = &pp->scratch[1];
-    // A comment (-C, -CC) is spelled as written, splices and trigraphs and all, as clang's lexer skips one without marking
-    // it for cleaning (Lexer::SkipBlockComment, SkipLineComment), but where a splice splits its opener or, in a `//` one,
-    // escapes a newline (any line break in it is one), which clang's lexer reads by getAndAdvanceChar, which marks it.
-    const bool comment = kind == C_TOKEN_UNKNOWN && length >= 2 && bytes[0] == '/' &&
-                         (bytes[1] == '*' || (bytes[1] == '/' && memchr(bytes, '\n', length) == 0 && memchr(bytes, '\r', length) == 0));
-    const bool final = comment || (bytes >= clean->base && bytes < clean->base + clean->capacity);
+    // A comment's spelling is as written (pp_comment_as_written); comments are tokens with -C and -CC alone.
+    const bool final = (bytes >= clean->base && bytes < clean->base + clean->capacity) || (BUSTER_UNLIKELY(pp->options.keep_comments) && pp_comment_as_written(kind, bytes, length));
     uint32_t result = length;
     *spelling = bytes;
     if (!final)
@@ -2725,16 +2736,22 @@ BUSTER_INLINE bool pp_line_comment_spelling(const uint8_t* spelling, uint32_t le
     return length >= 2 && spelling[0] == '/' && spelling[1] == '/';
 }
 
+// The comments among the tokens in [begin, end) of a file whose comments are tokens (-C, -CC: PPFileData.comments).
+static __attribute__((noinline, cold)) uint32_t pp_guard_comments(const PPFileData* data, uint32_t begin, uint32_t end)
+{
+    uint32_t result = 0;
+    for (uint32_t t = begin; t < end; t += 1)
+    {
+        result += pp_comment_token(data->bytes, data->kinds[t], data->starts[t]);
+    }
+    return result;
+}
+
 // The tokens in [begin, end) of a file that count for its include guard (pp_find_guard): all of them, but a file's
 // comments when they are tokens (-C, -CC: PPFileData.comments), which clang's multiple-include optimization doesn't count.
 static uint32_t pp_guard_tokens(const PPFileData* data, uint32_t begin, uint32_t end)
 {
-    uint32_t result = end - begin;
-    for (uint32_t t = begin; data->comments && t < end; t += 1)
-    {
-        result -= pp_comment_token(data->bytes, data->kinds[t], data->starts[t]);
-    }
-    return result;
+    return end - begin - (BUSTER_UNLIKELY(data->comments) ? pp_guard_comments(data, begin, end) : 0);
 }
 
 // The include guard of a prepared file, or 0, as clang's multiple-include optimization finds one: the file is null
@@ -3034,7 +3051,7 @@ BUSTER_INLINE bool pp_is_unterminated_comment(const uint8_t* bytes, uint8_t kind
 // Whether the comment token [start, end) of a text lexed with C_TOKENIZER_KEEP_COMMENTS is closed: a `//` comment, or a
 // block comment whose "*/" the lexer read (by get_char, so that a line splice or a trigraph may split it), which the
 // unterminated one, running to the text's end, lacks. Only a text's last token needs asking.
-static bool pp_comment_closed(const uint8_t* bytes, uint32_t start, uint32_t end, uint32_t refine_flags)
+static __attribute__((noinline, cold)) bool pp_comment_closed(const uint8_t* bytes, uint32_t start, uint32_t end, uint32_t refine_flags)
 {
     const ScalarLexer lexer = {
         .source = bytes,
@@ -3492,8 +3509,8 @@ static bool pp_record_named_ucns(const PPPrepare* prepare, Arena* arena, PPFileD
 // ends it). A token after a dropped comment keeps its gap, which refinement reads as whitespace, as a comment is
 // elsewhere. A comment before a '#' on its line took the line's start, so that '#' starts no directive, as with clang's
 // -C. Returns the tokens kept, moved down in place. The scalar walk is -E's opt-in output mode's, never a compile's.
-static uint32_t pp_drop_directive_comments(const PPPrepare* prepare, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
-                                           uint32_t count)
+static __attribute__((noinline, cold)) uint32_t pp_drop_directive_comments(const PPPrepare* prepare, const uint8_t* bytes, uint32_t length, uint8_t* kinds, uint32_t* starts, uint32_t* ends,
+                                                                               uint32_t count)
 {
     // Where a token is: outside the directives' lines, a directive's name next (after its '#'), a macro's name next (after
     // "define"), past that name, among the parameters, in the replacement list, or elsewhere in a directive's line.
@@ -6750,12 +6767,12 @@ struct PPMarkers
     uint8_t system;
     bool keep_line;
     uint32_t root;
+    // The include exits printed so far, which -dD's and -dI's directives count (pp_print_events), in what was a hole.
+    uint32_t exits_printed;
     uint32_t* cursors;
     uint32_t expansion;
     uint32_t token;
     const PPIncludeExit* include_exit;
-    uint32_t exits_printed;
-    const PPOutputEvent* output_event;
     Arena* arena;
     char* text;
     uint64_t length;

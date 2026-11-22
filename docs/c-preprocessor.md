@@ -1655,6 +1655,21 @@ replacement list's `//` comment as a block comment: the rarest of these modes.
 an include exit does, and `pp_print_events` prints it through stdio before the
 token it precedes.
 
+**The default path does none of this** (#2925). `pp_print` gives these modes
+an instance of the loop of their own (`pp_print_modes`, its `modes`
+argument), so that `-E`'s default instances test none of them. In those
+instances the `-CC` mask, the line starts after `//` comments and the
+directives' tests had cost `-E -P`'s printing of `main.c` 3.8% on the 9700X.
+The helpers that the default instances inline are `BUSTER_INLINE`, since the
+second caller made the compiler call some of them out of line instead, which
+cost the printing with line markers 1.6%. Elsewhere the modes' work is out of
+line, behind a test of the option: `pp_collect_step` (`pp_argument_comment`),
+`pp_paste` (`pp_paste_comments`), `pp_without_splices`
+(`pp_comment_as_written`), the include guard (`pp_guard_comments`) and
+preparation (`pp_drop_directive_comments`, `pp_comment_closed`). The options'
+and the preprocessor's new fields sit in what were holes, or at the end,
+so that the other fields keep their offsets.
+
 **Cost** (the 9700X, CPU 2, the frozen `sqlite3.c` with its pinned headers; [the
 record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/e-output-modes-1380-2026-11-17),
 buster-performance `59c2b612`). Without these options a run is main's: `-E -P`,
