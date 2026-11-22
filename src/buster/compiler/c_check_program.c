@@ -1279,17 +1279,17 @@ static bool check_program_branch_cast(const CheckProgram* program, uint32_t node
     return !unproved;
 }
 
-// A branch condition's truth as clang's CFG builder prunes its edges (#1447, CFGBuilder::tryEvaluateBool, whose
-// EvaluateAsBooleanCondition ignores side effects), which the -Wreturn-type walk and the runtime warnings' reachability
-// (check_common_body_reached) model: a known value's (check_program_runtime_truth), and a logical operator's that one
-// operand decides though the other isn't known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right,
-// or both together, through the condition's own node, conversions, casts and `!`. A conversion keeps the truth of the
+// An expression's truth as clang's evaluator folds a condition (#1447, EvaluateAsBooleanCondition, which ignores side
+// effects), the part of clang's CFG builder's branch pruning that reads values (c_check_program_cfg.c has the rest): a
+// known value's (check_program_runtime_truth), and a logical operator's that one operand decides though the other isn't
+// known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right, or both together, through the
+// expression's own node, conversions, casts and `!`. A conversion keeps the truth of the
 // 0 or 1 such an operator gives, the one value it isn't already known for. A post-order walk on an explicit stack (the
 // call graph's no-recursion rule), BUSTER_CHECK_BRANCH_TRUTH_DEPTH operands deep at most: each frame's node, its depth and
 // whether its operands are pushed, and each value 0 (false), 1 (true) or 2 (unknown), the left operand's first.
 #define BUSTER_CHECK_BRANCH_TRUTH_DEPTH 64u
 #define BUSTER_CHECK_BRANCH_TRUTH_FRAMES (2u * BUSTER_CHECK_BRANCH_TRUTH_DEPTH + 2u)
-static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
+static bool check_program_fold_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
     uint32_t frames[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
@@ -1363,6 +1363,8 @@ static bool check_program_branch_truth(const CheckProgram* program, uint32_t nod
     *truth = values[0] == 1u;
     return values[0] != 2u;
 }
+
+#include "c_check_program_cfg.c"
 
 // A switch's controlling type: an integer type, of up to 128 bits (check_action_integer_type) or a _BitInt past them
 // (#2220, check_wide_type).

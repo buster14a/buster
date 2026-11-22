@@ -6873,7 +6873,7 @@ warnings:
 | --- | --- | --- |
 | `check_program_references`, every body | the static objects its leaves name, a set | **the side record: its references** |
 | the return flow (`check_program_return_facts`; `-Wreturn-type` is on by default) | each call's callee, joined up the tree | **the side record: its root's fact** |
-| `check_program_branch_truth` (the return flow, the warnings' reach) | a branch's condition's truth, through `!`, casts and the operands of `&&` and `\|\|` | its value's: the window lists a logical operator decided by its second operand |
+| `check_program_branch_truth` (the return flow, the warnings' reach) | a branch's condition's truth, through `!`, casts and the operands of `&&` and `\|\|`, and clang's CFG heuristics' (#2990: `x * 0`, `x \| 1`, `(x & 8) == 4`, `x == 1 && x == 2`, `x && !x`) | its value's: the window lists a logical operator decided by its second operand, not yet a heuristic's |
 | the controls' fold (`check_control_fold_truth`) | the root's constant, and below it where it is one | its value's: a taken constant folds |
 | `-Wswitch` | the selector's type before the switch promotes it | its operand's window type, kept after the references |
 | the initializer planner (`check_initializers_run_events`) | the greatest node of the source's tokens' | the flip's: the summary node is its tokens' |
