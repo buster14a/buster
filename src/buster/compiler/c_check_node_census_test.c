@@ -1586,6 +1586,111 @@ static bool node_shadow_test_fixture(const char* directory, bool scalar, uint8_t
     return valid && same;
 }
 
+// The machine with no node of the walk's (c_check_node_machine_alone.c; docs/node-machine.md, "The machine with no node
+// of the walk's"): its fixture, read with `options`. Each body is read before the walk acts at it, by a front and a graph
+// of this piece's own, and every root's results must be the ones the machine makes of the walk's nodes after it.
+// - Whole bodies: arithmetic and a branch; calls, a logical operator and a loop, whose condition's root is made at the
+//   loop's closing token, after its body; three declarators' initializers and their discards at one `;`; a string.
+// - A bit-field, which the tests refuse; a `sizeof`, which the front leaves, so its statement has no root; a character
+//   constant with an escape under a label, which the front leaves and which loses no root.
+// - A braced initializer, whose elements are roots of the lowering's and none of the front's; a block's static table,
+//   whose values are roots of the front's that the lowering never pops.
+// - The walk's own warnings, each at a literal or a token the front leaves, so that no root is taken before one: a
+//   floating constant out of range, a character constant of several characters, `_Alignof` of an expression.
+// - A body of 400 statements under a loop: its tokens are several chunks of the postorder, the loop's condition waits
+//   through all of them, and its root is typed with its operand's records, which the graph still holds.
+// - A table of 4,200 elements, more values than the front's stack keeps: the front loses its waiting values, once, and
+//   the body's verdict says so.
+// `expected`: the bodies it reads, the roots it and the walk's nodes' machine both run on, and its verdicts of the bodies.
+typedef struct NodeAloneExpected NodeAloneExpected;
+struct NodeAloneExpected
+{
+    uint32_t bodies;
+    uint32_t roots;
+    uint32_t verdicts[BUSTER_NODE_ALONE_BODY_VERDICTS];
+    uint32_t own;
+    uint32_t walk;
+    uint32_t statics;
+    uint32_t lost;
+};
+
+static bool node_alone_test_fixture(const char* directory, char** options, uint32_t option_count, const NodeAloneExpected* expected)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/alone.c", directory);
+    const uint32_t capacity = 1u << 18;
+    char* text = malloc(capacity);
+    uint32_t length = 0;
+    bool valid = text != NULL;
+    if (valid)
+    {
+        length += (uint32_t)snprintf(text + length, capacity - length,
+                                     "struct S { int a; unsigned b : 3; long c; };\nint g;\nint h(int);\n"
+                                     "static int plain(int x, int y) { int t = x * 2; if (y > 3) { t += y; } return t + g; }\n"
+                                     "static long calls(struct S* s, int n) { long r = h(n) + h(n + 1); while (n > 0 && s->a != n) { r += s->c; n -= 1; } return r; }\n"
+                                     "static int several(int x) { int a = x, b = a + 1, c = b * a; return a + b + c; }\n"
+                                     "static const char* text(int k) { const char* r = \"one\"; if (k) { r = \"two\"; } return r; }\n"
+                                     "static int field(struct S* s) { return s->b + 1; }\n"
+                                     "static int query(int* p) { int n = *p; n += (int)sizeof(*p); return n; }\n"
+                                     "static int label(int c) { switch (c) { case '\\n': return 2; default: return c + 3; } }\n"
+                                     "static int braces(int i) { int v[3] = { 1, i, 3 }; return v[0] + v[2]; }\n"
+                                     "static int statics(int i) { static const unsigned char table[4] = { 1, 2, 3, 4 }; return table[i & 3]; }\n"
+                                     "static double range(double d) { d = d + 1e999; return d; }\n"
+                                     "static int several_characters(int c) { c = c + 'ab'; return c; }\n"
+                                     "static int aligned(int c) { c = c + (int)_Alignof(c); return c; }\n"
+                                     "static int waits(int* a, int n)\n{\n    int x = 0;\n    while (x < n && a[0] != n)\n    {\n");
+        for (uint32_t statement = 0; statement < 400 && length + 96 < capacity; statement += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, "        x += a[%u] * 3 + h(x);\n", statement & 7);
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length, "    }\n    return x;\n}\nstatic int table(int a)\n{\n    int big[4200] = {\n");
+        for (uint32_t element = 0; element < 4199 && length + 16 < capacity; element += 1)
+        {
+            length += (uint32_t)snprintf(text + length, capacity - length, (element & 31) == 31 ? "a,\n" : "1, ");
+        }
+        length += (uint32_t)snprintf(text + length, capacity - length,
+                                     "1 };\n    return big[a & 1];\n}\n"
+                                     "int entry(struct S* s, int n)\n{\n    return plain(n, 2) + (int)calls(s, n) + several(n) + (text(n)[0] == 'o') + field(s) + query(&n) + label(n) + braces(n) +\n"
+                                     "           statics(n) + (int)range(1.0) + several_characters(n) + aligned(n) + waits(&n, n) + table(n);\n}\n");
+    }
+    valid = valid && length + 1 < capacity && parse_test_write(path, text, length);
+    NodeShadow shadow = {
+        .front = (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER),
+        .reader = (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE),
+        .passes = 0,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const bool same = valid && !node_shadow_differs(&shadow) && shadow.alone_differences == 0 && shadow.alone_walk_only == 0 && shadow.alone_own_only == 0 &&
+                      shadow.alone_events_after == 0 && shadow.alone_bodies_left == 0 && shadow.alone_bodies_unread == 0;
+    bool counts = shadow.alone_bodies == expected->bodies && shadow.alone_compared == expected->roots && shadow.alone_whole_own == expected->own &&
+                  shadow.alone_whole_walk == expected->walk && shadow.alone_whole_walk_static == expected->statics && shadow.alone_resets == expected->lost;
+    for (uint32_t verdict = 0; verdict < BUSTER_NODE_ALONE_BODY_VERDICTS; verdict += 1)
+    {
+        counts = counts && shadow.alone_verdicts[verdict] == expected->verdicts[verdict];
+    }
+    if (!same || !counts)
+    {
+        fprintf(stderr, "test-checker: node-alone: %s, %s: %" PRIu64 " bodies read (%u expected), %" PRIu64 " left, %" PRIu64 " not read; %" PRIu64 " roots compared (%u), %" PRIu64
+                " differ, %" PRIu64 " the walk's nodes' alone, %" PRIu64 " its own alone, %" PRIu64 " taken before an event of the walk's; verdicts: whole %" PRIu64 " (%u), a root lost %"
+                PRIu64 " (%u), not run %" PRIu64 " (%u), T %" PRIu64 " (%u), the tests %" PRIu64 " (%u), C or X %" PRIu64 " (%u), no room %" PRIu64 " (%u); whole for it alone %" PRIu64
+                " (%u), for the walk's nodes' alone %" PRIu64 " (%u), with a block's static %" PRIu64 " (%u); waiting values lost %" PRIu64 " times (%u)\n",
+                valid ? "read" : "NOT READ", same ? "nothing differs" : "SOMETHING DIFFERS", shadow.alone_bodies, expected->bodies, shadow.alone_bodies_left, shadow.alone_bodies_unread,
+                shadow.alone_compared, expected->roots, shadow.alone_differences, shadow.alone_walk_only, shadow.alone_own_only, shadow.alone_events_after,
+                shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_WHOLE], expected->verdicts[BUSTER_NODE_ALONE_BODY_WHOLE], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_LEFT],
+                expected->verdicts[BUSTER_NODE_ALONE_BODY_LEFT], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_UNRUN], expected->verdicts[BUSTER_NODE_ALONE_BODY_UNRUN],
+                shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_TYPE], expected->verdicts[BUSTER_NODE_ALONE_BODY_TYPE], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_TESTS],
+                expected->verdicts[BUSTER_NODE_ALONE_BODY_TESTS], shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_SWEEP], expected->verdicts[BUSTER_NODE_ALONE_BODY_SWEEP],
+                shadow.alone_verdicts[BUSTER_NODE_ALONE_BODY_ROOM], expected->verdicts[BUSTER_NODE_ALONE_BODY_ROOM], shadow.alone_whole_own, expected->own, shadow.alone_whole_walk,
+                expected->walk, shadow.alone_whole_walk_static, expected->statics, shadow.alone_resets, expected->lost);
+    }
+    free(text);
+    unlink(path);
+    return same && counts;
+}
+
 // The test whose name `name` (`length` bytes) is, or NODE_CENSUS_TESTS.
 static uint32_t node_census_test_named(const char* name, uint32_t length)
 {
@@ -7244,6 +7349,18 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-facts window: a cut call's arguments are not kept, and the list stays within its room");
     check_test_expect(test, ready && node_facts_test_window_again(directory, loud, BUSTER_ARRAY_LENGTH(loud)),
                       "node-facts window: a value cut at a chunk's end is not whole again where the rows have room later");
+    // The machine with no node of the walk's, a body at a time before the walk acts at it.
+    const NodeAloneExpected alone_expected = {
+        .bodies = 15,
+        .roots = 433,
+        .verdicts = { [BUSTER_NODE_ALONE_BODY_WHOLE] = 9, [BUSTER_NODE_ALONE_BODY_LEFT] = 5, [BUSTER_NODE_ALONE_BODY_TESTS] = 1 },
+        .own = 1,
+        .lost = 2,
+    };
+    check_test_expect(test, ready && node_alone_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), &alone_expected),
+                      "node-alone: the machine on the front's records alone, before the walk, makes every root's results the machine makes of the walk's nodes");
+    check_test_expect(test, ready && node_alone_test_fixture(directory, quiet, BUSTER_ARRAY_LENGTH(quiet), &alone_expected),
+                      "node-alone: the same with the default warnings");
     // The flat front beside the lean one, its twin: on the shadow's fixture, at the chunks' ends, where the lean front's
     // stack is full, and past its own rings' reach.
     const uint8_t flat = BUSTER_NODE_FRONT_AFTER | BUSTER_NODE_FRONT_LEAN | BUSTER_NODE_FRONT_FLAT;
