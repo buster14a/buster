@@ -2534,8 +2534,8 @@ static bool check_semantic_overload_before(const Parser* parser, const CheckInpu
     const CheckOverloadCandidate* second = candidates + right->candidate;
     const uint32_t first_pragma = check_input_symbol_overload_source(input, first);
     const uint32_t second_pragma = check_input_symbol_overload_source(input, second);
-    const uint32_t first_source = first_pragma != BUSTER_CHECK_NONE ? first_pragma : parser->tokens.sources[first->declaration];
-    const uint32_t second_source = second_pragma != BUSTER_CHECK_NONE ? second_pragma : parser->tokens.sources[second->declaration];
+    const uint32_t first_source = first_pragma != BUSTER_CHECK_NONE ? first_pragma : parse_source_index(&parser->tokens, first->declaration);
+    const uint32_t second_source = second_pragma != BUSTER_CHECK_NONE ? second_pragma : parse_source_index(&parser->tokens, second->declaration);
     const bool located = first_source < second_source;
     return left_arity != right_arity ? right_arity :
            !left_arity ? located :

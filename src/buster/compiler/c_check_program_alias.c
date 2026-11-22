@@ -117,15 +117,15 @@ static String8 check_program_alias_label(const CheckInput* input, uint32_t token
 // one where none has a label. The program keeps an object's last declaration, which need not be the labelled one (a
 // definition after `int f(void) __asm__("g");`). A diagnostic's rare path: one scan of the tokens with attributes, in a
 // unit with an asm keyword alone.
-static String8 check_program_object_label(const CheckProgram* program, uint32_t object, bool scalar)
+static String8 check_program_object_label(const CheckProgram* program, uint32_t object)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     String8 label = { 0 };
-    for (uint32_t first = object != 0 && input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count, scalar) : count;
-         label.length == 0 && first < count; first = check_input_attributed_next(input->attributes, first + 16, count, scalar))
+    for (uint32_t first = object != 0 && input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count) : count;
+         label.length == 0 && first < count; first = check_input_attributed_next(input->attributes, first + 16, count))
     {
-        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count, scalar);
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
         for (uint32_t selected = lanes; label.length == 0 && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
