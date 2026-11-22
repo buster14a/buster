@@ -2058,7 +2058,8 @@ static void ir_vectorize_tail_rows(IrVectorizeWork* work, IrVectorizeBuild* buil
             ir_vectorize_vector_row(work, build, loop, plan, i);
             if (class == IR_VECTORIZE_CLASS_UPDATE)
             {
-                const uint32_t accumulator = work->classes[f->a[i]] == IR_VECTORIZE_CLASS_REDUCTION ? f->a[i] : f->b[i];
+                // The update's own phi: a min/max's update is a select or a join, whose operands aren't it.
+                const uint32_t accumulator = work->reduction[work->reduction_index[i]].phi;
                 work->values[i] = ir_vectorize_row(build, IR_VSELECT, vtype, lane, 0, mask, work->values[i], work->values[accumulator], BUSTER_IR_NONE);
             }
         }
