@@ -7566,6 +7566,135 @@ objects')
 compile that takes expressions, behind an option, where the sweeps' cost by
 the chunk is read.
 
+### The machine with no node of the walk's
+
+Every piece above ran the machine where the walk had been: T reads the
+graph the walk wrote, the tests read T's records and the graph's tokens, and
+the window's sweeps were given what they did not make. A compile that takes
+an expression from the machine has no node of it, since what it saves is the
+walk. `measure-node-machine --shadow --front-alone`
+(`c_check_node_machine_alone.c`,
+[the guide](commands/lowering.md#the-machine-with-no-node-of-the-walks-2850))
+runs the reference machine without one: for each function body, before the
+walk acts at its first token. It is the first piece of #2850's stream after
+the body boundary, and its measurements are on
+[the one-core path's page](one-core-path.md#the-redesigns-second-piece-the-machine-with-no-node-of-the-walks).
+No compile takes it.
+
+- **A body is a run of the postorder.** A subtree's tokens are one run of the
+  tokens and of the postorder, and a body's closing brace is its opening
+  one's parent, so a body's positions are the ones up to its closing
+  brace's. The piece reads them a chunk at a time as the walk reads the
+  unit's: the acting tokens compacted, their identifiers' and literals'
+  entries made, and a whole front of its own making its records. The front
+  begins each body with nothing held: no value waits at a body's opening
+  brace.
+- **The graph is the front's records.** Each record is written once, as it is
+  made, to a `CheckGraph` of the piece's own by the graph's own calls: its
+  operator and token, its operands as that graph's nodes, a leaf's value, a
+  member, a cast's or a return's type, a call's arguments, and its context as
+  the walk's flush gives a node one. Three columns the flush fills from a
+  node's token alone are filled the same way: its expression's end, its
+  warnings' suppression and its floating-point environment (without the
+  last, T took 243 of musl's roots that it refuses for their context). The
+  unit's tables the reader's graph points to (the tags' history, the marked
+  members, the system headers' tokens) are the same tables. A record the
+  front keeps past a chunk keeps its node; a left token that takes a kept
+  record's value marks its node's context unknown in the graph's own column.
+  While the machine runs, the reader's own graph has no column of nodes (each
+  is taken away and put back), so a read of the walk's node faults instead
+  of finding one.
+- **The bodies' records stay.** A condition's root is made at its control's
+  closing token, a body after its operand. The graph holds every body's
+  records one after another, so the operand's are there when the root comes,
+  and T takes a root apart from its operand's range as it does on the walk's
+  nodes. No expression is lost to a chunk's end. (The specification had the
+  front make a condition's root where its value is complete; the records
+  kept in the graph give the same without another order of roots.)
+- **The machine is the reader-time one.** `node_machine_reader_chunk` runs on
+  the chunk's roots with that graph for its own and results of its own: T,
+  the census's tests, C and X. The tests read the reader's output through a
+  copy whose graph is the piece's. Their events are the reader's so far,
+  which are the resolution's: the walk has raised none in the body yet.
+- **A root is its token.** The two graphs share nothing but the tokens. Each
+  root's node is kept by its token, the roots of one token in the order they
+  were made (a declaration's discards, one a declarator, are all at its
+  `;`), and after the pipeline each of the walk's nodes' roots is paired with
+  the next one at its token. The records' digest held a fault's node as the
+  graph's number; it holds the record of the expression's now, which is the
+  same in both.
+- **A body's verdict** is kept as it stands before the walk acts at the body:
+  every root the front made is taken (T took it, the tests left it silent, C
+  and X took it; a declaration's discard is no root of the machine's) and the
+  front lost none; or the first thing that stops it. The front loses a root
+  where a root's token is left (a statement's terminator, a condition, a
+  return or an initialization whose value it does not know) or where it
+  loses its waiting values. A token left under a declarator or a label
+  reaches no root and loses none.
+
+**Exact.** On `sqlite3.c`, Lua, musl and the compiler's own source, 159,318
+roots in 31,039 bodies: no root's records' count, refusal, digest, tests,
+root's kind, sweeps' refusal, target, object, tape or side differs, none is
+run by one of the two alone, and none is taken before the walk raises a
+warning's event at one of its tokens; with `-g` and with `-Wall -Wextra` too.
+
+**The walk's own diagnostics.** The reader-time tests refuse an expression at
+whose tokens the reader has raised a warning's event, and the walk raises its
+own as it acts, after this machine has decided. They reach no expression it
+takes. Of the 114 places that raise a reader's warning, 32 can run while the
+walk acts at a token, by four ways:
+
+| the walk's | what it warns of | why no taken expression has one |
+| --- | --- | --- |
+| literal's action | a floating constant out of range, a character constant of several characters or with an unknown escape, a `_BitInt` suffix before C23 | the front leaves a literal that reports, warns or makes a type (`node_front_literal`) |
+| own visit | `_Alignof` of an expression, a `_Static_assert`'s message, the builtins' evidence, and what the constant evaluator warns of from there | the front leaves every token of the walk's visit |
+| string's action | a string's escapes | the resolution decodes every string it reads, before any body is read here; the walk's action then finds it made |
+| call's action | nothing: its decode is asked for no warning | |
+
+An expression with a token the front left has no root. That the front leaves
+every token the walk's actions leave is counted, not read: the walk marks
+each token its class actions leave to its visit
+(`CheckInputReader.expression_declined`), and after its last chunk the piece
+looks for one among the tokens of each expression it took. None has one, on
+the corpora and in the fixture. The fixture has a floating constant out of
+range, a character constant of two characters and `_Alignof` of an
+expression, each in a body whose verdict is a root lost; and a string with
+an unknown escape, which the resolution warns of before any body is read
+here, so the tests refuse its expression for the event, as after the walk.
+
+**The fixture** (`node_alone_test_fixture`, with the default warnings and
+with `-Wall -Wextra`) is 18 bodies and 444 roots: whole bodies with calls, a
+logical operator, a loop, three declarators at one `;` and a string; a
+bit-field, a `sizeof`, an escape under a label, a braced initializer and a
+block's static table; the literals, the token and the string above; an address
+constant multiplied, whose value has a fault; a static table of 64 values,
+whose discards at its `;` are several roots of one token; a loop of 400
+statements, whose condition waits through several chunks; and a table of
+4,200 elements, where the front loses its waiting values.
+
+**Faults.** Fifteen, one at a time, each caught by the fixture
+(`node_alone_test_fixture`):
+
+- an operand, and a call's argument, written as the front's record and not
+  the graph's node; a call without its arguments;
+- a leaf without its object, and without its constant's kind; a record
+  without its type, and without its member;
+- one root kept a token; the tests reading the reader's graph; the reader's
+  graph given to the machine for the piece's;
+- a body's lost root not counted; a declaration's discard taken for a root of
+  the body's verdict;
+- a literal with a warning's event made a record, and a character constant of
+  several characters made one: the walk then warns at a taken root;
+- a fault's node digested as the graph's number.
+
+**What it does not do.** It makes no function: a body's statements, its
+locals' table and its calls' rows are other pieces', with the recorded
+functions of the boundary's scaffold as their oracle. It refuses nothing
+before its sweeps, so a body with a token left is swept to its end. And its
+cost is the reference's, which is most of what a taken body is worth: the
+one-core path's page has it against its gate, and what that changes in the
+order of the pieces after it.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken

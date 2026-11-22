@@ -129,6 +129,23 @@
 // comparison; the turns list what they list with them. One executable then reads the other sweeps with the facts and
 // without.
 #define BUSTER_NODE_READER_WINDOW_SUMMARY_OFF 4096u
+// The machine with no node of the walk's (measure-node-machine --shadow --front-alone, c_check_node_machine_alone.c,
+// #2850): before the walk acts at a function body, a front of its own makes the body's records, and T, the tests, C and
+// X run on a graph made of those records alone. After the pipeline each root's results are compared with the ones the
+// machine made of the walk's nodes (BUSTER_NODE_FRONT_TYPES, _SWEEPS and BUSTER_NODE_READER_TESTS, which it asks for).
+#define BUSTER_NODE_READER_ALONE 8192u
+// What it says of a body (NodeFrontShadow.alone_body_verdicts): every root the front made of it is taken (T took it, the
+// tests left it silent, C and X took it) and the front left no token of it; or the first thing in the body's order that
+// stops it: a token the front left or a value it lost (an expression it makes no root of), a root the machine didn't run
+// on, T's refusal, the tests', C's or X's.
+#define BUSTER_NODE_ALONE_BODY_WHOLE 0u
+#define BUSTER_NODE_ALONE_BODY_LEFT 1u
+#define BUSTER_NODE_ALONE_BODY_UNRUN 2u
+#define BUSTER_NODE_ALONE_BODY_TYPE 3u
+#define BUSTER_NODE_ALONE_BODY_TESTS 4u
+#define BUSTER_NODE_ALONE_BODY_SWEEP 5u
+#define BUSTER_NODE_ALONE_BODY_ROOM 6u
+#define BUSTER_NODE_ALONE_BODY_VERDICTS 7u
 // Why C on the window lists an expression (c_check_node_machine_window.c's BUSTER_NODE_CONTEXTS_REASON_*): how many.
 #define BUSTER_NODE_CONTEXTS_REASONS 8u
 // What the reference did with an expression (NodeFactsReader.c_ran, which the reader gives the kernel's state at each
@@ -637,6 +654,40 @@ struct NodeFrontShadow
     uint8_t* contexts;
     // T's results at reader time, or null (BUSTER_NODE_FRONT_TYPES).
     NodeFrontTypes* types;
+    // The machine with no node of the walk's (BUSTER_NODE_READER_ALONE): its results by its own graph's node, as `types`
+    // has the walk's nodes' by theirs; and by token, the node + 1 of the first root it made there (0: none), the unit's
+    // tokens' room. Null where it didn't run.
+    NodeFrontTypes* alone_types;
+    uint32_t* alone_roots;
+    // By its graph's node, the node + 1 of the next root it made at the same token (0: the last).
+    uint32_t* alone_chains;
+    // Its verdict of each body it read, in the bodies' order, as it stood before the walk acted at the body: the body's
+    // opening brace and what stops the machine there (BUSTER_NODE_ALONE_BODY_*: nothing, or the first of its roots'
+    // steps that does).
+    uint32_t* alone_body_openings;
+    uint8_t* alone_body_verdicts;
+    uint32_t alone_body_count;
+    // What it read: the bodies it read whole and those it left (a body whose tokens are no run of the postorder, or past
+    // its graph's room), their postorder positions, the records it made of them, and its ticks, all of it (the
+    // compaction, the entries, the front, the records' copy and the machine's runs).
+    uint64_t alone_bodies;
+    uint64_t alone_bodies_left;
+    uint64_t alone_positions;
+    uint64_t alone_records;
+    uint64_t alone_ticks;
+    // Of its ticks, the machine's two runs on the chunks' roots (the first is timed in its results, the second keeps them);
+    // and its reading's parts: the acting tokens' compaction and their entries (the walk's own preparation, made here
+    // for the body), the front, and the records' writing to its graph.
+    uint64_t alone_machine_ticks;
+    uint64_t alone_resets;
+    // The roots the whole machine took there, counted after the walk against the tokens the walk's class actions left to
+    // its own visit: those with such a token among their expression's (none: the front leaves every one, so an
+    // expression with one has no root, and the walk's visit is where its own warnings are).
+    uint64_t alone_taken_checked;
+    uint64_t alone_taken_declined;
+    uint64_t alone_prepare_ticks;
+    uint64_t alone_front_ticks;
+    uint64_t alone_write_ticks;
     // The flat front (BUSTER_NODE_FRONT_FLAT, c_check_node_machine_flat.c). Its passes' ticks after the compaction, its
     // own compaction's, and each stage's (BUSTER_NODE_FLAT_STAGE_*); the tokens it visited, the records it made and
     // the places it left empty, the children its tokens hopped over, the tokens with a child past the rings' reach, and
@@ -867,6 +918,8 @@ struct NodeFront
     uint32_t chunks;
     // The machine's state at reader time (c_check_node_machine_reader.c), or null.
     struct NodeMachineReader* typer;
+    // The machine with no node of the walk's (BUSTER_NODE_READER_ALONE), or null.
+    struct NodeAlone* alone;
     // The flat front's state (c_check_node_machine_flat.c), or null.
     struct NodeFlat* flat;
     CheckValue wide_values[BUSTER_NODE_FRONT_WIDES];
@@ -906,6 +959,15 @@ static inline void node_facts_window_kept(NodeFront* front, uint32_t to, uint32_
 static struct NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, NodeFrontShadow* shadow, bool sweeps);
 static void node_machine_reader_chunk(struct NodeMachineReader* typer, const NodeFront* front, const CheckInputReader* reader);
 static void node_machine_reader_finish(struct NodeMachineReader* typer);
+// The machine with no node of the walk's (c_check_node_machine_alone.c): its state for the unit `reader` reads, whose
+// walk's front is `front` (null without room); and, before the walk acts at postorder positions `first` to `end` - 1, the
+// function bodies that begin among them, each read whole.
+struct NodeAlone;
+static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* reader);
+static void node_alone_bodies(struct NodeAlone* alone, NodeFront* front, CheckInputReader* reader, uint32_t first, uint32_t end);
+// After the walk's last chunk: the roots it took against the tokens the walk's class actions left to its visit
+// (CheckInputReader.expression_declined), which the walk has marked by then.
+static void node_alone_finish(struct NodeAlone* alone, const CheckInputReader* reader);
 #endif
 
 // Whether the walk acts at `token` so as to read its children's values: a token it never acts at, or whose action is
