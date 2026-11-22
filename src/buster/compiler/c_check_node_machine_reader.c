@@ -535,6 +535,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
     const bool last = (reader->pp->options.node_reader & BUSTER_NODE_READER_LAST) != 0;
     // The graph as it stands after the chunk, and the types made since the last.
     typer->graph = reader->output->graph;
+    typer->graph.const_values = &reader->output->const_values;
     typer->graph.contexts = front->shadow->contexts;
     node_machine_settle(machine);
     node_machine_reader_strings(typer, reader->output);
