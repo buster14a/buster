@@ -150,6 +150,27 @@ struct CheckProgramBody
     uint8_t return_warning;
 };
 
+// An inline-only always_inline function whose direct calls the lowering expands in its callers (#2983,
+// check_program_select_wrappers): clang's AlwaysInliner expands every call of a body it has, an `extern inline`
+// gnu_inline one too (glibc's __fortify_function wrappers), where the unit emits none of its own. Its body is one
+// statement: `return E;` (`node` E with its conversion to the result) or, in a void function, `E;`; E's nodes are
+// `first` to `node`. Its parameters' objects are CheckProgram.wrapper_parameters' `parameter_count` from
+// `parameter_first`, 0 for an unnamed one, and their pass_object_size attributes `sizes` (CheckInputAttributes'
+// object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
+// A wrapper's parameters at most: glibc's take five.
+#define BUSTER_CHECK_WRAPPER_PARAMETERS 8u
+
+typedef struct CheckProgramWrapper CheckProgramWrapper;
+struct CheckProgramWrapper
+{
+    uint32_t object;
+    uint32_t node;
+    uint32_t first;
+    uint32_t parameter_first;
+    uint32_t parameter_count;
+    uint8_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS];
+};
+
 typedef struct CheckProgramRegion CheckProgramRegion;
 struct CheckProgramRegion
 {
@@ -277,6 +298,11 @@ struct CheckProgramOptions
     // Whether the code probes the stack as it grows it (#177, -fstack-clash-protection, predefines_stack_clash): every
     // function's (Tier0Function.probe_stack).
     bool probe_stack;
+    // Position-independent code for a shared library (#2101, -fPIC and -fpic where the code isn't a link's executable,
+    // check_request_program_options): a symbol another module may preempt is reached through its GOT slot and a
+    // thread-local by general- or local-dynamic accesses (check_program_object_access, c_check_program_tls.c). The
+    // client sets it where its code may go into a shared library (-c, -S, -shared), the predefines decide.
+    bool pic;
     // -fpatchable-function-entry=N[,M[,SECTION]] (#1447, predefines_patchable): the NOPs every function without a
     // patchable_function_entry attribute gets, `patchable_count` of them, `patchable_offset` before its symbol (none for a
     // count of 0), and the section of their entries for every function whose attribute names none (empty for
@@ -617,6 +643,11 @@ struct CheckProgram
     // groups' labels, each group's `label_count` from its `label_first`, by token. Null in a unit without them.
     SymbolId* clone_label_symbols;
     uint32_t* clone_label_tokens;
+    // A selection's inline-only always_inline functions whose direct calls the lowering expands (#2983,
+    // CheckProgramWrapper), by object, and their parameters' objects; null in a unit without one, the usual one.
+    CheckProgramWrapper* wrappers;
+    uint32_t* wrapper_parameters;
+    uint32_t wrapper_count;
     // The exits through cleanups' chains (#1370, CHECK_CONTROL_EXIT's), each record's plan (by its CheckInput.cleanups
     // index, of a body with such an exit) and the destinations of the records' dispatches; null in a unit without cleanups.
     CheckProgramExit* exits;
@@ -651,7 +682,8 @@ struct CheckProgram
     uint32_t constraint_count;
     uint32_t constraint_capacity;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands, asm_helpers, asm_bodies, helper_forms, target, frame_pointer and probe_stack.
+    // CheckProgramOptions.unselected_operands, asm_helpers, asm_bodies, helper_forms, target, frame_pointer, probe_stack
+    // and pic.
     bool unselected_operands;
     bool asm_helpers;
     bool asm_bodies;
@@ -659,6 +691,7 @@ struct CheckProgram
     X86Target target;
     uint8_t frame_pointer;
     bool probe_stack;
+    bool pic;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
     // it runs, without the condition, when no label or case of an outer switch enters the other, as clang -O0's code
@@ -707,6 +740,8 @@ struct CheckProgram
     // earlier emitted reference had already fixed that object's original spelling. The selection owns this cold
     // view; the input's asm-label facts remain unchanged for syntax and type checks.
     uint8_t* symbol_pragma_originals;
+    // Per object, the index plus one of a function rename after a use in the source.
+    uint32_t* late_function_renames;
     // With CheckProgramOptions.lifetimes (#177): each block's local declarations whose lifetimes the controls give, from
     // GNU's weak attribute and `#pragma weak` after a use (#1849): the weak declarations of the objects none of whose
     // weak declarations is its first declaration's own (a `#pragma weak` after the declaration it attaches to being
@@ -3822,15 +3857,15 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
     return constant;
 }
 
-// CheckProgram.object_labelled: the objects of the declarations with an asm label not ignored (check_input_attribute_of's),
-// by one scan of the tokens
-// with attributes (CheckInput.attributes), in a unit with an asm keyword alone; false where the column has no room.
+// Collect accepted asm labels from declaration attributes. Both an asm keyword and an applied
+// #pragma redefine_extname can supply one. Allocate the column on the first label.
 static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
 {
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
+    const bool may_have_labels = input->asm_capacity != 0 || (input->symbol_pragmas != NULL && input->symbol_pragmas->has_asm_label);
     bool room = true;
-    for (uint32_t first = input->asm_capacity != 0 ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
+    for (uint32_t first = may_have_labels ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
          first = check_input_attributed_next(input->attributes, first + 16, count))
     {
         const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
@@ -3857,6 +3892,8 @@ static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
     }
     return room;
 }
+
+static uint32_t check_program_token_body(const CheckProgram* program, uint32_t token);
 
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
 // cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
@@ -3885,7 +3922,21 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
     }
     const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
-    const bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
+    bool labelled = object != 0 && object < program->object_count && program->object_labelled[object] != 0;
+    const uint32_t rename = labelled && program->late_function_renames != NULL ? program->late_function_renames[object] : 0;
+    if (rename != 0)
+    {
+        const CheckInputSymbolPragma* pragma = program->input->symbol_pragmas->records + rename - 1;
+        const uint32_t token = graph->tokens[node];
+        if (token < pragma->token)
+        {
+            // An earlier call can see the label only if it saw the labelled declaration and its
+            // body is emitted after the pragma (at its closing brace, or at the end of the unit).
+            const uint32_t body = check_program_token_body(program, token);
+            labelled = token >= pragma->declaration && (body == 0 || (program->body_eager != NULL && !program->body_eager[body - 1]) ||
+                                                        program->parser->tree.parents[program->bodies[body - 1].opening] >= pragma->token);
+        }
+    }
     return marked && !labelled ? index : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
 }
 
@@ -6064,7 +6115,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
-                               .probe_stack = options.probe_stack, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
+                               .probe_stack = options.probe_stack, .pic = options.pic, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
                                .patchable_section = options.patchable_section, .initializer_references = options.initializer_references,
                                .initializer_reference_count = options.initializer_reference_count, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };

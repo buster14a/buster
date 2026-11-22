@@ -67,6 +67,9 @@ struct NodeMachineReader
     uint32_t strings;
     // The census's tests at reader time (c_check_node_census.c's), or null.
     struct NodeCensusReader* tests;
+    // Whether `graph` is the machine's own, made of the front's records alone (c_check_node_machine_alone.c): a chunk's
+    // run then leaves it as it stands, where it otherwise takes the reader's graph as the walk has left it.
+    bool alone;
     // #2850's fact words' kernel at reader time (c_check_node_machine_facts.c's), or null.
     struct NodeFactsReader* facts;
 };
@@ -273,7 +276,11 @@ static uint64_t node_machine_digest(const NodeMachine* machine, NodeMachineRefus
         digest = node_machine_mix(digest, (uint64_t)value.object << 32 | value.overload_head);
         digest = node_machine_mix(digest, (uint64_t)value.offset);
         digest = node_machine_mix(digest, (uint64_t)value.bit_width << 32 | (uint64_t)value.fault);
-        digest = node_machine_mix(digest, (uint64_t)value.fault_node << 32 | value.object_bit_offset);
+        // A fault's node as its record of the expression's: the nodes are another graph's where the machine reads the
+        // front's records alone (c_check_node_machine_alone.c), and the record is the same in both.
+        const uint32_t fault_record = value.fault == CHECK_FAULT_NONE ? value.fault_node : value.fault_node == machine->root ? machine->count - 1 :
+                                                                                           value.fault_node - machine->first;
+        digest = node_machine_mix(digest, (uint64_t)fault_record << 32 | value.object_bit_offset);
         digest = node_machine_mix(digest, (uint64_t)columns->words[r] << 32 | (uint64_t)columns->facts[r] << 8 | columns->value_classes[r]);
         digest = node_machine_mix(digest, (uint64_t)node_machine_record_converted(machine, r, 0) << 32 | node_machine_record_conversion_flags(machine, r, 0));
         digest = node_machine_mix(digest, (uint64_t)node_machine_record_converted(machine, r, 1) << 32 | node_machine_record_conversion_flags(machine, r, 1));
@@ -310,6 +317,54 @@ static uint64_t node_machine_side_digest(const NodeMachine* machine)
     return digest;
 }
 
+// What a splice reads of the machine's current expression beside its tape (NodeFrontTypes.side_*), kept by its root's
+// node `root`: its labels' places, its calls' rows, its temporaries and its root's facts. A root C and X refused, or one
+// the stores have no room for, keeps none (its labels' first is UINT32_MAX).
+static void node_machine_reader_side(NodeFrontTypes* types, const NodeMachine* machine, uint32_t root, bool taken)
+{
+    uint64_t arguments = 0;
+    for (uint32_t call = 0; taken && call < machine->call_count; call += 1)
+    {
+        arguments += node_machine_record_argument_count(machine, machine->call_records[call]);
+    }
+    const bool room = taken && machine->label_count <= types->side_capacity - types->side_label_count && machine->call_count <= types->side_capacity - types->side_call_count &&
+                      arguments <= types->side_capacity - types->side_argument_count;
+    types->side_label_firsts[root] = room ? (uint32_t)types->side_label_count : UINT32_MAX;
+    types->side_label_counts[root] = room ? machine->label_count : 0;
+    types->side_call_firsts[root] = room ? (uint32_t)types->side_call_count : 0;
+    types->side_call_counts[root] = room ? machine->call_count : 0;
+    types->side_temporaries[root] = room ? machine->temporary_count : 0;
+    types->side_facts[root] = 0;
+    types->side_unkept += taken && !room;
+    if (room)
+    {
+        // The root's record is the expression's last: a statement's condition's is its truth, a constant where its
+        // operand's value is one (an lvalue's own kind is its address's, and says nothing of its value).
+        const uint32_t last = machine->count - 1;
+        const bool constant = node_machine_record_constant_kind(machine, last) != CHECK_CONSTANT_NONE;
+        types->side_facts[root] = (uint8_t)(((node_machine_record_state(machine, last) & BUSTER_NODE_MACHINE_BRANCHED) != 0 ? BUSTER_NODE_FRONT_SIDE_BRANCHED : 0u) |
+                                            (constant ? BUSTER_NODE_FRONT_SIDE_CONSTANT : 0u));
+        memcpy(types->side_labels + types->side_label_count, machine->label_entries, (uint64_t)machine->label_count * sizeof(uint32_t));
+        types->side_label_count += machine->label_count;
+        for (uint32_t call = 0; call < machine->call_count; call += 1)
+        {
+            const uint32_t r = machine->call_records[call];
+            const uint32_t count = node_machine_record_argument_count(machine, r);
+            const uint64_t row = types->side_call_count;
+            types->side_call_targets[row] = node_machine_call_target(machine, r);
+            types->side_call_argument_counts[row] = count;
+            types->side_call_argument_firsts[row] = (uint32_t)types->side_argument_count;
+            types->side_call_variadic[row] = node_machine_call_variadic(machine, r);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                types->side_argument_classes[types->side_argument_count + i] = node_machine_class(machine, node_machine_record_argument_converted(machine, r, i));
+            }
+            types->side_argument_count += count;
+            types->side_call_count += 1;
+        }
+    }
+}
+
 // The conversion's target the lowering's task gives the machine's current expression's root where its consumer converts
 // it to `to` (check_lower_expression's, which a pop logs): `to` where the root's type isn't it and the conversion writes
 // entries (check_lower_conversion_empty's test, of the types' words), 0 otherwise.
@@ -325,10 +380,7 @@ static TypeId node_machine_reader_target(const NodeMachine* machine, TypeId to)
         const uint8_t to_facts = (uint8_t)(to_word >> 8);
         const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)from_word;
         const uint8_t class = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)to_word;
-        const bool empty = source == class && source < BUSTER_TYPED_CLASSES &&
-                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
-                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
-                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        const bool empty = check_lower_conversion_empty_by_class(source, from_facts, class, to_facts);
         target = empty ? 0 : to;
     }
     return target;
@@ -392,6 +444,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         typer->strings = 0;
         typer->tests = NULL;
         typer->facts = NULL;
+        typer->alone = false;
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
                                          symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
     }
@@ -534,8 +587,11 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
     const bool tested = typer->tests != NULL;
     const bool last = (reader->pp->options.node_reader & BUSTER_NODE_READER_LAST) != 0;
     // The graph as it stands after the chunk, and the types made since the last.
-    typer->graph = reader->output->graph;
-    typer->graph.contexts = front->shadow->contexts;
+    if (!typer->alone)
+    {
+        typer->graph = reader->output->graph;
+        typer->graph.contexts = front->shadow->contexts;
+    }
     node_machine_settle(machine);
     node_machine_reader_strings(typer, reader->output);
     if (tested)
@@ -571,7 +627,15 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     // record's VALUE context even when the outer node lies beyond the shadow's capacity.
                     const uint32_t initializer = front->tokens[record];
                     const bool required = initialization && initializer < reader->parser->tokens.count && BUSTER_CHECK_RARE(reader, static_initializers, initializer);
+                    // (The first run by sweep where the unit asks: a clock's read before each and after the last.)
+                    const bool split = pass == 0 && types->split;
+                    const uint64_t typing = split ? __rdtsc() : 0;
                     const NodeMachineRefusal refusal = node_machine_type_in_context(machine, first, root, records, required);
+                    if (split)
+                    {
+                        types->sweep_ticks[0] += __rdtsc() - typing;
+                        types->sweep_reads += 2;
+                    }
                     if (pass != 0)
                     {
                         types->digests[root] = node_machine_digest(machine, refusal);
@@ -600,7 +664,13 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         const uint32_t declaration = initialization && token < reader->parser->tokens.count ? reader->initializer_declarations[token] : BUSTER_CHECK_NONE;
                         const TypeId declared = declaration < reader->output->token_count ? reader->declared_types[declaration] : 0;
                         uint8_t kind = 0;
+                        const uint64_t testing = split ? __rdtsc() : 0;
                         verdict = node_census_reader_expression(typer->tests, root, (CheckOp)front->ops[record], token, declaration, declared, &kind, NULL);
+                        if (split)
+                        {
+                            types->sweep_ticks[1] += __rdtsc() - testing;
+                            types->sweep_reads += 2;
+                        }
                         if (pass != 0)
                         {
                             types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_TESTED;
@@ -634,6 +704,12 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         }
                         const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
+                        if (split)
+                        {
+                            types->sweep_ticks[2] += expand_start - contexts_start;
+                            types->sweep_ticks[3] += __rdtsc() - expand_start;
+                            types->sweep_reads += 1;
+                        }
                         if (pass != 0 && typer->facts != NULL)
                         {
                             // The reference of X's rows on the window: this run's ticks; its tape is kept below.
@@ -657,6 +733,10 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                                 memcpy(types->tape_classes + types->tape_count, machine->classes, entries);
                                 memcpy(types->tape_values + types->tape_count, machine->tape, (uint64_t)entries * sizeof(uint64_t));
                                 types->tape_count += entries;
+                            }
+                            if (types->side_label_firsts != NULL)
+                            {
+                                node_machine_reader_side(types, machine, root, taken);
                             }
                             types->swept += 1;
                             types->swept_refused[swept] += 1;

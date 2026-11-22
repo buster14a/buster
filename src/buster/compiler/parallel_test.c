@@ -1462,6 +1462,23 @@ static void parallel_test_command_line(ParallelTest* test)
 // options and costs.
 static void parallel_test_shards(ParallelTest* test)
 {
+    // Stale rows make the history index worthwhile. A direct caller with repeated command titles still gives
+    // both kinds of measurement to the first listed match, including when an earlier peak was zero.
+    ParallelCommand commands[64];
+    for (uint32_t i = 0; i < 64; i += 1)
+    {
+        commands[i] = (ParallelCommand){ .title = parallel_test_string("same"), .cpus = 1 };
+    }
+    const ParallelList repeated = { .commands = commands, .count = 64 };
+    const String8 history = parallel_test_string("1 gone\n1 gone\n1 gone\n1 gone\n#: peak 0 same\n2 same\n#: peak 3 same\n");
+    const ParallelCosts parsed = parallel_costs_parse(&test->arena, &repeated, history);
+    bool first_only = parsed.error == 0;
+    for (uint32_t i = 0; first_only && i < 64; i += 1)
+    {
+        first_only = parsed.milliseconds[i] == (i == 0 ? 2000 : BUSTER_PARALLEL_DEFAULT_COST_MILLISECONDS) && parsed.peaks[i] == (i == 0 ? 3 : 0);
+    }
+    parallel_test_check(test, "history lookup keeps the first matching title", first_only, (String8){ 0 }, 0);
+
     char list[600];
     char costs[600];
     char output[600];

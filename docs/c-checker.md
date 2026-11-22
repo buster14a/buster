@@ -2463,6 +2463,62 @@ a shared library's and the direct path makes no copy relocations, and a
 thread-local by local-exec where the unit defines it and by initial-exec where
 it doesn't.
 
+### Position-independent code
+
+`-fPIC` and `-fpic` make clang's `-fPIC` code where the code may go into a
+shared library (#2101): `-c`'s, `-S`'s, `-shared`'s and the source clients'
+(`CheckProgramOptions.pic`, which `check_request_program_options` keeps only
+with one of the two options last among the eight PIC and PIE ones; a link's
+executable takes `-fPIE`'s code, byte for byte). Both tiers take it from the
+lowering and the access column alone:
+
+- **Preemptible symbols.** A declaration of external linkage and default
+  visibility (`check_program_preemptible`: no visibility attribute or pragma
+  other than default, and no private size wrapper's) may be another module's
+  in a shared library, wherever the unit defines it. The access column reaches
+  it through its GOT slot (`check_program_object_access`), its data and its
+  function's address alike, and its calls stay `PLT32` against the symbol.
+  Hidden, protected and internal symbols, and literals, stay direct. The
+  `cpu_dispatch` and `target` resolvers return a preemptible version's address
+  from its slot too (`check_program_resolver_local`). Tier 1 may still expand a
+  call of the unit's own default-visibility function, as clang's `-O1` and
+  `-O2 -fPIC` do without `-fsemantic-interposition`.
+- **Thread-locals.** A preemptible one is general-dynamic, the unit's own
+  local-dynamic (`check_lower_tls_models`, `CheckLowerShared.tls_models`). The
+  lowering writes each access of one as a call of its accessor, which returns
+  its address, and the access through that address (`check_lower_tls`, at
+  `check_lower_append`, the entries' one way in): `GLOBAL` becomes the call and
+  a `LOAD`, `GLOBAL_ADDRESS` the call, and `STORE_GLOBAL` and `SET_GLOBAL` keep
+  their value in a temporary while the call runs, then `STORE` or `SET`. Tier
+  0's kinds (64, full) and Tier 1 take nothing new: calls. The node templates
+  and the batch path, which write `GLOBAL` themselves, aren't taken by a unit
+  with one. The accessor's call takes a provisional symbol (after the jump
+  tables', `CheckLowerShared.provisional_tls`), and marks `__tls_get_addr`
+  (`CHECK_LOWER_RUNTIME_TLS_GET_ADDR`) called.
+- **Accessors.** The emission gives each thread-local a live body reaches a
+  local function, `.Lbuster_tls_N` in symbol order
+  (`check_program_emit_tls_symbols`), retargets the bodies' references to it,
+  and writes its code (`check_program_emit_tls_atoms`), clang's sequence between
+  a `sub rsp, 8` and an `add rsp, 8; ret`, with its unwind entry: the 16 bytes
+  of `data16 lea rdi, [rip + x@tlsgd]; data16 data16 rex.W call
+  __tls_get_addr`, or the local-dynamic `lea rdi, [rip + x@tlsld]; call
+  __tls_get_addr; lea rax, [rax + x@dtpoff]`. Every linker relaxes them whole
+  in an executable (`executable_relax_tls`); the foreign link names the
+  dynamic executable's `__tls_get_addr` to its writer for that
+  (`foreign_link_dynamic_finish`), as `dynamic.c` does for the direct path.
+- **Unwind tables.** An FDE refers to its function through its section's
+  symbol (`ObjectOptions.local_unwind`, [the object writer](object-writer-and-linker.md)),
+  since GNU ld refuses a shared object's `PC32` to a preemptible symbol.
+- **`-shared`** links a shared library through the mixed path's foreign
+  resolver and writer ([the driver's guide](cc-driver.md)).
+
+`test-checker-driver --pic-only` (`c_check_pic_driver_test.c`) builds a library
+of each of these shapes by `-shared` at both tiers and by `-c` and `cc -shared`,
+and runs the same programs against each as against clang's: two threads, one
+that preempts the library's object, thread-local and function, and a `dlopen`
+harness; then executables of a program and the `-c` object, linked by the
+driver and by `cc`.
+
 What the lowering covers past scalars (#145's programs):
 
 - **Local objects.** Local arrays, structs and unions are Tier 0 frame objects
@@ -4556,8 +4612,10 @@ What the lowering covers past scalars (#145's programs):
   order clang emits the aliases): "alias must point to a defined variable or
   function" and "ifunc must point to a defined function" with clang's notes
   (that the name must be the mangled one, and the name clang gives each
-  emitted, referenced or defined declaration of that identifier, an
-  overloadable function's mangled one: `check_driver_overload_name`), "alias (or
+  emitted, referenced or defined declaration of that identifier: an asm label
+  any of its declarations has, as `int f(void) __asm__("g");` before `f`'s
+  definition gives `g` (`check_program_object_label`), or an overloadable
+  function's mangled one: `check_driver_overload_name`), "alias (or
   ifunc) definition is part of a cycle", "cannot alias a variable with a
   function" and "cannot alias a function with a variable" with the aliasee's
   definition noted, and "ifunc resolver function must return a pointer".
@@ -6807,7 +6865,18 @@ too. `c_check_binding.c` adds
 `-Wunused-variable`, `-Wunused-const-variable`, `-Wunused-function` and
 `-Wunused-parameter` as sparse events, with the declaration's body deciding
 the completion, so they follow Clang's after-function order; a redeclaration
-inherits an earlier `unused` or `used` attribute. A file-scope variable's
+inherits an earlier `unused` or `used` attribute. Attributes use what they
+name, as clang's do (#3300): a function definition with a `constructor` or
+`destructor` attribute, its own or an earlier declaration's, is never unused
+(clang's `DeclMustBeEmitted`; one only declared, or whose attribute follows its
+definition, still is, `check_input_unused_structor`), and an `alias`'s or
+`ifunc`'s string names the function or variable visible by that name where the
+attribute is read (clang's `markUsedForAliasOrIfunc`), whose declarations are
+then used as a use's are (`CheckInputAttribute.alias_target`,
+`check_input_alias_used`). A target declared after the attribute, one whose
+symbol is spelled otherwise (an asm label, `overloadable`), an ignored
+attribute's (an `ifunc` on a variable), a `weakref`'s and a `#pragma weak`
+alias's target stay unused. A file-scope variable's
 unused warning is given only in the main file, as Clang leaves a header's
 file-scope variables alone because every unit that includes the header shares
 them. `-Wunused-but-set-variable` (#2409, in `-Wunused` and `-Wall`) is an
@@ -7216,12 +7285,16 @@ walk. `check_driver_reports_from` therefore calls
 `check_common_failed_assertion` when publishing `CHECK_MESSAGE_STATIC_ASSERT`.
 Its bounded worklist visits the retained condition tree, using the existing
 integer and floating literal conversion emitters. The source span also locates
-retained conditional and comma nodes, including detached operands of static
-selections, through the token-to-node map (`check_common_failed_assert_source`).
-Those nodes are checked first in graph postorder, as Clang constructs their
-source expressions; the assertion's own conversion and nested logical operands
-then follow the completed expression's order. An inner assertion owns its own
-warnings. Explicit casts do not create implicit conversions, and a conditional's
+retained comma nodes, including detached operands of static selections, through
+the token-to-node map (`check_common_failed_assert_source`). Those nodes are
+checked first in graph postorder, as Clang constructs their source expressions;
+the assertion's own conversion and nested logical operands then follow the
+completed expression's order. A full conditional's condition is not this walk's:
+`check_common_conditional_conversions` publishes it once at construction for
+every retained conditional, and for each one a declaration/type query erased
+from the reader's sparse receipt (#2899), in the deferred phase the comma's
+marker shares, so that at one boundary a conditional built in a comma's right
+operand comes first. An inner assertion owns its own warnings. Explicit casts do not create implicit conversions, and a conditional's
 arms do not inherit its outer boolean context. GNU omitted-middle conditionals
 visit their shared condition once and do not diagnose that saved value as a
 new conversion of the written expression. Discarded comma operands reuse the
@@ -7238,17 +7311,15 @@ successful and non-warning controls, unrelated errors, macro expansion notes,
 C17/C23 and both reader choices and lane requests. The focused driver selector
 is `--assert-bool-only`; `--assert-diagnostics-only` also runs requirement
 printing and member-recovery checks. Clang is the external behavioral oracle;
-the fixtures and implementation are original. The cold path cannot recover
-operands that queries or type declarations erased altogether; those and the
-ordinary successful-expression gaps are tracked in
+the fixtures and implementation are original. `--query-bool-only` checks the
+erased and successful-expression conversions of
 [#2899](https://github.com/buster14a/buster/issues/2899).
 `-Wconstant-logical-operand`, absent from ordinary expressions too, is tracked
 in [#2900](https://github.com/buster14a/buster/issues/2900).
 The ordinary equality emitter's extra assignment-suggestion note for a
 nonassignable left operand is tracked in
 [#2906](https://github.com/buster14a/buster/issues/2906).
-Successful-assertion conditional warning ordering continues to use the
-ordinary warning walk.
+A successful assertion's conditionals are the construction pass's too.
 
 The graph's passes share their facts, `check_common_facts`, which give each
 node its parent, whether another node uses its value, whether it is evaluated,
@@ -11999,49 +12070,81 @@ compares scalar/vector objects and poisoned multi-lane objects. The shared walk
 borrows live preprocessing options only during selection and retains no new
 pointer to a worker's preprocessor.
 
-`#pragma weak ALIAS = TARGET` (#1849) declares ALIAS a weak alias of TARGET, as
-clang's Sema clones TARGET's declaration under ALIAS's name with weak and alias
-attributes: TARGET is looked up at the pragma, or at its first later external
-declaration, and one that already has an alias attribute makes it a no-op; a
-TARGET never declared is clang's "weak identifier 'TARGET' never declared" at
-ALIAS. The shapes whose ALIAS the unit declares with external linkage, of
-TARGET's kind, type and thread-local storage, without a section, alias or
-definition after the pragma and, where it declares ALIAS before the pragma,
-named by nothing after it, take the alias as attributes of ALIAS's declaration
-(`check_input_symbol_alias`), which the emission makes clang's weak alias of
-TARGET's definition; one whose ALIAS the unit defined before the pragma, or
-declared an alias of its own before it, is clang's no-op. Clang's clone itself
-is ALIAS's symbol where the unit never declares ALIAS, or declares it only
-before the pragma, never names or defines it, and gives it another kind, type,
-thread-local storage or a section (`CheckInputSymbolPragma.alias_target`): the
-selection keeps TARGET's definition as an alias's base, and
-`check_program_define_pragma_aliases` adds a weak symbol of ALIAS's name at
-it, of its type and size, after the aliases' (in the unit of several lanes
-that has TARGET's definition). Once the clone is visible, references to an
-earlier function or object declaration report clang's ambiguity and candidate
-notes, including when ALIAS was already defined. A lookup set with an object
-remains ambiguous when the earlier declaration and clone differ in kind, type,
-thread-local storage or section, or the earlier declaration already has an alias
-attribute or internal linkage. A function clone's candidate note names the
-pragma; an object clone's names TARGET's declaration. References before a later
-TARGET declaration keep their own lookup. Later object
-redeclarations report clang's redefinition and prior-definition notes. Other
-unmodeled shapes remain refused by name, including later declarations with
-another kind or type, two functions with different parameter types (which can
-form a valid overload set in clang), a TARGET the unit doesn't define, and the
-remaining internal-linkage ALIAS shapes. A mismatched declaration that is never
-referenced keeps its existing clone behavior; references hidden by a local
-shadow do not become ambiguous, but mismatched shapes that cannot carry the
-clone remain refused.
-This is separate
-from ordinary weak binding. `test-checker-driver`
-(`c_check_symbol_pragma_driver_test.c`) compares the supported shapes'
-symbols and programs with clang's, by both paths. Its runtime weak-alias
-catalogue also runs under `--semantic-recovery-only`: complete diagnostics and
-exit status under GNU17/C23, warning suppression/promotion and error limits,
-default/scalar readers and one/three requested deferred lanes. Rejected object
-commands preserve an existing output or create none; accepted controls must
-produce an ELF object.
+`#pragma weak ALIAS = TARGET` (#1849, #2449) declares ALIAS a weak alias of
+TARGET. Clang's Sema clones TARGET's declaration under ALIAS's name with weak
+and alias attributes. TARGET is looked up at the pragma, or at its first later
+external declaration; a target that already has an alias attribute makes the
+directive a no-op. A target never declared gives "weak identifier 'TARGET'
+never declared" at ALIAS. The retained record keeps the selected target
+declaration separately from the declaration or emitted symbol carrying the
+clone, so later declarations cannot change its type or diagnostic coordinates.
+
+Once the clone is visible, an earlier ALIAS declaration and the clone both
+participate in lookup. A set containing an object is ambiguous, including
+mixed object/function and internal-linkage declarations. Two functions use the
+ordinary overload selection for calls and typed addresses, with the selected
+return type retained in expressions and constant evaluation, whatever their
+signatures, as clang never merges the clone with the earlier declaration.
+Equal viable signatures remain ambiguous: a call is "call to 'A' is
+ambiguous", and an uncalled reference converts as `'<overloaded function
+type>'` (initializing, assigning or passing a function pointer), with the
+overload machinery's coverage and limits. A function clone's candidate note names the
+pragma, and two functions' notes are sorted by location as clang's overload
+candidates are, so a declaration written between the pragma and a later TARGET
+follows the pragma's note. An object's set lists every clone made before the
+reference, newest first (an object clone at TARGET's declaration, a function
+clone at the pragma), then the earlier declaration
+(`check_driver_weak_alias_candidates`). References before a later
+TARGET declaration keep their earlier lookup. Local parameters and block/loop
+declarations shadow the outer lookup set normally. Later declarations diagnose
+conflicting kind, type, definition or linkage against the clone and retain
+later independent errors, including repeated invalid redeclarations. A
+`static` object redeclaring an object clone gives its error before the clone's
+"weak declaration cannot have internal linkage" at the pragma, as clang checks
+the merged weak attribute after the redeclaration. These
+paths share the existing declaration-recovery and overload machinery.
+
+Compatible declarations carry the weak alias through
+`check_input_symbol_alias`, which `check_input_symbol_finish` runs in the order
+clang creates the clones (where each TARGET becomes visible, then by
+directive): a declared ALIAS carries the first-created clone, as code
+generation emits that one and ignores later clones of the name, even when a
+later directive created it. Other emitted clones retain TARGET in
+`CheckInputSymbolPragma.alias_target`. Selection keeps the target's definition
+as a base, and `check_program_define_pragma_aliases` adds ALIAS's weak symbol
+with its type and size in the unit containing that definition. Repeated clones
+keep the first emitted alias, ordered by when each target becomes visible,
+including targets declared after their directives. Ordinary object aliases
+retain deferred checking; function clone overload sets use the existing
+source-ordered overload path. This remains separate from ordinary weak binding.
+The clone can supply an ELF symbol where the unit never declares ALIAS; this
+does not add a synthetic parser declaration for C expression references to
+such an otherwise undeclared name.
+
+A declared target without an emitted definition is accepted by syntax checking
+and diagnosed at object generation with "alias must point to a defined variable
+or function", at the pragma's ALIAS token, with Clang's mangled-name notes.
+An inline-only function definition is not an emitted definition for this
+purpose. These diagnostics follow ordinary alias diagnostics and preserve
+clone-creation order and macro expansion locations. A target acquiring an alias
+later follows its resolved chain; ifunc targets supply indirect functions,
+while weakref identifiers supply no symbol under their C name. Weak-chain and
+type warnings use the pragma's source warning policy. At `-fcommon`, an alias
+of common storage remains refused by name, as described under GNU aliases;
+this applies to implicit pragma clones too, before any output is published.
+
+`test-checker-driver` (`c_check_symbol_pragma_driver_test.c`) compares the
+supported shapes' symbols and linked programs with Clang's on the default,
+scalar and one/three requested deferred-lane paths. The runtime
+`weak-alias` and `weak-alias-codegen` catalogues also run under
+`--semantic-recovery-only`: complete diagnostic lines and exit status under
+GNU17/GNU23, warning suppression/promotion and error limits. Syntax and object
+commands have separate Clang oracles, since undefined-target errors belong only
+to emission. Only scratch-space line numbers are normalized; columns, real
+source locations and macro notes remain compared. Rejected object commands
+preserve an existing output or create none; accepted controls must produce an
+ELF object. The `weak-alias-common` catalogue checks both `-fcommon` refusal and
+`-fno-common` symbol publication, including an ignored later common clone.
 
 With `-flazy-system-headers`, an earlier occurrence of the pragma's name in a
 deferred body is conservatively refused because its binding was not checked;

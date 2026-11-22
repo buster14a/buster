@@ -64,8 +64,17 @@ struct Range
 typedef struct Piece Piece;
 struct Piece
 {
-    char text[LONGEST_NAME];
+    const char* text;
+    size_t length;
     uint64_t saving;
+};
+
+typedef struct Dictionary Dictionary;
+struct Dictionary
+{
+    Piece pieces[PIECES];
+    // A one-based index, zero for an empty slot. At most half of the slots are occupied.
+    uint16_t slots[2 * PIECES];
 };
 
 typedef struct Table Table;
@@ -333,13 +342,29 @@ static int compare_pieces(const void* a, const void* b)
 {
     const Piece* x = a;
     const Piece* y = b;
-    return x->saving != y->saving ? (x->saving > y->saving ? -1 : 1) : strcmp(x->text, y->text);
+    int order = 0;
+    if (x->saving != y->saving)
+    {
+        order = x->saving > y->saving ? -1 : 1;
+    }
+    else
+    {
+        order = memcmp(x->text, y->text, x->length < y->length ? x->length : y->length);
+        if (order == 0)
+        {
+            order = (x->length > y->length) - (x->length < y->length);
+        }
+    }
+    return order;
 }
 
 // The UnicodeData.txt names made by rule, taken out of the stored names into listed ranges of consecutive code points.
 static void take_rule_names(Table* table, uint32_t data_names)
 {
-    qsort(table->names, data_names, sizeof(Name), compare_code_points);
+    if (data_names > 1)
+    {
+        qsort(table->names, data_names, sizeof(Name), compare_code_points);
+    }
     uint32_t kept = 0;
     for (uint32_t i = 0; table->valid && i < table->name_count; i += 1)
     {
@@ -431,9 +456,33 @@ static size_t next_piece(const char* suffix, size_t at)
     return end > at + (suffix[at] == ' ' ? 1 : 0) ? end - at : 1;
 }
 
-// The pieces that save the most bytes, as many as the bytes the alphabet leaves (`codes`, the byte each stands for).
-static uint32_t choose_pieces(const Table* table, Piece* pieces, uint8_t* codes)
+// The slot for these exact bytes, or the first empty slot on their probe sequence.
+static uint32_t piece_slot(const Dictionary* dictionary, const char* text, size_t length)
 {
+    _Static_assert((PIECES & (PIECES - 1)) == 0 && PIECES <= UINT16_MAX, "piece slots require a power-of-two capacity and 16-bit indices");
+    uint32_t hash = 2166136261u;
+    for (size_t i = 0; i < length; i += 1)
+    {
+        hash = (hash ^ (uint8_t)text[i]) * 16777619u;
+    }
+    const uint32_t mask = 2 * PIECES - 1;
+    uint32_t slot = hash & mask;
+    while (dictionary->slots[slot] != 0)
+    {
+        const Piece* piece = &dictionary->pieces[dictionary->slots[slot] - 1];
+        if (length == piece->length && memcmp(text, piece->text, length) == 0)
+        {
+            break;
+        }
+        slot = (slot + 1) & mask;
+    }
+    return slot;
+}
+
+// The pieces that save the most bytes, as many as the bytes the alphabet leaves (`codes`, the byte each stands for).
+static uint32_t choose_pieces(const Table* table, Dictionary* dictionary, uint8_t* codes)
+{
+    Piece* pieces = dictionary->pieces;
     uint32_t count = 0;
     for (uint32_t i = 0; i < table->name_count; i += 1)
     {
@@ -441,51 +490,54 @@ static uint32_t choose_pieces(const Table* table, Piece* pieces, uint8_t* codes)
         for (size_t at = 0; suffix[at] != 0;)
         {
             const size_t length = next_piece(suffix, at);
-            uint32_t found = count;
-            for (uint32_t p = 0; length > 1 && p < count && found == count; p += 1)
+            if (length > 1)
             {
-                found = strlen(pieces[p].text) == length && strncmp(pieces[p].text, suffix + at, length) == 0 ? p : count;
-            }
-            if (length > 1 && found == count && count < PIECES)
-            {
-                snprintf(pieces[count].text, LONGEST_NAME, "%.*s", (int)length, suffix + at);
-                pieces[count].saving = 0;
-                count += 1;
-            }
-            if (length > 1 && found < count)
-            {
-                pieces[found].saving += length - 1;
+                const uint32_t slot = piece_slot(dictionary, suffix + at, length);
+                uint16_t index = dictionary->slots[slot];
+                if (index == 0 && count < PIECES)
+                {
+                    // The sorted name storage stays fixed through encoding.
+                    pieces[count].text = suffix + at;
+                    pieces[count].length = length;
+                    count += 1;
+                    index = (uint16_t)count;
+                    dictionary->slots[slot] = index;
+                }
+                if (index != 0)
+                {
+                    pieces[index - 1].saving += length - 1;
+                }
             }
             at += length;
         }
     }
     qsort(pieces, count, sizeof(Piece), compare_pieces);
+    memset(dictionary->slots, 0, sizeof(dictionary->slots));
     uint32_t chosen = 0;
     for (uint32_t b = 1; b < 256; b += 1)
     {
         if (!is_alphabet((int)b) && chosen < count)
         {
-            codes[chosen++] = (uint8_t)b;
+            const uint32_t slot = piece_slot(dictionary, pieces[chosen].text, pieces[chosen].length);
+            codes[chosen] = (uint8_t)b;
+            chosen += 1;
+            dictionary->slots[slot] = (uint16_t)chosen;
         }
     }
     return chosen;
 }
 
 // Encodes name `i`'s rest past its shared prefix into `out` with the chosen pieces, then a 0: its length.
-static size_t encode_rest(const char* suffix, const Piece* pieces, const uint8_t* codes, uint32_t chosen, uint8_t* out)
+static size_t encode_rest(const char* suffix, const Dictionary* dictionary, const uint8_t* codes, uint8_t* out)
 {
     size_t length = 0;
     for (size_t at = 0; suffix[at] != 0;)
     {
         const size_t size = next_piece(suffix, at);
-        uint32_t found = chosen;
-        for (uint32_t p = 0; size > 1 && p < chosen && found == chosen; p += 1)
+        const uint16_t index = size > 1 ? dictionary->slots[piece_slot(dictionary, suffix + at, size)] : 0;
+        if (index != 0)
         {
-            found = strlen(pieces[p].text) == size && strncmp(pieces[p].text, suffix + at, size) == 0 ? p : chosen;
-        }
-        if (found < chosen)
-        {
-            out[length++] = codes[found];
+            out[length++] = codes[index - 1];
         }
         else
         {
@@ -536,7 +588,10 @@ static bool generate(FILE* data, FILE* aliases, FILE* out, const char* version, 
     // The listed ranges come from UnicodeData.txt's names alone, before the aliases, which keep their names.
     take_rule_names(&table, data_names);
     qsort(table.ranges, table.range_count, sizeof(Range), compare_ranges);
-    qsort(table.names, table.name_count, sizeof(Name), compare_names);
+    if (table.name_count > 1)
+    {
+        qsort(table.names, table.name_count, sizeof(Name), compare_names);
+    }
     uint32_t unique = 0;
     for (uint32_t i = 0; i < table.name_count; i += 1)
     {
@@ -569,10 +624,10 @@ static bool generate(FILE* data, FILE* aliases, FILE* out, const char* version, 
         }
         longest = table.ranges[r].listed && letters > longest ? letters : longest;
     }
-    Piece* pieces = table.valid ? calloc(PIECES, sizeof(Piece)) : NULL;
+    Dictionary* dictionary = table.valid ? calloc(1, sizeof(Dictionary)) : NULL;
     uint8_t codes[256] = { 0 };
-    const uint32_t chosen = pieces != NULL ? choose_pieces(&table, pieces, codes) : 0;
-    table.valid = table.valid && pieces != NULL && table.name_count != 0 && table.range_count != 0;
+    const uint32_t chosen = dictionary != NULL ? choose_pieces(&table, dictionary, codes) : 0;
+    table.valid = table.valid && dictionary != NULL && table.name_count != 0 && table.range_count != 0;
 
     fprintf(out, "// SPDX-License-Identifier: Unicode-3.0\n");
     fprintf(out, "// Generated by tools/generate_unicode_names.c; do not edit. Derived Unicode data: Copyright (c) 1991-2026 Unicode,\n");
@@ -598,8 +653,8 @@ static bool generate(FILE* data, FILE* aliases, FILE* out, const char* version, 
             piece = codes[p] == b ? p : chosen;
         }
         const char single[2] = { (char)b, 0 };
-        const char* expansion = is_alphabet((int)b) ? single : piece < chosen ? pieces[piece].text : "";
-        const size_t length = strlen(expansion);
+        const char* expansion = piece < chosen ? dictionary->pieces[piece].text : single;
+        const size_t length = piece < chosen ? dictionary->pieces[piece].length : (size_t)is_alphabet((int)b);
         table.valid &= text_length + length < sizeof(text);
         memcpy(text + text_length, expansion, table.valid ? length : 0);
         text_length += table.valid ? (uint32_t)length : 0;
@@ -631,7 +686,7 @@ static bool generate(FILE* data, FILE* aliases, FILE* out, const char* version, 
         size_t length = 0;
         entry[length++] = (uint8_t)shared;
         length += encode_difference(i % BUCKET == 0 ? (int64_t)table.names[i].code_point : (int64_t)table.names[i].code_point - previous, entry + length);
-        length += encode_rest(table.names[i].text + shared, pieces, codes, chosen, entry + length);
+        length += encode_rest(table.names[i].text + shared, dictionary, codes, entry + length);
         buckets[i / BUCKET] = i % BUCKET == 0 ? (uint32_t)offset : buckets[i / BUCKET];
         fputs(i % 4 == 0 ? "    \"" : "", out);
         write_bytes(out, entry, length);
@@ -672,7 +727,7 @@ static bool generate(FILE* data, FILE* aliases, FILE* out, const char* version, 
                 (unsigned long long)offset, longest);
     }
     free(buckets);
-    free(pieces);
+    free(dictionary);
     free(table.names);
     free(table.printable);
     free(table.formatting);
@@ -729,9 +784,12 @@ static int self_test(void)
         "D7A3;<Hangul Syllable, Last>;Lo;0;L;;;;;N;;;;;\n"
         "F900;CJK COMPATIBILITY IDEOGRAPH-F900;Lo;0;L;8C48;;;;N;;;;;\n"
         "F901;CJK COMPATIBILITY IDEOGRAPH-F901;Lo;0;L;66F4;;;;N;;;;;\n";
-    static const char aliases[] = "# a comment\n0000;NULL;control\n0000;NUL;abbreviation\n";
+    // These two alias spellings have the same 32-bit FNV-1a hash and tie on savings.
+    static const char aliases[] = "# a comment\n0000;NULL;control\n0000;NUL;abbreviation\n0041;OSDVWHSWA;alternate\n0042;ZPGSTQTSN;alternate\n";
     static const char* const expected[] = {
-        "#define BUSTER_UNICODE_NAME_COUNT 5\n",
+        "#define BUSTER_UNICODE_NAME_COUNT 7\n",
+        // The final three front-coded names, including both colliding aliases with their distinct piece codes.
+        "\"\\000\\202\\001\\001\\000\\000\\330\\001\\007\\004\\000\\000\\325\\001\\002\\000\"",
         "{ \"CJK COMPATIBILITY IDEOGRAPH-\", 0xF900, 0xF901, true },",
         "{ \"CJK UNIFIED IDEOGRAPH-\", 0x3400, 0x4DBF, false },",
         "{ 0x0041, 0x0042 }, { 0x3400, 0x4DBF }, { 0xAC00, 0xD7A3 }, { 0xF900, 0xF901 },",

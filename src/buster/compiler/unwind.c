@@ -847,25 +847,45 @@ static uint32_t unwind_rows_canonical(EmissionFrameRow* rows, uint32_t count, ui
         unmatched += rows[end - 1].kind == EMISSION_FRAME_RESTORE_STATE ? 1 : 0;
         end -= 1;
     }
-    // Each restored state's remembering: the latest ones that no restoring before the end matches, as many as went.
+    // Match restores inside the surviving prefix first. Only a remember with no such restore can be discarded.
+    // Its offset is dead, so use it to link the discarded rows in increasing order, with end as the sentinel.
+    uint32_t restores = 0;
+    uint32_t removed = end;
     for (uint32_t i = end; unmatched != 0 && i > 0; i -= 1)
     {
-        if (rows[i - 1].kind == EMISSION_FRAME_REMEMBER_STATE)
+        const uint8_t kind = rows[i - 1].kind;
+        if (kind == EMISSION_FRAME_RESTORE_STATE)
         {
-            int64_t balance = 1;
-            for (uint32_t k = i; balance != 0 && k < end; k += 1)
+            restores += 1;
+        }
+        else if (kind == EMISSION_FRAME_REMEMBER_STATE)
+        {
+            if (restores != 0)
             {
-                balance += rows[k].kind == EMISSION_FRAME_REMEMBER_STATE ? 1 : rows[k].kind == EMISSION_FRAME_RESTORE_STATE ? -1 : 0;
+                restores -= 1;
             }
-            if (balance != 0)
+            else
             {
-                memmove(rows + i - 1, rows + i, (uint64_t)(end - i) * sizeof(EmissionFrameRow));
-                end -= 1;
+                rows[i - 1].offset = removed;
+                removed = i - 1;
                 unmatched -= 1;
             }
         }
     }
-    return end;
+    // The prefix before the first removal is already in place. Move each intervening run once.
+    uint32_t kept = removed;
+    while (removed < end)
+    {
+        const uint32_t next = rows[removed].offset;
+        const uint32_t run = next - removed - 1;
+        if (run != 0)
+        {
+            memmove(rows + kept, rows + removed + 1, (size_t)run * sizeof(*rows));
+            kept += run;
+        }
+        removed = next;
+    }
+    return kept;
 }
 
 // A function's descriptor from its rows (unwind_rows_canonical's): its simple fixed shape where the rows are exactly
