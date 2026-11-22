@@ -1971,18 +1971,24 @@ struct NodeProducerExpected
 
 // The refusals that stand for what the walk's actions and the passes after it would say (#2850's gate against the
 // diagnostics), each with a body beside it that is taken. Taken: `present` and `calls` (an internal function the unit
-// defines, named), `same` (one enumeration's values stored, passed and compared), `kept` (a conditional whose arms its
-// conversion keeps), `narrow` (a compound shift inside its operand's own width). A root that may be warned of: `mixed`
-// (two enumerations' enumerators compared), `stored` and `passed` (an enumeration's value to another's object and
-// parameter), `armed` and `started` (a conditional's floating arms converted to an integer, by a return and by an
-// initialization). A token's kind: `pragmatic` (a pragma in the body), `undefined` (an internal function the unit does
-// not define, named). The machine's: `shifted` (a compound shift by its operand's own width, the census's constants').
+// defines, named), `same` (one enumeration's values stored, passed and compared), `kept`, `exact` and `halves` (a
+// conditional whose arms its conversion keeps: small integers to a floating type, floats to a double), `narrow` (a
+// compound shift inside its operand's own width). A root that may be warned of: `mixed` (two enumerations' enumerators
+// compared), `stored` and `passed` (an enumeration's value to another's object and parameter), `armed` and `started` (a
+// conditional's floating arms converted to an integer, by a return and by an initialization), `inexact` (an integer arm
+// a float does not hold). A token's kind: `pragmatic` (a pragma in the body), `undefined` (an internal function the
+// unit does not define, named). The machine's: `shifted` (a compound shift by its operand's own width, the census's
+// constants'). Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility).
 static const char node_producer_test_text[] =
     "enum A { A0, A1 };\nenum B { B0, B1 };\nstruct S { enum A a; enum B b; unsigned char c; int n; };\nvoid take(enum A);\n"
     "static int missing(void);\nstatic int present(void) { return 1; }\n"
     "int calls(void) { return present(); }\n"
     "int same(struct S *p) { take(p->a); p->a = A1; return p->a == A1; }\n"
     "double kept(int c) { return c ? 1 : 2; }\n"
+    "float exact(int c) { return c ? 3 : 1; }\n"
+    "double halves(int c) { return c ? 1.5f : 2.5f; }\n"
+    "float inexact(int c) { return c ? 16777217 : 1; }\n"
+    "int said(void) { int g(struct hidden *); return 1; }\n"
     "int narrow(struct S *p) { p->c <<= 7; return p->c; }\n"
     "int mixed(void) { return A1 == B1; }\n"
     "void stored(struct S *p) { p->a = B1; }\n"
@@ -1997,6 +2003,15 @@ static const char node_producer_test_text[] =
 static const char node_producer_test_members_text[] = "struct M { int n; int gone __attribute__((unavailable(\"gone\"))); };\nint member(struct M *p) { return p->n; }\n";
 static const char node_producer_test_counted_text[] = "struct C { int n; int *p __attribute__((counted_by(n))); };\nint counted(struct C *c) { return c->n; }\n";
 static const char node_producer_test_linkage_text[] = "__attribute__((internal_linkage)) int inner(void);\nint linked(void) { return 1; }\n";
+// A function's attribute of its code, one a unit: a target, its clones, an interrupt's, a processor's own version, a
+// dispatch among them. `bodies` is the unit's lowered bodies.
+static const struct { const char* text; uint32_t bodies; } node_producer_test_code_units[] = {
+    { "__attribute__((target(\"avx2\"))) int t(void) { return 1; }\n", 1 },
+    { "__attribute__((target_clones(\"avx2\",\"default\"))) int tc(void) { return 1; }\n", 2 },
+    { "struct interrupt_frame;\n__attribute__((interrupt)) void isr(struct interrupt_frame *frame) { (void)frame; }\nint plain(void) { return 1; }\n", 2 },
+    { "__attribute__((cpu_specific(generic))) int s1(void) { return 1; }\nint plain(void) { return 1; }\n", 2 },
+    { "__attribute__((cpu_dispatch(generic))) int d(void);\nint plain(void) { return 1; }\n", 1 },
+};
 static const char node_producer_test_results_text[] = "typedef int W __attribute__((warn_unused_result));\nW w(void);\nint result(void) { return 1; }\n";
 
 static bool node_producer_test_fixture(const char* directory, const char* text, uint64_t length, char** options, uint32_t option_count, bool lean,
@@ -7775,15 +7790,15 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // The refusals that stand for a diagnostic of the walk's or of a pass after it, each beside a body that is taken; and
     // the two units that take no body for a member's mark and for a result's attribute on a type.
     NodeProducerExpected produced_silent = {
-        .reasons = { [NODE_PRODUCER_TAKEN] = 5, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_MACHINE] = 1, [NODE_PRODUCER_LOUD] = 5 },
+        .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_MACHINE] = 1, [NODE_PRODUCER_LOUD] = 6 },
     };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), false,
                                                                  &produced_silent),
                       "node-producer: two enumerations meeting, a conditional's constant arm changed, a pragma, an undefined internal function and a narrow compound shift are left");
-    produced_silent.unread = 2;
+    produced_silent.unread = 3;
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), true,
                                                                  &produced_silent),
-                      "node-producer: the same as a compile would run it, two bodies unread");
+                      "node-producer: the same as a compile would run it, three bodies unread");
     const NodeProducerExpected produced_members = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_MEMBERS };
     const NodeProducerExpected produced_results = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_RESULTS };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_members_text, sizeof(node_producer_test_members_text) - 1, quiet,
@@ -7799,6 +7814,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_linkage_text, sizeof(node_producer_test_linkage_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_linkage),
                       "node-producer: a unit with a function of internal linkage by its attribute takes no body");
+    for (uint32_t unit = 0; unit < BUSTER_ARRAY_LENGTH(node_producer_test_code_units); unit += 1)
+    {
+        const NodeProducerExpected produced_code = { .reasons = { [NODE_PRODUCER_UNIT] = node_producer_test_code_units[unit].bodies }, .unit = BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES };
+        check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_code_units[unit].text, strlen(node_producer_test_code_units[unit].text), quiet,
+                                                                     BUSTER_ARRAY_LENGTH(quiet), false, &produced_code),
+                          "node-producer: a unit with a function's attribute of its code takes no body");
+    }
     check_test_expect(test, ready && node_bodies_test_controls(directory, true),
                       "node-bodies read as -c reads a unit: the statement controls' path is taken, and both comparisons are exact there");
     check_test_expect(test, ready && node_bodies_test_controls(directory, false),

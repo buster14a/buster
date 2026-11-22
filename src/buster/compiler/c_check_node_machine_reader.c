@@ -390,9 +390,10 @@ static TypeId node_machine_record_enumeration(const NodeMachine* machine, uint32
 
 // Whether the conversion of record `r`'s value to `target` may be warned of for a constant it changes, where the record
 // is a conditional (or a comma, by its second operand) and its arms carry the conversion (clang's
-// CheckConditionalOperator; check_common_conversion_arms): an integer constant arm outside an integer target's values, or
-// to a floating target past what a float holds exactly, or to any other target; a floating constant arm to what is no
-// floating type at least as large; a constant the columns do not hold whole; a nesting past `depth`.
+// CheckConditionalOperator; check_common_conversion_arms): an integer constant arm, but to a floating target that holds
+// it exactly whatever its type (under 2^24); a floating constant arm to what is no floating type at least as large; a
+// constant the columns do not hold whole; a nesting past `depth`. (T takes a conditional's conversion to a floating
+// target alone so far: an integer constant arm to an integer target is refused here whatever its value.)
 static bool node_machine_arm_changes(const NodeMachine* machine, uint32_t r, TypeId target, uint32_t depth)
 {
     const TypeTable* types = machine->types;
@@ -409,11 +410,7 @@ static bool node_machine_arm_changes(const NodeMachine* machine, uint32_t r, Typ
     {
         const CheckConstantKind kind = node_machine_record_constant_kind(machine, r);
         const TypeId source = node_machine_record_type(machine, r);
-        const uint8_t target_kind = check_action_kind(types, target);
-        const bool target_floating = target_kind == BUSTER_TYPE_KIND_FLOATING;
-        uint32_t target_width = 0;
-        bool target_signed = false;
-        const bool target_integer = check_action_integer_type(types, target, &target_width, &target_signed) && target_width != 0 && target_width <= 64;
+        const bool target_floating = check_action_kind(types, target) == BUSTER_TYPE_KIND_FLOATING;
         if (kind == CHECK_CONSTANT_INTEGER)
         {
             uint32_t width = 0;
@@ -424,11 +421,8 @@ static bool node_machine_arm_changes(const NodeMachine* machine, uint32_t r, Typ
             const uint32_t shift = whole ? 64 - width : 0;
             const int64_t value = is_signed ? (int64_t)(raw << shift) >> shift : (int64_t)((raw << shift) >> shift);
             const bool huge = whole && !is_signed && width == 64 && (raw >> 63) != 0;
-            const int64_t smallest = !target_signed ? 0 : target_width == 64 ? INT64_MIN : -(INT64_C(1) << (target_width - 1));
-            const uint64_t largest = target_signed ? (UINT64_C(1) << (target_width - 1)) - 1 : target_width == 64 ? UINT64_MAX : (UINT64_C(1) << target_width) - 1;
-            const bool fits = target_integer && !huge && value >= smallest && (value < 0 || (uint64_t)value <= largest);
-            const bool exact = target_floating && !huge && value > -(INT64_C(1) << 24) && value < (INT64_C(1) << 24);
-            changes = !whole || !(fits || exact);
+            const bool exact = whole && target_floating && !huge && value > -(INT64_C(1) << 24) && value < (INT64_C(1) << 24);
+            changes = !exact;
         }
         else if (kind == CHECK_CONSTANT_FLOATING)
         {

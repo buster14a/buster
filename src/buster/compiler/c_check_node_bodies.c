@@ -1083,10 +1083,9 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
             counted_member |= (reader->types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) != 0;
         }
         // The unit's own reason. Of its attributes, by the tokens that have some: a function's whose code they change or
-        // choose (a target, its clones, an interrupt's, a processor's dispatch, internal linkage); a member's of the
-        // counted_by family; and a result's on what is no function's declaration.
+        // choose (a target, its clones, an interrupt's, a processor's dispatch, internal linkage); and a result's on what is
+        // no function's declaration.
         bool attributed = false;
-        bool counted = false;
         bool results = false;
         const uint32_t attributed_end = count < input->token_count ? count : input->token_count;
         for (uint32_t first = check_input_attributed_next(input->attributes, 0, attributed_end); first < attributed_end;
@@ -1097,7 +1096,6 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
                 const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
                 const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
                 const bool function = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && input->declaration_kinds != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION;
-                counted |= attributes != NULL && attributes->counted;
                 results |= attributes != NULL && attributes->results && !function;
                 for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
                 {
@@ -1114,7 +1112,7 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
                          input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0 ? BUSTER_NODE_PRODUCER_UNIT_PRAGMAS :
                          input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0 ? BUSTER_NODE_PRODUCER_UNIT_SYMBOLS :
                          attributed ? BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES :
-                         counted || counted_member || input->marked_member_count != 0 ? BUSTER_NODE_PRODUCER_UNIT_MEMBERS :
+                         counted_member || input->marked_member_count != 0 ? BUSTER_NODE_PRODUCER_UNIT_MEMBERS :
                          results ? BUSTER_NODE_PRODUCER_UNIT_RESULTS : 0;
         shadow->produced_unit = producer->unit;
         shadow->produced_ran = true;
