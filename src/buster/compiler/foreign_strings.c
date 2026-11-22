@@ -1180,7 +1180,10 @@ static bool foreign_strings_path_valid(ForeignPath path)
 
 // The final linker needs the pool only below its original byte count. Finish interning first: alignment can grow
 // the pool and offset overflow is an error even if the linker would discard it. An empty result reports no saving.
-static ForeignStringsError foreign_strings_build_below(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output, uint64_t limit)
+// Without `suffixes` entries share whole entries only (no block heads): the consumer passes false when it refuses
+// every pool (foreign_strings_refused), so that it pays for no head it would discard (#3044).
+static ForeignStringsError foreign_strings_build_below(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output, uint64_t limit,
+                                                       bool suffixes)
 {
     ForeignStringsError error = arena == 0 || output == 0 || (input_count != 0 && inputs == 0) || !foreign_strings_path_valid(path) ?
                                 FOREIGN_STRINGS_ERROR_INPUT : FOREIGN_STRINGS_ERROR_NONE;
@@ -1237,7 +1240,7 @@ static ForeignStringsError foreign_strings_build_below(const ForeignStringInput*
             }
         }
         memset(table, 0, slots * sizeof(uint32_t));
-        error = foreign_strings_block_heads(inputs, &strings, pointers, sections, &blocks) ? FOREIGN_STRINGS_ERROR_NONE : FOREIGN_STRINGS_ERROR_MEMORY;
+        error = !suffixes || foreign_strings_block_heads(inputs, &strings, pointers, sections, &blocks) ? FOREIGN_STRINGS_ERROR_NONE : FOREIGN_STRINGS_ERROR_MEMORY;
     }
     if (error == FOREIGN_STRINGS_ERROR_NONE)
     {
@@ -1276,7 +1279,7 @@ static ForeignStringsError foreign_strings_build_below(const ForeignStringInput*
 
 static ForeignStringsError foreign_strings_build(const ForeignStringInput* inputs, uint32_t input_count, ForeignPath path, Arena* arena, ForeignStrings* output)
 {
-    return foreign_strings_build_below(inputs, input_count, path, arena, output, UINT64_MAX);
+    return foreign_strings_build_below(inputs, input_count, path, arena, output, UINT64_MAX, true);
 }
 
 static bool foreign_strings_entry(const ForeignStrings* strings, uint32_t input, uint64_t offset, uint32_t* entry)
