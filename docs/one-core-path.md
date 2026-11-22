@@ -117,7 +117,7 @@ token; the issue has each row's source:
 | 0 | The middle's passes on the real nodes, outside the compiler | every entry the stream's; 20 cycles a taken node or less; 0.2 mispredicted branches a node or fewer | met on the frozen SQLite and musl streams: 13.76 and 18.05 cycles on repeated passes, 18.29 and 19.37 after scalar work, with the largest of the 20 round means at 19.59 |
 | 1 | The fact words, in the shadow: T's leaves and lookups from one load each | every record the oracle's; 10 cycles a leaf or lookup or less, a body's expressions a run | measured: exact; 15.8 to 26.5 cycles; a leaf about 5, a lookup 25 to 46. Followed up: a lean record 14.1 to 20.8, the loads alone 8.8 to 15.2. On the later call-argument rules, completing a call in one visit gave 27.00 on SQLite in lean mode. |
 | 2 | The machine on these records where it runs (#2524's steps 2 to 4) | the bodies' middle at 38 cycles a node or less in `-c sqlite3.c` | first piece measured, in the shadow: T whole from the fact words, exact; 38 cycles an evaluated node with whole records and 32 with lean ones, where its own gate was 25. Second piece counted: of the operators that are no lookup, 5.4%, 24.2% and 6.1% need a value made at the record (`sqlite3.c`, Lua, musl; its line was 15%), and C decides on a type's identity for one question of a call's callee. Third piece measured: the kernel at reader time, its inputs from the front's records, exact; 16.4 TSC ticks a record where T again takes 49.2, and 44.8 with its inputs' making, where its gate was 35. The tests on the window measured: exact; 54.1 TSC ticks a record on `sqlite3.c` where their pass over T's columns reads 83.0 (gate 40, refuted at 65): the loop 0.7, its inputs 8.9, and 37.2 the tests that read T's records still. Their second half's first piece: an operator a constant sends for nothing is left out of the loop's list (20,898 of 48,645): 48.7. Its second: the tree's tests listed by the operator above (6 operators for 27,794 records), and an expression with nothing listed has its verdict from the window alone (21,157 of 50,993): 42.0. Its third: a call with no test to make is left out of the list (12,064 of 12,918) and a statement that discards nothing is not listed (35,069 expressions with nothing listed): 35.8. Its fourth: a pointer's cast to void or to a pointer, its subscript by a constant and its sum with one are left out of the list (9,744 of 15,688 listed operators; 41,456 expressions with nothing listed): 31.2. C on the window measured: C's templates, contexts and targets for the expressions with no call, logical operator, update or comma (63% of `sqlite3.c`'s placed expressions), exact; 12.6 TSC ticks a record of theirs where C on T's columns reads 40.2, and 13.9 with its bytes, where its gate was 10. A call on the window measured: the kernel makes each argument's conversion (every one for 99.6%, 98.8% and 98.0% of the calls) and C's answers for a call are made on the window from them, exact; 86%, 84% and 86% of the placed expressions are decided there, at 8.2 TSC ticks a record of theirs on `sqlite3.c` and 9.2 with its bytes (gate 10); the kernel in place reads 1.2 ticks a record more, where its gate was 1.0. Its ceiling in a compile, measured: with each whole tape's expression replaced by one leaf the middle falls from 87.6 ms to 56.7 on `sqlite3.c` (to 60.2 with the tapes the tests decide on the window alone, to 76.3 with those that hold no call, label or temporary), against about 10 ms for the machine: step 2 whole is about 1.23 times, and a first compile that takes no call gains nothing |
-| the redesign, 1 | The body boundary: a body's lowered function from outside the reader (#2524's step 3's boundary) | exact; `-c sqlite3.c` in 56 ms with its bodies supplied (refuted at 62); nothing moves with none supplied | measured on a scaffold, with a recording as the supplier: exact by default flags on `sqlite3.c`, Lua, `main.c` and musl, and not yet with `-Wall -Wextra` (the unused analysis lacks a supplied body's uses); 64.9 ms with 84% of the bodies' tokens supplied, a line that reaches 56.5 at 100%: refuted; 1,215.957 M and 1,215.946 M instructions with none supplied. Its gate on a masked unit's reader is merged (#3272) |
+| the redesign, 1 | The body boundary: a body's lowered function from outside the reader (#2524's step 3's boundary) | exact; `-c sqlite3.c` in 56 ms with its bodies supplied (refuted at 62); nothing moves with none supplied | measured on a scaffold, with a recording as the supplier: exact by default flags on `sqlite3.c`, Lua, `main.c` and musl, and not yet with `-Wall -Wextra` (the unused analysis lacks a supplied body's uses) nor for a unit whose unit-end warnings a supplied body's uses decide; 64.9 ms with 84% of the bodies' tokens supplied, a line that reaches 56.5 at 100%: refuted; 1,215.957 M and 1,215.946 M instructions with none supplied. Its gate on a masked unit's reader is merged (#3272) |
 | 3 | The front's row, into the window | 35 cycles a token or less | first part measured, in the shadow: the node machine's front writes the kernel's window and the kernel reads it in place, exact; the kernel with its inputs 29.9 TSC ticks a record on `sqlite3.c` (gate 35), 38.4 on Lua, 61.5 on musl. The lexer's and the parser's rows are not started |
 | 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates. Designed (#2874): a body's row at 14 cycles a typed entry. Its first piece, Tier 0's back half on byte templates, measured in the shadow: exact, and refuted on its cost (62.8 cycles an entry where today's back half takes 43.7). Its second, in the compile: a fixed frame's unwind descriptor from Tier 0's frame, the objects unchanged, 403 cycles a body where main's frame events take 1,512 (its gate 300), 4.0 cycles a token less on `sqlite3.c` |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted. Allocated: 14.3 to 15.0 on `sqlite3.c` and 25.0 on musl as one command, each row to the issue that removes it or kept. The kept rows optimized in the compile since (#2885, #2903, #2941): the row about 12 on `sqlite3.c`. Whether the budget's line moves to it is not settled |
@@ -2915,7 +2915,9 @@ supplied and with each half of them.
 
 Every variant's objects and diagnostics are the ordinary compile's. With `-Wall -Wextra` the objects are and the
 diagnostics are not: the reader's unused analysis lacks a supplied body's uses of its parameters and of the unit's
-declarations, and warns of them.
+declarations, and warns of them. And a unit of four lines shows a hole by default flags that the corpora don't have: a
+`static` function used and never defined warns at the unit's end (`-Wundefined-internal`), the driver gives a unit
+with a mask no unit-end warnings, and the supplied compile is silent where the ordinary one warns.
 
 The time (B2), `--time-stages` medians of seven rounds, ms; all 43 objects of a run are one:
 
@@ -2953,27 +2955,30 @@ Profiles of the compile with every body masked, 243.8 M cycles a run: the kernel
 ### What it means
 
 - **The boundary is real and exact where it was built.** A unit takes its bodies' code from outside the reader, in
-  whole or in part, and its object is the ordinary one to the byte on four corpora. What it lacks is listed: the uses
-  for the unused analysis, and block-scope statics, which are 15% of `sqlite3.c`'s body tokens (`sqlite3VdbeExec`
-  among them).
+  whole or in part, and its object is the ordinary one to the byte on four corpora. What it lacks: the uses for the
+  unused analysis; the unit-end warnings, which the driver gives no unit with a mask; and block-scope statics, which
+  are 15% of `sqlite3.c`'s body tokens (`sqlite3VdbeExec` among them).
 - **Its gate on the total is refuted, and what refutes it is the host.** 0%, 76% and 84% of the bodies' tokens are a
   line of 0.544 ms a percent: 56.5 ms with every body supplied and costing nothing, where the gate allowed 56 for
   everything. The bodies' checking and lowering is 46 ms of today's 111 for the bodies that were supplied. What the
   line leaves at its end is the reader's passes over every token (21 ms with every body masked), the front (16),
   Tier 0 and emission (9), the file scope's own checking and the supply, on memory that barely moves.
-- **A masked token costs by being there.** The bodies' tokens removed from the source left 14.2 ms between
-  `check-input` and `lower`; masked in place they leave 25.5, most of it pages the reader's columns touch for tokens
-  nothing reads. A reader that reads a view of the unit without the taken bodies' tokens, as it reads a view without
-  a unit's attested declarations, would not pay those 11 ms. That is the order's third step, and it is worth as
-  much as the stream's own cost will be.
+- **A masked token costs by being there: how much is an estimate.** Two readings that are not one experiment: the
+  bodies' tokens removed from a preprocessed source left 14.2 ms between `check-input` and `lower`, at main
+  `d541430bf`; masked in place in the frozen source they leave 25.5, at `0b150b71b`. The profile says where the
+  difference would be: pages the reader's columns touch for tokens nothing reads. A reader that reads a view of the
+  unit without the taken bodies' tokens, as it reads a view without a unit's attested declarations, is the order's
+  third step. It is not built, and what it saves is not measured.
 - **There is no small first slice of the stream.** Coverage by constructs is nothing until the expression language is
   there whole with branches and jumps. What takes bodies takes nearly all of them or nearly none, so the stream's
   first piece is a second middle for the language as code uses it, and whether that may be on main beside the first
   is [#2924](https://github.com/buster14a/buster/issues/2924)'s question, asked on the issue and not answered.
 - **A supplier that makes the function has the references.** They need no walk of their own on that path.
-- **Where this leaves the target.** With the stream at any cost and the view, the path that is measured ends near
-  half of today's time. The front's 16 ms, Tier 0's and the emission's 9 and the kernel's share are each more than the
-  9.5 ms the whole compile may take, and each is another row's redesign (steps 3 to 5 above).
+- **Where this leaves the target, as an estimate.** Nothing past the boundary is built. If a stream took every body
+  at no cost and a view saved what the two readings above differ by, `sqlite3.c` would compile in about half of
+  today's time. The front (16 ms) and the kernel's share (13 to 14 ms of the ordinary and of the supplied compile) are
+  each more than the 9.5 ms the whole compile may take, and Tier 0 with the emission (9) is nearly all of it. Each is
+  another row's redesign (steps 3 to 5 above).
 
 ## Step 4's first piece: a census of Tier 0's row
 
