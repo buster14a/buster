@@ -1,0 +1,506 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
+//
+// SCAFFOLD (#2850's redesign, #2524's body boundary; not for merge): the lowering's side of c_check_boundary.c. The
+// recording of each body's function at its part's end (check_lower_part_body, after the ABI wiring and before
+// check_lower_finish, so that its runtime functions' symbols are still the part's provisional ones), and its replay in a
+// supplying compile. Included by c_check_program_lower.c before check_lower_part_body.
+
+// How many elements a column of a function has.
+typedef enum CheckBoundaryExtent
+{
+    CHECK_BOUNDARY_EXTENT_ENTRIES,
+    CHECK_BOUNDARY_EXTENT_LOCALS,
+    CHECK_BOUNDARY_EXTENT_PARAMETERS,
+    CHECK_BOUNDARY_EXTENT_CALLS,
+    CHECK_BOUNDARY_EXTENT_ARGUMENTS,
+    CHECK_BOUNDARY_EXTENT_ONE,
+    CHECK_BOUNDARY_EXTENT_X87,
+    CHECK_BOUNDARY_EXTENT_VECTOR_WORDS,
+    CHECK_BOUNDARY_EXTENT_VECTORS,
+    CHECK_BOUNDARY_EXTENT_OPERATIONS,
+    CHECK_BOUNDARY_EXTENT_LABELS,
+    CHECK_BOUNDARY_EXTENT_TABLE_LABELS,
+    CHECK_BOUNDARY_EXTENT_TABLES,
+    CHECK_BOUNDARY_EXTENT_LIFETIMES,
+} CheckBoundaryExtent;
+
+typedef struct CheckBoundaryColumn CheckBoundaryColumn;
+struct CheckBoundaryColumn
+{
+    uint32_t offset;
+    uint32_t bytes;
+    uint32_t extent;
+};
+
+// Every column of Tier0Function the recording carries, in the file's order. symbol_access is the unit's, which the
+// emission gives every function; asm_bodies and call_asm are a refused function's.
+#define BUSTER_CHECK_BOUNDARY_COLUMN(field, Type, extent) { (uint32_t)offsetof(Tier0Function, field), (uint32_t)sizeof(Type), extent }
+static const CheckBoundaryColumn check_boundary_columns[] = {
+    BUSTER_CHECK_BOUNDARY_COLUMN(kinds, uint8_t, CHECK_BOUNDARY_EXTENT_ENTRIES),
+    BUSTER_CHECK_BOUNDARY_COLUMN(classes, uint8_t, CHECK_BOUNDARY_EXTENT_ENTRIES),
+    BUSTER_CHECK_BOUNDARY_COLUMN(values, uint64_t, CHECK_BOUNDARY_EXTENT_ENTRIES),
+    BUSTER_CHECK_BOUNDARY_COLUMN(local_classes, uint8_t, CHECK_BOUNDARY_EXTENT_LOCALS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(local_flags, uint8_t, CHECK_BOUNDARY_EXTENT_LOCALS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(parameters, AbiLocation, CHECK_BOUNDARY_EXTENT_PARAMETERS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(call_targets, SymbolId, CHECK_BOUNDARY_EXTENT_CALLS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(call_first, uint32_t, CHECK_BOUNDARY_EXTENT_CALLS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(call_argument_counts, uint32_t, CHECK_BOUNDARY_EXTENT_CALLS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(call_variadic, uint8_t, CHECK_BOUNDARY_EXTENT_CALLS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(calls, AbiCall, CHECK_BOUNDARY_EXTENT_CALLS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(argument_locations, AbiLocation, CHECK_BOUNDARY_EXTENT_ARGUMENTS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(argument_classes, uint8_t, CHECK_BOUNDARY_EXTENT_ARGUMENTS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(local_sizes, uint32_t, CHECK_BOUNDARY_EXTENT_LOCALS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(local_alignments, uint8_t, CHECK_BOUNDARY_EXTENT_LOCALS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(incoming_variadic, AbiCall, CHECK_BOUNDARY_EXTENT_ONE),
+    BUSTER_CHECK_BOUNDARY_COLUMN(argument_sizes, uint32_t, CHECK_BOUNDARY_EXTENT_ARGUMENTS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(call_result_objects, uint32_t, CHECK_BOUNDARY_EXTENT_CALLS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(x87_constants, uint64_t, CHECK_BOUNDARY_EXTENT_X87),
+    BUSTER_CHECK_BOUNDARY_COLUMN(vector_constants, uint64_t, CHECK_BOUNDARY_EXTENT_VECTOR_WORDS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(vector_constant_bytes, uint8_t, CHECK_BOUNDARY_EXTENT_VECTORS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(operations, Tier0Operation, CHECK_BOUNDARY_EXTENT_OPERATIONS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(label_entries, uint32_t, CHECK_BOUNDARY_EXTENT_LABELS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(label_tables, uint32_t, CHECK_BOUNDARY_EXTENT_TABLE_LABELS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(table_jumps, uint32_t, CHECK_BOUNDARY_EXTENT_TABLES),
+    BUSTER_CHECK_BOUNDARY_COLUMN(table_addresses, uint32_t, CHECK_BOUNDARY_EXTENT_TABLES),
+    BUSTER_CHECK_BOUNDARY_COLUMN(call_tails, uint8_t, CHECK_BOUNDARY_EXTENT_CALLS),
+    BUSTER_CHECK_BOUNDARY_COLUMN(lifetime_entries, uint32_t, CHECK_BOUNDARY_EXTENT_LIFETIMES),
+    BUSTER_CHECK_BOUNDARY_COLUMN(lifetime_locals, uint32_t, CHECK_BOUNDARY_EXTENT_LIFETIMES),
+};
+#undef BUSTER_CHECK_BOUNDARY_COLUMN
+
+static uint64_t check_boundary_extent(const Tier0Function* function, uint32_t extent)
+{
+    switch (extent)
+    {
+        case CHECK_BOUNDARY_EXTENT_ENTRIES: return function->count;
+        case CHECK_BOUNDARY_EXTENT_LOCALS: return function->local_count;
+        case CHECK_BOUNDARY_EXTENT_PARAMETERS: return function->parameter_count;
+        case CHECK_BOUNDARY_EXTENT_CALLS: return function->call_count;
+        case CHECK_BOUNDARY_EXTENT_ARGUMENTS: return function->argument_count;
+        case CHECK_BOUNDARY_EXTENT_ONE: return 1;
+        case CHECK_BOUNDARY_EXTENT_X87: return 2 * (uint64_t)function->x87_constant_count;
+        case CHECK_BOUNDARY_EXTENT_VECTOR_WORDS: return 8 * (uint64_t)function->vector_constant_count;
+        case CHECK_BOUNDARY_EXTENT_VECTORS: return function->vector_constant_count;
+        case CHECK_BOUNDARY_EXTENT_OPERATIONS: return function->operation_count;
+        case CHECK_BOUNDARY_EXTENT_LABELS: return function->label_count;
+        case CHECK_BOUNDARY_EXTENT_TABLE_LABELS: return function->table_count != 0 ? function->label_count : 0;
+        case CHECK_BOUNDARY_EXTENT_TABLES: return function->table_count;
+        default: return function->lifetime_count;
+    }
+}
+
+// The file's row of a body: its tokens, why it isn't supplied if it isn't, and where its columns are in the blob.
+typedef struct CheckBoundaryRow CheckBoundaryRow;
+struct CheckBoundaryRow
+{
+    uint32_t opening;
+    uint32_t closing;
+    uint32_t declaration;
+    uint32_t refusal;
+    uint32_t entries;
+    uint32_t reserved;
+    uint64_t offset;
+};
+
+// The recording's state over a unit's parts: each of the program's bodies' flags, found once at the first part, and the
+// writer's runtime count at each body's start.
+typedef struct CheckBoundaryUnit CheckBoundaryUnit;
+struct CheckBoundaryUnit
+{
+    const CheckProgram* program;
+    // Per body of the program: a floating builtin of it may set errno.
+    uint8_t* errno_bodies;
+    // Per string record of the reader: its body + 1, or 0 for one outside every body.
+    uint32_t* string_bodies;
+    // The writer's runtime functions' count before each body, and after the part's last one.
+    uint32_t* runtime_marks;
+    CheckBoundaryRow* rows;
+    uint32_t row_count;
+};
+
+static CheckBoundaryUnit check_boundary_unit;
+
+// The program's body that holds `token`, or BUSTER_CHECK_NONE: the bodies are in their openings' order.
+static uint32_t check_boundary_body_of(const CheckProgram* program, uint32_t token)
+{
+    uint32_t low = 0;
+    uint32_t high = program->body_count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (program->bodies[middle].opening <= token)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    const uint32_t body = low - 1;
+    return low != 0 && token <= program->parser->tree.parents[program->bodies[body].opening] ? body : BUSTER_CHECK_NONE;
+}
+
+static void check_boundary_unit_prepare(const CheckProgram* program)
+{
+    if (check_boundary_unit.program != program)
+    {
+        free(check_boundary_unit.errno_bodies);
+        free(check_boundary_unit.string_bodies);
+        free(check_boundary_unit.runtime_marks);
+        free(check_boundary_unit.rows);
+        check_boundary_unit = (CheckBoundaryUnit){ .program = program };
+        const CheckInput* input = program->input;
+        const CheckStream* stream = program->stream;
+        check_boundary_unit.errno_bodies = calloc((uint64_t)program->body_count + 1, 1);
+        check_boundary_unit.string_bodies = calloc((uint64_t)input->string_count + 1, sizeof(uint32_t));
+        check_boundary_unit.runtime_marks = calloc((uint64_t)program->body_count + 2, sizeof(uint32_t));
+        check_boundary_unit.rows = calloc((uint64_t)program->body_count + 1, sizeof(CheckBoundaryRow));
+        for (uint32_t k = 0; stream != NULL && check_boundary_unit.errno_bodies != NULL && k < stream->floating_count; k += 1)
+        {
+            const uint32_t body = stream->floating[k].may_set_errno ? check_boundary_body_of(program, input->graph.tokens[stream->floating[k].node]) : BUSTER_CHECK_NONE;
+            if (body != BUSTER_CHECK_NONE)
+            {
+                check_boundary_unit.errno_bodies[body] = 1;
+            }
+        }
+        for (uint32_t s = 0; check_boundary_unit.string_bodies != NULL && s < input->string_count; s += 1)
+        {
+            const uint32_t body = check_boundary_body_of(program, input->strings[s].token);
+            check_boundary_unit.string_bodies[s] = body != BUSTER_CHECK_NONE ? body + 1 : 0;
+        }
+        check_boundary.token_count = input->token_count;
+    }
+}
+
+// What the function's name `symbol` is to the recording: a fix-up for an object's or a runtime function's (true), or the
+// refusal of any other.
+static bool check_boundary_classify(const CheckLowerShared* shared, SymbolId symbol, CheckBoundaryFixup* fixup, uint32_t* refusal)
+{
+    const CheckProgram* program = shared->program;
+    const CheckProgramLowered* lowered = shared->lowered;
+    const uint64_t helpers = (uint64_t)program->symbol_count + 1;
+    const uint64_t pools = helpers + lowered->helpers.count;
+    bool named = false;
+    if (symbol != 0 && symbol <= program->symbol_count)
+    {
+        fixup->name = CHECK_BOUNDARY_NAME_OBJECT;
+        fixup->payload = program->symbol_objects[symbol - 1];
+        named = true;
+    }
+    else if (symbol >= helpers && symbol < pools)
+    {
+        *refusal = CHECK_BOUNDARY_HELPER;
+    }
+    else if (symbol >= pools && symbol < pools + lowered->initializers.count)
+    {
+        *refusal = CHECK_BOUNDARY_POOL;
+    }
+    else if (symbol >= shared->provisional_runtimes && symbol < shared->provisional_runtimes + CHECK_LOWER_RUNTIMES)
+    {
+        fixup->name = CHECK_BOUNDARY_NAME_RUNTIME;
+        fixup->payload = symbol - shared->provisional_runtimes;
+        named = true;
+        if (fixup->payload == CHECK_LOWER_RUNTIME_ERRNO)
+        {
+            // errno's function is numbered first of the runtime's wherever a builtin of the unit may set it.
+            *refusal = CHECK_BOUNDARY_ERRNO;
+            named = false;
+        }
+    }
+    else if (symbol >= shared->provisional_tables)
+    {
+        *refusal = CHECK_BOUNDARY_TABLE;
+    }
+    else if (symbol != 0)
+    {
+        *refusal = CHECK_BOUNDARY_SYMBOL;
+    }
+    return named;
+}
+
+// A part's bodies recorded, after its ABI wiring: each one's row, and for a supplied one its lists and its function in
+// the blob. `runtimes` are the writer's, in the part's first calls' order.
+static void check_boundary_record_part(const CheckLowerShared* shared, const CheckLowerPart* part, const uint16_t* runtimes, uint32_t runtime_count, bool sources)
+{
+    const CheckProgram* program = shared->program;
+    const CheckProgramLowered* lowered = shared->lowered;
+    const CheckInput* input = program->input;
+    check_boundary_unit_prepare(program);
+    CheckBoundaryUnit* unit = &check_boundary_unit;
+    const bool ready = unit->errno_bodies != NULL && unit->string_bodies != NULL && unit->runtime_marks != NULL && unit->rows != NULL;
+    for (uint32_t b = part->first; ready && b < part->end; b += 1)
+    {
+        const CheckProgramBody body = program->bodies[b];
+        const Tier0Function* function = &lowered->functions[b];
+        const uint32_t closing = program->parser->tree.parents[body.opening];
+        const CheckProgramNaked* naked = lowered->asms.naked != 0 ? lowered->asms.naked + b : 0;
+        uint32_t refusal = CHECK_BOUNDARY_SUPPLIED;
+        refusal = sources ? CHECK_BOUNDARY_SOURCES : refusal;
+        refusal = refusal == 0 && (function->asm_body_count != 0 || function->call_asm != NULL || (naked != NULL && naked->planned)) ? CHECK_BOUNDARY_ASM : refusal;
+        refusal = refusal == 0 && function->label_count != 0 ? CHECK_BOUNDARY_LABELS : refusal;
+        refusal = refusal == 0 && function->call_tails != NULL ? CHECK_BOUNDARY_TAILS : refusal;
+        refusal = refusal == 0 && unit->errno_bodies[b] != 0 ? CHECK_BOUNDARY_ERRNO : refusal;
+        // Its tokens that are objects with symbols: its string literals' alone may be.
+        for (uint32_t token = body.opening; refusal == 0 && token <= closing; token += 1)
+        {
+            if (program->object_symbols[token + 1] != 0)
+            {
+                const uint32_t string = check_sparse_get(input->string_ids, token);
+                const bool literal = string != BUSTER_CHECK_NONE && string < input->string_count && input->strings[string].object == token + 1 && !input->strings[string].predefined;
+                refusal = literal ? refusal : CHECK_BOUNDARY_OBJECT;
+            }
+            const uint32_t name = program->parser->tokens.names[token];
+            const bool storage = program->parser->tree.roles[token] == PARSE_ROLE_SPECIFIER && (name == C_NAME_STATIC || name == C_NAME_EXTERN);
+            refusal = refusal == 0 && storage ? CHECK_BOUNDARY_DECLARATION : refusal;
+        }
+        // A function's name's array among its strings (__func__ and its kin), which the reader makes by the function's own
+        // caches.
+        for (uint32_t s = 0; refusal == 0 && s < input->string_count; s += 1)
+        {
+            refusal = unit->string_bodies[s] == b + 1 && input->strings[s].predefined ? CHECK_BOUNDARY_OBJECT : refusal;
+        }
+        // Its names: the entries' of the global kinds, the calls' targets and the hidden copy.
+        const uint64_t mark = check_boundary.length;
+        uint32_t fixup_count = 0;
+        CheckBoundaryFixup* fixups = refusal == 0 ? malloc(((uint64_t)function->count + function->call_count + 2) * sizeof(CheckBoundaryFixup)) : NULL;
+        for (uint32_t i = 0; fixups != NULL && refusal == 0 && i < function->count; i += 1)
+        {
+            CheckBoundaryFixup fixup = { .place = CHECK_BOUNDARY_PLACE_VALUE, .index = i };
+            if (tier0_global_kind(function->kinds[i]) && check_boundary_classify(shared, (SymbolId)function->values[i], &fixup, &refusal))
+            {
+                fixups[fixup_count++] = fixup;
+            }
+        }
+        for (uint32_t c = 0; fixups != NULL && refusal == 0 && c < function->call_count; c += 1)
+        {
+            CheckBoundaryFixup fixup = { .place = CHECK_BOUNDARY_PLACE_CALL, .index = c };
+            if (check_boundary_classify(shared, function->call_targets[c], &fixup, &refusal))
+            {
+                fixups[fixup_count++] = fixup;
+            }
+        }
+        if (fixups != NULL && refusal == 0)
+        {
+            CheckBoundaryFixup fixup = { .place = CHECK_BOUNDARY_PLACE_HIDDEN_COPY };
+            if (check_boundary_classify(shared, function->hidden_copy, &fixup, &refusal))
+            {
+                fixups[fixup_count++] = fixup;
+            }
+        }
+        if (refusal == 0 && fixups != NULL)
+        {
+            check_boundary_write(program->references + body.reference_first, body.reference_count, sizeof(uint32_t));
+            uint32_t string_count = 0;
+            for (uint32_t s = 0; s < input->string_count; s += 1)
+            {
+                string_count += unit->string_bodies[s] == b + 1;
+            }
+            CheckBoundaryString* strings = malloc(((uint64_t)string_count + 1) * sizeof(CheckBoundaryString));
+            uint32_t written = 0;
+            for (uint32_t s = 0; strings != NULL && s < input->string_count; s += 1)
+            {
+                if (unit->string_bodies[s] == b + 1)
+                {
+                    strings[written++] = (CheckBoundaryString){ .token = input->strings[s].token, .index = s };
+                }
+            }
+            check_boundary_write(strings, strings != NULL ? string_count : 0, sizeof(CheckBoundaryString));
+            free(strings);
+            // The runtime functions the part first called in this body, in that order.
+            const uint32_t first = unit->runtime_marks[b];
+            const uint32_t end = b + 1 < part->end ? unit->runtime_marks[b + 1] : runtime_count;
+            uint32_t called[CHECK_LOWER_RUNTIMES];
+            for (uint32_t r = first; r < end; r += 1)
+            {
+                called[r - first] = runtimes[r];
+            }
+            check_boundary_write(called, end - first, sizeof(uint32_t));
+            check_boundary_write(fixups, fixup_count, sizeof(CheckBoundaryFixup));
+            check_boundary_write(function, sizeof(Tier0Function), 1);
+            for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(check_boundary_columns); c += 1)
+            {
+                const CheckBoundaryColumn* column = &check_boundary_columns[c];
+                const void* data = NULL;
+                memcpy(&data, (const uint8_t*)function + column->offset, sizeof(data));
+                check_boundary_write(data, check_boundary_extent(function, column->extent), column->bytes);
+            }
+        }
+        free(fixups);
+        unit->rows[unit->row_count++] = (CheckBoundaryRow){
+            .opening = body.opening,
+            .closing = closing,
+            .declaration = body.declaration,
+            .refusal = refusal,
+            .entries = function->count,
+            .offset = mark,
+        };
+    }
+}
+
+static int check_boundary_row_order(const void* left, const void* right)
+{
+    const uint32_t a = ((const CheckBoundaryRow*)left)->opening;
+    const uint32_t b = ((const CheckBoundaryRow*)right)->opening;
+    return a < b ? -1 : a > b;
+}
+
+// A body with a diagnostic in it is refused: `token` is the diagnostic's. Before the recording's end.
+static void check_boundary_record_diagnostic(uint32_t token)
+{
+    CheckBoundaryUnit* unit = &check_boundary_unit;
+    for (uint32_t r = 0; check_boundary_recording() && r < unit->row_count; r += 1)
+    {
+        CheckBoundaryRow* row = &unit->rows[r];
+        if (token >= row->opening && token <= row->closing && row->refusal == CHECK_BOUNDARY_SUPPLIED)
+        {
+            row->refusal = CHECK_BOUNDARY_DIAGNOSTIC;
+        }
+    }
+}
+
+static void check_boundary_record_finish(void)
+{
+    CheckBoundaryUnit* unit = &check_boundary_unit;
+    if (check_boundary_recording() && unit->rows != NULL)
+    {
+        qsort(unit->rows, unit->row_count, sizeof(CheckBoundaryRow), check_boundary_row_order);
+        FILE* file = fopen(check_boundary.path, "wb");
+        if (file != NULL)
+        {
+            const uint32_t header[4] = { BUSTER_CHECK_BOUNDARY_MAGIC, BUSTER_CHECK_BOUNDARY_VERSION, check_boundary.token_count, unit->row_count };
+            const uint64_t blob = check_boundary.length;
+            fwrite(header, sizeof(header), 1, file);
+            fwrite(&blob, sizeof(blob), 1, file);
+            fwrite(unit->rows, sizeof(CheckBoundaryRow), unit->row_count, file);
+            fwrite(check_boundary.bytes, 1, check_boundary.length, file);
+            fclose(file);
+        }
+        // The report reads the bodies' table.
+        free(check_boundary.bodies);
+        check_boundary.bodies = calloc((uint64_t)unit->row_count + 1, sizeof(CheckBoundaryBody));
+        check_boundary.body_count = check_boundary.bodies != NULL ? unit->row_count : 0;
+        for (uint32_t r = 0; r < check_boundary.body_count; r += 1)
+        {
+            check_boundary.bodies[r] = (CheckBoundaryBody){ .opening = unit->rows[r].opening, .closing = unit->rows[r].closing, .refusal = unit->rows[r].refusal,
+                                                            .entries = unit->rows[r].entries };
+        }
+        check_boundary_report("recorded");
+    }
+    check_boundary_unit.program = NULL;
+}
+
+// A supplying compile's recording parsed, once its bytes are read (check_boundary_begin): the bodies' table, and each
+// supplied body's lists and function pointed into the bytes. A recording that doesn't parse drops the unit's supply.
+static void check_boundary_load(void)
+{
+    const uint64_t start = __rdtsc();
+    const uint64_t fixed = 4 * sizeof(uint32_t) + sizeof(uint64_t);
+    uint32_t header[4] = { 0 };
+    uint64_t blob = 0;
+    bool valid = check_boundary.length >= fixed;
+    if (valid)
+    {
+        memcpy(header, check_boundary.bytes, sizeof(header));
+        memcpy(&blob, check_boundary.bytes + sizeof(header), sizeof(blob));
+        valid = header[0] == BUSTER_CHECK_BOUNDARY_MAGIC && header[1] == BUSTER_CHECK_BOUNDARY_VERSION &&
+                check_boundary.length == fixed + (uint64_t)header[3] * sizeof(CheckBoundaryRow) + blob;
+    }
+    const CheckBoundaryRow* rows = valid ? (const CheckBoundaryRow*)(const void*)(check_boundary.bytes + fixed) : NULL;
+    const uint64_t base = valid ? fixed + (uint64_t)header[3] * sizeof(CheckBoundaryRow) : 0;
+    check_boundary.bodies = valid ? calloc((uint64_t)header[3] + 1, sizeof(CheckBoundaryBody)) : NULL;
+    valid = valid && check_boundary.bodies != NULL;
+    check_boundary.token_count = valid ? header[2] : 0;
+    check_boundary.body_count = valid ? header[3] : 0;
+    for (uint32_t r = 0; valid && r < check_boundary.body_count; r += 1)
+    {
+        CheckBoundaryBody* body = &check_boundary.bodies[r];
+        *body = (CheckBoundaryBody){ .opening = rows[r].opening, .closing = rows[r].closing, .declaration = rows[r].declaration, .refusal = rows[r].refusal,
+                                     .entries = rows[r].entries };
+        if (body->refusal == CHECK_BOUNDARY_SUPPLIED)
+        {
+            uint64_t cursor = base + rows[r].offset;
+            uint64_t count = 0;
+            body->references = check_boundary_read(&cursor, sizeof(uint32_t), &count);
+            body->reference_count = (uint32_t)count;
+            body->strings = check_boundary_read(&cursor, sizeof(CheckBoundaryString), &count);
+            body->string_count = (uint32_t)count;
+            body->runtimes = check_boundary_read(&cursor, sizeof(uint32_t), &count);
+            body->runtime_count = (uint32_t)count;
+            body->fixups = check_boundary_read(&cursor, sizeof(CheckBoundaryFixup), &count);
+            body->fixup_count = (uint32_t)count;
+            Tier0Function* function = check_boundary_read(&cursor, 1, &count);
+            valid = function != NULL && count == sizeof(Tier0Function);
+            for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(check_boundary_columns); c += 1)
+            {
+                const CheckBoundaryColumn* column = &check_boundary_columns[c];
+                const void* data = check_boundary_read(&cursor, column->bytes, &count);
+                valid = data == NULL || count == check_boundary_extent(function, column->extent);
+                memcpy((uint8_t*)function + column->offset, &data, sizeof(data));
+            }
+            valid = valid && cursor <= check_boundary.length;
+            body->function = function;
+        }
+    }
+    if (!valid && check_boundary.mode == CHECK_BOUNDARY_SUPPLYING && check_boundary.dropped == NULL)
+    {
+        check_boundary.dropped = "a recording that doesn't parse";
+    }
+    check_boundary.load_ticks += __rdtsc() - start;
+}
+
+// A supplied body's function in the supplying compile: the recording's, its names made this unit's. False where a name
+// has no symbol here (the unit is not the recording's).
+static bool check_boundary_supply(CheckLowerWriter* writer, const CheckLowerShared* shared, const CheckBoundaryBody* body, Tier0Function* function)
+{
+    const CheckProgram* program = shared->program;
+    Tier0Function* recorded = body->function;
+    bool valid = true;
+    // The runtime functions it called first in its part, in that order (check_lower_runtime keeps the part's order).
+    for (uint32_t r = 0; r < body->runtime_count; r += 1)
+    {
+        valid = valid && body->runtimes[r] < CHECK_LOWER_RUNTIMES;
+        if (valid)
+        {
+            (void)check_lower_runtime(writer, (CheckLowerRuntime)body->runtimes[r]);
+        }
+    }
+    for (uint32_t f = 0; valid && f < body->fixup_count; f += 1)
+    {
+        const CheckBoundaryFixup fixup = body->fixups[f];
+        SymbolId symbol = 0;
+        if (fixup.name == CHECK_BOUNDARY_NAME_OBJECT)
+        {
+            symbol = fixup.payload != 0 && fixup.payload < program->object_count ? program->object_symbols[fixup.payload] : 0;
+        }
+        else if (fixup.payload < CHECK_LOWER_RUNTIMES)
+        {
+            symbol = check_lower_runtime(writer, (CheckLowerRuntime)fixup.payload);
+        }
+        valid = symbol != 0;
+        if (valid && fixup.place == CHECK_BOUNDARY_PLACE_VALUE && fixup.index < recorded->count)
+        {
+            ((uint64_t*)recorded->values)[fixup.index] = symbol;
+        }
+        else if (valid && fixup.place == CHECK_BOUNDARY_PLACE_CALL && fixup.index < recorded->call_count)
+        {
+            ((SymbolId*)recorded->call_targets)[fixup.index] = symbol;
+        }
+        else if (valid && fixup.place == CHECK_BOUNDARY_PLACE_HIDDEN_COPY)
+        {
+            recorded->hidden_copy = symbol;
+        }
+        else
+        {
+            valid = false;
+        }
+    }
+    if (valid)
+    {
+        *function = *recorded;
+        function->symbol_access = NULL;
+        function->symbol_count = 0;
+    }
+    return valid;
+}

@@ -20432,6 +20432,8 @@ static void check_lower_deferred_reset(const CheckLowerShared* shared)
     }
 }
 
+#include "c_check_boundary_lower.c"
+
 static inline __attribute__((always_inline)) void check_lower_part_body(CheckLowerWriter* writer, const CheckLowerShared* shared, CheckLowerPart* part,
                                                                        bool sources, Arena* output, Arena* scratch)
 {
@@ -20470,9 +20472,36 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     const bool timed = shared->timed;
     const uint64_t walk_start = timed ? __rdtsc() : 0;
     part->statement_ticks = 0;
+    if (__builtin_expect(check_boundary_recording(), 0))
+    {
+        check_boundary_unit_prepare(program);
+    }
     for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
     {
         const CheckProgramBody body = program->bodies[b];
+        // SCAFFOLD (c_check_boundary.c): a recording notes the runtime functions the part has called before this body; a
+        // supplying compile gives a taken body its recorded function and none of the lowering below.
+        if (__builtin_expect(check_boundary.mode != CHECK_BOUNDARY_OFF, 0))
+        {
+            if (check_boundary_recording() && check_boundary_unit.runtime_marks != NULL)
+            {
+                check_boundary_unit.runtime_marks[b] = writer->runtime_count;
+            }
+            const CheckBoundaryBody* taken = check_boundary_taken(body.opening);
+            if (taken != NULL)
+            {
+                Tier0Function* supplied = &lowered->functions[b];
+                writer->token = body.declaration;
+                if (!check_boundary_supply(writer, shared, taken, supplied))
+                {
+                    check_lower_unsupported(writer, "a supplied body whose names this unit doesn't have (the boundary's recording is another unit's)");
+                }
+                shared->signatures[b] = abi->count;
+                shared->incoming[b] = false;
+                part->entries += supplied->count;
+                continue;
+            }
+        }
         const TypeId type = input->declared_types[body.declaration];
         // A naked function's code is its templates' (check_program_asm_plan_naked): its own is a void function of no
         // parameters, locals or statements, which the emission doesn't compile, its one entry at its first statement.
@@ -21277,6 +21306,11 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         for (uint32_t b = part->first; b < part->end && status->status == CHECK_PROGRAM_OK; b += 1)
         {
             Tier0Function* function = &lowered->functions[b];
+            // SCAFFOLD (c_check_boundary.c): a supplied function has its locations, its calls' rows and its validation.
+            if (__builtin_expect(check_boundary.mode == CHECK_BOUNDARY_SUPPLYING, 0) && check_boundary_taken(program->bodies[b].opening) != NULL)
+            {
+                continue;
+            }
             const uint32_t signature_index = shared->signatures[b];
             const uint32_t first = abi->first[signature_index];
             const uint32_t declared = abi->counts[signature_index];
@@ -21338,6 +21372,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         part->stage = status->status != CHECK_PROGRAM_OK ? CHECK_LOWER_STAGE_FRAME : CHECK_LOWER_STAGE_NONE;
     }
     part->validate_ticks = timed ? __rdtsc() - walked : 0;
+    if (__builtin_expect(check_boundary_recording(), 0) && part->stage == CHECK_LOWER_STAGE_NONE)
+    {
+        check_boundary_record_part(shared, part, writer->runtimes, writer->runtime_count, sources);
+    }
     part->status = part->stage == CHECK_LOWER_STAGE_ROOM ? CHECK_PROGRAM_RESOURCE : status->status;
     part->token = part->stage == CHECK_LOWER_STAGE_ROOM ? BUSTER_CHECK_NONE : status->token;
     part->backend_node = status->backend_node;

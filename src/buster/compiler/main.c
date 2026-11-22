@@ -561,6 +561,8 @@ __asm__(".section .text.buster_checker,\"ax\",@progbits\n\t.p2align 12\n\t.skip 
 #include "buster/compiler/c_check_warning_source.c"
 #include "buster/compiler/c_check_initializer.c"
 #include "buster/compiler/c_check_data.c"
+// SCAFFOLD (#2850's redesign; not for merge): a body's lowered function supplied from outside the reader.
+#include "buster/compiler/c_check_boundary.c"
 #include "buster/compiler/c_check_input.c"
 // #113's deferred bodies: check_input with every function body read apart, out of order and on lanes.
 #include "buster/compiler/c_check_deferred.c"

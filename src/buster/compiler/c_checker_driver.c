@@ -12466,6 +12466,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     bool driver_fatal = false;
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
+    // SCAFFOLD (c_check_boundary.c): what the environment asks of this unit.
+    check_boundary_begin(path);
     // The thread's last arena failure as the unit starts, against which its end tells a commit the unit was refused.
     const ArenaFailure failure_before = arena_failure;
     // #2531's attested declarations: the lane's state where the unit is one of a command's several (none for the census's).
@@ -12708,6 +12710,55 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // bodies deferred (check_input_selected) or the whole unit (check_input). A whole unit's bodies are read apart
             // on the command's lanes (#151) where it asks for that and has more than one lane.
             const uint8_t* selected = lazy_system_headers && !prefix_only && lazy.deferred_count != 0 ? lazy.deferred_tokens : 0;
+            // SCAFFOLD (c_check_boundary.c): a supplying compile masks the bodies it takes from the unit's recording, each
+            // checked to be a body of this parse between the recording's tokens.
+            if (check_boundary_supplying() && !prefix_only && selected == NULL)
+            {
+                check_boundary_load();
+                const uint32_t boundary_count = checking->tokens.count;
+                uint8_t* boundary_mask = check_boundary_supplying() ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)boundary_count + 1) : NULL;
+                if (check_boundary_supplying() && (boundary_mask == NULL || check_boundary.token_count != boundary_count))
+                {
+                    check_boundary.dropped = "a unit of another token count than the recording's";
+                }
+                if (check_boundary_supplying())
+                {
+                    memset(boundary_mask, 0, (uint64_t)boundary_count + 1);
+                    uint32_t ordinal = 0;
+                    for (uint32_t b = 0; b < check_boundary.body_count && check_boundary_supplying(); b += 1)
+                    {
+                        CheckBoundaryBody* body = &check_boundary.bodies[b];
+                        if (body->opening >= boundary_count || checking->tree.roles[body->opening] != PARSE_ROLE_OPEN_BODY ||
+                            checking->tree.parents[body->opening] != body->closing)
+                        {
+                            check_boundary.dropped = "a body that isn't the recording's";
+                        }
+                        else if (body->refusal == CHECK_BOUNDARY_SUPPLIED)
+                        {
+                            if (ordinal % check_boundary.modulus == check_boundary.residue % check_boundary.modulus)
+                            {
+                                memset(boundary_mask + body->opening, 1, body->closing - body->opening + 1);
+                                body->taken = true;
+                                check_boundary.taken += 1;
+                                check_boundary.taken_tokens += body->closing - body->opening + 1;
+                            }
+                            ordinal += 1;
+                        }
+                    }
+                }
+                if (check_boundary_supplying() && check_boundary.taken != 0)
+                {
+                    selected = boundary_mask;
+                }
+                else
+                {
+                    for (uint32_t b = 0; b < check_boundary.body_count; b += 1)
+                    {
+                        check_boundary.bodies[b].taken = false;
+                    }
+                    check_boundary.taken = 0;
+                }
+            }
             const bool deferring = deferred != NULL && lanes != NULL && lanes->flow != NULL && !prefix_only && selected == NULL;
             const uint32_t deferred_lanes = deferring ? check_driver_deferred_lanes(lanes) : 1;
             CheckDriverDeferred grants = { .lanes = lanes };
@@ -13880,6 +13931,20 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     }
     // What follows the last stage (a dump, diagnostics after a failed parse) is charged to the release.
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+    // SCAFFOLD (c_check_boundary.c): a recording refuses the bodies with a diagnostic in them, and is written; a supplying
+    // compile says what it took, beside the recording.
+    if (check_boundary_recording())
+    {
+        for (const PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL; record = record->next)
+        {
+            check_boundary_record_diagnostic((uint32_t)(record->position / PP_DIAGNOSTIC_PHASE_COUNT));
+        }
+        check_boundary_record_finish();
+    }
+    else if (check_boundary.mode == CHECK_BOUNDARY_SUPPLYING)
+    {
+        check_boundary_report("supplied");
+    }
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
     result = pp->errors != 0 || driver_fatal ? 1 : result;

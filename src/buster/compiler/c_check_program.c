@@ -4150,7 +4150,7 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t* openin
         for (uint32_t token = 0; token < input->token_count; token += 1)
         {
             if (check_sparse_get(input->body_declarations, token) != BUSTER_CHECK_NONE &&
-                (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0))
+                (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0 || check_boundary_taken(token) != NULL))
             {
                 openings[count++] = token;
             }
@@ -4166,7 +4166,8 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t* openin
             {
                 const uint32_t token = openings[i];
                 openings[kept] = token;
-                kept += input->deferred_tokens[token] == 0;
+                // SCAFFOLD (c_check_boundary.c): a supplied body is masked and still the program's.
+                kept += input->deferred_tokens[token] == 0 || check_boundary_taken(token) != NULL;
             }
             count = kept;
         }
@@ -6655,6 +6656,49 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
         const uint32_t label_first = writer->label_position_count;
         const uint32_t exit_start = writer->exit_count;
         writer->body = b;
+        // SCAFFOLD (c_check_boundary.c): a supplied body has no controls; its references are the recording's, which the
+        // symbols' numbering and the selection read as they read a checked body's.
+        const CheckBoundaryBody* taken = check_boundary_taken(token);
+        if (__builtin_expect(taken != NULL, 0))
+        {
+            CheckProgramBody* supplied = &program->bodies[b];
+            supplied->first = start;
+            supplied->count = 0;
+            supplied->entry_count = 0;
+            supplied->reference_first = reference_count;
+            supplied->reference_count = taken->reference_count;
+            supplied->label_first = label_first;
+            supplied->label_count = 0;
+            supplied->cleanup_first = writer->cleanup_first;
+            supplied->cleanup_count = 0;
+            uint32_t* supplied_references = taken->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, taken->reference_count) : 0;
+            if (taken->reference_count != 0 && supplied_references == 0)
+            {
+                check_program_fail(program, CHECK_PROGRAM_RESOURCE, token);
+            }
+            else
+            {
+                if (program->references == 0)
+                {
+                    program->references = supplied_references;
+                }
+                for (uint32_t r = 0; r < taken->reference_count; r += 1)
+                {
+                    const uint32_t object = taken->references[r];
+                    supplied_references[r] = object;
+                    if (object != 0 && object <= run->count)
+                    {
+                        needed[object] = 1;
+                    }
+                    else
+                    {
+                        check_program_fail(program, CHECK_PROGRAM_INVALID, token);
+                    }
+                }
+                reference_count += taken->reference_count;
+            }
+            continue;
+        }
         check_control_build(writer, token);
         // Its source labels' places, from their numbers, before check_program_return_flow takes the writer's labels.
         for (uint32_t l = label_first; l < writer->label_position_count; l += 1)

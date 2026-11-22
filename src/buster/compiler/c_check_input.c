@@ -14591,6 +14591,18 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             {
                 check_deferred_cut(reader, i);
             }
+            // SCAFFOLD (c_check_boundary.c): a supplied body's string literals' records, in the recording's order, where the
+            // walk would have met them.
+            const CheckBoundaryBody* taken = check_boundary_taken(i);
+            for (uint32_t s = 0; taken != NULL && s < taken->string_count; s += 1)
+            {
+                const CheckInitString* string = check_input_string(reader, taken->strings[s].token);
+                if (string == NULL || (uint32_t)(string - reader->output->strings) != taken->strings[s].index)
+                {
+                    check_boundary.dropped = "a string's record out of the recording's order";
+                    reader->output->resource = true;
+                }
+            }
             i = parser->tree.parents[i];
             continue;
         }
