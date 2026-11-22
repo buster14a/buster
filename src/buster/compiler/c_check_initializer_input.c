@@ -70,7 +70,9 @@ static uint32_t check_init_declarations(const CheckInput* input, uint32_t end, u
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
             declarations[count] = token;
-            count += check_sparse_get(input->initializer_begins, token) != BUSTER_CHECK_NONE;
+            // EXPERIMENT (c_check_boundary.c's `resolve`): a supplied body's declarations are resolved, and their
+            // initializers are the supplied function's.
+            count += check_sparse_get(input->initializer_begins, token) != BUSTER_CHECK_NONE && (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0);
         }
     }
     return count;

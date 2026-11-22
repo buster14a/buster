@@ -14612,7 +14612,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             break;
         }
         // Only the deferred bodies' unit has them (-flazy-system-headers).
-        if (__builtin_expect(reader->output->deferred_tokens != 0, 0) && reader->output->deferred_tokens[i] != 0)
+        if (__builtin_expect(reader->output->deferred_tokens != 0, 0) && reader->output->deferred_tokens[i] != 0 && !check_boundary.resolve)
         {
             // The definition's declaration is visible at its ordinary source point. Only its selected-out
             // body is deferred; parameters and the full function declarator were checked before this opening.
@@ -17623,6 +17623,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     input->case_ranges = sparse_columns[10];
     input->string_ids = sparse_columns[11];
     reader.selected_sparse = sparse_columns[12];
+    const uint8_t* boundary_withheld = NULL;
     if (valid && deferred_tokens != 0)
     {
         uint8_t* retained = arena_push_array(arena, (uint64_t)count + 1, sizeof(uint8_t), 1);
@@ -17630,7 +17631,16 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         if (valid)
         {
             memcpy(retained, deferred_tokens, (uint64_t)count + 1);
-            input->deferred_tokens = retained;
+            // EXPERIMENT (c_check_boundary.c's `resolve`): the mask is withheld until the resolution has read the unit
+            // whole, so that every pass before it and the resolution itself read a supplied body as any body.
+            if (check_boundary.resolve)
+            {
+                boundary_withheld = retained;
+            }
+            else
+            {
+                input->deferred_tokens = retained;
+            }
         }
     }
     reader.declared_types = input->declared_types;
@@ -17931,7 +17941,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
         memset(reader.conditions, 0, (uint64_t)count + 1);
         memset(reader.constant_contexts, 0, (uint64_t)count + 1);
-        if (input->deferred_tokens != 0 && deferred == 0)
+        if (input->deferred_tokens != 0 && deferred == 0 && !check_boundary.resolve)
         {
             // A lazily deferred body is ignored by every phase; #113's deferred bodies are read later instead.
             memcpy(reader.ignored, input->deferred_tokens, (uint64_t)count + 1);
@@ -18107,6 +18117,16 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                     check_input_skip(&reader, reader.skips, count);
                 }
                 check_input_resolve_range(&reader, 0, count);
+                // EXPERIMENT (c_check_boundary.c's `resolve`): the supplied bodies' tokens are ignored from here on.
+                if (boundary_withheld != NULL && deferred == 0)
+                {
+                    // (Beside what the resolution itself marked ignored.)
+                    input->deferred_tokens = boundary_withheld;
+                    for (uint32_t token = 0; token <= count; token += 1)
+                    {
+                        reader.ignored[token] |= input->deferred_tokens[token];
+                    }
+                }
             }
             if (deferred != 0)
             {

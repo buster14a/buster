@@ -7302,6 +7302,11 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
     }
     bool whole = true;
     uint64_t body_nodes = 0;
+    // EXPERIMENT (#2850, BUSTER_EXPERIMENT_BODY_VERDICTS=FILE; not for merge): a line a body of what the machine at reader
+    // time said of the roots the lowering popped: how many, on how many T ran, how many it took, how many of those the
+    // tests left silent, how many C and X then took, and the same counted in evaluated nodes.
+    uint32_t verdict_roots = 0, verdict_ran = 0, verdict_typed = 0, verdict_silent = 0, verdict_swept = 0;
+    uint64_t verdict_nodes = 0, verdict_swept_nodes = 0;
     for (uint32_t p = 0; p < count; p += 1)
     {
         if (s->root_pop[p] == p)
@@ -7309,6 +7314,23 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
             const NodeCensusRoot context = node_census_root(s, pops + p);
             uint32_t walked = 0;
             NodeFrontTypes* typed = program->input->node_front != NULL ? program->input->node_front->types : NULL;
+            if (typed != NULL)
+            {
+                const uint32_t root_node = pops[p].node;
+                const bool known = root_node < typed->node_capacity;
+                const bool ran = known && typed->digests[root_node] != 0;
+                const bool taken = ran && (typed->refusals[root_node] & BUSTER_NODE_FRONT_TYPED_REFUSAL) == NODE_MACHINE_TAKEN;
+                const bool silent = taken && (typed->refusals[root_node] & BUSTER_NODE_FRONT_TYPED_TESTED) != 0 && typed->tests != NULL && typed->tests[root_node] == 0;
+                const bool swept = silent && (typed->refusals[root_node] & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0 && typed->sweep_refusals != NULL &&
+                                   typed->sweep_refusals[root_node] == NODE_MACHINE_TAKEN;
+                verdict_roots += 1;
+                verdict_ran += ran;
+                verdict_typed += taken;
+                verdict_silent += silent;
+                verdict_swept += swept;
+                verdict_nodes += s->expression_nodes[p];
+                verdict_swept_nodes += swept ? s->expression_nodes[p] : 0;
+            }
             if (typed != NULL && pops[p].node < typed->node_capacity)
             {
                 // Reader time's T ran on it, or not, before the selection: the lowering popped this root.
@@ -7335,6 +7357,22 @@ static void node_census_body(NodeCensus* census, NodeCensusScratch* s, uint32_t 
         s->node_pop[pops[p].node] = none;
     }
     node_census_mark_controls(s, body, false);
+    {
+        static FILE* verdicts;
+        static bool verdicts_asked;
+        if (!verdicts_asked)
+        {
+            verdicts_asked = true;
+            const char* path = getenv("BUSTER_EXPERIMENT_BODY_VERDICTS");
+            verdicts = path != NULL ? fopen(path, "a") : NULL;
+        }
+        if (verdicts != NULL)
+        {
+            fprintf(verdicts, "%u\t%u\t%u\t%u\t%u\t%u\t%u\t%llu\t%llu\t%u\n", body->opening, program->parser->tree.parents[body->opening], verdict_roots, verdict_ran,
+                    verdict_typed, verdict_silent, verdict_swept, (unsigned long long)verdict_nodes, (unsigned long long)verdict_swept_nodes, (unsigned)whole);
+            fflush(verdicts);
+        }
+    }
     census->bodies += 1;
     census->bodies_taken += whole;
     census->bodies_taken_nodes += whole ? body_nodes : 0;

@@ -748,7 +748,7 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
             }
             // SCAFFOLD (c_check_boundary.c): a supplied body's uses of the declarations outside it, the recording's, each
             // marking its declaration's chain as a use the reader met would.
-            if (__builtin_expect(check_boundary_supplying(), 0) && check_boundary.taken != 0)
+            if (__builtin_expect(check_boundary_supplying(), 0) && check_boundary.taken != 0 && !check_boundary.resolve)
             {
                 uint32_t* declare_events = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, (uint64_t)count + 1);
                 if (declare_events != NULL)

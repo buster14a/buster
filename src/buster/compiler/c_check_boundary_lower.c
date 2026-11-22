@@ -346,6 +346,17 @@ static void check_boundary_record_part(const CheckLowerShared* shared, const Che
         }
         refusal = refusal == 0 && (function->label_count != table_labels || function->table_count != table_count) ? CHECK_BOUNDARY_LABELS : refusal;
         refusal = refusal == 0 && function->call_tails != NULL ? CHECK_BOUNDARY_TAILS : refusal;
+        // EXPERIMENT (`resolve`): a body with a stack allocation is not for a supply that keeps the resolution.
+        for (uint32_t i = 0; check_boundary.resolve && refusal == 0 && i < body.count; i += 1)
+        {
+            const uint32_t kind = program->controls[body.first + i].kind;
+            refusal = kind == CHECK_CONTROL_VLA || kind == CHECK_CONTROL_STACK_SAVE || kind == CHECK_CONTROL_ALLOCATE || kind == CHECK_CONTROL_STACK_RESTORE ? CHECK_BOUNDARY_STACK : refusal;
+        }
+        // (And one with a variably modified type's bound, a type name's too.)
+        for (uint32_t v = 0; check_boundary.resolve && refusal == 0 && v < input->vla_count; v += 1)
+        {
+            refusal = input->vlas[v].bound_begin >= body.opening && input->vlas[v].bound_begin <= closing ? CHECK_BOUNDARY_STACK : refusal;
+        }
         refusal = refusal == 0 && (unit->errno_bodies[b] & 2) != 0 ? CHECK_BOUNDARY_ASM : refusal;
         refusal = refusal == 0 && (unit->errno_bodies[b] & 1) != 0 ? CHECK_BOUNDARY_ERRNO : refusal;
         // Its tokens that are objects with symbols: its string literals' alone may be.

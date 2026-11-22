@@ -47,11 +47,13 @@ typedef enum CheckBoundaryRefusal
     CHECK_BOUNDARY_DIAGNOSTIC,
     // The unit's options: -g's rows.
     CHECK_BOUNDARY_SOURCES,
+    // EXPERIMENT (`resolve`): a variable-length array or another stack allocation, whose bound is the walk's node.
+    CHECK_BOUNDARY_STACK,
     CHECK_BOUNDARY_REFUSALS,
 } CheckBoundaryRefusal;
 
 static const char* const check_boundary_refusal_names[CHECK_BOUNDARY_REFUSALS] = {
-    "supplied", "asm", "labels", "tails", "helper", "pool", "table", "errno", "symbol", "object", "declaration", "builtin", "diagnostic", "sources",
+    "supplied", "asm", "labels", "tails", "helper", "pool", "table", "errno", "symbol", "object", "declaration", "builtin", "diagnostic", "sources", "stack",
 };
 
 // How a recorded function names what is outside it: where the name is (an entry's value, a call's target, the hidden
@@ -201,6 +203,10 @@ struct CheckBoundary
     uint32_t* refused_tokens;
     uint32_t refused_token_count;
     uint32_t refused_token_capacity;
+    // EXPERIMENT (BUSTER_BOUNDARY_RESOLVE): a supplied body's tokens are resolved as any body's (its names, its local
+    // declarations, its strings, its uses), and only what comes after the resolution leaves them out: the state a stream
+    // that keeps the reader's resolution would run in.
+    bool resolve;
 };
 
 static CheckBoundary check_boundary;
@@ -478,6 +484,7 @@ static void check_boundary_begin(const char* source)
     if (record != NULL && source != NULL)
     {
         check_boundary.mode = CHECK_BOUNDARY_RECORDING;
+        check_boundary.resolve = getenv("BUSTER_BOUNDARY_RESOLVE") != NULL;
         check_boundary.directory = record;
         check_boundary_unit_path(record, source);
     }
@@ -487,6 +494,7 @@ static void check_boundary_begin(const char* source)
         check_boundary.mode = CHECK_BOUNDARY_SUPPLYING;
         check_boundary.directory = supply;
         check_boundary_unit_path(supply, source);
+        check_boundary.resolve = getenv("BUSTER_BOUNDARY_RESOLVE") != NULL;
         const char* select = getenv("BUSTER_BOUNDARY_SELECT");
         check_boundary.modulus = select != NULL && strtoul(select, NULL, 10) != 0 ? (uint32_t)strtoul(select, NULL, 10) : 1;
         check_boundary.residue = select != NULL && strchr(select, ':') != NULL ? (uint32_t)strtoul(strchr(select, ':') + 1, NULL, 10) : 0;
