@@ -397,6 +397,37 @@ static void check_test_sparse_lanes(CheckTest* test)
 // the entries' lists by both paths. Each column's directory ends at a PROT_NONE page, so that a read past its last entry
 // faults; the pool is a dirty arena's, so that a block the columns don't take is never read, and a dirty directory is
 // cleared (`zero` false). Then a fresh arena's directories, which a reserve with `zero` leaves unwritten.
+// Both selection encodings must survive block boundaries and partial vector scans.
+static void check_test_selected_operands(CheckTest* test)
+{
+    enum { count = 97 };
+    uint32_t expected[count];
+    for (uint32_t i = 0; i < count; i += 1) expected[i] = BUSTER_CHECK_NONE;
+    Arena arena = arena_reserve(UINT64_C(1) << 20);
+    CheckInput input = { 0 };
+    CheckInputReader reader = { .output = &input };
+    bool equal = arena.base != NULL && check_sparse_reserve(&arena, &input.sparse_pool, &reader.selected_sparse, 1, count, false, false);
+    const uint32_t positions[] = { 0, 15, 16, 29, 31, 48, 63, 64, 95, 96 };
+    for (uint32_t i = 0; equal && i < BUSTER_ARRAY_LENGTH(positions); i += 1)
+    {
+        const uint32_t token = positions[i];
+        expected[token] = (i & 1) != 0 ? CHECK_INPUT_SOURCE_SELECTION | i : i;
+        check_input_selection_set(&reader, token, expected[token]);
+    }
+    for (uint32_t end = 1; equal && end <= count; end += 1)
+    {
+        for (uint32_t first = 0; equal && first < end; first += 1)
+        {
+            uint32_t mask = 0;
+            for (uint32_t i = 0; i < 16 && i < end - first; i += 1)
+                mask |= (uint32_t)(expected[first + i] != BUSTER_CHECK_NONE) << i;
+            equal = check_input_selection_at(&reader, first) == expected[first] && check_input_selections_below(&reader, first, end) == mask;
+        }
+    }
+    check_test_expect(test, equal, "ordinary and proof-only selected operands retain exact values and tail masks");
+    arena_release(&arena);
+}
+
 static void check_test_sparse_columns(CheckTest* test)
 {
     const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
@@ -770,6 +801,7 @@ static __attribute__((noinline)) void check_test_input_scans(CheckTest* test)
 {
     check_test_output_none(test);
     check_test_sparse_columns(test);
+    check_test_selected_operands(test);
     check_test_sparse_next(test);
     check_test_sparse_wide(test);
     check_test_sparse_lanes(test);
