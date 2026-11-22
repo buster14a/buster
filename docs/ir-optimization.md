@@ -581,7 +581,11 @@ skips the pass (no caller expands a body with labels).
 
 On the issue's kernel (16 dense `return K` arms, 40 M calls with an LCG's
 selector) the dispatch becomes `cmp; ja; mov (%rax,%rcx,4), %eax; ret`, clang
--O2's shape; the 9700X's numbers are in #3298's pull request.
+-O2's shape: on the 9700X, 269.30 ms became 36.94 ms (clang -O2: 29.75 ms) and
+37.5 M branch misses 13 K. sqlite3.c, none of whose switches qualifies, compiles
+by `--tier1 -c` in 604.61 ms with the pass and 604.08 ms without (11 runs
+each). The record is buster-performance's
+[`tier1-switch-value-tables-3298-2026-11-22`](https://github.com/buster14a/buster-performance/tree/ccf13245f4afac66b77f408e9fa8c72b4c68c7d3/docs/measurements/tier1-switch-value-tables-3298-2026-11-22).
 `test-ir-optimize` runs `ir_switch_table_test.c`'s generated fixtures (returns
 and phis of i8 to i64 from i32 and i64 selectors, negative lowest cases, holes,
 shared arms, the join among the arms, and the refusals) on the independent
