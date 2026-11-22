@@ -12116,6 +12116,24 @@ later independent errors, including repeated invalid redeclarations. A
 the merged weak attribute after the redeclaration. These
 paths share the existing declaration-recovery and overload machinery.
 
+Clones made before any declaration of ALIAS (#2934) are pushed unchecked, so
+ALIAS's first declaration looks the name up among them: only the newest is the
+one it merges with (or conflicts with, or redefines), and the older ones stay
+in its lookup (`check_input_symbol_clones_before`). Function clones with a
+function declaration form an overload set: a compatible declaration replaces
+the newest clone and heads the older ones as an overload candidate of its own
+(`CheckInputSymbolPragma.early`, `check_input_symbol_overload_use`), so calls
+select by argument type and a typed address is `'<overloaded function type>'`
+with the declaration's note first; a conflicting one drops out, leaving the
+clones. A set holding an object, or an object declaration against function
+clones, is ambiguous: the declaration is "redefinition of 'A' as different
+kind of symbol" against the lookup's representative, and each later reference
+to an object set is ambiguous, listing the clones and the invalid
+redeclarations without an earlier declaration. A reference to function clones
+after an object declaration, clang's `'<overloaded function type>'` operand,
+remains refused by name. Without a use, the declaration carries the first
+clone's alias and the later records attach nothing.
+
 Compatible declarations carry the weak alias through
 `check_input_symbol_alias`, which `check_input_symbol_finish` runs in the order
 clang creates the clones (where each TARGET becomes visible, then by
@@ -12131,7 +12149,8 @@ retain deferred checking; function clone overload sets use the existing
 source-ordered overload path. This remains separate from ordinary weak binding.
 The clone can supply an ELF symbol where the unit never declares ALIAS; this
 does not add a synthetic parser declaration for C expression references to
-such an otherwise undeclared name.
+such an otherwise undeclared name (#2934's first shape: clang accepts such a
+reference, which buster still reports as an undeclared function or identifier).
 
 A declared target without an emitted definition is accepted by syntax checking
 and diagnosed at object generation with "alias must point to a defined variable
