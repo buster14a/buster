@@ -5,8 +5,7 @@
 // re-run (rerun-failed-jobs) only when every job that stopped did so in setup, before any test ran, so that green keeps
 // meaning the tests passed. A job stops at its first step that didn't pass: one that failed, or one that was cancelled
 // or left running (the job's timeout, a lost runner, fail-fast). That step must be a setup step of the allowlist below
-// (rerun_steps: GitHub's own "Set up job", the checkouts, the hosted tools, setup-hosted.sh, setup-baseline-runtime.sh
-// and the fetches), or a step that fails only because a setup failure stopped another job (its row's compiler build,
+// (rerun_steps: GitHub's own "Set up job", the checkouts, the hosted tools, setup-hosted.sh and the fetches), or a step that fails only because a setup failure stopped another job (its row's compiler build,
 // its row's draws, the required aggregate's needs). The jobs API reports a job that its timeout stopped exactly as one
 // that fail-fast cancelled, a cancelled job whose step was cancelled; only the job's annotations tell them apart. A job
 // that fail-fast cancelled, by its annotation, stopped nothing of its own, wherever it was. Everything else keeps the
@@ -42,6 +41,7 @@
 #define BUSTER_RERUN_TIMEOUT "exceeded the maximum execution time"
 // A reusable workflow's job is named `CALLER / JOB`: the row is the caller's part, `Tests on Ubuntu 26.04 (ARCH, ...)`.
 #define BUSTER_RERUN_ROW_SEPARATOR " / "
+// The x86-64 rows' shared build job, historical since #2924: runs from before then still name it.
 #define BUSTER_RERUN_ROW_BUILD "Build the compiler once for the row's shards"
 #define BUSTER_RERUN_TEST_STEP "Run correctness tests within the hosted CPU budget"
 #define BUSTER_RERUN_ROW_WORKFLOW "hosted-correctness.yml"
@@ -69,10 +69,14 @@ struct SetupStep
     StepKind kind;
     // GitHub's own step, which no workflow file names.
     bool runner;
+    // A step of runs from before the x86-64 rows were gone and the fuzz campaigns drew their runners (#2924), which no
+    // workflow names now: a rerun of such a run's failed jobs still reads it.
+    bool historical;
 };
 
-// The allowlist, by the step names of the watched workflows (9700x.yml, and hosted-correctness.yml and
-// prepare-hosted-tools.yml, which it calls). It applies to every GitHub-hosted job of the watched run.
+// The allowlist, by the step names of the watched workflows (9700x.yml, and the workflows it calls: hosted-correctness.yml,
+// prepare-hosted-tools.yml, drawn.yml, whose draws the fuzz campaigns and the AVX-512 jobs are, and the auxiliary ones).
+// It applies to every GitHub-hosted job of the watched run.
 static const SetupStep rerun_steps[] = {
     // The runner's provisioning: the job's environment and its actions' downloads.
     {
@@ -131,11 +135,15 @@ static const SetupStep rerun_steps[] = {
     {
         .name = "Install official Clang, sanitizer and libFuzzer runtimes",
         .kind = STEP_SETUP,
+        // The fuzz campaigns' own name before they drew AVX-512 runners (drawn.yml, #2924), whose setup step is the
+        // rows' name now.
+        .historical = true,
     },
-    // tools/ci/setup-baseline-runtime.sh and the fetches.
+    // The fetches, and the baseline runtime's for the scalar host's emulation, gone with it (#2924).
     {
         .name = "Fetch generic baseline startup objects and runtime for emulation",
         .kind = STEP_SETUP,
+        .historical = true,
     },
     {
         .name = "Fetch and verify frozen corpus inputs",
@@ -153,6 +161,7 @@ static const SetupStep rerun_steps[] = {
     {
         .name = "Require this row's compiler product",
         .kind = STEP_PRODUCT,
+        .historical = true,
     },
     {
         .name = "Require one passing qualified execution of each vector item",
@@ -1629,7 +1638,7 @@ static void rerun_policy(Policy* policy, const char* root)
                     }
                     char* callee = fits ? rerun_read_workflow(root, called) : NULL;
                     rerun_expect(policy, callee != NULL, "a watched workflow's reusable workflows are readable");
-                    row_read = row_read || (callee != NULL && strcmp(called, BUSTER_RERUN_ROW_WORKFLOW) == 0 && rerun_yaml_has_name(callee, BUSTER_RERUN_ROW_BUILD) && rerun_yaml_has_name(callee, BUSTER_RERUN_TEST_STEP));
+                    row_read = row_read || (callee != NULL && strcmp(called, BUSTER_RERUN_ROW_WORKFLOW) == 0 && !rerun_yaml_has_name(callee, BUSTER_RERUN_ROW_BUILD) && rerun_yaml_has_name(callee, BUSTER_RERUN_TEST_STEP));
                     const size_t callee_length = callee != NULL ? strlen(callee) : 0;
                     char* grown = callee != NULL ? realloc(steps, steps_length + callee_length + 2) : steps;
                     if (callee != NULL && grown != NULL)
@@ -1678,13 +1687,14 @@ static void rerun_policy(Policy* policy, const char* root)
     for (size_t i = 0; steps != NULL && i < BUSTER_RERUN_STEP_COUNT; i += 1)
     {
         const bool named = rerun_yaml_has_name(steps, rerun_steps[i].name);
-        if (named == rerun_steps[i].runner)
+        const bool absent = rerun_steps[i].runner || rerun_steps[i].historical;
+        if (named == absent)
         {
             fprintf(stderr, "rerun --self-test: allowlisted step: %s\n", rerun_steps[i].name);
         }
-        rerun_expect(policy, named != rerun_steps[i].runner, "each allowlisted step is one of the watched workflows' (GitHub's own steps are none of theirs)");
+        rerun_expect(policy, named != absent, "each allowlisted step is one of the watched workflows' (GitHub's own steps and the historical ones are none of theirs)");
     }
-    rerun_expect(policy, row_read, "the row workflow's build job and test step keep their names");
+    rerun_expect(policy, row_read, "the row workflow's test step keeps its name, and its shared build job is historical (#2924)");
     rerun_expect(policy, rerun_step_kind(BUSTER_RERUN_TEST_STEP) == STEP_OTHER, "the test step is no setup step");
     free(steps);
     free(trigger);

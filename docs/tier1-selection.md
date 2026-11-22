@@ -99,7 +99,18 @@ patterns are:
   index's sign extension too: a pattern reads its block's first symbol address,
   or sign or zero extension to I64, of the same operand in their place
   (`tier1_select_symbol_firsts`, #2601), so a block's accesses of one table
-  share one `lea` and one index register. An extension to I32 stays its own:
+  share one `lea` and one index register. An extension to I64 that selection
+  takes as a copy of its operand, whose storage already holds the 64-bit
+  value (a sign-stored I32's sign extension; a zero extension, or a sign
+  extension known nonnegative, of a narrow value or an I32 whose bits past
+  its width are zero), is that operand where the operand has other uses
+  (`tier1_select_extension_forwards`, #2843): a pattern reads the operand's
+  register in its place, so nothing computes the extension. Its copy had
+  moved the value into a register of its own while the operand stayed live,
+  `movslq (%rdi,%rcx,4),%rdx; mov %rdx,%r8` before `test %edx,%edx` and
+  `cmovg %r8,%r9`, where #2838's arms extend `p[i]` in `s += p[i] > 0 ?
+  p[i] : 1`. A single-use operand is left to its extension, which folds a
+  load into its `movsx` or takes the dying operand's register. An extension to I32 stays its own:
   `tier1_select_storage.c`'s column keeps each I32 sign-extended,
   zero-extended or neither above its 32 bits by its own users, so two of one
   operand can differ (`sqlite3LogEstAdd`'s `a + x[a - b]`, whose index read
@@ -197,7 +208,7 @@ patterns are:
   none that do: a store to any address, a call, any other load (#1059's audit:
   the typed stream doesn't carry a C access's volatility, so that a load the IR
   doesn't flag `BUSTER_IR_VOLATILE` may still be a volatile object's, and two
-  volatile reads keep their order: `tier1_select_fold_barrier`), an atomic
+  volatile reads keep their order: `tier1_select_barriers`), an atomic
   read/modify/write, a fence of any order or scope (a signal fence's too), an
   allocation or a restore of the dynamic stack; a volatile or atomic load (#1059:
   `BUSTER_IR_OBSERVABLE`) folds into nothing. On `main.c`'s `--tier1` build the
@@ -256,17 +267,17 @@ patterns are:
   `rm` and index or control in `vvvv`, the destination any register, an operand's too. Neither folds an operand. The
   emission's target allow-list refuses the instruction for a target without BMI2 (BMI1 for `bextr`), the lowering's
   own admission having refused its row there already; `test-tier1-select` runs each of both widths from both operand
-  orders into its own register and each operand's natively on both paths where the machine has them. The bit
+  orders into its own register and each operand's natively where the machine has them. The bit
   operations (#1374), `tzcnt`, `bsf`, `lzcnt`, `bsr` and `popcnt`, are `TIER1_RULE_INTRINSIC` too: their one
   instruction of the width, the operand in `rm` and the destination in `reg`, any register, the operand's too; and
   `bswap`, the operand moved into the destination where it isn't there, then swapped in place. The allow-list refuses
   `tzcnt` without BMI, `lzcnt` without LZCNT and `popcnt` without POPCNT; `test-tier1-select` runs each of both widths
-  into its operand's register and into two others, natively on both paths. The signed overflows (#1385), `saddo`, `ssubo` and
+  into its operand's register and into two others, natively. The signed overflows (#1385), `saddo`, `ssubo` and
   `smulo`, are `TIER1_RULE_INTRINSIC` too (`tier1_select_overflow`): `add` or `imul` into the destination, which takes
   the left operand first unless it holds an operand already (both operations and their flags commute), or `cmp` of
   the two, which writes no register; then `mov` of 0 into the destination, which keeps the flags, and `seto` into its
   low byte, the destination any register. `test-tier1-select` runs each of both widths from both operand orders, of a
-  masked operand and of one value twice, into a register apart and into each operand's, natively on both paths
+  masked operand and of one value twice, into a register apart and into each operand's, natively
   against the host compiler's builtins.
 - Signed/unsigned integer comparisons, comparisons with zero through the shared
   flags-aware form chooser, comparison/branch fusion, simple selects using
@@ -299,6 +310,162 @@ patterns are:
   fewer where its placement doesn't bound it. speedtest1 runs 0.48% fewer
   instructions and Lua's scripts 0.11% fewer; `sqlite3.c`'s Tier 1 functions
   are 0.53% smaller, with 947 fewer `setcc`s, and compile in the same time.
+- Selects of floating comparisons (#2791, `TIER1_RULE_FLOAT_SELECT_COMPARE`):
+  a select of an integer whose condition is an `fcmp` of `F32` or `F64` values
+  by `<`, `<=`, `>` or `>=` that only it reads, in its block, is the
+  comparison's `ucomis`, then the select's `mov` and `cmov`, neither of which
+  writes the flags, where it was `xor; ucomis; setcc; test; mov; cmovne`. It
+  takes the branch's fold (below, under floating values): `<` and `<=` swap
+  their operands, and `cmova` or `cmovae` is false for unordered ones, their
+  negation through C's truth values `cmovbe` or `cmovb` true. The move and the
+  `cmov` are #2676's (`tier1_select_fused_moves`), inverted where the
+  destination holds the chosen value. `int f(double a, double b, int x, int y)
+  { return a < b ? x : y; }` is `ucomisd %xmm0,%xmm1; mov %esi,%eax; cmova
+  %edi,%eax`, clang -O2's instructions. `==` and `!=` read the parity flag too
+  (#2922): their select is `ucomis`, a `mov` of the value equal operands choose
+  (`==`'s true value, `!=`'s false one), then `cmovne` and `cmovp` of the other,
+  as clang's select of an `fcmp oeq` is; where the destination holds the other
+  value, the scratch register keeps it past a `cmove` of the equal one. `a == b
+  ? x : y` is `ucomisd %xmm1,%xmm0; mov %edi,%eax; cmovne %esi,%eax; cmovp
+  %esi,%eax`, where it was `xor; ucomisd; sete; setnp; and; test; mov;
+  cmovne`. Both `cmov`s are on the path from each value to the result, where
+  the truth value's sequence has one, so a select whose values recur through it
+  by an operation keeps the truth value (`tier1_select_recurrent`): a walk back
+  from its two values, through their operands and the incoming values of the
+  phis it meets, reaches the select within 16 rows (if-conversion's bound for a
+  condition's recurrence) along a path through a row that is neither a phi nor
+  a copy. Its condition isn't walked, since two `cmov`s shorten the
+  comparison's own path. On the 9700X, over 2^20 doubles 80 times ([the
+  record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-float-equality-select-2922-2026-11-17),
+  each loop at four placements in a 64-byte line):
+  `if (p[i] == t) c += 5; else c += 1;`, an addition and both `cmov`s on its
+  chain, runs 260.0 Mcycles at every placement, and its truth value 217.1 to
+  217.3 at two placements (260.0 and 343.8 at the others), as if-conversion made
+  it then; #2932's fold has since made it `c += p[i] == t ? 5 : 1`, a select
+  of constants off the chain, which fuses; `b = p[i] == t ? i
+  : b`, whose chain is the `cmov`s alone (its value the phi's), runs 176.0 by
+  two `cmov`s at every placement, clang -O2's cycles, and 181.1 to 181.3 by its
+  truth value; and `s += p[i] == t ? x : y`, whose select isn't on the chain,
+  126.9 to 176.1 by two `cmov`s against 195.0 to 260.0. `a == b ? x : y`
+  called in a loop runs 2.5% fewer cycles than by its truth value, `a != b`
+  4.1% fewer, both clang -O2's. An ordered predicate's single `cmov` is on the
+  values' path either way: #2791's loop by `>` runs 0.3% fewer cycles at every
+  placement ([#2791's record](https://github.com/buster14a/buster-performance/tree/546d9633ba0d06a908c5b9a1e5029e00a2cdc485/docs/measurements/tier1-float-select-2791-2026-11-17)).
+  If-conversion's truth simplification makes a test of a floating comparison
+  its `i1` copy, where it rewrites an integer comparison's test into the
+  comparison ([ir-optimization.md](ir-optimization.md)), in every function it
+  changes: every if-converted select of one reads it through that copy, and so
+  does every branch on one in such a function. The truth walk and the grammar
+  take a copy of a floating comparison right before it as a link
+  (`TIER1_BURS_OP_COPY_TRUTH`), so such a branch is `ucomis` and `ja`, `jae`,
+  `jbe` or `jb` too, where it was `xor; ucomis; setcc; test; jne`. The grammar's
+  integer select takes the ordered comparisons' `FCOND` at 3, directly, through
+  their copy and through C's truth values' links, and `==` and `!=`'s `ECOND`
+  (their own operator, `TIER1_BURS_OP_FCMP_EQ`) at 4, directly or through their
+  copy, never through the links, whose patterns would take the tables to 1033
+  states. The copy reads a nonterminal of the comparison itself (`FCMP`,
+  `ECMP`), not every state's `FCOND`, which would take them to 1032. A floating
+  `==` or `!=`'s class is `FCMP_EQ` unless the select that reads it, directly or
+  through its copy (its last user), recurs (`tier1_burs_equality`): then it is
+  the REG leaf's, and the select tests munch's truth value, as
+  `tier1_select_candidates` makes no fused candidate of such a select; both
+  paths ask the same walk of the same select, the classifiers' scalar rare
+  case. The tables have 1018 of their 1024 states (main's 1006).
+  `test-tier1-select` runs the rule's records natively for each condition,
+  precision and select width, with the comparison's operands in two registers
+  or one and the destination its own, the chosen value's, the other value's or
+  both values' one register, on NaNs, signed zeros, infinities and a subnormal
+  against C's comparisons; and plans each predicate's select directly, through
+  its copy, past a copy that isn't the comparison's own and through one or two
+  links, each plan in the selection's frozen digest; and checks `tier1_select_recurrent`'s walk on its own: a
+  value's additions up to its bound and not past it, a phi of phis with an
+  addition, a phi the walk reaches through phis alone before its addition, and
+  no recurrence through phis or copies alone, or where only the select's result
+  or its condition reaches the phi. `test-tier1-emit` compiles such functions,
+  and branches of each shape, through the CFG consumer with both frame planners, with every
+  register and few, with and without a frame pointer, and with the select's
+  values ending at it, where its result takes the register of the value it
+  keeps, and runs them natively; and a loop of each predicate's select whose
+  accumulator recurs through an addition (directly or through another phi),
+  through phis alone or only through its result, where `==` and `!=` fuse but
+  for the first and maximal munch's cover chooses the same.
+  `tests/ir/float-selects.ir` and `float-select-loops.ir` are among the
+  grammar's twin fixtures (main's grammar took munch's fallback for one of the
+  first's selects), which must take no fallback; a fused select's candidate
+  must cost its pattern's 3 or 4. The driver's pattern test requires `ucomis` and a
+  `cmov` or jump of its flags, no `setcc`, in four C selects of ordered
+  comparisons, a parity `cmov` in three of `==` and `!=` (a loop's sum and a
+  running last match among them), and the truth value in a conditional scale
+  by `==` (`c = p[i] == t ? c * 3 : c + 1`). #2922 fuses 2 selects in `sqlite3.c`'s object
+  (`sqlite3_str_vappendf`), 8 fewer records and 16 fewer bytes, and none in
+  Lua's or musl's 312 sources; its compile runs the same instructions within
+  0.04% and 0.36% fewer cycles (11 runs). Such selects are rare in
+  the measured programs: `sqlite3.c`'s object has 2 more and 31 more such
+  branches, with 33 fewer `setcc`s and `test`s, 111 fewer records and 256 fewer
+  bytes; Lua's has 5 branches (two in `luaV_execute`), and 8 of musl's 312
+  math, stdlib, printf, scanf and time sources change. speedtest1 runs 0.038%
+  fewer instructions, and Lua's five scripts the same within their runs'
+
+  variation (callgrind).
+- Selects of floating values (#2842, `TIER1_RULE_FLOAT_BLEND` and
+  `TIER1_RULE_FLOAT_BLEND_COMPARE`): an `F32` or `F64` select, which
+  if-conversion makes since #2842 ([ir-optimization.md](ir-optimization.md)),
+  is a blend without a branch, every record of a form whose Zen 5 row is
+  measured. Its condition's `i1` (0 or 1) under an opmask register where the
+  CFG consumer gives it one (`Tier1SelectHoles.opmask`: k1, at a target with
+  AVX512VL, in a function with no mask values, so that no opmask register holds
+  a value between nodes): `kmovw` of the condition, then `vpblendmq` of the
+  false value and the true one under k1, at either width. A value's bits past
+  its width are anything, so an `F32`'s blend is the quadword's too. The blend
+  names three registers, so the destination takes no copy. Anywhere else, at
+  x86-64, x86-64-v2, x86-64-v3 and in a function with masks, its lane mask in
+  xmm15: `-c` (`neg %r11`) through the scratch general register and `movq`, at
+  either width, then `f ^ ((t ^ f) & mask)`, the true value copied into the
+  destination, `pxor`
+  of the false one, `pand` of the mask and `pxor` again. Bitwise operations
+  raise no floating exception and keep a NaN's bits. Where the destination
+  holds the false value, the mask is the condition's negation, `c - 1`, and the
+  two values change places, so that neither value's register takes a copy (the
+  select ties both, `tier1_select_ties`). A floating comparison of the values'
+  width that only the select reads, directly, through its `i1` copy or through
+  C's truth values' links, is folded: `movaps` of its left operand into xmm15
+  and `cmpss` or `cmpsd` by the predicate whose lanes are C's truth, `EQ_OQ`
+  for `==`, `LT_OS` for `<` and `>` (swapped), `LE_OS` for `<=` and `>=`,
+  `NEQ_UQ` for `!=`, and the other one of each pair (four apart: `NEQ_UQ`,
+  `NLT_US`, `NLE_US`, `EQ_OQ`) for a negation, which is true for unordered
+  operands as `!(a < b)` is. The relational predicates are IEC 60559's
+  signaling ones, as C's `<` is (C23 F.3), and the equalities quiet ones; the
+  comparison ran in the head anyway, so nothing is speculated. clang -O2's
+  select of an `fcmp` without AVX-512 is the same `cmpltsd` and mask. A
+  comparison of the other width, or one another node reads, computes its truth
+  value (`ucomis`, `setcc`) and the select blends by it. #2842's `k_ssel`,
+  `float f(float a, float b, int c) { return c ? a : b; }`, blends with
+  `kmovw` and `vpblendmq` at znver5 and x86-64-v4, and with
+  `mov %eax,%r11d; neg %r11; movq %r11,%xmm15` then `pxor`, `pand` and `pxor`
+  at x86-64, where clang -O2 branches. `a < b ? x : y` of doubles is `movaps`
+  of the left operand into xmm15, `cmpltsd`, then the same `pxor`, `pand` and
+  `pxor`, at every target. Two constants (`k_fsel`'s 3.0 and 1.0) are
+  each their own `FLOAT_CONSTANT` and blended: their bits selected in general
+  registers by a `cmov` and one `movq` would need a second general register,
+  which no rule has but the scratch one. Grammar-wise the select is the REG
+  leaf's (`tier1_burs_classify` takes integer selects alone), so both paths
+  take munch's candidate, the folded one first by its fold. `test-tier1-select`
+  runs both rules' records natively (`tier1_float_blend_test.c`): the blend at
+  both widths and both conditions, the values in two registers or one and the
+  destination its own, either value's or both's, past xmm7 too, by the lane
+  mask valid at x86-64's baseline and under k1 at x86-64-v4, on NaN payloads;
+  the comparisons' at each of the six immediates against C's comparisons, NaNs,
+  signed zeros, infinities and a subnormal among the operands, the operands in
+  two registers, one, or the destination's; and the plans of each predicate's
+  select directly, through its copy, past a copy that isn't its own, through
+  one or two links, of either width and the other, and by an integer condition,
+  each in the selection's frozen digest. `test-checker-driver` compiles #2842's
+  kernels, the six double comparisons, `!(a < b)` and `!(a == b)`, and the
+  float comparisons `<`, `!(a > b)` and `!=`, plus a mixed width, a triangle,
+  sequential and nested clamps, a magnitude, a reused load, a nested choice and
+  a select beside a mask value, at x86-64, x86-64-v3 and x86-64-v4 against
+  clang -O0, and decodes each function's blends and branches
+  (`c_check_tier1_if_convert_test.c`).
 - Labels and indirect jumps (#789): GNU C's labels as values and computed gotos,
   and the jump tables C's switches lower to. A label's address is its symbol's
   (`TIER1_RULE_SYMBOL_ADDRESS`). A `br_indirect` is a `jmp` through its target's
@@ -319,7 +486,14 @@ patterns are:
   `movq`), and an integer constant's conversion is the floating constant it
   converts to. A copy is a `movaps`. Addition, subtraction, multiplication and
   division are the two-operand `ss` or `sd` forms, the right operand from memory
-  where it folds a load, as an integer's. A negation `xorps` the sign bit, which
+  where it folds a load, as an integer's. A scalar FMA3 can fold its single-use
+  second multiplicand into 132 or 231. A first multiplicand can occupy that
+  same memory operand when the second is a non-NaN constant or the result
+  of an integer-to-floating conversion. The addend can fold into 213, which
+  keeps the multiplicands' NaN payload priority. A destination holding the first
+  multiplicand can exchange them when one is an integer conversion or a
+  non-NaN constant. Otherwise it takes the register form with a separate load.
+  A negation `xorps` the sign bit, which
   the scratch register moves into xmm15. Loads and stores are one `movss` or
   `movsd`, folded through their addresses as an integer's. A comparison's truth
   value is `ucomis`, `setcc` and `movzx`, where `<` and `<=` swap their operands
@@ -330,17 +504,21 @@ patterns are:
   truth values into `jbe` or `jb`, which are true for unordered operands as
   `!(a > b)` is: the unsigned conditions, whose negations the integer table
   already has. `==` and `!=` read the parity flag too, which one jump can't, so
-  a branch tests their truth value. The conversions from and to integers of 8
+  a branch tests their truth value; a select's two `cmov`s can (#2922, above). The conversions from and to integers of 8
   to 64 bits are `cvtsi2s*` and `cvtts*2si`, a narrow signed operand
   sign-extended into the scratch register first and an unsigned `I32` converted
   as its zero extension's 64 bits; the precisions convert by `cvtss2sd` and
-  `cvtsd2ss`, and a bitcast is `movd` or `movq`. A conversion to a floating value
+  `cvtsd2ss`, and a bitcast is `movd` or `movq`. A signed 32- or 64-bit load
+  can feed `cvtsi2s*` directly. A float or double load can feed `cvtts*2si` directly
+  for signed 32- or 64-bit results and unsigned 32-bit results. The latter uses
+  the 64-bit destination. A conversion to a floating value
   zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
   alone, which would otherwise wait for the register's last writer. An unsigned
-  64-bit integer's conversions, whose values past `INT64_MAX` no single
-  conversion takes, are sequences of the fixed-register path's room
-  (`TIER1_RULE_FLOAT_CONVERT_WIDE`, through the scratch registers alone). To a
-  floating value, the source converts as a signed value where its sign bit is
+  64-bit integer's conversions use the fixed-register path
+  (`TIER1_RULE_FLOAT_CONVERT_WIDE`). For integer to floating, an output target
+  admitting the unsigned qword register form uses `xorps` followed by
+  `vcvtusi2ss` or `vcvtusi2sd` with MXCSR rounding. On other targets the
+  source converts as a signed value where its sign bit is
   clear. Otherwise it is halved with its last bit kept as a sticky bit, so
   rounding the half rounds the source, then converted, and `paddq` or `paddd`
   adds 1 to the result's exponent. From a floating value, one truncation runs,
@@ -361,7 +539,14 @@ patterns are:
   consumer reads them from the IR's operands' objects (`tier1_emit_cfg_x87`), and
   the plan marks them needed as it marks a pattern's values. The values are the
   other operands alone: a load's and a store's address, a conversion's integer
-  or floating operand. A constant stores its 10 bytes as immediates. A load and a
+  or floating operand. An F80 constant emits no records at its definition. Its consumer
+  uses `fldz` for positive zero and `fld1` for positive one at the original x87
+  waiting point. Other constants use a 16-byte mergeable, PC-relative literal.
+  Negative zero and exact normal binary32 values use `flds`.
+  Other values exactly representable as normal binary64 use `fldl`. A narrower
+  subnormal load could raise a denormal-operand exception. All remaining
+  encodings retain their ten bytes and use `fldt`. External stores and
+  outgoing arguments write all ten bytes. A load and a
   store are `fld` and `fstp` of them through the address; arithmetic loads both
   operands and `faddp` (`fsubp`, `fmulp`, `fdivp`) `st(1), st(0)`; a negation is
   `fchs`. A comparison is `fucomip` of the operands in the order that makes
@@ -419,7 +604,7 @@ patterns are:
   remains; the transport replay does not claim decoded x87 certification.
 
   `test-tier1-wide` adds exact transfer counts for direct stores, arithmetic
-  chains, repeated operands, right operands and volatile stores on both paths.
+  chains, repeated operands, right operands and volatile stores.
   Its shared-helper fixtures reject mutated operations, stack indices,
   source accesses, missing stores, false eligibility and hidden private-home
   reads; depths eight and nine and guarded scalar/vector tails are checked.
@@ -484,7 +669,20 @@ patterns are:
   bytes in an xmm register, or 32 or 64 in a ymm or zmm one where the target's
   registers are that wide, moved by `movups`, `vmovdqu` or `vmovdqu64`
   (`tier1_select_part_form`); and a struct's whose high eightbyte is padding,
-  which its copy keeps as padding. A result in registers comes back as parts in rax and rdx or xmm0
+  which its copy keeps as padding. A record SSE, SSEUP of a size no vector
+  register has (#2113, #2798) holds its payload there, `<size / 8 x double>`:
+  a 17–23-byte record's first 16 bytes in an xmm register, and past them its
+  size rounded down to 8 in the ymm or zmm register LLVM widens it to, a part
+  of its payload's bytes in its register's width (`tier1_select_part_width`).
+  Its loads from and stores to an object of the record's size are Tier 0's
+  pieces, which stay inside it (`tier0_payload_load`, `tier0_payload_store`:
+  a call's result, a zmm argument's load into zmm16 and on, the function's own
+  result); its staging slots and a parameter's copy are as wide as its
+  register, which they move whole. A `PAYLOAD` stack slot, which holds the
+  payload alone, is a part of the payload's bytes with no register: a call
+  copies those bytes into it, and the entry copies the slot whole into the
+  parameter's copy through the vector scratch register.
+  A result in registers comes back as parts in rax and rdx or xmm0
   and xmm1 (`tier1_select_result_parts`, eightbyte 1 alone with `HIGH`), and
   one of the memory class through the hidden pointer (up to 4,096 bytes for a
   function's own, which its return copies). An aggregate parameter's value is
@@ -501,8 +699,9 @@ patterns are:
   the stack while a general register is free), since a call without them would
   place that address in the next general register. Refused: a result LLVM
   demotes to a hidden pointer (`DEMOTED`), which only a vector type makes. A call's parts in registers take staging
-  slots of 8 bytes, a whole vector register's its bytes'
-  (`tier1_select_part_slots`), but a 64-byte vector's, which waits in
+  slots of 8 bytes, a whole vector register's its register's bytes'
+  (`tier1_select_part_slots`, a payload's too, #2798), but a zmm register's
+  (a 64-byte vector's, or a 40-, 48- or 56-byte payload's), which waits in
   zmm16 and on instead (#141, `tier1_select_part_in_zmm`: Tier 1 allocates no
   register past xmm15, and only an AVX-512F target passes a zmm one), so that a
   call takes all eight of its vector registers' 64-byte vectors. Up to 14
@@ -519,7 +718,12 @@ patterns are:
   below rsp, so its use needn't be required: a call may pass more aggregates than
   its first allocation gives its uses registers. The consumer stores an
   aggregate result's parts into the result object, the call's into operand's
-  frame object, byte for byte, and points rdi at it for a hidden pointer. A
+  frame object, byte for byte, and points rdi at it for a hidden pointer. An
+  into operand that is a pointer value, no frame object's address (a call that
+  passes its function's own hidden pointer on, #2820), is the call's last
+  effective use, after an indirect call's callee, which the call's general moves
+  put in rdi; `test-tier1-emit`'s code certificate fixtures run such a call
+  natively and refuse its move into rdi left out. A
   return loads the parts staged below rsp (the frame stays out of the red zone),
   or copies the bytes through the hidden pointer that the entry stored, which
   rax returns.
@@ -605,7 +809,7 @@ plus stride. Unsigned guards also require a
 proven upper limit at most `INT32_MAX`. Equality, non-strict bounds, unrelated
 tests, unknown strides and possible wrapping sums retain their extensions.
 Only a complete certificate supplies facts, followed by one additional bounded
-propagation round. The candidate scan is masked SIMD with a scalar twin.
+propagation round. The candidate scan is masked SIMD.
 
 A separate phi certificate excludes `INT_MAX` when every incoming edge supplies
 an independently bounded value or necessarily tests that incoming value with
@@ -708,8 +912,7 @@ removes the separate truncation while preserving canonical narrow storage.
 
 The bounds occupy two scratch bytes per node and the storage certificate one.
 The independent range seeds are classified in 32-node SIMD batches with masked
-tails and an exact scalar twin; dependency propagation reuses bounded ordered
-sweeps on both selector paths. `test-tier1-select` checks poisoned ABI upper
+tails; dependency propagation reuses bounded ordered sweeps. `test-tier1-select` checks poisoned ABI upper
 halves, signed boundaries, zero-count shifts, identity operations, retruncation,
 volatile and exact-width loads, cyclic phis, and every tail through 65 nodes
 against protected pages. The bounds do not assume an ABI extension or infer a
@@ -727,7 +930,9 @@ negative bypass paths and unsafe unsigned bounds.
 
 Comparisons used by a branch or a select alone do not produce `setcc`. A
 branch's comparison and conditional jump are consecutive records, and a
-select's comparison, `mov` and `cmov` (#2676). A comparison producing a value uses
+select's comparison, `mov` and `cmov` (#2676), an ordered floating one's
+`ucomis`, `mov` and `cmov` (#2791), and a floating `==` or `!=`'s `ucomis`,
+`mov`, `cmovne` and `cmovp` where its values don't recur through it (#2922). A comparison producing a value uses
 canonical 32-bit storage and `setcc`. An independent destination is cleared with
 `xor` before `cmp`/`test`; an aliased input is read by the comparison first, then
 `mov r32, 0` clears the destination while preserving the flags. A floating
@@ -752,10 +957,9 @@ without weakening that API's checks.
 
 ## Producer, plan and allocation handoff
 
-`tier1_select_plan(function, dominance, output, scratch, vector, result,
-error_node)` returns `Tier1SelectError`. It verifies its input first, by its
-path's IR verifier: `ir_verify` on the vector path, `ir_verify_scalar` on the
-scalar one. A cross-block value use requires the supplied dominator intervals;
+`tier1_select_plan(function, dominance, output, scratch, result, error_node)`
+returns `Tier1SelectError`. It verifies its input first, by `ir_verify`. A
+cross-block value use requires the supplied dominator intervals;
 structural verification alone is insufficient.
 `tier1_select_plan_verified`, with the same arguments, gives the same plan
 without the verification: it takes a function its caller has verified with
@@ -821,11 +1025,13 @@ a nonterminal's derivation from an operator and its children's nonterminals, or
 from another nonterminal, at the structural cost below; a pattern stands for one
 candidate kind of `tier1_select_candidates`, an inner one (an address's piece,
 an immediate, a scaled index, a truth value's link) folding into its root's. Its
-eighteen nonterminals are a statement, a register, the constants' classes (an
+twenty-one nonterminals are a statement, a register, the constants' classes (an
 immediate, a lea's scale, a power of two, 3, 5 or 9, a shift's count, zero, a
 disp32), a load a consumer folds, a shift a lea scales, addresses without an
-index and with one, an index, and the comparisons a branch, a select (#2676)
-or a truth value takes, integer and floating, and their zero extensions.
+index and with one, an index, the comparisons a branch, a select (#2676)
+or a truth value takes, integer and floating, their zero extensions, an
+ordered floating comparison itself, which its `i1` copy takes (#2791), and a
+floating `==` or `!=` a select takes and one itself (#2922).
 
 `tier1_select_initialize` compiles the grammar into state tables once, by burg's
 algorithm: a state is each nonterminal's cheapest rule and its cost, normalized
@@ -861,16 +1067,14 @@ uses. The passes are:
    being the register leaf's state. A frame object's address, and an address
    whose constant index or offset doesn't fit 32 bits, take the scalar rule;
 2. labels: each node's state, a table lookup on its operator and its children's
-   representers; vector gathers visit one depth level at a time, while the
-   scalar twin visits nodes in order, since every visible child precedes its
-   parent;
+   representers; vector gathers visit one depth level at a time, every visible
+   child at a lower one;
 3. rules: each node's rule for its goal, a statement's or a register's;
 4. patterns: the node's candidate of its rule's kind, which
    `tier1_select_candidates`' walks fill (`tier1_burs_pick`). A node of an
    operator the grammar doesn't cover (calls, phis, floating arithmetic, masks
    and the rest) takes maximal munch's, made for every such node in the levels'
-   order on both paths, so that a node either path refuses is refused at the
-   same place; the covered nodes' patterns are made as the walk below needs them. A rule whose candidate the walks didn't make (a
+   order, so that a node is refused at one place; the covered nodes' patterns are made as the walk below needs them. A rule whose candidate the walks didn't make (a
    walk past `BUSTER_TIER1_SELECT_WALK`) takes munch's too.
 
 The cover is the cheapest the grammar has for each tree, and the grammar has
@@ -913,12 +1117,13 @@ comparison, however deep their walks went (#140). A pattern's `fold_count` is
 only maximal munch's rank. An iterative pass publishes the effective-use CSR.
 There is no recursive tree walk or speculative input load.
 
-Maximal munch remains a separate test reference and both paths' fallback
-outside the grammar. It ranks candidates by coverage and a switch's rule
+Maximal munch remains a separate test reference and the fallback outside the
+grammar. It ranks candidates by coverage and a switch's rule
 priority, independently of the BURS costs and tables. The tests execute its
-cover and both costed covers against the original IR and require the costed
-cover's estimate to be no higher than the reference's. The scalar production
-path does not use maximal munch for grammar-covered nodes. Both algorithms
+cover and the costed cover against the original IR, require the costed cover's
+estimate to be no higher than the reference's, and fold every costed cover the
+fixtures select into a digest frozen while both host paths still agreed
+(`BUSTER_TIER1_SELECT_TEST_PLAN_DIGEST`, #2924): a change to any cover shows there. Both algorithms
 prefer `lea` for multiplication by 3, 5 and 9, and a shift for a power of two
 under #1217's immediate-`imul` penalty. A division by a register ranks below
 every constant-divisor rule even when the constant has other uses and does not
@@ -957,10 +1162,7 @@ The immediates' forms are the shared form choice's (#221). Expansion leaves
 each record with an immediate empty, with its request (the operation's row,
 the value, the live flags and the destination); both emitters collect a
 function's requests and choose their forms 32 at a time, one pass of
-`x86_choose_forms`'s lanes, before checking the records; on the scalar path
-(the plan's, `Tier1SelectPlan.vector`, for this emitter; the options' for
-`tier1_emit_function`) each request's form is its scalar twin's, chosen as
-the request comes, and none is held (#141). This emitter
+`x86_choose_forms`'s lanes, before checking the records (#141). This emitter
 checks them in order after the batch, so a node's invalid record or a form
 the target refuses is reported before a later node's allocation failure, as
 when each node's records were checked as it was selected. Every record either
@@ -1223,7 +1425,7 @@ and without, and in each no mask may have a recipe or be marked to be recomputed
 with it, some of the general values beside the masks must be recomputed, which
 the division fixture's constants are.
 
-And the refusals, on both paths: a vector result at selection, a mask's `select` at
+And the refusals: a vector result at selection, a mask's `select` at
 selection, and at emission the baseline target (no opmask form) and AVX512F alone
 for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
 masks alone is taken; and each width's `kmov` forms, none for a width no mask
@@ -1365,7 +1567,7 @@ result. A vector local the checker initializes through its address (as C's vecto
 locals) stays in its frame object, as a 128-bit integer's does.
 
 `test-tier1-masks` takes five fixtures of vectors too, natively against the IR's
-interpreter on both paths, with and without rematerialization: every operation
+interpreter, with and without rematerialization: every operation
 and all ten predicates at each width; constants of every kind; a loop whose vector
 phis swap, a cycle through xmm15; eighteen 64-byte vectors live at once, spilled
 and reloaded; and vectors of each width live across two calls of the helper. And
@@ -1415,7 +1617,7 @@ allow-list). A third, at the baseline, complements a vector into another registe
 and in place, and a comparison and selection there must be refused at emission;
 `test-tier1-select` checks those records directly. `test-checker-driver`'s SSE fixture compiles C's operators on
 16-byte vectors of every element type by `--tier1 -march=x86-64` and
-`-march=x86-64-v2`, every function Tier 1's, by both paths and with and without
+`-march=x86-64-v2`, every function Tier 1's, with and without
 rematerialization, and matches clang -O0's output.
 
 ## Machine rows (#141)
@@ -1513,7 +1715,7 @@ producer is one of the former.
 
 `test-checker-driver`'s machine rows' fixture compiles a unit of x86-64-v4's
 vector builtins and vector operators on bytes, words and quadwords by `--tier1`,
-every function Tier 1's, by both paths and with and without rematerialization,
+every function Tier 1's, with and without rematerialization,
 and runs it with clang -O2's other unit, against clang -O0's build of both: compares
 into masks of every width, masked and zero-masked operations and blends,
 permutes and shuffles, shifts by immediates, by counts in general registers and by
@@ -1550,7 +1752,7 @@ places below 16 (#1281), every function Tier 1's, and the program runs as clang
 (#1284).
 
 Its VEX fixture (#1281) compiles a unit of x86-64-v3's AVX2 and F16C builtins and
-vector operators the same way, every function Tier 1's, by both paths and with and
+vector operators the same way, every function Tier 1's, with and
 without rematerialization, against clang -O0's build: the 32-bit integers'
 operators (the IR's own operations by their VEX forms, and the comparisons,
 shifts and complements as machine rows) on 16- and 32-byte vectors; the operators
@@ -1568,7 +1770,7 @@ does the same at `-march=sandybridge` (AVX without AVX2): 32-byte bitwise
 operators and constants, 16-byte arithmetic and AVX's float builtins.
 
 `test-tier1-masks` takes hand-written IR of machine rows too, natively against a C
-model of each (the interpreter has none of x86 records) by both paths, with and
+model of each (the interpreter has none of x86 records), with and
 without rematerialization: rows beside seven word masks live in k1 to k7, one
 naming k1 and k2 by number and one taking a mask scratch register, which borrow
 live masks' registers and reload them; rows that read their integer and mask
@@ -1681,15 +1883,16 @@ exhaustion. Empty functions and guarded, unpadded columns cover lengths around
 The bottom-up rewrite has checks of its own (`tier1_select_burs_test.c`, in
 `test-tier1-select`): the tables' invariants (the register leaf's state first,
 every state's rule of a nonterminal one that derives it, every map and table
-entry a state, each constant class deriving exactly its nonterminals); the
-labeling and the rule choice against their scalar twins on 64 rounds of random
-columns, with child states drawn from every state, 16-lane tails and lone
+entry a state, each constant class deriving exactly its nonterminals); every
+node's state and rule against their defining equations (`tier1_burs_test_equation`)
+on 64 rounds of random columns, with child states drawn from every state, 16-lane tails and lone
 levels; the IR's text fixtures (`tests/ir`, `tests/ir/optimize`); and addresses
 around a disp32's edges, constant indices and offsets inside and past 32 bits at
 every scale, among them pairs past it whose sum fits. On each function
-(`tier1_burs_check_function`) the vector classifier's classes and visible
-children must be the scalar one's, both kernels' states and rules alike, and
-every node of a class the grammar covers must have a candidate. The same check
+(`tier1_burs_check_function`) each visible child must be the node's own earlier
+operand, every node's state and rule must hold their equations, and every node
+of a class the grammar covers must have a candidate; the classes themselves the
+frozen plan digest checks. The same check
 runs on every function `test-tier1-pipeline` plans and every function
 `benchmark-tier1-select-source` selects, outside its time, where a difference
 fails the benchmark. `test-tier1-pipeline` also replans each function through
@@ -1746,16 +1949,16 @@ promotion; neither test suite is the pending full C-program differential corpus.
 Divisions by constants' reciprocals are tested at both levels. `test-tier1-select`
 plans each of the four divisions at both widths by 52 divisors (small ones, C
 programs' usual ones, the ends of 32 and 64 bits, negative ones, and those `div`,
-`idiv` and the power rules keep), by both paths, which must pick the reciprocal
+`idiv` and the power rules keep), which must pick the reciprocal
 exactly where `tier1_select_reciprocal_divisor` does; runs each reciprocal's
 records natively from four dividend registers (`rax` and `rdx` among them) into
 five destinations (the dividend's own among them) on the dividend's edges, against
 its interpreter; checks that the longest sequence fills the room exactly; and that
-a divisor whose constant has two uses still takes its rule by both paths.
+a divisor whose constant has two uses still takes its rule.
 `test-tier1-emit` (`tier1_divide_test.c`) runs whole functions through
 `tier1_emit_function` by both consumers: a straight-line one whose dividend and a
 parameter that lives past both divisions arrive in `rdx`, and a loop's digit sum,
-by both paths, with constants rematerialized and not, and with every register and
+with constants rematerialized and not, and with every register and
 a few, against C's own division; both consumers must save values around the
 sequences.
 
@@ -1764,28 +1967,26 @@ sequences.
 Its chain, wide-frontier and live-pressure shapes report selection separately
 from the complete backend path: plan, selected-use liveness, required register
 positions, allocation, rematerialization recipes, frame planning, fragment and
-frame emission, branch sizing and encoding. Scalar rows use the scalar encoder.
-Both paths are
-validated before timing. Samples alternate order, and report seven-sample
+frame emission, branch sizing and encoding. Both rows select with the one
+selector (#2924); the scalar rows' emission and encoding take their twins, the
+encoder's the scalar one. Both paths are validated before timing. Samples alternate order, and report seven-sample
 medians of nanoseconds and invariant TSC ticks per IR instruction. TSC ticks
 are **not core cycles**. The output also reports actual record/code-byte counts,
 unknown model IDs, spill slots, stores, reloads, rematerialized copies, peak
 retained arena bytes and the maximum of liveness and transition scratch bounds.
 The latter is not a whole-pipeline peak-memory measurement.
 
-`benchmark-tier1-select-source [--only select|select-scalar] [--after-scalar MS]
+`benchmark-tier1-select-source [--only select] [--after-scalar MS]
 [preprocessor options] file...` (`tier1_select_source_benchmark.c`, #141) times
 selection on real C: every function `-c` compiles of the files, lowered, promoted
 and optimized as the C driver's `--tier1` takes it, with its dominance, outside
 the time; then `tier1_select_plan_verified` of each, as the driver plans it,
-by both paths, in 21 passes that alternate which path runs first, as nanoseconds,
+in 21 passes, as nanoseconds,
 core cycles, instructions and the throttle (PMCx1A0's umask 0x08, #199) per IR
 instruction and cycles per typed entry. A function a step before selection
-refuses, or either path's selection refuses, is left out of both and counted;
-any other failure fails the command, which then reports no time. `--only` times
-one path alone, and `--after-scalar MS` runs the scalar path before each of the
-vector path's passes. Of the frozen `sqlite3.c`'s 2,668 functions, both paths
-select the 2,666 that the driver's `--tier1-report` gives Tier 1 (478,163 IR
+refuses, or selection refuses, is left out and counted; any other failure fails
+the command, which then reports no time. `--after-scalar MS` runs scalar integer
+work before each pass. Of the frozen `sqlite3.c`'s 2,668 functions, it selects the 2,666 that the driver's `--tier1-report` gives Tier 1 (478,163 IR
 instructions).
 
 Run each build, test and measurement on the approved 9700X under its shared

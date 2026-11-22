@@ -48,6 +48,10 @@ struct CheckOverloadContext
     // candidate's address ineligible. A call's arguments that are addresses never null (`&x`), one byte each, or null.
     const CheckConditionTable* conditions;
     const uint8_t* argument_nonnull;
+    // A set read where it has no expected type, an operator's operand or a cast to void (#2935): clang's
+    // CheckPlaceholderExpr takes its one candidate whose address is available (resolveAddressOfSingleOverloadCandidate),
+    // as an address for a `void *` takes it (check_overload_address).
+    bool placeholder;
 };
 
 typedef enum CheckOverloadStatus

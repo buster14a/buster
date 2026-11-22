@@ -33,8 +33,9 @@ array accesses in parallel over IR rows, clones the accepted body into vector
 lanes, guards it with exact trip count and run-time overlap checks, and leaves
 the original loop as the scalar fallback. Integer reductions use the existing
 reduction operations; strict floating-point reductions are never reassociated.
-An exact scalar twin is the oracle for every data-parallel analysis and
-rewrite.
+The data-parallel analyses are checked against their definitions, and every
+fixture's result against a frozen digest and the interpreter (#2924 deleted
+the exact scalar twin that was their oracle).
 
 ## The first implementation
 
@@ -49,14 +50,26 @@ are, and the body may be a chain of blocks. Its own verification is therefore
 structural; the optimizer that follows verifies dominance once it has removed
 the stubs, and `test-ir-vectorize` runs that optimizer on every result.
 
+The C typed stream still loses volatility on indirect loads. With `+vectorize`,
+the driver conservatively skips a function containing a volatile-qualified
+expression and carries that decision through calls it actually inlines.
+Other functions in the same translation unit remain eligible.
+
 **What it takes.** An innermost, reducible loop with one preheader whose only
 successor is the header; a header of phis, its exit test and dead rows; a body
-that is a chain of blocks back to the header. The induction is an `i32` or
+that leads back to the header through a chain of blocks, optionally containing
+a min/max reduction diamond. The induction is an `i32` or
 `i64` phi from an invariant start, `+ 1` on the back edge; the exit test is
 `iv < n` or `iv + k < n` (unsigned or signed, either operand order and either
 branch sense) against an invariant `n`. Every other header phi must be an
 integer reduction: one wrapping `add`, `mul`, `and`, `or` or `xor` of the phi
-and another value, at `i32` or `i64`, whose partial value nothing else reads.
+and another value at `i32` or `i64`, or a signed or unsigned `i32` min/max.
+The reduction's partial value must be private to its update. For min/max, the
+vectorizer matches the two operands of an ordered comparison to the values
+selected by a scalar `select` or the join of a one- or two-armed conditional.
+An arm may reload the element already compared when its address and the
+absence of an intervening write prove it reads the same value. Volatile
+accesses and conditional stores refuse the loop.
 Each needed row of the body is then, in order:
 
 - **uniform:** no lane depends on the induction. It is cloned once, in the guard
@@ -70,15 +83,16 @@ Each needed row of the body is then, in order:
   bytes per iteration.
 - **a vector:** a load or store whose pointer advances by its access's bytes;
   element-wise integer `add` to `ashr` (not divisions) and floating `fadd` to
-  `fdiv`, of vectors and uniforms (splatted); `icmp` into a mask; `select` on
-  one; `zext`/`sext` of a mask (a `vselect` of 1 or -1 and 0); `zext`, `sext` and
-  `trunc` between integer lanes (`extend`, `truncate`); `popcnt` of each lane
-  (`lane_unary`).
+  `fdiv` and `fma`, of vectors and uniforms (splatted); `sitofp`, `uitofp`,
+  `fptosi` and `fptoui` between i32 and f32 or i64 and f64; `icmp` into a mask;
+  `select` on one; `zext`/`sext` of a mask (a `vselect` of 1 or -1 and 0);
+  `zext`, `sext` and `trunc` between integer lanes (`extend`, `truncate`);
+  `popcnt` of each lane (`lane_unary`).
 
-Anything else refuses the loop, counted by reason: `shape` (control flow in the
-body, no dedicated preheader, an outer loop), `induction`, `phi` (a recurrence
+Anything else refuses the loop, counted by reason: `shape` (unmatched control
+flow in the body, no dedicated preheader, an outer loop), `induction`, `phi` (a recurrence
 that isn't a reduction, a float sum), `operation` (a call, a division, a fence,
-a volatile or atomic access, `fma`, `sitofp`), `address` (a strided or gathered
+a volatile or atomic access), `address` (a strided or gathered
 access), `use` (the induction as data, a reduction's partial value),
 `dependence` and `width`.
 
@@ -94,12 +108,42 @@ than eight pairs refuse.
 **The rewrite** appends three blocks per loop and leaves every original row in
 place: the guard (G), reached from the preheader instead of the header; the
 vector loop (VB); and its exit (VX), which reduces each accumulator (`reduce`,
-then `lane_extract` of lane 0), combines it with the initial value and enters
-the original header, whose phis take G's start or VX's results. The original
-loop is the remainder and the fallback at every target; the AVX-512 masked
-remainder is not implemented. The vector loop's induction is lane 0's, the
-original's type, stepping by the lanes to `start + vector_n` by the original's
-predicate.
+then `lane_extract` of lane 0) and enters
+the original header, whose phis take G's start or VX's results. Min/max
+broadcasts the incoming accumulator into every lane in G and uses `lane_op`
+in VB. The other reductions start at their identity and combine their scalar
+result with the incoming value in VX. The original
+loop is the remainder and the fallback. The vector loop's induction is lane
+0's, the original's type, stepping by the lanes to `start + vector_n` by the
+original's predicate.
+
+**The masked remainder (#2807).** Where the target makes the lanes' mask from
+a general register (`IrVectorizeTarget.mask`: Tier 1's `kmov` of the mask's
+bytes, `kmovb`, AVX512DQ's, for 8 lanes or fewer), has masked moves of each
+vector load's and store's lanes (`IrVectorizeTarget.masked`: `vmovdqu8` to
+`vmovdqu64`, EVEX's alone) and the loop's vector rows compute no floating
+value, the remainder is one masked vector iteration instead
+(`ir_vectorize_masked_legal`). A loop with no vector load or store, a
+reduction of a uniform, needs the mask too. A floating loop keeps the scalar remainder: its
+inactive lanes would raise flags the scalar loop never raises. The rewrite then
+appends G, P, VB, T, TM and TX:
+
+- G's overlap tests cover the whole trip count, and G enters P where it is
+  nonzero.
+- P enters VB where a whole vector is, else T: a loop shorter than a vector runs
+  in the tail alone.
+- T, after VB, enters TM where the trip count has a remainder of the lanes,
+  else TX.
+- TM makes the mask, `(1 << remainder) - 1` at the mask's type. Under it come
+  masked loads (zeros in the inactive lanes) and masked stores, and each
+  reduction's update is selected by the mask, so that its inactive lanes keep
+  the accumulator. A min/max's `lane_op` reads those zeros too, and the select
+  drops its result there: an inactive lane keeps the broadcast incoming value
+  or VB's partial result, which the reduction includes anyway.
+- TX joins the accumulators, reduces as VX does and enters the original header
+  at the trip's end, whose exit test fails at once.
+
+`IrVectorizeResult.masked` counts these loops (`test-ir-vectorize` checks it).
 
 **Widths.** The lanes per iteration are the widest whose vectors are all 16 to
 64 bytes and at which every row's operation is the target's.
@@ -112,23 +156,24 @@ conversions between lane widths, reductions and population counts are EVEX's.
 
 **Data-parallel part.** Every row's admission kind is one two-register byte
 lookup of its opcode per 64 rows, with the volatile and atomic flags folded in
-(`ir_vectorize_kinds_vector`), and each loop's blocks are scanned 64 rows at a
-time for a refusing kind (`ir_vectorize_forbidden`); both have exact scalar
-twins. The classification, which reads each row's operands' classes in order,
-and the emission are the ordered part, shared by both paths, so the two give the
-same function (and object) by construction; the tests compare them anyway. A
-function without a phi on a back edge in block order walks no blocks.
+(`ir_vectorize_kinds`), and each loop's blocks are scanned 64 rows at a time
+for a refusing kind (`ir_vectorize_forbidden`). `test-ir-vectorize` checks both
+against their definitions on random columns (#2924, which deleted their exact
+scalar twins). The classification, which reads each row's operands' classes in
+order, and the emission are the ordered part. A function without a phi on a
+back edge in block order walks no blocks.
 
 **Finding the loops.** The pass builds no CFG and no dominator tree: one
 iterative depth-first walk over the blocks' terminators marks the reachable
 blocks, counts each block's reachable predecessors and collects each back edge's
 header once. The admitted shape needs nothing more: a header (not the entry)
 with exactly two reachable predecessors, one of its branch's targets starting a
-chain of blocks each reached from the previous one alone and ending in a `br` to
-the next, back to the header, and the other predecessor ending in a `br` to it.
+chain back to the header, and the other predecessor ending in a `br` to it.
+An internal conditional must reconverge at a private two-predecessor join,
+directly or through one single-entry block on each side.
 That loop is natural, reducible and innermost by construction: the only way into
-the chain is from the header, and no chain block, having one predecessor, can
-head a loop. On sqlite3.c the CFG and the dominators were 84% of the pass's time
+the chain is from the header, including at a matched join. On sqlite3.c the CFG
+and the dominators were 84% of the pass's time
 by in-process cycle counters in a local build (890 of 2,602 functions have a
 candidate phi); with the walk, the measured kernels' objects are byte for byte
 the same. The report's `loops` count is every back edge's header, outer loops
@@ -157,7 +202,7 @@ accumulators where the vector loop has one chain (#2755's unroller) and using
 `vpmaddwd` for `dot_i16`. At x86-64 only `add_i32`, `saxpy_f32`, `fill_u32`,
 `copy_u8` and `matmul_f32`'s inner loop are taken: masks, reductions and lane
 conversions are EVEX forms in Tier 1. The refusals that remain have issues:
-`max_i32` (#2805), the contracted `fma` and `sitofp` (#2806), the masked
+`max_i32` (#2805), the masked
 remainder (#2807), and strided accesses and narrow-into-wide counts (#2808).
 Compiling sqlite3.c with the option cost 2.30% more user cycles at znver5 and
 1.51% at x86-64 in the first build, which built a CFG and dominators for each
@@ -404,7 +449,7 @@ lane extension or a masked operation the target lacks. Set-up and tail costs
 are included; short-trip-count profitability is measured separately from the
 8 KB steady-state suite before the pass becomes a default.
 
-## A data-parallel implementation with an exact scalar twin
+## A data-parallel implementation
 
 Add `ir_vectorize_loops.c` beside the other optimization passes and follow the
 shared immutable-input, fresh-output, verified-result and arena-rollback
@@ -428,13 +473,10 @@ an AST walk:
   operands from that map. CFG creation, phi cycle resolution and publication
   of one loop at a time remain the small ordered part.
 
-The scalar twin independently walks the same rows and constructs the same
-fresh IR. It is not merely the vector implementation with a width of one.
-Both paths must produce byte-identical canonical IR for every accepted and
-refused fixture; a legitimate difference in internal discovery order may not
-change block, value or guard order. A host without the full AVX-512 feature
-set uses the scalar path, and generated target objects must be identical
-between host paths.
+The design had a scalar twin that walked the same rows independently, and both
+paths had to give byte-identical IR. #2924 deleted it: the scans are checked
+against their definitions, and every fixture's result and counts at every
+target against a digest frozen where the two agreed.
 
 Report `vectorized_loops`, split by width and reduction kind, and refusal
 counts by reason in `--tier1-report`. These counts make a silently narrowing
@@ -489,8 +531,8 @@ which loops improve.
    remainder at all four targets, then integer reductions covered directly by
    `reduce`.
 3. **Coverage:** proven narrow reductions and conversions, followed by the
-   AVX-512 masked remainder. Each addition keeps the same oracle and target
-   matrix.
+   AVX-512 masked remainder (#2807, "The masked remainder" above). Each
+   addition keeps the same oracle and target matrix.
 4. **Default and follow-ups:** enable only with the full 9700X result and
    compile-cost record. Design unrolling on the resulting vector loops
    separately (#2755). Keep #1344, #2676, #2718 and #2719 with their existing owners,

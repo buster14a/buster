@@ -213,9 +213,8 @@ static void ir_reduce_test_fixture(IrReduceTest* test, const char* text, IrReduc
         arena_pop_to(&scratch, mark);
         IrFunction reparsed = { 0 };
         const bool roundtrip = first == IR_REDUCE_COMPLETE && ir_reduce_test_roundtrip(&reduced.function, &twin, &scratch, &reparsed);
-        ir_reduce_test_expect(test, roundtrip && ir_verify_complete(&reparsed, &scratch, true).error == IR_OK &&
-                              ir_verify_complete(&reparsed, &scratch, false).error == IR_OK,
-                              "reduced canonical text reparses and passes both complete SSA verifiers independently");
+        ir_reduce_test_expect(test, roundtrip && ir_verify_complete(&reparsed, &scratch).error == IR_OK,
+                              "reduced canonical text reparses and passes the complete SSA verifier");
         const IrReduceObservation replay = roundtrip ? ir_reduce_oracle(&reparsed, &limits, &oracle, &scratch) :
                                                      (IrReduceObservation){ .status = IR_REDUCE_PREDICATE_ERROR };
         ir_reduce_test_expect(test, replay.status == IR_REDUCE_OBSERVED && ir_reduce_same_failure(replay.failure, reduced.failure),
@@ -311,7 +310,7 @@ static void ir_reduce_test_contracts(IrReduceTest* test)
         IrReduceResult bounded = { 0 };
         const IrReduceStatus status = ir_reduce(&function, ir_reduce_test_predicate, &mode, &limits, &output, &scratch, &bounded);
         ir_reduce_test_expect(test, status == IR_REDUCE_CANDIDATE_LIMIT && bounded.candidates == 1 &&
-                              ir_verify_complete(&bounded.function, &scratch, true).error == IR_OK,
+                              ir_verify_complete(&bounded.function, &scratch).error == IR_OK,
                               "candidate budget returns a verified explicitly partial reproducer");
         arena_pop_to(&output, 0);
         Arena denied = output;
@@ -447,8 +446,7 @@ static void ir_reduce_test_lifetimes(IrReduceTest* test)
         markers += reduced.function.op[i] == IR_LIFETIME;
     }
     ir_reduce_test_expect(test, status == IR_REDUCE_COMPLETE && calls > 1 && reduced.accepted != 0 &&
-                          ir_verify_complete(&reduced.function, &scratch, true).error == IR_OK &&
-                          ir_verify_complete(&reduced.function, &scratch, false).error == IR_OK &&
+                          ir_verify_complete(&reduced.function, &scratch).error == IR_OK &&
                           reduced.function.instruction_count < source.instruction_count && markers == 4 && reduced.function.slot_count == 2,
                           "the reducer removes the dead row through rebuilt candidates that keep the markers and their slots");
     arena_release(&scratch);
@@ -477,12 +475,11 @@ static void ir_reduce_test_metadata(IrReduceTest* test)
         IrFunction source = { 0 };
         const bool parsed = ir_reduce_test_parse(ir_reduce_test_metadata_inputs[k], &input, &scratch, &source);
         arena_pop_to(&scratch, 0);
-        const bool verified = parsed && ir_verify_complete(&source, &scratch, true).error == IR_OK &&
-                              ir_verify_complete(&source, &scratch, false).error == IR_OK;
+        const bool verified = parsed && ir_verify_complete(&source, &scratch).error == IR_OK;
         arena_pop_to(&scratch, 0);
         const bool carried = k == 0 ? source.label_count == 1 : k == 1 ? source.variadic : source.parameter_passed != 0 &&
                              source.result_size == 12 && source.abi_call_count == 1 && source.calls[0].abi == 1;
-        ir_reduce_test_expect(test, verified && carried, "metadata fixture parses and passes both verifiers with its metadata");
+        ir_reduce_test_expect(test, verified && carried, "metadata fixture parses and passes the verifier with its metadata");
         IrFunction untouched;
         memset(&untouched, 0x3c, sizeof(untouched));
         const IrFunction before = untouched;
@@ -517,28 +514,35 @@ static void ir_reduce_test_cache(IrReduceTest* test)
     work.context = &mode;
     work.started = ir_reduce_milliseconds();
     IrFunction source = { 0 };
-    bool valid = ir_reduce_test_parse(ir_reduce_test_call, &input, &work.scratch, &source);
-    uint64_t length = 0;
-    uint64_t hash = 0;
-    uint8_t* key = valid ? ir_reduce_key(&source, &work.scratch, &length, &hash) : NULL;
-    uint8_t* forged = key != NULL ? arena_push(&work.cache, length, 1) : NULL;
-    valid = forged != NULL && length != 0;
-    IrReduceCache collision = { 0 };
+    IrReduceObservation observed = { 0 };
+    bool valid = ir_reduce_test_parse(ir_reduce_test_call, &input, &work.scratch, &source) &&
+                 ir_reduce_observe(&work, &source, &observed) && observed.status == IR_REDUCE_OBSERVED;
     if (valid)
     {
-        memcpy(forged, key, length);
-        forged[length - 1] ^= 1;
-        collision = (IrReduceCache){ .bytes = forged, .length = length, .hash = hash,
-            .observation = { .status = IR_REDUCE_OBSERVED, .failure = { .kind = 999 } } };
-        work.first = &collision;
-        arena_pop_to(&work.scratch, 0);
-        IrReduceObservation observed;
+        IrReduceCache* collision = work.root;
+        collision->bytes[collision->length - 1] ^= 1;
+        collision->observation.failure.kind = 999;
+        // Freeze the original cache budget: two 48-byte headers plus their keys, with the second header aligned.
+        const uint64_t capacity = work.cache.capacity;
+        const uint64_t first = 48 + collision->length;
+        const uint64_t alignment = _Alignof(IrReduceCache);
+        const uint64_t end = ((first + alignment - 1) & ~(alignment - 1)) + first;
+        work.cache.capacity = end - 1;
+        observed.failure.kind = 123;
+        valid = !ir_reduce_observe(&work, &source, &observed) && work.result.status == IR_REDUCE_CACHE_LIMIT &&
+                observed.failure.kind == 123 && work.result.predicates == 1 && work.cache.length == first && work.scratch.length == 0;
+        ir_reduce_test_expect(test, valid, "one byte short on a colliding key preserves the cache, scratch and observation");
+
+        work.cache.capacity = end;
+        work.result.status = IR_REDUCE_COMPLETE;
         valid = ir_reduce_observe(&work, &source, &observed) && observed.status == IR_REDUCE_OBSERVED &&
-                observed.failure.kind == 71 && work.result.predicates == 1 && work.result.cache_hits == 0;
+                observed.failure.kind == 71 && work.result.predicates == 2 && work.result.cache_hits == 0 && work.cache.length == end;
         ir_reduce_test_expect(test, valid, "a forced equal-hash/equal-length collision requires exact field bytes, not a hash alone");
-        valid = ir_reduce_observe(&work, &source, &observed) && observed.failure.kind == 71 &&
-                work.result.predicates == 1 && work.result.cache_hits == 1 && work.scratch.length == 0;
-        ir_reduce_test_expect(test, valid, "an exactly repeated candidate reuses its classified observation without another callback");
+        mode = 1;
+        valid = ir_reduce_observe(&work, &source, &observed) && observed.status == IR_REDUCE_OBSERVED && observed.failure.kind == 71 &&
+                work.result.predicates == 2 && work.result.cache_hits == 1 && work.cache.length == end && work.scratch.length == 0;
+        ir_reduce_test_expect(test, valid, "an exact hit beyond a collision uses the saved observation even in a full cache");
+        work.cache.capacity = capacity;
     }
     else
     {
@@ -596,8 +600,7 @@ static void ir_reduce_test_generated(IrReduceTest* test, uint64_t count)
             IrReduceResult result = { 0 };
             const IrReduceStatus status = ir_reduce(&function, ir_reduce_test_predicate, &mode, &limits, &output, &scratch, &result);
             valid = status == IR_REDUCE_COMPLETE && result.function.instruction_count == 2 && result.function.constant_count == 0 &&
-                    ir_verify_complete(&result.function, &scratch, true).error == IR_OK &&
-                    ir_verify_complete(&result.function, &scratch, false).error == IR_OK;
+                    ir_verify_complete(&result.function, &scratch).error == IR_OK;
         }
         ir_reduce_test_expect(test, valid && scratch.length == 0, "random valid IR is compacted without invalid operands or retained scratch");
         arena_pop_to(&input, 0);

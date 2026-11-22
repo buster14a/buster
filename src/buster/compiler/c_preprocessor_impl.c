@@ -7,14 +7,13 @@
 static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location);
 static bool pp_diagnostic_warning_visible(Preprocessor* pp, uint32_t location, uint32_t origin);
 static void pp_render_diagnostic(Preprocessor* pp, PPSeverity severity, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const char* format, va_list arguments);
+static void pp_diagnostic_resolve_ranges(Preprocessor* pp, bool resolve);
 static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_t position, uint32_t location, uint32_t origin, const PPDiagnosticNote* note, const PPOutputDiagnosticNote* source_notes, uint32_t source_note_count, const PPDiagnosticSourceNote* placed_notes, uint32_t placed_note_count, const char* format, va_list arguments);
 static void* pp_array_small(Preprocessor* pp, bool* reserved, uint64_t count, uint64_t size, uint64_t small);
 static PPMacroId pp_new_macro(Preprocessor* pp, IdentId name);
 static void pp_scan_body_scalar(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt);
 static uint32_t pp_start_with_splices(const uint8_t* bytes, uint32_t start, bool trigraphs);
 static void pp_continue_relex(Preprocessor* pp, uint32_t file_context, uint32_t begin, uint32_t expansion_end);
-static uint32_t pp_copy_file_run_scalar(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit);
-static uint32_t pp_copy_buffer_run_scalar(Preprocessor* pp, const PPTokens* tokens, uint32_t position, uint32_t end);
 static void pp_directive(Preprocessor* pp, PPContext* context);
 static void pp_finish_invocation(Preprocessor* pp);
 static void pp_close_builtin(Preprocessor* pp, bool closed);
@@ -33,8 +32,6 @@ static void pp_finish_embed(Preprocessor* pp);
 static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location);
 static void pp_embed(Preprocessor* pp, PPContext* context, uint32_t d);
 static void pp_resolve_keywords(Preprocessor* pp);
-static void pp_resolve_keywords_scalar(Preprocessor* pp);
-static uint64_t pp_embed_text_scalar(const uint8_t* bytes, uint64_t count, bool separated, uint8_t* out);
 static void pp_diagnose_output_location(Preprocessor* pp, PPSeverity severity, uint32_t token, uint32_t location, uint32_t position, PPDiagnosticPhase phase,
                                         const PPOutputDiagnosticNote* notes, uint32_t note_count, const char* format, va_list arguments);
 
@@ -95,6 +92,9 @@ static void pp_diagnostic_limit(Preprocessor* pp)
 {
     FILE* stream = pp->options.diagnostics != 0 ? pp->options.diagnostics : stderr;
     fputs("fatal error: too many errors emitted, stopping now [-ferror-limit=]\n", stream);
+    // A diagnostic of no place: the next one's source line shows (pp_diagnostic_snippet).
+    pp->diagnostic_caret_location = 0;
+    pp->diagnostic_caret_note = false;
 }
 
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_diagnostic_summary(const Preprocessor* pp)
@@ -137,7 +137,12 @@ BUSTER_PREPROCESSOR_ENTRY __attribute__((format(printf, 4, 5))) void pp_diagnose
         }
         else
         {
+            pp_diagnostic_resolve_ranges(pp, false);
+            pp->render_ranges = pp->diagnostic_ranges;
+            pp->render_range_count = pp->diagnostic_range_count;
             pp_render_diagnostic(pp, severity, location, location != 0 ? pp->diagnostic_origin : 0, NULL, format, arguments);
+            pp->render_ranges = NULL;
+            pp->render_range_count = 0;
         }
         va_end(arguments);
     }
@@ -565,14 +570,7 @@ static uint32_t pp_pragma_state(const Preprocessor* pp, uint32_t state, uint8_t 
     return start ? BUSTER_PP_PRAGMA_NAME : end ? BUSTER_PP_PRAGMA_OUTSIDE : state == BUSTER_PP_PRAGMA_NAME ? BUSTER_PP_PRAGMA_TOKENS : state;
 }
 
-// Whether -E spells an output token of `kind` at place `state` as written.
-static bool pp_spelled_as_written(uint32_t state, uint8_t kind)
-{
-    const bool identifier = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_KEYWORD + C_NAME_KEYWORD_COUNT);
-    return state == BUSTER_PP_PRAGMA_TOKENS && identifier;
-}
-
-// The spelling -E prints for an identifier it spells as written (pp_spelled_as_written), in `arena`:
+// The spelling -E prints for an identifier of a pragma line after its name, which it spells as written, in `arena`:
 // pp_identifier_as_written's, or the interned one when its location is in no range. Sets *spelling to null if `arena`
 // is full. Returns the length.
 static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t location, Arena* arena, const uint8_t** spelling)
@@ -598,10 +596,12 @@ static uint32_t pp_written_spelling(Preprocessor* pp, uint32_t value, uint32_t l
 // into the calling lane's bytes arena, which the cache keeps as long as its records, and a larger one is mapped with
 // MAP_POPULATE (all of them if the arena can't be reserved, so that the file's preparation, which needs the lane's other
 // arenas, says why it fails). A path whose first `directory_length` bytes are a directory the search looks in, followed
-// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent):
-// a path the listing rules out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
+// by a '/' (BUSTER_PP_NONE for none), is answered by the directory's listing once it has one (file_cache_listed_absent),
+// or by what the directory answered about the path's first component (file_cache_component_absent): a path either rules
+// out gets the entry a probe that found no file there (ENOENT) gives it, without the probe.
 // `*known` (if `known` isn't null) caches the directory's FileCacheDirectory for its caller: a search directory's.
-// Until some directory has a listing, only a failed probe looks its directory up. One lane at a time.
+// Until some directory has a listing or lacks a component it was asked for, only a failed probe looks its directory up.
+// One lane at a time.
 static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint32_t length, uint32_t directory_length, FileCacheDirectory** known,
                                        FileCacheCounts* counts, int* error)
 {
@@ -612,16 +612,17 @@ static uint32_t file_cache_lookup_path(FileCache* cache, const char* path, uint3
     {
         const bool in_directory = file_cache_in_directory(path, length, directory_length);
         FileCacheDirectory* directory = known != 0 ? *known : 0;
-        directory = directory == 0 && in_directory && cache->listed_directories != 0 ? file_cache_directory(cache, path, directory_length) : directory;
+        const bool answers = cache->listed_directories != 0 || cache->absent_components != 0;
+        directory = directory == 0 && in_directory && answers ? file_cache_directory(cache, path, directory_length) : directory;
         FileProbe probe = { .record = BUSTER_PP_NONE, .error = ENOENT };
-        const bool absent = directory != 0 && file_cache_listed_absent(directory, path, length);
+        const bool absent = directory != 0 && (file_cache_listed_absent(directory, path, length) || file_cache_component_absent(directory, path, length));
         counts->listed += absent;
         if (!absent)
         {
             Arena* bytes = &file_cache_arenas(cache, lane_index())->bytes;
             file_cache_probe(cache, path, FILE_CACHE_MAP_POPULATED, cache->read_limit, bytes->base != 0 ? bytes : 0, &probe, counts);
             directory = directory == 0 && in_directory && probe.error == ENOENT ? file_cache_directory(cache, path, directory_length) : directory;
-            file_cache_count_miss(cache, directory, &probe, counts);
+            file_cache_count_miss(cache, directory, path, length, &probe, counts);
         }
         if (known != 0 && directory != 0)
         {
@@ -667,7 +668,6 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
         .refine_flags = pp->refine_flags,
         .split_kinds = pp->split_kinds,
         .dollar_punctuation = pp_dollar_punctuation(&pp->options),
-        .vectorized = pp->vectorized,
         .window_bytes = pp->options.window_bytes,
     };
 }
@@ -848,18 +848,18 @@ static uint32_t pp_lookup_path(Preprocessor* pp, const char* path, uint32_t leng
 }
 
 // Whether buster's own headers' directory has a file `name` (`length` bytes), which clang's resource directory after
-// it (pp->fallback_directory) then doesn't supply, to the search or beside one of its own headers: so a #include_next
+// it (pp->search.fallback_directory) then doesn't supply, to the search or beside one of its own headers: so a #include_next
 // in buster's header goes on past clang's header of the same name, to the C library's. The path is the one the search
 // of buster's directory looks up, so its record is usually in the table already (a #include_next in buster's header
 // names that header).
 static bool pp_buster_supplies(Preprocessor* pp, const uint8_t* name, uint32_t length)
 {
     char path[PATH_MAX];
-    const uint32_t directory_length = pp->buster_directory_length;
+    const uint32_t directory_length = pp->search.buster_directory_length;
     bool result = false;
     if ((uint64_t)directory_length + 1 + length < PATH_MAX)
     {
-        memcpy(path, pp->buster_directory, directory_length);
+        memcpy(path, pp->search.buster_directory, directory_length);
         path[directory_length] = '/';
         memcpy(path + directory_length + 1, name, length);
         const uint32_t record = pp_lookup_path(pp, path, directory_length + 1 + length, directory_length, 0, BUSTER_PP_SYSTEM_FILE);
@@ -874,7 +874,7 @@ static bool pp_buster_supplies(Preprocessor* pp, const uint8_t* name, uint32_t l
 // a path that can't be opened for another reason than there being no file there (PPFile.error) or one PATH_MAX bytes
 // long or longer, which no system call takes (ENAMETOOLONG), is a fatal error at `report`, as clang's
 // getFileAndSuggestModule reports it, and ends the search; with `report` BUSTER_PP_NONE, it is a place without the file.
-// With --buster-headers, clang's resource directory after buster's (pp->fallback_directory) doesn't supply a name
+// With --buster-headers, clang's resource directory after buster's (pp->search.fallback_directory) doesn't supply a name
 // buster's directory has (pp_buster_supplies), neither as a search directory nor as the directory of an includer of
 // clang's: a #include_next in buster's header goes on past clang's header of the same name, to the C library's.
 // The optional timing spans this whole search, including candidate construction, cached hits/misses, file probing
@@ -906,13 +906,13 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
         // The place's directory as clang names it: the includer's, a search directory, or none for an absolute name.
         const bool absolute = length != 0 && name[0] == '/';
         const bool own = candidate != PP_CANDIDATE_END && !absolute && directory == BUSTER_PP_NONE;
-        const char* prefix = own ? (source.directory_length != BUSTER_PP_NONE ? source.path : ".") : directory != BUSTER_PP_NONE ? pp->directories[directory] : "";
+        const char* prefix = own ? (source.directory_length != BUSTER_PP_NONE ? source.path : ".") : directory != BUSTER_PP_NONE ? pp->search.directories[directory] : "";
         const uint32_t prefix_length = own ? (source.directory_length != BUSTER_PP_NONE ? source.directory_length : 1)
-                                           : directory != BUSTER_PP_NONE ? pp->directory_lengths[directory] : 0;
+                                           : directory != BUSTER_PP_NONE ? pp->search.directory_lengths[directory] : 0;
         // Clang's resource directory behind buster's, which doesn't supply a name buster's directory has.
-        const uint32_t fallback = pp->fallback_directory;
+        const uint32_t fallback = pp->search.fallback_directory;
         const bool behind = fallback != BUSTER_PP_NONE &&
-                            (own ? prefix_length == pp->directory_lengths[fallback] && memcmp(prefix, pp->directories[fallback], prefix_length) == 0 : directory == fallback);
+                            (own ? prefix_length == pp->search.directory_lengths[fallback] && memcmp(prefix, pp->search.directories[fallback], prefix_length) == 0 : directory == fallback);
         const bool shadowed = candidate != PP_CANDIDATE_END && behind && pp_buster_supplies(pp, name, length);
         int error = candidate == PP_CANDIDATE_SKIP && !shadowed ? ENAMETOOLONG : 0;
         if (candidate == PP_CANDIDATE_PATH && !shadowed)
@@ -945,16 +945,11 @@ static uint32_t pp_find_include(Preprocessor* pp, const uint8_t* name, uint32_t 
 // ---------------------------------------------------------------------------------------------------------------------
 // Macros
 
-BUSTER_INLINE bool pp_is_macro_vector(const Preprocessor* pp, IdentId id)
-{
-    return (pp->is_macro[id / 64] >> (id % 64)) & 1;
-}
-
-// The scalar reference reads the macro table itself, independently of the cached name bits. Poisoned names and
-// `defined` also have records: both must stop a run, although pp_is_defined does not consider them definitions.
+// Whether `id` names a macro, by the cached name bits. Poisoned names and `defined` also have records: both must stop a
+// run, although pp_is_defined does not consider them definitions.
 BUSTER_INLINE bool pp_is_macro(const Preprocessor* pp, IdentId id)
 {
-    return BUSTER_VECTOR_PATH(pp->vectorized) ? pp_is_macro_vector(pp, id) : pp->macro_of[id] != 0;
+    return (pp->is_macro[id / 64] >> (id % 64)) & 1;
 }
 
 // Sets `name`'s macro (0 for none: a poisoned name then gets its own record back, as pp_poison makes it).
@@ -1111,53 +1106,7 @@ BUSTER_INLINE ScalarLexer pp_file_lexer(uint32_t refine_flags, const PPFileData*
     return result;
 }
 
-// Past the comment that starts at byte `p` of a file, its delimiters read as the lexer reads them (get_char, so that a
-// line splice may split one: `*\` and a '/' on the next line close a block comment): past a block comment's "*/" (or at
-// the end of the file without one), or at a line comment's newline, which a splice doesn't end. `p` if no comment starts
-// there.
-static uint64_t pp_skip_comment(const ScalarLexer* lexer, uint64_t p)
-{
-    uint64_t size;
-    uint64_t at;
-    uint64_t result = p;
-    if (get_char(lexer, p, &size, &at) == '/')
-    {
-        uint64_t second;
-        const int32_t kind = get_char(lexer, p + size, &second, &at);
-        uint64_t q = p + size + second;
-        bool done = kind != '*' && kind != '/';
-        bool star = false;
-        while (!done)
-        {
-            uint64_t step;
-            const int32_t c = get_char(lexer, q, &step, &at);
-            done = c == BUSTER_LEX_END_OF_FILE || (kind == '*' ? star && c == '/' : c == '\n' || c == '\r');
-            star = c == '*';
-            q = kind == '/' && done ? at : q + step;
-        }
-        result = kind == '*' || kind == '/' ? q : p;
-    }
-    return result;
-}
-
-// The first place at or past byte `p` of a file that isn't a blank, a line splice or a comment, read as the lexer reads
-// them: where a token starts, a newline outside a comment, or the end of the file.
-static uint64_t pp_skip_blanks(const ScalarLexer* lexer, uint64_t p)
-{
-    uint64_t result = p;
-    bool done = false;
-    while (!done)
-    {
-        uint64_t size;
-        uint64_t at;
-        const int32_t c = get_char(lexer, result, &size, &at);
-        const uint64_t past = pp_skip_comment(lexer, result);
-        const bool blank = c == ' ' || c == '\t' || c == '\v' || c == '\f';
-        done = c == BUSTER_LEX_END_OF_FILE || (!blank && past == result);
-        result = done ? at : past != result ? past : result + size;
-    }
-    return result;
-}
+// (pp_skip_comment and pp_skip_blanks are c_preprocessor.c's: the checker finds a pragma line's end with them too.)
 
 // The end of the line that byte `p` of a file is on: its newline (not one a line splice joins to the next line), or the
 // end of the file.
@@ -1374,9 +1323,6 @@ static bool pp_same_definition(const Preprocessor* pp, const PPMacro* a, const P
 
 static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, uint32_t begin, uint32_t end, bool* pastes, bool* hashes, bool* va_opt)
 {
-#if !BUSTER_HOST_VECTOR
-    pp_scan_body_scalar(kinds, values, begin, end, pastes, hashes, va_opt);
-#else
     uint64_t found_pastes = 0;
     uint64_t found_hashes = 0;
     uint64_t found_va_opt = 0;
@@ -1398,7 +1344,6 @@ static void pp_scan_body_vector(const uint8_t* kinds, const uint32_t* values, ui
     *pastes = found_pastes != 0;
     *hashes = found_hashes != 0;
     *va_opt = found_va_opt != 0;
-#endif
 }
 
 // pp_scan_body_vector's scalar twin.
@@ -1454,29 +1399,24 @@ static void pp_token_name(const Preprocessor* pp, const PPFileData* data, uint32
     }
 }
 
-static void pp_parameter_index_begin(PPParameterIndex* index, bool vectorized)
+static void pp_parameter_index_begin(PPParameterIndex* index)
 {
-    (void)vectorized;
-
     // Only the occupied prefix is read. Clearing the inline arrays would add stores to every small definition.
     index->slots = 0;
     index->capacity = 0;
     index->count = 0;
-    index->vectorized = BUSTER_VECTOR_PATH(vectorized);
     index->repeated = false;
     index->scratch.arena = 0;
 }
 
 // Only large macros allocate even the index's descriptor. Keep its arrays out of the ordinary compiler stack frame.
-static PPParameterIndex* pp_parameter_index_allocate(bool vectorized)
+static PPParameterIndex* pp_parameter_index_allocate(void)
 {
-    (void)vectorized;
-
     Scratch scratch = scratch_begin(0);
     PPParameterIndex* result = arena_push(scratch.arena, sizeof(PPParameterIndex), _Alignof(PPParameterIndex));
     if (result != 0)
     {
-        pp_parameter_index_begin(result, BUSTER_VECTOR_PATH(vectorized));
+        pp_parameter_index_begin(result);
         result->scratch = scratch;
     }
     else
@@ -1507,7 +1447,7 @@ static __attribute__((noinline)) uint32_t pp_parameter_index(const PPParameterIn
         const uint32_t ordinal = (uint32_t)index->slots[slot];
         result = ordinal != 0 ? ordinal - 1 : BUSTER_PP_NONE;
     }
-    else if (BUSTER_VECTOR_PATH(index->vectorized))
+    else
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(0xFFFF, index->count);
         const __m512i names = _mm512_maskz_loadu_epi32(lanes, index->names);
@@ -1515,13 +1455,6 @@ static __attribute__((noinline)) uint32_t pp_parameter_index(const PPParameterIn
         if (matches != 0)
         {
             result = index->ordinals[__builtin_ctz(matches)];
-        }
-    }
-    else
-    {
-        for (uint32_t p = 0; result == BUSTER_PP_NONE && p < index->count; p += 1)
-        {
-            result = index->names[p] == id ? index->ordinals[p] : BUSTER_PP_NONE;
         }
     }
     return result;
@@ -1587,11 +1520,9 @@ static void pp_parameter_index_end(PPParameterIndex* index)
 
 // Return the descriptor directly: passing the address of the caller's local pointer would force it onto the stack
 // and add a stack-protector check to every ordinary macro. Keep this cold construction in its own frame.
-static __attribute__((noinline)) PPParameterIndex* pp_parameter_index_build(const IdentId* names, uint32_t count, bool vectorized)
+static __attribute__((noinline)) PPParameterIndex* pp_parameter_index_build(const IdentId* names, uint32_t count)
 {
-    (void)vectorized;
-
-    PPParameterIndex* result = pp_parameter_index_allocate(BUSTER_VECTOR_PATH(vectorized));
+    PPParameterIndex* result = pp_parameter_index_allocate();
     bool complete = result != 0;
     for (uint32_t p = 0; complete && p < count; p += 1)
     {
@@ -1606,14 +1537,12 @@ static __attribute__((noinline)) PPParameterIndex* pp_parameter_index_build(cons
     return result;
 }
 
-// Small compiled lists already have contiguous ids. Keep 0--4 names on the original bounded scalar lookup; a wider
-// list takes one masked comparison. The caller selects the mode once per macro. Neither path copies the list.
-BUSTER_INLINE uint32_t pp_parameter_index_small(const IdentId* names, uint32_t count, IdentId id, bool vectorized)
+// Small compiled lists already have contiguous ids. Keep 0--4 names on a bounded loop; a wider list (`wide`) takes one
+// masked comparison. The caller selects the mode once per macro. Neither path copies the list.
+BUSTER_INLINE uint32_t pp_parameter_index_small(const IdentId* names, uint32_t count, IdentId id, bool wide)
 {
-    (void)vectorized;
-
     uint32_t result = BUSTER_PP_NONE;
-    if (BUSTER_VECTOR_PATH(vectorized))
+    if (wide)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(0xFFFF, count);
         const __m512i ids = _mm512_maskz_loadu_epi32(lanes, names);
@@ -1745,7 +1674,7 @@ static __attribute__((noinline)) PPParameterIndex* pp_define_parameter_large(Pre
     PPParameterIndex* result = parameters;
     if (result == 0)
     {
-        result = pp_parameter_index_allocate(BUSTER_VECTOR_PATH(pp->vectorized));
+        result = pp_parameter_index_allocate();
         if (result != 0)
         {
             for (uint32_t p = 0; p < BUSTER_PP_SMALL_PARAMETERS; p += 1)
@@ -2162,14 +2091,14 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     PPParameterIndex* parameters = 0;
     if (result && parameter_count > BUSTER_PP_SMALL_PARAMETERS)
     {
-        parameters = pp_parameter_index_build(parameter_ids, parameter_count, BUSTER_VECTOR_PATH(pp->vectorized));
+        parameters = pp_parameter_index_build(parameter_ids, parameter_count);
         result = parameters != 0;
         if (!result)
         {
             pp_diagnose(pp, PP_SEVERITY_FATAL, macro->location, "out of memory indexing macro parameters");
         }
     }
-    const bool vector_parameters = BUSTER_VECTOR_PATH(pp->vectorized) && parameter_count > 4;
+    const bool vector_parameters = parameter_count > 4;
     macro->items_begin = pp->item_count;
     macro->expanded_parameters = 0;
     uint32_t va_opt_item = BUSTER_PP_NONE; // The open __VA_OPT__'s item,
@@ -2370,10 +2299,10 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         }
         strings |= kind == PP_ITEM_STRINGIZE ? 1u << i : 0;
     }
-    // A simple macro's template: its items are its body's tokens, one each. Only the vectorized kernels write expansions
-    // from templates, in a run that records no history (a deferred unit's), which alone has their array
-    // (pp_initialize): the scalar twins and the history's runs take pp_emit_simple_write and pp_substitute_simple, their
-    // twin, or for a macro with ## and # the invocation stack and pp_substitute.
+    // A simple macro's template: its items are its body's tokens, one each. Expansions are written from templates only in
+    // a run that records no history (a deferred unit's), which alone has their array (pp_initialize): the history's runs
+    // take pp_emit_simple_write and pp_substitute_simple instead, or for a macro with ## and # the invocation stack and
+    // pp_substitute.
     const bool templated = (simple || operators) && pp->templates != 0 && count <= BUSTER_PP_TEMPLATE_TOKENS &&
                            parameter_count <= BUSTER_PP_TEMPLATE_TOKENS && pp->template_count < (BUSTER_PP_MAX_TEMPLATES >> pp->capacity_shift);
     if (templated)
@@ -2389,8 +2318,7 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
         };
         // The operands of ##: a chain's token is its pastes' (or its one operand's that has a token).
         const uint32_t chained = pastes | (pastes << 1) | (pastes >> 1);
-        // The items pp_substitute's loop reads, in the vectorized kernels: a run of body tokens as one, and a ## with
-        // its right operand.
+        // The items pp_substitute's loop reads: a run of body tokens as one, and a ## with its right operand.
         for (uint32_t i = 0; i < count; i += 1)
         {
             template->anchor = (uint8_t)i;
@@ -3040,9 +2968,6 @@ static inline __attribute__((always_inline)) bool pp_append_stack_tokens(Preproc
 
 static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_copy_file_run_scalar(pp, data, base, position, limit);
-#else
     PPTokens* target = pp_target(pp);
     uint32_t p = position;
     bool stopped = false;
@@ -3057,7 +2982,7 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
         for (uint64_t bits = identifiers; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
-            if (pp_is_macro_vector(pp, data->values[p + lane]))
+            if (pp_is_macro(pp, data->values[p + lane]))
             {
                 take = lane;
                 stopped = true;
@@ -3072,7 +2997,6 @@ static uint32_t pp_copy_file_run_vector(Preprocessor* pp, const PPFileData* data
         p += take;
     }
     return p;
-#endif
 }
 
 // pp_copy_file_run_vector for a file's text read straight into the output (pp_step_file's `text`), which doesn't stop at
@@ -3103,13 +3027,13 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
             const IdentId value = data->values[p + lane];
-            if (pp_is_macro_vector(pp, value))
+            if (pp_is_macro(pp, value))
             {
                 const PPMacro* macro = &pp->macros[pp->macro_of[value]];
                 const PPFileData* body = &pp->datas[macro->data];
                 const uint32_t b = macro->body_begin;
                 const bool direct = !pp->options.preprocessed && (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->disabled == 0 &&
-                                    macro->body_end - b == 1 && ((body->kinds[b] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, body->values[b]));
+                                    macro->body_end - b == 1 && ((body->kinds[b] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, body->values[b]));
                 if (!direct)
                 {
                     take = lane;
@@ -3161,31 +3085,8 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
     return p;
 }
 
-// The same, a token at a time, testing the macro table without the vector path's cached name bits.
-static uint32_t pp_copy_file_run_scalar(Preprocessor* pp, const PPFileData* data, uint32_t base, uint32_t position, uint32_t limit)
-{
-    PPTokens* target = pp_target(pp);
-    uint32_t p = position;
-    bool stopped = false;
-    while (!stopped && p < limit && pp_room(pp, target, 1))
-    {
-        const PPToken token = pp_file_token(data, base, p);
-        stopped = token.kind == C_TOKEN_RAW_IDENTIFIER && pp->macro_of[token.value] != 0;
-        if (!stopped)
-        {
-            pp_tokens_set(target, target->count, token.kind, token.flags, token.value, token.location);
-            target->count += 1;
-            p += 1;
-        }
-    }
-    return p;
-}
-
 static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* tokens, uint32_t position, uint32_t end)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_copy_buffer_run_scalar(pp, tokens, position, end);
-#else
     PPTokens* target = pp_target(pp);
     uint32_t p = position;
     bool stopped = false;
@@ -3203,7 +3104,7 @@ static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* toke
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
             const IdentId id = tokens->values[p + lane];
-            if (pp_is_macro_vector(pp, id))
+            if (pp_is_macro(pp, id))
             {
                 if (pp->macros[pp->macro_of[id]].disabled != 0)
                 {
@@ -3229,31 +3130,6 @@ static uint32_t pp_copy_buffer_run_vector(Preprocessor* pp, const PPTokens* toke
         }
         target->count += take;
         p += take;
-    }
-    return p;
-#endif
-}
-
-static uint32_t pp_copy_buffer_run_scalar(Preprocessor* pp, const PPTokens* tokens, uint32_t position, uint32_t end)
-{
-    PPTokens* target = pp_target(pp);
-    uint32_t p = position;
-    bool stopped = false;
-    while (!stopped && p < end && pp_room(pp, target, 1))
-    {
-        uint8_t flags = tokens->flags[p];
-        const bool candidate = tokens->kinds[p] == C_TOKEN_RAW_IDENTIFIER && !(flags & BUSTER_PP_NO_EXPAND) && pp->macro_of[tokens->values[p]] != 0;
-        if (candidate && pp->macros[pp->macro_of[tokens->values[p]]].disabled == 0)
-        {
-            stopped = true;
-        }
-        else
-        {
-            flags |= candidate ? BUSTER_PP_NO_EXPAND : 0;
-            pp_tokens_set(target, target->count, tokens->kinds[p], flags, tokens->values[p], tokens->locations[p]);
-            target->count += 1;
-            p += 1;
-        }
     }
     return p;
 }
@@ -3381,7 +3257,7 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     const PPPrepare mode = pp_prepare_config(pp);
     int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count, false) : count;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count) : count;
     *comment = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
     count -= *comment;
     uint32_t result = count >= 0 && pp_room(pp, into, (uint32_t)count) ? (uint32_t)count : BUSTER_PP_NONE;
@@ -3403,20 +3279,14 @@ static uint32_t pp_lex_scratch(Preprocessor* pp, uint32_t location, uint32_t len
     return result;
 }
 
-// Whether `length` bytes have one past 0x7F: 64 at a time in masked loads, or for the scalar kernels one at a time.
-BUSTER_INLINE bool pp_has_non_ascii(const uint8_t* bytes, uint32_t length, bool vectorized)
+// Whether `length` bytes have one past 0x7F: 64 at a time in masked loads.
+BUSTER_INLINE bool pp_has_non_ascii(const uint8_t* bytes, uint32_t length)
 {
-    (void)vectorized;
-
     bool result = false;
-    for (uint32_t k = 0; BUSTER_VECTOR_PATH(vectorized) && !result && k < length; k += 64)
+    for (uint32_t k = 0; !result && k < length; k += 64)
     {
         const uint32_t available = length - k < 64 ? length - k : 64;
         result = _mm512_movepi8_mask(_mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, available), bytes + k)) != 0;
-    }
-    for (uint32_t k = 0; !BUSTER_VECTOR_PATH(vectorized) && k < length; k += 1)
-    {
-        result |= bytes[k] >= 0x80;
     }
     return result;
 }
@@ -3438,7 +3308,7 @@ static uint32_t pp_paste_written(Preprocessor* pp, uint32_t location, uint32_t l
 BUSTER_INLINE uint32_t pp_paste_spelling(Preprocessor* pp, PPToken token, uint8_t* buffer, Arena* arena, const uint8_t** spelling)
 {
     const uint32_t length = pp_spelling(pp, token.kind, token.value, token.location, buffer, spelling);
-    const bool non_ascii = token.kind == C_TOKEN_RAW_IDENTIFIER && pp_has_non_ascii(*spelling, length, BUSTER_VECTOR_PATH(pp->vectorized));
+    const bool non_ascii = token.kind == C_TOKEN_RAW_IDENTIFIER && pp_has_non_ascii(*spelling, length);
     return non_ascii ? pp_paste_written(pp, token.location, length, arena, spelling) : length;
 }
 
@@ -3469,8 +3339,8 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
         pp->statistics.pastes += pp->options.timing;
         // The commonest paste, an identifier and an identifier or a number (`prefix_ ## name`, `x ## 1`), makes an
         // identifier whenever both are ASCII identifier characters, whose interned spelling is the joined bytes: no
-        // need to lex them. The scalar kernels lex every paste.
-        bool identifier = BUSTER_VECTOR_PATH(pp->vectorized) && left.kind == C_TOKEN_RAW_IDENTIFIER &&
+        // need to lex them.
+        bool identifier = left.kind == C_TOKEN_RAW_IDENTIFIER &&
                           (right.kind == C_TOKEN_RAW_IDENTIFIER || right.kind == C_TOKEN_NUMERIC_CONSTANT || right.kind == BUSTER_PP_KIND_INTEGER);
         for (uint32_t k = 0; identifier && k < length; k += 64)
         {
@@ -3877,19 +3747,12 @@ static void pp_substitute(Preprocessor* pp, const PPInvocation* invocation, uint
             case PP_ITEM_TOKEN:
             {
                 const uint32_t at = out->count;
-                if (BUSTER_VECTOR_PATH(pp->vectorized))
-                {
-                    // The compiled suffix is a run of consecutive body tokens with their own leading spaces.
-                    // Keep the active __VA_OPT__ boundary explicit even though its removed ')' breaks the run.
-                    uint32_t last = i + item->parameter;
-                    last = va_opt_end > i && va_opt_end <= last ? va_opt_end - 1 : last;
-                    pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, item->token, items[last].token + 1, true);
-                    i = last;
-                }
-                else
-                {
-                    pp_push_token(pp, out, pp_body_token(pp, macro, item));
-                }
+                // The compiled suffix is a run of consecutive body tokens with their own leading spaces.
+                // Keep the active __VA_OPT__ boundary explicit even though its removed ')' breaks the run.
+                uint32_t last = i + item->parameter;
+                last = va_opt_end > i && va_opt_end <= last ? va_opt_end - 1 : last;
+                pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, item->token, items[last].token + 1, true);
+                i = last;
                 if (at < out->count)
                 {
                     pp_set_space(out, at, next_space || (after_literal_paste && pp_file_space(&pp->datas[macro->data], item->token)));
@@ -4471,7 +4334,7 @@ static bool pp_new_argument(Preprocessor* pp)
 // at that depth, or itself; each comma links to the next comma or ')'. While building, openers and commas form an
 // explicit backwards stack. Closing a level reverses its commas once, so all pairing work is linear. An unmatched
 // opener retains a backwards link, which cannot be mistaken for a matching closer. Delimiter masks batch the scan;
-// only delimiters need ordered pairing, with exactly the same pairing on the scalar path.
+// only delimiters need ordered pairing, a delimiter at a time.
 // Each appended segment is a complete argument collection, not a continuation of an unmatched indexed opener:
 // pp_invoke calls this only after collection has closed, while prescanning its retained argument buffer. A rewind
 // keeps a live owner's complete prefix and later collections append complete segments after it. Restarting previous
@@ -4501,22 +4364,11 @@ static bool pp_index_arguments(Preprocessor* pp)
     {
         const uint32_t count = pp->arguments.count - t < 64 ? pp->arguments.count - t : 64;
         uint64_t delimiters = 0;
-        if (BUSTER_VECTOR_PATH(pp->vectorized))
-        {
-            const __mmask64 valid = _bzhi_u64(~0ull, count);
-            const __m512i plain = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
-            delimiters = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_L_PAREN)) |
-                         _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_R_PAREN)) |
-                         _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_COMMA));
-        }
-        else
-        {
-            for (uint32_t j = 0; j < count; j += 1)
-            {
-                const uint8_t kind = kinds[t + j] & 0x7F;
-                delimiters |= (uint64_t)(kind == C_TOKEN_L_PAREN || kind == C_TOKEN_R_PAREN || kind == C_TOKEN_COMMA) << j;
-            }
-        }
+        const __mmask64 valid = _bzhi_u64(~0ull, count);
+        const __m512i plain = _mm512_and_si512(_mm512_maskz_loadu_epi8(valid, kinds + t), _mm512_set1_epi8(0x7F));
+        delimiters = _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_L_PAREN)) |
+                     _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_R_PAREN)) |
+                     _mm512_mask_cmpeq_epi8_mask(valid, plain, _mm512_set1_epi8(C_TOKEN_COMMA));
         for (uint64_t bits = delimiters; bits != 0; bits &= bits - 1)
         {
             const uint32_t at = t + (uint32_t)__builtin_ctzll(bits);
@@ -4689,7 +4541,7 @@ static void pp_scan_arguments(const uint8_t* kinds, uint32_t open, uint32_t limi
 // tokens between the parentheses go to pp->arguments in one copy (the commas between arguments with them, outside every
 // argument's range) and the arguments' records are set, the first of which pp_invoke made. Returns false, having changed
 // nothing, otherwise: pp_invoke then reads the tokens one at a time, through the contexts below and any directive on the
-// way, as the scalar kernels always do.
+// way.
 static bool pp_collect_arguments(Preprocessor* pp, PPInvocation* invocation, bool variadic, uint32_t parameter_count)
 {
     PPContext* context = &pp->contexts[pp->context_count - 1];
@@ -5309,7 +5161,7 @@ static void pp_collect_step(Preprocessor* pp)
 
 // Invokes a function-like macro whose name was just read and whose '(' is next: collects its arguments, then expands
 // and substitutes them. When they are all in the top context, pp_collect_arguments collects them at once; else the main
-// loop collects them a token at a time (pp_collect_step), as it does for the scalar kernels.
+// loop collects them a token at a time (pp_collect_step).
 // pp_substitute for a BUSTER_PP_MACRO_SIMPLE macro whose arguments expand to themselves: its body's runs of tokens, and
 // each parameter's raw argument, with the leading spaces pp_substitute gives them, into pp->expansions from `*begin`.
 static void pp_substitute_simple(Preprocessor* pp, const PPInvocation* invocation, uint32_t* begin, uint8_t* trailing)
@@ -5364,7 +5216,7 @@ static bool pp_direct_object(const Preprocessor* pp, const PPMacro* macro)
     bool result = (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_PASTES)) == 0 && macro->body_begin < macro->body_end;
     for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
     {
-        result = (body->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, body->values[t]);
+        result = (body->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, body->values[t]);
     }
     return result;
 }
@@ -5426,7 +5278,7 @@ static void pp_emit_argument_run(Preprocessor* pp, uint32_t begin, uint32_t end,
     {
         const uint8_t flags = tokens->flags[a];
         const uint8_t kind = tokens->kinds[a];
-        const bool paint = kind == C_TOKEN_RAW_IDENTIFIER && !(flags & BUSTER_PP_NO_EXPAND) && pp_is_macro_vector(pp, tokens->values[a]);
+        const bool paint = kind == C_TOKEN_RAW_IDENTIFIER && !(flags & BUSTER_PP_NO_EXPAND) && pp_is_macro(pp, tokens->values[a]);
         out->kinds[count] = kind;
         out->flags[count] = (uint8_t)((flags & ~BUSTER_PP_START_OF_LINE) | ((flags & BUSTER_PP_START_OF_LINE) ? BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE : 0) |
                                       BUSTER_PP_FROM_MACRO | (paint ? BUSTER_PP_NO_EXPAND : 0));
@@ -5451,7 +5303,7 @@ static void pp_emit_argument_run(Preprocessor* pp, uint32_t begin, uint32_t end,
         for (uint64_t bits = named; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
-            paint |= (uint64_t)pp_is_macro_vector(pp, tokens->values[p + lane]) << lane;
+            paint |= (uint64_t)pp_is_macro(pp, tokens->values[p + lane]) << lane;
         }
         moved = _mm512_mask_mov_epi8(moved, paint, _mm512_or_si512(moved, _mm512_set1_epi8(BUSTER_PP_NO_EXPAND)));
         _mm512_storeu_si512(out->kinds + count, kinds);
@@ -5519,7 +5371,7 @@ static void pp_emit_file_argument_run(Preprocessor* pp, const PPFileData* file, 
         for (uint64_t bits = identifiers; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(bits);
-            paint |= (uint64_t)pp_is_macro_vector(pp, file->values[p + lane]) << lane;
+            paint |= (uint64_t)pp_is_macro(pp, file->values[p + lane]) << lane;
         }
         __m512i flags = _mm512_maskz_mov_epi8(space | lines, _mm512_set1_epi8(BUSTER_PP_SPACE));
         flags = _mm512_or_si512(flags, _mm512_maskz_mov_epi8(lines, _mm512_set1_epi8(BUSTER_PP_LINE_SPACE)));
@@ -5575,7 +5427,7 @@ static bool pp_emit_simple_names(Preprocessor* pp, PPMacroId id, PPEmitPlan* pla
     for (uint32_t k = 0; result && k < macro->name_count; k += 1)
     {
         const uint32_t t = identifiers[k].token;
-        if (pp_is_macro_vector(pp, data->values[t]))
+        if (pp_is_macro(pp, data->values[t]))
         {
             const PPMacroId nested_id = pp->macro_of[data->values[t]];
             const PPMacro* nested = &pp->macros[nested_id];
@@ -5797,7 +5649,7 @@ BUSTER_INLINE void pp_template_argument(const Preprocessor* pp, const PPFileData
         for (uint32_t bits = paint ? identifiers : 0; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(bits);
-            painted |= (uint32_t)pp_is_macro_vector(pp, file->values[begin + lane]) << lane;
+            painted |= (uint32_t)pp_is_macro(pp, file->values[begin + lane]) << lane;
         }
         __m128i made = _mm_maskz_mov_epi8((__mmask16)space | lines, _mm_set1_epi8(BUSTER_PP_SPACE));
         made = _mm_or_si128(made, _mm_maskz_mov_epi8(lines, _mm_set1_epi8(BUSTER_PP_LINE_SPACE)));
@@ -5818,7 +5670,7 @@ BUSTER_INLINE void pp_template_argument(const Preprocessor* pp, const PPFileData
         for (uint32_t bits = paint ? named : 0; bits != 0; bits &= bits - 1)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(bits);
-            painted |= (uint32_t)pp_is_macro_vector(pp, tokens->values[begin + lane]) << lane;
+            painted |= (uint32_t)pp_is_macro(pp, tokens->values[begin + lane]) << lane;
         }
         __m128i moved = _mm_or_si128(_mm_andnot_si128(_mm_set1_epi8(BUSTER_PP_START_OF_LINE), read), _mm_set1_epi8(BUSTER_PP_FROM_MACRO));
         *flags = _mm_mask_mov_epi8(moved, lines, _mm_or_si128(moved, _mm_set1_epi8(BUSTER_PP_SPACE | BUSTER_PP_LINE_SPACE)));
@@ -5851,7 +5703,7 @@ BUSTER_INLINE void pp_template_body(const Preprocessor* pp, const PPMacro* macro
     *locations = _mm512_add_epi32(_mm512_maskz_loadu_epi32(valid, data->starts + begin), bases);
 }
 
-// The template of a macro, or null (pp_compile_macro makes them for the vectorized runs that record no history).
+// The template of a macro, or null (pp_compile_macro makes them for the runs that record no history).
 BUSTER_INLINE PPTemplate* pp_template_of(Preprocessor* pp, const PPMacro* macro)
 {
     return macro->template_index != 0 ? &pp->templates[macro->template_index - 1] : 0;
@@ -5869,7 +5721,7 @@ static void pp_template_find_names(Preprocessor* pp, PPMacroId id, PPTemplate* t
     {
         const uint32_t j = (uint32_t)__builtin_ctz(bits);
         const IdentId value = template->values[j];
-        if (pp_is_macro_vector(pp, value))
+        if (pp_is_macro(pp, value))
         {
             const PPMacroId nested_id = pp->macro_of[value];
             const PPMacro* nested = &pp->macros[nested_id];
@@ -5957,7 +5809,7 @@ BUSTER_INLINE uint32_t pp_template_operand(const Preprocessor* pp, const PPTempl
 // other is painted where the expansion goes straight in, as that rescan would paint it.
 BUSTER_INLINE void pp_template_name(const Preprocessor* pp, PPMacroId id, IdentId value, uint32_t j, PPOperators* operators)
 {
-    if (value != 0 && pp_is_macro_vector(pp, value))
+    if (value != 0 && pp_is_macro(pp, value))
     {
         const PPMacroId named = pp->macro_of[value];
         const bool expands = named != id && pp->macros[named].disabled == 0;
@@ -6459,7 +6311,7 @@ static void pp_finish_operators(Preprocessor* pp, const PPInvocation* invocation
 // Whether the name of a function-like macro at token `name` of pp->arguments, in an argument that ends at `end`, opens an
 // invocation that pp_expand_argument_in_place can expand, as the main loop would behind the argument's barrier (pp_invoke
 // and pp_finish_simple, which substitutes it into the expansions there, since a capture keeps it from going straight
-// out), then read back: its macro has a template (a vectorized run with its history deferred), its '(' follows its name
+// out), then read back: its macro has a template (a run with its history deferred), its '(' follows its name
 // and its ')' is in the argument, it is given as many arguments as it takes, none naming an enabled macro, and its
 // expansion has 1 to BUSTER_PP_TEMPLATE_TOKENS tokens (a template with ## and # may make none) and names no macro its
 // rescan would expand: its body's names (found again by pp_template_names where the expansions under way changed them)
@@ -6912,7 +6764,7 @@ static bool pp_invoke_file(Preprocessor* pp, PPContext* context, const PPFileDat
                 for (uint32_t t = parameter < count ? records[parameter].raw_begin : 0; simple && parameter < count && t < records[parameter].raw_end; t += 1)
                 {
                     const IdentId value = data->values[t];
-                    simple = (data->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, value) || pp->macros[pp->macro_of[value]].disabled != 0;
+                    simple = (data->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, value) || pp->macros[pp->macro_of[value]].disabled != 0;
                 }
             }
         }
@@ -7043,8 +6895,8 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
     }
     valid = valid && pp_new_argument(pp);
     const bool collected = valid && (pp_collect_argument_slice(pp, &invocation, variadic, macro->parameter_count) ||
-                                    (pp->vectorized && pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count)));
-    const bool finished = collected && pp->vectorized && pp_finish_simple(pp, &invocation);
+                                    pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count));
+    const bool finished = collected && pp_finish_simple(pp, &invocation);
     valid = valid && !finished;
     if (valid && !collected)
     {
@@ -7093,20 +6945,9 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
             pp_substitute(pp, &invocation, &substituted, &trailing);
         }
     }
-    else if (BUSTER_VECTOR_PATH(pp->vectorized))
+    else
     {
         pp_append_file_tokens(pp, tokens, data, macro->base, macro->body_begin, macro->body_end, true);
-    }
-    else if (pp_room(pp, tokens, macro->body_end - macro->body_begin))
-    {
-        for (uint32_t t = macro->body_begin; t < macro->body_end; t += 1)
-        {
-            PPToken token = pp_file_token(data, macro->base, t);
-            token.flags = (uint8_t)((token.flags & BUSTER_PP_SPACE) | BUSTER_PP_FROM_MACRO);
-            pp_tokens_set(tokens, tokens->count, token.kind, token.flags, token.value, token.location);
-            tokens->count += 1;
-        }
-        pp_history_fill(pp, tokens, begin, tokens->count, pp->history_current);
     }
     const bool empty = begin == tokens->count;
     // The name's line start as clang's token has it: BUSTER_PP_LINE_SPACE among a macro's arguments, and pp_name_line's.
@@ -8486,7 +8327,7 @@ static bool pp_expand_file_direct(Preprocessor* pp, PPContext* context, const PP
                   !pp->options.expansion_starts && (uint64_t)target->count + (macro->body_end - macro->body_begin) <= target->capacity;
     for (uint32_t t = macro->body_begin; result && t < macro->body_end; t += 1)
     {
-        result = (body->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro_vector(pp, body->values[t]);
+        result = (body->kinds[t] & 0x7F) != C_TOKEN_RAW_IDENTIFIER || !pp_is_macro(pp, body->values[t]);
     }
     if (result)
     {
@@ -8540,13 +8381,12 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             const uint32_t run_end = pp_step_limit(pp, context->position, limit);
             // A file's text read straight into the output: nothing open that a token read from a file goes to or is counted
             // by, no poisoned name, no raw string error to report, no -E markers' starts, nothing pending.
-            const bool text = BUSTER_VECTOR_PATH(pp->vectorized) && (pp->capture_count | pp->stream_count | pp->limit_count | pp->poison_count | context->pending_flags) == 0 &&
+            const bool text = (pp->capture_count | pp->stream_count | pp->limit_count | pp->poison_count | context->pending_flags) == 0 &&
                               !pp->options.expansion_starts && data->raw_error_count == 0;
             uint32_t directs = 0;
             uint32_t runs = 0;
-            const uint32_t stop = text            ? pp_copy_file_text_vector(pp, data, base, context->position, run_end, &directs, &runs)
-                                  : BUSTER_VECTOR_PATH(pp->vectorized) ? pp_copy_file_run_vector(pp, data, base, context->position, run_end)
-                                                   : pp_copy_file_run_scalar(pp, data, base, context->position, run_end);
+            const uint32_t stop = text ? pp_copy_file_text_vector(pp, data, base, context->position, run_end, &directs, &runs)
+                                       : pp_copy_file_run_vector(pp, data, base, context->position, run_end);
             if (pp->options.collect_diagnostics && data->raw_error_count != 0 && pp_target(pp) == &pp->output)
             {
                 pp->diagnostic_run_first = pp->output.count - (stop - context->position);
@@ -8588,7 +8428,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
             }
             else if (stop < run_end && !pp->fatal)
             {
-                more = BUSTER_VECTOR_PATH(pp->vectorized) && pp_expand_file_direct(pp, context, data, base);
+                more = pp_expand_file_direct(pp, context, data, base);
                 // A simple invocation whose expansion goes straight into the output, after which the main loop's next step
                 // would be this context's next run.
                 const bool invocation_read = !more && text && (pp->macros[pp->macro_of[data->values[stop]]].flags & BUSTER_PP_MACRO_FUNCTION);
@@ -8606,7 +8446,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
         // The output's keywords a chunk at a time, while its tokens are in the caches: nothing reads their kinds until the
         // run ends, and the output only grows at its end. Read back at the end, sqlite3.c's took 0.12 ms on the 9700X;
         // checked at each step, 0.7 million instructions.
-        if (BUSTER_VECTOR_PATH(pp->vectorized) && pp->output.count - pp->keywords_resolved >= BUSTER_PP_KEYWORD_CHUNK)
+        if (pp->output.count - pp->keywords_resolved >= BUSTER_PP_KEYWORD_CHUNK)
         {
             pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
             pp->keywords_resolved = pp->output.count;
@@ -8622,8 +8462,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
 static void pp_step_buffer(Preprocessor* pp, PPContext* context)
 {
     const uint32_t run_end = pp_step_limit(pp, context->position, context->end);
-    const uint32_t stop = BUSTER_VECTOR_PATH(pp->vectorized) ? pp_copy_buffer_run_vector(pp, context->tokens, context->position, run_end)
-                                         : pp_copy_buffer_run_scalar(pp, context->tokens, context->position, run_end);
+    const uint32_t stop = pp_copy_buffer_run_vector(pp, context->tokens, context->position, run_end);
     PPTokens* target = pp_target(pp);
     pp_history_copy(pp, target, target->count - (stop - context->position), context->tokens, context->position, stop);
     pp_take_pending_flags(pp, context, stop - context->position);
@@ -8782,15 +8621,15 @@ static void pp_run_contexts(Preprocessor* pp, uint32_t stop_depth)
 }
 
 // Copies a file's tokens [begin, end) to pp->arguments, as buffers hold them, for expanding a directive's line: 64 at a
-// time (pp_append_file_tokens), their line starts then cleared, or a token at a time by the scalar kernels and for a line
-// of a few tokens (#if 1: a line of one token cost 60 instructions more the vectorized way).
+// time (pp_append_file_tokens), their line starts then cleared, or a token at a time for a line of a few tokens (#if 1:
+// a line of one token cost 60 instructions more the vectorized way).
 static bool pp_copy_line(Preprocessor* pp, const PPContext* context, uint32_t begin, uint32_t end)
 {
     const PPFileData* data = &pp->datas[context->data];
     const uint32_t base = pp->ranges[context->range].base;
     PPTokens* arguments = &pp->arguments;
     bool result;
-    if (BUSTER_VECTOR_PATH(pp->vectorized) && end - begin > 3)
+    if (end - begin > 3)
     {
         const uint32_t at = arguments->count;
         result = pp_append_file_tokens(pp, arguments, data, base, begin, end, false);
@@ -8832,7 +8671,7 @@ static bool pp_copy_relexed(Preprocessor* pp, const PPContext* context, uint32_t
     uint32_t* ends = arena_push_array(scratch.arena, capacity, sizeof(uint32_t), 64);
     const PPPrepare mode = pp_prepare_config(pp);
     int64_t count = kinds != 0 && starts != 0 && ends != 0 ? c_tokenize_scalar(bytes, length, kinds, starts, ends, pp_lex_flags(&mode)) : -1;
-    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count, false) : count;
+    count = count > 0 ? pp_lex_for_mode(&mode, bytes, length, kinds, starts, ends, (uint32_t)count) : count;
     // An unterminated block comment at their end runs to the file's end (pp_relex_end), which clang's lexer reports where
     // it starts: the file's tokens, which read it as part of a line comment, didn't.
     const bool unterminated = count > 0 && pp_is_unterminated_comment(bytes, kinds[count - 1], starts[count - 1]);
@@ -9066,7 +8905,7 @@ static void pp_diagnostic_text(Preprocessor* pp, const PPFileData* data, uint32_
     if (buffer != 0)
     {
         const uint8_t* text;
-        const uint32_t length = pp_remove_splices_by(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, pp->options.scalar, buffer, &text);
+        const uint32_t length = pp_remove_splices_by(data->bytes + begin, end - begin, pp->refine_flags, C_TOKEN_RAW_IDENTIFIER, buffer, &text);
         uint32_t first = 0;
         while (first < length && (text[first] == ' ' || text[first] == '\t' || text[first] == '\v' || text[first] == '\f'))
         {
@@ -9261,7 +9100,7 @@ static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d
     const PPFileData* data = &pp->datas[context->data];
     const uint32_t base = pp->ranges[context->range].base;
     PPTokens* captures = &pp->captures;
-    bool result = BUSTER_VECTOR_PATH(pp->vectorized) && begin < end && end - begin <= BUSTER_PP_CONDITION_TOKENS &&
+    bool result = begin < end && end - begin <= BUSTER_PP_CONDITION_TOKENS &&
                   (pp->capture_count | pp->stream_count | pp->limit_count | pp->poison_count) == 0 && !pp->options.expansion_starts && !pp->fatal &&
                   data->raw_error_count == 0 && !pp_collecting(pp) && pp->arguments.count + (end - begin) <= pp->arguments.capacity &&
                   (uint64_t)captures->count + (end - begin) <= captures->capacity &&
@@ -9659,6 +9498,30 @@ static bool pp_alphanumeric(uint8_t c)
 }
 
 // The file a #include, #include_next or #import (`kind`) at `location` in the context's file names, written at
+// A header name's highlighted range (#2376), clang's FilenameRange: the name written at `location` as it was, from its
+// '"' or '<' to its closing one on the same line, as characters; none for a name a macro made (`origin`).
+static void pp_diagnostic_header_range(Preprocessor* pp, uint32_t location, uint32_t origin)
+{
+    const uint32_t range = location != 0 && origin == 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
+    {
+        const uint8_t* bytes = pp->ranges[range].bytes;
+        const uint32_t length = pp->ranges[range].length;
+        const uint32_t start = location - pp->ranges[range].base;
+        const uint8_t opener = start < length ? bytes[start] : 0;
+        const uint8_t closer = opener == '"' ? '"' : opener == '<' ? '>' : 0;
+        uint32_t end = start + 1;
+        while (closer != 0 && end < length && bytes[end] != closer && bytes[end] != '\n' && bytes[end] != '\r')
+        {
+            end += 1;
+        }
+        if (closer != 0 && end < length && bytes[end] == closer)
+        {
+            pp_diagnostic_range_characters(pp, location, end + 1 - start);
+        }
+    }
+}
+
 // `name_location` (with `name_origin`, the history of a name a macro made): entered, unless #import read it. As
 // clang's HandleHeaderIncludeOrImport goes: an empty name is an error; a name that ends in a space or a dot is
 // nonportable; an #include in an assume_nonnull or arc_cf_code_audited region is an error, which ends the region. A
@@ -9701,7 +9564,9 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
             file = pp_find_include(pp, name, length, false, next, context->file, context->search_index, &found_in, name_location);
             if (file != BUSTER_PP_NONE)
             {
+                pp_diagnostic_header_range(pp, name_location, name_origin);
                 pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "'%.*s' file not found with <angled> include; use \"quotes\" instead", (int)length, (const char*)name);
+                pp_diagnostic_ranges_clear(pp);
             }
         }
         uint32_t first = 0;
@@ -9725,7 +9590,9 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
         }
         if (file == BUSTER_PP_NONE && !pp->fatal)
         {
+            pp_diagnostic_header_range(pp, name_location, name_origin);
             pp_diagnose(pp, PP_SEVERITY_FATAL, name_location, "'%.*s' file not found", (int)length, (const char*)name);
+            pp_diagnostic_ranges_clear(pp);
         }
     }
     pp->diagnostic_origin = saved_origin;
@@ -13497,24 +13364,23 @@ static bool pp_clang_resource_directory(char* path, uint32_t capacity, uint64_t*
     return result;
 }
 
-static bool pp_add_directory(Preprocessor* pp, const char* path, uint8_t system)
+static bool pp_add_directory(PPSearchDirectories* search, Arena* arena, uint32_t capacity, const char* path, uint8_t system)
 {
     uint32_t length = (uint32_t)strlen(path);
     while (length > 1 && path[length - 1] == '/')
     {
         length -= 1;
     }
-    char* copy = arena_push(&pp->arena, (uint64_t)length + 1, 1);
-    const bool result = copy != 0 && pp->directory_count < (BUSTER_PP_MAX_PUSHED >> pp->capacity_shift);
+    char* copy = search->directory_count < capacity ? arena_push(arena, (uint64_t)length + 1, 1) : NULL;
+    const bool result = copy != NULL;
     if (result)
     {
         memcpy(copy, path, length);
         copy[length] = 0;
-        pp->directories[pp->directory_count] = copy;
-        pp->directory_lengths[pp->directory_count] = length;
-        pp->directory_system[pp->directory_count] = system;
-        pp->directory_entries[pp->directory_count] = 0;
-        pp->directory_count += 1;
+        search->directories[search->directory_count] = copy;
+        search->directory_lengths[search->directory_count] = length;
+        search->directory_system[search->directory_count] = system;
+        search->directory_count += 1;
     }
     return result;
 }
@@ -13522,10 +13388,10 @@ static bool pp_add_directory(Preprocessor* pp, const char* path, uint8_t system)
 // Drops the search directories that don't exist, and the later of two that are the same directory (the same device and
 // inode), as clang does (InitHeaderSearch): among the -iquote ones, then among the others, where a directory that is
 // both a system one and not drops the one that isn't. So #include_next can't find a file again through a repeated -I.
-static void pp_dedupe_directories(Preprocessor* pp)
+static void pp_dedupe_directories(PPSearchDirectories* search, uint64_t* stat_count)
 {
     Scratch scratch = scratch_begin(0);
-    const uint32_t count = pp->directory_count;
+    const uint32_t count = search->directory_count;
     uint64_t* devices = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint64_t), 8);
     uint64_t* inodes = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(uint64_t), 8);
     bool* kept = arena_push_array(scratch.arena, (uint64_t)count + 1, sizeof(bool), 8);
@@ -13534,22 +13400,22 @@ static void pp_dedupe_directories(Preprocessor* pp)
         for (uint32_t i = 0; i < count; i += 1)
         {
             struct stat stats;
-            if (pp->options.timing)
+            if (stat_count != NULL)
             {
-                pp->statistics.directory_stats += 1;
+                *stat_count += 1;
             }
-            kept[i] = stat(pp->directories[i], &stats) == 0 && S_ISDIR(stats.st_mode);
+            kept[i] = stat(search->directories[i], &stats) == 0 && S_ISDIR(stats.st_mode);
             devices[i] = kept[i] ? (uint64_t)stats.st_dev : 0;
             inodes[i] = kept[i] ? (uint64_t)stats.st_ino : 0;
         }
         for (uint32_t i = 0; i < count; i += 1)
         {
-            const uint32_t group_first = i < pp->angled_first ? 0 : pp->angled_first;
+            const uint32_t group_first = i < search->angled_first ? 0 : search->angled_first;
             for (uint32_t j = group_first; kept[i] && j < i; j += 1)
             {
                 if (kept[j] && devices[j] == devices[i] && inodes[j] == inodes[i])
                 {
-                    const bool system_over_user = pp->directory_system[i] && !pp->directory_system[j];
+                    const bool system_over_user = search->directory_system[i] && !search->directory_system[j];
                     kept[j] = !system_over_user;
                     kept[i] = system_over_user;
                 }
@@ -13562,22 +13428,106 @@ static void pp_dedupe_directories(Preprocessor* pp)
         uint32_t fallback = BUSTER_PP_NONE;
         for (uint32_t i = 0; i < count; i += 1)
         {
-            angled_first += i < pp->angled_first && kept[i];
+            angled_first += i < search->angled_first && kept[i];
             if (kept[i])
             {
-                fallback = i == pp->fallback_directory ? written : fallback;
-                pp->directories[written] = pp->directories[i];
-                pp->directory_lengths[written] = pp->directory_lengths[i];
-                pp->directory_system[written] = pp->directory_system[i];
-                pp->directory_entries[written] = 0;
+                fallback = i == search->fallback_directory ? written : fallback;
+                search->directories[written] = search->directories[i];
+                search->directory_lengths[written] = search->directory_lengths[i];
+                search->directory_system[written] = search->directory_system[i];
                 written += 1;
             }
         }
-        pp->directory_count = written;
-        pp->angled_first = angled_first;
-        pp->fallback_directory = fallback;
+        search->directory_count = written;
+        search->angled_first = angled_first;
+        search->fallback_directory = fallback;
     }
     scratch_end(scratch);
+}
+
+static bool pp_search_directories(PPSearchDirectories* search, Arena* arena, const PPOptions* options, uint32_t capacity, uint64_t* stat_count)
+{
+    bool result = true;
+    search->fallback_directory = BUSTER_PP_NONE;
+    // The search directories: -iquote ones for quoted names only, then -I, -isystem, the standard ones and -idirafter.
+    for (uint32_t i = 0; result && i < options->quote_directory_count; i += 1)
+    {
+        result = pp_add_directory(search, arena, capacity, options->quote_directories[i], BUSTER_PP_USER_FILE);
+    }
+    search->angled_first = search->directory_count;
+    for (uint32_t i = 0; result && i < options->include_directory_count; i += 1)
+    {
+        result = pp_add_directory(search, arena, capacity, options->include_directories[i], BUSTER_PP_USER_FILE);
+    }
+    for (uint32_t i = 0; result && i < options->system_directory_count; i += 1)
+    {
+        result = pp_add_directory(search, arena, capacity, options->system_directories[i], BUSTER_PP_SYSTEM_FILE);
+    }
+    if (result && !options->no_standard_includes)
+    {
+        // The compiler's headers, which -nobuiltininc leaves out: clang's resource directory (the default), or with
+        // --buster-headers buster's own, then clang's for the headers buster's doesn't supply. That one has no name
+        // buster's directory has (pp_find_include), so buster's headers' #include_next goes on to the C library's,
+        // and every other name is found as without the flag.
+        const bool builtin = !options->no_builtin_includes;
+        char buster[PATH_MAX];
+        char resource[PATH_MAX];
+        bool buster_added = false;
+        if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster), stat_count))
+        {
+            search->missing_headers = true;
+        }
+        else if (builtin && options->buster_headers)
+        {
+            result = pp_add_directory(search, arena, capacity, buster, BUSTER_PP_SYSTEM_FILE);
+            buster_added = result;
+            search->buster_directory = result ? search->directories[search->directory_count - 1] : 0;
+            search->buster_directory_length = result ? search->directory_lengths[search->directory_count - 1] : 0;
+        }
+        if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource), stat_count))
+        {
+            search->fallback_directory = buster_added ? search->directory_count : BUSTER_PP_NONE;
+            result = pp_add_directory(search, arena, capacity, resource, BUSTER_PP_SYSTEM_FILE);
+        }
+        // Then the C library's, as clang's Linux toolchain lists them: Debian's multiarch directory and /include
+        // between /usr/local/include and /usr/include. pp_dedupe_directories drops those a system doesn't have.
+        result = result && pp_add_directory(search, arena, capacity, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) &&
+                 pp_add_directory(search, arena, capacity, "/usr/include/x86_64-linux-gnu", BUSTER_PP_EXTERN_C_FILE) &&
+                 pp_add_directory(search, arena, capacity, "/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(search, arena, capacity, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
+    }
+    for (uint32_t i = 0; result && i < options->after_directory_count; i += 1)
+    {
+        result = pp_add_directory(search, arena, capacity, options->after_directories[i], BUSTER_PP_SYSTEM_FILE);
+    }
+    if (result)
+    {
+        search->requested = search->directory_count;
+        pp_dedupe_directories(search, stat_count);
+    }
+    return result;
+}
+
+// Build the search once before a command's unit lanes start. Paths and columns live in the command's arena.
+// On allocation failure the driver falls back to the ordinary per-unit setup.
+BUSTER_PREPROCESSOR_ENTRY bool pp_prepare_search(PPSearchDirectories* search, Arena* arena, const PPOptions* options)
+{
+    const uint64_t count = (uint64_t)options->quote_directory_count + options->include_directory_count + options->system_directory_count +
+                           options->after_directory_count + (options->no_standard_includes ? 0u : 6u);
+    const uint64_t mark = arena->length;
+    bool ready = count <= BUSTER_PP_MAX_PUSHED;
+    if (ready && count != 0)
+    {
+        search->directories = BUSTER_ARENA_PUSH_ARRAY(arena, char*, count);
+        search->directory_lengths = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
+        search->directory_system = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, count);
+        ready = search->directories != NULL && search->directory_lengths != NULL && search->directory_system != NULL;
+    }
+    ready = ready && pp_search_directories(search, arena, options, (uint32_t)count, NULL);
+    if (!ready)
+    {
+        arena_pop_to(arena, mark);
+    }
+    return ready;
 }
 
 // An array of `count` records of `size` bytes in an arena of its own (address space, touched as it is used), whose first
@@ -13686,7 +13636,6 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp->diagnostic_include_range = BUSTER_PP_NONE;
     pp->diagnostic_position = BUSTER_PP_NONE;
     pp->diagnostic_run_first = BUSTER_PP_NONE;
-    pp->fallback_directory = BUSTER_PP_NONE;
     pp->predefines_data = BUSTER_PP_NONE;
     pp->main_file = BUSTER_PP_NONE;
     pp->options = *options;
@@ -13700,7 +13649,8 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp->history_quiet = options->quiet;
     pp->options.no_history |= pp->history_deferred;
     const PPPrepare prepare = pp_prepare_options(options);
-    pp->vectorized = prepare.vectorized;
+    // pp_define's body scan by its scalar arm (PPOptions.scalar).
+    pp->vectorized = BUSTER_VECTOR_PATH(!options->scalar);
     pp->refine_flags = prepare.refine_flags;
     pp->split_kinds = prepare.split_kinds;
     // The memory, reserved in turn until a reservation fails (pp_release releases what was).
@@ -13739,6 +13689,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     // own file cache (#652), which had four arenas of their own, a mapping and a commit each, though a small unit
     // touches a page of each or none.
     const uint32_t shift = pp->capacity_shift;
+    const bool shared_search = options->search != NULL && options->search->requested <= (BUSTER_PP_MAX_PUSHED >> shift);
     PPTables plan = { 0 };
     pp_table(&plan, (void**)&pp->ranges, BUSTER_PP_MAX_RANGES >> shift, sizeof(PPRange));
     pp_table(&plan, (void**)&pp->datas, BUSTER_PP_MAX_FILES >> shift, sizeof(PPFileData));
@@ -13747,9 +13698,9 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp_table(&plan, (void**)&pp->files, BUSTER_PP_MAX_FILES >> shift, sizeof(PPFile));
     pp_table(&plan, (void**)&pp->file_slots, BUSTER_PP_FILE_SLOTS >> shift, sizeof(uint32_t));
     pp->file_slot_mask = BUSTER_PP_INITIAL_FILE_SLOTS - 1;
-    pp_table(&plan, (void**)&pp->directories, BUSTER_PP_MAX_PUSHED >> shift, sizeof(char*));
-    pp_table(&plan, (void**)&pp->directory_lengths, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint32_t));
-    pp_table(&plan, (void**)&pp->directory_system, BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint8_t));
+    pp_table(&plan, (void**)&pp->search.directories, shared_search ? 0 : BUSTER_PP_MAX_PUSHED >> shift, sizeof(char*));
+    pp_table(&plan, (void**)&pp->search.directory_lengths, shared_search ? 0 : BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint32_t));
+    pp_table(&plan, (void**)&pp->search.directory_system, shared_search ? 0 : BUSTER_PP_MAX_PUSHED >> shift, sizeof(uint8_t));
     pp_table(&plan, (void**)&pp->directory_entries, BUSTER_PP_MAX_PUSHED >> shift, sizeof(FileCacheDirectory*));
     pp_table(&plan, (void**)&pp->line_directives, BUSTER_PP_MAX_LINE_DIRECTIVES >> shift, sizeof(PPLineDirective));
     pp_table(&plan, (void**)&pp->expansion_starts, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> shift) + 1, sizeof(PPExpansionStart));
@@ -13761,8 +13712,8 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     pp_table(&plan, (void**)&pp->macros, BUSTER_PP_MAX_MACROS >> shift, sizeof(PPMacro));
     pp_table(&plan, (void**)&pp->items, BUSTER_PP_MAX_ITEMS >> shift, sizeof(PPItem));
     pp_table(&plan, (void**)&pp->parameters, BUSTER_PP_MAX_ITEMS >> shift, sizeof(IdentId));
-    // The vectorized path's compiled bodies, which a unit with history doesn't use.
-    pp_table(&plan, (void**)&pp->templates, BUSTER_VECTOR_PATH(pp->vectorized) && pp->options.no_history ? BUSTER_PP_MAX_TEMPLATES >> shift : 0, sizeof(PPTemplate));
+    // The macros' compiled bodies (PPTemplate), which a unit with history doesn't use.
+    pp_table(&plan, (void**)&pp->templates, pp->options.no_history ? BUSTER_PP_MAX_TEMPLATES >> shift : 0, sizeof(PPTemplate));
     pp_table(&plan, (void**)&pp->pushed_names, BUSTER_PP_MAX_PUSHED >> shift, sizeof(IdentId));
     pp_table(&plan, (void**)&pp->pushed_macros, BUSTER_PP_MAX_PUSHED >> shift, sizeof(PPMacroId));
     pp_table(&plan, (void**)&pp->contexts, BUSTER_PP_MAX_CONTEXTS >> shift, sizeof(PPContext));
@@ -13833,61 +13784,19 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
         // Macro 0 is none; location 0 is none.
         pp->macro_count = 1;
         pp->location_top = 1;
-        // The search directories: -iquote ones for quoted names only, then -I, -isystem, the standard ones and -idirafter.
-        for (uint32_t i = 0; result && i < options->quote_directory_count; i += 1)
+        if (shared_search)
         {
-            result = pp_add_directory(pp, options->quote_directories[i], BUSTER_PP_USER_FILE);
+            pp->search = *options->search;
         }
-        pp->angled_first = pp->directory_count;
-        for (uint32_t i = 0; result && i < options->include_directory_count; i += 1)
+        else
         {
-            result = pp_add_directory(pp, options->include_directories[i], BUSTER_PP_USER_FILE);
+            result = pp_search_directories(&pp->search, &pp->arena, options, BUSTER_PP_MAX_PUSHED >> shift, options->timing ? &pp->statistics.directory_stats : NULL);
         }
-        for (uint32_t i = 0; result && i < options->system_directory_count; i += 1)
+        if (pp->search.missing_headers)
         {
-            result = pp_add_directory(pp, options->system_directories[i], BUSTER_PP_SYSTEM_FILE);
+            pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
         }
-        if (result && !options->no_standard_includes)
-        {
-            // The compiler's headers, which -nobuiltininc leaves out: clang's resource directory (the default), or with
-            // --buster-headers buster's own, then clang's for the headers buster's doesn't supply. That one has no name
-            // buster's directory has (pp_find_include), so buster's headers' #include_next goes on to the C library's,
-            // and every other name is found as without the flag.
-            const bool builtin = !options->no_builtin_includes;
-            char buster[PATH_MAX];
-            char resource[PATH_MAX];
-            bool buster_added = false;
-            uint64_t* stat_count = options->timing ? &pp->statistics.directory_stats : 0;
-            if (builtin && options->buster_headers && !pp_buster_headers_directory(buster, sizeof(buster), stat_count))
-            {
-                pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "--buster-headers: no src/buster/include beside the executable's build directory");
-            }
-            else if (builtin && options->buster_headers)
-            {
-                result = pp_add_directory(pp, buster, BUSTER_PP_SYSTEM_FILE);
-                buster_added = result;
-                pp->buster_directory = result ? pp->directories[pp->directory_count - 1] : 0;
-                pp->buster_directory_length = result ? pp->directory_lengths[pp->directory_count - 1] : 0;
-            }
-            if (result && builtin && pp_clang_resource_directory(resource, sizeof(resource), stat_count))
-            {
-                pp->fallback_directory = buster_added ? pp->directory_count : BUSTER_PP_NONE;
-                result = pp_add_directory(pp, resource, BUSTER_PP_SYSTEM_FILE);
-            }
-            // Then the C library's, as clang's Linux toolchain lists them: Debian's multiarch directory and /include
-            // between /usr/local/include and /usr/include. pp_dedupe_directories drops those a system doesn't have.
-            result = result && pp_add_directory(pp, "/usr/local/include", BUSTER_PP_EXTERN_C_FILE) &&
-                     pp_add_directory(pp, "/usr/include/x86_64-linux-gnu", BUSTER_PP_EXTERN_C_FILE) &&
-                     pp_add_directory(pp, "/include", BUSTER_PP_EXTERN_C_FILE) && pp_add_directory(pp, "/usr/include", BUSTER_PP_EXTERN_C_FILE);
-        }
-        for (uint32_t i = 0; result && i < options->after_directory_count; i += 1)
-        {
-            result = pp_add_directory(pp, options->after_directories[i], BUSTER_PP_SYSTEM_FILE);
-        }
-        if (result)
-        {
-            pp_dedupe_directories(pp);
-        }
+        memset(pp->directory_entries, 0, (size_t)pp->search.directory_count * sizeof(*pp->directory_entries));
         // The builtin macros.
         static const struct
         {
@@ -14434,6 +14343,8 @@ static void pp_history_record(Preprocessor* pp, bool report)
         // The include stack the replay's diagnostics printed last, as the unit's own run would have left it: a later
         // diagnostic prints "In file included from" only for another one (pp_diagnostic_includes).
         pp->diagnostic_include_range = replay->diagnostic_include_range;
+        pp->diagnostic_caret_location = replay->diagnostic_caret_location;
+        pp->diagnostic_caret_note = replay->diagnostic_caret_note;
         pp->history_replay = replay;
         if (pp->options.collect_diagnostics)
         {
@@ -14731,7 +14642,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_run_input(Preprocessor* pp, const char* path)
     else
     {
         String8 bytes = { 0 };
-        const int kind = driver_read_nonregular(&pp->arena, path, &bytes);
+        const int kind = path == pp->options.probed_input ? 0 : driver_read_nonregular(&pp->arena, path, &bytes, NULL);
         if (kind > 0)
         {
             result = bytes.length <= UINT32_MAX && pp_run_source(pp, path, (const uint8_t*)bytes.pointer, (uint32_t)bytes.length);
@@ -14814,76 +14725,11 @@ static void pp_resolve_keywords_range(Preprocessor* pp, uint32_t begin, uint32_t
     }
 }
 
-static __attribute__((unused)) void pp_resolve_keywords_vector(Preprocessor* pp)
-{
-#if !BUSTER_HOST_VECTOR
-    pp_resolve_keywords_scalar(pp);
-#else
-    pp_resolve_keywords_range(pp, 0, pp->output.count);
-#endif
-}
-
-static void pp_resolve_keywords_scalar(Preprocessor* pp)
-{
-    PPTokens* out = &pp->output;
-    for (uint32_t i = 0; i < out->count; i += 1)
-    {
-        if (out->kinds[i] == C_TOKEN_RAW_IDENTIFIER && out->values[i] < BUSTER_PP_KEYWORD_TABLE)
-        {
-            out->kinds[i] = pp->keyword_kinds[out->values[i]];
-        }
-    }
-}
-
-// The output's keywords their kinds: the tokens the vectorized kernels' chunks left (pp_run_contexts), or all of them.
+// The output's keywords their kinds: the tokens after those the main loop's chunks resolved (pp_run_contexts).
 static void pp_resolve_keywords(Preprocessor* pp)
 {
-#if !BUSTER_HOST_VECTOR
-    pp_resolve_keywords_scalar(pp);
-#else
-    if (BUSTER_VECTOR_PATH(pp->vectorized))
-    {
-        pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
-        pp->keywords_resolved = pp->output.count;
-    }
-    else
-    {
-        pp_resolve_keywords_scalar(pp);
-    }
-#endif
-}
-
-// The characters that can join a punctuator before them into a longer one, or start a comment after '/'.
-static bool pp_punctuation_joins(uint8_t before, uint8_t after)
-{
-    static const char joining[] = "+-*/%<>=!&|^#.:?";
-    return before != 0 && after != 0 && strchr(joining, before) != 0 && strchr(joining, after) != 0;
-}
-
-// Would printing `after` right after `before` (their last and first characters) lex differently? Then a space goes
-// between them. It errs towards a space: -E's output only has to lex into the same tokens.
-static bool pp_needs_separation(uint8_t before_last, uint8_t before_kind, uint8_t after_first, bool dollar_punctuation)
-{
-    bool result = false;
-    if (before_kind == C_TOKEN_NUMERIC_CONSTANT)
-    {
-        // A pp-number goes on with word characters, '.', a digit separator and an exponent's sign.
-        result = pp_word_character(after_first, dollar_punctuation) || after_first == '.' || after_first == '\'' || after_first == '+' || after_first == '-';
-    }
-    else if (pp_word_character(before_last, dollar_punctuation))
-    {
-        // An identifier goes on with word characters, and a prefix makes a literal with a quote.
-        result = pp_word_character(after_first, dollar_punctuation) || after_first == '"' || after_first == '\'';
-    }
-    else if (before_last == '.')
-    {
-        result = (after_first >= '0' && after_first <= '9') || pp_punctuation_joins(before_last, after_first);
-    }
-    else
-    {
-        result = pp_punctuation_joins(before_last, after_first);
-    }
-    return result;
+    pp_resolve_keywords_range(pp, pp->keywords_resolved, pp->output.count);
+    pp->keywords_resolved = pp->output.count;
 }
 
 // The markers' state before the first token: the stack is the main file's, at its first line, which the text gives
@@ -15292,9 +15138,6 @@ static __attribute__((noinline, cold)) uint32_t pp_print_moves(Preprocessor* pp,
 
 static uint64_t pp_embed_text_vector(const uint8_t* bytes, uint64_t count, bool separated, uint8_t* out)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_embed_text_scalar(bytes, count, separated, out);
-#else
     // Slot j of 8: the separator (quarter 3's ", "), byte j's hundreds, tens and ones (quarters 0 to 2), and zeros.
     static const uint8_t slots[2][64] __attribute__((aligned(64))) = {
         {
@@ -15339,36 +15182,6 @@ static uint64_t pp_embed_text_vector(const uint8_t* bytes, uint64_t count, bool 
         used += (uint64_t)__builtin_popcountll(high_kept);
     }
     return used;
-#endif
-}
-
-// pp_embed_text_vector's scalar twin, a byte at a time.
-static uint64_t pp_embed_text_scalar(const uint8_t* bytes, uint64_t count, bool separated, uint8_t* out)
-{
-    uint64_t used = 0;
-    for (uint64_t i = 0; i < count; i += 1)
-    {
-        const uint32_t value = bytes[i];
-        if (separated || i != 0)
-        {
-            out[used] = ',';
-            out[used + 1] = ' ';
-            used += 2;
-        }
-        if (value >= 100)
-        {
-            out[used] = (uint8_t)('0' + value / 100);
-            used += 1;
-        }
-        if (value >= 10)
-        {
-            out[used] = (uint8_t)('0' + value / 10 % 10);
-            used += 1;
-        }
-        out[used] = (uint8_t)('0' + value % 10);
-        used += 1;
-    }
-    return used;
 }
 
 // The bytes an #embed's data token (BUSTER_PP_KIND_EMBED, `value`) stands for, and how many.
@@ -15389,12 +15202,10 @@ static void pp_embed_ends(const Preprocessor* pp, uint32_t value, uint8_t* first
     *last = (uint8_t)('0' + bytes[length - 1] % 10);
 }
 
-// Prints an #embed's text (pp_embed_text_vector, or with `scalar` pp_embed_text_scalar) through `buffer`, which holds
+// Prints an #embed's text (pp_embed_text_vector) through `buffer`, which holds
 // `*used` bytes of `capacity` (and 64 more of slack) and is written to `stream` as it fills.
-static bool pp_print_embed(const Preprocessor* pp, uint32_t value, bool scalar, uint8_t* buffer, uint64_t* used, uint64_t capacity, FILE* stream)
+static bool pp_print_embed(const Preprocessor* pp, uint32_t value, uint8_t* buffer, uint64_t* used, uint64_t capacity, FILE* stream)
 {
-    (void)scalar;
-
     uint32_t length;
     const uint8_t* bytes = pp_embed_bytes(pp, value, &length);
     bool result = true;
@@ -15408,130 +15219,9 @@ static bool pp_print_embed(const Preprocessor* pp, uint32_t value, bool scalar, 
             *used = 0;
         }
         uint8_t* out = buffer + *used;
-        *used += BUSTER_SCALAR_PATH(scalar) ? pp_embed_text_scalar(bytes + done, step, done != 0, out) : pp_embed_text_vector(bytes + done, step, done != 0, out);
+        *used += pp_embed_text_vector(bytes + done, step, done != 0, out);
     }
     return result;
-}
-
-static bool pp_print_scalar(Preprocessor* pp, FILE* stream, bool markers)
-{
-    const PPTokens* out = &pp->output;
-    Scratch scratch = scratch_begin(0);
-    // Room for a spelling, and for an #embed's text a piece at a time (pp_print_embed).
-    uint32_t buffer_size = 1 << 16;
-    _Static_assert(5 * BUSTER_PP_EMBED_PRINT_BYTES + 128 <= 1 << 16, "the scalar printer's buffer holds an #embed's piece");
-    uint8_t* buffer = arena_push(scratch.arena, buffer_size, 1);
-    uint8_t previous_last = 0;
-    uint8_t previous_kind = 0;
-    bool line_start = true;
-    bool force_line = false;
-    uint32_t pragma = BUSTER_PP_PRAGMA_OUTSIDE;
-    uint32_t silent = 0;
-    PPMarkers marked;
-    bool result = buffer != 0 && pp_markers_initialize(pp, &marked, scratch.arena) && (!markers || pp_print_start(pp, &marked));
-    if (result && markers)
-    {
-        fwrite(marked.text, 1, marked.length, stream);
-    }
-    for (uint32_t i = 0; result && i < out->count; i += 1)
-    {
-        if (markers && BUSTER_UNLIKELY(marked.include_exit != 0 && marked.include_exit->token <= i))
-        {
-            result = pp_print_include_exits(pp, &marked, i, &line_start, stream);
-            force_line = true;
-            if (!result)
-            {
-                break;
-            }
-        }
-        const uint8_t kind = out->kinds[i];
-        const uint8_t flags = out->flags[i];
-        const bool written = pp_spelled_as_written(pragma, kind);
-        pragma = pp_pragma_state(pp, pragma, kind, out->locations[i]);
-        if (kind == BUSTER_PP_KIND_PRAGMA_END)
-        {
-            force_line = true;
-            continue;
-        }
-        const bool starts = (flags & BUSTER_PP_START_OF_LINE) || force_line || i == 0;
-        const uint32_t moved = markers && !starts && ((flags & BUSTER_PP_LINE_SPACE) || (silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token <= i))
-                                   ? pp_print_moves(pp, &marked, i, &silent)
-                                   : BUSTER_PP_NONE;
-        if (starts || moved != BUSTER_PP_NONE)
-        {
-            uint32_t breaks = !line_start;
-            const uint32_t located = markers ? pp_print_location(pp, &marked, i) : 0;
-            uint32_t place = moved != BUSTER_PP_NONE ? moved : located;
-            const uint32_t range = markers ? pp_find_range(pp, place) : BUSTER_PP_NONE;
-            if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
-            {
-                place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, place - pp->ranges[range].base, pp->options.trigraphs);
-                breaks = pp_print_place(pp, &marked, range, place, pp_line_of(pp, range, place, 0), line_start, &result);
-                fwrite(marked.text, 1, marked.length, stream);
-            }
-            for (uint32_t n = 0; n < breaks; n += 1)
-            {
-                fputc('\n', stream);
-            }
-            line_start = true;
-            force_line = false;
-            previous_last = 0;
-        }
-        if (kind == BUSTER_PP_KIND_EMBED)
-        {
-            // An #embed's text, through the buffer, which has room for its pieces: then like a number before what comes
-            // after.
-            uint8_t first;
-            uint8_t last;
-            pp_embed_ends(pp, out->values[i], &first, &last);
-            if (!line_start && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, first, pp->options.assembly)))
-            {
-                fputc(' ', stream);
-            }
-            uint64_t used = 0;
-            result = pp_print_embed(pp, out->values[i], true, buffer, &used, buffer_size - 64, stream) && fwrite(buffer, 1, used, stream) == used;
-            previous_last = last;
-            previous_kind = C_TOKEN_NUMERIC_CONSTANT;
-            line_start = false;
-            continue;
-        }
-        const uint32_t room = kind == C_TOKEN_RAW_IDENTIFIER || (kind >= BUSTER_PP_KIND_KEYWORD && kind < BUSTER_PP_KIND_PRAGMA_END) ? 0 : out->values[i] - out->locations[i];
-        if (room + 64 > buffer_size)
-        {
-            buffer_size = room + 64;
-            buffer = arena_push(scratch.arena, buffer_size, 1);
-            result = buffer != 0;
-        }
-        const uint64_t mark = scratch.arena->length;
-        const uint8_t* spelling = 0;
-        const uint32_t length = !result ? 0
-                                : written ? pp_written_spelling(pp, out->values[i], out->locations[i], scratch.arena, &spelling)
-                                          : pp_spelling(pp, kind, out->values[i], out->locations[i], buffer, &spelling);
-        result = result && spelling != 0;
-        if (result)
-        {
-            if (!line_start && length != 0 && ((flags & BUSTER_PP_SPACE) || pp_needs_separation(previous_last, previous_kind, spelling[0], pp_dollar_punctuation(&pp->options))))
-            {
-                fputc(' ', stream);
-            }
-            fwrite(spelling, 1, length, stream);
-            marked.line += markers && kind == C_TOKEN_UNKNOWN ? pp_print_token_lines(spelling, length) : 0;
-            previous_last = length != 0 ? spelling[length - 1] : previous_last;
-            previous_kind = kind;
-            line_start = false;
-        }
-        arena_pop_to(scratch.arena, mark);
-    }
-    if (result && markers && marked.include_exit != 0)
-    {
-        result = pp_print_include_exits(pp, &marked, out->count, &line_start, stream);
-    }
-    if (!line_start)
-    {
-        fputc('\n', stream);
-    }
-    scratch_end(scratch);
-    return result && ferror(stream) == 0;
 }
 
 static uint32_t* pp_build_directory(const Preprocessor* pp, Arena* arena)
@@ -15576,7 +15266,10 @@ static const uint8_t pp_before_classes[128] __attribute__((aligned(64))) = {
     ['%'] = 3, ['<'] = 3, ['>'] = 3, ['='] = 3, ['!'] = 3, ['&'] = 3, ['|'] = 3, ['^'] = 3, ['#'] = 3, [':'] = 3, ['?'] = 3,
 };
 
-// Whether a space goes between two tokens, by before-class * 8 + after-class: pp_needs_separation as a table. A word
+// Whether a space goes between two tokens, by before-class * 8 + after-class: whether printing the second right after the
+// first (their last and first characters) would lex differently, erring towards a space (-E's output only has to lex
+// into the same tokens). The joining characters are those that can join a punctuator before them into a longer one,
+// or start a comment after '/': "+-*/%<>=!&|^#.:?". A word
 // goes on with a word, a digit or a quote (a prefix makes a literal); '.' with a digit or a joining character; a joining
 // character with one; a pp-number with a word, a digit, '.', '\'' (a digit separator) or an exponent's sign.
 static const uint8_t pp_separation_table[64] __attribute__((aligned(64))) = {
@@ -15763,7 +15456,7 @@ static uint32_t pp_print_offsets(const uint32_t* lengths, uint32_t count, uint64
     return ordinary ? total : 0;
 }
 
-// pp_print_vector's step 1 for a chunk of `valid` tokens (of the columns at `kinds`, `values` and `locations`, from
+// pp_print's step 1 for a chunk of `valid` tokens (of the columns at `kinds`, `values` and `locations`, from
 // the chunk's first) of which none is a pragma line's identifier spelled as written, an integer, an #embed's data or
 // another internal kind, without a branch on each token's kind (#649): the identifiers' spellings from the intern
 // table, a loop over their bits; and every other token's bytes at its location, which is its spelling unless a line
@@ -15926,18 +15619,17 @@ static uint32_t pp_print_place_lines(Preprocessor* pp, PPMarkers* markers, PPPri
     return result;
 }
 
-// Prints the output as pp_print_scalar does, byte for byte, 64 tokens at a time into one buffer that is written as it
-// fills. For each chunk: each token's spelling (pp_print_spellings: an identifier's from the intern table, else its
-// bytes in the location space, found a range at a time; or the general loop's, token by token, for a chunk with a
-// pragma line, an integer, an #embed or a possible line splice), then the spaces for all 64 at once: a token at the
-// start of a line gets none, any other one if whitespace was before it or if its first character would lex together
-// with the last character of the token before (pp_separation_table, indexed by the two characters' classes from
-// vpermi2b lookups, which pp_print_spellings gives by kind), and then the copies, one masked 64-byte store per token
-// (more for a longer spelling), with the line breaks and line markers between: in batches at prefix-sum offsets
-// (pp_print_offsets), each up to a spelling past 64 bytes and with line markers up to each line start that needs a
-// marker (pp_print_place_lines), and that token and the rest token by token. pp_print_vector compiles it
-// for each value of `markers`: with -P, the batch's gaps are one bit each, as they were before the line markers' batch,
-// whose code in one copy for both cost -P 8-12% (#649, on an AVX-512 Xeon).
+// Prints the output as `-E` does, 64 tokens at a time into one buffer that is written as it fills. For each chunk: each
+// token's spelling (pp_print_spellings: an identifier's from the intern table, else its bytes in the location space,
+// found a range at a time; or the general loop's, token by token, for a chunk with a pragma line, an integer, an #embed
+// or a possible line splice), then the spaces for all 64 at once: a token at the start of a line gets none, any other
+// one if whitespace was before it or if its first character would lex together with the last character of the token
+// before (pp_separation_table, indexed by the two characters' classes from vpermi2b lookups, which pp_print_spellings
+// gives by kind), and then the copies, one masked 64-byte store per token (more for a longer spelling), with the line
+// breaks and line markers between: in batches at prefix-sum offsets (pp_print_offsets), each up to a spelling past 64
+// bytes and with line markers up to each line start that needs a marker (pp_print_place_lines), and that token and the
+// rest token by token. pp_print compiles it for each value of `markers`: with -P, the batch's gaps are one bit each, as
+// they were before the line markers' batch, whose code in one copy for both cost -P 8-12% (#649, on an AVX-512 Xeon).
 BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bool markers)
 {
     // The columns and tables in locals: a store through a byte pointer may change any field, which the loops would load
@@ -15971,7 +15663,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
     uint8_t firsts[64] __attribute__((aligned(64))) = { 0 };
     uint8_t lasts[64] __attribute__((aligned(64))) = { 0 };
     PPPrintLines lines = { .range = BUSTER_PP_NONE };
-    // The state between tokens, as pp_print_scalar keeps it.
+    // The state between tokens.
     bool line_start = true;
     bool force_line = false;
     uint32_t silent = 0;
@@ -16002,9 +15694,9 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
         const uint32_t available = count - c < 64 ? count - c : 64;
         const __mmask64 valid = _bzhi_u64(~0ull, available);
         const __m512i kinds = _mm512_maskz_loadu_epi8(valid, out_kinds + c);
-        // 0. The identifiers of pragma lines after their names, which -E spells as written (pp_spelled_as_written): a
-        // line from its '#' (a hash at the scratch "#") to its end, which alternate, is the bits [start, end) of ends
-        // less starts, less one when the chunk starts inside a line, whose end comes first.
+        // 0. The identifiers of pragma lines after their names, which -E spells as written (pp_pragma_state's
+        // BUSTER_PP_PRAGMA_TOKENS): a line from its '#' (a hash at the scratch "#") to its end, which alternate, is the bits
+        // [start, end) of ends less starts, less one when the chunk starts inside a line, whose end comes first.
         uint64_t pragma_starts = 0;
         for (uint32_t q = 0; q < 4; q += 1)
         {
@@ -16152,7 +15844,6 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                     const __m512i length = _mm512_maskz_loadu_epi32(lanes, lengths + 16 * q);
                     longs |= (uint64_t)_mm512_mask_cmpge_epu32_mask(lanes, _mm512_sub_epi32(length, _mm512_set1_epi32(1)), _mm512_set1_epi32(64)) << (16 * q);
                 }
-                stale = false;
             }
             // 3. Copies. A batch of the tokens from `from` without a branch per token, their output offsets by a prefix
             // sum (pp_print_offsets), up to the first spelling past 64 bytes: with -P, of a chunk without a pragma end
@@ -16339,7 +16030,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                 bool direct = BUSTER_UNLIKELY(out_kinds[i] == BUSTER_PP_KIND_EMBED);
                 if (direct)
                 {
-                    result = result && pp_print_embed(pp, out_values[i], false, buffer, &used, capacity, stream);
+                    result = result && pp_print_embed(pp, out_values[i], buffer, &used, capacity, stream);
                 }
                 else
                 {
@@ -16387,22 +16078,9 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
     return result && ferror(stream) == 0;
 }
 
-static bool pp_print_vector(Preprocessor* pp, FILE* stream, bool markers)
-{
-#if !BUSTER_HOST_VECTOR
-    return pp_print_scalar(pp, stream, markers);
-#else
-    return markers ? pp_print_vector_mode(pp, stream, true) : pp_print_vector_mode(pp, stream, false);
-#endif
-}
-
 BUSTER_PREPROCESSOR_ENTRY bool pp_print(Preprocessor* pp, FILE* stream, bool markers)
 {
-#if !BUSTER_HOST_VECTOR
-    return pp_print_scalar(pp, stream, markers);
-#else
-    return BUSTER_VECTOR_PATH(pp->vectorized) ? pp_print_vector(pp, stream, markers) : pp_print_scalar(pp, stream, markers);
-#endif
+    return markers ? pp_print_vector_mode(pp, stream, true) : pp_print_vector_mode(pp, stream, false);
 }
 
 BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)
@@ -16492,11 +16170,11 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
     const bool found = search && pp_buster_headers_directory(ours, PATH_MAX, 0);
     const bool interned = found && intern_initialize(&table);
     const bool initialized = interned && pp_initialize(&pp, &quiet, &table) && !pp.fatal;
-    const uint32_t directories = initialized ? pp.directory_count : 0;
+    const uint32_t directories = initialized ? pp.search.directory_count : 0;
     uint64_t bytes = 0;
     for (uint32_t d = 0; d < directories; d += 1)
     {
-        bytes += (uint64_t)pp.directory_lengths[d] + 1;
+        bytes += (uint64_t)pp.search.directory_lengths[d] + 1;
     }
     const uint64_t slots = (uint64_t)count + 2 * (uint64_t)directories + 2;
     char** result = !search || initialized ? malloc(slots * sizeof(char*) + bytes) : 0;
@@ -16533,18 +16211,18 @@ static __attribute__((unused)) char** pp_clang_arguments(const PPOptions* option
         bool after = false;
         for (uint32_t d = 0; ready && d < directories; d += 1)
         {
-            const uint8_t system = pp.directory_system[d];
-            const bool fallback = d == pp.fallback_directory;
+            const uint8_t system = pp.search.directory_system[d];
+            const bool fallback = d == pp.search.fallback_directory;
             after = after || system == BUSTER_PP_EXTERN_C_FILE;
             *linked = *linked || (fallback && pp_clang_fallback_links(ours, links));
             ready = !fallback || *linked;
             if (ready && system != BUSTER_PP_EXTERN_C_FILE)
             {
-                memcpy(names, pp.directories[d], (size_t)pp.directory_lengths[d] + 1);
-                result[n] = d < pp.angled_first ? "-iquote" : system == BUSTER_PP_USER_FILE ? "-I" : after ? "-idirafter" : "-isystem";
+                memcpy(names, pp.search.directories[d], (size_t)pp.search.directory_lengths[d] + 1);
+                result[n] = d < pp.search.angled_first ? "-iquote" : system == BUSTER_PP_USER_FILE ? "-I" : after ? "-idirafter" : "-isystem";
                 result[n + 1] = fallback ? links : names;
                 n += 2;
-                names += pp.directory_lengths[d] + 1;
+                names += pp.search.directory_lengths[d] + 1;
             }
         }
     }

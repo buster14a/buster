@@ -8,12 +8,14 @@ absent or damaged inputs, in this order:
 
 **exact verified Actions cache → digest-pinned GHCR mirror → original upstream URL.**
 
-The test/fuzz matrix (`9700x.yml`, whose rows' jobs, a portable row's compiler
-build among them, are `hosted-correctness.yml`'s) and both self-host bootstrap
-rows (`selfhost.yml`) depend on successful preparation; they never independently
-fall back to a remote source. `build.yml`'s single job is its workflow's only
-consumer, so the `hosted-tools` action, given an empty `artifact-name`, runs the
-same preparation inside that job. `build-pgo.yml` and the 9700X need only CMake
+The test rows and fuzz campaigns (`9700x.yml`, whose rows' jobs are
+`hosted-correctness.yml`'s and whose campaigns are `drawn.yml`'s) and the
+self-host bootstrap (`selfhost.yml`, through `drawn.yml`) depend on successful
+preparation; they never independently fall back to a remote source.
+`build.yml`'s regressions, the one drawn job that holds them (`drawn.yml`'s
+`regressions` row), are their workflow's only consumer, so the `hosted-tools`
+action, given an empty `artifact-name`, runs the same preparation inside that
+job. `build-pgo.yml` and the 9700X need only CMake
 and Ninja: `setup-build-tools.sh` without `BUSTER_HOSTED_RELEASES` acquires each
 from the mirror, then upstream, with the same checks.
 
@@ -204,8 +206,7 @@ resolve Ubuntu's mirrors failed every hosted job of four main runs in setup.
 
 | Input | Acquired by | Pinned by |
 | --- | --- | --- |
-| apt closure of `setup-hosted.sh`'s packages | `apt-get install --download-only` on the preparation's runner | the package list (in `hosted-offline.sh`) and the runner image |
-| baseline runtime's 4 `.deb`s | `setup-baseline-runtime.sh`, through `cached-download.sh`, from the archive's snapshot of 2026-11-11 (`snapshot.ubuntu.com`), since the archive drops superseded updates | their SHA-256 digests |
+| apt closure of `setup-hosted.sh`'s packages, and the image's packages it pins exactly | `apt-get install --download-only` and `apt-get download` on the preparation's runner | the package list (in `hosted-offline.sh`) and the runner image |
 | frozen corpus | `fetch-corpus.sh`, through `cached-download.sh` | its SHA-256 digest |
 | c-testsuite and SQLite | `fetch-c-testsuite.sh`, `fetch-sqlite.sh` | their commits |
 | Lua 5.4.8 | `hosted-offline.sh lua`, through `cached-download.sh` | the release archive's SHA-256 digest |
@@ -213,15 +214,16 @@ resolve Ubuntu's mirrors failed every hosted job of four main runs in setup.
 **Layout.** The bundle's `apt/` holds the downloaded `.deb`s and `MANIFEST`,
 which records the runner (`ImageOS`, `ImageVersion`, release, architecture),
 the package list, each `.deb`'s package, version and SHA-256 (`bundle`
-records), and the version of each listed package the image already has
-(`image` records). `ci/` is `BUSTER_CI_CACHE`'s layout, as on the 9700X:
+records, carried packages among them), and the version of each listed package
+the image already has (`image` records). `ci/` is `BUSTER_CI_CACHE`'s layout, as on the 9700X:
 `downloads/DIGEST` and bare mirrors holding `refs/pinned/COMMIT`.
 
 **Preparation.** `prepare-hosted-tools.yml` restores two caches and runs
 `hosted-offline.sh prepare`:
 
-- `hosted-apt-v1-IMAGEOS-IMAGEVERSION-LIST`: the apt closure, which is the
-  image's, since it holds what that image lacks.
+- `hosted-apt-v2-IMAGEOS-IMAGEVERSION-LIST`: the apt closure, which is the
+  image's, since it holds what that image lacks. Version 2 carries pinned
+  packages (#2974).
 - `hosted-ci-v1-SCRIPTS`: the rest, keyed by the contents of the scripts that
   pin them, including `hosted-offline.sh` for Lua. Their pins stay in those
   scripts: `nightly.sh` records `fetch-corpus.sh`'s blob as the corpus identity.
@@ -233,7 +235,13 @@ fails so is acquired, and the log names every input's source
 - **Cache hit.** Every input is the cache's, and the job contacts no external
   host.
 - **Cache miss.** `apt-get update` and `--download-only` are tried up to 3
-  times, each bounded to 8 minutes, with pauses of 20 and 40 s. Each other
+  times, each bounded to 8 minutes, with pauses of 20 and 40 s. The closure
+  then **carries** each of the image's packages that it pins exactly, as
+  `apt-get download NAME=VERSION`, retried the same way, until nothing more
+  is pinned. A package is pinned when a `.deb` of the closure depends on its
+  installed version with `=`, or when it depends with `=` on a carried or
+  bundled package's version. Today that is `libtcl8.6`, which `tcl8.6-dev`
+  pins. The log names each one (`carrying NAME=VERSION`). Each other
   input's script is run up to 3 times; `cached-download.sh` also retries each
   download for 240 s. Before each network attempt, an apt host the runner
   can't resolve is pinned in `/etc/hosts` to the address Cloudflare's
@@ -245,7 +253,8 @@ fails so is acquired, and the log names every input's source
 Every acquired input is checked as its consumers will use it. The corpus and
 the runtime are extracted and verified. The checkouts must be the pinned
 commits. The closure must install from the bundle alone on the preparation's
-image: an `apt-get --simulate` with no package lists. The job then publishes
+image: an `apt-get --simulate` with no package lists. It must also carry every
+package it pins; a cached bundle that doesn't is acquired again. The job then publishes
 the bundle as the attempt's companion artifact, `ARTIFACT-NAME-offline`, on
 every run (92 MB, kept 1 day). As for the release inputs, only a push or
 dispatch on `main` saves the caches.
@@ -259,11 +268,12 @@ It then sets `BUSTER_HOSTED_OFFLINE`, `BUSTER_CI_CACHE` and
 `BUSTER_CI_OFFLINE=1` for every later step.
 
 - `setup-hosted.sh` runs `hosted-offline.sh apt-install`. That is
-  `apt-get install --no-download` of the manifest's `.debs`, resolved against
-  the installed packages alone: an empty `Dir::State::Lists`, so neither the
-  image's lists nor its sources play any part, and there is no
-  `apt-get update`. It then compares every recorded version with dpkg's, and
-  lists them in the step summary.
+  `apt-get install --no-download --allow-downgrades --no-remove` of the
+  manifest's `.debs`, resolved against the installed packages alone: an empty
+  `Dir::State::Lists`, so neither the image's lists nor its sources play any
+  part, and there is no `apt-get update`. It then compares every recorded
+  version with dpkg's, and lists them in the step summary. Where the bundle
+  replaced the image's own version, the summary says so ("the image had …").
 - With `BUSTER_CI_OFFLINE=1`, `cached-download.sh`, `fetch-c-testsuite.sh`,
   `fetch-sqlite.sh` and `hosted-offline.sh lua DIR` read the bundle alone. A
   missing file, a hash that doesn't match or a broken mirror fails the step.
@@ -272,8 +282,8 @@ It then sets `BUSTER_HOSTED_OFFLINE`, `BUSTER_CI_CACHE` and
   runtime measurement before extracting its tree, including `src/luac.c`.
   The hosted code-size qualification consumes that tree and the frozen
   SQLite amalgamation with `measure-tier1-programs --sizes-only
-  --check-code-size=lua`. It validates both reports and enforces the Lua
-  bound, reusing the row's existing compiler with no timing or 9700X work.
+  --check-code-size`. It validates both reports and enforces both bounds
+  (#1116's Lua one and #2646's SQLite one), reusing the row's existing compiler with no timing or 9700X work.
 - A single-job workflow (`build.yml`, an empty `artifact-name`) is its own
   preparation. It restores the same caches and runs `prepare` itself.
 
@@ -281,17 +291,31 @@ It then sets `BUSTER_HOSTED_OFFLINE`, `BUSTER_CI_CACHE` and
 shard can draw a different image from its preparation's. It still installs the
 bundle's `.deb`s, with a warning, and every `bundle` record must hold. An image
 package whose version differs from its `image` record is reported, but only on
-another image; on the bundle's own image it fails. Where the closure no longer
-installs on the other image, the step fails, naming both images. Rerunning the
-failed jobs may draw the bundle's image; a new run resolves the closure for
-whatever image its preparation draws.
+another image; on the bundle's own image it fails.
+
+A package the closure pins exactly is why the bundle carries it. On
+2026-11-18, `valgrind`'s `libc6-dbg` pinned `libc6 (= 2.43-2ubuntu2.4)`.
+Shards on the next image, whose `libc6` was `2.43-2ubuntu2.7`, could not
+install the bundle without a download. A merge-queue candidate ends at its
+first failed job, so four candidates were dropped (#2974). Now, on another
+image, a carried package moves to the bundle's version: up from an older
+image, down from a newer one (`--allow-downgrades`). Its exact pinners move
+with it, because they are carried too. Nothing of the image's is removed to
+make room (`--no-remove`). `valgrind` left the package list: nothing hosted
+had run it since #2924.
+
+Where the closure still doesn't install on the other image, the step fails,
+naming both images. That leaves one case: another image has an exact pinner
+the preparation's image lacks. Rerunning the failed jobs may draw the
+bundle's image; a new run resolves the closure for whatever image its
+preparation draws.
 
 **Recovery.** A corrupt restored cache entry is reacquired by the preparation.
 Actions caches are immutable, so delete that exact entry to stop reacquiring it
 on every run. A consumer never repairs anything: rerun the workflow, or its
 preparation job, not just a shard.
 
-**Validation.** `bash tests/ci/hosted-offline.sh` takes about 10 s and needs no
+**Validation.** `bash tests/ci/hosted-offline.sh` takes about 15 s and needs no
 network. It stands in for `apt-get`, `dpkg-query`, `sudo` and `curl`, uses real
 `.deb`s and Git upstreams, and covers:
 
@@ -300,6 +324,9 @@ network. It stands in for `apt-get`, `dpkg-query`, `sudo` and `curl`, uses real
 - a consumer reading an artifact-shaped copy;
 - a missing file, a bad hash and an unlisted `.deb`;
 - a changed image, for both the preparation and a consumer;
+- a package the closure pins exactly, and its own exact pinner: carried, moved
+  down and up on images that have other versions, a bundle without them failing
+  there and refused by the preparation, and one the archive lacks;
 - a changed package list, release or format;
 - the repair of a damaged bundle.
 
@@ -309,8 +336,9 @@ two real-runner jobs:
 - **A shard's setup.** It takes Ubuntu's mirrors (every host apt's sources name,
   and plain HTTP), packages.microsoft.com, Lua and GitHub's release, raw and
   package hosts down before the handoff's restore, and github.com and
-  codeload.github.com right after it. Setup, the baseline runtime, the corpus
-  and both mirrors must still succeed, as must extracting Lua.
+  codeload.github.com right after it. Setup, the corpus and both mirrors must
+  still succeed, as must extracting Lua. (The baseline runtime's `.deb`s, for the
+  scalar host's emulation, went with it, #2924.)
 - **A warm preparation.** It prepares cold, keeps the bundle in a cache of its
   own, takes every source down, and requires a fresh restore to prepare with
   every input from the cache.

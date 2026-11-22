@@ -73,7 +73,7 @@ static IrSimdExecution ir_simd_execute(const IrFunction* function, const IrSimdA
     IrCheck verified = { .error = IR_ERROR_STRUCTURE };
     if (function != NULL && scratch != NULL && (argument_count == 0 || arguments != NULL))
     {
-        verified = ir_verify_complete(function, scratch, false);
+        verified = ir_verify_complete(function, scratch);
     }
     if (verified.error == IR_ERROR_MEMORY)
     {

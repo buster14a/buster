@@ -31,7 +31,7 @@ static uint32_t check_test_program_diagnostic(CheckTest* test, const char* sourc
             ready = !input.resource && (accepted || input.diagnostic_graph);
         }
         CheckStream stream = { 0 };
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         ready = ready && check_graph_run(&types.table, &input.graph, &stream_arena, &scratch, &options, &stream);
         uint8_t* prefix = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 64) : 0;
         ready = ready && prefix != 0;
@@ -85,7 +85,7 @@ static uint32_t check_test_program_diagnostic(CheckTest* test, const char* sourc
             }
             const char* file = 0;
             uint32_t length = 0;
-            const uint32_t actual_line = reported < parser.tokens.count ? pp_presumed(&pp, pp.output.locations[parser.tokens.sources[reported]], &file, &length) : 0;
+            const uint32_t actual_line = reported < parser.tokens.count ? pp_presumed(&pp, pp.output.locations[parse_source_index(&parser.tokens, reported)], &file, &length) : 0;
             if (path == 0)
             {
                 line = actual_line;

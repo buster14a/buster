@@ -36,7 +36,6 @@
 // files (files_benchmark_unused), and run_files_benchmark.
 
 #include "host_isa.h"
-#if BUSTER_HOST_VECTOR
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -129,8 +128,10 @@ struct FilesBenchmarkCounts
     uint64_t opens;
     uint64_t maps;
     uint64_t reads;
-    // Directories listed, and the candidates their listings ruled out without an open (FileCacheDirectory).
+    // Directories listed, directories asked for a first component, and the candidates their listings and answers ruled
+    // out without an open (FileCacheDirectory).
     uint64_t listings;
+    uint64_t asks;
     uint64_t listed;
 };
 
@@ -225,6 +226,7 @@ static bool files_benchmark_run(const PPOptions* options, const char* const* roo
         counts->maps += lane->counts.maps;
         counts->reads += lane->counts.reads;
         counts->listings += lane->counts.listings;
+        counts->asks += lane->counts.asks;
         counts->listed += lane->counts.listed;
     }
     if (benchmark.run.lanes != 0)
@@ -690,10 +692,10 @@ int run_files_benchmark(int argc, char** argv)
     if (result)
     {
         printf("a run: %u rounds, %u waves; %lu files, %lu bytes, %lu tokens; %u shared ids; %lu candidates exchanged, %lu opens, %lu mappings and %lu reads, "
-               "%lu directories listed and %lu candidates they ruled out (on %u lanes)\n",
+               "%lu directories listed, %lu asked for a subdirectory and %lu candidates they ruled out (on %u lanes)\n",
                counts.rounds, counts.waves, (unsigned long)counts.files, (unsigned long)counts.bytes, (unsigned long)counts.tokens, counts.ids,
                (unsigned long)counts.candidates, (unsigned long)counts.opens, (unsigned long)counts.maps, (unsigned long)counts.reads, (unsigned long)counts.listings,
-               (unsigned long)counts.listed, lanes[lane_count - 1]);
+               (unsigned long)counts.asks, (unsigned long)counts.listed, lanes[lane_count - 1]);
     }
     if (result && !flat)
     {
@@ -711,11 +713,3 @@ int run_files_benchmark(int argc, char** argv)
     return result ? 0 : 1;
 }
 
-#else
-int run_files_benchmark(int argc, char** argv)
-{
-    (void)argc;
-    (void)argv;
-    return 1;
-}
-#endif // BUSTER_HOST_VECTOR

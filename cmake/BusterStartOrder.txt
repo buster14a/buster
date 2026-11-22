@@ -3,16 +3,18 @@
 # library's, placed by its name; the parallel split puts a unit's functions of .text.buster_checker first in that
 # section in this order (cmake/BusterStartOrder.cmake, docs/commands/build.md, "The start's code order").
 #
-# Written by `compiler start-order` from main at c7caeb56b with #2873's change, built on the 9700X as the benchmark
-# builds are (BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0, Release, CI's toolchain: Clang 23.1.4 and its lld): its
-# `readelf -sW`, and `compiler start-trace` of each command, which lists the functions it runs exactly: an empty
-# file's -fsyntax-only and -E -P, tiny.c's -c and hello.c's -c (the inputs of buster-performance's
+# Written by `compiler start-order` from main at 2d8174328 with #2873's asks of the include search, built on the 9700X
+# as the benchmark builds are (BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0, Release, CI's toolchain: Clang 23.1.4 and
+# its lld): its `readelf -sW`, and `compiler start-trace` of each command, which lists the functions it runs exactly:
+# an empty file's -fsyntax-only and -E -P, tiny.c's -c and hello.c's -c (the inputs of buster-performance's
 # docs/measurements/checker-start-order-1444-2026-11-14), the -c of each of the frozen corpus's 1,336 units of musl,
 # a process a unit (the selection and options of buster-performance's
 # docs/measurements/kernel-census-musl-2873-2026-11-16), and sqlite3.c's -c, in that order: each command's functions
 # that the ones before it didn't run, in address order, and musl's by how many of its units ran each, most first.
-# Refresh it as that guide says when compiles' code moves.
-# start-order: 1016193 addresses, 0 of them in no function; 1161 local functions of main.c's units (4167 KB) and 279 by name (184 KB)
+# Refresh it as that guide says when compiles' code moves. Edited by hand since (#2924): branch sizing's run lost its
+# scalar path and Clang inlines it into size_branches, so the checker unit's entry names size_branches, and
+# branch_sizing_run after it for a build that keeps the run out of line.
+# start-order: 1019114 addresses, 0 of them in no function; 1162 local functions of main.c's units (4168 KB) and 279 by name (184 KB)
 main.c tokenize_with_flags
 main.c lane_threads_report
 main.c main_information
@@ -31,6 +33,7 @@ main_unit_frontend.c parse_tokens_from_output
 main_unit_frontend.c parse_prepare_meanings
 main_unit_frontend.c parse_kernels_reserve_tree
 main_unit_frontend.c parse_vector_buffers_reserve
+main_unit_frontend.c parse_vector
 main_unit_frontend.c arena_reserve_small
 main_unit_frontend.c pp_warning_flag
 main_unit_frontend.c arena_reserve_tables
@@ -230,6 +233,7 @@ main_unit_checker.c check_common_facts
 - exit
 - getenv
 - strtouq
+- __isoc23_strtoumax
 - ____strtoul_l_internal
 - _itoa_word
 - snprintf
@@ -404,7 +408,14 @@ main_unit_checker.c check_common_facts
 - _dl_debug_initialize
 - _dl_cet_setup_features
 - __libc_early_init
-main_unit_frontend.c pp_print_vector
+- __close_nocancel_nostatus
+- next_line
+- read_sysfs_file
+- get_nprocs
+- sysconf
+- __read_nocancel
+main_unit_frontend.c file_cache_count_miss
+main_unit_frontend.c pp_print
 main_unit_frontend.c run_preprocessor_command_mode
 main_unit_frontend.c intern_lay_out
 main_unit_frontend.c pp_build_directory
@@ -430,10 +441,12 @@ main_unit_checker.c unwind_write
 main_unit_checker.c link_add_fixup
 main_unit_checker.c abi_initialize_types
 main_unit_checker.c x86_measure
+main_unit_checker.c size_branches
 main_unit_checker.c branch_sizing_run
 main_unit_checker.c link_check
 main_unit_checker.c link_groups_valid
 main_unit_checker.c link_check_fixups
+main_unit_checker.c abi_classify_all
 main_unit_checker.c abi_classify_levels
 main_unit_checker.c abi_assign
 main_unit_checker.c tier0_validate_scalar_entries
@@ -572,6 +585,7 @@ main_unit_frontend.c pp_line_end_location
 main_unit_frontend.c pp_check_replacement_list
 main_unit_frontend.c pp_same_definition
 main_unit_frontend.c pp_same_file_token
+main_unit_frontend.c pp_without_splices
 main_unit_frontend.c pp_remove_splices_by
 main_unit_frontend.c pp_literal_header_name
 main_unit_frontend.c pp_header_name_tail
@@ -1073,13 +1087,6 @@ main_unit_checker.c check_program_runtime_effects
 main_unit_checker.c pp_presumed
 main_unit_checker.c pp_line_of
 main_unit_checker.c check_common_expansion_point
-- __isoc23_strtoumax
-- __close_nocancel_nostatus
-- next_line
-- read_sysfs_file
-- get_nprocs
-- sysconf
-- __read_nocancel
 main_unit_checker.c check_input_typedef_use
 main_unit_checker.c check_lower_power_divisor
 main_unit_checker.c check_data_scalar_float_bytes

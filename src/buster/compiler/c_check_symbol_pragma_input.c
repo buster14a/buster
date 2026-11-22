@@ -999,7 +999,7 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
                 if (!external)
                 {
                     record->warning = CHECK_SYMBOL_WARNING_INTERNAL;
-                    record->diagnostic_source = reader->parser->tokens.sources[selected];
+                    record->diagnostic_source = parse_source_index(&reader->parser->tokens, selected);
                     record->declaration = selected;
                     valid = check_input_symbol_warning_append(reader, i, &reader->warning_events, selected, CHECK_WARNING_COMPLETE_AT_TOKEN,
                                                                previous != BUSTER_CHECK_NONE ? record->token : selected);

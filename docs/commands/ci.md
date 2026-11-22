@@ -22,6 +22,87 @@ push trigger among them. `tests/ci/nightly.sh` checks the candidates' evidence
 and coverage. Before the queue, every push ran its own hosted rows (#1271):
 the plain rows in the nightly mode (#2057), and the full matrix before it.
 
+## Early hosted feedback and reproductions (#1427)
+
+Every hosted job that runs the compiler is a drawn item on an AVX-512 runner
+(#2924). Each plain item of a pull request's or a merge-queue candidate's run
+gives its first result at the start of its own run: the step **Early hosted
+feedback (not qualification)**, just before "Run correctness tests within the
+hosted CPU budget". It adds no build: it runs the item's compiler, built or
+installed. It runs the fixed driver corpus (`tests/ci/feedback/`, no random
+seed), which:
+
+- preprocesses, parses and checks a unit;
+- emits two units' objects and links them with clang;
+- runs the program;
+- checks an undeclared-identifier diagnostic.
+
+A failure stops the item before its suite, as the suite's own first failure
+would (`--fail-fast`). The step qualifies nothing: the suite runs the corpus's
+heading, `Test the early driver feedback corpus`, in its deal, and every row,
+item, sanitizer configuration and merge-queue case is unchanged. Sanitizer items
+skip the step, and so do dispatched and nightly runs, whose suites report every
+command. On pull requests and candidates, plain shard 1 also checks that the
+corpus fails on a compiler broken in each area it promises
+(`tests/ci/feedback.sh --compiler`). #2034's accounting counts the early step as
+first useful feedback (`accounting_phase`).
+
+`tools/ci/feedback.sh` records each item's build, early step and suite. Each
+record holds:
+
+- the log and the exact inventory and runner arguments (`command.sh`,
+  `selected.tests`);
+- the revision, configuration and flags;
+- the CPU (`cpu.txt`) and the draw's probe answers (`probe.txt`);
+- the tool pins and the apt manifest;
+- retained failing cases;
+- `result.tsv`, which tells a product failure from an infrastructure failure
+  and an incomplete run (a cancellation or a timeout, which never passes).
+
+The item uploads the records as `feedback-ROW-SANITIZER-O3-shardK-ATTEMPT`.
+To replay one, check out its `revision` clean and run `bash
+/path/to/artifact/reproduce.sh` on Ubuntu 26.04:
+
+- The CPU must pass the vector probe (`tools/ci/vector-probe.c`). A `native`
+  record needs the recorded CPU model too.
+- It uses the original run's prepared offline inputs through `gh` while
+  they're retained. Otherwise it acquires them again and refuses an apt closure
+  that differs from the record.
+- It then runs the item's setup and build steps in order, and the recorded
+  command.
+
+A full rerun on GitHub is `9700x.yml`'s `full` dispatch.
+
+The `changes` job adds an **advisory** affected-test plan to its summary
+(`continue-on-error`). Its dependency map is `feedback_rules` in
+`tools/ci/feedback.c`, and heading ownership is `feedback_heading`:
+
+- Frontend edits select every downstream group; checker edits include
+  emission, execution and diagnostics.
+- Headers, unknown paths and build, toolchain, CI and selector changes expand to
+  every group, as does an empty change list.
+- Documentation is exempt, except the CI and toolchain policy guides.
+- An unclassified heading always runs, every decision has its reason, and a
+  malformed plan publishes no commands.
+
+The plan selects nothing in CI. Locally, `feedback.sh run DIR PROFILE` runs a
+plan through `parallel` with the same records. PROFILE is one of:
+
+- `smoke`: the corpus alone, as the early step runs it;
+- `affected`, the groups of the paths in the file `BUSTER_FEEDBACK_FILES`
+  names;
+- `frontend`, `checker`, `object`, `link` or `diagnostics`, one group;
+- `full`: the whole inventory, as each item's suite runs it.
+
+The `affected` and group profiles always run the corpus and the lexer,
+link-representation and diagnostic-ordering regressions too.
+
+```sh
+bash tests/ci/feedback.sh                                    # in the CI glue fixtures job
+bash tests/ci/feedback.sh --compiler build/compiler          # the corpus's mutants, plain shard 1's step
+BUSTER_COMPILER=build/compiler bash tools/ci/feedback.sh run build/feedback checker --jobs 4
+```
+
 ## The merge queue
 
 `9700x.yml` runs on `merge_group` (`checks_requested`, main, no path filter),
@@ -31,15 +112,16 @@ nothing, since the queue tested it before it landed.
 
 - **What a candidate runs.** The full hosted contract on its exact commit,
   documentation alone included:
-  - every `x86-64` row and sanitizer, and the `native` plain row (#2032);
+  - the `native` plain row (#2032; the `x86-64` rows are gone with the scalar
+    host, #2924);
   - the vector pool;
   - the three fuzz campaigns.
 
   It takes its own run-id concurrency group. Like a pull request's run, it
   stops at its first failure (the owner's choice on 2026-11-12):
   - its tests and fuzz campaigns wait for the policy job;
-  - its rows, shards, vector draws and fuzz campaigns fail fast, each within
-    its own matrix;
+  - its rows, shards, vector draws and the fuzz campaigns' draws fail fast,
+    each within its own matrix;
   - each shard stops at its first failing command (`parallel --fail-fast`,
     #2703), as a pull request's does;
   - once its test rows or fuzz campaigns have failed, `stop-tests` or
@@ -64,12 +146,13 @@ nothing, since the queue tested it before it landed.
 - **Aggregate.** The required aggregate passes a candidate only through its
   coverage step, `bash tools/ci/nightly.sh coverage DIR`. That step reads the
   run's jobs and runs `nightly coverage --run RUN < FACTS`, which needs:
-  - every shard 1..N of every row of the contract (`x86-64`'s four, `native`'s
-    plain one);
+  - the native plain row's verdict (drawn since #2924);
   - the vector verdict;
-  - each fuzz campaign;
+  - the fuzz campaigns' verdict (they draw AVX-512 runners through
+    `drawn.yml`, #2924);
   - every job of each auxiliary workflow the selector named
-    (`--auxiliary "$AUXILIARY"`), and none of the others;
+    (`--auxiliary "$AUXILIARY"`), but its draws' skipped ones, and its drawn
+    job's one verdict; and none of the others;
 
   all completed and successful. `qualification.c` reads the step's outcome
   (`COVERAGE_RESULT`); no other event runs the step.
@@ -82,10 +165,10 @@ nothing, since the queue tested it before it landed.
   reports `Integration qualification` passed when the label is added, and `9700x.yml` skips the aggregate on the
   pull request's later pushes. Its candidate still runs everything. Use it for fixes that must land fast: a
   hotfix that fails does so in the queue, where it costs the entries behind it a rebuild.
-- **Accounting.** `ci-timings.yml` reports candidates by fate (merged,
-  passed but invalidated, failed, cancelled), with their runner-minutes, the
-  merged ones' wall time and their hosted jobs' waits for a runner
-  (`timings --queue`, #2031).
+- **Accounting.** `ci-timings.yml` reports outcomes separately from candidate
+  fate (merged, live, confirmed invalidated, unknown), all collected attempts'
+  runner-minutes, feedback/completion-proxy latency and hosted job queue waits
+  (`timings --accounting`, #2034). Failed reads do not prove invalidation.
 - **Policy pins.** `changes --self-test` pins the trigger, the concurrency
   group, the selector's routing, the auxiliary calls and the aggregate's
   coverage step. Its mutants include a path filter, another branch or type, a
@@ -95,11 +178,28 @@ nothing, since the queue tested it before it landed.
 [The merge queue](../ci.md#the-merge-queue) has the details and the ruleset's
 settings.
 
+## Clang Static Analyzer
+
+Pull requests and merge-queue candidates each run a separate `Clang Static Analyzer`
+job on GitHub-hosted Ubuntu 26.04. It checks the triggering merge revision,
+including documentation-only changes. The job uses the pinned CI Clang and
+the ordinary vector Release build's translation units and flags from
+`build.sh print-sources` and `build.sh print-compile-flags`. It uses one
+analyzer process per available CPU. Static analysis does not execute the
+compiler or need an AVX-512 runner.
+
+Each analyzer finding is a Clang error. The job finishes the sweep, fails
+qualification and retains the diagnostic paths as an artifact. A candidate's
+analyzer failure also stops the rest of that candidate's run. An optional
+build configuration such as libFuzzer needs its own analysis invocation.
+[Hosted timing evidence](https://github.com/buster14a/buster-performance/tree/4087a9e563960f17e9e1fc2729f7904e12343270/docs/measurements/merge-queue-clang-analyzer-2026-11-18).
+
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
-Clang/LLVM 23.1.4 release, in baseline x86-64 and native host builds. Native
-builds on CPUs without the complete vector feature set use the scalar fallback.
+Clang/LLVM 23.1.4 release, in native host builds (the baseline `x86-64` rows
+are gone, #2924). Native builds on CPUs without the complete vector feature set
+use the scalar fallback.
 On a pull request the native row is the vector row instead (#2033): the
 explicit vector target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
 whose plain configuration's 4 shards are items that each draw's collector
@@ -124,27 +224,27 @@ Each row (`.github/workflows/hosted-correctness.yml`, which the test job calls
 per row) runs its inventory as its own number of shards, a runner each:
 `parallel --shard K/N --costs tools/ci/costs/ROW.costs` deals the commands by
 the row's hosted costs, the same deal on every shard's runner, so the shards run
-each command once ([Shard costs](#shard-costs)). A portable `x86-64` row
-builds its compiler once, and its shards verify and run that product
-(`tools/ci/hosted-product.sh`; [Shared row
-products](../ci.md#shared-row-products), #2032), and so does each vector
-configuration, on a qualifying CPU; the `native` plain row's shards each
-build their own (a native build must run on the CPU it was built for), which is
-why the `native` sanitizer rows went (#2032). Run
+each command once ([Shard costs](#shard-costs)). Each vector configuration
+builds its compiler once, on a qualifying CPU, and its items verify and run that
+product (`tools/ci/hosted-product.sh`; [Shared row
+products](../ci.md#shared-row-products), #2032); the `native` plain row's items,
+drawn on qualifying CPUs as the vector row's are (#2924), each build their own
+(a native build must run on the CPU it was built for), which is why the
+`native` sanitizer rows went (#2032). Run
 `bash tests/ci/hosted-product.sh` after changing the product's packing, identity
 or checks. A plain row's test step took 14.6 minutes on one 4-CPU runner; its
-4 shards take about 4 to 6. The steps a row needs once (the baseline fallback,
-QEMU and arena checks, the parser smoke test, the performance readers and the
-TSan/MSan `main.c` compiles) run in its shard 1.
+4 shards take about 4 to 6. The steps a row needs once (the native row's arena
+checks, the parser smoke test, the performance
+readers and the TSan/MSan `main.c` compiles) run in its shard 1.
 The repository syntax check retains each build's sanitizer feature flags and
 predefines, while excluding its exact host-only detector and frame controls
 (#1423). The compiler executing the check remains instrumented.
 On merge-queue candidates and the daily and dispatched runs, the nightly
 snapshot's daily run among them (not on pull requests, which they would hold up
 for over an hour; before the queue, on pushes before the nightly mode), the
-`x86-64` row and the vector row's configurations also run the
-inventory under `BUSTER_SANITIZER=address|thread|memory` (the `native`
-sanitizer rows went in #2032; `native` keeps its plain row), but the
+vector row's configurations also run the inventory under
+`BUSTER_SANITIZER=address|thread|memory` (the `native` sanitizer rows went in
+#2032 and the `x86-64` rows in #2924; `native` keeps its plain row), but the
 compiler's own `main.c` checking comparison in the TSan and MSan rows, whose
 measured memory (docs/ci.md) exceeds a hosted runner's; their `-c` compiles run
 in a separate step after the suite. ASan combines UBSan, bounds,
@@ -320,10 +420,11 @@ Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
   companion artifact `ARTIFACT-NAME-offline`. It holds:
   - the apt closure of `setup-hosted.sh`'s packages, resolved on the
     preparation's runner image, with a manifest of every package and version;
-  - the baseline runtime's 4 `.deb`s and the corpus (`downloads/DIGEST`);
+    it carries the image's packages that it pins exactly (#2974);
+  - the corpus and Lua's archive (`downloads/DIGEST`);
   - bare mirrors of c-testsuite and SQLite at `refs/pinned/COMMIT`.
 
-  The preparation keeps them in two caches. `hosted-apt-v1-…` is keyed by the
+  The preparation keeps them in two caches. `hosted-apt-v2-…` is keyed by the
   package list and the image (`ImageOS`, `ImageVersion`). `hosted-ci-v1-…` is
   keyed by the scripts that pin the rest. On a hit it contacts no external
   host. On a miss it fetches each input once, with retries, and checks it as
@@ -337,18 +438,72 @@ Ubuntu mirror, DNS or release-host outage can't fail a shard (#2275).
 - **Summaries:** each job's step summary lists the installed package versions,
   and the preparation's lists every input's source.
 - **Image rollouts:** a shard on another image installs the same `.deb`s and
-  warns where the image's own packages differ.
+  warns where the image's own packages differ. A carried package moves to the
+  bundle's version, up or down. Before this, an exactly pinned image package
+  that had moved failed the job. In the merge queue, that dropped the
+  candidate (#2974).
 
 Run `bash tests/ci/hosted-offline.sh` after changing any of these scripts. It
 is network-free, and the preparation job runs it. `hosted-inputs-drill.yml`
 runs a shard's setup, and a warm preparation, with those hosts down. Details,
 failure handling and recovery: [Offline inputs](../hosted-toolchain.md#offline-inputs-2275).
 
+## Deterministic work and growth contracts
+
+The correctness inventory's `Test deterministic work and growth contracts`
+heading (#2041) runs `bash tests/work-contracts/run.sh` on one CPU. Its small
+declared set runs in every applicable PR row and every merge candidate's full
+hosted coverage, with the row's host and sanitizer flags. Native correctness
+retains the same inventory.
+
+`work_contract.h` uses the existing tagged key/value report style:
+
+```text
+work-contract fixture=NAME size=N metric=NAME actual=COUNT bound=LIMIT semantic=pass|fail result=pass|fail
+```
+
+A record passes only when its semantic check passes and `actual <= bound`.
+Report write/flush failures fail the command too. The runner requires the
+complete declared record inventory and identical records on a second run;
+missing sizes, duplicate records or a crashed negative control cannot pass.
+Inputs are 256, 512 and 1024 (N, 2N and 4N). No elapsed-time or RSS value
+enters a verdict.
+
+| Fixture and counted operation | Bound and reason | Required useful result |
+| --- | --- | --- |
+| Dependency admission: actual filesystem probes (#1314) | At most 9N: up to three probes for each source, object and destination. Doubling N permits at most twice the probes. | Distinct destinations admitted; final source/object hard-link aliases, absent parent-directory aliases and dangling links refused with diagnostics; protected bytes unchanged; stdout requires no probes or storage. |
+| Dependency admission: identity comparisons | N × (32 + 20 × ceil(log2(2N))), including index construction; doubling N permits at most three times the work. This retains the existing driver's bounded sorting/search allowance. | The same admission controls, including conflicts at the end of the protected set. |
+| Dependency admission: retained arena bytes | N × (80 + 2 × sizeof(DependencyIdentity) + 6 × sizeof(identity pointer)) + three alignment boundaries: bounded names, two protected identities and their three index columns. Doubling permits twice the storage plus alignment. | The same admission controls; this metric describes retained arena demand, not RSS. |
+| SSA scoped loops: total requested construction bytes (#1353) | 4096N + 65536: 4 KiB per loop and 64 KiB fixed slack for topology, accesses, reusable local workspace and actual phis. The fixture has 3N+2 blocks, 8N instructions and 4N+1 edges; no blocks-times-locals table is needed. | Every local promoted with one two-input phi and independently known reaching values; all blocks reachable, input unchanged and scratch restored. Phi numbering may differ. |
+| SSA scoped loops: total requested verification bytes | The same linear allowance, charged separately from construction. | The independent SSA verifier accepts the complete result and restores scratch. |
+
+The dependency fixture reuses the driver's existing comparison API and
+independently counts actual `stat`/`lstat` calls. SSA wraps the real arena
+request functions only in its standalone translation unit: failed requests
+and requests later released by restoring scratch are still charged. Fixture
+generation and the fixture's own oracle buffers are outside those counters.
+
+The runner deliberately restores excessive work in temporary copies of the
+real implementations: linear dependency-index searches and dense SSA
+selection must fail the work bounds while every semantic check still passes.
+A third mutation skips overlap checks and must fail semantic verification
+despite doing less work. A source fragment that no longer matches fails the
+mutation setup rather than silently testing an unmodified implementation.
+
+The new instrumentation belongs only to standalone test builds, with no
+production-source edits. The runner checks the actual znver5 Release flags
+and production source inventory, then requires every test wrapper to refuse
+the production-unit flags. Existing optional dependency counters are unchanged;
+this guarantees no new counter code in benchmark builds. These contracts do not replace
+native performance measurements, existing timing guardrails or the focused
+SQLite object-change policy. Their counts constrain the stated operations,
+not CPU, cache or layout performance.
+
 ## Shard costs
 
 Each hosted row deals its inventory to its shards by a table of its own,
-`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `x86-64`, `native` and
-`vector` rows (#2033), each sanitizer. Each table is
+`tools/ci/costs/ARCH-SANITIZER-O3.costs` (#2031): the `native` and `vector`
+rows (#2033), each sanitizer (the `x86-64` rows' tables went with them, #2924). Each table is
 `tools/ci/costs.c`'s output alone, never edited by hand. Its first line says
 so, and `costs --self-test --root .`, which the selector's job runs on every
 pull request, fails a table that differs in any byte from what `costs refresh`
@@ -464,8 +619,7 @@ The test job in `9700x.yml` gives each row its count (`shards`):
 
 | Row | Shards | Why |
 | --- | ---: | --- |
-| plain, both | 4 | `tools/ci/nightly.c` counts the plain rows' shards as one N; more native shards each rebuild the compiler for under a minute less |
-| `x86-64` TSan, MSan | 7 | a portable row's extra shard costs a minute of setup; 7 reach the rows' longest commands (#2703: with #2712's finer parts, `costs plan` gives MSan 975 s as 6 and 841 s as 7, TSan 909 and 872 s, at the same runner-minutes) |
+| `native` plain | 4 | its items, drawn as the vector row's (#2924); more items each rebuild the compiler for under a minute less |
 | `vector`, each configuration | 4 | its items, `BUSTER_VECTOR_ITEMS`, which its draws are sized for; the take gives the run step its configuration's count |
 | others | 4 | already shorter than the run's longest row |
 
@@ -533,8 +687,8 @@ never ones that failed, so green keeps meaning the tests passed.
   | `Check out triggering commit`, `Check out the triggering commit and its parents`, `Check out the run's commit and its first parent`, `Check out the exact caller revision`, `Check out the qualification policy`, `Check out reviewed first-party performance fixtures and acceptance harnesses`, `Fetch the vector draw's script from this commit` | the checkouts |
   | `Restore verified hosted release inputs` | `.github/actions/hosted-tools` |
   | `Acquire missing inputs once and verify the complete set`, `Acquire missing offline inputs once and check each as the jobs read it` | `prepare-hosted-tools.yml`'s acquisitions |
-  | `Install official Clang 23.1.4 and test tools`, `Install official Clang, sanitizer and libFuzzer runtimes` | `tools/ci/setup-hosted.sh` |
-  | `Fetch generic baseline startup objects and runtime for emulation` | `tools/ci/setup-baseline-runtime.sh` |
+  | `Install official Clang 23.1.4 and test tools`, `Install official Clang, sanitizer and libFuzzer runtimes` (the fuzz campaigns' before #2924) | `tools/ci/setup-hosted.sh` |
+  | `Fetch generic baseline startup objects and runtime for emulation` (historical: the scalar host's, gone with #2924) | `tools/ci/setup-baseline-runtime.sh`, removed |
   | `Fetch and verify frozen corpus inputs`, `Fetch c-testsuite at its pinned commit`, `Fetch SQLite's sources at their pinned commit` | the fetches |
 
 - **Notes.** The workflow's run summary lists every stopped job by the step
@@ -634,21 +788,26 @@ the policy. In short:
 
 ## Queue and execution timing
 
-The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid, after
-the nightly window, and on manual dispatch. It samples the latest 100 main CI workflow runs and reports the
-median and nearest-rank p95 separately for PR, main-push, nightly targeted and
-full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
-run name. Besides queue and execution, it reports the host's occupation, from
-the job's first step (after the runner hook took the lock) to its end. It also
-reports the shared lock's wait and hold, which it reads from the runner hooks'
-lines in each job's log. It keeps
-the raw API responses and normalized observations as workflow artifacts. It
-does not run benchmarks, weaken the hardware gate, or change any schedule.
+The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid and
+on manual dispatch. `tools/ci/timings.sh` collects bounded API snapshots and
+`tools/ci/timings.c --accounting` reports all outcomes/collected attempts,
+first feedback and completion-proxy p50/p95, runner-minutes, reconciled phases,
+CPU classes, queue fate and finite-capacity limits. PR setup/build uses actual
+step spans and remains measurable without native tests. `Compare` and `Time`
+belong to measurement; missing timestamps remain unknown. Lock hold is an
+overlay, not an extra additive phase.
 
-Read `docs/ci.md` for metric definitions and limitations. In particular, the
-runner hook's step duration includes its overhead. The shared-lock wait and
-hold (`lock-wait`, `lock-hold`) come from the hooks' own log lines, which
-bracket the lock operations to within tens of milliseconds.
-Missing timestamps are unknown rather than zero. Run its network-free fixtures with
-`bash tests/ci/timings.sh`. Keep stored raw evidence in `buster-performance`, not
-in this repository's retired `docs/measurements` path.
+The default sample is 10 runs per workflow/event; a UTC split queries separate
+before/after windows. Collection uses bounded retries and records incomplete
+reads instead of dropping available evidence. Raw JSON, normalized facts,
+request/run receipts and the report are retained as workflow artifacts.
+`CI_TIMINGS_REPLAY=INPUT_DIRECTORY` regenerates a report in a different output
+directory without network calls. Actual account concurrency defaults to
+unknown and needs a dated administrative source; the report changes no
+scheduling or coverage policy. Backlog age links and quotes the existing
+#1439 nightly report rather than creating another ledger.
+
+Read [the metric definitions, configuration and replay recipe](../ci.md#ci-latency-baseline)
+before interpreting results. Run `bash tests/ci/timings.sh` for the network-free
+regressions. Store raw live evidence in `buster-performance`, not this
+repository's retired `docs/measurements` path.

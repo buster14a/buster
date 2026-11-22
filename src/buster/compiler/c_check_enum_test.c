@@ -42,7 +42,7 @@ static void check_test_enum_metadata(CheckTest* test)
         if (ready)
         {
             CheckStream stream = { 0 };
-            const CheckOptions check_options = { .scalar = parse_options.scalar };
+            const CheckOptions check_options = { 0 };
             check_test_expect(test, check_graph_run(&types.table, &input.graph, &checked_storage, &scratch, &check_options, &stream) && stream.report_count == 0,
                               "C17 and C23 enum graph semantics accept both completed type forms");
             uint32_t declaration = BUSTER_CHECK_NONE;
@@ -57,7 +57,7 @@ static void check_test_enum_metadata(CheckTest* test)
                 if (identifier)
                 {
                     uint8_t buffer[32];
-                    const uint32_t source = parser.tokens.sources[token];
+                    const uint32_t source = parse_source_index(&parser.tokens, token);
                     length = pp_spelling(&pp, pp.output.kinds[source], pp.output.values[source], pp.output.locations[source], buffer, &spelling);
                 }
                 if ((input.constant_warnings[token] & CHECK_WARNING_ENUM_TOO_LARGE) != 0)
