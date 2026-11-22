@@ -3144,8 +3144,7 @@ static bool node_contexts_test_fixture(const char* directory, const char* name, 
 // - A condition evaluated as branches: `&&`, `||` and `!` under an if, a while, a do and a for, nested in either
 //   operand, and a tested value of each class's width, a member's, a call's, a comparison's and an update's.
 // - What it lists: an integer constant converted to a floating class; a conversion to a long double, a return's
-//   (its root's record's alone); a bool's update, and a postfix one through an address with no room for its first
-//   row; and a tested value with a conversion of its own (a const bool's read).
+//   (its root's record's alone); a bool's update, and a postfix one through an address with no room for its first row.
 // - 64 statements of an odd number of records each, with a member's row of three entries and a conversion to bool of
 //   four: a step's eight records' entries straddle the streams' registers in turn.
 static const char node_rows_test_source[] =
@@ -3501,19 +3500,17 @@ static const char node_rows_test_source[] =
     "    if (us && a) local = 36;\n"
     "    if (a || !c) local = 37;\n"
     "    if (!us || !u) local = 38;\n"
-    // What it lists: a tested value with a conversion of its own has no room for its test. A const bool's read is
-    // converted to bool, four entries: either operand's.
+    // A qualified bool leaves room for its branch test on either side of a logical operator (#3185).
     "    if (cb && a) local = 32;\n"
     "    if (a || cb) local = 33;\n"
     "    if (!cb && co->inner.flag) local = 34;\n"
-    // (One more, under a `do`: the fixture lists 67 expressions for an update's destination, and as many for this
-    // made the two reasons' counts the same when a fault swapped the two.)
+    // A qualified bool tested at the bottom of a loop.
     "    do { local++; } while (local < 9 && cb);\n"
     // A bool's update that is a tested value lists its expression for its own row, the update's.
     "    if ((flag |= t) && a) local = 35;\n"
     // A block's every lane: a condition's records and their operands on either side of a block's end, and more than
     // 16 records evaluated as branches in a block (their list's second turn); with a narrow value's test of four
-    // entries, a do's sense, and the one it lists.
+    // entries, a do's sense and a qualified bool.
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    if (a && c) local++;\n")
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    if ((a || !b) && (h || p)) local++;\n")
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    do { local++; } while (!a && (b || !c));\n")
@@ -6940,13 +6937,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, node_rows_test_tables(), "node-rows: each shape's row has its length's entries, and no class's source where the rows' write resolves none");
     static const NodeRowsExpected rows_expected = {
         .expressions = 1379,
-        .taken = 1165,
-        .entries = 9509,
+        .taken = 1233,
+        .entries = 10123,
         .listed_update = 133,
-        .listed_branches = 69,
+        .listed_branches = 1,
         .listed_conversion = 10,
         .listed_floating = 2,
-        .written = 11147,
+        .written = 11143,
         .words = 405,
         .lines = 625,
         .updates = 681,
@@ -6956,13 +6953,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
             [BUSTER_NODE_ROWS_LIST_STORED] = 380,
             [BUSTER_NODE_ROWS_LIST_CONSTANT] = 115,
             [BUSTER_NODE_ROWS_LIST_STRIDE] = 31,
-            [BUSTER_NODE_ROWS_LIST_CONTROLLED] = 521,
+            [BUSTER_NODE_ROWS_LIST_CONTROLLED] = 590,
             [BUSTER_NODE_ROWS_LIST_REST] = 13,
             [BUSTER_NODE_ROWS_LIST_SECOND] = 68,
         },
         .numbered = 68,
         .steps = 473,
-        .control_valued = 291,
+        .control_valued = 308,
         .chunks = 9,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows.c", node_rows_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_expected),
