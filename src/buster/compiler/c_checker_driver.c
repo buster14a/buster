@@ -13698,8 +13698,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     // the internal functions used but never defined, unless an error has occurred (clang's
                     // hasErrorOccurred, which counts a warning -Werror promotes); the tentative arrays' warnings; then, again
                     // unless an error has occurred, a promoted one among those included, the unused file-scope declarations'.
+                    // A unit with lazily deferred bodies has them too, from the tokens that were read: a deferred body's
+                    // uses count for nothing, as its errors don't (check_warning_undefined_internal).
                     const bool final_warnings = pp->errors == 0 && !pp->fatal && program_checked && !prefix_only && !repairing && !parse_failed &&
-                                                input.deferred_tokens == NULL && !pp->diagnostic_collection_failed && !pp->history_failed;
+                                                !pp->diagnostic_collection_failed && !pp->history_failed;
                     if (final_warnings)
                     {
                         CheckInput undefined_input;
