@@ -148,9 +148,16 @@ library search never falls back to a `.so`.
 
 The existing direct linker still rejects nonempty user `-l` archives. This change
 does not implement general archive extraction beyond the runtime's own archives.
-`-fPIC` / `-shared` still require real preemption and shared-library TLS support
-(#811); `-shared` stays an unknown argument, so it can't take precedence over
-`-no-pie` as Clang's does. Stack-protector and control-flow-protection requests
+A link takes `-fPIC` and `-fpic` (#2101): its executable is the one it links
+without them (a PIE by default, or `-no-pie`'s, `-static`'s or
+`-static-pie`'s), and only interposition, which an executable's definitions
+don't have, tells their code from `-fPIE`'s. Its predefined macros are Clang's for
+the same options (`__PIC__` and `__pic__` 2 or 1, no `__PIE__`, the last of the
+eight PIC and PIE options deciding). `-c -fPIC` and `-shared` still require real
+preemption and shared-library TLS support (#811): `-c` refuses `-fPIC` and
+`-fpic` by name, since its object may go into another link, and `-shared` stays
+an unknown argument, so it can't take precedence over `-no-pie` as Clang's
+does. Stack-protector and control-flow-protection requests
 remain explicit refusals, not ignored security flags. `-S`, `-save-temps`, general object-input
 linking and macro-only forced includes (`-imacros`) are not added here. These
 limits mean **#1113 remains open**; dependency support alone does not make Buster

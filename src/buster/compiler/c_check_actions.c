@@ -532,6 +532,10 @@ static uint32_t check_wide_count(uint32_t width);
 static uint64_t* check_wide_allocate(uint32_t count);
 static void check_wide_publish(CheckValue* value, const uint64_t* limbs);
 static const uint64_t* check_wide_limbs(const CheckValue* value, uint32_t count);
+// Complex integer constants of elements past 64 bits (#2219, c_check_complex.c): their parts' limbs.
+static bool check_complex_wide_element(const TypeTable* table, TypeId element, uint32_t* width, bool* sign);
+static bool check_complex_wide_truth(const CheckValue* value, uint32_t width, bool* truth);
+static void check_complex_wide_publish(CheckValue* value, uint64_t* const parts[2]);
 
 static bool check_action_is_integer(const TypeTable* table, TypeId type)
 {
@@ -609,11 +613,22 @@ static bool check_action_truth(const TypeTable* table, const CheckValue* value, 
     else if (value->constant_kind == CHECK_CONSTANT_COMPLEX)
     {
         const TypeId element = type_element(table, type_strip_aligned(table, value->type));
-        // A _Complex __float128's parts are its bits (check_quad_complex_set): true where either is no zero.
+        // A _Complex __float128's parts are its bits (check_quad_complex_set): true where either is no zero. An integer
+        // element past 64 bits's are limbs (#2219).
         const bool quad = type_unqualified(type_strip_aligned(table, element)) == BUSTER_TYPE_FLOAT128;
-        *truth = check_action_is_integer(table, element) ? value->integer != 0 :
-                 quad ? ((value->integer | check_quad_complex_imaginary(value)) & ~BUSTER_CHECK_QUAD_SIGN) != 0 :
-                        value->floating != 0 || value->imaginary != 0;
+        uint32_t width = 0;
+        bool sign = false;
+        const bool integer = check_action_is_integer(table, element);
+        if (__builtin_expect(integer && check_complex_wide_element(table, element, &width, &sign), 0))
+        {
+            known &= check_complex_wide_truth(value, width, truth);
+        }
+        else
+        {
+            *truth = integer ? value->integer != 0 :
+                     quad ? ((value->integer | check_quad_complex_imaginary(value)) & ~BUSTER_CHECK_QUAD_SIGN) != 0 :
+                            value->floating != 0 || value->imaginary != 0;
+        }
     }
     else if (value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {
@@ -2374,6 +2389,63 @@ static void check_action_pointer_arithmetic(TypeTable* table, const CheckAction*
     }
 }
 
+// Distinct source objects compare unequal at interior addresses. Either may be one-past unless the other
+// address is its object's beginning. String literals can share storage with each other.
+static bool check_action_separate_objects(const TypeTable* table, const CheckContext* context, const CheckValue* left, const CheckValue* right)
+{
+    const CheckConstValues* values = context->const_values;
+    bool separate = values != NULL;
+    const CheckConstPart* strings[2] = { NULL, NULL };
+    const CheckValue* operands[2] = { left, right };
+    for (uint32_t i = 0; separate && i < 2; i += 1)
+    {
+        const CheckValue* address = operands[i];
+        const uint32_t id = address->object;
+        const bool declared = id != 0 && id <= values->declarations.count && values->declarations.objects[id - 1] == id;
+        // A declared object has a type even without an initializer. A string literal's completed array is
+        // registered with its storage size. A label or other synthetic base has neither proof.
+        TypeId type = declared ? values->declarations.types[id - 1] : 0;
+        if (!declared)
+        {
+            const CheckConstValues* owner = NULL;
+            const CheckConstObject* literal = check_const_find(values, id, context->source_position, &owner);
+            if (literal != NULL && literal->part_count == 1 && literal->part_first < owner->part_count && owner->parts != NULL)
+            {
+                const CheckConstPart* bytes = owner->parts + literal->part_first;
+                if (bytes->kind == CHECK_CONST_BYTES && bytes->bytes != NULL && bytes->bit_offset == 0 &&
+                    bytes->byte_count == literal->byte_size && bytes->bit_count == bytes->byte_count * 8)
+                {
+                    strings[i] = bytes;
+                    type = literal->type;
+                }
+            }
+        }
+        separate = type_is_valid(table, type);
+        if (separate)
+        {
+            const uint8_t kind = check_action_kind(table, type);
+            const uint64_t size = declared ? type_size(table, type) : strings[i]->byte_count;
+            const uint64_t offset = (uint64_t)address->offset;
+            separate = declared && kind == BUSTER_TYPE_KIND_FUNCTION ? offset == 0 :
+                       (declared || type_kind_is_array(kind)) && check_context_source_complete(table, type, context) &&
+                       size != 0 && (offset < size || (offset == size && operands[1 - i]->offset != 0));
+        }
+    }
+    if (separate && strings[0] != NULL && strings[1] != NULL)
+    {
+        // Equal pointers would align the bytes before and after each offset. A mismatch in their overlap
+        // disproves equality even with literal pooling; a matching overlap leaves the linker's choice open.
+        const uint64_t a = (uint64_t)left->offset;
+        const uint64_t b = (uint64_t)right->offset;
+        const uint64_t before = a < b ? a : b;
+        const uint64_t a_tail = strings[0]->byte_count - a;
+        const uint64_t b_tail = strings[1]->byte_count - b;
+        const uint64_t after = a_tail < b_tail ? a_tail : b_tail;
+        separate = memcmp(strings[0]->bytes + (a - before), strings[1]->bytes + (b - before), before + after) != 0;
+    }
+    return separate;
+}
+
 // Comparisons as clang's CheckCompareOperands has them in C, in every language mode: two pointers always compare,
 // with a warning for incompatible pointees (but for void and any pointee under equality), the right converted to the
 // left's type (the left to the right's when only the left is a null pointer constant). A pointer and an integer
@@ -2433,7 +2505,7 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
         result->value.type = BUSTER_TYPE_INT;
         check_action_inherit(&result->value, &left);
         check_action_inherit(&result->value, &right);
-        // Different objects can have equal one-past/beginning addresses. Leave their comparison to emitted code.
+        // Addresses with the same base compare by their displacements.
         if (left.constant_kind == CHECK_CONSTANT_ADDRESS && right.constant_kind == CHECK_CONSTANT_ADDRESS && left.object == right.object && (equality || left.object != 0) && result->value.fault == CHECK_FAULT_NONE)
         {
             bool answer = false;
@@ -2449,6 +2521,19 @@ static void check_action_pointer_compare(TypeTable* table, const CheckAction* ac
             }
             result->value.constant_kind = CHECK_CONSTANT_INTEGER;
             result->value.integer = answer;
+        }
+        else if (equality && action->context.constant_evaluated && left.constant_kind == CHECK_CONSTANT_ADDRESS &&
+                 right.constant_kind == CHECK_CONSTANT_ADDRESS && result->value.fault == CHECK_FAULT_NONE)
+        {
+            const bool left_nonnull = left.object != 0 && (left.flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0;
+            const bool right_nonnull = right.object != 0 && (right.flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0;
+            const bool against_null = (left_nonnull && right.object == 0 && right.offset == 0) ||
+                                      (right_nonnull && left.object == 0 && left.offset == 0);
+            if (against_null || (left_nonnull && right_nonnull && check_action_separate_objects(table, &action->context, &left, &right)))
+            {
+                result->value.constant_kind = CHECK_CONSTANT_INTEGER;
+                result->value.integer = action->op == CHECK_OP_NOT_EQUAL;
+            }
         }
     }
 }

@@ -150,6 +150,7 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
 }
 
 #include "c_check_label_order_driver_test.c"
+#include "c_check_suppress_recovery_driver_test.c"
 // #2449: a repeated function definition with an alias retains both declaration and body conflicts around the
 // alias handler's error. Original runtime cases include the neighbouring valid and one-error forms, late attributes,
 // C23 spelling and macros. Every rejected compile preserves an existing output, through either reader and deferred
@@ -1605,6 +1606,7 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     free(expected_lines);
     free(actual_lines);
     check_test_driver_attribute_recovery(test, clang, executable, directory);
+    check_test_driver_suppress_recovery(test, clang, executable, directory);
     check_test_driver_label_order(test, clang, executable, directory);
     check_test_driver_alias_redefinition(test, clang, executable, directory);
 }

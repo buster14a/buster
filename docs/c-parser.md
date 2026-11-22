@@ -272,6 +272,17 @@ assertion, at file scope and in a block, are its statement's markers
 (`parse_scalar_extension_assertion`), specifiers of no declaration to the
 checker (`check_input_extension_assertion`).
 
+Within a record, a leading `__extension__` instead begins declaration
+specifiers. A following `_Static_assert` therefore reports the missing type,
+missing member name and missing semicolon, in that order (#2409), and retains
+the rejected record's recovery boundary. The semicolon points before the
+assertion even though it is reported last. Macro expansion and argument
+origins follow each diagnostic's source range. Original runtime fixtures
+`tests/driver/assert_member_extension*.c`, run by
+`test-checker-driver --assert-diagnostics-only`, compare the complete errors
+and notes with Clang, including repeated markers, subsequent declarations,
+error limits and accepted file/block controls.
+
 It is the fallback for what the vector path flags and the parser of a unit with
 errors: the vector path sends the whole unit to it when the fallback finds one,
 so that its diagnostics are the scalar parser's alone. Until #2924 it was also

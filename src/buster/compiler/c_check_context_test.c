@@ -168,12 +168,12 @@ static void check_test_context_contract(CheckTest* test)
                     inherited &= check_graph_fp_contract(&graph, node) == policies[policy] && context.fp_environment == policies[policy];
                 }
                 check_test_expect(test, inherited, "new nodes inherit off/on/fast without a lexical policy allocation");
-                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+                for (uint32_t defined = 0; defined < 2; defined += 1)
                 {
                     CheckGraphValidation validation;
                     uint32_t failed;
-                    const bool valid = scalar ? check_graph_validate(&graph, pure, &validation, &failed) :
-                                                check_graph_validate_vector(&graph, pure, &validation, &failed);
+                    const bool valid = defined ? check_test_graph_validate_definition(&graph, pure, &validation, &failed) :
+                                                 check_graph_validate(&graph, pure, &validation, &failed);
                     check_test_expect(test, valid && failed == BUSTER_CHECK_NONE, "both graph validators accept every valid default at node-block boundaries");
                 }
             }
@@ -187,20 +187,20 @@ static void check_test_context_contract(CheckTest* test)
                 check_test_expect(test, check_graph_fp_contract(&graph, node) == policy && context.fp_environment == environments[node],
                                   "lexical off/on/fast replaces the default while preserving environment access and evaluation format");
             }
-            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            for (uint32_t defined = 0; defined < 2; defined += 1)
             {
                 CheckGraphValidation validation;
                 uint32_t failed;
-                const bool valid = scalar ? check_graph_validate(&graph, pure, &validation, &failed) :
-                                            check_graph_validate_vector(&graph, pure, &validation, &failed);
+                const bool valid = defined ? check_test_graph_validate_definition(&graph, pure, &validation, &failed) :
+                                             check_graph_validate(&graph, pure, &validation, &failed);
                 check_test_expect(test, valid, "both graph validators accept independent lexical contraction and floating environment settings");
                 if (graph.count != 0)
                 {
                     const uint32_t node = graph.count - 1;
                     const uint8_t saved = environments[node];
                     environments[node] |= BUSTER_CHECK_FP_CONTRACT_MASK;
-                    const bool invalid = scalar ? check_graph_validate(&graph, pure, &validation, &failed) :
-                                                  check_graph_validate_vector(&graph, pure, &validation, &failed);
+                    const bool invalid = defined ? check_test_graph_validate_definition(&graph, pure, &validation, &failed) :
+                                                   check_graph_validate(&graph, pure, &validation, &failed);
                     check_test_expect(test, !invalid && failed == node, "contradictory lexical contraction permissions fail at the exact node");
                     environments[node] = saved;
                 }
@@ -208,8 +208,8 @@ static void check_test_context_contract(CheckTest* test)
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_defaults); i += 1)
                 {
                     graph.fp_contract_default = invalid_defaults[i];
-                    const bool invalid = scalar ? check_graph_validate(&graph, pure, &validation, &failed) :
-                                                  check_graph_validate_vector(&graph, pure, &validation, &failed);
+                    const bool invalid = defined ? check_test_graph_validate_definition(&graph, pure, &validation, &failed) :
+                                                   check_graph_validate(&graph, pure, &validation, &failed);
                     check_test_expect(test, !invalid, "an invalid graph default is rejected even for an empty graph or a lexical override");
                 }
                 graph.fp_contract_default = BUSTER_CHECK_FP_CONTRACT_FAST;

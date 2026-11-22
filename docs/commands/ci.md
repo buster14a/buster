@@ -84,10 +84,10 @@ nothing, since the queue tested it before it landed.
   reports `Integration qualification` passed when the label is added, and `9700x.yml` skips the aggregate on the
   pull request's later pushes. Its candidate still runs everything. Use it for fixes that must land fast: a
   hotfix that fails does so in the queue, where it costs the entries behind it a rebuild.
-- **Accounting.** `ci-timings.yml` reports candidates by fate (merged,
-  passed but invalidated, failed, cancelled), with their runner-minutes, the
-  merged ones' wall time and their hosted jobs' waits for a runner
-  (`timings --queue`, #2031).
+- **Accounting.** `ci-timings.yml` reports outcomes separately from candidate
+  fate (merged, live, confirmed invalidated, unknown), all collected attempts'
+  runner-minutes, feedback/completion-proxy latency and hosted job queue waits
+  (`timings --accounting`, #2034). Failed reads do not prove invalidation.
 - **Policy pins.** `changes --self-test` pins the trigger, the concurrency
   group, the selector's routing, the auxiliary calls and the aggregate's
   coverage step. Its mutants include a path filter, another branch or type, a
@@ -366,6 +366,57 @@ Run `bash tests/ci/hosted-offline.sh` after changing any of these scripts. It
 is network-free, and the preparation job runs it. `hosted-inputs-drill.yml`
 runs a shard's setup, and a warm preparation, with those hosts down. Details,
 failure handling and recovery: [Offline inputs](../hosted-toolchain.md#offline-inputs-2275).
+
+## Deterministic work and growth contracts
+
+The correctness inventory's `Test deterministic work and growth contracts`
+heading (#2041) runs `bash tests/work-contracts/run.sh` on one CPU. Its small
+declared set runs in every applicable PR row and every merge candidate's full
+hosted coverage, with the row's host and sanitizer flags. Native correctness
+retains the same inventory.
+
+`work_contract.h` uses the existing tagged key/value report style:
+
+```text
+work-contract fixture=NAME size=N metric=NAME actual=COUNT bound=LIMIT semantic=pass|fail result=pass|fail
+```
+
+A record passes only when its semantic check passes and `actual <= bound`.
+Report write/flush failures fail the command too. The runner requires the
+complete declared record inventory and identical records on a second run;
+missing sizes, duplicate records or a crashed negative control cannot pass.
+Inputs are 256, 512 and 1024 (N, 2N and 4N). No elapsed-time or RSS value
+enters a verdict.
+
+| Fixture and counted operation | Bound and reason | Required useful result |
+| --- | --- | --- |
+| Dependency admission: actual filesystem probes (#1314) | At most 9N: up to three probes for each source, object and destination. Doubling N permits at most twice the probes. | Distinct destinations admitted; final source/object hard-link aliases, absent parent-directory aliases and dangling links refused with diagnostics; protected bytes unchanged; stdout requires no probes or storage. |
+| Dependency admission: identity comparisons | N × (32 + 20 × ceil(log2(2N))), including index construction; doubling N permits at most three times the work. This retains the existing driver's bounded sorting/search allowance. | The same admission controls, including conflicts at the end of the protected set. |
+| Dependency admission: retained arena bytes | N × (80 + 2 × sizeof(DependencyIdentity) + 6 × sizeof(identity pointer)) + three alignment boundaries: bounded names, two protected identities and their three index columns. Doubling permits twice the storage plus alignment. | The same admission controls; this metric describes retained arena demand, not RSS. |
+| SSA scoped loops: total requested construction bytes (#1353) | 4096N + 65536: 4 KiB per loop and 64 KiB fixed slack for topology, accesses, reusable local workspace and actual phis. The fixture has 3N+2 blocks, 8N instructions and 4N+1 edges; no blocks-times-locals table is needed. | Every local promoted with one two-input phi and independently known reaching values; all blocks reachable, input unchanged and scratch restored. Phi numbering may differ. |
+| SSA scoped loops: total requested verification bytes | The same linear allowance, charged separately from construction. | The independent SSA verifier accepts the complete result and restores scratch. |
+
+The dependency fixture reuses the driver's existing comparison API and
+independently counts actual `stat`/`lstat` calls. SSA wraps the real arena
+request functions only in its standalone translation unit: failed requests
+and requests later released by restoring scratch are still charged. Fixture
+generation and the fixture's own oracle buffers are outside those counters.
+
+The runner deliberately restores excessive work in temporary copies of the
+real implementations: linear dependency-index searches and dense SSA
+selection must fail the work bounds while every semantic check still passes.
+A third mutation skips overlap checks and must fail semantic verification
+despite doing less work. A source fragment that no longer matches fails the
+mutation setup rather than silently testing an unmodified implementation.
+
+The new instrumentation belongs only to standalone test builds, with no
+production-source edits. The runner checks the actual znver5 Release flags
+and production source inventory, then requires every test wrapper to refuse
+the production-unit flags. Existing optional dependency counters are unchanged;
+this guarantees no new counter code in benchmark builds. These contracts do not replace
+native performance measurements, existing timing guardrails or the focused
+SQLite object-change policy. Their counts constrain the stated operations,
+not CPU, cache or layout performance.
 
 ## Shard costs
 
@@ -656,21 +707,26 @@ the policy. In short:
 
 ## Queue and execution timing
 
-The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid, after
-the nightly window, and on manual dispatch. It samples the latest 100 main CI workflow runs and reports the
-median and nearest-rank p95 separately for PR, main-push, nightly targeted and
-full (daily, dispatched, snapshot) runs, a nightly backlog run told apart by its
-run name. Besides queue and execution, it reports the host's occupation, from
-the job's first step (after the runner hook took the lock) to its end. It also
-reports the shared lock's wait and hold, which it reads from the runner hooks'
-lines in each job's log. It keeps
-the raw API responses and normalized observations as workflow artifacts. It
-does not run benchmarks, weaken the hardware gate, or change any schedule.
+The hosted-only `CI latency report` workflow runs at 08:37 Europe/Madrid and
+on manual dispatch. `tools/ci/timings.sh` collects bounded API snapshots and
+`tools/ci/timings.c --accounting` reports all outcomes/collected attempts,
+first feedback and completion-proxy p50/p95, runner-minutes, reconciled phases,
+CPU classes, queue fate and finite-capacity limits. PR setup/build uses actual
+step spans and remains measurable without native tests. `Compare` and `Time`
+belong to measurement; missing timestamps remain unknown. Lock hold is an
+overlay, not an extra additive phase.
 
-Read `docs/ci.md` for metric definitions and limitations. In particular, the
-runner hook's step duration includes its overhead. The shared-lock wait and
-hold (`lock-wait`, `lock-hold`) come from the hooks' own log lines, which
-bracket the lock operations to within tens of milliseconds.
-Missing timestamps are unknown rather than zero. Run its network-free fixtures with
-`bash tests/ci/timings.sh`. Keep stored raw evidence in `buster-performance`, not
-in this repository's retired `docs/measurements` path.
+The default sample is 10 runs per workflow/event; a UTC split queries separate
+before/after windows. Collection uses bounded retries and records incomplete
+reads instead of dropping available evidence. Raw JSON, normalized facts,
+request/run receipts and the report are retained as workflow artifacts.
+`CI_TIMINGS_REPLAY=INPUT_DIRECTORY` regenerates a report in a different output
+directory without network calls. Actual account concurrency defaults to
+unknown and needs a dated administrative source; the report changes no
+scheduling or coverage policy. Backlog age links and quotes the existing
+#1439 nightly report rather than creating another ledger.
+
+Read [the metric definitions, configuration and replay recipe](../ci.md#ci-latency-baseline)
+before interpreting results. Run `bash tests/ci/timings.sh` for the network-free
+regressions. Store raw live evidence in `buster-performance`, not this
+repository's retired `docs/measurements` path.

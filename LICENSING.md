@@ -23,7 +23,8 @@ material:
   RAD Debugger notice.
 - The Unicode character names' table, `c_unicode_names.inc`, is derived
   Unicode data under the Unicode License V3, and `c_unicode_names.c`, a C
-  translation of LLVM routines, keeps LLVM's terms.
+  translation of LLVM routines, keeps LLVM's terms, as do the column widths'
+  ranges copied from LLVM, `c_unicode_widths.inc`, with the Unicode notice.
 - `xxh3_short.c`, a C translation of xxHash's XXH3 hash for short inputs, is
   provided under xxHash's BSD 2-Clause License with its retained notice.
 - The identified benchmark helpers retain MIT; the surrounding original

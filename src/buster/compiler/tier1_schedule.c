@@ -11,7 +11,7 @@
 // floating operations move among the other records. An adjacent cmp/test and conditional branch remains adjacent.
 // The weighted heights are priorities, not cycle predictions: a register's or a flag's RAW edge carries the writer's
 // measured latency, or its class's weight where the model has none (tier1_schedule_weight); a barrier's is zero.
-// AVX-512 resolves effects, compares eight prior records at once and reduces contiguous height columns by level; the
+// AVX-512 resolves effects, compares eight prior records at once and reduces successor levels and heights; the
 // list scheduler breaks equal priorities by original position.
 // tier1_schedule_verify independently reconstructs scalar effects and checks the resulting permutation, the register
 // and memory hazards and each flag's reaching writers. The C driver's --tier1-schedule=post runs it on every block of
@@ -267,50 +267,39 @@ static void tier1_schedule_pending(uint64_t* pending, uint32_t count)
 
 static void tier1_schedule_heights_vector(Tier1ScheduleGraph* graph, uint32_t count, Tier1ScheduleStats* stats)
 {
-    uint64_t pending[BUSTER_TIER1_SCHEDULE_WORDS];
-    tier1_schedule_pending(pending, count);
+    uint16_t max_level = 0;
     const uint32_t words = (count + 63) / 64;
-    uint32_t left = count;
-    uint16_t level = 0;
-    while (left != 0)
+    // Each edge goes from a prior record to a later one. In reverse order every selected lane is already final.
+    for (uint32_t remaining = count; remaining != 0; remaining -= 1)
     {
-        uint64_t frontier[BUSTER_TIER1_SCHEDULE_WORDS] = { 0 };
-        for (uint32_t current = 0; current < count; current += 1)
+        const uint32_t current = remaining - 1;
+        const bool movable = graph->barriers[current] == 0;
+        __m256i levels = _mm256_setzero_si256();
+        __m512i heights = _mm512_setzero_si512();
+        for (uint32_t word = remaining / 64; word < words; word += 1)
         {
-            const uint64_t bit = UINT64_C(1) << (current & 63);
-            if ((pending[current / 64] & bit) && !tier1_schedule_intersects(graph->successors[current], pending, words))
+            uint64_t successors = graph->successors[current][word];
+            uint64_t data = movable ? graph->data_successors[current][word] : 0;
+            for (uint32_t first = word * 64; successors != 0; first += 16)
             {
-                frontier[current / 64] |= bit;
-            }
-        }
-        level += 1;
-        // Every successor of this frontier belongs to an earlier, completed level. No gather or padded read is needed.
-        for (uint32_t word = 0; word < words; word += 1)
-        {
-            uint64_t nodes = frontier[word];
-            while (nodes != 0)
-            {
-                const uint32_t current = word * 64 + (uint32_t)__builtin_ctzll(nodes);
-                uint32_t height = 0;
-                if (!graph->barriers[current])
+                if ((__mmask16)successors != 0)
                 {
-                    __m512i maxima = _mm512_setzero_si512();
-                    for (uint32_t first = 0; first < count; first += 16)
-                    {
-                        const __mmask16 successors = (__mmask16)(graph->data_successors[current][first / 64] >> (first & 63));
-                        maxima = _mm512_max_epu32(maxima, _mm512_maskz_loadu_epi32(successors, graph->heights + first));
-                    }
-                    height = _mm512_reduce_max_epu32(maxima) + graph->latencies[current];
+                    levels = _mm256_max_epu16(levels, _mm256_maskz_loadu_epi16((__mmask16)successors, graph->levels + first));
                 }
-                graph->heights[current] = height;
-                graph->levels[current] = level;
-                nodes &= nodes - 1;
-                left -= 1;
+                if ((__mmask16)data != 0)
+                {
+                    heights = _mm512_max_epu32(heights, _mm512_maskz_loadu_epi32((__mmask16)data, graph->heights + first));
+                }
+                successors >>= 16;
+                data >>= 16;
             }
-            pending[word] &= ~frontier[word];
         }
+        const uint16_t level = 1 + _mm256_reduce_max_epu16(levels);
+        graph->levels[current] = level;
+        graph->heights[current] = movable ? graph->latencies[current] + _mm512_reduce_max_epu32(heights) : 0;
+        max_level = level > max_level ? level : max_level;
     }
-    stats->levels = level;
+    stats->levels = max_level;
 }
 
 static void tier1_schedule_order(const Tier1ScheduleGraph* graph, uint32_t count, uint16_t* order, Tier1ScheduleStats* stats)

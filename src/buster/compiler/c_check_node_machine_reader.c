@@ -81,7 +81,7 @@ static struct NodeFactsReader* node_facts_reader_begin(CheckInputReader* reader,
 // What the reference's C did with the expression at hand, for C on the window (BUSTER_NODE_READER_WINDOW_CONTEXTS):
 // whether it ran (0: it didn't; 1: it took the expression; 2: it refused it for a template), its ticks, and the
 // root's target.
-static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target);
+static void node_facts_reader_contexts(struct NodeFactsReader* state, uint8_t ran, uint64_t ticks, TypeId target, bool sense);
 static void node_facts_reader_rows(struct NodeFactsReader* state, uint64_t ticks);
 static void node_facts_reader_expression(struct NodeFactsReader* state, const NodeFront* front, uint32_t first, uint32_t root, uint32_t count, uint32_t record,
                                          uint32_t operand, bool taken);
@@ -177,7 +177,8 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
 // whether there was room. The program's columns T reads are made from the input's as the program makes them, into
 // `declarations` and `facts` (the caller's, an entry an object: the unit's token count and one): each static object's
 // last declaration (check_program_static_objects' visit, its returns_twice by check_program_static_object's test) and
-// the objects with an asm label (check_program_labelled_objects' test); and the names that return twice from
+// the objects with an asm label the asm pass will keep (check_program_labelled_objects' test of the labels
+// check_input_asm_labels leaves); and the names that return twice from
 // `identifiers` (check_lower_twice_names'). `symbols` (the caller's too) is what stands for the objects' symbols: each
 // object with a static declaration has itself there, the others 0.
 static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* input, const Parser* parser, TypeTable* types, const CheckGraph* graph,
@@ -193,6 +194,8 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
     };
     const uint32_t late = types->types.capacity - types->types.count < BUSTER_NODE_MACHINE_LATE_TYPES ? types->types.capacity - types->types.count : BUSTER_NODE_MACHINE_LATE_TYPES;
     const bool room = node_machine_setup(machine, types, graph, types->types.count + late, false, verify, arena);
+    machine->overloads = node_machine_overloads(input, graph);
+    machine->renames = node_machine_renames(input);
     machine->reader_declarations = declarations;
     machine->reader_facts = facts;
     if (room)
@@ -207,6 +210,7 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
             if (object != 0 && object <= count)
             {
                 const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+                machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_DECLARED;
                 if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
                 {
                     machine->reader_declarations[object] = token;
@@ -214,10 +218,16 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
                     const uint32_t bits = attributes != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_program_attribute_bits(attributes) : 0;
                     machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_TWICE : 0;
                 }
-                if (input->asm_capacity != 0 && attributes != NULL && check_input_attribute_of(attributes, CHECK_ATTRIBUTE_ASM_LABEL) != NULL)
+                // The asm pass, which runs after the bodies, ignores a label on a declaration of an object that a
+                // declaration before it defines, where none before it kept a label (check_input_asm_labels): the same of
+                // the declarations in their order (#3207). A label kept before stays the object's whatever this one's
+                // fate, and a register variable, whose label the pass never asks, has one declaration.
+                const bool kept = (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_DEFINED) == 0;
+                if (input->asm_capacity != 0 && attributes != NULL && check_input_attribute_of(attributes, CHECK_ATTRIBUTE_ASM_LABEL) != NULL && kept)
                 {
                     machine->reader_facts[object] |= BUSTER_NODE_MACHINE_OBJECT_LABELLED;
                 }
+                machine->reader_facts[object] |= check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) ? BUSTER_NODE_MACHINE_OBJECT_DEFINED : 0;
             }
         }
         for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
@@ -364,7 +374,16 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
     uint64_t* tests = tested ? arena_push_array(reader->arena, capacity, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
     uint8_t* kinds = tested ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
     TypeId* declared = tested ? arena_push_array(reader->arena, capacity, sizeof(TypeId), _Alignof(TypeId)) : NULL;
-    room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL));
+    uint32_t* root_declarations = tested ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    room = room && (!tested || (tests != NULL && kinds != NULL && declared != NULL && root_declarations != NULL));
+    // A summary's side facts by root node, and their references' store: no expression has more references than
+    // leaves, and each switch's additional selector type has its own promotion node, so a word a node is room for all.
+    const bool summaries = (options & BUSTER_NODE_READER_WINDOW_ROWS) != 0;
+    uint32_t* summary_firsts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    uint16_t* summary_counts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint16_t), _Alignof(uint16_t)) : NULL;
+    uint8_t* summary_facts = summaries ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
+    uint32_t* summary_words = summaries ? arena_push_array(reader->arena, (uint64_t)capacity + 1, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+    room = room && (!summaries || (summary_firsts != NULL && summary_counts != NULL && summary_facts != NULL && summary_words != NULL));
     if (room)
     {
         typer->graph = reader->output->graph;
@@ -403,11 +422,21 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         types->tape_values = tape_values;
         types->tape_capacity = tape_capacity;
         types->node_capacity = capacity;
+        if (summaries)
+        {
+            memset(summary_firsts, 0xff, (uint64_t)capacity * sizeof(uint32_t));
+            types->summary_firsts = summary_firsts;
+            types->summary_counts = summary_counts;
+            types->summary_facts = summary_facts;
+            types->summary_words = summary_words;
+            types->summary_capacity = capacity;
+        }
         if (tested)
         {
             types->tests = tests;
             types->kinds = kinds;
             types->declared = declared;
+            types->declarations = root_declarations;
             typer->tests = node_census_reader_begin(reader, &typer->machine, types, capacity);
             room = typer->tests != NULL;
         }
@@ -538,7 +567,11 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                 else if (root < types->node_capacity && inner <= root && size != 0 && size <= inner + 1)
                 {
                     const uint32_t first = inner + 1 - size;
-                    const NodeMachineRefusal refusal = node_machine_type(machine, first, root, records);
+                    // T types an initializer's value without its INITIALIZE record. The token's mark supplies that
+                    // record's VALUE context even when the outer node lies beyond the shadow's capacity.
+                    const uint32_t initializer = front->tokens[record];
+                    const bool required = initialization && initializer < reader->parser->tokens.count && BUSTER_CHECK_RARE(reader, static_initializers, initializer);
+                    const NodeMachineRefusal refusal = node_machine_type_in_context(machine, first, root, records, required);
                     if (pass != 0)
                     {
                         types->digests[root] = node_machine_digest(machine, refusal);
@@ -556,7 +589,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     NodeMachineRefusal swept = NODE_MACHINE_TAKEN;
                     if (typer->facts != NULL)
                     {
-                        node_facts_reader_contexts(typer->facts, BUSTER_NODE_CONTEXTS_RAN_NONE, 0, 0);
+                        node_facts_reader_contexts(typer->facts, BUSTER_NODE_CONTEXTS_RAN_NONE, 0, 0, false);
                     }
                     for (uint32_t step = 0; step < 2; step += 1)
                     {
@@ -574,6 +607,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                             types->tests[root] = verdict;
                             types->kinds[root] = kind;
                             types->declared[root] = declared;
+                            types->declarations[root] = declaration;
                             types->tested += 1;
                             types->tested_refused += verdict != 0;
                             types->tested_first[verdict != 0 ? (uint32_t)__builtin_ctzll(verdict) : 63] += verdict != 0;
@@ -596,7 +630,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         {
                             // The reference of C on the window: this run's answers, which the kernel's hook below keeps.
                             const uint8_t ran = swept == NODE_MACHINE_TAKEN ? BUSTER_NODE_CONTEXTS_RAN_TAKEN : BUSTER_NODE_CONTEXTS_RAN_REFUSED;
-                            node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target);
+                            node_facts_reader_contexts(typer->facts, ran, __rdtsc() - contexts_start, target, (context & BUSTER_NODE_MACHINE_ROOT_BRANCH_TRUE) != 0);
                         }
                         const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;

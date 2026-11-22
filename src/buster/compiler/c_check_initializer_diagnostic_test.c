@@ -38,7 +38,7 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
             input_valid = check_input(&input, &parser, &pp, &types.table, &input_arena, &scratch);
             ready = !input.resource && (input_valid || input.diagnostic_graph);
         }
-        const CheckOptions options = { .scalar = path == 0 };
+        const CheckOptions options = { 0 };
         CheckStream stream = { 0 };
         ready = ready && check_graph_run(&types.table, &input.graph, &stream_arena, &scratch, &options, &stream);
         uint8_t* prefix = ready ? BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 64) : 0;
@@ -184,7 +184,7 @@ static void check_init_test_diagnostic_capacity(CheckTest* test)
         Arena scratch = arena_reserve(UINT64_C(1) << 22);
         Arena semantic_arena = arena_reserve(UINT64_C(1) << 20);
         const ParseOptions parsing = { .scalar = path == 0 };
-        const CheckOptions checking = { .scalar = path == 0 };
+        const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
         CheckStream stream = { 0 };
         bool ready = output.capacity >= 4096 && check_test_types_open(&types) && parse_initialize(&parser, &parsing, preprocessing.language) &&

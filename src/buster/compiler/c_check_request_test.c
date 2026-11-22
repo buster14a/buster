@@ -9,7 +9,8 @@
 //   refusal and its option, the arguments that go on to the preprocessor, an option's value or an input after -- never
 //   read as an option, and a refused or unreadable request (an arena without room, an option without its value after
 //   pp_parse_options filled the fields of the options before it) leaving its configuration all zero; then the driver on
-//   each list, by -c and by -fsyntax-only, whose exit status and first line of errors must be check_request_describe's;
+//   each list, by -c, by a link (which takes -fPIC and -fpic, #2101) and by -fsyntax-only, whose exit status and first
+//   line of errors must be check_request_describe's;
 // - the program's options: check_request_program_options takes the identifiers, the target and the predefines from
 //   the preprocessor and keeps the unit's own fields;
 // - receipts: one file prepared twice gives the same digest and text; another -march, -D, -funsigned-char, --scalar,
@@ -104,8 +105,10 @@ struct CheckRequestTestRefusal
     const char* label;
     // The options before the file, ended by null.
     const char* options[5];
-    // Whether the client emits code, as -c does.
+    // Whether the client emits code, as -c does, and whether it links that code into an executable, as the driver does
+    // without -c (CHECK_REQUEST_CODE_EXECUTABLE, which `emits` goes with).
     bool emits;
+    bool links;
     CheckRequestError error;
     // The option the refusal names, or null.
     const char* option;
@@ -157,10 +160,19 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
           .passed = 1 },
         { .label = "-fcf-protection=none last", .options = { "-fcf-protection", "-fcf-protection=none", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED,
           .passed = 2 },
-        { .label = "-fPIC for code", .options = { "-fPIC", 0 }, .emits = true, .error = CHECK_REQUEST_PIC, .option = "-fPIC", .passed = 1 },
-        { .label = "-fpic for code", .options = { "-fpic", 0 }, .emits = true, .error = CHECK_REQUEST_PIC, .option = "-fpic", .passed = 1 },
+        { .label = "-fPIC for an object", .options = { "-fPIC", 0 }, .emits = true, .error = CHECK_REQUEST_PIC, .option = "-fPIC", .passed = 1 },
+        { .label = "-fpic for an object", .options = { "-fpic", 0 }, .emits = true, .error = CHECK_REQUEST_PIC, .option = "-fpic", .passed = 1 },
         { .label = "-fPIC without code", .options = { "-fPIC", 0 }, .emits = false, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
         { .label = "-fPIC turned off again", .options = { "-fPIC", "-fno-pic", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 2 },
+        { .label = "-fPIC for a link (#2101)", .options = { "-fPIC", 0 }, .emits = true, .links = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
+        { .label = "-fpic for a link (#2101)", .options = { "-fpic", 0 }, .emits = true, .links = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 1 },
+        { .label = "-fPIE after -fPIC for a link", .options = { "-fPIC", "-fPIE", 0 }, .emits = true, .links = true, .error = CHECK_REQUEST_ACCEPTED, .passed = 2 },
+        { .label = "a layout beside PIC for a link", .options = { "-fshort-enums", "-fPIC", 0 }, .emits = true, .links = true, .error = CHECK_REQUEST_LAYOUT,
+          .option = "-fshort-enums", .passed = 2 },
+        { .label = "instrumentation beside PIC for a link", .options = { "-fPIC", "-fopenmp", 0 }, .emits = true, .links = true, .error = CHECK_REQUEST_OPENMP,
+          .option = "-fopenmp", .passed = 2 },
+        { .label = "a hidden default visibility beside PIC for a link", .options = { "-fPIC", "-fvisibility=hidden", 0 }, .emits = true, .links = true,
+          .error = CHECK_REQUEST_CODEGEN, .option = "-fvisibility=hidden", .passed = 2 },
         { .label = "-fshort-enums", .options = { "-fshort-enums", 0 }, .emits = false, .error = CHECK_REQUEST_LAYOUT, .option = "-fshort-enums", .passed = 1 },
         { .label = "-fshort-enums turned off again", .options = { "-fshort-enums", "-fno-short-enums", 0 }, .emits = true, .error = CHECK_REQUEST_ACCEPTED,
           .passed = 2 },
@@ -219,8 +231,10 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
     };
     char errors_path[PATH_MAX];
     char object_path[PATH_MAX];
+    char executable_path[PATH_MAX];
     snprintf(errors_path, sizeof(errors_path), "%s/errors.txt", directory);
     snprintf(object_path, sizeof(object_path), "%s/refusal.o", directory);
+    snprintf(executable_path, sizeof(executable_path), "%s/refusal", directory);
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         const CheckRequestTestRefusal* item = cases + c;
@@ -245,7 +259,8 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
         memset(&parsed, 0xa5, sizeof(parsed));
         CheckRequestRefusal refusal = { 0 };
         const char* input = "poisoned";
-        const bool accepted = arena.base != 0 && check_request_parse(&parsed, &refusal, &input, file, options, count, item->emits, &arena);
+        const CheckRequestCode code = item->links ? CHECK_REQUEST_CODE_EXECUTABLE : item->emits ? CHECK_REQUEST_CODE_OBJECT : CHECK_REQUEST_CODE_NONE;
+        const bool accepted = arena.base != 0 && check_request_parse(&parsed, &refusal, &input, file, options, count, code, &arena);
         const char* named = check_request_named(&refusal);
         const bool option = item->option == 0 ? named == 0 : named != 0 && strcmp(named, item->option) == 0;
         const bool zero = accepted ? parsed.semantic_pragmas && input == file : check_request_test_zero(&parsed, sizeof(parsed)) && input == 0;
@@ -255,14 +270,17 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
         check_test_expect(test, accepted == (item->error == CHECK_REQUEST_ACCEPTED) && refusal.error == item->error && option && zero && passed == item->passed,
                           label);
         arena_release(&arena);
-        // The driver on the same options: -c for a client that emits, -fsyntax-only otherwise.
+        // The driver on the same options: a link for a client that links, -c for one that emits, -fsyntax-only otherwise.
         char* arguments[16];
         uint32_t argument_count = 0;
-        arguments[argument_count++] = item->emits ? "-c" : "-fsyntax-only";
+        if (!item->links)
+        {
+            arguments[argument_count++] = item->emits ? "-c" : "-fsyntax-only";
+        }
         if (item->emits)
         {
             arguments[argument_count++] = "-o";
-            arguments[argument_count++] = object_path;
+            arguments[argument_count++] = item->links ? executable_path : object_path;
         }
         arguments[argument_count++] = "-nostdinc";
         for (uint32_t i = 0; i < count; i += 1)
@@ -287,7 +305,8 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
         }
         const bool driven = text != NULL && status == (item->error == CHECK_REQUEST_ACCEPTED ? 0 : 1) && length == strlen(expected) &&
                             memcmp(text, expected, length) == 0;
-        snprintf(label, sizeof(label), "request: %s: the driver's %s %s it with the same message", item->label, item->emits ? "-c" : "-fsyntax-only",
+        const char* command = item->links ? "link" : item->emits ? "-c" : "-fsyntax-only";
+        snprintf(label, sizeof(label), "request: %s: the driver's %s %s it with the same message", item->label, command,
                  item->error == CHECK_REQUEST_ACCEPTED ? "accepts" : "refuses");
         check_test_expect(test, driven, label);
         if (!driven)
@@ -306,19 +325,20 @@ static void check_test_request_refusals(CheckTest* test, const char* directory, 
     const char* input = "poisoned";
     Arena empty = { 0 };
     char* plain[] = { "-DVALUE=1" };
-    bool read = check_request_parse(&parsed, &refusal, &input, file, plain, 1, true, &empty);
+    bool read = check_request_parse(&parsed, &refusal, &input, file, plain, 1, CHECK_REQUEST_CODE_OBJECT, &empty);
     check_test_expect(test, !read && refusal.error == CHECK_REQUEST_ACCEPTED && check_request_test_zero(&parsed, sizeof(parsed)) && input == 0,
                       "request: no room for its arguments leaves a zero configuration, unrefused");
     Arena arena = arena_reserve(UINT64_C(1) << 24);
     char* malformed[] = { "-I", "include", "-DVALUE=1", "-include" };
     memset(&parsed, 0xa5, sizeof(parsed));
     input = "poisoned";
-    read = arena.base != 0 && check_request_parse(&parsed, &refusal, &input, file, malformed, BUSTER_ARRAY_LENGTH(malformed), true, &arena);
+    read = arena.base != 0 && check_request_parse(&parsed, &refusal, &input, file, malformed, BUSTER_ARRAY_LENGTH(malformed), CHECK_REQUEST_CODE_OBJECT, &arena);
     check_test_expect(test, !read && refusal.error == CHECK_REQUEST_ACCEPTED && check_request_test_zero(&parsed, sizeof(parsed)) && input == 0,
                       "request: an option without its value leaves a zero configuration, though the options before it were read");
     arena_release(&arena);
     unlink(errors_path);
     unlink(object_path);
+    unlink(executable_path);
 }
 
 // check_request_read, the reading of a client's own arguments with the file among them (benchmark-checker-source's and
@@ -333,7 +353,7 @@ static void check_test_request_read(CheckTest* test, const char* file)
     const char* input = "poisoned";
     char* mixed[] = { "-DVALUE=2", (char*)file, "-I", "-pg", "-nostdinc" };
     memset(&parsed, 0xa5, sizeof(parsed));
-    bool read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, mixed, BUSTER_ARRAY_LENGTH(mixed), false, &arena);
+    bool read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, mixed, BUSTER_ARRAY_LENGTH(mixed), CHECK_REQUEST_CODE_NONE, &arena);
     check_test_expect(test, read && input == file && refusal.error == CHECK_REQUEST_ACCEPTED && parsed.semantic_pragmas && parsed.macro_count == 1 &&
                             strcmp(parsed.macros[0], "DVALUE=2") == 0 && parsed.include_directory_count == 1 && strcmp(parsed.include_directories[0], "-pg") == 0 &&
                             parsed.no_standard_includes,
@@ -341,27 +361,27 @@ static void check_test_request_read(CheckTest* test, const char* file)
     char* output[] = { "-DVALUE=2", "-o", "out.o", (char*)file };
     memset(&parsed, 0xa5, sizeof(parsed));
     input = "poisoned";
-    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, output, BUSTER_ARRAY_LENGTH(output), false, &arena);
+    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, output, BUSTER_ARRAY_LENGTH(output), CHECK_REQUEST_CODE_NONE, &arena);
     check_test_expect(test, !read && input == 0 && refusal.error == CHECK_REQUEST_ACCEPTED && check_request_test_zero(&parsed, sizeof(parsed)),
                       "request: check_request_read refuses -o and leaves a zero configuration");
     char* refused[] = { (char*)file, "-fshort-enums", "-ftls-model=initial-exec" };
     memset(&parsed, 0xa5, sizeof(parsed));
     input = "poisoned";
-    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, refused, BUSTER_ARRAY_LENGTH(refused), false, &arena);
+    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, refused, BUSTER_ARRAY_LENGTH(refused), CHECK_REQUEST_CODE_NONE, &arena);
     check_test_expect(test, !read && input == 0 && refusal.error == CHECK_REQUEST_CODEGEN && strcmp(refusal.option, "-ftls-model=initial-exec") == 0 &&
                             check_request_test_zero(&parsed, sizeof(parsed)),
                       "request: check_request_read refuses code generation before the layout, before parsing");
     char* ended[] = { "-nostdinc", "--", "-fshort-enums" };
     memset(&parsed, 0xa5, sizeof(parsed));
     input = "poisoned";
-    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, ended, BUSTER_ARRAY_LENGTH(ended), false, &arena);
+    read = arena.base != 0 && check_request_read(&parsed, &refusal, &input, ended, BUSTER_ARRAY_LENGTH(ended), CHECK_REQUEST_CODE_NONE, &arena);
     check_test_expect(test, read && input != 0 && strcmp(input, "-fshort-enums") == 0 && refusal.error == CHECK_REQUEST_ACCEPTED && parsed.no_standard_includes,
                       "request: check_request_read takes an argument after -- as the input, never as a refused option");
     Arena empty = { 0 };
     char* plain[] = { (char*)file };
     memset(&parsed, 0xa5, sizeof(parsed));
     input = "poisoned";
-    read = check_request_read(&parsed, &refusal, &input, plain, 1, false, &empty);
+    read = check_request_read(&parsed, &refusal, &input, plain, 1, CHECK_REQUEST_CODE_NONE, &empty);
     check_test_expect(test, !read && input == 0 && refusal.error == CHECK_REQUEST_ACCEPTED && check_request_test_zero(&parsed, sizeof(parsed)),
                       "request: check_request_read without room for its arguments leaves a zero configuration, unrefused");
     arena_release(&arena);
@@ -621,6 +641,10 @@ static void check_test_request_parity(CheckTest* test, const char* directory)
         { .label = "an always_inline callee's target the caller lacks", .fixture = 5, .options = { "-nostdinc", 0 }, .outcome = 2 },
         { .label = "an always_inline callee's target the unit has", .fixture = 5, .options = { "-nostdinc", "-march=x86-64-v3", 0 } },
         { .label = "a layout the checker doesn't implement", .fixture = 0, .options = { "-nostdinc", "-fshort-enums", 0 }, .outcome = 3 },
+        // The source clients compile as -c does, whose object may go into another link: -fPIC and -fpic, which a link's
+        // executable takes, are refused for it (#2101).
+        { .label = "-fPIC, which -c refuses", .fixture = 0, .options = { "-nostdinc", "-fPIC", 0 }, .outcome = 3 },
+        { .label = "-fpic, which -c refuses", .fixture = 0, .options = { "-nostdinc", "-fpic", 0 }, .outcome = 3 },
         { .label = "scalar code for the baseline, again last", .fixture = 0, .options = { "-nostdinc", 0 } },
     };
     char paths[FIXTURES][PATH_MAX];

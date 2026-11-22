@@ -42,7 +42,7 @@ static __attribute__((unused)) __m512i foreign_order_values(const uint64_t* keys
 // The high half is the complete checked first-record ordinal, the low half the opaque name ID. Stable byte radix
 // count/place/fill, with the same conflict/rank scheme as this project's c_bindings_sort. The scalar twin takes all
 // four digits; vector skips only digits proved constant while keys were packed. IDs never break an ordinal tie:
-// distinct names cannot have the same first record. Both buffers own count entries and stay alive through copying.
+// distinct names cannot have the same first record. Return the buffer holding the last completed pass.
 static uint64_t* foreign_order_sort(uint64_t* keys, uint64_t* temporary, uint32_t count, ForeignPath path, uint32_t varying)
 {
     uint64_t* input = keys;
@@ -125,8 +125,7 @@ static bool foreign_name_order(ForeignNames* names, Arena* arena, ForeignPath pa
 {
     Scratch scratch = scratch_begin(arena);
     uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)names->count + 1);
-    uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)names->count + 1);
-    bool result = keys != 0 && temporary != 0;
+    bool result = keys != 0;
     uint32_t regular = 0;
     for (uint32_t id = 0; result && id < names->count; id += 1)
     {
@@ -146,12 +145,20 @@ static bool foreign_name_order(ForeignNames* names, Arena* arena, ForeignPath pa
         any[class] |= ordinal;
         every[class] &= ordinal;
     }
+    // All raw keys are consumed. Each class can now alternate between its scratch and permanent ranges.
     for (uint32_t class = 0; result && class < 2; class += 1)
     {
         const uint32_t begin = class == 0 ? 0 : regular;
         const uint32_t count = class == 0 ? regular : names->count - regular;
-        const uint64_t* sorted = foreign_order_sort(keys + begin, temporary + begin, count, path, any[class] ^ every[class]);
-        memcpy(names->order + begin, sorted, (uint64_t)count * sizeof(uint64_t));
+        if (count != 0)
+        {
+            uint64_t* order = names->order + begin;
+            const uint64_t* sorted = foreign_order_sort(keys + begin, order, count, path, any[class] ^ every[class]);
+            if (sorted != order)
+            {
+                memcpy(order, sorted, (uint64_t)count * sizeof(*order));
+            }
+        }
     }
     scratch_end(scratch);
     return result;

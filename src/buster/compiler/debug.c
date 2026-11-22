@@ -7,12 +7,12 @@
 // inline scopes and CFI are separate interfaces; this module does not infer them from machine instructions.
 //
 // Rows are contiguous columns, with each function owning its next row range; offsets are nondecreasing and less than
-// the function size. Files are zero-based, lines are in [0, INT32_MAX], and a sequence has one file. The line program
-// explicitly selects that file, avoiding DWARF 5's initial file register of 1. Functions need not be in address order.
+// the function size. Files are zero-based and lines are in [0, INT32_MAX]. Each sequence explicitly selects its file,
+// avoiding DWARF 5's initial file register of 1. Functions need not be in address order.
 // A function may mark the row where its body starts (DebugFunction.prologue_end): DW_LNS_set_prologue_end before that
 // row, where gdb and lldb put a breakpoint on the function.
-// Four rows at a time: form the address/line deltas, spread their seven-bit groups with vpmultishiftqb, select their
-// valid bytes and compact directly into the line program. No temporary encoded rows or per-row allocations. The
+// Four rows at a time: write fitting address/line deltas as special opcodes. For other deltas, spread the seven-bit
+// groups with vpmultishiftqb and compact each row's bytes into the line program. No per-row allocations. The
 // exact path independently writes each opcode and LEB128 value; tails use it too. All vector loads/stores are bounded.
 //
 // The caller owns every slice and keeps input and output disjoint. No padding is read or written. Empty units are
@@ -30,6 +30,9 @@
 
 #define BUSTER_DEBUG_SECTIONS 5
 #define BUSTER_DEBUG_DWARF32_LIMIT 0xfffffff0u
+#define BUSTER_DEBUG_LINE_BASE (-5)
+#define BUSTER_DEBUG_LINE_RANGE 14
+#define BUSTER_DEBUG_OPCODE_BASE 13
 
 typedef enum DebugSectionKind
 {
@@ -176,23 +179,30 @@ static void debug_length(DebugWriter* writer, uint64_t offset, uint64_t value)
 // A row, its offset and line from the row before's; `prologue_end` marks it the function body's start.
 static void debug_row_scalar(DebugWriter* writer, uint32_t offset, int32_t line, bool prologue_end)
 {
-    debug_integer(writer, 2, 1); // DW_LNS_advance_pc
-    debug_uleb(writer, offset);
-    debug_integer(writer, 3, 1); // DW_LNS_advance_line
-    debug_sleb(writer, line);
+    const uint32_t adjusted = (uint32_t)line - BUSTER_DEBUG_LINE_BASE;
+    const uint64_t special = BUSTER_DEBUG_OPCODE_BASE + (uint64_t)offset * BUSTER_DEBUG_LINE_RANGE + adjusted;
+    uint8_t opcode = 1; // DW_LNS_copy
+    if (adjusted < BUSTER_DEBUG_LINE_RANGE && special <= UINT8_MAX)
+    {
+        opcode = (uint8_t)special;
+    }
+    else
+    {
+        debug_integer(writer, 2, 1); // DW_LNS_advance_pc
+        debug_uleb(writer, offset);
+        debug_integer(writer, 3, 1); // DW_LNS_advance_line
+        debug_sleb(writer, line);
+    }
     if (prologue_end)
     {
         debug_integer(writer, 10, 1); // DW_LNS_set_prologue_end
     }
-    debug_integer(writer, 1, 1); // DW_LNS_copy
+    debug_integer(writer, opcode, 1);
 }
 
-// Four rows, their previous offsets and lines already formed by the caller. Eight qwords carry alternating unsigned
-// address and signed line deltas; each pair becomes one 16-byte template, whose unused LEB groups are compressed out.
-static void debug_rows_vector(DebugWriter* writer, __m128i offset, __m128i line)
+// At least one of the four rows needs LEBs. Each pair of address and line qwords becomes a 16-byte template.
+static void debug_rows_pack(DebugWriter* writer, __m512i pc, __m512i ln, __mmask8 special, __m128i opcodes)
 {
-    const __m512i pc = _mm512_cvtepu32_epi64(_mm256_zextsi128_si256(offset));
-    const __m512i ln = _mm512_cvtepi32_epi64(_mm256_zextsi128_si256(line));
     const __m512i interleave = _mm512_set_epi64(11, 3, 10, 2, 9, 1, 8, 0);
     const __m512i values = _mm512_permutex2var_epi64(pc, interleave, ln);
     const __m512i sign = _mm512_srai_epi64(values, 63);
@@ -215,12 +225,16 @@ static void debug_rows_vector(DebugWriter* writer, __m128i offset, __m128i line)
     const __m512i order = _mm512_set_epi64(0x3f3f3f3f3c3b3a39ull, 0x383f34333231303full, 0x2f2f2f2f2c2b2a29ull, 0x282f24232221202full,
                                           0x1f1f1f1f1c1b1a19ull, 0x181f14131211101full, 0x0f0f0f0f0c0b0a09ull, 0x080f04030201000full);
     __m512i bytes = _mm512_permutexvar_epi8(order, groups);
-    bytes = _mm512_mask_set1_epi8(bytes, 0x0001000100010001ull, 2);
+    const __mmask64 starts = 0x0001000100010001ull;
+    const __m128i first = _mm_mask_mov_epi8(_mm_set1_epi8(2), special, opcodes); // DW_LNS_advance_pc or the entire row
+    bytes = _mm512_mask_expand_epi8(bytes, starts, _mm512_castsi128_si512(first));
     bytes = _mm512_mask_set1_epi8(bytes, 0x0040004000400040ull, 3);
     bytes = _mm512_mask_set1_epi8(bytes, 0x1000100010001000ull, 1);
     const __m512i valid_groups = _mm512_maskz_set1_epi8(_mm512_cmplt_epu8_mask(positions, repeated), 1);
     const __m512i valid = _mm512_permutexvar_epi8(order, valid_groups);
-    const __mmask64 keep = (_mm512_test_epi8_mask(valid, valid) & 0x0fbe0fbe0fbe0fbeull) | 0x1041104110411041ull;
+    const __mmask64 leb = (_mm512_test_epi8_mask(valid, valid) & 0x0fbe0fbe0fbe0fbeull) | 0x1041104110411041ull;
+    // A set bit at a special row's start removes bytes 1..15 of that row alone.
+    const __mmask64 keep = leb & ~(_pdep_u64(special, starts) * 0xfffeull);
     const uint32_t size = (uint32_t)__builtin_popcountll(keep);
     if (writer->bytes != 0)
     {
@@ -230,6 +244,27 @@ static void debug_rows_vector(DebugWriter* writer, __m128i offset, __m128i line)
     writer->size += size;
 }
 
+static void debug_rows_vector(DebugWriter* writer, __m128i offset, __m128i line)
+{
+    // Widen before forming the opcode so neither a large PC nor a signed line delta can wrap into one byte.
+    const __m512i pc = _mm512_cvtepu32_epi64(_mm256_zextsi128_si256(offset));
+    const __m512i ln = _mm512_cvtepi32_epi64(_mm256_zextsi128_si256(line));
+    const __m512i adjusted = _mm512_sub_epi64(ln, _mm512_set1_epi64(BUSTER_DEBUG_LINE_BASE));
+    const __m512i advance = _mm512_mullo_epi64(pc, _mm512_set1_epi64(BUSTER_DEBUG_LINE_RANGE));
+    const __m512i opcode = _mm512_add_epi64(advance, _mm512_add_epi64(adjusted, _mm512_set1_epi64(BUSTER_DEBUG_OPCODE_BASE)));
+    const __mmask8 special = 0x0f & _mm512_cmplt_epu64_mask(adjusted, _mm512_set1_epi64(BUSTER_DEBUG_LINE_RANGE)) &
+                             _mm512_cmple_epu64_mask(opcode, _mm512_set1_epi64(UINT8_MAX));
+    const __m128i opcodes = _mm512_cvtepi64_epi8(opcode);
+    if (special == 0x0f)
+    {
+        debug_integer(writer, (uint32_t)_mm_cvtsi128_si32(opcodes), 4);
+    }
+    else
+    {
+        debug_rows_pack(writer, pc, ln, special, opcodes);
+    }
+}
+
 static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* addresses, bool exact)
 {
     debug_integer(writer, 0, 4);
@@ -237,7 +272,7 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
     debug_integer(writer, 8, 1);
     debug_integer(writer, 0, 1);
     debug_integer(writer, 0, 4);
-    const uint8_t header[] = { 1, 1, 1, 0xfb, 14, 13, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1 };
+    const uint8_t header[] = { 1, 1, 1, (uint8_t)BUSTER_DEBUG_LINE_BASE, BUSTER_DEBUG_LINE_RANGE, BUSTER_DEBUG_OPCODE_BASE, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1 };
     debug_bytes(writer, header, sizeof(header));
     // One directory format: path/string. One directory, the compilation directory.
     debug_integer(writer, 1, 1);

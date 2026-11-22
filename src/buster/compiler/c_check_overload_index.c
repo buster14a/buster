@@ -112,33 +112,18 @@ static uint64_t check_overload_index_key(uint64_t signature, uint32_t name, uint
     return type_hash_finish(type_hash_mix(signature, (uint64_t)name | (uint64_t)scope << 32)) | 1;
 }
 
-// Eight contiguous fingerprints per probe; metadata is read only for matching lanes. The scalar twin uses exactly
-// the same buckets and empty-slot order, including a completely full table. Neither path reads past the last bucket.
-static uint32_t check_overload_index_find(const CheckOverloadIndex* index, uint64_t key, uint32_t name, uint32_t scope, bool scalar)
+// Eight contiguous fingerprints per probe, one zmm's compares; metadata is read only for matching lanes. A completely
+// full table is probed to its end, and no probe reads past the last bucket.
+static uint32_t check_overload_index_find(const CheckOverloadIndex* index, uint64_t key, uint32_t name, uint32_t scope)
 {
     uint32_t result = UINT32_MAX;
     const uint32_t mask = index->capacity - 1;
     uint32_t bucket = (uint32_t)key & mask & ~(BUSTER_CHECK_OVERLOAD_INDEX_GROUP - 1);
     for (uint32_t visited = 0; result == UINT32_MAX && visited < index->capacity; visited += BUSTER_CHECK_OVERLOAD_INDEX_GROUP)
     {
-        uint32_t matches = 0;
-        uint32_t empty = 0;
-        if (scalar)
-        {
-            // Keep the scalar source reader an independent executable reference for the intrinsic group probe.
-            #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
-            for (uint32_t lane = 0; lane < BUSTER_CHECK_OVERLOAD_INDEX_GROUP; lane += 1)
-            {
-                matches |= index->keys[bucket + lane] == key ? 1u << lane : 0;
-                empty |= index->keys[bucket + lane] == 0 ? 1u << lane : 0;
-            }
-        }
-        else
-        {
-            const __m512i keys = _mm512_loadu_si512(index->keys + bucket);
-            matches = _mm512_cmpeq_epi64_mask(keys, _mm512_set1_epi64((long long)key));
-            empty = _mm512_cmpeq_epi64_mask(keys, _mm512_setzero_si512());
-        }
+        const __m512i keys = _mm512_loadu_si512(index->keys + bucket);
+        uint32_t matches = _mm512_cmpeq_epi64_mask(keys, _mm512_set1_epi64((long long)key));
+        const uint32_t empty = _mm512_cmpeq_epi64_mask(keys, _mm512_setzero_si512());
         while (result == UINT32_MAX && matches != 0)
         {
             const uint32_t slot = bucket + (uint32_t)__builtin_ctz(matches);

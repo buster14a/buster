@@ -38,11 +38,21 @@
 //
 // A statement's CONDITION over `&&`, `||` and `!` is evaluated as branches and no value (node_machine_classify_branches),
 // which C says of a record from the root down. Here a record says it of itself, from its own bytes, its first operand's
-// and its consumer's class, and what one level cannot say lists the expression (the loop's comment).
+// and its consumer's class, and for a record that has its consumer's answer, the next record, from that one's, down a
+// run of such records; what that cannot say lists the expression (the loop's comment).
 //
-// What is listed, for C on T's records as before: an `&&` or an `||` that is a value or whose first operand's truth is
-// known, a `!` that is a value over one or is branched over a `!`, a conditional, an update the masks don't take, a
-// comma, a selection, a division or a remainder by an integer constant (the tasks' when its divisor is a power of two:
+// An `&&`, an `||` and a conditional as a value (node_machine_logical) have two labels, a condition converted and then
+// tested or evaluated as branches, and their other operands converted: a logical operator's second to T's conversion
+// of it, a conditional's arms to its own type. A comma passes its second operand, its first converted to void, and is
+// discarded where its consumer's conversion of it is to void. Each is a mask in the loop, as the other templates are,
+// with three of C's terms a record at a time (below).
+//
+// What is listed, for C on T's records as before: an `&&` or an `||` whose first operand's truth may be known, one
+// that is a value whose first operand is a `!`, a `!` over an `&&` or an `||` under a statement's CONDITION, a run of
+// more than three records that each have their consumer's answer, a conditional whose condition's truth may be known
+// or that is folded, of one operand twice, an operator's value whose consumer's conversion the tasks put into its arms,
+// a comma that is read for its address, that is folded or that is a comma's second operand, a selection, an update the
+// masks don't take, a division or a remainder by an integer constant (the tasks' when its divisor is a power of two:
 // the divisor's value), a record whose value the columns don't hold whole, a cast to a union, a leaf C's rules give a
 // template the loop doesn't make, a call whose arguments' conversions the kernel didn't all make (one T's rule or its
 // action makes, or a call the kernel left to T), a callee with an object that is no name's leaf (its symbol's bit is a
@@ -50,10 +60,12 @@
 // has to be C's own, so each of C's terms is here unless what makes the records implies it, and the comments say what
 // does.
 //
-// Four things are a record at a time: a pointer's stride, its type's row's (a subscript's and a pointer's sum's rule);
+// Seven things are a record at a time: a pointer's stride, its type's row's (a subscript's and a pointer's sum's rule);
 // C's rule on T's two conversions themselves (node_contexts_converted), for a sum or a binary operator whose operands'
-// own classes don't say what their conversions' are; the range under a record that isn't evaluated; and a consumer or
-// a first operand out of the two registers' reach.
+// own classes don't say what their conversions' are; the range under a record that isn't evaluated; a consumer or a
+// first operand out of the two registers' reach; whether a comma's consumer's type is void itself; whether an
+// operator's value's consumer's conversion is one the tasks put into its arms (node_contexts_sinks), and a root's in
+// its expression's part; and a discarded comma's context's byte.
 // C on T's columns at reader time is the reference: every record of every expression decided here and taken is compared
 // with its answers, and every decided expression with its verdict (node_contexts_window_compare). A refused
 // expression's records are compared with nothing: no one reads them. No compile takes any of it.
@@ -130,6 +142,8 @@
 #define BUSTER_NODE_CONTEXTS_SOURCE_LONG 3u
 // And its own record's: a call's argument's conversion's type, which the kernel's call rule wrote there.
 #define BUSTER_NODE_CONTEXTS_SOURCE_OWN 4u
+// And void: a comma's first operand's, and a discarded comma's second's.
+#define BUSTER_NODE_CONTEXTS_SOURCE_VOID 5u
 #define BUSTER_NODE_CONTEXTS_SOURCE 0x07u
 // A row's bit: the consumer evaluates the operand.
 #define BUSTER_NODE_CONTEXTS_EVALUATES 0x80u
@@ -148,7 +162,7 @@
 #define BUSTER_NODE_CONTEXTS_REASON_OPERATOR 7u
 _Static_assert(BUSTER_NODE_CONTEXTS_REASON_OPERATOR + 1 == BUSTER_NODE_CONTEXTS_REASONS, "the unit's counts have a place a reason");
 static const char* const node_contexts_reason_names[BUSTER_NODE_CONTEXTS_REASONS] = {
-    "none", "call", "logical-or-conditional", "update", "comma-or-selection", "division-by-a-constant", "wide-value", "operator",
+    "none", "call", "logical-or-conditional", "update", "comma", "division-by-a-constant", "wide-value", "operator",
 };
 
 // A block's masks (NodeFactsReader.window_c_masks, a line of the cache a block of 64 records): the records C
@@ -178,6 +192,13 @@ static const char* const node_contexts_reason_names[BUSTER_NODE_CONTEXTS_REASONS
 // pointer's. The loop keeps the keys in a register for the block below; the column it stores is C's templates'.
 #define BUSTER_NODE_CONTEXTS_KEY_ADDRESS 2u
 #define BUSTER_NODE_CONTEXTS_KEY_POINTER 4u
+// And three keys past an update's: a comma's template is a wrapper's and a conditional's is a logical operator's
+// value's, with other rows. A comma's first operand is converted to void and its second to the comma's type, or to
+// void too where the comma is discarded; a conditional's condition is converted as a logical operator's is, and its
+// arms to its own type.
+#define BUSTER_NODE_CONTEXTS_KEY_COMMA 27u
+#define BUSTER_NODE_CONTEXTS_KEY_COMMA_DISCARD 28u
+#define BUSTER_NODE_CONTEXTS_KEY_CONDITIONAL 29u
 typedef struct NodeContextsTables NodeContextsTables;
 struct NodeContextsTables
 {
@@ -212,7 +233,7 @@ static void node_contexts_tables(NodeContextsTables* tables)
             case CHECK_OP_CALL: class = BUSTER_NODE_CONTEXTS_CLASS_CALL; break;
             case CHECK_OP_LOGICAL_AND: case CHECK_OP_LOGICAL_OR: class = BUSTER_NODE_CONTEXTS_CLASS_LOGICAL; break;
             case CHECK_OP_CONDITIONAL: class = BUSTER_NODE_CONTEXTS_CLASS_CONDITIONAL; break;
-            case CHECK_OP_COMMA: case CHECK_OP_SELECT: class = BUSTER_NODE_CONTEXTS_CLASS_COMMA; break;
+            case CHECK_OP_COMMA: class = BUSTER_NODE_CONTEXTS_CLASS_COMMA; break;
             default:
             {
                 const bool update = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN;
@@ -256,6 +277,20 @@ static void node_contexts_tables(NodeContextsTables* tables)
     // bit in the loop.
     tables->rows[NODE_MACHINE_TEMPLATE_BRANCHES << 1] = given;
     tables->rows[(NODE_MACHINE_TEMPLATE_BRANCHES << 1) + 1] = given;
+    // A logical operator's value (node_machine_logical's): its condition to T's conversion of it, which is then
+    // tested, and its second operand to T's. A condition that is branches has no target, by its own record's bit.
+    tables->rows[NODE_MACHINE_TEMPLATE_BRANCH << 1] = given;
+    tables->rows[(NODE_MACHINE_TEMPLATE_BRANCH << 1) + 1] = given;
+    // A conditional's: its condition so too, and each arm to the conditional's own type.
+    tables->rows[BUSTER_NODE_CONTEXTS_KEY_CONDITIONAL << 1] = given;
+    tables->rows[(BUSTER_NODE_CONTEXTS_KEY_CONDITIONAL << 1) + 1] = node;
+    // A comma's (node_machine_classify's case): its first operand to void, and its second to the comma's type, or to
+    // void where the comma is discarded.
+    const uint8_t voided = BUSTER_NODE_CONTEXTS_EVALUATES | BUSTER_NODE_CONTEXTS_SOURCE_VOID;
+    tables->rows[BUSTER_NODE_CONTEXTS_KEY_COMMA << 1] = voided;
+    tables->rows[(BUSTER_NODE_CONTEXTS_KEY_COMMA << 1) + 1] = node;
+    tables->rows[BUSTER_NODE_CONTEXTS_KEY_COMMA_DISCARD << 1] = voided;
+    tables->rows[(BUSTER_NODE_CONTEXTS_KEY_COMMA_DISCARD << 1) + 1] = voided;
     // An update's (node_machine_classify_update), by its key (its template's number and its destination's bits): its
     // destination for its address unless the update names it, and its second operand to T's conversion of it, or to
     // long where the destination is a pointer.
@@ -274,13 +309,16 @@ _Static_assert(BUSTER_NODE_MACHINE_TEMPLATE_UPDATE + BUSTER_NODE_CONTEXTS_KEY_AD
                BUSTER_NODE_CONTEXTS_KEY_POINTER == 2 * BUSTER_NODE_CONTEXTS_KEY_ADDRESS &&
                BUSTER_NODE_MACHINE_TEMPLATE_UPDATE + BUSTER_NODE_CONTEXTS_KEY_ADDRESS + BUSTER_NODE_CONTEXTS_KEY_POINTER < 32,
                "an update's keys with a bit are past every template's number and in the table");
+_Static_assert(BUSTER_NODE_CONTEXTS_KEY_COMMA > BUSTER_NODE_MACHINE_TEMPLATE_UPDATE + BUSTER_NODE_CONTEXTS_KEY_ADDRESS + BUSTER_NODE_CONTEXTS_KEY_POINTER &&
+               BUSTER_NODE_CONTEXTS_KEY_CONDITIONAL < 32 && NODE_MACHINE_TEMPLATE_BRANCH < 32,
+               "a comma's keys and a conditional's are past an update's and in the table, and so is a logical operator's value's template");
 _Static_assert(CHECK_LOWER_TEMPLATE_GLOBAL == (CHECK_LOWER_TEMPLATE_LOCAL | 1), "a global's template's number is a local's and one bit");
 _Static_assert(BUSTER_NODE_MACHINE_STANDING(3, 7) == 0x1f && BUSTER_NODE_MACHINE_STANDING(0, CHECK_CONSTANT_NONE) == 0,
                "a standing's category and its constant's kind are its low five bits, and no constant's kind is zero: the loop reads a first operand's truth from them");
 _Static_assert(BUSTER_NODE_CONTEXTS_CLASS_DIVIDE == BUSTER_NODE_CONTEXTS_CLASS_BINARY + 1 && BUSTER_NODE_CONTEXTS_CLASS_CALL == BUSTER_NODE_CONTEXTS_CLASS_DIVIDE + 1 &&
                BUSTER_NODE_CONTEXTS_CLASS_UPDATE == BUSTER_NODE_CONTEXTS_CLASS_CALL + 1 && BUSTER_NODE_CONTEXTS_CLASS_LOGICAL == BUSTER_NODE_CONTEXTS_CLASS_UPDATE + 1 &&
                BUSTER_NODE_CONTEXTS_CLASS_CONDITIONAL == BUSTER_NODE_CONTEXTS_CLASS_LOGICAL + 1 && BUSTER_NODE_CONTEXTS_CLASS_COMMA <= BUSTER_NODE_CONTEXTS_CLASS_KIND,
-               "the loop reads the binary classes and the listed kinds as ranges");
+               "the loop reads the binary classes as a range, and a class's kind is five bits");
 
 // A 128-entry byte table by a key of seven bits, as two registers: one byte permute of two registers.
 static inline __attribute__((always_inline)) __m512i node_window_table(const uint8_t* table, __m512i keys)
@@ -338,10 +376,11 @@ static inline __attribute__((always_inline)) __m512i node_window_consumers(const
 // Whether a pointer's sum, a subscript or a pointer's update at the window's record `x` has a stride
 // (check_action_pointer_stride's of its first operand's conversion's type, a pointer's, which its record holds): its
 // type's row's, or the type table's where the row doesn't hold it (an element past 4 GB), by a call the loop keeps out
-// of its way.
-static __attribute__((noinline, cold)) bool node_contexts_stride_asked(const NodeFacts* facts, TypeId pointer)
+// of its way. The stride is kept by the record (NodeFactsReader.window_c_strides): it is the value of the PTR_ADD X
+// writes for the record, which X's rows' values read there.
+static __attribute__((noinline, cold)) uint64_t node_contexts_stride_asked(const NodeFacts* facts, TypeId pointer)
 {
-    return pointer != 0 && check_action_pointer_stride(facts->machine->types, pointer) != 0;
+    return pointer != 0 ? check_action_pointer_stride(facts->machine->types, pointer) : 0;
 }
 
 static inline __attribute__((always_inline)) bool node_contexts_stride(const struct NodeFactsReader* state, uint32_t x, uint64_t* asked)
@@ -350,13 +389,14 @@ static inline __attribute__((always_inline)) bool node_contexts_stride(const str
     const TypeId pointer = facts->records[x].converted[0];
     const uint32_t index = type_index(pointer);
     const NodeFactsRow* row = facts->rows + (index < facts->row_count ? index : facts->row_count);
-    bool stride = row->stride != 0;
+    uint64_t stride = row->stride;
     if (__builtin_expect((row->flags & BUSTER_NODE_FACTS_STRIDE) == 0, 0))
     {
         stride = node_contexts_stride_asked(facts, pointer);
         *asked += 1;
     }
-    return stride;
+    state->window_c_strides[x] = stride;
+    return stride != 0;
 }
 
 // Whether T's conversions of the two operands of the window's record `x`, a sum or a binary operator, are both of a
@@ -374,6 +414,38 @@ static __attribute__((noinline, cold)) bool node_contexts_converted(const struct
     const uint32_t word_a = node_machine_word(machine, facts->records[x].converted[0]);
     const uint32_t word_b = node_machine_word(machine, facts->records[x].converted[1]);
     return node_machine_scalar_class((uint8_t)word_a) && node_machine_scalar_class((uint8_t)word_b);
+}
+
+// Whether the tasks may put the conversion of the window's record `x`, an operator's value the masks took, to its
+// target `to` into its arms (node_machine_sinks, C's rule, which leaves such a record to the tasks;
+// check_lower_conditional_target, #2678): the rule's own terms that a record here separates, and no more, so that
+// what this lists is all the rule leaves and a little else:
+// - a target that is another type than its own (the rule's first; to none, nothing is converted);
+// - of an integer's class, a pointer's and a bool's among them (check_lower_conditional_sinks' first: the conversion
+//   folds into a constant of such a class alone);
+// - with an arm that is a constant: a logical operator's 0 or 1 is, and a conditional's arm is where it is an integer
+//   constant (check_lower_integer_constant's kind; its second operand's record, and its third, the record before its
+//   own).
+// The rule asks more, each a term that takes: that the conversion write entries (two types of one class convert by
+// none: `int` to an enumeration's), that it fold for these classes and facts, and that the arm be no lvalue, of an
+// integer's class and with no effect. An expression those would take is listed here (the measurement record has
+// their count on the corpora). An aggregate's target has no class's number: an argument's of a transparent union, in
+// a call that is not plain, and a cast's to a union, which lists its expression itself. Out of line: one record in
+// some hundreds asks.
+static __attribute__((noinline, cold)) bool node_contexts_sinks(const struct NodeFactsReader* state, const NodeFront* front, uint32_t x, TypeId to)
+{
+    const NodeFacts* facts = &state->facts;
+    bool sinks = false;
+    if (to != 0 && facts->records[x].type != to)
+    {
+        const uint8_t target = node_machine_class(facts->machine, to);
+        const uint8_t first = state->window_c_standings[x - front->window_right[x]] & 0x1c;
+        const uint8_t second = state->window_c_standings[x - 1] & 0x1c;
+        const bool conditional = (front->ops[x] & 0x7f) == CHECK_OP_CONDITIONAL;
+        const bool constant = !conditional || first == (CHECK_CONSTANT_INTEGER << 2) || second == (CHECK_CONSTANT_INTEGER << 2);
+        sinks = constant && target >= BUSTER_TYPED_CLASS_I8 && target <= BUSTER_TYPED_CLASS_U64;
+    }
+    return sinks;
 }
 
 // The far lanes' bytes' rows in the loop's block of its frame: a consumer's operator's class and its template (its
@@ -405,6 +477,11 @@ struct NodeContextsLoopCounts
     // The records the loop evaluates as branches, and those of them a statement's CONDITION.
     uint64_t branched;
     uint64_t branched_roots;
+    // The records it gives an operator's value's two labels (a conditional's, an `&&`'s and an `||`'s), those of them
+    // whose rule on their target's type listed their expression (node_contexts_sinks), and the commas it takes.
+    uint64_t valued;
+    uint64_t sunk;
+    uint64_t commas;
 };
 
 // The loop over a chunk's `count` records, 64 a step, from its last block to its first: each record's template, its
@@ -424,6 +501,12 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     __m512i next_codes = zero;
     __m512i next_classes = zero;
     __m512i next_keys = zero;
+    // Whether the block after's first record is evaluated as branches: a record chained to its consumer, the next
+    // record, has its consumer's answer.
+    uint64_t carry_branched = 0;
+    uint64_t valued_count = 0;
+    uint64_t sunk_count = 0;
+    uint64_t comma_count = 0;
     // The lowest record of a range that isn't evaluated and reaches below the block at hand (UINT32_MAX: none yet). A
     // range that ended in a block above reads as none too: its lowest record is at or above that block's first.
     uint32_t dead_low = UINT32_MAX;
@@ -439,8 +522,8 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     // any is in a segment's space (type_object_qualifiers, which check_lower_segment_override reads).
     const bool extended = state->facts.machine->types->extended;
     // The far lanes' bytes, a row a column: written a byte a lane where a block has any, and read by one masked load a
-    // column.
-    _Alignas(64) uint8_t far_bytes[BUSTER_NODE_CONTEXTS_FAR_ROWS][64] = { 0 };
+    // column. Each selected byte is written under the same lane mask before the load.
+    _Alignas(64) uint8_t far_bytes[BUSTER_NODE_CONTEXTS_FAR_ROWS][64];
     const uint32_t blocks = (count + 63) / 64;
     for (uint32_t block = blocks; block != 0; block -= 1)
     {
@@ -502,16 +585,10 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
                 const uint32_t lane = (uint32_t)_tzcnt_u64(pending);
                 const uint32_t consumer = x + lane + front->window_ups[x + lane];
                 const uint8_t code = front->ops[consumer] & 0x7f;
-                // Its key: its template's number, and for an update its destination's address's bit again, from the byte
-                // the masks read it in (the column has C's templates). The pointer's bit is read by an update's second
-                // operand alone, the record right before its own, which no load reads for. A placed record's first
-                // operand is a record of the window, and one that has none reads its own byte, for no one.
-                const uint8_t template = state->window_c_templates[consumer];
-                const uint32_t destination = consumer - front->window_left[consumer];
-                const uint32_t address_bit = (front->ops[destination] & 0x7f) != CHECK_OP_VALUE ? BUSTER_NODE_CONTEXTS_KEY_ADDRESS : 0u;
+                // Its key, which its own block's step stored (NodeFactsReader.window_c_keys: the column of C's
+                // templates has no update's bits, no comma's key and no conditional's).
                 far_bytes[BUSTER_NODE_CONTEXTS_FAR_CONSUMER_CLASS][lane] = tables->classes[code];
-                far_bytes[BUSTER_NODE_CONTEXTS_FAR_TEMPLATE][lane] =
-                    template != BUSTER_NODE_MACHINE_TEMPLATE_UPDATE ? template : (uint8_t)(BUSTER_NODE_MACHINE_TEMPLATE_UPDATE + address_bit);
+                far_bytes[BUSTER_NODE_CONTEXTS_FAR_TEMPLATE][lane] = state->window_c_keys[consumer];
             }
             for (uint64_t pending = far_left; pending != 0; pending &= pending - 1)
             {
@@ -616,7 +693,7 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         const __mmask64 is_call = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CALL));
         const __mmask64 is_update = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_UPDATE));
         const __mmask64 is_logical = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_LOGICAL));
-        const __mmask64 is_uncased = _mm512_cmpge_epu8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CONDITIONAL)) | _mm512_testn_epi8_mask(class_kinds, class_kinds);
+        const __mmask64 is_uncased = _mm512_testn_epi8_mask(class_kinds, class_kinds);
         const __mmask64 both_scalar = left_scalar & right_scalar;
         // The templates, C's rules (node_machine_classify's) as a mask a template: what every operator shares comes
         // first (a type no template takes, an atomic lvalue's read, a folded constant), then an operator's own case,
@@ -648,28 +725,46 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         // elements, which no template takes.
         const __mmask64 made_member = free & is_member & ~vector & (placed_value | numeric);
         const __mmask64 made_unary = free & is_unary & numeric;
-        // An operator evaluated as branches (node_machine_classify_branches: a statement's CONDITION over `&&`, `||` and
-        // `!`, which make no value). C branches a record from the root down; here each record says it of itself, from
-        // its own bytes, its first operand's and its consumer's class, and lists what those cannot say:
+        // An operator evaluated as branches (node_machine_classify_branches: `!`, `&&` and `||` under a condition,
+        // which make no value), and an `&&` or an `||` that is a value (node_machine_logical). C branches a record from
+        // the root down; here each record says it of itself, from its own bytes, its first operand's, its consumer's
+        // class and its place there, and for a record whose answer is its consumer's, the next record, from that
+        // record's:
         // - a branch operator (node_machine_branch_operator) is a `!`, an `&&` or an `||` that is no folded constant
         //   (`free`), and for `&&` and `||` one whose first operand's truth is not known: no constant, or an object's
         //   lvalue, whose constant is its address (check_action_truth). That its value is an int's and no lvalue is the
-        //   checker's, which takes no vector's `!`, `&&` or `||`;
+        //   checker's, which takes no vector's `!`, `&&` or `||`. An `&&` or an `||` that is none lists its expression
+        //   (a folded one, and one whose condition's truth may be known, whose templates are not made here);
+        // - a branch operator is entered where it is the first operand of an `&&` or an `||`: branched, whatever that
+        //   operator is. Under a branched one it is its operand, which a branch operator is as branches. Under a
+        //   value's it is the value's condition, which is branches where an `&&` or an `||` is under its `!`s
+        //   (node_machine_branch_condition's peel): an `&&` and an `||` are, and a value whose first operand is a `!`
+        //   lists its expression, since a `!` is not such a condition by itself;
+        // - a `!` is deep where an `&&` or an `||` that is a branch operator is under it, with `!`s alone between: the
+        //   runs of `!` records right after such an operator's record, a `!`'s operand being the record before it, by
+        //   one sum's carries. A deep `!` and such an `&&` or `||` are entered too as a statement's CONDITION's
+        //   operand and as a conditional's condition, where a `!` that is not deep is a value. A CONDITION over a deep
+        //   `!` is branched itself, two levels away: the `!` lists its expression. And a run that starts a block is
+        //   not seen there: the block before's last record lists its expression where it is a branch operator under a
+        //   `!`;
+        // - a branch operator is chained where it is an `&&`'s or an `||`'s second operand or a `!`'s operand: it has
+        //   the answer of its consumer, the next record. The answers go down each run of chained records by two
+        //   doubling steps, three records up, a block's last record's from the block after's first; a record with
+        //   three chained ones after it lists its expression;
+        // - any other is a value: an `&&` or an `||` with its two labels (below), a `!` with its truth's template;
         // - a CONDITION is branched where its operand is `&&` or `||`. One that is no branch operator after all is no
-        //   branched record at its own lane, and lists its expression there (a CONDITION that is a folded constant has
-        //   such an operand: its operand's truth is its own);
-        // - `&&` and `||` are branched under a CONDITION, an `&&`, an `||` or a `!`, and `!` under an `&&` or an `||`:
-        //   by the consumer's class alone. A consumer that is not itself branched is a value: an `&&` or an `||` then
-        //   lists the expression at its own lane, and a `!` does where its operand is `&&` or `||`;
-        // - C branches a `!` under a branched `!` too, and a CONDITION over a `!` that is over `&&` or `||`: two levels
-        //   away. The branched `!` over a `!` lists its expression, and so does the second case's `!`, as a value's
-        //   over `&&` or `||`.
+        //   branched record at its own lane, and lists its expression there.
         // A branched record's operands are evaluated, each a branch in its turn or a value C tests: its template is
         // none where an operand is none a truth's entries test (above). A `!` and a CONDITION have no second operand,
         // whose bytes then read zero.
         const __m512i consumer_kinds = _mm512_and_si512(consumer_classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_KIND));
         const __mmask64 consumer_logical = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_LOGICAL));
         const __mmask64 consumer_truth = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_TRUTH));
+        const __mmask64 consumer_condition = consumer_truth & _mm512_test_epi8_mask(consumer_classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CONDITION));
+        const __mmask64 consumer_not = consumer_truth & ~consumer_condition;
+        const __mmask64 consumer_conditional = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CONDITIONAL));
+        const __mmask64 consumer_comma = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_COMMA));
+        const __mmask64 consumer_wrap = _mm512_cmpeq_epi8_mask(consumer_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_WRAP));
         const __mmask64 is_condition = is_truth & _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CONDITION));
         const __mmask64 is_not = is_truth & ~is_condition;
         const __mmask64 left_logical = _mm512_cmple_epu8_mask(_mm512_sub_epi8(left_codes, _mm512_set1_epi8(CHECK_OP_LOGICAL_AND)), _mm512_set1_epi8(1));
@@ -679,12 +774,55 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         const __mmask64 left_placed = _mm512_cmpeq_epi8_mask(_mm512_and_si512(left_standings, _mm512_set1_epi8(0x1f)), _mm512_set1_epi8((CHECK_CONSTANT_ADDRESS << 2) | CHECK_LVALUE));
         const __mmask64 left_object = _mm512_test_epi8_mask(left_flags, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_OBJECT));
         const __mmask64 left_unknown = left_variable | (left_placed & left_object);
-        const __mmask64 branched_not = is_not & free & consumer_logical;
-        const __mmask64 branched_logical = is_logical & free & left_unknown & (consumer_logical | consumer_truth);
+        const uint64_t operator_logical = _cvtmask64_u64(is_logical & free & left_unknown);
+        const uint64_t operator_not = _cvtmask64_u64(is_not & free);
+        const uint64_t deep_not = operator_not & ~(operator_not + (operator_logical << 1));
+        const uint64_t operators = operator_logical | operator_not;
+        const uint64_t deep = operator_logical | deep_not;
+        // The block's last record, a branch operator under a `!`, the block after's first record, whose run that block
+        // did not see.
+        const uint64_t edge = operators & _cvtmask64_u64(consumer_not) & (UINT64_C(1) << 63);
+        const uint64_t entered = (operators & _cvtmask64_u64(consumer_logical & first_place)) | (deep & _cvtmask64_u64(consumer_condition | (consumer_conditional & first_place)));
+        const uint64_t chained = operators & _cvtmask64_u64((consumer_logical & ~first_place) | consumer_not);
+        uint64_t generate = entered | (chained & (carry_branched << 63));
+        uint64_t propagate = chained;
+        generate |= propagate & (generate >> 1);
+        propagate &= propagate >> 1;
+        generate |= propagate & (generate >> 2);
+        propagate &= propagate >> 2;
+        const uint64_t unreached = propagate;
         const __mmask64 branched_root = is_condition & left_logical;
-        const __mmask64 branched = branched_not | branched_logical | branched_root;
+        const __mmask64 branched = _cvtu64_mask64(generate) | branched_root;
         const __mmask64 made_branches = branched & left_tested & right_tested;
-        const __mmask64 unbranched = (is_logical & ~branched_logical) | (is_not & ~branched_not & left_logical) | (branched_not & left_not);
+        const __mmask64 valued_logical = _cvtu64_mask64(operator_logical & ~generate & ~unreached);
+        const __mmask64 unbranched = (is_logical & ~_cvtu64_mask64(operator_logical)) | (_cvtu64_mask64(deep_not) & consumer_condition) | (valued_logical & left_not) |
+                                     _cvtu64_mask64(unreached | edge);
+        // An operator's value (node_machine_logical, which C asks of one that is not read for its address: none is,
+        // since an operator that takes its first operand's address asks an lvalue or a struct's of the checker, and
+        // these are neither): an `&&` or an `||` that is a branch operator and not branched, whose first operand is
+        // no `!` (its class is a number's, an int's: the checker's), and a conditional of
+        // a number's class or of void's whose condition's truth is not known, where its condition's conversion's type
+        // is one a truth's entries test, and an `&&`'s or an `||`'s second operand's is too. Its two labels and its
+        // operands' segments are X's to write. A conditional whose condition's truth may be known lists its
+        // expression, and so does a folded one (C's rules give them other templates: one arm is not evaluated). Three
+        // of C's terms are a record at a time, below: the conversion its consumer puts into its arms
+        // (node_contexts_sinks), a conditional of one operand twice, and, in its expression's part, a root's.
+        const __mmask64 is_conditional = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_CONDITIONAL));
+        const __mmask64 open_conditional = is_conditional & free & left_unknown;
+        const __mmask64 made_conditional = open_conditional & (numeric | void_type) & left_tested;
+        const __mmask64 made_valued = made_conditional | (valued_logical & ~left_not & left_tested & right_tested);
+        // A comma (node_machine_classify's case): of a number's class, its second operand alone. One read for its
+        // address passes that to its second operand, which no mask here gives: it lists its expression, whatever
+        // template it has. Its own context is the discard's where its target is void (node_machine_child_context),
+        // which is its consumer's to say: a comma's first operand's is; a wrapper's operand's and a conditional's
+        // arm's are where that record's type is void's (a byte's load a comma, below: a cast's type has no qualifier,
+        // and void's class is void's alone); and a comma's second operand's is where that comma is discarded, its own
+        // consumer's answer: listed. A comma that is no free record lists its expression too: a folded one has the constant's template
+        // with the discard's context, which writes it no entry (`(void)(1, 2)`), and the masks give a discard to the
+        // commas they take alone.
+        const __mmask64 is_comma = _mm512_cmpeq_epi8_mask(class_kinds, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_COMMA));
+        const __mmask64 made_comma = free & is_comma & numeric;
+        const __mmask64 uncommaed = is_comma & (~free | address | (consumer_comma & ~first_place));
         // A truth's value is an int's (check_action_logic): its own class asks no mask.
         const __mmask64 made_truth = free & is_truth & left_tested;
         const __mmask64 either_pointer = left_pointer | right_pointer;
@@ -715,7 +853,6 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         // destination of one and a divisor that is an integer constant have, and no other update.)
         const __mmask64 update_divisor = integral & right_constant & _mm512_test_epi8_mask(classes, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_CLASS_QUOTIENT));
         const __mmask64 divisor = (is_divide & right_constant) | update_divisor;
-        _mm512_storeu_si512(state->window_c_contexts + x, _mm512_maskz_mov_epi8(address, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS)));
         _mm512_storeu_si512(state->window_c_reasons + x, class_kinds);
         // An update: C asks its plan (node_machine_update_plan) of a record of a number's class that is not read for its
         // address (node_machine_classify's case). No update's record is read for its address: its value is no lvalue
@@ -787,12 +924,36 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         updates_taken += (uint64_t)_mm_popcnt_u64(made_update);
         branched_count += (uint64_t)_mm_popcnt_u64(placed & made_branches);
         branched_roots += (uint64_t)_mm_popcnt_u64(placed & made_branches & is_condition);
+        // A comma under a wrapper or a conditional's arm: whether that record's type is void's, a record at a time
+        // (most commas are a statement's, under its cast to void, and a comma is one record in some hundreds).
+        uint64_t voided = 0;
+        for (uint64_t pending = made_comma & (near_up | far_up) & (consumer_wrap | (consumer_conditional & ~first_place)); pending != 0; pending &= pending - 1)
+        {
+            const uint32_t lane = (uint32_t)_tzcnt_u64(pending);
+            const uint32_t consumer = x + lane + front->window_ups[x + lane];
+            voided |= (uint64_t)(state->window_c_classes[consumer] == BUSTER_TYPED_CLASS_VOID ? 1 : 0) << lane;
+        }
+        // (A comma the masks don't take has no answer anyone reads: its expression is listed or refused.)
+        const __mmask64 discarded = (is_comma & consumer_comma & first_place) | _cvtu64_mask64(voided);
+        // A record's context: an address's by the mask, and a discarded comma's a byte each (no such comma is read for
+        // its address).
+        _mm512_storeu_si512(state->window_c_contexts + x, _mm512_maskz_mov_epi8(address, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS)));
+        for (uint64_t pending = discarded; pending != 0; pending &= pending - 1)
+        {
+            state->window_c_contexts[x + (uint32_t)_tzcnt_u64(pending)] = BUSTER_CHECK_LOWER_TEMPLATE_DISCARD;
+        }
+        // (A record the kernel didn't place is in no expression decided here. It has no class's byte, so it is no
+        // comma the masks take and no conditional, and it may be an `&&` or an `||` with the value's mask, which the
+        // count and the step below leave out.)
+        valued_count += (uint64_t)_mm_popcnt_u64(placed & made_valued);
+        comma_count += (uint64_t)_mm_popcnt_u64(made_comma);
         const __mmask64 listed = placed & (is_uncased | (is_wrap & union_type) | divisor | wide | odd_leaf | (is_call & ~converted_call) | (called & ~is_value) |
-                                           (update_asked & ~made_update) | unbranched);
-        // A template's number is four bits: each bit's records, one mask a bit.
+                                           (update_asked & ~made_update) | unbranched | (is_conditional & ~open_conditional) | uncommaed);
+        // A template's number is four bits: each bit's records, one mask a bit. A comma's is a wrapper's.
+        const __mmask64 passed = made_pass | made_comma;
         const __mmask64 bit0 = made_constant | made_global | made_dereference | made_unary | made_binary | made_store_local | made_store;
-        const __mmask64 bit1 = made_pass | made_dereference | made_truth | made_binary | made_store_global | made_store;
-        const __mmask64 bit2 = made_name | made_pass | made_dereference | made_pointer | made_store_local | made_store_global | made_store;
+        const __mmask64 bit1 = passed | made_dereference | made_truth | made_binary | made_store_global | made_store;
+        const __mmask64 bit2 = made_name | passed | made_dereference | made_pointer | made_store_local | made_store_global | made_store;
         const __mmask64 bit3 = made_member | made_unary | made_truth | made_binary | made_pointer | made_store_local | made_store_global | made_store;
         const __m512i own_templates = _mm512_or_si512(_mm512_or_si512(_mm512_maskz_mov_epi8(bit0, _mm512_set1_epi8(1)), _mm512_maskz_mov_epi8(bit1, _mm512_set1_epi8(2))),
                                                       _mm512_or_si512(_mm512_maskz_mov_epi8(bit2, _mm512_set1_epi8(4)), _mm512_maskz_mov_epi8(bit3, _mm512_set1_epi8(8))));
@@ -800,11 +961,18 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         // a pointer's update's, which `made_pointer` has too, takes its own number here.
         const __m512i called_templates = _mm512_mask_mov_epi8(own_templates, made_call, _mm512_set1_epi8(BUSTER_NODE_MACHINE_TEMPLATE_CALL));
         const __m512i updated_templates = _mm512_mask_mov_epi8(called_templates, made_update, _mm512_set1_epi8(BUSTER_NODE_MACHINE_TEMPLATE_UPDATE));
-        const __m512i templates = _mm512_mask_mov_epi8(updated_templates, made_branches, _mm512_set1_epi8(NODE_MACHINE_TEMPLATE_BRANCHES));
+        const __m512i branched_templates = _mm512_mask_mov_epi8(updated_templates, made_branches, _mm512_set1_epi8(NODE_MACHINE_TEMPLATE_BRANCHES));
+        const __m512i templates = _mm512_mask_mov_epi8(branched_templates, made_valued, _mm512_set1_epi8(NODE_MACHINE_TEMPLATE_BRANCH));
         // Its key, which its operands' rows are read by: its template's number, and for an update its destination's two
-        // bits: one that is no name's is evaluated for its address, and a pointer's second operand is made a long.
+        // bits: one that is no name's is evaluated for its address, and a pointer's second operand is made a long. A
+        // conditional's, a comma's and a discarded comma's are keys of their own.
         const __m512i placed_keys = _mm512_mask_add_epi8(templates, made_update & ~left_named, templates, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_KEY_ADDRESS));
-        const __m512i keys = _mm512_mask_add_epi8(placed_keys, made_update & left_pointer, placed_keys, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_KEY_POINTER));
+        const __m512i update_keys = _mm512_mask_add_epi8(placed_keys, made_update & left_pointer, placed_keys, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_KEY_POINTER));
+        // (The three keys of their own are made beside the templates, from the masks alone, and take their records'
+        // places in one step.)
+        const __m512i comma_keys = _mm512_mask_mov_epi8(_mm512_set1_epi8(BUSTER_NODE_CONTEXTS_KEY_COMMA), discarded, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_KEY_COMMA_DISCARD));
+        const __m512i own_keys = _mm512_mask_mov_epi8(comma_keys, made_conditional, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_KEY_CONDITIONAL));
+        const __m512i keys = _mm512_mask_mov_epi8(update_keys, made_comma | made_conditional, own_keys);
         // What its consumer's key gives it: whether it is evaluated, and its target's source.
         const __m512i near_keys = _mm512_maskz_permutex2var_epi8(near_up, keys, at_up, next_keys);
         const __m512i consumer_keys = _mm512_mask_loadu_epi8(near_keys, far_up, far_bytes[BUSTER_NODE_CONTEXTS_FAR_TEMPLATE]);
@@ -813,7 +981,31 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         // An operand of `&x` has no target, and no more has a record evaluated as branches.
         const __m512i sources = _mm512_maskz_mov_epi8(~(addressed | branched), _mm512_and_si512(rows, _mm512_set1_epi8(BUSTER_NODE_CONTEXTS_SOURCE)));
         _mm512_storeu_si512(state->window_c_templates + x, templates);
+        _mm512_storeu_si512(state->window_c_keys + x, keys);
         _mm512_storeu_si512(state->window_c_sources + x, sources);
+        // An operator's value's terms that are a record at a time (one record in some hundreds): a conditional of one
+        // operand twice (`a ?: b`, which C's rule leaves to the tasks), and the conversion to its target, the type its
+        // consumer's row names, where the tasks put it into its arms (node_contexts_sinks). Either lists its
+        // expression. A root's target is its expression's part's to give, and to ask.
+        uint64_t sunk = 0;
+        for (uint64_t pending = placed & made_valued; pending != 0; pending &= pending - 1)
+        {
+            const uint32_t lane = (uint32_t)_tzcnt_u64(pending);
+            const uint32_t r = x + lane;
+            // (A record nothing takes yet has no distance and no source: its own line is read for nothing.)
+            const uint32_t consumer = front->ups[r] != 0 ? r + front->window_ups[r] : r;
+            const uint32_t source = state->window_c_sources[r];
+            const NodeFactsRecord* line = state->facts.records + consumer;
+            const TypeId target = source == BUSTER_NODE_CONTEXTS_SOURCE_GIVEN ? line->converted[front->places[r] != 0 ? 1 : 0] :
+                                  source == BUSTER_NODE_CONTEXTS_SOURCE_NODE  ? line->type :
+                                  source == BUSTER_NODE_CONTEXTS_SOURCE_LONG  ? BUSTER_TYPE_LONG :
+                                  source == BUSTER_NODE_CONTEXTS_SOURCE_OWN   ? (TypeId)state->facts.records[r].spare : 0;
+            // (To void, a comma's first operand's target, nothing is put into the arms: no target reads as none. And
+            // a logical operator's two operands are two records.)
+            const bool twice = front->window_left[r] == front->window_right[r];
+            sunk |= (uint64_t)(twice || node_contexts_sinks(state, front, r, target) ? 1 : 0) << lane;
+        }
+        sunk_count += (uint64_t)_mm_popcnt_u64(sunk);
         // The records it takes out with it where it isn't evaluated: its subtree's, the front's sizes'. And those a
         // record of a block after took out.
         uint64_t dead = dead_low <= x ? ~UINT64_C(0) : dead_low < x + 64 ? ~UINT64_C(0) << (dead_low - x) : 0;
@@ -830,12 +1022,13 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         uint64_t* masks = state->window_c_masks + BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(block - 1);
         masks[BUSTER_NODE_CONTEXTS_MASK_ALIVE] = alive;
         masks[BUSTER_NODE_CONTEXTS_MASK_NONE] = alive & _mm512_testn_epi8_mask(templates, templates);
-        masks[BUSTER_NODE_CONTEXTS_MASK_LISTED] = listed;
+        masks[BUSTER_NODE_CONTEXTS_MASK_LISTED] = listed | sunk;
         masks[BUSTER_NODE_CONTEXTS_MASK_DIVISOR] = placed & divisor;
         masks[BUSTER_NODE_CONTEXTS_MASK_WIDE] = placed & wide;
         next_codes = codes;
         next_classes = classes;
         next_keys = keys;
+        carry_branched = generate & 1;
     }
     counts->strides += strides;
     counts->asked += asked;
@@ -845,6 +1038,9 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     counts->updates_taken += updates_taken;
     counts->branched += branched_count;
     counts->branched_roots += branched_roots;
+    counts->valued += valued_count;
+    counts->sunk += sunk_count;
+    counts->commas += comma_count;
 }
 
 // The targets of a chunk's `count` records, 16 a step: the type each evaluated record's source names. T's conversion of
@@ -876,7 +1072,9 @@ static __attribute__((noinline)) void node_contexts_window_targets(struct NodeFa
         fields = _mm512_mask_mov_epi32(fields, own, _mm512_set1_epi32((int32_t)offsetof(NodeFactsRecord, spare)));
         const __m512i offsets = _mm512_add_epi32(_mm512_slli_epi32(lines, 6), fields);
         const __m512i gathered = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), given | node | own, offsets, records, 1);
-        const __m512i targets = _mm512_mask_mov_epi32(gathered, index, _mm512_set1_epi32((int32_t)BUSTER_TYPE_LONG));
+        const __mmask16 voided = _mm512_mask_cmpeq_epi32_mask(alive, sources, _mm512_set1_epi32(BUSTER_NODE_CONTEXTS_SOURCE_VOID));
+        const __m512i indexed = _mm512_mask_mov_epi32(gathered, index, _mm512_set1_epi32((int32_t)BUSTER_TYPE_LONG));
+        const __m512i targets = _mm512_mask_mov_epi32(indexed, voided, _mm512_set1_epi32((int32_t)BUSTER_TYPE_VOID));
         _mm512_storeu_si512(state->window_c_targets + x, targets);
     }
 }
@@ -987,7 +1185,17 @@ static __attribute__((noinline)) void node_contexts_window_part(struct NodeFacts
             // Its root's target: the one its consumer gives it (an initialization's object's type), where the loop
             // gave a root none.
             state->window_c_targets[rooted ? record : operand] = state->c_targets[e];
-            verdict = (uint8_t)(listed ? BUSTER_NODE_CONTEXTS_LISTED : refused ? BUSTER_NODE_CONTEXTS_REFUSED : BUSTER_NODE_CONTEXTS_TAKEN);
+            // A root that is an operator's value, an initialization's: C's rule on its target (node_contexts_sinks),
+            // which the loop asks of a record with a consumer. (A root of its own record is a control's or a
+            // wrapper's, no such operator.)
+            // It lists the expression as the loop's does: by the record's bit, which the shadow's count of the
+            // reasons reads.
+            const bool sunk = !rooted && state->window_c_templates[operand] == NODE_MACHINE_TEMPLATE_BRANCH && node_contexts_sinks(state, front, operand, state->c_targets[e]);
+            if (__builtin_expect(sunk, 0))
+            {
+                state->window_c_masks[BUSTER_NODE_CONTEXTS_MASKS * (uint64_t)(operand / 64) + BUSTER_NODE_CONTEXTS_MASK_LISTED] |= UINT64_C(1) << (operand & 63);
+            }
+            verdict = (uint8_t)(listed || sunk ? BUSTER_NODE_CONTEXTS_LISTED : refused ? BUSTER_NODE_CONTEXTS_REFUSED : BUSTER_NODE_CONTEXTS_TAKEN);
         }
         state->c_verdicts[e] = verdict;
     }
@@ -1002,22 +1210,40 @@ static void node_contexts_window_chunk(struct NodeFactsReader* state, const Node
     NodeFrontTypes* types = state->types;
     uint64_t* counts = types->facts_counts;
     const uint32_t count = front->count;
+    NodeWindowCounter* const counter = node_window_counting != NULL && node_window_counting->family == NODE_WINDOW_CONTEXTS ? node_window_counting : NULL;
+    uint64_t first_sample[4];
+    uint64_t second_sample[4];
     const uint64_t t0 = __rdtsc();
+    first_sample[0] = node_window_stamp(counter);
     NodeContextsLoopCounts loop_counts = { 0 };
     node_contexts_window_loop(state, front, count, &loop_counts);
+    state->c_updates_now = loop_counts.updates_taken;
+    state->c_branches_now = loop_counts.branched - loop_counts.branched_roots + loop_counts.valued;
     const uint64_t t1 = __rdtsc();
+    first_sample[1] = node_window_stamp(counter);
     node_contexts_window_targets(state, front, count);
     const uint64_t t2 = __rdtsc();
+    first_sample[2] = node_window_stamp(counter);
     node_contexts_window_part(state, front);
     const uint64_t t3 = __rdtsc();
+    first_sample[3] = node_window_stamp(counter);
+    second_sample[0] = first_sample[3];
     // The shadow's own: the second run, the counts, and each decided expression against the reference.
     NodeContextsLoopCounts again = { 0 };
     node_contexts_window_loop(state, front, count, &again);
     const uint64_t t4 = __rdtsc();
+    second_sample[1] = node_window_stamp(counter);
     node_contexts_window_targets(state, front, count);
     const uint64_t t5 = __rdtsc();
+    second_sample[2] = node_window_stamp(counter);
     node_contexts_window_part(state, front);
     const uint64_t t6 = __rdtsc();
+    second_sample[3] = node_window_stamp(counter);
+    if (counter != NULL)
+    {
+        node_window_collect(counter, 0, first_sample, 3, count);
+        node_window_collect(counter, 1, second_sample, 3, count);
+    }
     uint64_t decided_records = 0;
     for (uint32_t e = 0; e < state->expression_count; e += 1)
     {
@@ -1068,6 +1294,9 @@ static void node_contexts_window_chunk(struct NodeFactsReader* state, const Node
     counts[NODE_FACTS_COUNT_CONTEXTS_UPDATES_TAKEN] += loop_counts.updates_taken;
     counts[NODE_FACTS_COUNT_CONTEXTS_BRANCHED] += loop_counts.branched;
     counts[NODE_FACTS_COUNT_CONTEXTS_BRANCHED_ROOTS] += loop_counts.branched_roots;
+    counts[NODE_FACTS_COUNT_CONTEXTS_VALUED] += loop_counts.valued;
+    counts[NODE_FACTS_COUNT_CONTEXTS_SUNK] += loop_counts.sunk;
+    counts[NODE_FACTS_COUNT_CONTEXTS_COMMAS] += loop_counts.commas;
     counts[NODE_FACTS_COUNT_CONTEXTS_LOOP_TICKS] += t1 - t0;
     counts[NODE_FACTS_COUNT_CONTEXTS_TARGET_TICKS] += t2 - t1;
     counts[NODE_FACTS_COUNT_CONTEXTS_PART_TICKS] += t3 - t2;

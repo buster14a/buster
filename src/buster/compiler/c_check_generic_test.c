@@ -20,10 +20,15 @@ static void check_test_generic_masks(CheckTest* test)
             }
             for (TypeId key = 7; key <= 10; key += 1)
             {
-                const uint32_t scalar = check_generic_masks(keys, key, true);
-                const uint32_t vector = check_generic_masks(keys, key, false);
-                check_test_expect(test, scalar == vector && (scalar >> BUSTER_CHECK_GENERIC_GROUP) == (UINT16_MAX & (UINT32_C(0xffff) << length)),
-                                  "generic scalar/vector masks agree through the last owned group");
+                // The definition: a lane's bit where its key is `key`, and where it's empty in the high half.
+                uint32_t expected = 0;
+                for (uint32_t lane = 0; lane < BUSTER_CHECK_GENERIC_GROUP; lane += 1)
+                {
+                    expected |= (uint32_t)(keys[lane] == key) << lane | (uint32_t)(keys[lane] == 0) << (BUSTER_CHECK_GENERIC_GROUP + lane);
+                }
+                const uint32_t masks = check_generic_masks(keys, key);
+                check_test_expect(test, masks == expected && (masks >> BUSTER_CHECK_GENERIC_GROUP) == (UINT16_MAX & (UINT32_C(0xffff) << length)),
+                                  "generic masks are each lane's match and emptiness through the last owned group");
             }
         }
     }
@@ -95,7 +100,7 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
                 const uint32_t selected = count / 2;
                 const uint64_t mark = scratch.length;
                 CheckGenericSet set;
-                bool valid = check_generic_initialize(&reader, &set, count * 4, types[selected], 1);
+                bool valid = check_generic_initialize(&reader, &set, count, types[selected], 1);
                 uint32_t matched = 0;
                 for (uint32_t i = 0; valid && i < count; i += 1)
                 {
@@ -118,7 +123,7 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
         // Twenty incompatible pointer depths share a key. They fill the last group and wrap to the first group;
         // the repeated last depth must still visit all nineteen earlier candidates before its equal type.
         CheckGenericSet collided;
-        bool valid = check_generic_initialize(&reader, &collided, 80, BUSTER_TYPE_INT, 1);
+        bool valid = check_generic_initialize(&reader, &collided, 20, BUSTER_TYPE_INT, 1);
         TypeId nested = 0;
         for (uint32_t i = 0; nested == 0 && i < BUSTER_ARRAY_LENGTH(records); i += 1)
         {
@@ -213,7 +218,7 @@ static __attribute__((noinline)) void check_test_generic_index(CheckTest* test)
                         const TypeAnswer expected = type_compatible_at(&storage.table, a, b, activations, storage.table.tags.count, position);
                         CheckGenericSet set;
                         bool matches = false;
-                        bool valid = a != 0 && b != 0 && expected != TYPE_ANSWER_FULL && check_generic_initialize(&reader, &set, 8, b, position);
+                        bool valid = a != 0 && b != 0 && expected != TYPE_ANSWER_FULL && check_generic_initialize(&reader, &set, 2, b, position);
                         valid = valid && check_generic_association(&reader, &set, a, &matches);
                         check_test_expect(test, valid && matches == (expected == TYPE_ANSWER_YES), "generic control filtering agrees with independent exact compatibility");
                         check_test_expect(test, valid && check_generic_association(&reader, &set, b, &matches) == (expected == TYPE_ANSWER_NO),

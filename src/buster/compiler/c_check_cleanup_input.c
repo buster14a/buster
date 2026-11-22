@@ -51,6 +51,8 @@ static bool check_input_cleanup_record(CheckInputReader* reader, CheckInputClean
     }
     if (valid)
     {
+        const uint32_t reach = input->cleanup_count != 0 ? input->cleanups[input->cleanup_count - 1].reach : 0;
+        cleanup.reach = cleanup.end > reach ? cleanup.end : reach;
         input->cleanups[input->cleanup_count++] = cleanup;
     }
     input->resource |= !valid;

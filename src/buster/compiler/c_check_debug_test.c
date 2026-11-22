@@ -495,7 +495,7 @@ static void check_debug_test_compile(CheckDebugTestUnit* unit, Preprocessor* pp,
         unit->index_arena = arena_reserve(type_index_capacity_bytes(capacity));
         ready = type_initialize(&unit->types, &unit->type_arena, &unit->index_arena, capacity);
     }
-    const CheckOptions check_options = { .scalar = scalar };
+    const CheckOptions check_options = { 0 };
     ready = ready && check_input(&unit->input, parser, pp, &unit->types, &unit->arena, &unit->scratch) &&
             check_graph_run(&unit->types, &unit->input.graph, &unit->output, &unit->scratch, &check_options, &unit->stream) && unit->stream.report_count == 0 &&
             check_asms_run(&unit->asms, &unit->input, &unit->stream, &unit->types, &unit->output, &unit->scratch) &&
@@ -588,7 +588,7 @@ static uint64_t check_debug_test_lines(CheckDebugTestTally* tally, CheckDebugTes
         bool presumed = true;
         for (uint32_t r = first; presumed && r < first + count; r += 1)
         {
-            const uint32_t output = parser->tokens.sources[rows->tokens[r]];
+            const uint32_t output = parse_source_index(&parser->tokens, rows->tokens[r]);
             const uint32_t location = check_lazy_expansion_location(pp, output, pp_history_at(pp, output));
             const char* name = 0;
             uint32_t length = 0;
