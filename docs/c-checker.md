@@ -7242,8 +7242,9 @@ the fixtures and implementation are original. The cold path cannot recover
 operands that queries or type declarations erased altogether; those and the
 ordinary successful-expression gaps are tracked in
 [#2899](https://github.com/buster14a/buster/issues/2899).
-`-Wconstant-logical-operand`, absent from ordinary expressions too, is tracked
-in [#2900](https://github.com/buster14a/buster/issues/2900).
+`-Wconstant-logical-operand` (#2900) is reported as each logical expression
+is built, in ordinary expressions and assertions alike, before an assertion's
+failure (`--constant-logical-only`, [the checker guide](commands/checker.md)).
 The ordinary equality emitter's extra assignment-suggestion note for a
 nonassignable left operand is tracked in
 [#2906](https://github.com/buster14a/buster/issues/2906).
