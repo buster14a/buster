@@ -319,6 +319,12 @@
 // takes it (another kind's value is its own whole: a constant's top bits are its own).
 #define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
 #define BUSTER_TYPED_ACCESS_SEGMENT (UINT64_C(3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT)
+// A LOAD's, STORE's or SET's volatile access (#3310): one of a volatile-qualified lvalue, below the segment's bits, on a
+// scalar class's (an integer's, a floating value's or a 128-bit integer's, whose `value` holds nothing else but an atomic
+// marker and the segment). A function with one says so (Tier0Function.volatiles). Tier 0 emits every access anyway and
+// strips the bit out of line (tier0_segments_strip); the IR keeps it as BUSTER_IR_VOLATILE, which no pass removes,
+// merges or forwards (BUSTER_IR_OBSERVABLE).
+#define BUSTER_TYPED_ACCESS_VOLATILE (UINT64_C(1) << 61)
 #define BUSTER_TYPED_SEGMENT_FS 1
 #define BUSTER_TYPED_SEGMENT_GS 2
 #define BUSTER_TYPED_SEGMENT_SS 3
@@ -694,6 +700,9 @@ struct Tier0Function
     // their paths never see one, and the compilation adds each to its entry's records after (tier0_apply_segments).
     // ir_lower refuses such a function, which Tier 0 compiles.
     bool segments;
+    // Whether a LOAD, STORE or SET is a volatile access (#3310, BUSTER_TYPED_ACCESS_VOLATILE), which validation and
+    // compilation strip as they strip the segment overrides.
+    bool volatiles;
     // Vector transport: 0 preserves the EVEX path; 16 uses SSE2 and 32 uses AVX.
     // This is the generated function's target, never the compiler host's ISA.
     uint8_t vector_bytes;
@@ -14692,10 +14701,10 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
     return code;
 }
 
-// A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
-// its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or
-// ATOMIC_CAS's value. Another
-// kind's value is its own whole (a constant's top bits are its own).
+// A function with segment overrides (#1447, Tier0Function.segments) or volatile accesses (#3310, Tier0Function.volatiles),
+// out of line: its values without them, in a copy of its values column (`values`), and each entry's override
+// (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's value. Another kind's value is its own whole
+// (a constant's top bits are its own).
 static void tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
 {
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -14705,7 +14714,8 @@ static void tier0_segments_strip(const Tier0Function* function, uint64_t* values
         const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
         const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_ATOMIC_RMW ||
                             kind == BUSTER_TYPED_ATOMIC_CAS;
-        values[i] = access ? value & ~BUSTER_TYPED_ACCESS_SEGMENT : value;
+        const bool marked = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
+        values[i] = access ? value & ~(BUSTER_TYPED_ACCESS_SEGMENT | (marked ? BUSTER_TYPED_ACCESS_VOLATILE : 0)) : value;
         segments[i] = access ? (uint8_t)segment : 0;
     }
 }
@@ -14729,7 +14739,10 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
-        code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, segments, output) : tier0_compile_scalar_entries(&stripped, segments, output);
+        stripped.volatiles = false;
+        // A function with volatile accesses alone has no override to add.
+        const uint8_t* overrides = function->segments ? segments : 0;
+        code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, overrides, output) : tier0_compile_scalar_entries(&stripped, overrides, output);
     }
     scratch_end(scratch);
     return code;
@@ -14737,12 +14750,12 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
 
 static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, false) : tier0_compile_scalar_entries(function, 0, output);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_compile_segments(function, output, false) : tier0_compile_scalar_entries(function, 0, output);
 }
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -15872,6 +15885,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
+        stripped.volatiles = false;
         check = vector ? tier0_validate_entries(&stripped) : tier0_validate_scalar_entries(&stripped);
     }
     scratch_end(scratch);
@@ -15880,10 +15894,10 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
 
 static Tier0Check tier0_validate(const Tier0Function* function)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, true) : tier0_validate_entries(function);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_validate_segments(function, true) : tier0_validate_entries(function);
 }
 
 static Tier0Check tier0_validate_scalar(const Tier0Function* function)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, false) : tier0_validate_scalar_entries(function);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_validate_segments(function, false) : tier0_validate_scalar_entries(function);
 }
