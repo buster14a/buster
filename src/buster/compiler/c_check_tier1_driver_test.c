@@ -6432,11 +6432,12 @@ static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* c
 // #2743's loop vectorizer (--tier1-passes=+vectorize): loops over arrays as C programmers write them (element-wise
 // operations of each width, a fill, a copy, sums, a dot product, a conditional sum, a clamp of an int induction, byte
 // arithmetic through 32-bit lanes, population counts, a stencil, float and double operations without contraction, a
-// xor reduction, and a prefix sum the vectorizer must leave), called at lengths around the vectors' boundaries and on
-// overlapping arrays, a digest of every result and array printed. By each path at x86-64, x86-64-v2, x86-64-v3 and
-// x86-64-v4, with --verify's certificates: no fallback, the loops each target vectorizes (its 16- and 32-byte
-// element-wise loops; AVX-512's conversions, compares, selects and reductions too), the same object by both paths, and
-// clang -O0's output.
+// xor reduction, and a prefix sum the vectorizer must leave; #2808's counts of comparisons, a sum over an array of
+// structs and RGB to gray, whose loads are strided), called at lengths around the vectors' boundaries and on
+// overlapping arrays, a digest of every result and array printed. By each path at x86-64, x86-64-v2, x86-64-v3,
+// x86-64-v4 and znver5, with --verify's certificates: no fallback, the loops each target vectorizes (its 16- and 32-byte
+// element-wise loops; AVX-512's conversions, compares, selects, reductions, counts and de-interleaves too), the same
+// object by both paths, and clang -O0's output.
 static const char check_test_tier1_vectorize_source[] =
     "#include <stdint.h>\n"
     "#include <stdio.h>\n"
@@ -6456,7 +6457,13 @@ static const char check_test_tier1_vectorize_source[] =
     "__attribute__((noinline)) void add_f64(double* d, const double* a, const double* b, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = a[i] + b[i]; }\n"
     "__attribute__((noinline)) uint32_t xor_u32(const uint32_t* a, size_t n) { uint32_t s = 0x5a5a5a5au; for (size_t i = 0; i < n; i += 1) s ^= a[i]; return s; }\n"
     "__attribute__((noinline)) void prefix_i32(int32_t* a, size_t n) { for (size_t i = 1; i < n; i += 1) a[i] = (int32_t)((uint32_t)a[i] + (uint32_t)a[i - 1]); }\n"
+    "__attribute__((noinline)) size_t count_eq_u8(const uint8_t* a, size_t n, uint8_t v) { size_t c = 0; for (size_t i = 0; i < n; i += 1) c += a[i] == v; return c; }\n"
+    "__attribute__((noinline)) int count_gt_i32(const int32_t* a, size_t n, int32_t t) { int c = 0; for (size_t i = 0; i < n; i += 1) c += a[i] > t; return c; }\n"
+    "typedef struct { int32_t x, y, w, pad; } Particle;\n"
+    "__attribute__((noinline)) int64_t aos_sum(const Particle* p, size_t n) { int64_t s = 0; for (size_t i = 0; i < n; i += 1) s += (int64_t)p[i].x * p[i].w; return s; }\n"
+    "__attribute__((noinline)) void rgb_to_gray(uint8_t* g, const uint8_t* rgb, int n) { for (int i = 0; i < n; i += 1) g[i] = (uint8_t)((77 * rgb[3 * i] + 150 * rgb[3 * i + 1] + 29 * rgb[3 * i + 2]) >> 8); }\n"
     "static int32_t x[600], y[600], z[600];\n"
+    "static Particle particles[300];\n"
     "static uint8_t b8[1200], c8[1200];\n"
     "static int16_t h[600], g[600];\n"
     "static uint64_t q[600];\n"
@@ -6475,6 +6482,14 @@ static const char check_test_tier1_vectorize_source[] =
     "        const size_t n = lengths[l];\n"
     "        for (size_t i = 0; i < 600; i += 1) { x[i] = (int32_t)next(); y[i] = (int32_t)next(); h[i] = (int16_t)next(); g[i] = (int16_t)next(); q[i] = next(); f[i] = (float)(int32_t)next() / 65536.0f; u[i] = (double)(int64_t)next() / 3.0; v[i] = (double)(int32_t)next(); }\n"
     "        for (size_t i = 0; i < 1200; i += 1) { b8[i] = (uint8_t)next(); c8[i] = (uint8_t)next(); }\n"
+    "        for (size_t i = 0; i < 300; i += 1) { particles[i].x = (int32_t)next(); particles[i].y = (int32_t)next(); particles[i].w = (int32_t)next(); }\n"
+    "        mix64(count_eq_u8(b8, n, b8[n / 2]));\n"
+    "        mix64(count_eq_u8(b8, n, (uint8_t)(n & 3)));\n"
+    "        mix64((uint64_t)count_gt_i32(x, n, (int32_t)next()));\n"
+    "        mix64((uint64_t)aos_sum(particles, n));\n"
+    "        rgb_to_gray(c8, b8, (int)n);\n"
+    "        rgb_to_gray(b8 + 1, b8, (int)n);\n"
+    "        rgb_to_gray(b8 + 900, b8 + 899, (int)n / 4);\n"
     "        add_i32(z, x, y, n);\n"
     "        add_i32(x + 1, x, y, n);\n"
     "        add_i32(y, y + 3, x, n);\n"
@@ -6521,12 +6536,13 @@ static bool check_test_tier1_vectorize_field(const char* text, const char* name,
 
 static void check_test_driver_tier1_vectorize(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char* const targets[4] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4" };
+    static const char* const targets[5] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5" };
     // The loops each target vectorizes: add_i32, copy_u8, fill_u32, scale_f32 and add_f64 at 16 or 32 bytes; at
-    // x86-64-v4 also the sums, the dot product, the conditional sum, the clamp, the bytes' scaling, the stencil and the xor
-    // reduction (its population count is VPOPCNTDQ's, which x86-64-v4 hasn't). main's loops call next(), and the prefix sum
+    // x86-64-v4 also the sums, the dot product, the conditional sum, the clamp, the bytes' scaling, the stencil, the xor
+    // reduction, the counts and the array of structs' sum (its population count is VPOPCNTDQ's and RGB to gray's byte
+    // permute VBMI's, which x86-64-v4 hasn't); at znver5 those two too. main's loops call next(), and the prefix sum
     // carries a dependence: none of theirs.
-    static const uint64_t vectorized[4] = { 5, 5, 5, 13 };
+    static const uint64_t vectorized[5] = { 5, 5, 5, 16, 18 };
     char unit[512];
     snprintf(unit, sizeof(unit), "%s/tier1-vectorize.c", directory);
     const bool written = parse_test_write(unit, check_test_tier1_vectorize_source, strlen(check_test_tier1_vectorize_source));

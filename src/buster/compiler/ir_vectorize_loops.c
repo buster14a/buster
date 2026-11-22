@@ -12,9 +12,12 @@
 // a chain of blocks optionally containing min/max reduction diamonds, back to the header; and one preheader, whose only successor
 // is the header. Every needed row of the chain is classified in order (IrVectorizeClass): uniform (no lane depends on
 // the induction), an index or a pointer that is affine in the induction, or a vector value of one lane per iteration.
-// A row nothing needs is ignored. Loads and stores must be consecutive: their pointer advances by its access's bytes.
-// Anything else (calls, divisions, fences, volatile accesses, floating reductions, a data use of the induction, a
-// strided or gathered access) refuses the loop, counted by reason (IrVectorizeRefusal).
+// A row nothing needs is ignored. Stores must be consecutive: their pointer advances by its access's bytes; a load may
+// also advance by 2 to 8 times them (#2808: k loads and k - 1 permutes de-interleave it). A count of comparisons,
+// `c += (x == y)`, is a reduction whose accumulator is a scalar, the population count of the comparison's mask added each
+// iteration (#2808); a 32-bit index of a 32-bit induction is affine where G finds that it doesn't wrap. Anything else
+// (calls, divisions, fences, volatile accesses, floating reductions, a data use of the induction, a strided store, a
+// gathered access) refuses the loop, counted by reason (IrVectorizeRefusal).
 //
 // The rewrite leaves every original row where it is and appends three blocks per loop:
 // - G, the guard, reached from the preheader instead of the header: the speculatable uniform rows' clones, the trip
@@ -54,6 +57,14 @@
 #define BUSTER_IR_VECTORIZE_WIDTHS 3u
 // Above this many vector iterations' elements, a loop with guards stays scalar, so that no range's length wraps.
 #define BUSTER_IR_VECTORIZE_RANGE_LIMIT (UINT64_C(1) << 56)
+// A strided load's elements per iteration at most (#2808): its de-interleave is that many loads and one fewer permutes.
+#define BUSTER_IR_VECTORIZE_STRIDE_LIMIT 8u
+// A 32-bit index's coefficient's magnitude below this (#2808): the guard's product of it and a 32-bit trip count fits
+// in 64 bits.
+#define BUSTER_IR_VECTORIZE_NARROW_COEFFICIENT (INT64_C(1) << 30)
+// A reduction's operation past the IR's (BUSTER_IR_REDUCE_*): a count of a mask's set lanes, `c += (x == y)` (#2808),
+// accumulated in a scalar by the population count of the mask's bits.
+#define BUSTER_IR_VECTORIZE_COUNT 15u
 
 // A row's admission kind, by its opcode (ir_vectorize_kind_table); 0 refuses its loop.
 #define BUSTER_IR_VECTORIZE_KIND_FORBID 0u
@@ -116,6 +127,12 @@ struct IrVectorizeTarget
     // The masked tail's mask of 1 << k lanes from a general register, a bit k for 2 to 64 lanes (#2807): a kmov of the mask
     // type's bytes, which a loop with no vector load or store needs too (kmovb, of 8 lanes or fewer, is AVX512DQ's).
     uint8_t mask;
+    // A permute of two tables of lanes of 1 << size bytes at the width (vpermt2b to vpermt2q): a strided load's
+    // de-interleave (#2808), EVEX's alone.
+    uint8_t permute2[4];
+    // A count of a mask of 1 << k lanes' set bits in a general register, a bit k for 2 to 64 lanes (#2808): the kmov of the
+    // mask type's bytes to one, and popcnt.
+    uint8_t count;
 };
 
 // test-ir-vectorize's mutants (IrVectorizeOptions.mutation): each breaks one rule of the rewrite, and the tests' oracle
@@ -131,7 +148,11 @@ struct IrVectorizeTarget
 #define BUSTER_IR_VECTORIZE_MUTATE_LANES 4u
 // The masked tail's mask has one lane more than the trip count's remainder (#2807).
 #define BUSTER_IR_VECTORIZE_MUTATE_MASK 5u
-#define BUSTER_IR_VECTORIZE_MUTATIONS 6u
+// No test of a 32-bit index's wrap (#2808).
+#define BUSTER_IR_VECTORIZE_MUTATE_NARROW 6u
+// A strided load's permutes take each lane's next element (#2808).
+#define BUSTER_IR_VECTORIZE_MUTATE_STRIDE 7u
+#define BUSTER_IR_VECTORIZE_MUTATIONS 8u
 
 typedef struct IrVectorizeOptions IrVectorizeOptions;
 struct IrVectorizeOptions
@@ -216,10 +237,15 @@ struct IrVectorizeLoop
     // Whether the tail is one masked vector iteration (#2807, ir_vectorize_masked_legal), not the scalar loop's.
     bool masked;
     bool stores;
+    // Whether a load is strided (#2808): its tail is the scalar loop's.
+    bool strided;
     uint32_t reductions;
     uint32_t guards;
     // The accesses whose ranges G tests against each other: guard_pairs[2k] and [2k + 1].
     uint32_t guard_pairs[2 * BUSTER_IR_VECTORIZE_GUARD_LIMIT];
+    // The 64-bit extensions of 32-bit indices (#2808), whose values G tests for a wrap over the vector iterations.
+    uint32_t narrows;
+    uint32_t narrow_rows[BUSTER_IR_VECTORIZE_GUARD_LIMIT];
 };
 
 // The function being built: original rows and blocks in place, then the new ones. While counting, nothing is
@@ -233,6 +259,9 @@ struct IrVectorizeBuild
     uint32_t blocks;
     uint32_t extras;
     uint32_t constants;
+    // The vector constants (a strided load's permutes' indices) and addresses (its loads' offsets) appended (#2808).
+    uint32_t vector_constants;
+    uint32_t addresses;
 };
 
 typedef struct IrVectorizeWork IrVectorizeWork;
@@ -268,6 +297,8 @@ struct IrVectorizeWork
     int64_t* coefficients;
     uint32_t* values;
     uint32_t* starts;
+    // The G clones of a 32-bit index's chain at the vector iterations' last induction (#2808).
+    uint32_t* lasts;
     uint32_t* splats;
     uint32_t* ones;
     uint32_t* zeros;
@@ -581,6 +612,7 @@ static void ir_vectorize_reset(IrVectorizeWork* work)
         work->coefficients[v] = 0;
         work->values[v] = BUSTER_IR_NONE;
         work->starts[v] = BUSTER_IR_NONE;
+        work->lasts[v] = BUSTER_IR_NONE;
         work->splats[v] = BUSTER_IR_NONE;
         work->ones[v] = BUSTER_IR_NONE;
         work->zeros[v] = BUSTER_IR_NONE;
@@ -625,6 +657,24 @@ static uint32_t ir_vectorize_truth(const IrFunction* f, uint32_t value)
         depth += 1;
     }
     return at;
+}
+
+// A comparison's operands and predicate as the vector loop compares them (#2808): where both operands extend one
+// narrower integer type alike, the extensions' sources at that type, so that `a[i] == v` of bytes promoted to int
+// compares bytes, as many lanes as they are; else its own. Both extensions preserve both orders, signed and unsigned,
+// except that zero extensions' values are non-negative: a signed predicate of them is the sources' unsigned one.
+static void ir_vectorize_compared(const IrFunction* f, uint32_t i, uint32_t* x, uint32_t* y, uint32_t* predicate)
+{
+    const uint32_t a = f->a[i];
+    const uint32_t b = f->b[i];
+    const uint32_t pred = f->c[i];
+    const bool extensions = a < f->instruction_count && b < f->instruction_count && (f->op[a] == IR_ZEXT || f->op[a] == IR_SEXT) && f->op[b] == f->op[a];
+    const uint32_t from = extensions ? f->type[f->a[a]] : IR_VOID;
+    const bool narrow = extensions && from == f->type[f->a[b]] && from >= IR_I8 && from <= IR_I64 && ir_vectorize_size(from) < ir_vectorize_size(f->type[a]);
+    const bool unsigned_order = narrow && f->op[a] == IR_ZEXT && pred >= IR_LT && pred <= IR_GE;
+    *x = narrow ? f->a[a] : a;
+    *y = narrow ? f->a[b] : b;
+    *predicate = unsigned_order ? pred + (IR_ULT - IR_LT) : pred;
 }
 
 // Meet the branch's two edges at one join, directly or through a private block ending in br. Both
@@ -1048,8 +1098,14 @@ static void ir_vectorize_needed(IrVectorizeWork* work, uint32_t loop, const IrVe
         {
             const bool update = work->classes[i] == IR_VECTORIZE_CLASS_UPDATE;
             const uint32_t mask = update || f->op[i] == IR_PHI ? 1u : ir_value_mask3(f, i);
-            const uint32_t first = update ? work->reduction[work->reduction_index[i]].lane : f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i];
-            const uint32_t operands[3] = { first, f->b[i], ir_value_third(f, i) };
+            uint32_t first = update ? work->reduction[work->reduction_index[i]].lane : f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i];
+            uint32_t second = f->b[i];
+            uint32_t predicate = 0;
+            if (!update && f->op[i] == IR_ICMP)
+            {
+                ir_vectorize_compared(f, i, &first, &second, &predicate);
+            }
+            const uint32_t operands[3] = { first, second, ir_value_third(f, i) };
             for (uint32_t k2 = 0; k2 < 3; k2 += 1)
             {
                 const uint32_t v = operands[k2];
@@ -1075,7 +1131,7 @@ static bool ir_vectorize_lane_operand(const IrVectorizeWork* work, uint32_t loop
 
 // One needed row's class from its operands' (the rules in this file's header). Returns the refusal, or
 // IR_VECTORIZE_REFUSALS where it is admitted.
-static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, const IrVectorizeLoop* plan, uint32_t i)
+static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan, uint32_t i)
 {
     const IrFunction* f = work->function;
     const uint32_t op = f->op[i];
@@ -1129,6 +1185,14 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
         {
             // An i32 induction's 64-bit index: it doesn't wrap where the exit test bounds it.
             ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_INDEX, 1, 3, false);
+        }
+        else if (ca == IR_VECTORIZE_CLASS_INDEX && f->type[a] == IR_I32 && type == IR_I64 && f->type[plan->induction] == IR_I32 && plan->narrows < BUSTER_IR_VECTORIZE_GUARD_LIMIT)
+        {
+            // A 32-bit index's 64-bit one (`rgb[3 * i + 1]` of an int i, #2808): affine where its 32-bit value doesn't wrap
+            // over the vector iterations, which G tests.
+            plan->narrow_rows[plan->narrows] = i;
+            plan->narrows += 1;
+            ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_INDEX, work->coefficients[a], 3, false);
         }
         else if (ca == IR_VECTORIZE_CLASS_MASK && integer)
         {
@@ -1189,7 +1253,11 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
         uint64_t k = 0;
         const bool constant = ir_vectorize_constant(f, left ? b : a, &k);
         int64_t result = 0;
-        bool admitted = type == IR_I64 && other == IR_VECTORIZE_CLASS_UNIFORM;
+        // A 32-bit index (#2808) is the 32-bit induction's affine function: its coefficient exact, its 64-bit extension
+        // guarded against a wrap (ir_vectorize_narrow_guards).
+        const bool narrow = type == IR_I32 && variable == IR_VECTORIZE_CLASS_INDEX;
+        const int64_t factor = narrow ? (int64_t)(int32_t)(uint32_t)k : (int64_t)k;
+        bool admitted = (type == IR_I64 || narrow) && other == IR_VECTORIZE_CLASS_UNIFORM;
         if (op == IR_ADD)
         {
             result = coefficient;
@@ -1201,14 +1269,16 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
         }
         else if (op == IR_MUL)
         {
-            result = (int64_t)((uint64_t)coefficient * k);
+            result = (int64_t)((uint64_t)coefficient * (uint64_t)factor);
             admitted = admitted && constant && variable == IR_VECTORIZE_CLASS_INDEX;
         }
         else
         {
             result = k < 64 ? (int64_t)((uint64_t)coefficient << k) : 0;
-            admitted = admitted && constant && left && k < 64 && variable == IR_VECTORIZE_CLASS_INDEX;
+            admitted = admitted && constant && left && k < (narrow ? 31u : 64u) && variable == IR_VECTORIZE_CLASS_INDEX;
         }
+        const bool bounded = result > -BUSTER_IR_VECTORIZE_NARROW_COEFFICIENT && result < BUSTER_IR_VECTORIZE_NARROW_COEFFICIENT;
+        admitted = admitted && (!narrow || (bounded && coefficient > -BUSTER_IR_VECTORIZE_NARROW_COEFFICIENT && coefficient < BUSTER_IR_VECTORIZE_NARROW_COEFFICIENT));
         refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
         if (admitted)
         {
@@ -1217,11 +1287,16 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
     }
     else if (op == IR_LOAD)
     {
-        const bool admitted = ca == IR_VECTORIZE_CLASS_POINTER && size < 4 && work->coefficients[a] == (int64_t)(UINT64_C(1) << size);
+        // Consecutive, or strided by a few elements (#2808): its pointer advances by a multiple of them.
+        const int64_t element = (int64_t)(UINT64_C(1) << (size & 3));
+        const int64_t step = ca == IR_VECTORIZE_CLASS_POINTER ? work->coefficients[a] : 0;
+        const bool strided = step > element && step % element == 0 && step / element <= BUSTER_IR_VECTORIZE_STRIDE_LIMIT;
+        const bool admitted = ca == IR_VECTORIZE_CLASS_POINTER && size < 4 && (step == element || strided);
         refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_ADDRESS;
         if (admitted)
         {
             ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_VECTOR, 0, size, type == IR_F32 || type == IR_F64);
+            plan->strided = plan->strided || strided;
         }
     }
     else if (op == IR_STORE)
@@ -1238,8 +1313,12 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
     }
     else if (op == IR_ICMP)
     {
-        const uint32_t otype = f->type[a];
-        const bool admitted = (otype >= IR_I8 && otype <= IR_I64) && ir_vectorize_lane_operand(work, loop, a, otype) && ir_vectorize_lane_operand(work, loop, b, otype);
+        uint32_t x = a;
+        uint32_t y = b;
+        uint32_t predicate = 0;
+        ir_vectorize_compared(f, i, &x, &y, &predicate);
+        const uint32_t otype = f->type[x];
+        const bool admitted = (otype >= IR_I8 && otype <= IR_I64) && ir_vectorize_lane_operand(work, loop, x, otype) && ir_vectorize_lane_operand(work, loop, y, otype);
         refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
         if (admitted)
         {
@@ -1306,6 +1385,23 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, cons
     return refusal;
 }
 
+// Whether a reduction's addend counts a comparison (#2808): its zero extension from i1, extended again by either
+// extension (of 0 or 1, both give 0 or 1), a comparison of the loop's: that comparison, or BUSTER_IR_NONE.
+static uint32_t ir_vectorize_counted(const IrVectorizeWork* work, uint32_t loop, uint32_t value)
+{
+    const IrFunction* f = work->function;
+    uint32_t at = value;
+    uint32_t depth = 0;
+    while (depth < 4 && at < f->instruction_count && (f->op[at] == IR_ZEXT || f->op[at] == IR_SEXT) && f->a[at] < f->instruction_count && f->type[f->a[at]] != IR_I1)
+    {
+        at = f->a[at];
+        depth += 1;
+    }
+    const bool counted = at < f->instruction_count && f->op[at] == IR_ZEXT && f->a[at] < f->instruction_count && f->type[f->a[at]] == IR_I1 && f->op[f->a[at]] == IR_ICMP &&
+                         ir_vectorize_inside(work, loop, f->a[at]);
+    return counted ? f->a[at] : BUSTER_IR_NONE;
+}
+
 // The header phis are the induction and independent integer reductions. A min/max diamond's update was
 // recorded at its join; a select or an arithmetic update is recognized here, before tracing the needed operands.
 static uint32_t ir_vectorize_phis(IrVectorizeWork* work, uint32_t loop, IrVectorizeLoop* plan)
@@ -1335,9 +1431,10 @@ static uint32_t ir_vectorize_phis(IrVectorizeWork* work, uint32_t loop, IrVector
             else if (admitted)
             {
                 static const uint8_t operations[IR_OP_COUNT] = { [IR_ADD] = BUSTER_IR_REDUCE_ADD, [IR_MUL] = BUSTER_IR_REDUCE_MUL, [IR_AND] = BUSTER_IR_REDUCE_AND, [IR_OR] = BUSTER_IR_REDUCE_OR, [IR_XOR] = BUSTER_IR_REDUCE_XOR };
-                const uint32_t operation = operations[op];
                 const uint32_t other = f->a[update] == i ? f->b[update] : f->a[update];
-                const IrVectorizeReduction reduction = { .phi = i, .lane = other, .operation = operation };
+                const uint32_t compare = op == IR_ADD ? ir_vectorize_counted(work, loop, other) : BUSTER_IR_NONE;
+                const uint32_t operation = compare != BUSTER_IR_NONE ? BUSTER_IR_VECTORIZE_COUNT : operations[op];
+                const IrVectorizeReduction reduction = { .phi = i, .lane = compare != BUSTER_IR_NONE ? compare : other, .operation = operation };
                 admitted = operation != 0 && (f->a[update] == i) != (f->b[update] == i) && ir_vectorize_record_reduction(work, plan, update, reduction);
             }
             refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_PHI;
@@ -1366,8 +1463,10 @@ static uint32_t ir_vectorize_rows(IrVectorizeWork* work, uint32_t loop, IrVector
         }
         else if (work->classes[i] == IR_VECTORIZE_CLASS_UPDATE)
         {
-            const uint32_t lane = work->reduction[work->reduction_index[i]].lane;
-            refusal = ir_vectorize_lane_operand(work, loop, lane, f->type[i]) ? refusal : IR_VECTORIZE_REFUSE_USE;
+            const IrVectorizeReduction reduction = work->reduction[work->reduction_index[i]];
+            const bool counted = reduction.operation == BUSTER_IR_VECTORIZE_COUNT;
+            const bool admitted = counted ? ir_vectorize_class(work, loop, reduction.lane) == IR_VECTORIZE_CLASS_MASK : ir_vectorize_lane_operand(work, loop, reduction.lane, f->type[i]);
+            refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
         }
         else
         {
@@ -1406,6 +1505,15 @@ static uint32_t ir_vectorize_rows(IrVectorizeWork* work, uint32_t loop, IrVector
     return refusal;
 }
 
+// A vector load's elements per iteration (#2808): 1 where it is consecutive, else its stride's.
+static uint32_t ir_vectorize_stride(const IrVectorizeWork* work, uint32_t i)
+{
+    const IrFunction* f = work->function;
+    const bool load = f->op[i] == IR_LOAD && work->classes[i] == IR_VECTORIZE_CLASS_VECTOR;
+    const uint32_t result = load ? (uint32_t)(work->coefficients[f->a[i]] >> work->sizes[i]) : 1;
+    return result;
+}
+
 // Whether every vector row's operation is the target's at `lanes` lanes per iteration.
 static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoop* plan, uint32_t lanes)
 {
@@ -1420,7 +1528,12 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
         const uint32_t size = work->sizes[i];
         const uint32_t bytes = lanes << size;
         const uint32_t lane = ir_vectorize_lane(size, work->floating[i] != 0);
-        if (class == IR_VECTORIZE_CLASS_UPDATE)
+        if (class == IR_VECTORIZE_CLASS_UPDATE && work->reduction[work->reduction_index[i]].operation == BUSTER_IR_VECTORIZE_COUNT)
+        {
+            // A count's accumulator is a scalar: the mask's bits in a general register, counted.
+            legal = ((t->count >> __builtin_ctz(lanes)) & 1) != 0;
+        }
+        else if (class == IR_VECTORIZE_CLASS_UPDATE)
         {
             const uint32_t operation = work->reduction[work->reduction_index[i]].operation;
             legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->moves, bytes) && ir_vectorize_has(t->splat[lane], bytes) && ir_vectorize_has(t->reduce[size][operation], bytes);
@@ -1429,7 +1542,12 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
         else if (class == IR_VECTORIZE_CLASS_VECTOR)
         {
             legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->moves, bytes);
-            if (op == IR_LOAD || op == IR_STORE || op == IR_COPY || op == IR_PHI)
+            if (op == IR_LOAD && ir_vectorize_stride(work, i) != 1)
+            {
+                // A strided load's de-interleave: its loads, and permutes of two tables of its lanes (#2808).
+                legal = legal && ir_vectorize_has(t->permute2[size], bytes);
+            }
+            else if (op == IR_LOAD || op == IR_STORE || op == IR_COPY || op == IR_PHI)
             {
             }
             else if (op == IR_SELECT)
@@ -1483,14 +1601,25 @@ static bool ir_vectorize_legal(const IrVectorizeWork* work, const IrVectorizeLoo
         else if (class == IR_VECTORIZE_CLASS_MASK)
         {
             legal = bytes >= 16 && bytes <= 64 && ir_vectorize_has(t->compare[lane], bytes);
+            uint32_t x = 0;
+            uint32_t y = 0;
+            uint32_t predicate = 0;
+            ir_vectorize_compared(f, i, &x, &y, &predicate);
             for (uint32_t k2 = 0; legal && k2 < 2; k2 += 1)
             {
-                const uint32_t v = k2 == 0 ? f->a[i] : f->b[i];
+                const uint32_t v = k2 == 0 ? x : y;
                 legal = work->classes[v] == IR_VECTORIZE_CLASS_VECTOR || ir_vectorize_has(t->splat[lane], bytes);
             }
         }
     }
     return legal;
+}
+
+// Whether row i is a count's update (#2808), whose accumulator is a scalar: no vector of its own.
+static bool ir_vectorize_scalar_update(const IrVectorizeWork* work, uint32_t i)
+{
+    const bool result = work->classes[i] == IR_VECTORIZE_CLASS_UPDATE && work->reduction[work->reduction_index[i]].operation == BUSTER_IR_VECTORIZE_COUNT;
+    return result;
 }
 
 // The lanes per iteration: the widest width whose lanes give every vector row at least 16 bytes and at most the width,
@@ -1504,7 +1633,7 @@ static uint32_t ir_vectorize_width(const IrVectorizeWork* work, const IrVectoriz
     {
         const uint32_t i = work->rows[k];
         const uint32_t class = work->classes[i];
-        if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_UPDATE || class == IR_VECTORIZE_CLASS_MASK)
+        if ((class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_UPDATE || class == IR_VECTORIZE_CLASS_MASK) && !ir_vectorize_scalar_update(work, i))
         {
             smallest = work->sizes[i] < smallest ? work->sizes[i] : smallest;
             largest = work->sizes[i] > largest ? work->sizes[i] : largest;
@@ -1546,8 +1675,11 @@ static bool ir_vectorize_masked_legal(const IrVectorizeWork* work, const IrVecto
     for (uint32_t i = f->block_offsets[plan->header]; legal && f->op[i] == IR_PHI; i += 1)
     {
         const uint32_t size = work->sizes[i];
-        legal = work->classes[i] != IR_VECTORIZE_CLASS_REDUCTION || ir_vectorize_has(t->select[ir_vectorize_lane(size, false)], lanes << size);
+        const bool vector = work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION && !ir_vectorize_scalar_update(work, ir_vectorize_incoming(f, i, plan->latch));
+        legal = !vector || ir_vectorize_has(t->select[ir_vectorize_lane(size, false)], lanes << size);
     }
+    // A strided load's de-interleave has no masked form here (#2808).
+    legal = legal && !plan->strided;
     return legal;
 }
 
@@ -1626,10 +1758,11 @@ static uint32_t ir_vectorize_dependences(IrVectorizeWork* work, uint32_t loop, I
             }
         }
     }
-    // A guard's pointers are computed in G at the start: each chain's uniforms must be there.
-    for (uint32_t g = 0; refusal == IR_VECTORIZE_REFUSALS && g < plan->guards * 2; g += 1)
+    // A guard's pointers are computed in G at the start, and a 32-bit index's chain (#2808) at the start and at the last
+    // vector iteration: each chain's uniforms must be there.
+    for (uint32_t g = 0; refusal == IR_VECTORIZE_REFUSALS && g < plan->guards * 2 + plan->narrows; g += 1)
     {
-        const uint32_t access = plan->guard_pairs[g];
+        const uint32_t access = g < plan->guards * 2 ? plan->guard_pairs[g] : plan->narrow_rows[g - plan->guards * 2];
         uint32_t stack[BUSTER_IR_VECTORIZE_DEPTH * 3] = { 0 };
         uint32_t depth = 0;
         stack[depth] = f->a[access];
@@ -1705,7 +1838,7 @@ static uint32_t ir_vectorize_plan(IrVectorizeWork* work, uint32_t loop, IrVector
         {
             const uint32_t i = work->rows[k];
             const uint32_t class = work->classes[i];
-            largest = (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_UPDATE) && work->sizes[i] > largest ? work->sizes[i] : largest;
+            largest = (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_UPDATE) && !ir_vectorize_scalar_update(work, i) && work->sizes[i] > largest ? work->sizes[i] : largest;
         }
         const uint32_t bytes = plan->lanes << largest;
         plan->width = bytes == 16 ? 0 : bytes == 32 ? 1 : 2;
@@ -1773,41 +1906,75 @@ static uint32_t ir_vectorize_pairs(IrVectorizeBuild* build, const uint32_t* pair
     return offset;
 }
 
+// A vector constant's row (#2808): `count` lanes of 1 << size bytes, lane l `lanes[l]`, at `type`, appended to the vector
+// constant table.
+static uint32_t ir_vectorize_vector_constant(IrVectorizeBuild* build, uint32_t type, uint32_t size, const uint32_t* lanes, uint32_t count)
+{
+    const uint32_t index = build->vector_constants;
+    if (!build->counting)
+    {
+        IrSimdValue value = { 0 };
+        uint8_t bytes[64] = { 0 };
+        for (uint32_t l = 0; l < count; l += 1)
+        {
+            const uint64_t bits = lanes[l];
+            memcpy(bytes + ((uint64_t)l << size), &bits, (uint64_t)1 << size);
+        }
+        memcpy(value.words, bytes, sizeof(bytes));
+        build->view->vector_constants[index] = value;
+    }
+    build->vector_constants += 1;
+    return ir_vectorize_row(build, IR_VCONST, type, 0, 0, index, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+}
+
+// `base` plus `offset` bytes, an address row of its own entry in the address table (#2808).
+static uint32_t ir_vectorize_offset(IrVectorizeBuild* build, uint32_t base, int64_t offset)
+{
+    const uint32_t index = build->addresses;
+    if (!build->counting)
+    {
+        build->view->addresses[index] = (IrAddress){ .offset = offset, .scale = 1 };
+    }
+    build->addresses += 1;
+    return ir_vectorize_row(build, IR_ADDRESS, IR_PTR, 0, 0, base, BUSTER_IR_NONE, index, BUSTER_IR_NONE);
+}
+
 static uint32_t ir_vectorize_origin(const IrFunction* f, uint32_t i)
 {
     const uint32_t result = f->debug != NULL ? f->debug->origins[i] : BUSTER_IR_NONE;
     return result;
 }
 
-// A value as a clone reads it: outside the loop itself; in the loop, its clone in VB (or G), or, where `start`, the G
-// clone with the induction at its start.
-static uint32_t ir_vectorize_operand(const IrVectorizeWork* work, uint32_t loop, uint32_t value, bool start)
+// A value as a clone reads it: outside the loop itself; in the loop, its clone in VB (or G), or, where `chain` is a G
+// chain's clones (IrVectorizeWork.starts, .lasts), an index's or a pointer's clone there, at that chain's induction.
+static uint32_t ir_vectorize_operand(const IrVectorizeWork* work, uint32_t loop, uint32_t value, const uint32_t* chain)
 {
     uint32_t result = value;
     if (ir_vectorize_inside(work, loop, value))
     {
         const uint32_t class = work->classes[value];
-        const bool chain = class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER;
-        result = start && chain ? work->starts[value] : work->values[value];
+        const bool affine = class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER;
+        result = chain != NULL && affine ? chain[value] : work->values[value];
     }
     return result;
 }
 
 // A scalar clone of row i, its operands read as ir_vectorize_operand gives them.
-static uint32_t ir_vectorize_clone(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, uint32_t i, bool start)
+static uint32_t ir_vectorize_clone(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, uint32_t i, const uint32_t* chain)
 {
     const IrFunction* f = work->function;
     const uint32_t mask = ir_value_mask(f, i);
-    const uint32_t a = (mask & 1) != 0 ? ir_vectorize_operand(work, loop, f->a[i], start) : f->a[i];
-    const uint32_t b = (mask & 2) != 0 ? ir_vectorize_operand(work, loop, f->b[i], start) : f->b[i];
-    const uint32_t c = (mask & 4) != 0 ? ir_vectorize_operand(work, loop, f->c[i], start) : f->c[i];
+    const uint32_t a = (mask & 1) != 0 ? ir_vectorize_operand(work, loop, f->a[i], chain) : f->a[i];
+    const uint32_t b = (mask & 2) != 0 ? ir_vectorize_operand(work, loop, f->b[i], chain) : f->b[i];
+    const uint32_t c = (mask & 4) != 0 ? ir_vectorize_operand(work, loop, f->c[i], chain) : f->c[i];
     return ir_vectorize_row(build, f->op[i], f->type[i], f->flags[i], f->alignment_log2[i], a, b, c, ir_vectorize_origin(f, i));
 }
 
-// The G clones of a guard's pointer chain, the induction at its start, each once and after its operands' (an operand's
-// before the next one's, in operand order), by an explicit stack (the call graph's no-recursion rule) of values and
-// whether their operands were pushed; a value is pushed at most once per operand that reads it.
-static void ir_vectorize_start_chain(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, const IrVectorizeLoop* plan, uint32_t value)
+// The G clones of an index's or a pointer's chain into `memo` (IrVectorizeWork.starts or .lasts), the induction at
+// `induction`, each once and after its operands' (an operand's before the next one's, in operand order), by an explicit
+// stack (the call graph's no-recursion rule) of values and whether their operands were pushed; a value is pushed at most
+// once per operand that reads it.
+static void ir_vectorize_start_chain(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, const IrVectorizeLoop* plan, uint32_t value, uint32_t* memo, uint32_t induction)
 {
     const IrFunction* f = work->function;
     uint32_t count = 1;
@@ -1818,7 +1985,7 @@ static void ir_vectorize_start_chain(IrVectorizeWork* work, IrVectorizeBuild* bu
         const uint32_t v = work->chain[count - 1];
         const bool expanded = work->chain_expanded[count - 1] != 0;
         const uint32_t class = ir_vectorize_class(work, loop, v);
-        const bool pending = (class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER) && ir_vectorize_inside(work, loop, v) && work->starts[v] == BUSTER_IR_NONE;
+        const bool pending = (class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER) && ir_vectorize_inside(work, loop, v) && memo[v] == BUSTER_IR_NONE;
         const bool copy = f->op[v] == IR_COPY || f->op[v] == IR_PHI;
         if (!pending)
         {
@@ -1826,14 +1993,14 @@ static void ir_vectorize_start_chain(IrVectorizeWork* work, IrVectorizeBuild* bu
         }
         else if (v == plan->induction)
         {
-            work->starts[v] = plan->start;
+            memo[v] = induction;
             count -= 1;
         }
         else if (expanded)
         {
             // Every operand's start is made: this one's, a copy's its source's.
             const uint32_t source = f->op[v] == IR_PHI ? f->extra[f->a[v] + 1] : f->a[v];
-            work->starts[v] = copy ? ir_vectorize_operand(work, loop, source, true) : ir_vectorize_clone(work, build, loop, v, true);
+            memo[v] = copy ? ir_vectorize_operand(work, loop, source, memo) : ir_vectorize_clone(work, build, loop, v, memo);
             count -= 1;
         }
         else
@@ -1861,7 +2028,7 @@ static uint32_t ir_vectorize_splat(IrVectorizeWork* work, IrVectorizeBuild* buil
     if (work->splats[value] == BUSTER_IR_NONE)
     {
         const uint32_t size = ir_vectorize_size(f->type[value]);
-        const uint32_t scalar = ir_vectorize_operand(work, loop, value, false);
+        const uint32_t scalar = ir_vectorize_operand(work, loop, value, NULL);
         work->splats[value] = ir_vectorize_row(build, IR_INTRINSIC, ir_vectorize_vector_type(lanes << size), 0, 0, scalar, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
         ir_vectorize_touch(work, value);
     }
@@ -1875,6 +2042,39 @@ static uint32_t ir_vectorize_lanes_of(IrVectorizeWork* work, IrVectorizeBuild* b
     const bool vector = class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_MASK || class == IR_VECTORIZE_CLASS_REDUCTION || class == IR_VECTORIZE_CLASS_UPDATE;
     const uint32_t result = vector ? work->values[value] : ir_vectorize_splat(work, build, loop, value, lanes);
     return result;
+}
+
+// A strided load's de-interleave (#2808), for k elements per iteration and L lanes of E bytes: k loads of L lanes from
+// lane 0's address, the s-th s * L elements past it, except the last, which ends at the last lane's element instead,
+// k - 1 elements before (k - 1) * L, so that no byte past the scalar loop's last one is read; lane l's element l * k is
+// in the s-th load where s * L <= l * k < (s + 1) * L for s < k - 1, else in the last. The permutes fold them in order:
+// the first takes the first two loads' lanes, and the s-th the s-th load's into the lanes the ones before it placed
+// (vpermt2b to vpermt2q, a lane past L naming the second table's). G makes their k - 1 index vectors in order: returns the
+// first one's row, the next ones' following it.
+static uint32_t ir_vectorize_deinterleave_indices(IrVectorizeWork* work, IrVectorizeBuild* build, const IrVectorizeLoop* plan, uint32_t i)
+{
+    const uint32_t lanes = plan->lanes;
+    const uint32_t size = work->sizes[i];
+    const uint32_t k = ir_vectorize_stride(work, i);
+    const uint32_t vtype = ir_vectorize_vector_type(lanes << size);
+    uint32_t first = BUSTER_IR_NONE;
+    for (uint32_t s = 1; s < k; s += 1)
+    {
+        uint32_t indices[64] = { 0 };
+        for (uint32_t l = 0; l < lanes; l += 1)
+        {
+            // The mutant takes lane 1's element in lane 0.
+            const uint32_t element = (l == 0 && work->mutation == BUSTER_IR_VECTORIZE_MUTATE_STRIDE ? 1 : l) * k;
+            const bool last = element >= (k - 1) * lanes;
+            const uint32_t source = last ? k - 1 : element / lanes;
+            const uint32_t place = last ? element - (k - 1) * lanes + (k - 1) : element % lanes;
+            const uint32_t earlier = s == 1 ? place : l;
+            indices[l] = source == s ? lanes + place : source < s ? earlier : 0;
+        }
+        const uint32_t row = ir_vectorize_vector_constant(build, vtype, size, indices, lanes);
+        first = s == 1 ? row : first;
+    }
+    return first;
 }
 
 // The splats G makes before the vector loop: each uniform operand of a vector row that G has, and each mask
@@ -1899,7 +2099,12 @@ static void ir_vectorize_g_splats(IrVectorizeWork* work, IrVectorizeBuild* build
         else if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_MASK)
         {
             const uint32_t mask = ir_value_mask(f, i);
-            const uint32_t operands[3] = { f->a[i], f->b[i], f->c[i] };
+            uint32_t operands[3] = { f->a[i], f->b[i], f->c[i] };
+            uint32_t predicate = 0;
+            if (op == IR_ICMP)
+            {
+                ir_vectorize_compared(f, i, &operands[0], &operands[1], &predicate);
+            }
             for (uint32_t k2 = 0; k2 < 3; k2 += 1)
             {
                 const uint32_t v = operands[k2];
@@ -1909,6 +2114,10 @@ static void ir_vectorize_g_splats(IrVectorizeWork* work, IrVectorizeBuild* build
                 {
                     ir_vectorize_splat(work, build, loop, v, lanes);
                 }
+            }
+            if (op == IR_LOAD && ir_vectorize_stride(work, i) != 1)
+            {
+                work->ones[i] = ir_vectorize_deinterleave_indices(work, build, plan, i);
             }
             if ((op == IR_ZEXT || op == IR_SEXT) && work->classes[f->a[i]] == IR_VECTORIZE_CLASS_MASK)
             {
@@ -1923,6 +2132,40 @@ static void ir_vectorize_g_splats(IrVectorizeWork* work, IrVectorizeBuild* build
     }
 }
 
+// A reduction phi's accumulator's type in the vector loop: a vector of its lanes, or a count's scalar (#2808).
+static uint32_t ir_vectorize_accumulator(const IrVectorizeWork* work, const IrVectorizeLoop* plan, uint32_t phi)
+{
+    const IrFunction* f = work->function;
+    const bool scalar = ir_vectorize_scalar_update(work, ir_vectorize_incoming(f, phi, plan->latch));
+    const uint32_t result = scalar ? f->type[phi] : ir_vectorize_vector_type(plan->lanes << work->sizes[phi]);
+    return result;
+}
+
+// A count's update (#2808): its accumulator plus the population count of its comparison's mask's bits, of those that
+// `tail` (the masked tail's mask, of the same type) has set where it isn't BUSTER_IR_NONE.
+static uint32_t ir_vectorize_count_row(IrVectorizeWork* work, IrVectorizeBuild* build, const IrVectorizeLoop* plan, uint32_t i, uint32_t tail)
+{
+    const IrFunction* f = work->function;
+    const IrVectorizeReduction reduction = work->reduction[work->reduction_index[i]];
+    const uint32_t mtype = ir_vectorize_mask_type(plan->lanes);
+    const uint32_t bits_type = mtype == IR_M8 ? IR_I8 : mtype == IR_M16 ? IR_I16 : mtype == IR_M32 ? IR_I32 : IR_I64;
+    uint32_t bits = ir_vectorize_row(build, IR_BITCAST, bits_type, 0, 0, work->values[reduction.lane], BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    if (tail != BUSTER_IR_NONE)
+    {
+        const uint32_t active = ir_vectorize_row(build, IR_BITCAST, bits_type, 0, 0, tail, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        bits = ir_vectorize_row(build, IR_AND, bits_type, 0, 0, bits, active, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    // popcnt counts 32 or 64 bits.
+    const uint32_t count_type = bits_type == IR_I64 ? IR_I64 : IR_I32;
+    const uint32_t wide = bits_type == count_type ? bits : ir_vectorize_row(build, IR_ZEXT, count_type, 0, 0, bits, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    const uint32_t counted = ir_vectorize_row(build, IR_INTRINSIC, count_type, 0, 0, wide, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_POPCNT, BUSTER_IR_NONE);
+    const uint32_t type = f->type[i];
+    const uint32_t resize = type == IR_I64 ? IR_ZEXT : IR_TRUNC;
+    const uint32_t addend = type == count_type ? counted : ir_vectorize_row(build, resize, type, 0, 0, counted, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    const uint32_t result = ir_vectorize_row(build, IR_ADD, type, 0, 0, work->values[reduction.phi], addend, BUSTER_IR_NONE, ir_vectorize_origin(f, i));
+    return result;
+}
+
 // One vector row in VB.
 static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, const IrVectorizeLoop* plan, uint32_t i)
 {
@@ -1934,7 +2177,11 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
     const uint32_t lane = ir_vectorize_lane(size, work->floating[i] != 0);
     const uint32_t origin = ir_vectorize_origin(f, i);
     uint32_t value = BUSTER_IR_NONE;
-    if (work->classes[i] == IR_VECTORIZE_CLASS_UPDATE && work->reduction[work->reduction_index[i]].operation < BUSTER_IR_REDUCE_ADD)
+    if (ir_vectorize_scalar_update(work, i))
+    {
+        value = ir_vectorize_count_row(work, build, plan, i, BUSTER_IR_NONE);
+    }
+    else if (work->classes[i] == IR_VECTORIZE_CLASS_UPDATE && work->reduction[work->reduction_index[i]].operation < BUSTER_IR_REDUCE_ADD)
     {
         const IrVectorizeReduction reduction = work->reduction[work->reduction_index[i]];
         const uint32_t other = ir_vectorize_lanes_of(work, build, loop, reduction.lane, lanes);
@@ -1944,21 +2191,47 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
     {
         value = work->values[op == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i]];
     }
+    else if (op == IR_LOAD && ir_vectorize_stride(work, i) != 1)
+    {
+        // A strided load (#2808): its k loads and the permutes of ir_vectorize_deinterleave_indices.
+        const uint32_t k = ir_vectorize_stride(work, i);
+        const uint32_t base = ir_vectorize_operand(work, loop, f->a[i], NULL);
+        const int64_t width = (int64_t)lanes << size;
+        const int64_t element = (int64_t)1 << size;
+        for (uint32_t s = 0; s < k; s += 1)
+        {
+            const int64_t offset = s + 1 < k ? (int64_t)s * width : (int64_t)(k - 1) * (width - element);
+            const uint32_t pointer = s == 0 ? base : ir_vectorize_offset(build, base, offset);
+            const uint32_t loaded = ir_vectorize_row(build, IR_LOAD, vtype, 0, f->alignment_log2[i], pointer, BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
+            uint32_t extra = build->extras;
+            if (s != 0 && !build->counting)
+            {
+                build->view->extra[extra] = loaded;
+            }
+            build->extras += s != 0 ? 1 : 0;
+            const uint32_t kind = ir_intrinsic_ternary_c(BUSTER_IR_INTRINSIC_PERMUTE2, extra);
+            value = s == 0 ? loaded : ir_vectorize_row(build, IR_INTRINSIC, vtype, size, 0, value, work->ones[i] + s - 1, kind, origin);
+        }
+    }
     else if (op == IR_LOAD)
     {
-        value = ir_vectorize_row(build, IR_LOAD, vtype, 0, f->alignment_log2[i], ir_vectorize_operand(work, loop, f->a[i], false), BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
+        value = ir_vectorize_row(build, IR_LOAD, vtype, 0, f->alignment_log2[i], ir_vectorize_operand(work, loop, f->a[i], NULL), BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
     }
     else if (op == IR_STORE)
     {
         const uint32_t stored = ir_vectorize_lanes_of(work, build, loop, f->b[i], lanes);
-        value = ir_vectorize_row(build, IR_STORE, IR_VOID, 0, f->alignment_log2[i], ir_vectorize_operand(work, loop, f->a[i], false), stored, BUSTER_IR_NONE, origin);
+        value = ir_vectorize_row(build, IR_STORE, IR_VOID, 0, f->alignment_log2[i], ir_vectorize_operand(work, loop, f->a[i], NULL), stored, BUSTER_IR_NONE, origin);
     }
     else if (op == IR_ICMP)
     {
         const uint32_t olane = ir_vectorize_lane(size, false);
-        const uint32_t x = ir_vectorize_lanes_of(work, build, loop, f->a[i], lanes);
-        const uint32_t y = ir_vectorize_lanes_of(work, build, loop, f->b[i], lanes);
-        value = ir_vectorize_row(build, IR_VCMP, ir_vectorize_mask_type(lanes), olane, 0, x, y, f->c[i], origin);
+        uint32_t left = 0;
+        uint32_t right = 0;
+        uint32_t predicate = 0;
+        ir_vectorize_compared(f, i, &left, &right, &predicate);
+        const uint32_t x = ir_vectorize_lanes_of(work, build, loop, left, lanes);
+        const uint32_t y = ir_vectorize_lanes_of(work, build, loop, right, lanes);
+        value = ir_vectorize_row(build, IR_VCMP, ir_vectorize_mask_type(lanes), olane, 0, x, y, predicate, origin);
     }
     else if (op == IR_SELECT)
     {
@@ -2034,7 +2307,7 @@ static void ir_vectorize_tail_rows(IrVectorizeWork* work, IrVectorizeBuild* buil
         const uint32_t lane = ir_vectorize_lane(size, false);
         if ((class == IR_VECTORIZE_CLASS_UNIFORM && work->placed_g[i] == 0) || class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER)
         {
-            work->values[i] = copy ? ir_vectorize_operand(work, loop, op == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], false) : ir_vectorize_clone(work, build, loop, i, false);
+            work->values[i] = copy ? ir_vectorize_operand(work, loop, op == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], NULL) : ir_vectorize_clone(work, build, loop, i, NULL);
         }
         else if (vector && op == IR_LOAD)
         {
@@ -2044,14 +2317,18 @@ static void ir_vectorize_tail_rows(IrVectorizeWork* work, IrVectorizeBuild* buil
                 const uint32_t zero = ir_vectorize_const(build, integers[size & 3], 0);
                 zeros[size & 3] = ir_vectorize_row(build, IR_INTRINSIC, vtype, 0, 0, zero, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
             }
-            const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[i], false);
+            const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[i], NULL);
             work->values[i] = ir_vectorize_row(build, IR_MASKED_LOAD, vtype, lane, f->alignment_log2[i], pointer, mask, zeros[size & 3], ir_vectorize_origin(f, i));
         }
         else if (vector && op == IR_STORE)
         {
             const uint32_t stored = ir_vectorize_lanes_of(work, build, loop, f->b[i], lanes);
-            const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[i], false);
+            const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[i], NULL);
             work->values[i] = ir_vectorize_row(build, IR_MASKED_STORE, IR_VOID, lane, f->alignment_log2[i], pointer, stored, mask, ir_vectorize_origin(f, i));
+        }
+        else if (ir_vectorize_scalar_update(work, i))
+        {
+            work->values[i] = ir_vectorize_count_row(work, build, plan, i, mask);
         }
         else if (vector)
         {
@@ -2064,6 +2341,41 @@ static void ir_vectorize_tail_rows(IrVectorizeWork* work, IrVectorizeBuild* buil
             }
         }
     }
+}
+
+// The 32-bit indices' tests (#2808), in G: each one's 64-bit extension at the vector iterations' first and last
+// inductions (its chain cloned at each) must be its coefficient times their distance apart. The 32-bit value is the
+// exact affine one modulo 2^32, so its extension is that value less a multiple of 2^32 that can only grow (or only
+// shrink) with the induction; equal at both ends, it is the same for every iteration between them, and each lane's
+// index is lane 0's plus the coefficient per lane. Returns `enter` with the tests.
+static uint32_t ir_vectorize_narrow_guards(IrVectorizeWork* work, IrVectorizeBuild* build, uint32_t loop, const IrVectorizeLoop* plan, uint32_t covered, uint32_t enter)
+{
+    const IrFunction* f = work->function;
+    uint32_t result = enter;
+    const uint32_t narrows = work->mutation == BUSTER_IR_VECTORIZE_MUTATE_NARROW ? 0 : plan->narrows;
+    if (narrows != 0)
+    {
+        // covered - 1 iterations from the start to the last: covered is nonzero wherever the tests matter.
+        const uint32_t one = ir_vectorize_const(build, IR_I64, 1);
+        const uint32_t distance = ir_vectorize_row(build, IR_SUB, IR_I64, 0, 0, covered, one, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t narrow = ir_vectorize_row(build, IR_TRUNC, IR_I32, 0, 0, distance, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t last = ir_vectorize_row(build, IR_ADD, IR_I32, 0, 0, plan->start, narrow, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k < narrows; k += 1)
+        {
+            const uint32_t row = plan->narrow_rows[k];
+            const uint32_t index = f->a[row];
+            ir_vectorize_start_chain(work, build, loop, plan, index, work->starts, plan->start);
+            ir_vectorize_start_chain(work, build, loop, plan, index, work->lasts, last);
+            const uint32_t first_value = ir_vectorize_row(build, f->op[row], IR_I64, 0, 0, ir_vectorize_operand(work, loop, index, work->starts), BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t last_value = ir_vectorize_row(build, f->op[row], IR_I64, 0, 0, ir_vectorize_operand(work, loop, index, work->lasts), BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t difference = ir_vectorize_row(build, IR_SUB, IR_I64, 0, 0, last_value, first_value, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t coefficient = ir_vectorize_const(build, IR_I64, (uint64_t)work->coefficients[row]);
+            const uint32_t expected = ir_vectorize_row(build, IR_MUL, IR_I64, 0, 0, distance, coefficient, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint32_t affine = ir_vectorize_row(build, IR_ICMP, IR_I1, 0, 0, difference, expected, IR_EQ, BUSTER_IR_NONE);
+            result = ir_vectorize_row(build, IR_SELECT, IR_I1, 0, 0, result, affine, result, BUSTER_IR_NONE);
+        }
+    }
+    return result;
 }
 
 // One accepted loop's G, VB and VX, and its preheader's branch and header's phis rewritten. A masked tail's (#2807)
@@ -2092,13 +2404,13 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         if (work->classes[i] == IR_VECTORIZE_CLASS_UNIFORM && work->placed_g[i] != 0)
         {
             const bool copy = f->op[i] == IR_COPY || f->op[i] == IR_PHI;
-            work->values[i] = copy ? ir_vectorize_operand(work, loop, f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], false) : ir_vectorize_clone(work, build, loop, i, false);
+            work->values[i] = copy ? ir_vectorize_operand(work, loop, f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], NULL) : ir_vectorize_clone(work, build, loop, i, NULL);
         }
     }
     // The trip count from the start (plus the exit test's offset, which must not wrap) to the bound, 0 where the bound
     // isn't past it, as 64 bits.
     const uint32_t start = plan->start;
-    const uint32_t bound = ir_vectorize_operand(work, loop, plan->bound, false);
+    const uint32_t bound = ir_vectorize_operand(work, loop, plan->bound, NULL);
     const uint32_t zero64 = ir_vectorize_const(build, IR_I64, 0);
     uint32_t first = start;
     uint32_t unwrapped = BUSTER_IR_NONE;
@@ -2156,11 +2468,13 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         for (uint32_t side = 0; side < 2; side += 1)
         {
             const uint32_t access = plan->guard_pairs[pair * 2 + side];
-            ir_vectorize_start_chain(work, build, loop, plan, f->a[access]);
-            const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[access], true);
+            ir_vectorize_start_chain(work, build, loop, plan, f->a[access], work->starts, plan->start);
+            const uint32_t pointer = ir_vectorize_operand(work, loop, f->a[access], work->starts);
             base[side] = f->type[f->a[access]] == IR_I64 ? pointer : ir_vectorize_row(build, IR_PTRTOINT, IR_I64, 0, 0, pointer, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            const uint32_t shift = ir_vectorize_const(build, IR_I64, work->sizes[access]);
-            length[side] = ir_vectorize_row(build, IR_SHL, IR_I64, 0, 0, covered, shift, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            // A strided load's range is its stride's bytes per iteration (#2808), past its last element's end.
+            const uint32_t stride = ir_vectorize_stride(work, access);
+            const uint32_t factor = ir_vectorize_const(build, IR_I64, stride == 1 ? work->sizes[access] : (uint64_t)work->coefficients[f->a[access]]);
+            length[side] = ir_vectorize_row(build, stride == 1 ? IR_SHL : IR_MUL, IR_I64, 0, 0, covered, factor, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
         const uint32_t forward = ir_vectorize_row(build, IR_SUB, IR_I64, 0, 0, base[1], base[0], BUSTER_IR_NONE, BUSTER_IR_NONE);
         const uint32_t backward = ir_vectorize_row(build, IR_SUB, IR_I64, 0, 0, base[0], base[1], BUSTER_IR_NONE, BUSTER_IR_NONE);
@@ -2169,6 +2483,7 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         const uint32_t apart = ir_vectorize_row(build, IR_SELECT, IR_I1, 0, 0, after, before, after, BUSTER_IR_NONE);
         enter = ir_vectorize_row(build, IR_SELECT, IR_I1, 0, 0, enter, apart, enter, BUSTER_IR_NONE);
     }
+    enter = ir_vectorize_narrow_guards(work, build, loop, plan, covered, enter);
     ir_vectorize_g_splats(work, build, loop, plan);
     // Arithmetic identities and the min/max accumulators' incoming values.
     uint32_t seeds[BUSTER_IR_VECTORIZE_REDUCTION_LIMIT] = { 0 };
@@ -2181,12 +2496,21 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
             const uint32_t operation = work->reduction[work->reduction_index[update]].operation;
             // Min/max is idempotent: seeding every lane includes the incoming accumulator in the horizontal result.
             uint32_t seed = ir_vectorize_incoming(f, i, plan->preheader);
-            if (operation >= BUSTER_IR_REDUCE_ADD)
+            if (operation == BUSTER_IR_VECTORIZE_COUNT)
             {
-                const uint64_t bits = (operation == BUSTER_IR_REDUCE_MUL ? 1 : operation == BUSTER_IR_REDUCE_AND ? UINT64_MAX : 0) + (work->mutation == BUSTER_IR_VECTORIZE_MUTATE_IDENTITY ? 1 : 0);
-                seed = ir_vectorize_const(build, f->type[i], bits);
+                // A count's scalar accumulator starts at the incoming value (#2808).
+                const bool mutated = work->mutation == BUSTER_IR_VECTORIZE_MUTATE_IDENTITY;
+                seeds[count] = mutated ? ir_vectorize_row(build, IR_ADD, f->type[i], 0, 0, seed, ir_vectorize_const(build, f->type[i], 1), BUSTER_IR_NONE, BUSTER_IR_NONE) : seed;
             }
-            seeds[count] = ir_vectorize_row(build, IR_INTRINSIC, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, seed, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
+            else
+            {
+                if (operation >= BUSTER_IR_REDUCE_ADD)
+                {
+                    const uint64_t bits = (operation == BUSTER_IR_REDUCE_MUL ? 1 : operation == BUSTER_IR_REDUCE_AND ? UINT64_MAX : 0) + (work->mutation == BUSTER_IR_VECTORIZE_MUTATE_IDENTITY ? 1 : 0);
+                    seed = ir_vectorize_const(build, f->type[i], bits);
+                }
+                seeds[count] = ir_vectorize_row(build, IR_INTRINSIC, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, seed, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT, BUSTER_IR_NONE);
+            }
             count += 1;
         }
     }
@@ -2208,7 +2532,7 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
     {
         if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
         {
-            phis[count] = ir_vectorize_row(build, IR_PHI, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            phis[count] = ir_vectorize_row(build, IR_PHI, ir_vectorize_accumulator(work, plan, i), 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
             work->values[i] = phis[count];
             count += 1;
         }
@@ -2221,12 +2545,12 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         if (class == IR_VECTORIZE_CLASS_UNIFORM && work->placed_g[i] == 0)
         {
             const bool copy = f->op[i] == IR_COPY || f->op[i] == IR_PHI;
-            work->values[i] = copy ? ir_vectorize_operand(work, loop, f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], false) : ir_vectorize_clone(work, build, loop, i, false);
+            work->values[i] = copy ? ir_vectorize_operand(work, loop, f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], NULL) : ir_vectorize_clone(work, build, loop, i, NULL);
         }
         else if (class == IR_VECTORIZE_CLASS_INDEX || class == IR_VECTORIZE_CLASS_POINTER)
         {
             const bool copy = f->op[i] == IR_COPY || f->op[i] == IR_PHI;
-            work->values[i] = copy ? ir_vectorize_operand(work, loop, f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], false) : ir_vectorize_clone(work, build, loop, i, false);
+            work->values[i] = copy ? ir_vectorize_operand(work, loop, f->op[i] == IR_PHI ? f->extra[f->a[i] + 1] : f->a[i], NULL) : ir_vectorize_clone(work, build, loop, i, NULL);
         }
         else if (class == IR_VECTORIZE_CLASS_VECTOR || class == IR_VECTORIZE_CLASS_MASK || class == IR_VECTORIZE_CLASS_UPDATE)
         {
@@ -2261,7 +2585,7 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
         {
             if (work->classes[i] == IR_VECTORIZE_CLASS_REDUCTION)
             {
-                tails[count] = ir_vectorize_row(build, IR_PHI, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                tails[count] = ir_vectorize_row(build, IR_PHI, ir_vectorize_accumulator(work, plan, i), 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 work->values[i] = tails[count];
                 count += 1;
             }
@@ -2292,7 +2616,7 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
             {
                 const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
                 masked_updates[count] = work->values[update];
-                joins[count] = ir_vectorize_row(build, IR_PHI, ir_vectorize_vector_type(lanes << work->sizes[i]), 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                joins[count] = ir_vectorize_row(build, IR_PHI, ir_vectorize_accumulator(work, plan, i), 0, 0, 0, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
                 work->values[update] = joins[count];
                 count += 1;
             }
@@ -2307,10 +2631,18 @@ static void ir_vectorize_emit(IrVectorizeWork* work, IrVectorizeBuild* build, ui
             const uint32_t update = ir_vectorize_incoming(f, i, plan->latch);
             const uint32_t operation = work->reduction[work->reduction_index[update]].operation;
             const uint32_t size = work->sizes[i];
-            const uint32_t reduced = ir_vectorize_row(build, IR_INTRINSIC, IR_V4I32, size | operation << 2, 0, work->values[update], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_REDUCE, BUSTER_IR_NONE);
-            const uint32_t lane = ir_vectorize_row(build, IR_INTRINSIC, f->type[i], size, 0, reduced, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, BUSTER_IR_NONE);
-            const uint32_t initial = ir_vectorize_incoming(f, i, plan->preheader);
-            finals[count] = operation < BUSTER_IR_REDUCE_ADD ? lane : ir_vectorize_row(build, f->op[update], f->type[i], 0, 0, initial, lane, BUSTER_IR_NONE, ir_vectorize_origin(f, update));
+            if (operation == BUSTER_IR_VECTORIZE_COUNT)
+            {
+                // A count's accumulator is the scalar result, the incoming value included (#2808).
+                finals[count] = work->values[update];
+            }
+            else
+            {
+                const uint32_t reduced = ir_vectorize_row(build, IR_INTRINSIC, IR_V4I32, size | operation << 2, 0, work->values[update], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_REDUCE, BUSTER_IR_NONE);
+                const uint32_t lane = ir_vectorize_row(build, IR_INTRINSIC, f->type[i], size, 0, reduced, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_LANE_EXTRACT, BUSTER_IR_NONE);
+                const uint32_t initial = ir_vectorize_incoming(f, i, plan->preheader);
+                finals[count] = operation < BUSTER_IR_REDUCE_ADD ? lane : ir_vectorize_row(build, f->op[update], f->type[i], 0, 0, initial, lane, BUSTER_IR_NONE, ir_vectorize_origin(f, update));
+            }
             count += 1;
         }
     }
@@ -2440,6 +2772,7 @@ static __attribute__((unused)) void ir_vectorize_target_ir(IrVectorizeTarget* ta
         }
         target->popcount[from] = 7;
         target->masked[from] = 7;
+        target->permute2[from] = 7;
     }
     // Same-width integer/float conversions (#2806), keyed by the float lane.
     target->binary[IR_SITOFP][IR_SIMD_LANE_F32] = 7;
@@ -2450,8 +2783,9 @@ static __attribute__((unused)) void ir_vectorize_target_ir(IrVectorizeTarget* ta
     target->binary[IR_FPTOSI][IR_SIMD_LANE_F64] = 7;
     target->binary[IR_FPTOUI][IR_SIMD_LANE_F32] = 7;
     target->binary[IR_FPTOUI][IR_SIMD_LANE_F64] = 7;
-    // A mask of 2 to 64 lanes.
+    // A mask of 2 to 64 lanes, and its count.
     target->mask = 0x7e;
+    target->count = 0x7e;
     for (uint32_t operation = 0; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
     {
         target->reduce[2][operation] = 7;
@@ -2494,6 +2828,7 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
         work.coefficients = ir_allocate(scratch, n, sizeof(int64_t), &ok);
         work.values = ir_allocate(scratch, n, 4, &ok);
         work.starts = ir_allocate(scratch, n, 4, &ok);
+        work.lasts = ir_allocate(scratch, n, 4, &ok);
         work.splats = ir_allocate(scratch, n, 4, &ok);
         work.ones = ir_allocate(scratch, n, 4, &ok);
         work.zeros = ir_allocate(scratch, n, 4, &ok);
@@ -2511,11 +2846,20 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
     {
         memset(work.values, 0xff, n * 4);
         memset(work.starts, 0xff, n * 4);
+        memset(work.lasts, 0xff, n * 4);
         memset(work.splats, 0xff, n * 4);
         memset(work.ones, 0xff, n * 4);
         memset(work.zeros, 0xff, n * 4);
         ir_vectorize_kinds(function, work.kinds);
-        IrVectorizeBuild counting = { .counting = true, .rows = function->instruction_count, .blocks = function->block_count, .extras = function->extra_count, .constants = function->constant_count };
+        IrVectorizeBuild counting = {
+            .counting = true,
+            .rows = function->instruction_count,
+            .blocks = function->block_count,
+            .extras = function->extra_count,
+            .constants = function->constant_count,
+            .vector_constants = function->vector_constant_count,
+            .addresses = function->address_count,
+        };
         ir_vectorize_replay(&work, &counting);
         if (work.statistics.vectorized != 0)
         {
@@ -2537,6 +2881,13 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
             view.block_offsets = ir_allocate(output, blocks + 1, 4, &ok);
             view.extra = ir_allocate(output, counting.extras, 4, &ok);
             view.constants = ir_allocate(output, counting.constants, sizeof(IrConstant), &ok);
+            // The strided loads' indices and offsets (#2808), past the function's own: its tables otherwise stay shared.
+            const bool vectors = counting.vector_constants != function->vector_constant_count;
+            const bool addresses = counting.addresses != function->address_count;
+            view.vector_constant_count = counting.vector_constants;
+            view.address_count = counting.addresses;
+            view.vector_constants = vectors ? ir_allocate(output, counting.vector_constants, sizeof(IrSimdValue), &ok) : function->vector_constants;
+            view.addresses = addresses ? ir_allocate(output, counting.addresses, sizeof(IrAddress), &ok) : function->addresses;
             ok = ok && ir_debug_create(output, &view, function->debug);
             check.error = ok ? IR_OK : rows >= UINT32_MAX || blocks >= UINT32_MAX ? IR_ERROR_LIMIT : IR_ERROR_MEMORY;
             if (check.error == IR_OK)
@@ -2557,13 +2908,31 @@ static __attribute__((unused)) IrCheck ir_vectorize_loops(const IrFunction* func
                 {
                     memcpy(view.constants, function->constants, (uint64_t)function->constant_count * sizeof(IrConstant));
                 }
+                if (vectors && function->vector_constant_count != 0)
+                {
+                    memcpy(view.vector_constants, function->vector_constants, (uint64_t)function->vector_constant_count * sizeof(IrSimdValue));
+                }
+                if (addresses && function->address_count != 0)
+                {
+                    memcpy(view.addresses, function->addresses, (uint64_t)function->address_count * sizeof(IrAddress));
+                }
                 ir_debug_remap(function, &view, NULL, NULL, NULL);
-                IrVectorizeBuild build = { .counting = false, .view = &view, .rows = function->instruction_count, .blocks = function->block_count, .extras = function->extra_count, .constants = function->constant_count };
+                IrVectorizeBuild build = {
+                    .counting = false,
+                    .view = &view,
+                    .rows = function->instruction_count,
+                    .blocks = function->block_count,
+                    .extras = function->extra_count,
+                    .constants = function->constant_count,
+                    .vector_constants = function->vector_constant_count,
+                    .addresses = function->address_count,
+                };
                 const IrVectorizeResult counted = work.statistics;
                 ir_vectorize_replay(&work, &build);
                 work.statistics = counted;
                 view.block_offsets[view.block_count] = view.instruction_count;
-                check.error = build.rows == counting.rows && build.blocks == counting.blocks && build.extras == counting.extras && build.constants == counting.constants ? IR_OK : IR_ERROR_STRUCTURE;
+                const bool tables = build.vector_constants == counting.vector_constants && build.addresses == counting.addresses;
+                check.error = build.rows == counting.rows && build.blocks == counting.blocks && build.extras == counting.extras && build.constants == counting.constants && tables ? IR_OK : IR_ERROR_STRUCTURE;
                 view.arena_bytes = output->length - om;
             }
             if (check.error == IR_OK)
