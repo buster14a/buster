@@ -10,11 +10,14 @@ requirements. [Command index](README.md).
   original-offset map for one-, two- and four-byte `SHF_MERGE | SHF_STRINGS`
   entries; a one-byte entry also takes the end of its block head, the
   earliest entry of its group that ends with it (#3044). Only groups whose
-  one-byte entries have several lengths are considered: a bitmap prefilter
+  one-byte entries have several lengths are considered: a bitmap prefilter,
+  whose long level's candidates are checked exactly by their last 8 bytes,
   flags the contents that have a proper extension, together with their
   blocks, and only those are sorted by reversed content (an MSD radix on
   8-byte keys, ties refined from a work list, each level past its members'
-  common tail) before a stack pass writes the heads.
+  common tail) before a stack pass writes the heads. A link whose PC32 or
+  CALL fixups reach a pooled string, which the consumer refuses whatever the
+  pool, shares whole entries alone (#3261).
   `benchmark-foreign-strings` has six shapes: `unique` and `duplicate` (one
   length, nothing sorted), `suffix` (every second literal the end of the one
   before), `lengths` (several lengths, nothing to share), `repeats` (the

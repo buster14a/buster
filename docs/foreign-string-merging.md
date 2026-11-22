@@ -114,8 +114,12 @@ the end of `yzab`, at 6, for 9 bytes.
   proper extension in its group together with its whole block. A key holds
   the last eight content bytes, the one before the terminator most
   significant. The long level marks the (group, last 8 bytes) of each entry
-  with at least 8 content bytes as seen and twice seen, in two bitmaps of at least 16
-  bits an entry, and flags an entry whose mark was seen twice. The short
+  with at least 8 content bytes as seen and twice seen, in two bitmaps of at
+  least 16 bits an entry, an entry at a time. A second pass gathers 8
+  entries' keys and bitmap words to a `zmm` and lists the entries whose mark
+  was seen twice; each listed entry that shares its (group, last 8 bytes)
+  with another, found through a hash table of the listed entries' keys, is
+  flagged, so a collision in the bitmaps flags nothing (#3261). The short
   levels mark each 1- to 7-byte receiver's (group, length, bytes), flag
   every longer donor whose last j bytes hit a receiver's mark of length j,
   and then flag the receivers hit. The hash is
@@ -149,25 +153,37 @@ the end of `yzab`, at 6, for 9 bytes.
   every member's head only where it is not the class's own first entry. The
   interning loop checks a head in O(1).
 
-A model of the prefilter run over the same inputs, which flags the C
-prefilter's 1,007 on clang's `build_regression.o`, flags these shares of the
-one-byte entries of multi-length groups: `build_regression.o` 1,007 of 1,327
-(75.9%) with clang and 852 of 3,835 (22.2%) with gcc; `shell.o` 83.8% with
-clang, 84.4% with gcc -Os and 38.6% with gcc; `sqlite3.o` 76.8% with clang,
-46.4% with gcc -O3 and 46.6% with gcc; libc 38.4%, libcrypto 64.1%, libssl
-39.2%, libX11 47.5%, libdb 33.3% and libfreetype 73.1%; gcc's
-`build_regression.o`, `shell.o` and both `sqlite3.o` together 42.4%, and
-clang's `build_regression.o` eight times 95.5%.
+A model of the prefilter as first written (the bitmaps alone, before the
+exact check of the long level's listed entries) run over the same inputs,
+which flags the C prefilter's 1,007 on clang's `build_regression.o`, flags
+these shares of the one-byte entries of multi-length groups:
+`build_regression.o` 1,007 of 1,327 (75.9%) with clang and 852 of 3,835
+(22.2%) with gcc; `shell.o` 83.8% with clang, 84.4% with gcc -Os and 38.6%
+with gcc; `sqlite3.o` 76.8% with clang, 46.4% with gcc -O3 and 46.6% with
+gcc; libc 38.4%, libcrypto 64.1%, libssl 39.2%, libX11 47.5%, libdb 33.3%
+and libfreetype 73.1%; gcc's `build_regression.o`, `shell.o` and both
+`sqlite3.o` together 42.4%, and clang's `build_regression.o` eight times
+95.5%.
 
 ### What stays scalar
 
-Each part below stays scalar for the reason or count given; none of them has
-9700X figures yet, and that measurement is still owed:
+Each part below stays scalar for the reason or count given; the 9700X
+figures follow.
 
-- Key loads: one per considered entry and prefilter pass (an 8-byte load
-  when eight bytes remain, else a masked one).
-- Bitmap marks and tests: at most 2 (long), 7 (donor levels) and 1
-  (receiver) an entry. AVX-512 has no bit scatter.
+- The long level's first pass: per entry one 8-byte key load, one hash and
+  two bitmap bit operations, as AVX-512 has no bit scatter. A version that
+  hashed 8 entries to a `zmm` and read the slots back a lane at a time
+  stalled on that store every step: `foreign_strings_flag` took about
+  115,000 cycles a process on `lengths` at 4,096 literals, against about
+  31,000 with this pass scalar (`perf record`, #3261). The second pass is
+  vector: it gathers 8 entries' keys and bitmap words a step, and with it
+  scalar the block heads took 2,286,498 TSC ticks on `lengths` at 131,072
+  literals, against 1,948,412 (medians of 15 processes).
+- The exact check of the long level's listed entries: one probe sequence
+  each. On `lengths` no two literals share their last 8 bytes, so it flags
+  nothing and nothing is sorted.
+- The short levels: a receiver's key load and mark, and a donor's key load
+  and at most 7 level tests.
 - Radix counts and scatters: one of each for every partition a record
   takes, which is one per key digit that varies in its range, so at most 8
   a sort: a group's slice, or a tie of more than 32 at one level. On Zen 5 a
@@ -185,13 +201,47 @@ Each part below stays scalar for the reason or count given; none of them has
 - Head writes: one per member of a class headed by an extension.
 - Interning: O(1) more an entry, in the loop that was scalar before.
 
-Benchmark timings come from the 9700X, and these parts have none yet. The
-`unique`, `duplicate` and `lengths` shapes link to main's outputs byte for
-byte. On `lengths`, which shares nothing, a long bitmap of 32 bits an entry
-cut the flagged entries from 588 to 288 at 4,096 literals and from 1,256 to
-924 at 131,072. Keys and hashes 8 entries to a `zmm` were also tried. Which
-of the two pays is left to a 9700X run; neither is in. Plain 8-byte long
-keys, the flag bitset and the reused pages were kept.
+#### 9700X figures
+
+The merge-strings stage of `link-foreign --merge-strings --time --lanes 1`,
+in µs, one process a reading pinned to CPU 2, Release builds (#3261):
+medians over 6 placements of `main_unit_executable.c`'s code (`./build.sh
+shifts`) and 10 or 12 rounds, for two families of placements, shifts of 0
+to 3,520 bytes in steps of 704 / shifts of 0, 16, 32, 48, 2,064 and 3,120.
+"Before" is this branch before #3261. A second copy of main read 0.988 to
+1.009 of main. The `unique`, `duplicate` and `lengths` outputs are main's
+byte for byte, and the sharing shapes' are the branch's before #3261.
+
+| Input | Main | Before | Now | Now / main |
+| --- | ---: | ---: | ---: | ---: |
+| `lengths`, 4,096 | 43 / 43 | 69 / 69 | 62 / 62 | 1.44 / 1.44 |
+| `lengths`, 131,072 | 1,714 / 1,722 | 2,427 / 2,427 | 2,201 / 2,215 | 1.28 / 1.29 |
+| `duplicate`, 4,096 | 84 / 86 | 89 / 87 | 90 / 87 | 1.07 / 1.01 |
+| `duplicate`, 131,072 | 2,850 / 2,890 | 2,943 / 2,897 | 2,958 / 2,888 | 1.04 / 1.00 |
+| `unique`, 4,096 | 43 / 43 | 47 / 48 | 46 / 46 | 1.07 / 1.07 |
+| `unique`, 131,072 | 1,904 / 1,893 | 1,998 / 1,988 | 1,917 / 1,934 | 1.01 / 1.02 |
+| clang -O2 `build_regression.o` | 27 / 27 | 138 / 138 | 30 / 29 | 1.11 / 1.07 |
+| `suffix`, 4,096 | 43 / 43 | 179 / 178 | 190 / 187 | 4.42 / 4.35 |
+| `suffix`, 131,072 | 1,732 / 1,724 | 6,475 / 6,421 | 6,553 / 6,475 | 3.78 / 3.76 |
+| `repeats`, 4,096 | 109 / 110 | 183 / 181 | 193 / 191 | 1.78 / 1.74 |
+| `repeats`, 131,072 | 3,870 / 3,923 | 6,994 / 6,917 | 7,084 / 6,996 | 1.83 / 1.78 |
+| `tie`, 4,096 | 43 / 43 | 208 / 207 | 223 / 220 | 5.17 / 5.12 |
+| `tie`, 131,072 | 1,904 / 1,915 | 7,878 / 7,814 | 7,971 / 7,929 | 4.19 / 4.14 |
+
+The shapes that share nothing still cost more than main's. With timers in
+the producer (15 processes, medians), `lengths`' block heads, where the
+groups are mapped and the prefilter runs and flags nothing, took 64,296 TSC
+ticks (17 µs) at 4,096 literals, 11 page faults among them, and 1,965,968
+(518 µs) at 131,072, with 138; counting, the entries and interning took
+144,818 ticks against main's 147,630, and 6.38 million against 6.70
+million, as the probe table takes the block heads' pages. Deciding that nothing can be shared
+there costs two passes over the group's entries and the bitmaps' first
+touch, and only a larger change than #3261's would remove that: the
+prefilter's first pass folded into an existing one, and its memory placed
+in pages the stage touches anyway. On `duplicate`, `unique` and
+`build_regression.o` the producer's phases, timed the same way, are within
+1%, 2% and 4% of main's, and what remains of the stage (1 to 6 µs at
+4,096) depends on the placement family.
 
 The 9700X workflow's foreign-strings step runs every shape.
 
@@ -253,6 +303,15 @@ No unconditional four-byte adjustment is guessed. Section-symbol PC64 is
 also refused in this initial consumer; named PC64 is data-only in Link and
 uses the same-entry rule above. Any unsupported expression leaves every Link column and
 the output arena unchanged, so the caller can write the unmerged input.
+
+Such a refusal does not depend on the pool, so the consumer looks for it
+first (#3261): `foreign_strings_refused` compares the fixups' kinds 64 at a
+time and reads the target atom of each PC32 or CALL until one is selected.
+A link it finds one in builds its pool by whole entries alone, the rule
+before one-byte suffixes, with no block head: the pool is then thrown away
+or refused as under that rule, and the link costs what it did. Compilers
+address their literals so: on clang -O2's `build_regression.o` the block
+heads had cost the merge-strings stage 5.1 times main's (below).
 
 All translated symbol values and changed addends are computed before any
 Link mutation. Relocations inside the string storage are unsupported.
