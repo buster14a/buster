@@ -223,6 +223,7 @@ struct Bind
     // A static runtime's closure: the members of a round, a bit each, the members its references load, compressed, and
     // those marked a byte each in 64-byte rows that the round leaves clear (the vector path's); and a queue of the
     // members (the exact path's).
+    // Dynamic binding reuses the frontier as a summary: one bit per 64-member word with new requests.
     uint64_t* frontier;
     uint32_t* loads;
     uint8_t* marks;
@@ -952,8 +953,16 @@ static void bind_check_undefined(Bind* bind)
     }
 }
 
+// Bounds of the summary words that received a new dynamic archive request in this round.
+typedef struct BindMemberWords BindMemberWords;
+struct BindMemberWords
+{
+    uint32_t first;
+    uint32_t end;
+};
+
 // Binds `symbol`, which nothing in the link defines; with `members`, an archive member defining it is marked needed.
-static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool members)
+static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, BindMemberWords* members)
 {
     const Runtime* runtime = bind->runtime;
     const RuntimeNames* names = &runtime->global_names;
@@ -1008,13 +1017,24 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
         const ImportLibrary* library = runtime_export_library(runtime, export - 1, &index);
         bind_import(bind, symbols, symbol, &library->exports, index);
     }
-    else if (member != 0 && members && !weak)
+    else if (member != 0 && members != 0 && !weak)
     {
         // Its member defines it when it joins, at the end of this round. Until then the symbol isn't a reference left to
         // nothing (source NONE), which bind_merge would take it for when another member that joins first refers to the
         // name: libgcc.a's __fixdfti's to __fixunsdfti, of a program that calls both.
         const uint32_t m = member - 1;
-        bind->members_needed[m / 64] |= 1ull << (m % 64);
+        const uint32_t w = m / 64;
+        const uint64_t bit = 1ull << (m % 64);
+        const uint64_t needed = bind->members_needed[w];
+        bind->members_needed[w] = needed | bit;
+        // The first new member of a word schedules it for this round.
+        if ((needed & bit) == 0 && needed == bind->members_joined[w])
+        {
+            const uint32_t group = w / 64;
+            bind->frontier[group] |= 1ull << (w % 64);
+            members->first = group < members->first ? group : members->first;
+            members->end = group + 1 > members->end ? group + 1 : members->end;
+        }
         symbols->source[symbol] = BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE;
     }
     else if (after_members && shareable)
@@ -1066,7 +1086,7 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, bool me
 
 // The symbols from `first` to `end` that nothing defines (no atom, a name, and a source that isn't the program's, the
 // linker's or absolute), selected eight at a time by a compress, then bound in symbol order.
-static void bind_resolve_vector(Bind* bind, Link* link, SymbolId first, SymbolId end, bool members)
+static void bind_resolve_vector(Bind* bind, Link* link, SymbolId first, SymbolId end, BindMemberWords* members)
 {
     const LinkSymbols* symbols = &link->symbols;
     const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
@@ -1091,7 +1111,7 @@ static void bind_resolve_vector(Bind* bind, Link* link, SymbolId first, SymbolId
     }
 }
 
-static void bind_resolve_exact(Bind* bind, Link* link, SymbolId first, SymbolId end, bool members)
+static void bind_resolve_exact(Bind* bind, Link* link, SymbolId first, SymbolId end, BindMemberWords* members)
 {
     const LinkSymbols* symbols = &link->symbols;
     for (SymbolId symbol = first; symbol < end; symbol += 1)
@@ -1105,7 +1125,7 @@ static void bind_resolve_exact(Bind* bind, Link* link, SymbolId first, SymbolId 
     }
 }
 
-static void bind_resolve(Bind* bind, Link* link, SymbolId first, SymbolId end, bool members)
+static void bind_resolve(Bind* bind, Link* link, SymbolId first, SymbolId end, BindMemberWords* members)
 {
     if (bind->path == BIND_PATH_VECTOR)
     {
@@ -1121,27 +1141,32 @@ static void bind_resolve(Bind* bind, Link* link, SymbolId first, SymbolId end, b
 // round, until no member joins.
 static void bind_members(Bind* bind, Link* link, SymbolId first)
 {
-    const Runtime* runtime = bind->runtime;
-    const uint32_t words = (runtime->member_count + 63) / 64;
     SymbolId from = first;
     bool joined = true;
     while (joined && bind->error == BIND_ERROR_NONE)
     {
         const SymbolId to = link->symbols.count;
-        bind_resolve(bind, link, from, to, true);
+        BindMemberWords members = { .first = UINT32_MAX };
+        bind_resolve(bind, link, from, to, &members);
         bind->resolved = to;
-        joined = false;
-        for (uint32_t w = 0; bind->error == BIND_ERROR_NONE && w < words; w += 1)
+        joined = members.first < members.end;
+        for (uint32_t group = members.first; bind->error == BIND_ERROR_NONE && group < members.end; group += 1)
         {
-            uint64_t pending = bind->members_needed[w] & ~bind->members_joined[w];
-            bind->members_joined[w] |= pending;
-            while (pending != 0 && bind->error == BIND_ERROR_NONE)
+            uint64_t words = bind->frontier[group];
+            bind->frontier[group] = 0;
+            while (words != 0 && bind->error == BIND_ERROR_NONE)
             {
-                const uint32_t m = w * 64 + (uint32_t)__builtin_ctzll(pending);
-                pending &= pending - 1;
-                bind->member_symbols = bind->member_symbols == 0 ? link->symbols.count : bind->member_symbols;
-                bind_join(bind, link, RUNTIME_OBJECTS + m);
-                joined = true;
+                const uint32_t w = group * 64 + (uint32_t)__builtin_ctzll(words);
+                words &= words - 1;
+                uint64_t pending = bind->members_needed[w] & ~bind->members_joined[w];
+                bind->members_joined[w] |= pending;
+                while (pending != 0 && bind->error == BIND_ERROR_NONE)
+                {
+                    const uint32_t m = w * 64 + (uint32_t)__builtin_ctzll(pending);
+                    pending &= pending - 1;
+                    bind->member_symbols = bind->member_symbols == 0 ? link->symbols.count : bind->member_symbols;
+                    bind_join(bind, link, RUNTIME_OBJECTS + m);
+                }
             }
         }
         from = to;
@@ -2105,6 +2130,10 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
         memset(bind->name_symbols, 0, runtime->global_names.count * sizeof(SymbolId));
         memset(bind->members_needed, 0, words * sizeof(uint64_t));
         memset(bind->members_joined, 0, words * sizeof(uint64_t));
+        if (!runtime_kind_is_static(runtime->kind))
+        {
+            memset(bind->frontier, 0, ((words + 63u) / 64u) * sizeof(uint64_t));
+        }
         memset(bind->signatures, 0, signature_words * sizeof(uint64_t));
         memset(bind->marks, 0, 64 * (uint64_t)words);
         bind_match(bind, link, 1, link->symbols.count);
@@ -2160,7 +2189,7 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
     bind->bound = true;
     if (bind->error == BIND_ERROR_NONE && static_runtime)
     {
-        bind_resolve(bind, link, 1, link->symbols.count, false);
+        bind_resolve(bind, link, 1, link->symbols.count, 0);
         bind->resolved = link->symbols.count;
     }
     else if (bind->error == BIND_ERROR_NONE)
@@ -2179,7 +2208,7 @@ BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)
     bind->tail_joined = true;
     if (bind->error == BIND_ERROR_NONE)
     {
-        bind_resolve(bind, link, before_tail, link->symbols.count, false);
+        bind_resolve(bind, link, before_tail, link->symbols.count, 0);
         bind->resolved = link->symbols.count;
     }
     bind_keep_imports(bind, link);

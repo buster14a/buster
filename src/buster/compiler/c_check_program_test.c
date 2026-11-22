@@ -2259,7 +2259,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                 check_test_constant_conversion_lowered(test, name, lower, &program, &output, &scratch);
             }
             // #2883's fixtures: their conditions' `&&` and `||` written as branches, on both lowerings and by the node templates.
-            if (strcmp(name, "branch-condition-shapes") == 0 || strcmp(name, "branch-condition-order") == 0)
+            if (strncmp(name, "branch-condition-", sizeof("branch-condition-") - 1) == 0)
             {
                 check_test_branch_condition_lowered(test, name, lower, &program, &output, &scratch);
             }

@@ -669,6 +669,7 @@ static PPPrepare pp_prepare_config(const Preprocessor* pp)
         .split_kinds = pp->split_kinds,
         .dollar_punctuation = pp_dollar_punctuation(&pp->options),
         .window_bytes = pp->options.window_bytes,
+        .comments = pp_comment_mode(&pp->options),
     };
 }
 
@@ -718,6 +719,7 @@ static void pp_copy_prepared(PPFileData* data, const PPFileData* record)
     data->guard = record->guard;
     data->unterminated_comment = record->unterminated_comment;
     data->unterminated_comment_starts_line = record->unterminated_comment_starts_line;
+    data->comments = record->comments;
     data->guard_opener = record->guard_opener;
     data->line_pages = record->line_pages;
     data->prepared = true;
@@ -971,6 +973,46 @@ static void pp_set_macro(Preprocessor* pp, IdentId name, PPMacroId macro)
     else
     {
         pp->is_macro[name / 64] &= ~(1ull << (name % 64));
+    }
+}
+
+// Records a -dD or -dI directive (PPOutputEvent) before the next output token, after the include exits recorded so far,
+// with an include's name copied after the record. Running out of memory is fatal, as it is for an include exit.
+static __attribute__((noinline, cold)) void pp_output_event(Preprocessor* pp, uint8_t kind, uint32_t location, uint32_t value, uint8_t directive, bool angled,
+                                                            const uint8_t* name)
+{
+    const uint64_t bytes = kind == PP_OUTPUT_INCLUDE ? value : 0;
+    PPOutputEvent* event = arena_push(&pp->arena, sizeof(PPOutputEvent) + bytes, _Alignof(PPOutputEvent));
+    if (event != 0)
+    {
+        uint8_t* copy = (uint8_t*)(event + 1);
+        if (bytes != 0)
+        {
+            memcpy(copy, name, bytes);
+        }
+        *event = (PPOutputEvent){
+            .name = copy,
+            .token = pp->output.count,
+            .exits = pp->include_exit_count,
+            .location = location,
+            .value = value,
+            .kind = kind,
+            .directive = directive,
+            .angled = angled,
+        };
+        if (pp->last_output_event != 0)
+        {
+            pp->last_output_event->next = event;
+        }
+        else
+        {
+            pp->output_events = event;
+        }
+        pp->last_output_event = event;
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, location, "out of memory recording a directive for -dD or -dI");
     }
 }
 
@@ -2040,6 +2082,10 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
             {
                 pp->macros[id] = macro;
                 pp_set_macro(pp, name, id);
+                if (BUSTER_UNLIKELY(pp->options.dump_defines))
+                {
+                    pp_output_event(pp, PP_OUTPUT_DEFINE, location, id, 0, false, 0);
+                }
             }
         }
         if (parameters != 0)
@@ -3315,8 +3361,8 @@ BUSTER_INLINE uint32_t pp_paste_spelling(Preprocessor* pp, PPToken token, uint8_
 // Pastes two tokens (C 6.10.5.3): their spellings joined (pp_paste_spelling) must lex as exactly one token, which takes
 // the left one's leading space and the line it started among a macro's arguments (BUSTER_PP_LINE_SPACE), as clang's
 // TokenLexer::pasteTokens gives it the left one's flags. Returns false with an error if they don't, as clang does, and
-// the caller keeps them both.
-BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPToken* result)
+// the caller keeps them both. With `comments` (-CC), a comment pasted on the left is skipped (pp_paste).
+BUSTER_INLINE bool pp_paste_with(Preprocessor* pp, PPToken left, PPToken right, PPToken* result, const bool comments)
 {
     Scratch scratch = scratch_begin(0);
     uint8_t left_buffer[24];
@@ -3335,7 +3381,7 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
     {
         memcpy(joined, left_spelling, left_length);
         memcpy(joined + left_length, right_spelling, right_length);
-        const uint32_t length = left_length + right_length;
+        uint32_t length = left_length + right_length;
         pp->statistics.pastes += pp->options.timing;
         // The commonest paste, an identifier and an identifier or a number (`prefix_ ## name`, `x ## 1`), makes an
         // identifier whenever both are ASCII identifier characters, whose interned spelling is the joined bytes: no
@@ -3370,6 +3416,16 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
             // A prefixed literal the mode doesn't have lexes as two tokens (pp_split_kinds).
             valid = count == 1 && starts[0] == 0 && ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]) &&
                     !pp_splits_unknown(joined, starts[0], ends[0], pp->split_kinds) && !pp_is_unterminated_comment(joined, kinds[0], 0);
+            // A comment pasted on the left (-CC) is skipped, as clang's raw lexer skips it in the joined text: `/* c */ ## b`
+            // is `b`, the text from the token on. One on the right is left over, an invalid paste.
+            if (comments && !valid && count == 1 && left.kind == C_TOKEN_UNKNOWN && left_length != 0 && left_spelling[0] == '/')
+            {
+                valid = ends[0] == length && !pp_splits_kind(pp->split_kinds, kinds[0]) && !pp_splits_unknown(joined, starts[0], ends[0], pp->split_kinds) &&
+                        !pp_is_unterminated_comment(joined, kinds[0], starts[0]);
+                const uint32_t skipped = valid ? starts[0] : 0;
+                joined += skipped;
+                length -= skipped;
+            }
             kind = valid ? kinds[0] & 0x7F : kind;
         }
         if (valid)
@@ -3408,6 +3464,18 @@ BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPTok
     }
     scratch_end(scratch);
     return valid;
+}
+
+// pp_paste_with for -CC (#1380), whose comments may be pasted, out of line: -E's default runs inline pp_paste_with
+// without that test (#2925).
+static __attribute__((noinline)) bool pp_paste_comments(Preprocessor* pp, PPToken left, PPToken right, PPToken* result)
+{
+    return pp_paste_with(pp, left, right, result, true);
+}
+
+BUSTER_INLINE bool pp_paste(Preprocessor* pp, PPToken left, PPToken right, PPToken* result)
+{
+    return BUSTER_UNLIKELY(pp->options.keep_macro_comments) ? pp_paste_comments(pp, left, right, result) : pp_paste_with(pp, left, right, result, false);
 }
 
 // Stringizes tokens [begin, end) of a stack (C 6.10.4.2): their spellings with one space wherever whitespace separated
@@ -5033,6 +5101,14 @@ static PPCollected pp_collect_written_header(Preprocessor* pp, PPInvocation* inv
     return result;
 }
 
+// Whether the file's token at `position` is a comment that -C drops from the arguments `invocation` collects: a macro's,
+// but not a builtin's (clang's _Pragma, say, reads it and fails). Out of line, so that pp_collect_step, which -E's
+// default runs inline, only tests the option (#2925).
+static __attribute__((noinline, cold)) bool pp_argument_comment(const PPInvocation* invocation, const PPFileData* data, uint32_t position)
+{
+    return invocation->opened && !invocation->builtin && pp_comment_token(data->bytes, data->kinds[position], data->starts[position]);
+}
+
 // One step of the main loop while it collects the top invocation's arguments (or a builtin's operand) a token at a time:
 // the top context's tokens up to its end or its next directive. An exhausted buffer is popped (which enables its macro
 // again); a directive runs, as clang runs one among a macro's arguments (its line may start a capture, during which the
@@ -5057,12 +5133,14 @@ static void pp_collect_step(Preprocessor* pp)
             {
                 pp_read_raw_errors(pp, context, context->position, context->position + 1);
                 const PPToken token = pp_file_token(data, base, context->position);
+                // -C drops a comment from a macro's arguments (pp_argument_comment).
+                const bool dropped = BUSTER_UNLIKELY(pp->drop_argument_comments) && pp_argument_comment(invocation, data, context->position);
                 context->position += 1;
                 if (token.kind == C_TOKEN_RAW_IDENTIFIER)
                 {
                     pp_check_poison(pp, token.value, token.location);
                 }
-                collected = pp_collect_token(pp, invocation, token, token.location);
+                collected = dropped ? PP_COLLECTED_MORE : pp_collect_token(pp, invocation, token, token.location);
             }
         }
         else if (context->next_directive < data->directive_count)
@@ -5108,6 +5186,7 @@ static void pp_collect_step(Preprocessor* pp)
                         pp->include_exits = event;
                     }
                     pp->last_include_exit = event;
+                    pp->include_exit_count += 1;
                     pp->ranges[range].collected_exit = pp->output.count + 1;
                 }
                 else
@@ -6894,8 +6973,10 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
         pp_diagnose(pp, PP_SEVERITY_FATAL, name.location, "macro expansion nests too deeply");
     }
     valid = valid && pp_new_argument(pp);
-    const bool collected = valid && (pp_collect_argument_slice(pp, &invocation, variadic, macro->parameter_count) ||
-                                    pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count));
+    // -C's arguments drop their comments a token at a time (pp_collect_step).
+    const bool collected = valid && !pp->drop_argument_comments &&
+                           (pp_collect_argument_slice(pp, &invocation, variadic, macro->parameter_count) ||
+                            pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count));
     const bool finished = collected && pp_finish_simple(pp, &invocation);
     valid = valid && !finished;
     if (valid && !collected)
@@ -8431,7 +8512,7 @@ static void pp_step_file(Preprocessor* pp, PPContext* context)
                 more = pp_expand_file_direct(pp, context, data, base);
                 // A simple invocation whose expansion goes straight into the output, after which the main loop's next step
                 // would be this context's next run.
-                const bool invocation_read = !more && text && (pp->macros[pp->macro_of[data->values[stop]]].flags & BUSTER_PP_MACRO_FUNCTION);
+                const bool invocation_read = !more && text && (pp->macros[pp->macro_of[data->values[stop]]].flags & BUSTER_PP_MACRO_FUNCTION) && !pp->drop_argument_comments;
                 more = more || (invocation_read && pp_invoke_file(pp, context, data, base, limit));
                 if (!more)
                 {
@@ -9329,6 +9410,27 @@ static void pp_start_condition(Preprocessor* pp, PPContext* context, uint32_t d,
     }
 }
 
+// -CC: the comments that replacement lists put in a directive's line as the capture expanded it (from `begin` on), which
+// clang's readers of those lines skip (LexNonComment in #if's evaluation, as #include's, #line's and #embed's names and
+// numbers come out), dropped in place, with their origins.
+static __attribute__((noinline, cold)) void pp_capture_drop_comments(Preprocessor* pp, uint32_t begin)
+{
+    PPTokens* tokens = &pp->captures;
+    uint32_t kept = begin;
+    for (uint32_t t = begin; t < tokens->count; t += 1)
+    {
+        const uint8_t* bytes = tokens->kinds[t] == C_TOKEN_UNKNOWN ? pp_location_bytes(pp, tokens->locations[t]) : 0;
+        const bool comment = bytes != 0 && bytes[0] == '/';
+        pp_tokens_set(tokens, kept, tokens->kinds[t], tokens->flags[t], tokens->values[t], tokens->locations[t]);
+        if (tokens->origins != 0)
+        {
+            tokens->origins[kept] = tokens->origins[t];
+        }
+        kept += !comment;
+    }
+    tokens->count = kept;
+}
+
 // The barrier over a #if or #elif line ended: the capture is the line expanded, which decides the group.
 static void pp_finish_condition(Preprocessor* pp)
 {
@@ -9337,6 +9439,10 @@ static void pp_finish_condition(Preprocessor* pp)
     const PPContext* file = &pp->contexts[capture.context];
     const PPFileData* data = &pp->datas[file->data];
     pp_read_raw_errors(pp, file, data->directive_hash[capture.directive], data->directive_end[capture.directive]);
+    if (BUSTER_UNLIKELY(pp->options.keep_macro_comments))
+    {
+        pp_capture_drop_comments(pp, capture.begin);
+    }
     const bool taken = pp_evaluate(pp, &pp->captures, capture.begin, pp->captures.count, capture.location);
     if (pp->options.timing)
     {
@@ -9536,6 +9642,11 @@ static void pp_include_file(Preprocessor* pp, PPContext* context, uint8_t kind, 
     pp->diagnostic_origin = name_origin;
     uint32_t file = BUSTER_PP_NONE;
     uint32_t found_in = BUSTER_PP_NONE;
+    if (BUSTER_UNLIKELY(pp->options.dump_includes) && length != 0)
+    {
+        // -dI: the directive as clang's InclusionDirective prints it, before what it includes, whether it enters it or not.
+        pp_output_event(pp, PP_OUTPUT_INCLUDE, location, length, kind, angled, name);
+    }
     if (length == 0)
     {
         pp_diagnose(pp, PP_SEVERITY_ERROR, name_location, "empty filename");
@@ -9644,6 +9755,10 @@ static uint32_t pp_computed_name_end(const PPTokens* tokens, uint32_t begin, uin
 static void pp_finish_include(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    if (BUSTER_UNLIKELY(pp->options.keep_macro_comments))
+    {
+        pp_capture_drop_comments(pp, capture.begin);
+    }
     const PPTokens* tokens = &pp->captures;
     PPContext* context = &pp->contexts[capture.context];
     const PPFileData* data = &pp->datas[context->data];
@@ -10156,6 +10271,10 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
 static void pp_finish_line(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    if (BUSTER_UNLIKELY(pp->options.keep_macro_comments))
+    {
+        pp_capture_drop_comments(pp, capture.begin);
+    }
     pp_apply_line(pp, &pp->contexts[capture.context], capture.directive, &pp->captures, capture.begin, pp->captures.count, capture.location, capture.anchor);
     pp->capture_count -= 1;
     pp->captures.count = capture.begin;
@@ -11143,6 +11262,11 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
                         pp_diagnose_group(pp, PP_WARNING_BUILTIN_MACRO_REDEFINED, name_location, "undefining builtin macro");
                     }
                     pp_set_macro(pp, name, 0);
+                    if (BUSTER_UNLIKELY(pp->options.dump_defines))
+                    {
+                        // Whether or not it was defined, as clang's MacroUndefined is called.
+                        pp_output_event(pp, PP_OUTPUT_UNDEF, name_location, name, 0, false, 0);
+                    }
                 }
             }
             else if (hash + 2 < end)
@@ -12677,6 +12801,10 @@ static void pp_embed_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
 static void pp_finish_embed(Preprocessor* pp)
 {
     const PPCapture capture = pp->capture_frames[pp->capture_count - 1];
+    if (BUSTER_UNLIKELY(pp->options.keep_macro_comments))
+    {
+        pp_capture_drop_comments(pp, capture.begin);
+    }
     PPContext* context = &pp->contexts[capture.context];
     const PPFileData* data = &pp->datas[context->data];
     const uint32_t hash = data->directive_hash[capture.directive];
@@ -13651,6 +13779,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     const PPPrepare prepare = pp_prepare_options(options);
     // pp_define's body scan by its scalar arm (PPOptions.scalar).
     pp->vectorized = BUSTER_VECTOR_PATH(!options->scalar);
+    pp->drop_argument_comments = prepare.comments == 1;
     pp->refine_flags = prepare.refine_flags;
     pp->split_kinds = prepare.split_kinds;
     // The memory, reserved in turn until a reservation fails (pp_release releases what was).
@@ -13774,7 +13903,7 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
         result = result && file_cache_start(pp->cache, table, pp_prepare_config(pp), cache_shift, cache_arrays);
     }
     else if (pp->cache->table != table || pp->cache->prepare.refine_flags != pp->refine_flags || pp->cache->prepare.split_kinds != pp->split_kinds ||
-             pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options))
+             pp->cache->prepare.dollar_punctuation != pp_dollar_punctuation(options) || pp->cache->prepare.comments != pp_comment_mode(options))
     {
         fprintf(stderr, "error: the file cache was made for another language mode or intern table\n");
         result = false;
@@ -13996,6 +14125,7 @@ static bool pp_command_include_raw(Preprocessor* pp, const char* path)
 static bool pp_run_prelude(Preprocessor* pp)
 {
     pp_warning_options_diagnose(pp);
+    pp_unused_arguments_diagnose(pp);
     bool result = !pp->fatal;
     // The predefines.
     if (result && pp->options.predefines_path != 0)
@@ -14293,6 +14423,9 @@ static void pp_history_record(Preprocessor* pp, bool report)
     options.defer_history = false;
     options.quiet = !report;
     options.show_includes = false;
+    // The run's own -dD and -dI records are the printer's (PPOutputEvent); the replay's output is the same without them.
+    options.dump_defines = false;
+    options.dump_includes = false;
     options.timing = false;
     options.files = pp->cache;
     options.dependencies.enabled = false;
@@ -14549,6 +14682,8 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_output_ensure(Preprocessor* pp)
         options.defer_history = false;
         options.quiet = true;
         options.show_includes = false;
+        options.dump_defines = false;
+        options.dump_includes = false;
         options.collect_diagnostics = false;
         options.timing = false;
         options.files = pp->cache;
@@ -14806,11 +14941,15 @@ static PPPresumed pp_print_presumed(const Preprocessor* pp, PPMarkers* markers, 
 
 // The presumed position where a range includes another (`child`): the line after the directive when `after`, for a
 // marker that goes back to it.
+// Another root (the predefines, the command line's file, the forced includes'), which no directive includes, is the main
+// file's at its first line, as clang includes its <built-in> buffer there (`# 1 "main.c" 2` after it): -dD's directives
+// go through it from one root to the next.
 static PPPresumed pp_print_includer(Preprocessor* pp, PPMarkers* markers, uint32_t range, uint32_t child, bool after)
 {
-    const uint32_t location = pp->ranges[child].include_location;
-    PPPresumed result = pp_print_presumed(pp, markers, range, location, pp_line_of(pp, range, location, 0));
-    result.line += after;
+    const bool root = pp->ranges[child].parent == BUSTER_PP_NONE;
+    const uint32_t location = root ? pp->ranges[range].base : pp->ranges[child].include_location;
+    PPPresumed result = pp_print_presumed(pp, markers, range, location, root ? 1 : pp_line_of(pp, range, location, 0));
+    result.line += after && !root;
     return result;
 }
 
@@ -14870,7 +15009,7 @@ static bool pp_print_marker_line(PPMarkers* markers, bool* line_start, uint32_t 
 }
 
 // The first step: `# 1 "main.c"`, the main file's marker, in markers->text.
-static bool pp_print_start(const Preprocessor* pp, PPMarkers* markers)
+BUSTER_INLINE bool pp_print_start(const Preprocessor* pp, PPMarkers* markers)
 {
     markers->length = 0;
     bool line_start = true;
@@ -15059,12 +15198,13 @@ BUSTER_INLINE uint32_t pp_print_place(Preprocessor* pp, PPMarkers* markers, uint
     return result;
 }
 
-// Replay the include exits that happened before this token was returned. A header with no preceding output still
-// gets its entry marker before its exit. The vector printer flushes its batch buffer before this cold stdio path.
-static __attribute__((noinline)) bool pp_print_include_exits(Preprocessor* pp, PPMarkers* markers, uint32_t token, bool* line_start, FILE* stream)
+// Replay the include exits that happened before this token was returned, up to the `limit`-th (UINT32_MAX for all). A
+// header with no preceding output still gets its entry marker before its exit. The vector printer flushes its batch
+// buffer before this cold stdio path.
+static __attribute__((noinline)) bool pp_print_include_exits(Preprocessor* pp, PPMarkers* markers, uint32_t token, uint32_t limit, bool* line_start, FILE* stream)
 {
     bool result = true;
-    while (result && markers->include_exit != 0 && markers->include_exit->token <= token)
+    while (result && markers->include_exit != 0 && markers->include_exit->token <= token && markers->exits_printed < limit)
     {
         const PPIncludeExit* event = markers->include_exit;
         markers->length = 0;
@@ -15084,21 +15224,63 @@ static __attribute__((noinline)) bool pp_print_include_exits(Preprocessor* pp, P
         markers->system = back.system;
         result = result && fwrite(markers->text, 1, markers->length, stream) == markers->length;
         markers->include_exit = event->next;
+        markers->exits_printed += 1;
     }
     return result;
 }
 
-// The line breaks in an unknown token's spelling (\r\n and \n\r count as one), which clang's printer adds to its line
-// (HandleNewlinesInToken): an unknown token the lexer read as a raw string literal (its delimiter invalid) can have
-// some. It counts no other token's, a raw string literal's among them.
-static __attribute__((noinline)) uint32_t pp_print_token_lines(const uint8_t* spelling, uint32_t length)
+// The directives -dD and -dI print before output token `token` (PPOutputEvent), in the order they ran, each after the
+// include exits recorded before it: on a line of its own, at its line (`location`'s, placed as a token that starts a
+// line is: pp_print_place), as clang's printer moves to it (MoveToLine) and prints it, and the next token starts a line
+// after it (EmittedDirectiveOnThisLine). A #define as -dM prints it (pp_print_macro_definition), an #undef with its
+// name, and an include as `#include "name" /* clang -E -dI */`, its directive's name and the name it gives. The
+// printer's instance for these modes calls it (pp_print_vector_mode's `modes`), its batches stopping at a chunk that
+// holds one, as at an include exit; `*next` is the first directive not printed yet. Returns false if the stream or memory
+// fails.
+static __attribute__((noinline, cold)) bool pp_print_events(Preprocessor* pp, PPMarkers* markers, const PPOutputEvent** next, uint32_t token, bool with_markers,
+                                                             bool* line_start, Arena* arena, FILE* stream)
 {
-    uint32_t result = 0;
-    for (uint32_t i = 0; i < length; i += 1)
+    bool result = true;
+    while (result && *next != 0 && (*next)->token <= token)
     {
-        const bool line_break = spelling[i] == '\n' || spelling[i] == '\r';
-        result += line_break;
-        i += line_break && i + 1 < length && (spelling[i + 1] == '\n' || spelling[i + 1] == '\r') && spelling[i + 1] != spelling[i];
+        const PPOutputEvent* event = *next;
+        if (with_markers && markers->include_exit != 0 && markers->exits_printed < event->exits)
+        {
+            result = pp_print_include_exits(pp, markers, token, event->exits, line_start, stream);
+        }
+        uint32_t breaks = !*line_start;
+        const uint32_t range = with_markers ? pp_find_range(pp, event->location) : BUSTER_PP_NONE;
+        if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
+        {
+            markers->token = token;
+            markers->keep_line = false;
+            const uint32_t place = pp->ranges[range].base + pp_start_with_splices(pp->ranges[range].bytes, event->location - pp->ranges[range].base, pp->options.trigraphs);
+            breaks = pp_print_place(pp, markers, range, place, pp_line_of(pp, range, place, 0), *line_start, &result);
+            result = result && fwrite(markers->text, 1, markers->length, stream) == markers->length;
+        }
+        for (uint32_t n = 0; n < breaks; n += 1)
+        {
+            fputc('\n', stream);
+        }
+        uint32_t lines = 0;
+        if (event->kind == PP_OUTPUT_DEFINE)
+        {
+            const PPMacro* macro = &pp->macros[event->value];
+            result = result && pp_print_macro_definition(pp, macro->name, macro, arena, &lines, stream);
+        }
+        else if (event->kind == PP_OUTPUT_UNDEF)
+        {
+            fprintf(stream, "#undef %.*s", (int)intern_length(pp->table, event->value), intern_bytes(pp->table, event->value));
+        }
+        else
+        {
+            fprintf(stream, "#%s %c%.*s%c /* clang -E -dI */", pp_include_name(event->directive), event->angled ? '<' : '"', (int)event->value, (const char*)event->name,
+                    event->angled ? '>' : '"');
+        }
+        // A replacement list's comment (-CC) may hold line breaks, which the printer's line counts.
+        markers->line += lines;
+        *line_start = false;
+        *next = event->next;
     }
     return result;
 }
@@ -15204,7 +15386,7 @@ static void pp_embed_ends(const Preprocessor* pp, uint32_t value, uint8_t* first
 
 // Prints an #embed's text (pp_embed_text_vector) through `buffer`, which holds
 // `*used` bytes of `capacity` (and 64 more of slack) and is written to `stream` as it fills.
-static bool pp_print_embed(const Preprocessor* pp, uint32_t value, uint8_t* buffer, uint64_t* used, uint64_t capacity, FILE* stream)
+BUSTER_INLINE bool pp_print_embed(const Preprocessor* pp, uint32_t value, uint8_t* buffer, uint64_t* used, uint64_t capacity, FILE* stream)
 {
     uint32_t length;
     const uint8_t* bytes = pp_embed_bytes(pp, value, &length);
@@ -15220,6 +15402,31 @@ static bool pp_print_embed(const Preprocessor* pp, uint32_t value, uint8_t* buff
         }
         uint8_t* out = buffer + *used;
         *used += pp_embed_text_vector(bytes + done, step, done != 0, out);
+    }
+    return result;
+}
+
+// Whether the comment token at `location` (-CC) is in a directive's line: a #define's replacement list, the only line that
+// keeps one (pp_drop_directive_comments). Its file's last directive whose '#' is before it ends past it.
+static __attribute__((noinline, cold)) bool pp_comment_in_directive(Preprocessor* pp, uint32_t location)
+{
+    const uint32_t range = pp_find_range(pp, location);
+    bool result = false;
+    if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
+    {
+        const PPFileData* data = &pp->datas[pp->files[pp->ranges[range].file].data];
+        const uint32_t offset = location - pp->ranges[range].base;
+        uint32_t low = 0;
+        uint32_t high = data->directive_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = data->starts[data->directive_hash[middle]] < offset;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        const uint32_t end = low != 0 ? data->directive_end[low - 1] : 0;
+        result = low != 0 && (end >= data->token_count || data->starts[end] > offset);
     }
     return result;
 }
@@ -15413,7 +15620,7 @@ static const uint8_t pp_print_kind_lasts[128] __attribute__((aligned(64))) = {
     [BUSTER_PP_KIND_KEYWORD ... 127] = 'a',
 };
 
-static uint32_t pp_print_line(Preprocessor* pp, PPPrintLines* lines, uint32_t range, uint32_t location)
+BUSTER_INLINE uint32_t pp_print_line(Preprocessor* pp, PPPrintLines* lines, uint32_t range, uint32_t location)
 {
     const PPRange* record = &pp->ranges[range];
     const PPFileData* data = &pp->datas[pp->files[record->file].data];
@@ -15595,7 +15802,7 @@ static bool pp_print_unspliced(const uint8_t* const* spellings, const uint32_t* 
 // and the printer's lines advanced past them as pp_print_place advances them. Returns the first line start it can't
 // place so (a marker, a jump of more than 8 lines, a place in no file, or a #pragma's line kept), with nothing of its
 // own placed but the idempotent steps the per-token copies take again (its expansion, its place's line), or 64.
-static uint32_t pp_print_place_lines(Preprocessor* pp, PPMarkers* markers, PPPrintLines* lines, const uint32_t* directory, uint32_t c, uint64_t starts, uint8_t* counts)
+BUSTER_INLINE uint32_t pp_print_place_lines(Preprocessor* pp, PPMarkers* markers, PPPrintLines* lines, const uint32_t* directory, uint32_t c, uint64_t starts, uint8_t* counts)
 {
     uint32_t result = 64;
     for (uint64_t bits = starts; result == 64 && bits != 0; bits &= bits - 1)
@@ -15630,7 +15837,9 @@ static uint32_t pp_print_place_lines(Preprocessor* pp, PPMarkers* markers, PPPri
 // bytes and with line markers up to each line start that needs a marker (pp_print_place_lines), and that token and the
 // rest token by token. pp_print compiles it for each value of `markers`: with -P, the batch's gaps are one bit each, as
 // they were before the line markers' batch, whose code in one copy for both cost -P 8-12% (#649, on an AVX-512 Xeon).
-BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bool markers)
+// `modes` compiles in -C's, -CC's, -dD's and -dI's work (#1380), which pp_print gives an instance of its own, so that -E's
+// default instances do none of it (#2925: in them it cost -E -P's printing of main.c 3.8% on the 9700X).
+BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bool markers, const bool modes)
 {
     // The columns and tables in locals: a store through a byte pointer may change any field, which the loops would load
     // again for every token.
@@ -15650,6 +15859,13 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
     specials = _mm512_mask_mov_epi8(specials, 1ull << ('\\' & 63), _mm512_set1_epi8('\\'));
     specials = _mm512_mask_mov_epi8(specials, (uint64_t)trigraphs << ('?' & 63), _mm512_set1_epi8('?'));
     const bool per_token = pp->options.print_per_token;
+    // -C's and -CC's comments, unknown tokens whose first byte is '/' (#1380): the next token after a `//` one starts a line,
+    // and -CC's chunks that hold one go through the general loop, which spells a replacement list's `//` comment as a block
+    // comment.
+    const bool keep_comments = modes && pp->options.keep_comments;
+    const bool keep_macro_comments = modes && pp->options.keep_macro_comments;
+    // -dD's and -dI's next directive (pp_print_events).
+    const PPOutputEvent* event = modes ? pp->output_events : 0;
     const __m512i hash_location = _mm512_set1_epi32((int)pp->hash_location);
     Scratch scratch = scratch_begin(0);
     const uint32_t* directory = pp_build_directory(pp, scratch.arena);
@@ -15722,7 +15938,9 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
         // of its tokens not printed yet are made again.
         const uint64_t spare_mark = scratch.arena->length;
         const uint64_t internal = _mm512_mask_cmpge_epu8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_PRAGMA_END));
-        bool general = per_token || (written | internal) != 0 ||
+        // With -C or -CC, the unknown tokens, among which the comments are.
+        const uint64_t comments = keep_comments ? _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8(C_TOKEN_UNKNOWN)) : 0;
+        bool general = per_token || (written | internal) != 0 || (keep_macro_comments && comments != 0) ||
                        !pp_print_spellings(pp, directory, out_kinds + c, out_values + c, out_locations + c, identifiers, valid, !markers, records, spans, spellings,
                                            lengths, firsts, lasts);
         const uint64_t embeds = _mm512_mask_cmpeq_epi8_mask(valid, kinds, _mm512_set1_epi8((char)BUSTER_PP_KIND_EMBED));
@@ -15737,6 +15955,8 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
         const bool entry_line_start = line_start;
         uint64_t line_starts = 0;
         uint64_t spaced = 0;
+        // The `//` comments (-C, -CC), after which the next token starts a line.
+        uint64_t line_comments = 0;
         // The tokens a batch can't copy, an empty spelling or one past 64 bytes: each ends a batch and goes token by
         // token, and the next batch starts after it.
         uint64_t longs = 0;
@@ -15788,6 +16008,21 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                         length = result ? pp_without_splices(pp, kind, spelling, length, spare, &spelling) : 0;
                         length = result && kind == C_TOKEN_UNKNOWN && spelling == spare ? pp_trailing_splice(pp, location, raw, spare, length) : length;
                     }
+                    // -CC: a replacement list's `// x` is clang's `/* x*/`, as clang's lexer made it when the definition kept it.
+                    if (BUSTER_UNLIKELY(keep_macro_comments && result && ((comments >> k) & 1) && pp_line_comment_spelling(spelling, length) &&
+                                        pp_comment_in_directive(pp, location)))
+                    {
+                        uint8_t* block = arena_push(scratch.arena, (uint64_t)length + 2, 1);
+                        result = block != 0;
+                        if (result)
+                        {
+                            memcpy(block, "/*", 2);
+                            memcpy(block + 2, spelling + 2, length - 2);
+                            memcpy(block + length, "*/", 2);
+                            spelling = block;
+                            length += 2;
+                        }
+                    }
                 }
                 else if (kind == BUSTER_PP_KIND_INTEGER)
                 {
@@ -15835,7 +16070,16 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                 before = _mm512_mask_permutexvar_epi8(_mm512_set1_epi8((char)carried), ~1ull, previous_lanes, before);
                 const __m512i pair = _mm512_add_epi8(_mm512_slli_epi16(before, 3), after);
                 const uint64_t joins = _mm512_test_epi8_mask(_mm512_permutexvar_epi8(pair, separation), _mm512_set1_epi8(1));
-                line_starts = starts | (pragma_ends << 1) | (uint64_t)entry_force_line | (uint64_t)(c == 0 && entry_line_start);
+                // After a `//` comment (-C, -CC) the next token starts a line, as after clang's setEmittedDirectiveOnThisLine;
+                // the chunk's last one's goes on to the next chunk (force_line). A replacement list's, now a block comment
+                // (-CC), isn't one.
+                line_comments = 0;
+                for (uint64_t bits = comments; bits != 0; bits &= bits - 1)
+                {
+                    const uint32_t k = (uint32_t)__builtin_ctzll(bits);
+                    line_comments |= (uint64_t)pp_line_comment_spelling(spellings[k], lengths[k]) << k;
+                }
+                line_starts = starts | (pragma_ends << 1) | (line_comments << 1) | (uint64_t)entry_force_line | (uint64_t)(c == 0 && entry_line_start);
                 spaced = (spaces | joins) & ~line_starts & valid;
                 longs = 0;
                 for (uint32_t q = 0; q < 4; q += 1)
@@ -15854,7 +16098,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
             const PPMarkers entry_marked = marked;
             const PPPrintLines entry_lines = lines;
             const uint64_t ahead = valid & ~_bzhi_u64(~0ull, from);
-            const bool batchable = result && pragma_ends == 0 && embeds == 0 &&
+            const bool batchable = result && pragma_ends == 0 && embeds == 0 && !(modes && event != 0 && event->token < c + available) &&
                                    (!markers || ((unknowns | (line_spaces & ~line_starts)) == 0 && !(marked.include_exit != 0 && marked.include_exit->token < c + available) &&
                                                  !(silent < pp->silent_pragma_count && pp->silent_pragmas[silent].token < c + available)));
             const uint64_t stops = longs & ahead;
@@ -15950,10 +16194,21 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
             {
                 const uint32_t i = c + k;
                 const uint32_t length = lengths[k];
+                // -dD's and -dI's directives before the token (pp_print_events), through stdio as the include exits.
+                const bool evented = modes && BUSTER_UNLIKELY(event != 0 && event->token <= i);
+                if (evented)
+                {
+                    result = result && fwrite(buffer, 1, used, stream) == used && pp_print_events(pp, &marked, &event, i, markers, &line_start, scratch.arena, stream);
+                    used = 0;
+                    if (!result)
+                    {
+                        break;
+                    }
+                }
                 const bool exited = markers && BUSTER_UNLIKELY(marked.include_exit != 0 && marked.include_exit->token <= i);
                 if (exited)
                 {
-                    result = result && fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, i, &line_start, stream);
+                    result = result && fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, i, UINT32_MAX, &line_start, stream);
                     used = 0;
                     if (!result)
                     {
@@ -15977,7 +16232,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                                            ? pp_print_moves(pp, &marked, i, &silent)
                                            : BUSTER_PP_NONE;
                 const bool moves = moved != BUSTER_PP_NONE;
-                const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves | (uint32_t)exited;
+                const uint32_t starts_line = (uint32_t)((line_starts >> k) & 1) | (uint32_t)moves | (uint32_t)exited | (uint32_t)evented;
                 // A line start's break after something on the line; with markers, as many as pp_print_place puts.
                 uint32_t breaks = starts_line & (uint32_t)!line_start;
                 if (markers && starts_line)
@@ -16022,7 +16277,7 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
                 line_start = line_start || starts_line;
                 force_line = false;
                 buffer[used] = ' ';
-                used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves & (uint32_t)!exited;
+                used += ((spaced >> k) & 1) & (length != 0) & (uint32_t)!moves & (uint32_t)!exited & (uint32_t)!evented;
                 // The spelling: one masked 64-byte copy, or more for a longer one (written straight out past the
                 // buffer's room), or an #embed's text in pieces.
                 const uint8_t* spelling = spellings[k];
@@ -16061,11 +16316,17 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
             }
             from = unspliced ? last : from;
         }
+        force_line = force_line || ((line_comments >> (available - 1)) & 1) != 0;
         arena_pop_to(scratch.arena, spare_mark);
+    }
+    if (modes && result && event != 0)
+    {
+        result = fwrite(buffer, 1, used, stream) == used && pp_print_events(pp, &marked, &event, count, markers, &line_start, scratch.arena, stream);
+        used = 0;
     }
     if (result && markers && marked.include_exit != 0)
     {
-        result = fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, count, &line_start, stream);
+        result = fwrite(buffer, 1, used, stream) == used && pp_print_include_exits(pp, &marked, count, UINT32_MAX, &line_start, stream);
         used = 0;
     }
     if (result && !line_start)
@@ -16078,9 +16339,18 @@ BUSTER_INLINE bool pp_print_vector_mode(Preprocessor* pp, FILE* stream, const bo
     return result && ferror(stream) == 0;
 }
 
+// -C's, -CC's, -dD's and -dI's printing (#1380): the printer's instance with their work, one for both values of `markers`,
+// outside pp_print, whose default instances it leaves as they were (#2925). The helpers that those inline (pp_print_start,
+// pp_print_embed, pp_print_line, pp_print_place_lines) are BUSTER_INLINE, so that this second caller doesn't move them out.
+static __attribute__((noinline)) bool pp_print_modes(Preprocessor* pp, FILE* stream, bool markers)
+{
+    return pp_print_vector_mode(pp, stream, markers, true);
+}
+
 BUSTER_PREPROCESSOR_ENTRY bool pp_print(Preprocessor* pp, FILE* stream, bool markers)
 {
-    return markers ? pp_print_vector_mode(pp, stream, true) : pp_print_vector_mode(pp, stream, false);
+    const bool modes = pp->options.keep_comments || pp->options.dump_defines || pp->options.dump_includes;
+    return modes ? pp_print_modes(pp, stream, markers) : markers ? pp_print_vector_mode(pp, stream, true, false) : pp_print_vector_mode(pp, stream, false, false);
 }
 
 BUSTER_PREPROCESSOR_ENTRY bool pp_parse_options(int count, char** arguments, PPOptions* options, Arena* arena, const char** input, const char** output, bool* markers)

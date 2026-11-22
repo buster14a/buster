@@ -1,11 +1,11 @@
 # #2219's diagnostics sources: name, standard (c23 or gnu17), then Clang's warnings, errors and notes.
 # check_test_driver_imaginary_bit_int (c_check_imaginary_bit_int_driver_test.c) compares Clang's complete output with
-# buster's by the shared default-warning harness. The type errors are C23's alone: before C23, buster gives a literal's
-# -Wc23-extensions after an error its expression has, where clang gives it before (as for 5wb).
+# buster's by the shared default-warning harness. types.c uses C23 digit separators.
 constants c23 1 0 0
 constants gnu17 38 0 0
 suffixes c23 0 12 0
 suffixes gnu17 0 12 0
 types c23 0 5 0
+error-order gnu17 6 5 1
 assertions c23 0 5 0
 assertions gnu17 3 5 0

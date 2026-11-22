@@ -62,6 +62,9 @@ struct CheckProgramCode
 {
     Link link;
     CheckProgramLowered lowered;
+    // Position-independent code (#2101, CheckProgram.pic), whose object's unwind tables refer to their functions through
+    // their sections' symbols (ObjectOptions.local_unwind).
+    bool pic;
     AtomId* function_atoms;
     // #619: the file-scope assembly's atoms (check_program_asm_plan_file's, which check_program_emit_asm_unit publishes),
     // in the link before the functions', and each one's section, which -c's object gives it (check_program_sections).
@@ -3649,8 +3652,124 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
                               (check_program_alias_external(program, object) || check_program_alias_weak_target(program, object));
         const bool own = literal || defined[object] || (check_input_linkage(program->input->declaration_bits, declaration) != 2 && !external);
         const bool thread_local = !literal && check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
-        access[s + 1] = thread_local ? (own ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC) : own ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
+        // In position-independent code (#2101), a definition another module may preempt is reached as one the unit
+        // doesn't define (check_program_preemptible), and a thread-local never by local-exec, which no shared library
+        // has: the lowering makes its accesses general- or local-dynamic (check_lower_tls), and initial-exec is what
+        // any it left would take.
+        const bool reached = own && !(program->pic && check_program_preemptible(program, object));
+        const uint8_t exec = reached && !program->pic ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC;
+        access[s + 1] = thread_local ? exec : reached ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
     }
+}
+
+// Position-independent code's thread-locals' accessors (#2101, check_lower_tls): each thread-local a live body reaches
+// (`codes`' references of CheckLowerShared.provisional_tls + s, but a dead body's or a naked function's, whose references
+// are its templates' names) gets one, a local function of the unit, `symbols[s]` its symbol, made in symbol order after
+// the link's, with a name a source can't spell; `symbols` is null where none is reached. Returns false for a failed
+// allocation or symbol.
+static bool check_program_emit_tls_symbols(Link* link, const CheckProgram* program, const CheckLowerShared* shared, const EmittedCode* codes, uint32_t count,
+                                           const uint8_t* dead, const CheckProgramAsms* asms, bool binding, Arena* scratch, SymbolId** symbols)
+{
+    SymbolId* made = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, (uint64_t)program->symbol_count + 1);
+    bool valid = made != NULL;
+    bool reached = false;
+    if (valid)
+    {
+        memset(made, 0, ((uint64_t)program->symbol_count + 1) * sizeof(SymbolId));
+    }
+    for (uint32_t b = 0; valid && b < count; b += 1)
+    {
+        const bool skipped = (dead != NULL && dead[b] != 0) || (asms->naked != 0 && asms->naked[b].planned);
+        for (uint32_t i = 0; !skipped && i < codes[b].reference_count; i += 1)
+        {
+            const uint64_t variable = (uint64_t)codes[b].references[i].target - shared->provisional_tls;
+            if (variable <= program->symbol_count && shared->tls_models[variable] != 0)
+            {
+                made[variable] = 1;
+                reached = true;
+            }
+        }
+    }
+    uint32_t index = 0;
+    for (uint32_t v = 1; valid && reached && v <= program->symbol_count; v += 1)
+    {
+        if (made[v] != 0)
+        {
+            char spelling[48];
+            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_tls_%u", index);
+            const NameId name = link_add_name(link, (const uint8_t*)spelling, (uint32_t)length);
+            const SymbolId symbol = name != 0 ? link_add_symbol(link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
+                                                                 binding ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) : 0;
+            valid = symbol != 0;
+            made[v] = symbol;
+            index += 1;
+        }
+    }
+    *symbols = valid && reached ? made : NULL;
+    return valid;
+}
+
+// The accessors' code (#2101): each reached thread-local's (`symbols`, check_program_emit_tls_symbols) as clang's -fPIC
+// sequence of its model (CheckLowerShared.tls_models), in a function of its own that returns the thread-local's address
+// in rax, which check_lower_tls's call takes:
+//
+//     sub rsp, 8                                ; the stack aligned for the call
+//   general-dynamic, one another module may preempt:
+//     data16 lea rdi, [rip + x@tlsgd]           ; TLSGD
+//     data16 data16 rex.W call __tls_get_addr   ; PLT32
+//   local-dynamic, the unit's own:
+//     lea rdi, [rip + x@tlsld]                  ; TLSLD
+//     call __tls_get_addr                       ; PLT32
+//     lea rax, [rax + x@dtpoff]                 ; DTPOFF32
+//     add rsp, 8
+//     ret
+//
+// The 16 and 12 bytes of each access are the ones every linker relaxes whole (executable_relax_tls), so that an
+// executable linked from these objects reaches the thread-local by initial- or local-exec. `tls_get_addr` is the
+// runtime function's symbol (CHECK_LOWER_RUNTIME_TLS_GET_ADDR). With `frames`, each accessor's unwind entry from it on,
+// in symbol order, and its symbol in `frame_symbols`: the CFA at rsp + 16 after the sub, at rsp + 8 again for the ret;
+// `*frame_count` how many. Returns false with `code`'s status and reason set.
+static bool check_program_emit_tls_atoms(CheckProgramCode* code, const CheckProgram* program, const uint8_t* models, const SymbolId* symbols, SymbolId tls_get_addr,
+                                         UnwindFunction* frames, SymbolId* frame_symbols, uint32_t* frame_count, Arena* bytes)
+{
+    static const uint8_t general[] = { 0x48, 0x83, 0xec, 0x08, 0x66, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0x66, 0x66, 0x48, 0xe8, 0, 0, 0, 0, 0x48, 0x83, 0xc4, 0x08, 0xc3 };
+    static const uint8_t local[] = { 0x48, 0x83, 0xec, 0x08, 0x48, 0x8d, 0x3d, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x48, 0x8d, 0x80, 0, 0, 0, 0, 0x48, 0x83, 0xc4, 0x08, 0xc3 };
+    Link* link = &code->link;
+    bool valid = tls_get_addr != 0;
+    *frame_count = 0;
+    for (uint32_t v = 1; valid && v <= program->symbol_count; v += 1)
+    {
+        if (symbols[v] != 0)
+        {
+            const bool own = models[v] == BUSTER_CHECK_LOWER_TLS_LOCAL;
+            const uint32_t size = own ? (uint32_t)sizeof(local) : (uint32_t)sizeof(general);
+            uint8_t* text = arena_push(bytes, size, 16);
+            const AtomId atom = text != NULL ? link_add_atom(link, BUSTER_LINK_CLASS_TEXT, 4, size, memcpy(text, own ? local : general, size), 0) : 0;
+            valid = atom != 0 && link_add_fixup(link, atom, own ? 7 : 8, own ? BUSTER_LINK_FIXUP_TLSLD : BUSTER_LINK_FIXUP_TLSGD, v, -4) != 0 &&
+                    link_add_fixup(link, atom, own ? 12 : 16, BUSTER_LINK_FIXUP_CALL, tls_get_addr, -4) != 0 &&
+                    (!own || link_add_fixup(link, atom, 19, BUSTER_LINK_FIXUP_DTPOFF32, v, 0) != 0) && link_define_symbol(link, symbols[v], atom, 0, size);
+            if (valid)
+            {
+                link->symbols.source[symbols[v]] = BUSTER_LINK_SOURCE_PROGRAM;
+            }
+            EmissionFrameRow* rows = valid && frames != NULL ? BUSTER_ARENA_PUSH_ARRAY(bytes, EmissionFrameRow, 2) : NULL;
+            valid = valid && (frames == NULL || rows != NULL);
+            if (valid && frames != NULL)
+            {
+                rows[0] = (EmissionFrameRow){ .offset = 4, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 16 };
+                rows[1] = (EmissionFrameRow){ .offset = size - 1, .kind = EMISSION_FRAME_CFA_OFFSET, .value = 8 };
+                frames[*frame_count] = (UnwindFunction){ .size = size, .open = BUSTER_UNWIND_ROWS, .rows = rows, .row_count = 2 };
+                frame_symbols[*frame_count] = symbols[v];
+                *frame_count += 1;
+            }
+        }
+    }
+    if (!valid)
+    {
+        code->status = CHECK_PROGRAM_BACKEND;
+        code->reason = "a thread-local's general- or local-dynamic access couldn't be emitted";
+    }
+    return valid;
 }
 
 // How Tier 0 reaches each symbol of a lowered program, as check_lower_finish numbered them (Tier0Function.symbol_access):
@@ -3866,7 +3985,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
 {
     (void)scalar;
 
-    *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE };
+    *result = (CheckProgramCode){ .token = BUSTER_CHECK_NONE, .pic = program->pic };
     const bool timing = lanes != NULL && lanes->timing;
     const uint64_t started = timing ? check_program_lanes_now() : 0;
     const uint64_t mark = output->length;
@@ -3919,8 +4038,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // check_program_object_access gives them. The helpers are the unit's, and the C runtime's errno function isn't;
     // libgcc's functions are linked into the image. The runtime's functions have their provisional symbols while the
     // bodies compile (check_lower_runtime), each its own, and the jump tables theirs after them
-    // (CheckLowerShared.provisional_tables), the unit's own: direct.
-    const uint32_t access_count = valid ? shared.provisional_tables + (deferred ? shared.deferred_tables->capacity : result->lowered.table_count) : 0;
+    // (CheckLowerShared.provisional_tables), the unit's own: direct; and in position-independent code the thread-locals'
+    // accessors' after them (CheckLowerShared.provisional_tls, #2101), the unit's own too.
+    const uint32_t table_symbols = valid ? shared.provisional_tables + (deferred ? shared.deferred_tables->capacity : result->lowered.table_count) : 0;
+    const uint32_t access_count = valid && shared.tls_models != NULL ? shared.provisional_tls + program->symbol_count + 1 : table_symbols;
     uint8_t* access = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, access_count) : 0;
     uint8_t* defined = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : 0;
     valid = valid && access != 0 && defined != 0;
@@ -3951,9 +4072,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     arena_pop_to(reserved, 0);
     Arena* columns = column_bytes != 0 && reserved->base != 0 ? reserved : scratch;
     // The lanes' run: the bodies' codes and code, their frames, and the parts' cut by the bodies' tokens.
-    // (And the resolvers' of multiversioning by target strings, #1838, after them.)
+    // (And the resolvers' of multiversioning by target strings, #1838, after them, and room for the thread-locals'
+    // accessors' of position-independent code, #2101, after those.)
     const uint32_t target_frames = unwind && program->target_group_count != 0 ? check_program_target_frames(program) : 0;
-    const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) + target_frames : 0;
+    const uint32_t tls_frames = unwind && valid ? shared.tls_count : 0;
+    const uint64_t frames = unwind ? (uint64_t)count + (valid ? result->lowered.helpers.count : 0) + target_frames + tls_frames : 0;
     CheckEmitRun run = {
         .program = program,
         .parser = parser,
@@ -4951,15 +5074,18 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         cpu_symbols += program->input->symbol_pragmas->records[i].alias_target != BUSTER_CHECK_NONE ? 1u : 0u;
     }
+    // And the thread-locals' accessors of position-independent code (#2101, check_program_emit_tls_atoms): an atom, a
+    // symbol and its name and up to three fixups each.
+    const uint64_t tls_room = valid ? shared.tls_count : 0;
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms + literal_room;
+                                (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms + literal_room + tls_room;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
-                                 cpu_fixups;
+                                 cpu_fixups + 3 * tls_room;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends + unit_wide;
     const uint64_t symbol_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.symbols +
-                                  unit_symbols + patched + cpu_symbols + literal_room;
+                                  unit_symbols + patched + cpu_symbols + literal_room + tls_room;
     const uint64_t name_count = (uint64_t)program->symbol_count + helpers->count + pools->count + result->lowered.runtime_symbol_count + switch_symbols + asm_own + runtime.names +
-                                unit_names + patched + cpu_symbols + literal_room;
+                                unit_names + patched + cpu_symbols + literal_room + tls_room;
     // A unit with literals keeps every symbol below their provisional targets (BUSTER_EMITTED_LITERAL), so that a target
     // past it is a literal's however the runtime functions' and jump tables' references were renamed.
     valid = valid && (literal_room == 0 || symbol_count < BUSTER_EMITTED_LITERAL);
@@ -5324,6 +5450,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE,
                                             binding != NULL ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == literals.symbol_base + u;
     }
+    // The thread-locals' accessors of position-independent code that the live bodies call (#2101), each a local function's
+    // symbol, as the literals' are.
+    SymbolId* tls_symbols = NULL;
+    valid = valid && (shared.tls_models == NULL ||
+                      check_program_emit_tls_symbols(&result->link, program, &shared, run.codes, count, dead, asms, binding != NULL, scratch, &tls_symbols));
     // Every symbol of the program's exists: an executable's runtime joins now, before the program's atoms, with the
     // symbols this emission and the static data will define marked as the program's definitions (bind.c).
     for (uint32_t b = 0; valid && binding != NULL && b < count + helpers->count + binding->data_count; b += 1)
@@ -5401,6 +5532,19 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         {
             const uint64_t table = (uint64_t)code->references[i].target - shared.provisional_tables;
             code->references[i].target = table < result->lowered.table_count ? result->lowered.case_symbol_base + (SymbolId)table : code->references[i].target;
+        }
+    }
+    // Then every reference of a thread-local's accessor's provisional symbol takes the accessor's (#2101,
+    // check_program_emit_tls_symbols): the runtime functions' and the tables' final symbols are all below the accessors'
+    // provisional ones, and the literals' tags above.
+    for (uint32_t b = 0; valid && tls_symbols != NULL && b < count; b += 1)
+    {
+        const EmittedCode* code = run.codes + b;
+        const bool naked = asms->naked != 0 && asms->naked[b].planned;
+        for (uint32_t i = 0; !naked && i < code->reference_count; i += 1)
+        {
+            const uint64_t variable = (uint64_t)code->references[i].target - shared.provisional_tls;
+            code->references[i].target = variable <= program->symbol_count && tls_symbols[variable] != 0 ? tls_symbols[variable] : code->references[i].target;
         }
     }
     // Every reference of an asm template's (an asm helper's or a naked function's) takes its name's symbol: its target is
@@ -5754,11 +5898,20 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // cpu_dispatch's resolvers, and cpu_specific's versions' other names at their code (#1447).
     valid = valid && (program->cpu_group_count == 0 || check_program_cpu_atoms(result, program, bytes));
     // Multiversioning by target strings' resolvers, and target_clones' other names at their bodies (#1838).
-    const uint64_t target_first = frames - target_frames;
+    const uint64_t target_first = frames - tls_frames - target_frames;
     SymbolId* target_frame_symbols = valid && target_frames != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, target_frames) : 0;
     valid = valid && (target_frames == 0 || target_frame_symbols != 0);
     valid = valid && (program->target_group_count == 0 ||
                       check_program_target_atoms(result, program, target_frames != 0 ? run.frames + target_first : NULL, target_frame_symbols, bytes));
+    // The thread-locals' accessors of position-independent code (#2101), with their frames in the room after the
+    // resolvers'.
+    const uint64_t tls_first = frames - tls_frames;
+    SymbolId* tls_frame_symbols = valid && tls_frames != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, tls_frames) : 0;
+    valid = valid && (tls_frames == 0 || tls_frame_symbols != 0);
+    uint32_t tls_frame_count = 0;
+    valid = valid && (tls_symbols == NULL ||
+                      check_program_emit_tls_atoms(result, program, shared.tls_models, tls_symbols, result->lowered.runtime_symbols[CHECK_LOWER_RUNTIME_TLS_GET_ADDR],
+                                                   tls_frames != 0 ? run.frames + tls_first : NULL, tls_frame_symbols, &tls_frame_count, bytes));
     check_clock_mark(stage_clock, CHECK_STAGE_CODE_ATOMS);
     // The unwind tables, after the last function: measured, then written into the byte arena, one CIE and an FDE per
     // function after it, as one EH_FRAME atom whose FDEs' initial locations refer to their functions.
@@ -5770,24 +5923,26 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         uint32_t kept = 0;
         for (uint32_t f = 0; valid && f < frames; f += 1)
         {
-            if (f >= count || dead == NULL || dead[f] == 0)
+            // (And the room of an accessor no live body reached, #2101.)
+            if ((f >= count || dead == NULL || dead[f] == 0) && (f < tls_first || f - tls_first < tls_frame_count))
             {
                 frame_symbols[kept] = f < count ? check_program_body_symbol(program, f) : f < target_first ? helpers->items[f - count].symbol :
-                                      target_frame_symbols[f - target_first];
+                                      f < tls_first ? target_frame_symbols[f - target_first] : tls_frame_symbols[f - tls_first];
                 run.frames[kept] = run.frames[f];
                 kept += 1;
             }
         }
+        // (No frame is kept where the only ones are the room of accessors no body reached, #2101: no table then.)
         UnwindOutput tables = { .location_capacity = kept, .shared = true };
-        valid = valid && unwind_write(run.frames, kept, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_ERROR_CAPACITY;
-        uint32_t* locations = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, kept) : 0;
-        uint8_t* table_bytes = valid ? arena_push(bytes, tables.size, 8) : 0;
+        valid = valid && (kept == 0 || unwind_write(run.frames, kept, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_ERROR_CAPACITY);
+        uint32_t* locations = valid && kept != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, kept) : 0;
+        uint8_t* table_bytes = valid && kept != 0 ? arena_push(bytes, tables.size, 8) : 0;
         tables.bytes = table_bytes;
         tables.capacity = tables.size;
         tables.locations = locations;
-        valid = locations != 0 && table_bytes != 0 && unwind_write(run.frames, kept, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_OK;
-        const AtomId atom = valid ? link_add_atom(&result->link, BUSTER_LINK_CLASS_EH_FRAME, 3, tables.size, table_bytes, 0) : 0;
-        valid = atom != 0;
+        valid = valid && (kept == 0 || (locations != 0 && table_bytes != 0 && unwind_write(run.frames, kept, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_OK));
+        const AtomId atom = valid && kept != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_EH_FRAME, 3, tables.size, table_bytes, 0) : 0;
+        valid = valid && (kept == 0 || atom != 0);
         for (uint32_t f = 0; valid && f < kept; f += 1)
         {
             valid = link_add_fixup(&result->link, atom, locations[f], BUSTER_LINK_FIXUP_PC32, frame_symbols[f], 0) != 0;
@@ -6154,12 +6309,34 @@ static bool check_program_define_pragma_aliases(CheckProgramCode* code, const Ch
     for (uint32_t i = 0; valid && history != NULL && i < history->count; i += 1)
     {
         const CheckInputSymbolPragma* record = history->records + i;
-        const uint32_t object = record->alias_target < input->token_count ? input->objects[record->alias_target] : 0;
+        bool first = record->alias_target < input->token_count;
+        const uint32_t point = record->token > record->alias_declaration ? record->token : record->alias_declaration;
+        // A second clone encounters an already-defined alias and contributes no symbol. A forward directive's
+        // clone is created only when its target appears, so directive order alone cannot choose the winner.
+        for (uint32_t j = 0; first && j < history->count; j += 1)
+        {
+            const CheckInputSymbolPragma* previous = history->records + j;
+            const uint32_t before = previous->token > previous->alias_declaration ? previous->token : previous->alias_declaration;
+            const bool materialized = previous->alias_target < input->token_count || previous->declaration < input->token_count;
+            const bool earlier = before < point || (before == point && j < i);
+            first = !(previous->kind == CHECK_SYMBOL_PRAGMA_ALIAS && previous->name == record->name && materialized && earlier);
+        }
+        const uint32_t object = first ? input->objects[record->alias_target] : 0;
         const SymbolId taken = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
         const SymbolId base = taken != 0 && program->symbol_objects[taken - 1] == object ? taken : 0;
         const AtomId atom = base != 0 && base < link->symbols.count ? link->symbols.atom[base] : 0;
+        // A clone cannot be placed at a common symbol's linker-owned storage, just as an explicit alias cannot.
+        // Refuse before publication even when this unit has no atom for that common definition.
+        if (record->alias_target != BUSTER_CHECK_NONE && base != 0 && base < link->symbols.count &&
+            (link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON)
+        {
+            code->status = CHECK_PROGRAM_UNSUPPORTED;
+            code->reason = "an alias of a common symbol, which clang's assembler refuses";
+            code->token = record->token;
+            valid = false;
+        }
         // A unit of several (#777) without T's definition leaves the alias to the unit with it.
-        if (record->alias_target != BUSTER_CHECK_NONE && identifiers != NULL && atom != 0)
+        if (valid && record->alias_target != BUSTER_CHECK_NONE && identifiers != NULL && atom != 0)
         {
             const NameId name = link_add_name(link, intern_bytes(identifiers, record->name), intern_length(identifiers, record->name));
             const uint8_t flags = (uint8_t)((link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_WEAK);

@@ -107,6 +107,45 @@ static void check_test_branch_condition_lowered(CheckTest* test, const char* nam
             check_test_expect(test, loaded ? loads != 0 : loads == 0, description);
         }
     }
+    if (strcmp(name, "branch-condition-qualified-bool") == 0)
+    {
+        for (uint32_t p = 0; p < 2; p += 1)
+        {
+            const Tier0Function* functions = lowered[p].functions;
+            const bool complete = lowered[p].count == 6;
+            check_test_expect(test, complete && check_test_program_function(functions, functions + 1),
+                              "plain and const _Bool parameters lower to identical branches");
+            // The remaining probes return one value each, in fixture order.
+            static const struct
+            {
+                const char* name;
+                uint32_t loads;
+                uint32_t atomic_loads;
+                uint32_t normalizations;
+            } reads[] = {
+                { "read_volatile", 1, 0, 0 },
+                { "read_atomic", 1, 1, 1 },
+                { "from_byte", 0, 0, 1 },
+            };
+            for (uint32_t f = 0; complete && f < BUSTER_ARRAY_LENGTH(reads); f += 1)
+            {
+                const Tier0Function* function = functions + 2 + f;
+                uint32_t loads = 0;
+                uint32_t atomic_loads = 0;
+                uint32_t normalizations = 0;
+                for (uint32_t e = 0; e < function->count; e += 1)
+                {
+                    const bool load = function->kinds[e] == BUSTER_TYPED_LOAD;
+                    loads += load;
+                    atomic_loads += load && function->values[e] == (BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST);
+                    normalizations += function->kinds[e] == BUSTER_TYPED_NE;
+                }
+                snprintf(description, sizeof(description), "%s: %s has %u loads, %u atomic loads and %u truth conversions",
+                         name, reads[f].name, loads, atomic_loads, normalizations);
+                check_test_expect(test, loads == reads[f].loads && atomic_loads == reads[f].atomic_loads && normalizations == reads[f].normalizations, description);
+            }
+        }
+    }
     CheckProgramLowered templated = { 0 };
     bool same = check_program_lower_templates(&templated, program, true, output, scratch) && templated.count == lowered[0].count && templated.template_mismatches == 0;
     for (uint32_t b = 0; same && b < templated.count; b += 1)
@@ -117,7 +156,7 @@ static void check_test_branch_condition_lowered(CheckTest* test, const char* nam
     check_test_expect(test, same, description);
 }
 
-// The fixtures are runtime data (#2053): tests/checker/branch-conditions, three programs that check_test_program_source
+// The fixtures are runtime data (#2053): tests/checker/branch-conditions, programs that check_test_program_source
 // runs natively against clang's build, by the catalog's names, which select their checks
 // (check_test_branch_condition_lowered).
 static void check_test_branch_conditions(CheckTest* test, const char* clang)
@@ -126,7 +165,7 @@ static void check_test_branch_conditions(CheckTest* test, const char* clang)
     const bool loaded = check_test_fixtures_load(&catalog, "checker/branch-conditions");
     char problem[sizeof(catalog.problem) + 128];
     snprintf(problem, sizeof(problem), "checker/branch-conditions fixtures (#2053): %s", catalog.problem);
-    check_test_expect(test, loaded && catalog.count == 3, problem);
+    check_test_expect(test, loaded && catalog.count == 4, problem);
     for (uint32_t i = 0; loaded && i < catalog.count; i += 1)
     {
         check_test_program_source(test, catalog.cases[i].source, catalog.cases[i].name, clang);

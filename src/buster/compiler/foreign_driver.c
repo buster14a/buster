@@ -150,9 +150,10 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
         .entry = foreign_string("_start"),
         .kind = RUNTIME_KIND_STATIC,
         .path = FOREIGN_PATH_VECTOR,
+        .linker = { .path_capacity = (uint32_t)argc + 1 },
     };
     char** inputs = argc >= 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, char*, (uint64_t)argc + 2) : 0;
-    bool valid = inputs != 0 && linker_options_initialize(&driver->linker, (uint32_t)argc + 1, arena);
+    bool valid = inputs != 0;
     uint32_t count = 1;
     bool pie = false;
     bool no_pie = false;
@@ -169,10 +170,11 @@ static bool foreign_driver_arguments(ForeignDriver* driver, int argc, char** arg
                             (foreign_starts_with(argument, "-o") && argument[2] != 0);
         const bool interpreter = strcmp(argument, "-dynamic-linker") == 0 || strcmp(argument, "--dynamic-linker") == 0 || foreign_starts_with(argument, "--dynamic-linker=");
         const bool lanes = strcmp(argument, "--lanes") == 0 || foreign_starts_with(argument, "--lanes=");
-        if (linker_options_parse(&driver->linker, argc, argv, &i))
+        if (linker_options_parse(&driver->linker, argc, argv, &i, arena))
         {
             valid = driver->linker.error == NULL && !driver->linker.resource;
-            if (!valid)
+            // As with the input array above, a failed initial path-array reservation returns the usage diagnostic.
+            if (!valid && (!driver->linker.resource || driver->linker.paths != NULL))
             {
                 linker_options_diagnose(&driver->linker, "link-foreign: ");
             }
@@ -414,8 +416,8 @@ static SymbolId foreign_driver_entry(const ForeignDriver* driver, const Foreign*
     return name != 0 ? converted->names[name - 1] : 0;
 }
 
-// A shared library's version that the resolution refuses (#1590, ForeignCommand.library_versions), worded as the direct
-// path words it (c_checker_driver.c): a needed library's reference that no library exports at its version, as GNU ld
+// A shared library's reference or version that the resolution refuses (#1590, #2910), worded as the direct
+// path words it (c_checker_driver.c): a needed library's unresolved reference, with its version if any, as GNU ld
 // words it, and a version a loaded library needs of another that that one doesn't define, as glibc's loader words it;
 // each library by its path.
 static void foreign_driver_version_error(const Foreign* foreign)
@@ -427,8 +429,13 @@ static void foreign_driver_version_error(const Foreign* foreign)
     {
         const ImportReferences* references = &library->library.references;
         const String8 version = library->versions.reference_versions[failure->reference];
-        fprintf(stderr, "link-foreign: %.*s: undefined reference to '%.*s@%.*s'\n", (int)path.length, path.pointer, (int)references->length[failure->reference],
-                (const char*)references->name[failure->reference], (int)version.length, version.pointer);
+        fprintf(stderr, "link-foreign: %.*s: undefined reference to '%.*s", (int)path.length, path.pointer, (int)references->length[failure->reference],
+                (const char*)references->name[failure->reference]);
+        if (version.length != 0)
+        {
+            fprintf(stderr, "@%.*s", (int)version.length, version.pointer);
+        }
+        fprintf(stderr, "'\n");
     }
     else
     {

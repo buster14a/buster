@@ -249,7 +249,7 @@ static bool tier1_code_size_summary(String8 line, uint64_t* functions, uint64_t*
 
 // One -c command's document and final summary. Multifile compiler invocations may print several documents, but
 // this reader deliberately requires one source/object pair so static names from different units never collide.
-static bool tier1_code_size_manifest(Tier1SizeBody** bodies, uint32_t* count, String8 text, Arena* arena)
+static bool tier1_code_size_manifest(Tier1SizeBody** bodies, uint32_t* count, uint32_t* tier1_count, String8 text, Arena* arena)
 {
     *bodies = NULL;
     *count = 0;
@@ -318,13 +318,39 @@ static bool tier1_code_size_manifest(Tier1SizeBody** bodies, uint32_t* count, St
             valid = tier1_code_size_name_order((*bodies)[b - 1].name, (*bodies)[b].name) != 0;
         }
     }
+    *tier1_count = valid ? (uint32_t)compiled : 0;
     return valid;
 }
 
-static const Tier1SizeSymbol* tier1_code_size_find(const Tier1SizeObject* object, String8 name)
+// Both streams have unique names in ascending order. Leave the cursor just past a match, or at the first symbol
+// greater than a missing name. Walk a dense suffix; in a sparse suffix bisect so a single query is logarithmic.
+static const Tier1SizeSymbol* tier1_code_size_find(const Tier1SizeObject* object, String8 name, uint32_t* cursor, uint32_t remaining_names)
 {
-    const Tier1SizeSymbol key = { .name = name };
-    return object->count != 0 ? bsearch(&key, object->symbols, object->count, sizeof(Tier1SizeSymbol), tier1_code_size_symbol_order) : NULL;
+    uint32_t first = *cursor;
+    uint32_t end = object->count;
+    const bool dense = end - first <= (uint64_t)remaining_names * 4;
+    const Tier1SizeSymbol* found = NULL;
+    while (first < end)
+    {
+        const uint32_t at = dense ? first : first + (end - first) / 2;
+        const int order = tier1_code_size_name_order(object->symbols[at].name, name);
+        if (order == 0)
+        {
+            found = object->symbols + at;
+            first = at + 1;
+            break;
+        }
+        if (order < 0)
+        {
+            first = at + 1;
+        }
+        else
+        {
+            end = at;
+        }
+    }
+    *cursor = first;
+    return found;
 }
 
 static bool tier1_code_size_ranges(Tier1SizeBody* bodies, uint32_t count)
@@ -350,11 +376,12 @@ static bool tier1_code_size_compare(Tier1CodeSize* result, String8 object, Strin
     Tier1SizeObject theirs = { 0 };
     Tier1SizeBody* bodies = NULL;
     uint32_t count = 0;
+    uint32_t reference_names = 0;
     bool valid = tier1_code_size_object(&ours, object, arena) && tier1_code_size_object(&theirs, oracle, arena);
     const char* reason = "code size: malformed object or ambiguous function symbol names";
     if (valid)
     {
-        valid = tier1_code_size_manifest(&bodies, &count, report, arena);
+        valid = tier1_code_size_manifest(&bodies, &count, &reference_names, report, arena);
         reason = "code size: missing, malformed or inconsistent Tier 1 function manifest";
     }
     Tier1SizeBody* references = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, Tier1SizeBody, count) : NULL;
@@ -365,11 +392,12 @@ static bool tier1_code_size_compare(Tier1CodeSize* result, String8 object, Strin
     }
     Tier1CodeSize unit = { .units = 1, .text_bytes = ours.text_bytes, .clang_text_bytes = theirs.text_bytes };
     uint64_t body_bytes = 0;
+    uint32_t own_cursor = 0;
+    uint32_t reference_cursor = 0;
     for (uint32_t b = 0; valid && b < count; b += 1)
     {
         Tier1SizeBody* body = bodies + b;
-        const Tier1SizeSymbol* own = tier1_code_size_find(&ours, body->name);
-        const Tier1SizeSymbol* reference = tier1_code_size_find(&theirs, body->name);
+        const Tier1SizeSymbol* own = tier1_code_size_find(&ours, body->name, &own_cursor, count - b);
         valid = own != NULL && own->executable && own->size != 0 && own->size == body->size;
         reason = "code size: a manifest body is absent, non-executable, empty or differs from its ELF size";
         if (valid)
@@ -381,8 +409,11 @@ static bool tier1_code_size_compare(Tier1CodeSize* result, String8 object, Strin
             valid = tier1_code_size_sum(&body_bytes, own->size);
             reason = "code size: function-byte total overflow";
         }
+        const Tier1SizeSymbol* reference = NULL;
         if (valid && body->tier1)
         {
+            reference = tier1_code_size_find(&theirs, body->name, &reference_cursor, reference_names);
+            reference_names -= 1;
             valid = tier1_code_size_sum(&unit.tier1_bytes, own->size);
         }
         if (valid && !body->tier1)

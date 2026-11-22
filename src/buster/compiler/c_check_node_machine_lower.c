@@ -91,10 +91,7 @@ static inline __attribute__((always_inline)) uint32_t node_machine_back_convert(
     {
         const uint8_t to_facts = node_machine_facts(machine, to);
         const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
-        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
-                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
-                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
-                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        const bool empty = check_lower_conversion_empty_by_class(source, from_facts, target, to_facts);
         const bool mixed = ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 && target != BUSTER_TYPED_CLASS_VOID;
         const bool complex = ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) != 0 && target != BUSTER_TYPED_CLASS_VOID;
         if (empty)
@@ -143,10 +140,7 @@ static __attribute__((noinline)) bool node_machine_back_fold(const NodeMachine* 
         const uint8_t from_facts = node_machine_record_facts(machine, r);
         const uint8_t to_facts = node_machine_facts(machine, to);
         const uint8_t target = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : node_machine_class(machine, to);
-        const bool empty = source == target && source < BUSTER_TYPED_CLASSES &&
-                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
-                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
-                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        const bool empty = check_lower_conversion_empty_by_class(source, from_facts, target, to_facts);
         uint8_t converted_class = 0;
         uint64_t converted_bits = *bits;
         folded = !empty && check_lower_constant_conversion(source, from_facts, target, to_facts, &converted_class, &converted_bits);

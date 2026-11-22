@@ -972,7 +972,7 @@ static bool check_target_versions_overloadable(const CheckGraph* graph, uint32_t
     for (uint32_t current = head; !marked && current < graph->overload_candidate_count;)
     {
         const CheckOverloadCandidate* candidate = graph->overload_candidates + current;
-        marked = (candidate->flags & BUSTER_CHECK_OVERLOADABLE) != 0;
+        marked = (candidate->flags & (BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA)) != 0;
         current = candidate->previous < current ? candidate->previous : BUSTER_CHECK_NONE;
     }
     return marked;

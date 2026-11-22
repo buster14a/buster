@@ -899,7 +899,7 @@ static __attribute__((noinline, aligned(64))) void node_rows_window_shapes(struc
         // bool; else a CONVERT where the classes differ. The reads' columns have a target's class and facts for the
         // records whose target's word they read; void's are zeros. The rule's other terms are asked of no byte, each
         // for what makes it:
-        // - An empty conversion (two types of one class, the target no bool): each line below writes it nothing. To
+        // - An empty conversion (two types of one class, with no normalization to bool): each line below writes it nothing. To
         //   another class's type alone is there a DISCARD or a CONVERT; the fold of an integer constant's is its own
         //   CONST again; and a void's conversion to a void is of one class.
         // - A complex's and a _BitInt's source: C gives a record of either no template (node_machine_classify's first
@@ -916,7 +916,7 @@ static __attribute__((noinline, aligned(64))) void node_rows_window_shapes(struc
         const __m512i to_classes = _mm512_maskz_loadu_epi8(worded, state->window_x_targets + x);
         const __m512i to_facts = _mm512_maskz_loadu_epi8(worded, state->window_x_facts + x);
         const __mmask64 same_class = _mm512_cmpeq_epi8_mask(classes, to_classes);
-        const __mmask64 to_bool = _mm512_test_epi8_mask(to_facts, _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_BOOL));
+        const __mmask64 normalize = _mm512_test_epi8_mask(_mm512_andnot_si512(facts, to_facts), _mm512_set1_epi8(BUSTER_CHECK_LOWER_TYPE_BOOL));
         const __mmask64 valued = _mm512_test_epi8_mask(to_classes, to_classes);
         // An integer constant's one CONST takes its conversion where it folds (check_lower_constant_conversion): to an
         // integer's class or bool's that is no _BitInt's; to float's or double's where its value converts exactly,
@@ -926,7 +926,8 @@ static __attribute__((noinline, aligned(64))) void node_rows_window_shapes(struc
         // to an aggregate or an array.
         const __m512i to_from_i8 = _mm512_sub_epi8(to_classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_I8));
         const __mmask64 foldable = converts & is_constant & integer_constant & _mm512_testn_epi8_mask(to_facts, _mm512_set1_epi8((char)BUSTER_CHECK_LOWER_TYPE_BIT_INT));
-        const __mmask64 folded = foldable & _mm512_cmple_epu8_mask(to_from_i8, _mm512_set1_epi8(BUSTER_TYPED_CLASS_U64 - BUSTER_TYPED_CLASS_I8));
+        // A same-class integer constant already has the required bits unless the target needs a boolean truth test.
+        const __mmask64 folded = foldable & (~same_class | normalize) & _mm512_cmple_epu8_mask(to_from_i8, _mm512_set1_epi8(BUSTER_TYPED_CLASS_U64 - BUSTER_TYPED_CLASS_I8));
         const __mmask64 floated = foldable & _mm512_cmple_epu8_mask(_mm512_sub_epi8(to_classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_F32)),
                                                                     _mm512_set1_epi8(BUSTER_TYPED_CLASS_F64 - BUSTER_TYPED_CLASS_F32));
         own = _mm512_mask_mov_epi8(own, folded, _mm512_set1_epi8(BUSTER_NODE_ROWS_FOLDED));
@@ -935,10 +936,9 @@ static __attribute__((noinline, aligned(64))) void node_rows_window_shapes(struc
         const __mmask64 converted = converts & ~folded;
         const __mmask64 moved = converted & ~same_class;
         const __mmask64 refused = converted & _mm512_cmpge_epu8_mask(_mm512_max_epu8(classes, to_classes), _mm512_set1_epi8(BUSTER_TYPED_CLASS_F80));
-        // To another class's type, a DISCARD where the target is void and else a CONVERT; then, to bool from any
-        // class, its test.
+        // A change of class discards or converts. A non-boolean value converted to _Bool needs a truth test even within U8.
         __m512i conversion = _mm512_maskz_mov_epi8(moved, _mm512_mask_mov_epi8(_mm512_set1_epi8(BUSTER_TYPED_DISCARD), valued, _mm512_set1_epi8(BUSTER_NODE_ROWS_CONVERT)));
-        conversion = _mm512_mask_mov_epi8(conversion, converted & to_bool,
+        conversion = _mm512_mask_mov_epi8(conversion, converted & normalize,
                                           _mm512_mask_mov_epi8(_mm512_set1_epi8(BUSTER_NODE_ROWS_BOOL), narrow, _mm512_set1_epi8(BUSTER_NODE_ROWS_BOOL + 1)));
         own = _mm512_maskz_mov_epi8(alive, own);
         // Its row's entries: its two parts' lengths' sum.

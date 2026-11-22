@@ -2455,6 +2455,10 @@ static bool check_constant_bind(CheckConstantInput* input, bool type_name)
                     {
                         reader->output->overload_heads[token] = reader->output->overload_heads[declaration];
                     }
+                    if (reader->output->symbol_pragmas != NULL)
+                    {
+                        check_input_symbol_overload_use(reader, token, declaration);
+                    }
                     if (c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) == 0)
                     {
                         reader->output->resource = true;
@@ -4797,6 +4801,10 @@ static bool check_constant_raw_bind(CheckConstantInput* input, bool type_name)
                 if (reader->output->overload_heads != 0)
                 {
                     reader->output->overload_heads[token] = reader->output->overload_heads[declaration];
+                }
+                if (reader->output->symbol_pragmas != NULL)
+                {
+                    check_input_symbol_overload_use(reader, token, declaration);
                 }
                 valid = c_bindings_use(&reader->bindings, C_BINDING_ORDINARY, name, token, check_input_use_point(reader, token)) != 0;
                 reader->output->resource |= !valid;
