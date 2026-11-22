@@ -1592,6 +1592,10 @@ struct PPDiagnosticRecord
     // Nonzero orders a completed construct's diagnostics before unsequenced ones at the same publication position.
     // Zero retains ordinary discovery order. Notes belong to the same record and follow its primary.
     uint64_t suborder;
+    // The output token it is at plus one, or zero for a diagnostic at a place of its own (pp_diagnose_output_location's):
+    // what orders a source-ordered record among the others at its position (pp_diagnostic_source_merge). A queued runtime
+    // warning's is where clang queues it instead (pp_diagnostic_queued, #2252).
+    uint32_t token;
     uint32_t location;
     uint32_t origin;
     uint32_t note_location;
@@ -1605,6 +1609,8 @@ struct PPDiagnosticRecord
     bool spans;
     // Whether its macro notes show the argument it came from (Preprocessor.diagnostic_arguments).
     bool arguments;
+    // Ordered among its position's other records by its token, not by discovery (pp_diagnostic_source_order, #2252).
+    bool source_ordered;
     // Its highlighted ranges (Preprocessor.diagnostic_ranges).
     PPDiagnosticRange ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
     uint32_t range_count;
@@ -1886,6 +1892,8 @@ struct Preprocessor
     uint32_t diagnostic_run_first;
     bool diagnostic_collection_failed;
     bool diagnostic_source;
+    // Whether a collected record is source-ordered (pp_diagnostic_source_order): only then does publication merge them.
+    bool diagnostic_source_ordered;
     // Set by a caller around a literal's diagnostic at a character of its spelling (#1447): clang's StringLiteralParser and
     // CharLiteralParser diagnostics, whose macro notes show the macro argument the literal came from ("expanded from
     // macro 'M'" at the parameter), where other diagnostics' forwarding is silent (pp_render_diagnostic).

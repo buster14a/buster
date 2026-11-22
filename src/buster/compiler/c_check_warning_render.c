@@ -3153,8 +3153,10 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                              event->completion > event->token + 1)
                     {
                         // A constant bound's comma in a function body (#2202, check_input_unused_completion): with the body's
-                        // queued runtime diagnostics, at its end.
+                        // queued runtime diagnostics, at its end, in source order among them as clang queues it (#2252), though
+                        // the reader finds it before them.
                         pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DEFERRED, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnostic_source_order(pp, previous);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_ZERO_LENGTH_ARRAY)
                     {

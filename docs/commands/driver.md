@@ -444,7 +444,13 @@ from the command's common options and its recorded language. The single-input
 kernels, option boundaries and a `.S` preprocessing/reassembly execution round-trip.
 
 C-only links retain the existing direct path, including its shared-library
-version validation and runtime snapshot. When a `-lNAME` or `-l:FILE` request
+version validation and runtime snapshot. Mixed links validate the shared
+libraries' versions as the direct path does (#1590,
+`ForeignCommand.library_versions`): a needed library's versioned reference
+binds only to an export at its version and keeps an `--as-needed` library
+that exports it, unless the referring library's `DT_NEEDED` names one, and
+the loaded libraries' version needs are checked before anything is written;
+version needs that don't read are refused as malformed input. When a `-lNAME` or `-l:FILE` request
 selects a populated archive, the source command uses the mixed/foreign path
 (#1470), so that archive gets the same lazy member selection and input ordering
 as a positional archive. Empty archives retain the direct path. The selection

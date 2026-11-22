@@ -129,9 +129,11 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
         // A reduction: tier1_select_reduce's halvings down to one lane, each with its combining form, then lane 0's move.
         for (uint32_t size = 2; moves && size < 4; size += 1)
         {
-            for (uint32_t operation = BUSTER_IR_REDUCE_ADD; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
+            for (uint32_t operation = size == 2 ? 0 : BUSTER_IR_REDUCE_ADD; operation < BUSTER_IR_REDUCE_OPERATIONS; operation += 1)
             {
                 bool legal = !legacy && ir_vectorize_target_allows(allowed, size == 2 ? X86_FORM_VMOVD_RM32_X_EVEX : X86_FORM_VMOVQ_RM64_X_EVEX);
+                // Min/max also uses this operation on both full-width inputs in the vector loop.
+                legal = legal && (operation >= BUSTER_IR_REDUCE_ADD || ir_vectorize_target_allows(allowed, ir_simd_reduce_form(operation, size, w)));
                 for (uint32_t span = width / 2; legal && span >= (1u << size); span /= 2)
                 {
                     const uint16_t halve = span >= 16 ? (span == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8) : X86_FORM_VPSHUFD_X_XM128_IMM8_EVEX;

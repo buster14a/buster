@@ -188,6 +188,7 @@ static unsigned int accounting_test(unsigned int* checks)
     accounting_destroy(accounting);
     accounting_expect(accounting_phase("Time native code") == ACCOUNTING_MEASUREMENT && accounting_phase("Compare candidates") == ACCOUNTING_MEASUREMENT && accounting_phase("Attribute overhead") == ACCOUNTING_MEASUREMENT, "all measurement families", checks, &failures);
     accounting_expect(accounting_phase("Gauge sqlite3.c's compile at one worker and at eight, by stage") == ACCOUNTING_MEASUREMENT && accounting_phase("Reproduce a sample of the Zen 5 model's rows") == ACCOUNTING_MEASUREMENT && accounting_phase("Reproduce the Zen 5 sample in two more processes") == ACCOUNTING_MEASUREMENT, "actual Gauge and Zen 5 reproduction measurements", checks, &failures);
+    accounting_expect(accounting_phase("Early hosted feedback (not qualification)") == ACCOUNTING_CORRECTNESS && accounting_phase("Check that the early corpus detects a regression in each promised area") == ACCOUNTING_CORRECTNESS && accounting_phase("Preserve exact feedback records and reproductions") == ACCOUNTING_UPLOAD, "early feedback is first useful feedback, its records an upload", checks, &failures);
     accounting_expect(accounting_phase("Some future workflow step") == ACCOUNTING_UNCLASSIFIED, "new steps not silently categorized", checks, &failures);
     return failures;
 }
