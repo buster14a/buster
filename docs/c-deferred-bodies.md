@@ -1168,7 +1168,76 @@ estimate of the bodies' walk time before the walks, such as per-kind weights
 summed over the bodies' tokens, which would be another pass over them.
 buster-performance#81's fit of such weights generalized worse than token count.
 The rule stays as it is: in the driver's readings, only the two dominant-body
-units above are behind.
+units above are behind. The next section takes those to source order (#1668);
+the one after it measures the estimate again (#1667).
+
+### A dominant body (#1668)
+
+The driver also reads a unit in source order where its bodies' tokens beyond
+the critical path (the rule's excess) are less than half the unit's tokens
+(`check_deferred_dominant`, `BUSTER_CHECK_DEFERRED_DOMINANT_SHARE`), but where
+`--lanes N` forces the lanes, and `--time-stages` reports "a dominant body".
+There the lanes share too little of the unit to win back what the deferred
+reader costs over source order on one lane: the top level's record, the
+lanes' copies and the merge, 15 to 18% of a generated unit and 20 to 50% of
+the real ones measured, on the 9700X. The decision is made with the rule's, before the
+top level's walk, so such a unit takes no lanes.
+
+[The record](https://github.com/buster14a/buster-performance/tree/6bbb66e5ebc6cf0dd26b193b93f3315a86ac9377/docs/measurements/deferred-dominant-1668-2026-11-23)
+measures, at main `a891cc05`, `benchmark-checker-deferred`'s readings by the
+rule on 8 permitted lanes in four processes each, against source order in
+the same process. Fifteen of its generated units (`gen2.c`'s, one or two
+dominant bodies of varied share and size, beside many of 5 to 38 blocks) and
+Lua 5.4.7 as one unit were not used to choose the threshold:
+
+| Units | Excess over the unit's tokens | The rule's lanes | Deferred against source order |
+| --- | ---: | ---: | ---: |
+| eleven generated units, `d16x19f384s288` and `d16x19f384s192` among them | 0.30 to 0.49 | 3 to 5 | +0.4% (−3.8 to +3.2) to +12.3% |
+| `d12x38f256s48`, `l16x38f384`, `h16x38` | 0.50, 0.51, 0.68 | 4, 5, 5 | −0.3%, +0.1%, +0.1%, within the processes' spread |
+| `d16x38f384s96`, `d32x19f256s48`, `d24x38f768s288` | 0.53 to 0.59 | 6 to 8 | −1.3% to −5.3% |
+| `d24x19f384s192`, `d32x10f96s48` | 0.52, 0.57 | 6, 4 | +0.9%, +7.4% |
+| Lua 5.4.7's interpreter as one unit (`onelua.c`, 240,739 tokens) | 0.64 | 8 | +3.2% |
+| `sqlite3.c` | 0.74 | 8 | −8.2% |
+
+So every unit below half is read faster in source order, all but one beyond
+the spread of its processes, and no unit the deferred reader wins on is below
+it; `sqlite3.c` keeps its 8 lanes. Above half the excess doesn't tell the
+units apart: three read slower apart, among them Lua's interpreter, the only
+real unit besides `sqlite3.c` that reaches four lanes, whose one-lane reading
+costs 46% more than source order.
+
+End to end, `-c -w --deferred-bodies` by `time-runs`, unpinned, two rounds of 11
+runs: of the 21 units, the gate reads the 10 that main reads apart below half
+5.8 to 11.1% faster in wall time and 23 to 32% in CPU time, and changes the
+others by no more than 2.2% in wall time either way. On main, the driver's
+`--deferred-bodies` reads each of the 20 it takes apart (all but
+`d32x5f384s192`, which the rule gives 3 lanes) slower in wall time than source
+order but `d24x38f768s288` in one round, with 30 to 56% more CPU time:
+`onelua.c` by 6.8% and `sqlite3.c` by 2.4%, which "The post-merge
+measurements" in [function-lanes.md](function-lanes.md) had 2.37% faster.
+
+### The walk's estimate, again (#1667)
+
+At main `a891cc05`, the gap is where #447 left it. In four processes of
+`--every-lane --lanes 2`, 2 lanes read c-testsuite `00204.c` 3.0% faster than
+one, `vfprintf.c` 2.4%, `regexec.c` 1.7%, `malloc.c` 1.2% and
+`pthread_create.c` 1.0%, and Lua's `lvm.c` 3.4%, which the rule gives one
+lane each; they read
+`fmal.c`, `lgamma_r.c`, `j0.c` and `exp2l.c` 1.0 to 2.1% slower and
+`crypt_des.c` 3.4%. The deferred reader on either count is 20 to 50% slower
+than source order on each of them, which is how the driver reads them.
+
+The record's probe build wrote each body's one-lane walk and its tokens'
+parser kinds for musl `src`, c-testsuite, Lua 5.4.7 and `sqlite3.c` (1,752
+units, 6 passes). Fitted by non-negative least squares on two thirds of musl
+and c-testsuite and `sqlite3.c`, and scored on the units' whole walks, an
+estimate from eight groups of kinds was better than token counts on the 18
+held-out units with 4,000 body tokens or more (a median error of 14.0%
+against 19.8%, 31.6% against 63.1% at the 90th percentile), and worse on the
+182 with 2,000 or more (14.4% against 6.3% at the median). A token's walk
+time grows with the unit (8.8 ns in `lvm.c`, 20.7 in `sqlite3.c`), which no
+count of a body's kinds sees. Since no unit the estimate would move reaches
+the driver's four lanes, the rule stays on tokens.
 
 ### The merge's serial work (#697)
 

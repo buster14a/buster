@@ -198,6 +198,32 @@ static void tier1_vex_test_dirty(Tier1EmitTest* test)
             tier1_emit_test_expect(test, x86_upper_dirty(placed, BUSTER_ARRAY_LENGTH(placed)) && !x86_upper_dirty(placed, at), "a ymm or zmm register below 16 dirties the upper state where it is");
         }
     }
+    // Every VEX twin (x86_vex_forms) names xmm registers alone: each pass rewrites its records before
+    // tier1_emit_function scans them, so a twin read as a ymm or zmm write would put vzeroupper in clean code. Each twin
+    // between registers 0 to 15, its VEX.vvvv the destination, and every twin in one run, leave the state clean.
+    X86Instruction twins[64];
+    uint32_t twin_count = 0;
+    for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
+    {
+        const uint32_t entry = x86_vex_forms[form];
+        for (uint32_t r = 0; entry != 0 && r < 16; r += 5)
+        {
+            const X86Instruction twin = {
+                .form = (uint16_t)(entry & BUSTER_X86_VEX_FORM),
+                .mode = BUSTER_X86_REGISTER_DIRECT,
+                .reg = (uint8_t)r,
+                .vvvv = (uint8_t)r,
+                .rm = (uint8_t)(15 - r),
+            };
+            tier1_emit_test_expect(test, !x86_upper_dirty(&twin, 1), "a VEX twin of a legacy SSE record leaves the upper state clean (#2830)");
+        }
+        if (entry != 0 && twin_count < BUSTER_ARRAY_LENGTH(twins))
+        {
+            twins[twin_count] = (X86Instruction){ .form = (uint16_t)(entry & BUSTER_X86_VEX_FORM), .mode = BUSTER_X86_REGISTER_DIRECT, .reg = 1, .vvvv = 1, .rm = 2 };
+            twin_count += 1;
+        }
+    }
+    tier1_emit_test_expect(test, twin_count >= 40 && !x86_upper_dirty(twins, twin_count), "every VEX twin in one run leaves the upper state clean (#2830)");
 }
 
 static void tier1_vex_tests(Tier1EmitTest* test)

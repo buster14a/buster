@@ -204,6 +204,20 @@ the block's load did). Tier 0 takes it as it takes a call:
   saves `cpuid`'s rbx;
 - rsp is 16-byte aligned at the template, as in a function that calls.
 
+A register output can be the call row's result instead of a store (#2144,
+`CheckProgramAsm.inline_result`, `Tier0AsmBody.result`): the first output that is
+a general register's `int` or `long` (4 or 8 bytes; not a high byte, `A`'s
+widened register, nor a register variable's) and whose lvalue is an automatic,
+non-volatile object named by itself (`check_asm_returnable`), and that the body
+touches. The body doesn't store it and the block holds no address for it; a `+`
+one's input is the object's value, passed in its register. The row's result is
+in that register, which Tier 0 moves to its depth's (`tier0_call_result_register`,
+the deep path's store too), and the lowering's SET_LOCAL after the row stores it
+into the object's local. The `"c"` shift's `+r` output then costs no block slot,
+no address and no store through it. An asm goto keeps its exit in eax, and a
+lowering for `--tier1` keeps the store: the IR's body call has no result yet, and
+`ir_lower` leaves a function with a result's body to Tier 0.
+
 There is no call, return or frame of the template's own. `cpuid` with its four
 fixed outputs runs as two loads, `cpuid` and four stores in its function.
 `rdtsc`, `syscall` (musl's wrappers' explicit register variables among them), a

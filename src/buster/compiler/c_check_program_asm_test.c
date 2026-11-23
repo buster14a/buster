@@ -282,10 +282,11 @@ static void check_test_program_asm_placement(CheckTest* test)
             if (right && s == PLACED)
             {
                 // cpuid's body (#1839): its inputs are its call's arguments, which Tier 0 moves into eax and ecx, so it starts
-                // at cpuid; then each output's address from the block into the store register, and its store.
+                // at cpuid; then each output's address from the block into the store register, and its store, but eax's: the
+                // first output is its call row's result (#2144).
                 const X86Instruction* records = plan->inline_records;
-                right = plan->inline_passed && plan->inline_count == 9 && records[0].form == X86_FORM_CPUID && records[1].rm == BUSTER_TIER0_ASM_BLOCK &&
-                        records[2].form == X86_FORM_MOV_RM32_R32 && records[2].reg == X86_REGISTER_RAX &&
+                right = plan->inline_passed && plan->inline_count == 7 && plan->inline_result == 1 && records[0].form == X86_FORM_CPUID &&
+                        records[1].rm == BUSTER_TIER0_ASM_BLOCK && records[2].form == X86_FORM_MOV_RM32_R32 && records[2].reg == X86_REGISTER_RBX &&
                         (plan->inline_touched & (1u << X86_REGISTER_RBX | 1u << X86_REGISTER_RDX)) == (1u << X86_REGISTER_RBX | 1u << X86_REGISTER_RDX) &&
                         (plan->inline_touched & (1u << X86_REGISTER_RSP | 1u << X86_REGISTER_RBP | 1u << X86_REGISTER_R15)) == 0;
             }
@@ -566,6 +567,22 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "long r;__asm__ volatile(\"syscall\" : \"=a\"(r) : \"0\"(39L) : \"rcx\", \"r11\", \"memory\");"
         "return (int)(s^(unsigned)t^(unsigned)u^(unsigned)(r>0));}",
         "asm-bodies", clang);
+    // Register outputs returned by their bodies' call rows (#2144): a `+r` int's shift by a "c" count, an `=r` long's, the
+    // first of cpuid's four outputs (the others stored), an output named twice with a memory input of its object, a
+    // local whose address is taken, each in a loop of live values; beside outputs that keep their stores (a global, an
+    // object through a pointer, a short), one under a statement expression 11 values deep, and an always_inline
+    // function's spliced twice.
+    check_test_program_source(test,
+        "static int g;static inline __attribute__((always_inline)) long twice(long v){long r;__asm__(\"leaq (%1,%1), %0\" : \"=r\"(r) : \"r\"(v));return r;}"
+        "int tested(int n){unsigned long a=n,b=n+1,c=n+2,d=n+3,e=n+4,f=n+5,g2=n+6,h=n+7;unsigned s=0;int x=n;long y=0;"
+        "for(int i=0;i<6;i++){__asm__(\"shll %%cl, %0\" : \"+r\"(x) : \"c\"(i&3));__asm__(\"leaq 3(%1), %0\" : \"=r\"(y) : \"r\"((long)i));"
+        "unsigned l0,l1,l2,l3;__asm__ volatile(\"cpuid\" : \"=a\"(l0), \"=b\"(l1), \"=c\"(l2), \"=d\"(l3) : \"0\"(0u), \"2\"(0u));"
+        "int m=i;int* pm=&m;__asm__(\"addl %1, %0\" : \"+r\"(m) : \"m\"(m));int t=*pm;short h16=(short)i;__asm__(\"incw %0\" : \"+r\"(h16));"
+        "__asm__(\"movl %1, %0\" : \"=r\"(g) : \"r\"(i*5));int q=0;int* pq=&q;__asm__(\"movl %1, %0\" : \"=r\"(*pq) : \"r\"(i+9));"
+        "s=s*7+(unsigned)x+(unsigned)y*3+(l0!=0)+(unsigned)t*5+(unsigned)h16*11+(unsigned)g*13+(unsigned)q*17+(unsigned)(a+b+c+d+e+f+g2+h);a+=1;h-=1;x=(x&255)+1;}"
+        "unsigned long u=a*(b+(c*(d+(e*(f+(g2*(h+(a*(b+(c*({long k=n;__asm__(\"negq %0\" : \"+r\"(k));k;})))))))))));"
+        "return (int)(s^(unsigned)u^(unsigned)twice(n)^(unsigned)twice(n+1));}",
+        "asm-body-results", clang);
     // Asm bodies of templates with their own labels and branches (#1839): a backward loop (decl and jnz), a forward jmp over a store, a template whose branches go to its end (the stores), and a byte copy's loop of
     // two pointers, each in a loop of live values, against clang's build.
     check_test_program_source(test,
