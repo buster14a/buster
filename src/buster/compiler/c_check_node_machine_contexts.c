@@ -417,6 +417,9 @@ static __attribute__((noinline)) bool node_machine_update_plan(const NodeMachine
     // Operand 1's type, which check_lower_count reads for a shift's count, is of such a class too.
     takes = takes && (increment || pointer || (node_machine_scalar_class((uint8_t)right_word) && ((right_word >> 8) & excluded) == 0));
     takes = takes && check_lower_segment_override(types, stored) == 0;
+    // A volatile destination's update (#3310): the lowering reads and stores it through its address, each with its mark;
+    // but a local's by name, as any local's.
+    takes = takes && !(machine->marks && check_lower_volatile(stored_class, stored) && !local);
     // A float's or a double's compound sum, where the unit's target fuses one with a product (NodeMachine.fuses): the
     // lowering's may be the fused operation's, which no plan here is.
     takes = takes && !(machine->fuses && (op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_SUBTRACT_ASSIGN) &&
@@ -523,6 +526,13 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
     else if (!address && category == CHECK_LVALUE && (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0)
     {
     }
+    else if (machine->marks && !address && category == CHECK_LVALUE && check_lower_volatile(class, node_machine_record_type(machine, r)) &&
+             !(op == CHECK_OP_VALUE && known && node_machine_local(machine, known_object)))
+    {
+        // A volatile lvalue's read (#3310), whose access the lowering's tasks mark (check_lower_access): no template of
+        // the lowering's has it, and no row of X's its mark. (A local's by name is the tasks' LOCAL, with no mark: the
+        // row below's.)
+    }
     else if (constant_kind != CHECK_CONSTANT_NONE && op != CHECK_OP_INITIALIZE && node_machine_record_fault(machine, r) == CHECK_FAULT_NONE &&
              (node_machine_record_flags(machine, r) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
              ((category == CHECK_RVALUE && !address) || ((address || address_value) && constant_kind == CHECK_CONSTANT_ADDRESS)))
@@ -625,12 +635,16 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
             {
                 const uint32_t destination_facts = a < r ? node_machine_facts(machine, node_machine_record_type(machine, a)) : 0;
                 const bool bit_field = op == CHECK_OP_ASSIGN && a < r && (node_machine_record_flags(machine, a) & BUSTER_CHECK_BIT_FIELD) != 0;
-                if (plain && (destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field)
+                const TypeId type = node_machine_record_type(machine, r);
+                const uint32_t target = op == CHECK_OP_INITIALIZE ? object :
+                                        a < r && node_machine_record_op(machine, a) == CHECK_OP_VALUE ? node_machine_record_object(machine, a) : 0;
+                const bool named = target != 0 && target < machine->object_count;
+                // A volatile destination's store (#3310) is the tasks', which mark it; but a local's by name, their
+                // STORE_LOCAL with no mark.
+                const bool marked = machine->marks && op == CHECK_OP_ASSIGN && a < r && check_lower_volatile(class, node_machine_record_type(machine, a)) &&
+                                    !(named && node_machine_local(machine, target));
+                if (plain && (destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field && !marked)
                 {
-                    const TypeId type = node_machine_record_type(machine, r);
-                    const uint32_t target = op == CHECK_OP_INITIALIZE ? object :
-                                            a < r && node_machine_record_op(machine, a) == CHECK_OP_VALUE ? node_machine_record_object(machine, a) : 0;
-                    const bool named = target != 0 && target < machine->object_count;
                     if (named)
                     {
                         kind = node_machine_local(machine, target) ? CHECK_LOWER_TEMPLATE_STORE_LOCAL : CHECK_LOWER_TEMPLATE_STORE_GLOBAL;

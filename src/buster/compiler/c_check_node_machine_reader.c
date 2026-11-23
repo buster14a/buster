@@ -671,6 +671,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
                                          symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
         typer->machine.fuses |= (reader->pp->options.target.features & BUSTER_NODE_MACHINE_FUSED) != 0;
+        typer->machine.marks = (options & BUSTER_NODE_READER_WINDOW) == 0;
     }
     if (room)
     {
