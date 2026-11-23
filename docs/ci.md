@@ -59,14 +59,13 @@ configured default (`BUSTER_HOST_SSP_DEFAULT`). The build's post-link step
 checks each linked executable for a `__stack_chk_fail` reference and fails if
 the policy did not take effect.
 
-The baseline build (`BUSTER_HOST_ARCH=x86-64`) still builds until #2924's next
-step requires the AVX-512 host, but no hosted row runs it. Native builds select
-the existing scalar twins when the compiler's host target lacks the full SIMD
-feature set. Generated-code ISA and ABI remain controlled by the existing target
-options. Every hosted row logs its CPU, target features and selected path, and
-must report `vector`: every row is drawn on CPUs its probe qualified (see "The
-native row"), so the native row runs the vector path too, as it must once the
-host requires AVX-512.
+There is no baseline build any more: `host_isa.h` stops a build whose target
+lacks its AVX-512 feature set, and the build's configuration checks that first,
+so `BUSTER_HOST_ARCH=x86-64`, or `native` on a CPU without them, fails before
+compiling (#2924). Generated-code ISA and ABI remain controlled by the existing
+target options. Every hosted row logs its CPU, target features and selected
+path, and must report `vector`: every row is drawn on CPUs its probe qualified
+(see "The native row"), so the native row runs the vector path too.
 
 Each matrix row is a call of `.github/workflows/hosted-correctness.yml`, which
 runs the row's inventory as its configuration's items, a qualifying runner each
