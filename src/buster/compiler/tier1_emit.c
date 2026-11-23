@@ -331,8 +331,8 @@ struct Tier1EmitResult
     uint64_t transition_scratch_bytes;
     // #2830: the code names ymm0 to ymm15 or zmm0 to zmm15 (tier1_emit_upper_dirty), so a vzeroupper precedes each call
     // and each return's epilogue, but a call's whose arguments or a return's whose result are live in such a register
-    // (tier1_select_call_wide, tier1_select_result_wide). tier1_emit_function sets it and emits the function again when
-    // its first code is dirty; the certificate regenerates the same records from it.
+    // (tier1_select_call_wide, tier1_select_result_wide). tier1_emit_function predicts it from the values' types and emits
+    // the function again where its code says otherwise; the certificate regenerates the same records from it.
     bool zero_upper;
     // A function the straight-line consumer doesn't take goes through tier1_emit_cfg.c, which leaves `liveness` and
     // `prepared.allocation` empty: its CFG's allocation problem (values numbered densely, value_nodes[v] their nodes,
@@ -2413,19 +2413,42 @@ static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_f
     }
 }
 
-// Emits a function (#140): its first code, and where that code leaves the upper state dirty (tier1_emit_upper_dirty) and
-// the target has vzeroupper, the function again with a vzeroupper before each call and each return's epilogue
-// (Tier1EmitResult.zero_upper, #2830), as clang's code has; then, at a target with AVX, its legacy SSE records as their
-// VEX twins (tier1_emit_vex). The records that decide it are the allocation's, so the
-// second emission repeats the first's work: only a function naming a ymm or zmm register pays it.
+// Whether a function likely leaves the upper state dirty (#2830): one of its values is a 32- or 64-byte vector, which
+// Tier 1 keeps in a ymm or zmm register. Sixty-four types a step, by masked loads that stay inside the type column. A
+// machine row or an asm body may name such a register without one, and a function with one may not, which
+// tier1_emit_function then finds in its code and emits it again for.
+static bool tier1_emit_upper_likely(const IrFunction* function)
+{
+    const __m512i wide = _mm512_set1_epi8((char)IR_V8I32);
+    const __m512i widest = _mm512_set1_epi8((char)IR_V16I32);
+    uint64_t found = 0;
+    for (uint32_t first = 0; found == 0 && first < function->instruction_count; first += 64)
+    {
+        const uint32_t left = function->instruction_count - first;
+        const __mmask64 live = left >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << left) - 1);
+        const __m512i types = _mm512_maskz_loadu_epi8(live, function->type + first);
+        found = (_mm512_cmpeq_epi8_mask(types, wide) | _mm512_cmpeq_epi8_mask(types, widest)) & live;
+    }
+    return found != 0;
+}
+
+// Emits a function (#140) with a vzeroupper before each call and each return's epilogue where its code names a ymm or
+// zmm register below 16 (Tier1EmitResult.zero_upper, #2830), as clang's code has. Whether it will is predicted from its
+// values' types (tier1_emit_upper_likely) and checked on its code (tier1_emit_upper_dirty): a wrong prediction emits the
+// function again, as the code says, so that only a mispredicted function pays a second emission (one emission of every
+// function that names such a register cost main.c's compile 5.7% at -march=znver5 on the 9700X). Then, at a target with
+// AVX, its legacy SSE records become their VEX twins (tier1_emit_vex).
 static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const uint64_t output_mark = output != 0 ? output->length : 0;
-    Tier1EmitError error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, false);
-    if (error == TIER1_EMIT_OK && x86_target_form_allowed(allowed_forms, X86_FORM_VZEROUPPER) && tier1_emit_upper_dirty(result->code.records, result->code.count))
+    const bool clears = allowed_forms != 0 && x86_target_form_allowed(allowed_forms, X86_FORM_VZEROUPPER);
+    const bool predicted = clears && plan != 0 && plan->function != 0 && tier1_emit_upper_likely(plan->function);
+    Tier1EmitError error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, predicted);
+    const bool dirty = error == TIER1_EMIT_OK && clears && tier1_emit_upper_dirty(result->code.records, result->code.count);
+    if (error == TIER1_EMIT_OK && dirty != predicted)
     {
         arena_pop_to(output, output_mark);
-        error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, true);
+        error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, dirty);
     }
     if (error == TIER1_EMIT_OK)
     {

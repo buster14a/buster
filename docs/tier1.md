@@ -530,17 +530,19 @@ saxpy body ran at 6.0 cycles an element after a 512-bit instruction, against 1.0
 after `vzeroupper` ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-unroll-2755-2026-11-15),
 `9700x/forms/`). Tier 1 keeps the state clean in two ways, as clang does:
 
-- **`vzeroupper` on the way out.** `tier1_emit_function` emits the function, then
-  scans its records (`tier1_emit_upper_dirty`, sixteen at a time, each form's
-  operand classes gathered from the form table). If any record names a ymm or
-  zmm register below 16, the function is emitted again with
-  `Tier1EmitResult.zero_upper`. A `vzeroupper` then goes right before each call,
+- **`vzeroupper` on the way out.** `tier1_emit_function` predicts from the
+  function's value types whether its code will name a ymm or zmm register below
+  16 (`tier1_emit_upper_likely`: a 32- or 64-byte vector value), and emits it
+  with `Tier1EmitResult.zero_upper` if so. It then checks the code
+  (`tier1_emit_upper_dirty`, sixteen records at a time, each form's operand
+  classes gathered from the form table) and emits the function again only where
+  the prediction was wrong. Emitting every such function twice instead cost
+  `main.c`'s `--tier1 -march=znver5` compile 5.7% on the 9700X. A `vzeroupper` then goes right before each call,
   after its `al`. Another goes before each return's epilogue, so the unwind
   reader still finds the epilogue right before the `ret`. Neither goes where a
   ymm or zmm argument (`tier1_select_call_wide`) or result
   (`tier1_select_result_wide`) is live. zmm16 to zmm31 don't count: no legacy
-  instruction reaches them, and `vzeroupper` leaves them alone. Only a function
-  that names such a register pays for the second emission. The code's
+  instruction reaches them, and `vzeroupper` leaves them alone. The code's
   certificate regenerates the call's `vzeroupper` and accepts the epilogue's.
   The placement is one per call and ret, not clang's per-block analysis: a
   function that is dirty anywhere clears the state at every exit.
