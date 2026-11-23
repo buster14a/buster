@@ -14472,6 +14472,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
 #endif
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
+    // Whether anything asked for the unit's expansion history, which preprocesses the unit again (pp_history_ensure).
+    check_clock_history(stage_clock, pp->history_replay != NULL);
     result = pp->errors != 0 || driver_fatal ? 1 : result;
     // A failure that memory may explain (#1521), which the stage that failed may have reported as its capacity: on a
     // thread switched to compact reservations, each arena it reserved since then holds at most
