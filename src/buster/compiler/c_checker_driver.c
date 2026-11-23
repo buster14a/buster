@@ -13438,7 +13438,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                 if ((pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0)
                 {
-                    // --node-bodies: the bodies the producer decided, those the compile takes and their tokens.
+                    // --node-bodies: the bodies the producer decided, those the compile takes and their tokens; and the
+                    // positions of the bodies it read or began to, with the nodes its machine's columns were made for and the
+                    // bytes all the machine's state took of the reader's arenas.
                     uint32_t decided = 0;
                     uint32_t taken = 0;
                     uint64_t taken_tokens = 0;
@@ -13451,7 +13453,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         taken += masked;
                         taken_tokens += masked ? (uint64_t)checking->tree.parents[opening] - opening + 1 : 0;
                     }
-                    fprintf(errors, "node-bodies: bodies=%u taken=%u tokens=%" PRIu64 " graph-nodes=%u\n", decided, taken, taken_tokens, input.graph.count);
+                    fprintf(errors, "node-bodies: bodies=%u taken=%u tokens=%" PRIu64 " graph-nodes=%u swept=%" PRIu64 " room=%u made=%" PRIu64 "\n", decided, taken,
+                            taken_tokens, input.graph.count, supply != NULL ? supply->alone_swept : 0, supply != NULL ? supply->alone_room : 0,
+                            supply != NULL ? supply->alone_made : 0);
                 }
 #endif
                 for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
