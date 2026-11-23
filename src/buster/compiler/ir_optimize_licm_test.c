@@ -507,6 +507,61 @@ static void ir_licm_test_vector_nested(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// A vector value of a loop whose operand is an invariant scalar of the same loop, a splat of a sum: the vector-only
+// policy moves the splat with the sum it reads, by its backward pass's operand closure, or the splat would read a value
+// of the loop from the preheader; the unrestricted policy moves both too. Each result is the interpreter's.
+static void ir_licm_test_vector_operands(IrOptimizeTest* test)
+{
+    static const char text[] = "function (i32) -> m16 {\n"
+                               "b0:\n"
+                               "  %0 = param.i32 0\n"
+                               "  %1 = intrinsic.v4i32 %0 splat\n"
+                               "  %2 = const.i32 0x0\n"
+                               "  %3 = const.i32 0x1\n"
+                               "  %4 = const.i32 0x4\n"
+                               "  %5 = br.void b1\n"
+                               "b1:\n"
+                               "  %6 = phi.i32 [%2, b0], [%10, b1]\n"
+                               "  %7 = phi.v4i32 [%1, b0], [%11, b1]\n"
+                               "  %8 = add.i32 %0, %3\n"
+                               "  %9 = intrinsic.v4i32 %8 splat\n"
+                               "  %10 = add.i32 %6, %3\n"
+                               "  %11 = add.v4i32 %7, %9\n"
+                               "  %12 = icmp.i1 %10, %4 lt\n"
+                               "  %13 = cbr.void %12, b1, b2\n"
+                               "b2:\n"
+                               "  %14 = vcmp.m16 %11, %1 ugt lanes=i8\n"
+                               "  %15 = ret.void %14\n"
+                               "}\n";
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena output = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    IrFunction f = { 0 };
+    const bool ready = input.base != NULL && output.base != NULL && scratch.base != NULL;
+    const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+    const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+    ir_optimize_test_expect(test, fixture, "LICM's splat-of-a-sum fixture parses");
+    for (uint32_t policy = 0; fixture && policy < 2; policy += 1)
+    {
+        IrLicmOptions options = ir_licm_options();
+        options.vectors = policy == 0;
+        IrLicmResult result = { 0 };
+        const IrCheck check = ir_optimize_licm(&f, &output, &scratch, options, &result);
+        // The preheader (b0) gains the sum and its splat, ahead of its branch.
+        const IrFunction* out = &result.function;
+        const bool moved = check.error == IR_OK && result.moved == 2 && out->block_offsets[1] == 8 && out->op[5] == IR_ADD && out->op[6] == IR_INTRINSIC && out->a[6] == 5;
+        ir_optimize_test_expect(test, moved, "LICM moves a loop's splat with the invariant sum it reads, by either policy");
+        if (check.error == IR_OK)
+        {
+            ir_optimize_test_simd_semantics(test, &f, out, &scratch);
+        }
+        arena_pop_to(&output, 0);
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static void ir_licm_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
@@ -765,6 +820,7 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
         ir_licm_test_progress(&test);
         ir_licm_test_simd(&test);
         ir_licm_test_vector_nested(&test);
+        ir_licm_test_vector_operands(&test);
         ir_licm_test_widths(&test);
         ir_licm_test_permute2(&test);
         // The digest of the walk's results, with the default seed, which generates the random fixtures.
