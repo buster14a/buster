@@ -828,11 +828,6 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
             node_producer_kept(alone->producer, types);
         }
     }
-    if (!room)
-    {
-        // (A producer whose machine could not be made decides no body: it did not run, as before it was begun first.)
-        shadow->produced_ran = false;
-    }
     return room ? alone : NULL;
 }
 
