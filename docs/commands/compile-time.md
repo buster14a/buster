@@ -29,7 +29,8 @@ requirements. [Command index](README.md).
 
 With `-flazy-system-headers --time-stages`, each planned translation unit also
 prints `time-lazy planner=eager|tree|bindings tokens=N scalar-replay-tokens=N
-bodies=N selected=N deferred=N references=N retained-bytes=N` (#1364).
+bodies=N selected=N deferred=N skipped=N references=N retained-bytes=N` (#1364); `skipped` counts the deferred
+definitions whose whole headers the tree planner skipped too (#3307).
 `eager` proves the existing opaque-reference policy requires every body and
 allocates no plan. `tree` certifies the completed syntax tree without a second grammar traversal;
 `bindings` is the exact fallback for inputs the tree certificate cannot prove.

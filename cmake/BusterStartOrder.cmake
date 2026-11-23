@@ -12,6 +12,13 @@
 # lane_exit_probe); buster_start_end, the checker's section's end, is how far its exit helper then asks for huge pages
 # whatever the process ran.
 #
+# Before that code, from a 2 MB boundary too, the data a compile only reads but that the C library's link puts with
+# writable data (#2886): the baked tables (buster_baked, baked.h) and the compiler's own objects' relocated read-only
+# data (.data.rel.ro.buster: their .data.rel.ro, which a static link at a fixed address relocates in the file, where the
+# C library's own, in .data.rel.ro, is written by its start). The two make a writable segment of their own, between the
+# read-only data and the code, which the bake makes read-only (baked.c's bake_seal), so that the exit helper can ask
+# for its ranges in huge pages as for the code's.
+#
 #   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE)
 #
 # writes SCRIPT, a linker script for lld that places each `UNIT NAME` line's function by its unit's object and its
@@ -75,7 +82,10 @@ function(buster_start_order_files list script symbols shift_source)
     endif()
     string(CONCAT text
         "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
-        "SECTIONS\n{\n    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x20000;\n${sections}    }\n"
+        "SECTIONS\n{\n"
+        "    buster_baked : ALIGN(0x200000)\n    {\n        *(buster_baked)\n    }\n"
+        "    .data.rel.ro.buster :\n    {\n        *.c.o(.data.rel.ro .data.rel.ro.*)\n        */native.o(.data.rel.ro .data.rel.ro.*)\n    }\n"
+        "    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x20000;\n${sections}    }\n"
         "    ASSERT(SIZEOF(.text.buster_start) > 0x20000, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
         "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n        buster_start_end = .;\n    }\n"
         "}\nINSERT BEFORE .text;\n")

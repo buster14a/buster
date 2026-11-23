@@ -178,9 +178,13 @@ applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 guide](ir-memory-value-numbering.md)), `vectors` (#2781's value numbering and
 LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
 [its guide](tier1-loop-vectorization.md)), `unroll` (#2755's [loop
-unrolling](tier1-loop-unrolling.md)), `gvn` (as `--tier1-gvn`), `inline`
-(`-inline` as `--tier1-no-inline`), or `all`. The default is SCCP, dead-code
-removal, CFG cleanup, its merges, the inlining and `vectors`. The restricted
+unrolling](tier1-loop-unrolling.md)), `tables` (#3298's switches of
+constants as loads of their jump tables' values, [the optimization
+guide](ir-optimization.md#switches-of-constants-3298)), `storemotion` (#3309's
+[loop store motion](tier1-store-motion.md), before promotion), `gvn` (as
+`--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or `all`. The
+default is SCCP, dead-code removal, CFG cleanup, its merges, the inlining,
+`vectors` and `tables`. The restricted
 value numbering runs before promotion; LICM runs after if-conversion, before
 the optimizer, which cleans up after it, then the loop vectorizer, then the
 unroller. Explicit `+gvn` or `+licm` runs that pass on every value instead of
@@ -196,7 +200,8 @@ SROA, as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
-(slots), `gvn_removed` and `loads_forwarded` (value numbering with memory's);
+(slots), `gvn_removed`, `loads_forwarded` (value numbering with memory's) and
+`value_tables` (the switches whose jump tables hold their constants);
 with `vectorize`, a `tier1-vectorize` line gives the loops examined (each back
 edge's header once, outer loops included), those vectorized by their widest
 vector (`bytes16`, `bytes32`, `bytes64`), their reductions and run-time overlap
@@ -206,7 +211,13 @@ loop was seen: the natural loops (`loops`), how many were `unrolled`, each
 refusal's count by its name (`outer`, `irreducible`, `preheader`, `latch`,
 `exit`, `call`, `control`, `stack`, `test`, `predicate`, `bound`, `induction`,
 `size`, `growth`), and the main loops' `copies`, the `reductions` they split
-and the instructions they `added`.
+and the instructions they `added`. With `+storemotion`, a `tier1-store-motion`
+line follows wherever the pass looked at a loop: the loops that store to one of
+the unit's distinct objects (`loops`), each outcome's count (`moved`,
+`irreducible`, `barrier`, `preheader`, `unknown-store`, `many`, `no-key`), the
+`keys` moved and the stored keys left by refusal (`key.met`, `key.bounds`,
+`key.type`, `key.unread`, `key.limit`, `key.chain`), the `loads` that read a
+slot, the `stores` a slot takes too and the instructions `added`.
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block
@@ -683,11 +694,17 @@ zmm0 to zmm3 (#1847). The function's own return loads each such part, a whole
 vector register's, straight from the result's address
 (`tier1_select_part_direct`), which is in a general register no load
 overwrites, and the code's certificate takes each load as reading the result's
-bytes through the address and defining the part in its register. Any other
-part (a record's in rax and rdx or xmm0 and xmm1, whose bytes may be fewer
-than its load's) is staged in the red zone's eightbyte slots first
-(`tier1_select_result_staged`, which the consumer and the certificate check
-too); two of them take at most two slots. `test-checker-driver`'s wide results' unit returns a
+bytes through the address and defining the part in its register. Since #3299 a
+whole eightbyte's part, 8 bytes in rax or rdx (an `__int128`'s halves, a
+struct of two longs) or in xmm0 or xmm1, is loaded straight from the address
+too, which no byte past the object widens; a general register's load may
+overwrite the address, so the part loaded into the address's own register
+goes last (`tier1_select_result_order`, which the certificate follows). On the
+9700X that took the issue's 128-bit chain from 66 to 58 ms. Any other part (an
+eightbyte's tail of fewer bytes, whose load would read past the object) is
+staged in the red zone's eightbyte slots first (`tier1_select_result_staged`,
+which the consumer and the certificate check too); two of them take at most
+two slots. `test-checker-driver`'s wide results' unit returns a
 128-byte vector at x86-64-v3 and x86-64-v4 against clang -O0, and its 256-byte
 results' unit one of 256 bytes (`make64`, called by `use64`) at x86-64-v4;
 below AVX-512 LLVM returns that one through a hidden pointer clang doesn't
@@ -754,7 +771,12 @@ blocks keep their numbers and a block's phis stay first:
   no count reaches 64), and selects on its bit 6;
 - a comparison: equality from the halves' `xor`s, `or`ed; an order from the high
   halves' (strict, of the predicate's signedness) where they differ, else the
-  low halves' (unsigned);
+  low halves' (unsigned); of two sign extensions, or two zero extensions, from
+  the same 32- or 64-bit type (C's `(__int128)a < b` of two longs, #3035), the
+  sources' own comparison, by the predicate for sign extensions (which keep
+  both orders) and by its unsigned twin for zero extensions (whose values are
+  never negative), one `cmp` and `setcc` where the halves' took three compares
+  and a `cmov`; mixed extensions and any other operands keep the general form;
 - an extension: the value as the low half (a 64-bit one itself) and zero or its
   sign as the high half; a truncation, the low half (to 64 bits the half
   itself); a pointer's conversions, through the low half;
@@ -785,11 +807,23 @@ that register. Such a function now goes through the CFG consumer, whose
 allocation moves values (`tier1_emit_function`), rather than stopping the
 build.
 
-A 128-bit local is still a frame object (the checker gives `__int128`'s locals
-Tier 0's memory, initialized through its address), so promotion leaves its
-loads and stores, which the split makes 8-byte accesses: `sqlite3Multiply128`'s
-`r` goes through its frame slot. Promoting such a local is a front-end change
-(the checker's initialization and the IR lowering's slot types) not made here.
+A 128-bit local is still a frame object (the checker gives `__int128`'s locals,
+parameters and temporaries Tier 0's memory, initialized through its address),
+so promotion leaves its loads and stores, which the split makes 8-byte
+accesses. Since #3299 the driver's passes then split such objects into their
+halves (`check_tier1_passes`, after the split): every access of one is an
+8-byte half at offset 0 or 8, which SROA (flagged, as the inlining's: the typed
+stream marks every object address-taken, and SROA takes one whose every use
+its provenance understands) makes two `I64` fields, and promotion again makes
+those values, so that a loop's 128-bit value is a phi of each half rather than
+stores and loads of its slot around every operation. A function SROA refuses or
+splits nothing of goes on as the split left it, and an object whose address
+escapes stays memory: a call's by-value argument and its result object, a
+return's bytes, and an aggregate parameter's incoming copy, which its halves
+are loaded from. On the 9700X that took the issue's chain (`t = f(t, i | 1)`
+of `a * b + (a >> 3)`, 40 million calls) from 77 to 66 ms against clang -O2's
+38; `test-checker-driver`'s 128-bit integers' fixture checks that a loop of
+them addresses nothing from rsp, where it had 32 such accesses.
 
 `test-tier1-wide` runs hand-written 128-bit IR (every operation the split takes,
 `sqlite3Multiply128`'s product, a shift by an extended constant, phis around a

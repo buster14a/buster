@@ -719,6 +719,7 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 // T where it sits (step 2's first measure): the machine's state at reader time and T on the front's expressions there.
 #include "buster/compiler/c_check_node_machine_reader.c"
 #include "buster/compiler/c_check_node_machine_alone.c"
+#include "buster/compiler/c_check_node_bodies.c"
 // #2850's step 1: a leaf's and a lookup's record from one load each, in the shadow (measure-node-machine --shadow --facts).
 #include "buster/compiler/c_check_node_machine_facts.c"
 // #2850's step 2's second piece: what reads T's record, counted in the shadow (measure-node-machine --shadow --facts-reads).
@@ -942,6 +943,8 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_unroll_test.c"
 #endif
+// #3309: loop store motion, before promotion.
+#include "buster/compiler/ir_store_motion.c"
 #include "buster/compiler/ir_optimize_sroa.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_optimize_sroa_test.c"
@@ -958,6 +961,9 @@ int run_tier1_frame_benchmark(int argc, char** argv);
 #include "buster/compiler/ir_vectorize_loops.c"
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #include "buster/compiler/ir_vectorize_loops_test.c"
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
+#include "buster/compiler/ir_store_motion_test.c"
 #endif
 // #866's GVN variants on real source's lowered IR are part of #131's IR benchmark, which needs GVN's definitions.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
@@ -2410,6 +2416,10 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     {
         result = run_ir_unroll_tests(argc - 1, argv + 1);
     }
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-store-motion") == 0)
+    {
+        result = run_ir_store_motion_tests(argc - 1, argv + 1);
+    }
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND) && argc >= 2 && strcmp(argv[1], "test-ir-sroa") == 0)
     {
         result = run_ir_sroa_tests(argc - 1, argv + 1);
@@ -2642,6 +2652,23 @@ static bool main_source_first(const char* argument)
     return !name;
 }
 
+// The baked tables' pages made writable (#2886): the bake makes the segment that holds them read-only (baked.c's
+// bake_seal), which a compile only reads, as its initializers find them built. A test, a benchmark or a tool may build
+// them again, or put their state back to unbuilt, so every command but a compile's starts so: one mprotect, which a
+// file the bake didn't seal (or a link without the section) has nothing to change for.
+extern char __start_buster_baked[] __attribute__((weak));
+extern char __stop_buster_baked[] __attribute__((weak));
+
+static void main_baked_writable(void)
+{
+    const uintptr_t first = (uintptr_t)__start_buster_baked & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uintptr_t last = ((uintptr_t)__stop_buster_baked + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    if (first != 0 && last > first)
+    {
+        mprotect((void*)first, last - first, PROT_READ | PROT_WRITE);
+    }
+}
+
 static int main_driver(int argc, char** argv)
 {
     // A source command's .bss in base pages (arena_static_base_pages) before the process touches any of it (#1444): with
@@ -2655,6 +2682,10 @@ static int main_driver(int argc, char** argv)
     if (source || compiles)
     {
         arena_static_base_pages();
+    }
+    else
+    {
+        main_baked_writable();
     }
     // Base pages on a virtual machine, or as BUSTER_HUGE_PAGES says (#1109), before any arena is reserved.
     arena_page_policy(getenv("BUSTER_HUGE_PAGES"));

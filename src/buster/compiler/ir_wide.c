@@ -18,7 +18,8 @@
 //   half alone past 64 bits, or the other half itself at 64, for no instruction; by a variable count, both halves shifted by its low 6 bits, the bits crossing between them by
 //   the complement's count (two shifts, so that a count of 0 shifts by no more than 63), and selects on its bit 6;
 // - a comparison: equality from the halves' xors, ored; an order from the high halves' (strict, of the predicate's
-//   signedness) where they differ, else the low halves' (unsigned);
+//   signedness) where they differ, else the low halves' (unsigned); of two extensions of one kind from the same 32- or
+//   64-bit type (#3035), the sources' comparison;
 // - a zero or sign extension: the value as the low half (a 64-bit one itself), and zero or its sign as the high half;
 //   a truncation, the low half (to 64 bits, the half itself); a pointer's conversions, through the low half;
 // - a load and a store: two 8-byte accesses, the high half's address 8 bytes on (its own address's offset plus 8 where
@@ -363,8 +364,22 @@ static uint32_t ir_wide_compare(IrWideWork* work, uint32_t i)
     const uint32_t a = f->a[i];
     const uint32_t b = f->b[i];
     const uint32_t predicate = f->c[i];
+    // Two extensions of one kind from the same 32- or 64-bit type (#3035): C's `(__int128)a < b` of two longs. Sign
+    // extension keeps both orders of its values, signed and unsigned (a negative value stays above every non-negative one
+    // as unsigned, at either width), and zero extension makes every value non-negative, so that a signed order is the
+    // unsigned one: the sources' own comparison, the predicate's for sign extensions and its unsigned twin for zero
+    // extensions. Mixed extensions, other sources and narrower ones take the halves' general comparison.
+    static const uint8_t unsigned_twin[IR_PREDICATE_COUNT] = { IR_EQ, IR_NE, IR_ULT, IR_ULE, IR_UGT, IR_UGE, IR_ULT, IR_ULE, IR_UGT, IR_UGE };
+    const uint32_t op = f->op[a];
+    const uint32_t source_type = op == IR_ZEXT || op == IR_SEXT ? f->type[f->a[a]] : IR_VOID;
+    const bool extended = (op == IR_ZEXT || op == IR_SEXT) && f->op[b] == op && f->type[f->a[b]] == source_type && (source_type == IR_I32 || source_type == IR_I64);
     uint32_t result = 0;
-    if (predicate == IR_EQ || predicate == IR_NE)
+    if (extended)
+    {
+        const uint32_t order = op == IR_ZEXT ? unsigned_twin[predicate] : predicate;
+        result = ir_wide_emit(work, IR_ICMP, IR_I1, ir_wide_low(work, f->a[a]), ir_wide_low(work, f->a[b]), order);
+    }
+    else if (predicate == IR_EQ || predicate == IR_NE)
     {
         const uint32_t low = ir_wide_emit(work, IR_XOR, IR_I64, ir_wide_low(work, a), ir_wide_low(work, b), BUSTER_IR_NONE);
         const uint32_t high = ir_wide_emit(work, IR_XOR, IR_I64, ir_wide_high(work, a), ir_wide_high(work, b), BUSTER_IR_NONE);

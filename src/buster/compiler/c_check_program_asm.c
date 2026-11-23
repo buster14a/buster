@@ -182,6 +182,9 @@ struct CheckAsmPlace
     bool global;
     // A symbol operand's name (BUSTER_CHECK_ASM_SYMBOL and _SYMBOL_MEMORY, #1845).
     String8 symbol;
+    // An asm body's register output that its call row returns in its register (#2144, CheckProgramAsm.inline_result),
+    // which the body doesn't store.
+    bool returned;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -267,9 +270,13 @@ struct CheckProgramAsm
     uint32_t* inline_branches;
     uint32_t* inline_targets;
     uint32_t inline_branch_count;
-    // An asm goto's body without stores after its exits (Tier0AsmBody.exits, #2351): its exits' first record, past the
-    // template's; 0 for any other body.
+    // An asm goto's body (Tier0AsmBody.exits and goto_labels, #2351): its exits' first record, past the template's, and
+    // its labels' count; 0 for any other body.
     uint32_t inline_exits;
+    uint32_t inline_goto_labels;
+    // The register output its body's call row returns (#2144, Tier0AsmBody.result): its operand's index plus one, 0 for
+    // none. The lowering stores the row's result into the output's local.
+    uint32_t inline_result;
     // Whether its template returns (Tier0AsmBody.leaves).
     bool inline_leaves;
     // Whether it moves rsp's variable's input into rsp (#1846, Tier0AsmBody.stack).
@@ -1526,6 +1533,22 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
 // the fall-through's move of 0 into `exit` and its jump to the stores, then each label's move of its index plus one and
 // jump (the last one falling into them), and after the stores the exit's move into eax, which its call row returns; the
 // caller makes the jumps branches.
+// Whether asm body output `place` (operand k of `statement`) may be its call row's result (#2144): a general register's
+// int or long of 4 or 8 bytes, not a high byte's, A's widened one or a register variable's (global or explicit), whose
+// lvalue is an automatic object named by itself and not volatile, so that the lowering stores the row's result into the object's local (SET_LOCAL), with
+// no address in the block and no store in the body.
+static bool check_asm_returnable(const CheckProgram* program, const CheckInputAsm* statement, const CheckAsmPlace* place, uint32_t k)
+{
+    const CheckStream* stream = program->stream;
+    const uint32_t node = statement->operands[k].node;
+    const bool named = node < stream->count && program->input->graph.ops[node] == CHECK_OP_VALUE;
+    const uint32_t object = named ? check_stream_value(stream, node).object : 0;
+    const CheckValue value = named ? check_stream_value(stream, node) : (CheckValue){ 0 };
+    return place->kind == BUSTER_CHECK_ASM_GENERAL && place->written && !place->high && !place->global && !place->atomic && !place->packed && !place->m64 &&
+           !place->wide && (place->size == 4 || place->size == 8) && named && object != 0 && object < program->object_count && program->object_symbols[object] == 0 &&
+           (value.flags & BUSTER_CHECK_REGISTER) == 0 && (check_stream_flags(stream, node) & BUSTER_CHECK_VOLATILE_PART) == 0;
+}
+
 static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const uint8_t stores[2], uint32_t pops,
                                       bool passed, uint32_t labels, uint8_t exit, X86Instruction** records, uint32_t* first, bool* room, Arena* output)
 {
@@ -1668,7 +1691,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         for (uint32_t k = 0; k < count; k += 1)
         {
             const CheckAsmPlace* place = places + k;
-            if (check_asm_stores(place))
+            if (check_asm_stores(place) && !place->returned)
             {
                 written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = BUSTER_TIER0_ASM_BLOCK, .mode = BUSTER_X86_MEMORY_BASE,
                                                   .displacement = (int32_t)place->slot };
@@ -1769,7 +1792,8 @@ static bool check_asm_return(uint32_t form)
 
 // The forms common in inline assembly that x86_semantics.c gives only its conservative record (every register, unknown
 // control), with the registers each writes, as the instruction set's references define them: none touches the stack,
-// and each returns to the next instruction (syscall through the kernel). A form of neither keeps its statement's helper.
+// and each returns to the next instruction (syscall through the kernel) but hlt, which faults in user mode and never
+// returns. A form of neither keeps its statement's helper.
 typedef struct CheckAsmImplicit CheckAsmImplicit;
 struct CheckAsmImplicit
 {
@@ -1800,6 +1824,9 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_EMMS, 0 },
     { X86_FORM_CLFLUSH_M8, 0 },
     { X86_FORM_SERIALIZE, 0 },
+    // hlt writes nothing: in user mode it faults (#GP, delivered as SIGSEGV), which is what musl's a_crash wants of it
+    // (#2351's survey: the only form of the corpora's templates whose effects kept its helper).
+    { X86_FORM_HLT, 0 },
     { X86_FORM_XSETBV, 0 },
     { X86_FORM_VZEROUPPER, BUSTER_TIER0_XMM_ALL },
     { X86_FORM_VZEROALL, BUSTER_TIER0_XMM_ALL },
@@ -3388,6 +3415,17 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         bool room = false;
         // An asm goto's (#1839's item 2): the helper's exits in the body, its exit number the call row's result.
         const uint32_t labels = statement->is_goto ? statement->label_count : 0;
+        // The first register output its call row may return (#2144), which then needs no store through its address.
+        uint32_t result = 0;
+        for (uint32_t k = 0; passed && !statement->is_goto && !returns && !program->asm_bodies && result == 0 && k < statement->output_count; k += 1)
+        {
+            result = check_asm_returnable(program, statement, places + k, k) && ((inline_touched >> places[k].reg) & 1) != 0 ? k + 1 : 0;
+        }
+        if (result != 0)
+        {
+            places[result - 1].returned = true;
+        }
+        plan->inline_result = result;
         const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, labels, exit, &records, &first, &room, output);
         plan->inline_passed = passed;
         const uint32_t branch_count = code.branch_count + goto_count + labels;
@@ -3443,9 +3481,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->label_count = valid ? code.label_count : 0;
         plan->inline_records = records;
         plan->inline_count = records_count;
-        // An asm goto's whose exits fall straight into the exit's move into eax, with no store or pop between (#2351):
-        // Tier 0 may branch from its jumps to their labels and drop the exits.
-        plan->inline_exits = valid && labels != 0 && records_count == tail + 1 ? exits : 0;
+        // An asm goto's (#2351): Tier 0 may branch from its jumps to their labels and drop the exits, each label's
+        // through a copy of the stores (and pops) between the exits and the move into eax.
+        plan->inline_exits = valid && labels != 0 && records_count > tail ? exits : 0;
+        plan->inline_goto_labels = plan->inline_exits != 0 ? labels : 0;
         // An asm goto's exit number in eax, its call row's result.
         plan->inline_touched = inline_touched | (labels != 0 ? 1u << X86_REGISTER_RAX : 0);
         plan->inline_masks = inline_masks;
@@ -3536,6 +3575,8 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_records = 0;
         plan->inline_count = 0;
         plan->inline_exits = 0;
+        plan->inline_goto_labels = 0;
+        plan->inline_result = 0;
         plan->inline_label_records = 0;
         plan->inline_label_names = 0;
         plan->inlined = false;
@@ -4122,6 +4163,33 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
                 }
             }
         }
+    }
+    // An asm body's private labels (#2351's gap 4): a `.L` name, which the object's symbols leave out, that no template
+    // refers to and no directive names. The body's own branches reach their targets without it, so it defines nothing,
+    // and Tier 0 may splice its function into its callers (tier0_inline_callee_valid), as clang inlines a function whose
+    // template's `.Lx%=` labels each copy renumbers. Its name, a label of no other template (each defines its own once),
+    // is then no label, and so no symbol.
+    for (uint32_t s = 0; valid && s < statements; s += 1)
+    {
+        CheckProgramAsm* plan = result->plans + s;
+        uint32_t kept = 0;
+        for (uint32_t k = 0; plan->planned && plan->reason == NULL && plan->inlined && k < plan->label_count; k += 1)
+        {
+            CheckAsmName* name = names + plan->labels[k].name;
+            const String8 spelling = plan->labels[k].spelling;
+            const bool local = spelling.length >= 2 && spelling.pointer[0] == '.' && spelling.pointer[1] == 'L';
+            const bool kept_label = !local || name->referenced || name->directives != 0;
+            // A dropped one is no label: unreferenced, it then has no link symbol (check_program_emit_asm_symbols).
+            name->label = kept_label;
+            if (kept_label)
+            {
+                plan->labels[kept] = plan->labels[k];
+                plan->inline_label_records[kept] = plan->inline_label_records[k];
+                plan->inline_label_names[kept] = plan->inline_label_names[k];
+                kept += 1;
+            }
+        }
+        plan->label_count = plan->planned && plan->reason == NULL && plan->inlined ? kept : plan->label_count;
     }
     result->names = names;
     result->name_count = count;
