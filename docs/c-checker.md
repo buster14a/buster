@@ -7481,6 +7481,69 @@ then the unconstrained output once the index passes the last. The semantics are 
 `test-checker`'s existing warning and constraint fixtures, and by
 `test-diagnostics` for their ordering.
 
+### Floating precision and floating comparisons (#1875)
+
+`-Wimplicit-float-conversion` (off by default, under `-Wconversion`) is the
+floating case of clang's `CheckImplicitConversion`: an implicit conversion of a
+floating value to a floating type of lower rank (`getFloatingTypeSemanticOrder`:
+`__bf16`, `_Float16` and `__fp16` alike, `float`, `double`, `long double`,
+`__float128`; complex types by their elements, complex to complex alone) warns
+"implicit conversion loses floating-point precision: 'double' to 'float'", at the
+converted expression past its implicit conversions (`check_common_float_location`:
+an operator's at its operator, a call's at its callee's name, a builtin's too),
+its type as written, an lvalue's qualifiers included (`'const double'`), to the
+target's, its typedef spelled as clang does (`'F' (aka 'float')`). It follows
+the enumerations' carriers (`check_common_float_precision`, as
+`check_common_enum_cast`): initializations, brace initializers' parts
+(designated, nested, file scope), assignments, returns, a prototype's
+arguments, a conditional's arms (both, the true one first) and a root comma's
+result. A constant that converts exactly is exempt, as clang's
+`IsSameFloatAfterCast` decides: a folded value or a read of a const object
+whose initializer completed (`CheckInput.const_values`), whose significant bits
+fit the target's precision at its exponent and range (`check_float_fits`,
+subnormals too; a quiet NaN whose payload fits; never a signaling one); an
+assignment's or an increment's value is no constant. A compound assignment
+whose computation's type has a higher rank than its left operand's warns,
+whatever its value, "implicit conversion when assigning computation result
+loses floating-point precision", from the right operand's type to the left
+one's, at the right operand (`check_common_float_result_precision`, clang's
+`AnalyzeCompoundAssignment`). Both are plain Diags, published as the full
+expression completes, in unreachable code and short-circuited operands too,
+but not in `sizeof`'s operand; an `_Atomic` target takes neither. Only a unit
+where the warning may report pays for its candidates
+(`CheckCommonEnabled.float_precision`): the compound assignments join the
+walk's reach operators then. Not given: its child
+`-Wimplicit-int-float-conversion`'s integer conversions, which need clang's
+approximate expression ranges, and `-Wdouble-promotion`, its opposite (#3339);
+`-Wconversion` itself stays refused (#1365).
+
+`-Wliteral-range`'s floating comparison (on by default) is clang's
+`CheckFloatComparison`: an `==` or `!=` whose left operand, past parentheses
+and static selections, is a floating literal its comparison doesn't convert and
+whose right one is a cast (an implicit conversion, an lvalue's read or an
+explicit cast), or else the other way round, warns where the cast's operand's
+real floating type can't hold the literal exactly: "floating-point comparison
+is always false" for `==`, "true" for `!=`, "constant cannot be represented
+exactly in type 'float'", that type's canonical name, at the operator
+(`check_common_float_comparisons`). A sign, an integer operand, an ordering, a
+complex type or a literal converted to a wider type is none of these. It is a
+plain Diag Sema gives as it builds the comparison, so it reports in
+unevaluated operands (`sizeof`, `typeof`, `_Generic`'s controlling
+expression) and unreachable code too. The constant reader's comparisons that
+no graph node holds (an array bound's, an enumerator's, a bit-field width's)
+are kept as `CHECK_WARNING_EVENT_FLOAT_COMPARE` events
+(`check_constant_float_compare`) and reported among them.
+
+The original driver fixtures (`c_check_float_precision_driver_test.c`,
+`test-checker-driver --float-precision-only`) compare clang's complete output
+at the default flags, `-Wall`, `-Wimplicit-float-conversion`, `-Weverything`,
+`-Wno-`, `-Werror=`, `-Werror`, `-w` and diagnostic pragmas, in gnu17 and C23,
+through both readers and one and three lanes, at `-fsyntax-only` and `-c`,
+with controls that must not warn. A system header's macro's literal (`M_PI`) is
+still suppressed by the common warnings' system-token test, which reads the
+token's spelling place where clang reads its expansion's; `-Wliteral-conversion`
+shares that gap (#3338).
+
 ## The constraint catalogue
 
 `test-checker` checks the constraint catalogue (`c_check_constraints_test.c`, #133's first "Done when" item). For

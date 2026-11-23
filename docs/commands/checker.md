@@ -84,6 +84,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --unused-comparison-only |
+  --float-precision-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
@@ -148,6 +149,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--float-precision-only` runs `c_check_float_precision_driver_test.c` (#1875):
+  `-Wimplicit-float-conversion`'s and `-Wliteral-range`'s floating comparisons
+  against clang's complete output, with their controls and policies
+  ([the c-checker section](../c-checker.md#floating-precision-and-floating-comparisons-1875)).
   `--unused-comparison-only` runs `c_check_unused_comparison_driver_test.c`
   and the original `tests/driver/unused_comparison*.c` sources (#2906).
   It compares complete Clang diagnostics for discarded comparisons, eligible
