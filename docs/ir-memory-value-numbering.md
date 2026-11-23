@@ -33,7 +33,10 @@ An address is then a root, an optional index value with its scale, and a
 constant offset. Every value it is read through is the identities' forwarded
 one. A step whose offset would leave `int64_t`'s range doesn't happen: the value
 it would have left is the root. A slot's `stack_addr`s all have the slot's first
-one as their root. The access's family is (root, index, scale), and its key the
+one as their root, and a symbol's `symbol_addr`s the first of them among the
+accesses' roots (#2826): the lowering takes a global's address at each use, so a
+global stored and read again is one family without #866's solver merging the
+two `symbol_addr`s. The access's family is (root, index, scale), and its key the
 family, the offset and the access's type. Two accesses of one key read and
 write the same bytes: their addresses are the same values' same arithmetic.
 
@@ -128,13 +131,19 @@ gathers can't index (below).
   instruction: kind, type, SCCP's constant and reachability).
 - **Derivation:** the slot each value's chain starts at, by pointer jumping
   along those operands until no jump moves (the scalar fallback: reverse
-  postorder).
+  postorder). The jumps run over a compressed list of the values that have an
+  operand to follow, and a value leaves it once its jump reaches a chain's
+  start (#2826): an address step is a small part of a function's values.
 - **Escapes:** the values derived from a slot, found 16 at a time by a mask,
   and their uses (the use lists the optimizer built).
 - **Events:** each block's accesses, writes and markers, compressed into one
   list 16 instructions at a time (`vpcompressd`), and the accesses into
   another; the walk and the blocks' summaries read these, not every
   instruction.
+- **Early exits (#2826):** the accesses' loads, and their byte and word loads,
+  counted 16 at a time from their info words. A function with no load or one
+  access stops there; one whose every key is one access's, with no byte or
+  word load, stops after the grouping. Neither forwards anything.
 - **Hashes:** the families' and keys' 64-bit hashes 8 at a time; the grouping
   (an open-addressed table numbering them in access order, comparing whole
   keys) is shared.
@@ -225,6 +234,19 @@ The whole pass by each version, each over the corpus in runs of its own
 
 The record is buster-performance's
 [`memory-value-numbering-2718-2026-11-14`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/memory-value-numbering-2718-2026-11-14).
+
+**#2826's re-measurement** (main `9ba3d792`, the 9700X; record
+[`memory-value-numbering-2826-2026-11-23`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/memory-value-numbering-2826-2026-11-23)):
+`+memory` took 0.981 to 0.994 of speedtest1's cycles and 0.982 to 0.993 of
+Lua's over three runs, about the 1% between equal builds, for 3.1% of
+`sqlite3.c`'s compile (603.6 to 622.4 ms). The issue's restrictions (no
+forwarding from a load across blocks, from a single-use load an operation would
+fold, across a call; only stores' values; only within a block) did no better,
+and the last two lost Lua's gain. The pass keeps its rules and stays opt-in.
+With one root per symbol, #3309's kernel of two globals ran in 137.6 M cycles
+by `+memory` against 200.2 M without it (clang -O2: 187.8 M).
+
+The rest of this section is #2718's.
 
 **Run time decides the default.** On the final code (`566770b`, against main
 `750f6a0`), `measure-tier1-programs --runs 11 --variant
