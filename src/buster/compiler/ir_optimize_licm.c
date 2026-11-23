@@ -14,8 +14,11 @@ struct IrLicmOptions
     // Move only the values of vector or mask type (#2781, Tier 1's default policy), each with the movable values its
     // operands are: the constants vector code builds at every use, without the general registers' longer live ranges
     // (#2719). A function without loops isn't classified, a loop that holds no such value is passed over, and each
-    // other loop is walked over its own blocks (ir_licm_loop_vectors). A function where nothing moves is returned as it
-    // was given: *result's function is the input's, and nothing is written to the output.
+    // other loop is walked over its own blocks (ir_licm_loop_vectors). A loop that holds a call moves nothing (#2743):
+    // every vector and mask register is the caller's across a call, so a value moved out of such a loop is stored and
+    // reloaded around each of its calls; a vectorized loop inlined into sqlite3VdbeExec had its two splats moved out of
+    // the interpreter's loop, and the function grew from 87 KB to 131 KB, 1,788 call stores more. A function where
+    // nothing moves is returned as it was given: *result's function is the input's, and nothing is written to the output.
     bool vectors;
     // Move what pays for the register it holds through the loop (#2719, Tier 1's policy for functions without vector or
     // mask values; ir_licm_loop_pressure). Every value moved stays live from the preheader through the whole loop, which
@@ -51,7 +54,7 @@ struct IrLicmResult
     uint32_t moved;
     uint32_t eligible_loops;
     uint32_t skipped_loops;
-    // IrLicmOptions.pressure: the eligible loops passed over because they hold a call.
+    // IrLicmOptions.pressure and .vectors: the eligible loops passed over because they hold a call.
     uint32_t called_loops;
     // The instructions the loop walks visited.
     uint64_t visits;
@@ -414,11 +417,12 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
             holders[work->destination[i] / 64] |= UINT64_C(1) << (work->destination[i] % 64);
         }
     }
-    // IrLicmOptions.pressure: the blocks that hold a call, 64 operations at a time. A loop whose body has one moves
-    // nothing, and its instructions are not walked.
+    // IrLicmOptions.pressure and .vectors: the blocks that hold a call, 64 operations at a time. A loop whose body has
+    // one moves nothing, and its instructions are not walked.
     const bool pressure = options.pressure && !options.vectors;
-    uint64_t* callers = pressure ? ir_allocate(scratch, words, sizeof(uint64_t), &ok) : 0;
-    for (uint64_t first = 0; ok && pressure && first < work->ir.function->instruction_count; first += 64)
+    const bool calls = pressure || options.vectors;
+    uint64_t* callers = calls ? ir_allocate(scratch, words, sizeof(uint64_t), &ok) : 0;
+    for (uint64_t first = 0; ok && calls && first < work->ir.function->instruction_count; first += 64)
     {
         const uint64_t count = work->ir.function->instruction_count - first < 64 ? work->ir.function->instruction_count - first : 64;
         const __mmask64 valid = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
@@ -459,11 +463,12 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
                 held = (body[word] & holders[word]) != 0;
             }
             bool called = false;
-            for (uint64_t word = 0; pressure && word < words; word += 1)
+            for (uint64_t word = 0; calls && word < words; word += 1)
             {
                 called = called || (body[word] & callers[word]) != 0;
             }
             work->statistics.called_loops += called;
+            held = held && !(options.vectors && called);
             if (pressure)
             {
                 if (!called)

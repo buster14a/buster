@@ -562,6 +562,120 @@ static void ir_licm_test_vector_operands(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// The block of the last instruction of `op` and `type` in `f`, or BUSTER_IR_NONE.
+static uint32_t ir_licm_test_block_of(const IrFunction* f, IrOp op, IrType type)
+{
+    uint32_t found = BUSTER_IR_NONE;
+    for (uint32_t b = 0; b < f->block_count; b += 1)
+    {
+        for (uint32_t i = f->block_offsets[b]; i < f->block_offsets[b + 1]; i += 1)
+        {
+            found = f->op[i] == op && f->type[i] == type ? b : found;
+        }
+    }
+    return found;
+}
+
+// IrLicmOptions.vectors and calls (#2743): ir_licm_test_vector_nested's loops with a call in the outer loop, where the
+// vector moves to the inner loop's preheader (b2) and stops there, and with the call in the inner loop, where nothing
+// moves. Across a call every vector register is the caller's, so a value moved out of a loop that holds one is stored
+// and reloaded around it.
+static void ir_licm_test_vector_calls(IrOptimizeTest* test)
+{
+    static const char* const texts[2] = {
+        "function (i32) -> m16 {\n"
+        "b0:\n"
+        "  %0 = param.i32 0\n"
+        "  %1 = const.i32 0x0\n"
+        "  %2 = const.i32 0x1\n"
+        "  %3 = const.i32 0x2\n"
+        "  %4 = intrinsic.v4i32 %0 splat\n"
+        "  %5 = br.void b1\n"
+        "b1:\n"
+        "  %6 = phi.i32 [%1, b0], [%18, b5]\n"
+        "  %7 = icmp.i1 %6, %3 lt\n"
+        "  %8 = cbr.void %7, b2, b6\n"
+        "b2:\n"
+        "  %9 = br.void b3\n"
+        "b3:\n"
+        "  %10 = phi.i32 [%1, b2], [%16, b4]\n"
+        "  %11 = icmp.i1 %10, %3 lt\n"
+        "  %12 = cbr.void %11, b4, b5\n"
+        "b4:\n"
+        "  %13 = mul.i32 %0, %3\n"
+        "  %14 = add.v4i32 %4, %4\n"
+        "  %15 = add.i32 %13, %2\n"
+        "  %16 = add.i32 %10, %2\n"
+        "  %17 = br.void b3\n"
+        "b5:\n"
+        "  %18 = add.i32 %6, %2\n"
+        "  %19 = call.void @2() fixed=() variadic=0\n"
+        "  %20 = br.void b1\n"
+        "b6:\n"
+        "  %21 = vcmp.m16 %4, %4 eq lanes=i8\n"
+        "  %22 = ret.void %21\n"
+        "}\n",
+        "function (i32) -> m16 {\n"
+        "b0:\n"
+        "  %0 = param.i32 0\n"
+        "  %1 = const.i32 0x0\n"
+        "  %2 = const.i32 0x1\n"
+        "  %3 = const.i32 0x2\n"
+        "  %4 = intrinsic.v4i32 %0 splat\n"
+        "  %5 = br.void b1\n"
+        "b1:\n"
+        "  %6 = phi.i32 [%1, b0], [%18, b5]\n"
+        "  %7 = icmp.i1 %6, %3 lt\n"
+        "  %8 = cbr.void %7, b2, b6\n"
+        "b2:\n"
+        "  %9 = br.void b3\n"
+        "b3:\n"
+        "  %10 = phi.i32 [%1, b2], [%16, b4]\n"
+        "  %11 = icmp.i1 %10, %3 lt\n"
+        "  %12 = cbr.void %11, b4, b5\n"
+        "b4:\n"
+        "  %13 = mul.i32 %0, %3\n"
+        "  %14 = add.v4i32 %4, %4\n"
+        "  %15 = call.void @2() fixed=() variadic=0\n"
+        "  %16 = add.i32 %10, %2\n"
+        "  %17 = br.void b3\n"
+        "b5:\n"
+        "  %18 = add.i32 %6, %2\n"
+        "  %19 = br.void b1\n"
+        "b6:\n"
+        "  %20 = vcmp.m16 %4, %4 eq lanes=i8\n"
+        "  %21 = ret.void %20\n"
+        "}\n",
+    };
+    // The outer call's fixture moves the vector once, to b2; the inner call's moves nothing and leaves it in b4.
+    static const uint32_t moved[2] = { 1, 0 };
+    static const uint32_t blocks[2] = { 2, 4 };
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        Arena input = arena_reserve(UINT64_C(16) << 20);
+        Arena output = arena_reserve(UINT64_C(16) << 20);
+        Arena scratch = arena_reserve(UINT64_C(16) << 20);
+        IrFunction f = { 0 };
+        const bool ready = input.base != NULL && output.base != NULL && scratch.base != NULL;
+        const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)texts[t], .length = strlen(texts[t]) }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
+        const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+        ir_optimize_test_expect(test, fixture, "LICM's vector-only fixtures with calls parse");
+        // The expected motion, and the loops passed over for their calls (the interpreter runs no call, so
+        // ir_licm_test_vectors' semantic check doesn't apply).
+        IrLicmOptions options = ir_licm_options();
+        options.vectors = true;
+        IrLicmResult result = { 0 };
+        const IrCheck check = fixture ? ir_optimize_licm(&f, &output, &scratch, options, &result) : ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+        ir_optimize_test_expect(test, check.error == IR_OK && result.moved == moved[t], "LICM's vector-only policy moves the expected values past a loop's calls");
+        ir_optimize_test_expect(test, check.error == IR_OK && result.called_loops == (t == 0 ? 1u : 2u), "LICM's vector-only policy counts the loops it passes over for their calls");
+        ir_optimize_test_expect(test, check.error == IR_OK && ir_licm_test_block_of(&result.function, IR_ADD, IR_V4I32) == blocks[t],
+                                "LICM's vector-only policy moves no vector out of a loop that holds a call");
+        arena_release(&input);
+        arena_release(&output);
+        arena_release(&scratch);
+    }
+}
+
 static void ir_licm_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
@@ -821,6 +935,7 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
         ir_licm_test_simd(&test);
         ir_licm_test_vector_nested(&test);
         ir_licm_test_vector_operands(&test);
+        ir_licm_test_vector_calls(&test);
         ir_licm_test_widths(&test);
         ir_licm_test_permute2(&test);
         // The digest of the walk's results, with the default seed, which generates the random fixtures.

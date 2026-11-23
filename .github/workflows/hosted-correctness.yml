@@ -171,8 +171,8 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # The settings the workflow's environment gives a row of the item's sanitizer alone: the take set its
-      # configuration, which the workflow's BUSTER_SANITIZER (the pool's list) can't be, and this checks it did.
+      # The settings the workflow's environment gives a row of the item's sanitizer alone, and of its architecture: the
+      # take set its configuration, which the workflow's BUSTER_SANITIZER (the pool's list) can't be, and this checks it did.
       - name: Set the vector item's configuration
         if: env.BUSTER_SHARD != ''
         run: |
@@ -189,6 +189,12 @@ jobs:
           differential=''
           if [ "$BUSTER_SANITIZER" = none ]; then
               linker=auto
+          fi
+          # The native plain row alone also runs each of the converted commands' in-process and served runs as a child,
+          # and fails on a difference (--differential, #2071; the owner's choice on 2026-11-23): it runs on every
+          # merge-queue candidate, nightly run and full dispatch. The vector row's plain configuration, a pull request's
+          # row and the merge queue pool's, runs them in-process and served alone, as the sanitizer configurations do.
+          if [ "$BUSTER_SANITIZER" = none ] && [ "$BUSTER_HOST_ARCH" = native ]; then
               differential=1
           fi
           printf 'BUSTER_LINKER=%s\nBUSTER_DRIVER_DIFFERENTIAL=%s\n' "$linker" "$differential" >> "$GITHUB_ENV"

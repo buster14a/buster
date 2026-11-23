@@ -1010,9 +1010,10 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
     // The largest body's tokens: the twin's columns and its tasks have a place a token of the body at hand, and two more.
     uint32_t largest = 0;
     uint64_t inside = 0;
-    for (uint32_t token = 0; token < count; token += 1)
+    for (uint32_t body = 0; body < alone->opened_count; body += 1)
     {
-        const uint32_t closing = parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[token] : count;
+        const uint32_t token = alone->opened[body];
+        const uint32_t closing = parser->tree.parents[token];
         const uint32_t extent = closing < count && closing > token ? closing - token + 1 : 0;
         largest = extent > largest ? extent : largest;
         inside += extent;
@@ -1093,37 +1094,31 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
         }
         // The functions the unit defines, by their first declarations.
         memset(producer->defined, 0, ((uint64_t)count / 64 + 2) * sizeof(uint64_t));
-        for (uint32_t token = 0; token < count; token += 1)
+        for (uint32_t body = 0; body < alone->opened_count; body += 1)
         {
-            const uint32_t declaration = parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY ? check_sparse_get(input->body_declarations, token) : BUSTER_CHECK_NONE;
+            const uint32_t declaration = check_sparse_get(input->body_declarations, alone->opened[body]);
             const uint32_t object = declaration < input->token_count && input->objects != NULL ? input->objects[declaration] : 0;
             if (object != 0 && object <= count)
             {
                 producer->defined[(object - 1) / 64] |= UINT64_C(1) << ((object - 1) % 64);
             }
         }
-        // The unit's enumerations' definitions (check_input_enum_records' list, which the reader makes at its end): one
-        // pass counts them and one writes them.
-        for (uint32_t pass = 0; valid && pass < 2; pass += 1)
+        // The unit's enumerations' definitions (check_input_enum_records' list, which the reader makes at its end): the
+        // `enum` keywords a scan lists, each asked for its opening brace. The room is the keywords', a definition each at
+        // most.
+        const uint32_t keywords = node_alone_tokens(parser->tokens.kinds, count, PARSE_KIND_ENUM, NULL);
+        uint32_t* keyword_tokens = arena_push_array(reader->scratch, (uint64_t)keywords + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        producer->enums = arena_push_array(reader->scratch, (uint64_t)keywords + 1, sizeof(CheckInputEnumDefinition), _Alignof(CheckInputEnumDefinition));
+        valid = keyword_tokens != NULL && producer->enums != NULL;
+        const uint32_t listed = valid ? node_alone_tokens(parser->tokens.kinds, count, PARSE_KIND_ENUM, keyword_tokens) : 0;
+        for (uint32_t keyword = 0; keyword < listed; keyword += 1)
         {
-            uint32_t at = 0;
-            for (uint32_t token = 0; token < count; token += 1)
+            const uint32_t token = keyword_tokens[keyword];
+            const uint32_t brace = check_input_enum_opening(reader, token);
+            if (brace != BUSTER_CHECK_NONE)
             {
-                const uint32_t brace = parser->tokens.kinds[token] == PARSE_KIND_ENUM ? check_input_enum_opening(reader, token) : BUSTER_CHECK_NONE;
-                if (brace != BUSTER_CHECK_NONE)
-                {
-                    if (pass == 1)
-                    {
-                        producer->enums[at] = (CheckInputEnumDefinition){ .type = reader->tag_types[token], .open = brace, .close = parser->tree.parents[brace] };
-                    }
-                    at += 1;
-                }
-            }
-            if (pass == 0)
-            {
-                producer->enums = arena_push_array(reader->scratch, (uint64_t)at + 1, sizeof(CheckInputEnumDefinition), _Alignof(CheckInputEnumDefinition));
-                producer->enum_count = at;
-                valid = producer->enums != NULL;
+                producer->enums[producer->enum_count] = (CheckInputEnumDefinition){ .type = reader->tag_types[token], .open = brace, .close = parser->tree.parents[brace] };
+                producer->enum_count += 1;
             }
         }
         producer->unit = node_producer_unit(reader);

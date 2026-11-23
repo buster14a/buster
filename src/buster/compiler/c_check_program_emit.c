@@ -558,8 +558,8 @@ struct CheckEmitGrowth
 // output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries). Every
 // lane reserves the first BUSTER_CHECK_TIER1_STEPS_ALWAYS steps; the others are the optional passes' outputs, reserved
-// only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
-// and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
+// only where the pass runs: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's (on by
+// default) and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
 // the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither;
 // and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol. LICM's
 // pressure policy (--tier1-passes=+hoist, #2719) takes step 9 too, reserved at the lane's first function that has a loop,
@@ -586,7 +586,7 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_LICM 8u
 #define BUSTER_CHECK_TIER1_PASS_SROA 16u
 #define BUSTER_CHECK_TIER1_PASS_MERGE 32u
-// The loop vectorizer (#2743, ir_vectorize_loops.c), a measurement option.
+// The loop vectorizer (#2743, ir_vectorize_loops.c), on by default (docs/tier1-loop-vectorization.md's "By default").
 #define BUSTER_CHECK_TIER1_PASS_VECTORIZE 64u
 // #2755's loop unroller (ir_optimize_unroll.c), off by default.
 #define BUSTER_CHECK_TIER1_PASS_UNROLL 128u
@@ -608,13 +608,13 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_NUMBERING 32768u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT                                                                                                                              \
     (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \
-     BUSTER_CHECK_TIER1_PASS_TABLES)
+     BUSTER_CHECK_TIER1_PASS_TABLES | BUSTER_CHECK_TIER1_PASS_VECTORIZE)
 // Loop store motion (#3309, ir_store_motion.c): a loop's globals read from registers, before promotion; off by default
 // (docs/tier1-store-motion.md's MEASUREMENTS: of speedtest1's and Lua's code it changes one start-up loop, sqlite3.c's
 // memsys5Init, and it costs a --tier1 compile of sqlite3.c 0.27% more instructions).
 #define BUSTER_CHECK_TIER1_PASS_STORE_MOTION 8192u
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
-    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
+    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_UNROLL | \
      BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION | BUSTER_CHECK_TIER1_PASS_HOIST | BUSTER_CHECK_TIER1_PASS_NUMBERING)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
@@ -636,7 +636,7 @@ struct CheckTier1Lane
     uint8_t* allowed;
     // The vector operations the target selects, for the loop vectorizer (ir_vectorize_target.c), in `forms` with `allowed`.
     struct IrVectorizeTarget* vectorize;
-    // The opt-in C vectorizer's source qualifier guard (#2805), indexed by body, including inline callees. Loop store
+    // The C loop vectorizer's source qualifier guard (#2805), indexed by body, including inline callees. Loop store
     // motion's too (#3309): a body with a volatile expression keeps every access.
     const uint8_t* vectorize_volatile;
     uint32_t emitting_body;
@@ -2110,7 +2110,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
 }
 
 // Indirect C accesses lose their volatile qualifier in the typed stream (docs/ir.md). Until the stream carries
-// per-access flags, the opt-in vectorizer can only widen reads in a body whose checked expressions are all clear.
+// per-access flags, the loop vectorizer can only widen reads in a body whose checked expressions are all clear.
 // Inspect the unit once. Only set bits need their source token mapped to a body. Qualifiers on a cast's result
 // matter at the dereference, just as they do on a parameter's pointee.
 static uint8_t* check_program_vectorize_volatile(const CheckProgram* program, Arena* arena)
@@ -4221,7 +4221,7 @@ static bool check_program_emit_literals(CheckEmitLiterals* literals, const Emitt
 
 // -S's copy of a body's records and branch columns (#1362), in `output`, which outlives the lanes' arenas the code is
 // in: what the assembly sink prints the body's atom from. Returns false if `output` can't hold them.
-static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, Arena* output)
+static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, uint32_t sled, Arena* output)
 {
     const uint32_t count = code->count;
     const uint32_t branch_count = code->branch_count;
@@ -4247,6 +4247,7 @@ static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCod
             .targets = targets,
             .count = count,
             .branch_count = branch_count,
+            .sled = sled,
         };
     }
     return valid;
@@ -6152,11 +6153,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
             }
-            // -S's copy of the records the atom's bytes are (#1362): a template's code and a NOP sled's aren't records the
-            // sink prints, which it refuses by name.
-            if (valid && keep_records && !assembly && body->sled == 0 && !body->windowed && atom < result->assembly_code_count)
+            // -S prints the sled's bytes before the body's instruction records. Templates have no records here.
+            if (valid && keep_records && !assembly && !body->windowed && atom < result->assembly_code_count)
             {
-                valid = check_program_emit_keep_records(&result->assembly_code[atom], code, output);
+                valid = check_program_emit_keep_records(&result->assembly_code[atom], code, body->sled, output);
                 result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
             }
             // The labels its templates define, each at its record's offset (its lane's, for a naked function): the

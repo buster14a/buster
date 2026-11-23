@@ -75,7 +75,8 @@ unchanged. `test-checker-driver`'s value tables unit runs a C fixture's
 
 ## Loop vectorization (#2743)
 
-`test-ir-vectorize [--seed N] [--print NAME]` (`ir_vectorize_loops_test.c`) runs
+`--tier1` runs the loop vectorizer by default (`--tier1-passes=-vectorize`
+turns it off). `test-ir-vectorize [--seed N] [--print NAME]` (`ir_vectorize_loops_test.c`) runs
 the loop vectorizer's text fixtures, `tests/ir/vectorize/*.ir`: element-wise
 operations of every lane width, fills, copies, sums with widening, a dot
 product, the four other integer reductions, an if-converted conditional sum
@@ -130,9 +131,11 @@ values, it runs value numbering before promotion and LICM after if-conversion,
 restricted to those values; `+gvn` and `+licm` still request the unrestricted
 passes, and `-vectors` disables both restricted forms. The LICM implementation
 walks each eligible loop's own blocks and skips loops with no safe vector or
-mask value. `test-ir-gvn` covers both host paths, and `test-ir-licm` the
-walk's frozen digest (its whole-function oracle went in #2924), scalar
-neutrality and nested loops;
+mask value, and loops that hold a call (#2743: every vector register is
+caller-saved, so a value moved out of one is stored and reloaded around its
+calls). `test-ir-gvn` covers both host paths, and `test-ir-licm` the walk's
+frozen digest (its whole-function oracle went in #2924), scalar neutrality,
+nested loops and calls;
 `test-checker-driver` checks the default and `-vectors` reports and native
 output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
 
@@ -318,8 +321,11 @@ forwarding. Tier 1 now takes them in three steps, all in
 - **The optimizer's identities** take what the eightbytes leave: an `and` of a
   zero extension and a mask that keeps its bits, a bitcast of a bitcast and a
   truncation of an extension back to the first value's type, and an `undef`
-  as zero (an `and` absorbed by it, an `or`, `xor` or `add` of it the other
-  operand), as Tier 1 selects it.
+  as zero where it is an operand: an `or`, `xor` or `add` of it is the other
+  operand, and SCCP folds an `and` of it to zero, as LLVM does. The `and`
+  isn't the `undef` itself (#3424): its other operand clears bits, and an
+  `undef` that reaches a phi has no definition, so the phi's register held
+  whatever it held, a struct field left zero among it.
 
 Tier 1 runs the widening SROA on every function with its own ABI records
 (`check_tier1_compile`, and `check_tier1_inline_expand` where the expansion

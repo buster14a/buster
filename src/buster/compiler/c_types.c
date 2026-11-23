@@ -310,10 +310,14 @@ _Static_assert(TYPE_PARAMETER_ABI_COUNT <= 1u << BUSTER_TYPE_PARAMETER_ABI_BITS,
 // A member's flags.
 #define BUSTER_TYPE_MEMBER_PACKED 0x01
 #define BUSTER_TYPE_MEMBER_BIT_FIELD 0x02
+#define BUSTER_TYPE_MEMBER_INVALID 0x20
 // clang's counted_by family on a member (#148), its kind in the flags' bits 2 to 4 as TypeMember.count_kind has it, and
 // the count's member's name in TypeMembers.count.
 #define BUSTER_TYPE_MEMBER_COUNT_SHIFT 2
 #define BUSTER_TYPE_MEMBER_COUNT_MASK 0x1C
+
+// For struct and union types only. An invalid field leaves its declaration visible for recovery.
+#define BUSTER_TYPE_RECORD_INVALID 0x01
 // TypeMember.count_kind: none, or clang's CountAttributedType kinds plus one.
 #define BUSTER_TYPE_COUNT_NONE 0
 #define BUSTER_TYPE_COUNTED_BY 1
@@ -583,6 +587,7 @@ struct TypeMember
     // A counted_by family attribute's kind (BUSTER_TYPE_COUNTED_BY and the others, #148) and the name of its count's
     // member; BUSTER_TYPE_COUNT_NONE and 0 for none.
     uint8_t count_kind;
+    bool invalid;
     uint32_t count_name;
 };
 
@@ -3235,17 +3240,19 @@ static TypeError type_check_member(const TypeTable* table, const TypeMember* mem
         const uint8_t kind = type_kind(table, type_strip_aligned(table, member->type));
         const bool bit_field = member->bit_width != BUSTER_TYPE_NOT_BIT_FIELD;
         // A member with extended qualifiers is clang's "field may not be qualified with an address space" (#1447).
-        if (kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID || (table->types.flags[type_index(member->type)] & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0 ||
-            type_address_space(type_object_qualifiers(table, member->type)) != 0)
+        // Keep a rejected field's type for lookup, without attempting to lay it out.
+        if (!member->invalid &&
+            (kind == BUSTER_TYPE_KIND_FUNCTION || kind == BUSTER_TYPE_KIND_VOID || (table->types.flags[type_index(member->type)] & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) != 0 ||
+             type_address_space(type_object_qualifiers(table, member->type)) != 0))
         {
             result = TYPE_ERROR_MEMBER;
         }
-        else if (!type_is_complete(table, member->type))
+        else if (!member->invalid && !type_is_complete(table, member->type))
         {
             *flexible = kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY && last && !bit_field;
             result = *flexible ? TYPE_ERROR_NONE : TYPE_ERROR_MEMBER;
         }
-        if (result == TYPE_ERROR_NONE && bit_field)
+        if (result == TYPE_ERROR_NONE && bit_field && !member->invalid)
         {
             const uint64_t width = type_integer_width(table, member->type);
             if (width == 0 || member->bit_width > width || (member->bit_width == 0 && member->name != 0))
@@ -3508,12 +3515,13 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
     {
         bool flexible = false;
         error = type_check_member(table, &members[i], any_flexible || i + 1 == count, &flexible);
-        if (error == TYPE_ERROR_NONE && attributes.ms_struct && members[i].bit_width != BUSTER_TYPE_NOT_BIT_FIELD)
+        if (error == TYPE_ERROR_NONE && attributes.ms_struct && !members[i].invalid && members[i].bit_width != BUSTER_TYPE_NOT_BIT_FIELD)
         {
             const uint64_t size = type_size(table, members[i].type);
             error = size != 0 && (size & (size - 1)) == 0 ? TYPE_ERROR_NONE : TYPE_ERROR_MS_STRUCT_ALIGNMENT;
         }
         flags |= flexible ? BUSTER_TYPE_FLAG_FLEXIBLE : 0;
+        flags |= members[i].invalid ? BUSTER_TYPE_RECORD_INVALID : 0;
     }
     if (error == TYPE_ERROR_NONE)
     {
@@ -3529,7 +3537,8 @@ static bool type_record_define(TypeTable* table, TypeId record, const TypeMember
             columns->bit_width[begin + i] = bit_field ? member->bit_width : 0;
             columns->alignment_log2[begin + i] = member->alignment_log2;
             columns->flags[begin + i] = (uint8_t)((member->packed ? BUSTER_TYPE_MEMBER_PACKED : 0) | (bit_field ? BUSTER_TYPE_MEMBER_BIT_FIELD : 0) |
-                                                  ((member->count_kind << BUSTER_TYPE_MEMBER_COUNT_SHIFT) & BUSTER_TYPE_MEMBER_COUNT_MASK));
+                                                  ((member->count_kind << BUSTER_TYPE_MEMBER_COUNT_SHIFT) & BUSTER_TYPE_MEMBER_COUNT_MASK) |
+                                                  (member->invalid ? BUSTER_TYPE_MEMBER_INVALID : 0));
             columns->offset[begin + i] = 0;
             columns->count_name[begin + i] = member->count_kind != BUSTER_TYPE_COUNT_NONE ? member->count_name : 0;
         }
@@ -4172,7 +4181,15 @@ static bool type_record_layout(TypeTable* table, TypeId record)
         const uint32_t tag = table->types.index[type_index(record)];
         uint64_t size = 0;
         uint32_t alignment_log2 = 0;
-        error = type_layout_scalar(table, tag, &size, &alignment_log2);
+        if (__builtin_expect((table->types.flags[type_index(record)] & BUSTER_TYPE_RECORD_INVALID) != 0, 0))
+        {
+            // Clang's recovery gives an invalid record size and alignment one.
+            size = 1;
+        }
+        else
+        {
+            error = type_layout_scalar(table, tag, &size, &alignment_log2);
+        }
         if (error == TYPE_ERROR_NONE)
         {
             type_finish_record(table, tag, size, alignment_log2);
