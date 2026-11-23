@@ -156,6 +156,8 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t fir
     uint32_t chosen = BUSTER_CHECK_NONE;
     uint32_t fallback = BUSTER_CHECK_NONE;
     uint32_t association = separator + 1;
+    // A second default or a type compatible with an earlier association's stopped the walk (#2914).
+    bool duplicate = false;
     while (valid && association < close)
     {
         const uint32_t colon = check_constant_punctuation(parser, association, close, PARSE_KIND_COLON);
@@ -165,6 +167,7 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t fir
         valid &= root != BUSTER_CHECK_NONE;
         if (valid && parser->tokens.kinds[association] == PARSE_KIND_DEFAULT)
         {
+            duplicate = association + 1 == colon && fallback != BUSTER_CHECK_NONE;
             valid = association + 1 == colon && fallback == BUSTER_CHECK_NONE;
             fallback = root;
         }
@@ -177,7 +180,9 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t fir
                 check_generic_unreachable(reader, association, colon, type);
             }
             bool matches = false;
-            valid = valid && check_generic_association(reader, &seen, type, &matches);
+            const bool listed = valid && check_generic_association(reader, &seen, type, &matches);
+            duplicate = valid && !listed && !reader->output->resource;
+            valid = listed;
             if (valid)
             {
                 if (matches)
@@ -190,6 +195,10 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t fir
         association = after + 1;
     }
     chosen = chosen != BUSTER_CHECK_NONE ? chosen : fallback;
+    if (duplicate)
+    {
+        check_input_generic_duplicates(reader, NULL, separator, close);
+    }
     if (valid && chosen == BUSTER_CHECK_NONE)
     {
         check_input_generic_no_match(reader, first, separator, control, control_type);

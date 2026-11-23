@@ -418,6 +418,13 @@ typedef enum CheckInputMessage
     // A _Generic selection whose controlling type (its lvalue conversion's) matches no association and which has no
     // default (#2914): clang's err_generic_sel_no_match at the controlling expression's first token, with that type.
     CHECK_INPUT_GENERIC_NO_MATCH,
+    // A _Generic association's type compatible with an earlier association's (#2914, clang's err_assoc_compatible_types):
+    // at the later type name's first token that isn't a qualifier, type and type_spelling its type, value the earlier
+    // one's type and detail its typedef spelling, with CHECK_INPUT_NOTE_GENERIC_COMPATIBLE at the earlier type name.
+    CHECK_INPUT_GENERIC_COMPATIBLE,
+    // A _Generic selection's second default association (#2914, clang's err_duplicate_default_assoc): at its `default`,
+    // with CHECK_INPUT_NOTE_GENERIC_DEFAULT at the first.
+    CHECK_INPUT_GENERIC_DEFAULT,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -595,6 +602,8 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENUM_VALUE_TYPE] = "integer constant expression must have integer type",
     [CHECK_INPUT_AUTO_ATOMIC_POINTER] = "variable with atomic deduced pointee has incompatible initializer",
     [CHECK_INPUT_GENERIC_NO_MATCH] = "controlling expression type not compatible with any generic association type",
+    [CHECK_INPUT_GENERIC_COMPATIBLE] = "type in generic association compatible with previously specified type",
+    [CHECK_INPUT_GENERIC_DEFAULT] = "duplicate default generic association",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -653,6 +662,11 @@ typedef enum CheckInputNoteKind
     // constant expression".
     CHECK_INPUT_NOTE_CONSTANT_VOID,
     CHECK_INPUT_NOTE_CONSTANT_CONVERSION,
+    // A _Generic association's earlier compatible type (#2914): "compatible type 'T' specified here", T the report's value
+    // and detail (CHECK_INPUT_GENERIC_COMPATIBLE's).
+    CHECK_INPUT_NOTE_GENERIC_COMPATIBLE,
+    // A _Generic selection's first default association (#2914): "previous default generic association is here".
+    CHECK_INPUT_NOTE_GENERIC_DEFAULT,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,

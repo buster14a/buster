@@ -1796,6 +1796,108 @@ static TypeId check_constant_type(CheckConstantInput* input, uint32_t first, uin
     return valid ? result : 0;
 }
 
+static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first, uint32_t end, uint8_t punctuation);
+
+// The duplicates that stopped a selection's walk over its associations in [separator + 1, close) (#2914), as clang
+// gives them: a second default's error alone, with its note at the first (its parser's, which stops there and so leaves
+// Sema none of the rest); or each association's type compatible with a later one's, for each association and then each
+// later one in order, the earlier's -Wunreachable-code-generic-assoc first (CreateGenericSelectionExpr's loop). Only an
+// invalid selection pays for this: its keys (check_generic_key) are compared 16 at a time and only a key's match asks
+// the exact compatibility, as the walk's set does. The association types are the expression reader's (selection_types)
+// or, with `input`, the constant reader's (check_constant_type).
+static void check_input_generic_duplicates(CheckInputReader* reader, CheckConstantInput* input, uint32_t separator, uint32_t close)
+{
+    const Parser* parser = reader->parser;
+    const uint64_t mark = reader->scratch->length;
+    const uint32_t capacity = (check_generic_associations(parser, separator + 1, close) + 15u) & ~15u;
+    TypeId* keys = arena_push_array(reader->scratch, capacity + 16u, sizeof(TypeId), 64);
+    TypeId* types = arena_push_array(reader->scratch, capacity, sizeof(TypeId), 4);
+    uint32_t* starts = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
+    uint32_t* names = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
+    uint32_t* colons = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
+    // (Whether an association's type has its error yet: a later one at its token is another, as clang's is.)
+    bool* reported = arena_push_array(reader->scratch, capacity, sizeof(bool), 1);
+    const bool valid = keys != NULL && types != NULL && starts != NULL && names != NULL && colons != NULL && reported != NULL;
+    reader->output->resource |= !valid;
+    uint32_t count = 0;
+    uint32_t defaults[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+    uint32_t association = separator + 1;
+    if (valid)
+    {
+        // (Zero keys pad the last block: check_generic_key gives none.)
+        memset(keys, 0, (uint64_t)(capacity + 16u) * sizeof(TypeId));
+    }
+    while (valid && association < close && defaults[1] == BUSTER_CHECK_NONE)
+    {
+        const uint32_t colon = check_constant_punctuation(parser, association, close, PARSE_KIND_COLON);
+        const uint32_t after = colon < close ? check_constant_punctuation(parser, colon + 1, close, PARSE_KIND_COMMA) : close;
+        const TypeId type = colon >= close ? 0 : input != NULL ? check_constant_type(input, association, colon) : reader->selection_types[colon];
+        if (parser->tokens.kinds[association] == PARSE_KIND_DEFAULT)
+        {
+            defaults[defaults[0] != BUSTER_CHECK_NONE] = association;
+        }
+        else if (type != 0 && count < capacity)
+        {
+            // (The type name's TypeLoc begins past its qualifiers, as check_generic_unreachable's location does.)
+            uint32_t at = association;
+            while (at + 1 < colon && parser->tokens.kinds[at] == PARSE_KIND_QUALIFIER)
+            {
+                at += 1;
+            }
+            keys[count] = check_generic_key(reader->types, type);
+            types[count] = type;
+            starts[count] = association;
+            names[count] = at;
+            colons[count] = colon;
+            reported[count] = false;
+            count += 1;
+        }
+        association = after + 1;
+    }
+    if (defaults[1] != BUSTER_CHECK_NONE)
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, defaults[1], CHECK_INPUT_GENERIC_DEFAULT);
+        if (reader->output->report_count > before)
+        {
+            reader->output->reports[before].note_token = defaults[0];
+            reader->output->reports[before].note_kind = CHECK_INPUT_NOTE_GENERIC_DEFAULT;
+        }
+    }
+    for (uint32_t i = 0; defaults[1] == BUSTER_CHECK_NONE && i < count; i += 1)
+    {
+        check_generic_unreachable(reader, starts[i], colons[i], types[i]);
+        const __m512i key = _mm512_set1_epi32((int)keys[i]);
+        for (uint32_t block = (i + 1) & ~15u; block < count; block += 16)
+        {
+            // (Lanes at or before i are no later association's.)
+            uint32_t candidates = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(keys + block), key) & (uint32_t)(UINT64_C(0xffffffff) << ((i + 1) > block ? (i + 1) - block : 0));
+            while (candidates != 0)
+            {
+                const uint32_t j = block + (uint32_t)__builtin_ctz(candidates);
+                candidates &= candidates - 1;
+                const TypeAnswer answer = type_compatible_at(reader->types, types[j], types[i], reader->transparent_unions, reader->types->tags.count, close + 1);
+                reader->output->resource |= answer == TYPE_ANSWER_FULL;
+                const uint32_t before = reader->output->report_count;
+                if (answer == TYPE_ANSWER_YES)
+                {
+                    check_input_report_typed(reader, names[j], CHECK_INPUT_GENERIC_COMPATIBLE, types[j], colons[j], types[i]);
+                }
+                if (reader->output->report_count > before)
+                {
+                    CheckInputReport* report = reader->output->reports + before;
+                    report->detail = check_input_typedef_spelling(reader->output, parser, colons[i]);
+                    report->note_token = names[i];
+                    report->note_kind = CHECK_INPUT_NOTE_GENERIC_COMPATIBLE;
+                    report->repeated = reported[j];
+                    reported[j] = true;
+                }
+            }
+        }
+    }
+    arena_pop_to(reader->scratch, mark);
+}
+
 // Mark only declarator syntax. Array-bound expressions remain ordinary expression nodes and can themselves
 // contain casts/type queries; the increasing source-order pass will refine each nested type range afterward. A C23
 // attribute list's `[[` is no bound (#2293): its arguments stay the type's syntax, as GNU lists' do.
@@ -2773,6 +2875,8 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         uint32_t default_first = BUSTER_CHECK_NONE;
         uint32_t default_end = 0;
         uint32_t association = separator + 1;
+        // A second default or a type compatible with an earlier association's stopped the walk (#2914).
+        bool duplicate = false;
         while (valid && association < token)
         {
             const uint32_t colon = check_constant_punctuation(parser, association, token, PARSE_KIND_COLON);
@@ -2780,6 +2884,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
             valid = colon < token && colon + 1 < after;
             if (valid && parser->tokens.kinds[association] == PARSE_KIND_DEFAULT)
             {
+                duplicate = association + 1 == colon && default_first != BUSTER_CHECK_NONE;
                 valid = association + 1 == colon && default_first == BUSTER_CHECK_NONE;
                 default_first = colon + 1;
                 default_end = after;
@@ -2795,7 +2900,9 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                     check_generic_unreachable(reader, association, colon, type);
                 }
                 bool matches = false;
-                valid = valid && check_generic_association(reader, &seen, type, &matches);
+                const bool listed = valid && check_generic_association(reader, &seen, type, &matches);
+                duplicate = valid && !listed && !reader->output->resource;
+                valid = listed;
                 if (valid)
                 {
                     if (matches)
@@ -2807,6 +2914,10 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 }
             }
             association = after + 1;
+        }
+        if (duplicate)
+        {
+            check_input_generic_duplicates(reader, input, separator, token);
         }
         if (chosen_first == BUSTER_CHECK_NONE)
         {
