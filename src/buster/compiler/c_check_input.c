@@ -421,6 +421,8 @@ typedef enum CheckInputMessage
     // A _Generic selection whose controlling type (its lvalue conversion's) matches no association and which has no
     // default (#2914): clang's err_generic_sel_no_match at the controlling expression's first token, with that type.
     CHECK_INPUT_GENERIC_NO_MATCH,
+    // A nullability specifier at the deduced base's level with a non-pointer deduction (#1844).
+    CHECK_INPUT_AUTO_TYPE_NULLABILITY,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -599,6 +601,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENUM_VALUE_TYPE] = "integer constant expression must have integer type",
     [CHECK_INPUT_AUTO_ATOMIC_POINTER] = "variable with atomic deduced pointee has incompatible initializer",
     [CHECK_INPUT_GENERIC_NO_MATCH] = "controlling expression type not compatible with any generic association type",
+    [CHECK_INPUT_AUTO_TYPE_NULLABILITY] = "nullability specifier cannot be applied to non-pointer type",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -14273,8 +14276,8 @@ static bool check_input_c23_auto_placeholder(const TypeTable* types, TypeId type
            kind != BUSTER_TYPE_KIND_QUALIFIED;
 }
 
-static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputReader* reader, TypeId declared, TypeId initializer, uint32_t name,
-                                                                     TypeId* base_out)
+static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputReader* reader, TypeId declared, TypeId initializer,
+                                                                     TypeId* base_out, TypeId* raw_base_out)
 {
     TypeTable* types = reader->types;
     const uint64_t mark = reader->scratch->length;
@@ -14285,6 +14288,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
     TypeId result = 0;
     bool valid = true;
     *base_out = 0;
+    *raw_base_out = 0;
     for (; valid;)
     {
         if (check_input_c23_auto_placeholder(types, declared_level))
@@ -14297,6 +14301,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
             const TypeId base = atomic_base != 0 ? type_qualify(types, atomic_base, qualifiers) : 0;
             valid = base != 0;
             *base_out = base;
+            *raw_base_out = deduced & ~(TypeId)qualifiers;
             result = base;
             for (CheckC23AutoLevel* level = top; valid && level != 0; level = level->previous)
             {
@@ -14407,7 +14412,6 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
         }
     }
     arena_pop_to(reader->scratch, mark);
-    (void)name;
     return valid ? result : 0;
 }
 

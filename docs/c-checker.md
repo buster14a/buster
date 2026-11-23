@@ -9275,7 +9275,12 @@ spelled as its initializer spells it (`'T' (aka 'int')`), once a declaration,
 as clang's comparison of its declarators stops there
 (`CheckInputReader.declaration_deduced_first`). The later declarator is
 invalid, its uses quiet (`check_input_invalid_declare`), and the reader goes
-on past the error. A variably modified deduced
+on past the error. A nullability specifier on `__auto_type` checks the
+deduced base before the declaration applies its own qualifiers. If that base
+isn't a pointer, the diagnostic names its type and points to the specifier.
+A qualifier written next to `*` applies to that pointer level. The reader
+recovers the invalid declaration and continues with the next declarator.
+A variably modified deduced
 type is the initializer's, whose sizes its own declaration evaluated, and the
 declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
 cast to a variably modified type in the initializer evaluates its bounds once,
@@ -9358,6 +9363,8 @@ GNU restrict spellings, macros, comma groups and later independent errors.
 Atomic pointer initializers also cover nested pointers, pointer qualifiers,
 unconverted source types and typedefs, mixed valid/invalid comma declarators,
 quiet uses of invalid bindings and expression warnings after the recovered error.
+Nullability fixtures cover its four keyword spellings, deduced types with
+typedef names, pointers with qualifiers on either level, and grouped recovery.
 Missing initializers retain both errors, and `typeof` assertions check the
 recovered atomic types. Accepted neighboring atomic and restricted-pointer
 declarations check that deduction and emission remain valid; C23 constexpr
