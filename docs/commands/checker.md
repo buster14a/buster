@@ -912,6 +912,14 @@ for a condition on an lvalue at an absolute address (#3028).
 WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
 compared with clang's in every policy, mode, lane request and reader.
 
+`tests/checker/designator-recovery` (#1842) is a warning catalog of
+`test-checker-driver`'s, beside `initializer-comma` (its parts' unused-result
+section and `--semantic-recovery-only`), in the same format: the
+lists after a designator that names no member, each unit's whole output and
+status compared with clang's in every policy, mode, lane request and reader
+([the checker guide](../c-checker.md)'s "A designator that names no member
+(#1842)").
+
 `tests/checker/cfg-pruning` (#2990) is one too: conditions clang's CFG builder
 decides by its heuristics (`x * 0`, `x | 1`, `(x & 8) == 4`, `x == 1 && x == 2`,
 `x && !x`, `c_check_program_cfg.c`), whose pruned branches give no runtime
