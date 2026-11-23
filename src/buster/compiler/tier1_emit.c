@@ -111,8 +111,6 @@ struct Tier1EmitOptions
     // With BUSTER_TIER1_FRAME_KEEP_POINTER in `frame_flags`: a function without calls keeps no frame pointer
     // (-momit-leaf-frame-pointer's leaf rule, #177; tier1_emit_frame_flags).
     bool omit_leaf_frame_pointer;
-    // The frame colorer's path (#2699): its vector path, or with false its scalar twin.
-    bool vector;
     bool rematerialize;
     // Retain each record's IR origin for source/debug publication, without changing allocation or code generation.
     // The CFG certificate also asks for origins, independently of this opt-in.
@@ -2163,7 +2161,7 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
         };
         if (error == TIER1_EMIT_OK)
         {
-            const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted.frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted.frame);
+            const Tier1FrameError framed = tier1_frame_plan(&request, output, scratch, &emitted.frame);
             tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);
             error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : framed == TIER1_FRAME_OVERFLOW ? TIER1_EMIT_LIMIT : TIER1_EMIT_FRAME;
         }

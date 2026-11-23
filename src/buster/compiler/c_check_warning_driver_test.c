@@ -2994,6 +2994,56 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .errors = 8,
     },
     {
+        // A cast to or from nullptr_t that C23 6.5.4p4 doesn't allow (#2914, clang's err_bad_cstyle_cast_generic), at the
+        // operand's first token: "cannot cast an object of type 'S' to 'T'", the other side's sugar kept (a typedef's, the
+        // operand's after its lvalue conversion) and nullptr_t's dropped, an _Atomic target's value type; and the casts
+        // it allows, to a pointer, bool or void and from a nullptr_t.
+        .name = "casts to and from nullptr_t",
+        .source =
+                  "typedef float F; typedef typeof(nullptr) N; typedef N M; typedef int I; typedef int *IP; enum E { A };\n"
+                  "void f(N n, const N cn, M m, I i, IP p, const int ci, int a[2]) {\n"
+                  "(void)(float)nullptr; (void)(_Complex float)nullptr; (void)(F)n; (void)(enum E)m; (void)(long double)cn; (void)(_BitInt(8))nullptr;\n"
+                  "(void)(_Atomic float)n; (void)(N)1; (void)(N)i; (void)(N)p; (void)(M)ci; (void)(N)a; (void)(N)(int*)0; (void)(N)1.5; (void)(const N)p;\n"
+                  "(void)(I)n; (void)(N)\"x\";\n"
+                  "(void)(_Bool)nullptr; (void)(void*)n; (void)(int*)m; (void)(void)n; (void)(N)n; (void)(N)0; (void)(N)(void *)0; }\n",
+        .errors = 17,
+        .c23 = true,
+    },
+    {
+        // A null pointer constant cast to nullptr_t (#2914): an integer constant expression's zero, a character's, an
+        // enumerator's, false and (void *)0, at file scope as a static object's constant too.
+        .name = "null pointer constants cast to nullptr_t",
+        .source =
+                  "typedef typeof(nullptr) N; enum E { A };\n"
+                  "N g = (N)0; N h = (N)(void *)0; static N k = (N)false; N u; void *v = (N)0; struct P { int a; N n; } ps = { 1, (N)0 };\n"
+                  "int f(void) { N a = (N)0; N b = (N)(void*)0; N c = (N)(1 - 1); N d = (N)A; N e = (N)'\\0'; N q = (N)(char)0; N r = (N)((void*)0);\n"
+                  "return (a == nullptr) + (b == nullptr) + (c == nullptr) + (d == nullptr) + (e == nullptr) + (q == nullptr) + (r == nullptr) + (g == nullptr) + (h == nullptr) + (k == nullptr); }\n",
+        .c23 = true,
+    },
+    {
+        // A _Generic selection's duplicate associations (#2914, clang's CreateGenericSelectionExpr and its parser): each
+        // type compatible with an earlier one's, for every earlier one, at the later type name past its qualifiers with
+        // "compatible type 'T' specified here" at the earlier; a second default alone, its parser stopping there; in a
+        // body, at file scope, in an array bound, a case label and a static assertion.
+        .name = "generic selections' duplicate associations",
+        .source =
+                  "typedef int I; typedef const int CI;\n"
+                  "void f(int x) {\n"
+                  "(void)_Generic(x, int: 1, int: 2, int: 3); (void)_Generic(x, I: 1, int: 2); (void)_Generic(x, char: 1, int: 2, char: 3, short: 4);\n"
+                  "(void)_Generic(x, int: 1, int: 2, default: 1, default: 2, default: 3); (void)_Generic(x, default: 1, default: 2);\n"
+                  "(void)_Generic(x, CI: 3, default: 0); (void)_Generic(x, int*: 1, int*: 2);\n"
+                  "(void)_Generic(x, int(*)[]: 1, int(*)[2]: 2); (void)_Generic(x, long: 1, long int: 2); (void)_Generic(x, default: 0, int[2]: 3, int: 1, int: 2);\n"
+                  "}\n"
+                  "int g = _Generic(1, int: 1, int: 2);\n"
+                  "int h[_Generic(1, long: 1, long: 2)];\n"
+                  "int k(void) { switch (1) { case _Generic(1, int: 1, int: 2): return 0; } return 1; }\n"
+                  "_Static_assert(_Generic(1, default: 1, default: 2), \"\");\n",
+        .warnings = 2,
+        .errors = 15,
+        .notes = 15,
+        .c23 = true,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },

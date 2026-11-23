@@ -1487,7 +1487,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
             .used_callee_saved = emitted->callee_used | prepared->asm_callee,
             .flags = tier1_emit_cfg_frame_flags(plan->function, options, prepared->call_count + prepared->asm_count != 0),
         };
-        const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted->frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted->frame);
+        const Tier1FrameError framed = tier1_frame_plan(&request, output, scratch, &emitted->frame);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);
         error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : framed == TIER1_FRAME_OVERFLOW ? TIER1_EMIT_LIMIT : TIER1_EMIT_FRAME;
     }

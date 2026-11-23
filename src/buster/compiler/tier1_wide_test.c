@@ -691,7 +691,7 @@ static uint8_t* tier1_wide_test_load(Tier1WideTest* test, Tier1EmitResult* emitt
 
 // The optimized function by one of Tier 1's paths: planned, emitted, its allocation certified, and run natively on every
 // input in a child process, which must leave the expected buffers.
-static void tier1_wide_test_native(Tier1WideTest* test, const char* name, const IrFunction* function, const IrDominance* dominance, bool vector, bool rematerialize, const uint8_t* inputs, const uint64_t* counts,
+static void tier1_wide_test_native(Tier1WideTest* test, const char* name, const IrFunction* function, const IrDominance* dominance, bool rematerialize, const uint8_t* inputs, const uint64_t* counts,
                                    const uint8_t* expected)
 {
     const uint64_t output_mark = test->output.length;
@@ -701,14 +701,13 @@ static void tier1_wide_test_native(Tier1WideTest* test, const char* name, const 
     bool ok = tier1_wide_test_expect(test, selected == TIER1_SELECT_OK, "Tier 1 selects the split function");
     if (!ok)
     {
-        printf("test-tier1-wide: %s, %s path: selection error %u at node %u (%s)\n", name, vector ? "vector" : "scalar", (unsigned)selected, node, node < function->instruction_count ? ir_op_names[function->op[node]] : "-");
+        printf("test-tier1-wide: %s: selection error %u at node %u (%s)\n", name, (unsigned)selected, node, node < function->instruction_count ? ir_op_names[function->op[node]] : "-");
     }
     Tier1EmitDiagnostic diagnostic = { 0 };
     const Tier1EmitOptions options = {
         .diagnostic = &diagnostic,
         .certify = true,
         .register_mask = tier1_liveness_register_mask(),
-        .vector = vector,
         .rematerialize = rematerialize,
     };
     Tier1EmitResult emitted = { 0 };
@@ -718,7 +717,7 @@ static void tier1_wide_test_native(Tier1WideTest* test, const char* name, const 
         ok = tier1_wide_test_expect(test, error == TIER1_EMIT_OK, "Tier 1 emits the split function");
         if (!ok)
         {
-            printf("test-tier1-wide: %s, %s path%s: emission error %u at node %u (cause %u, error %u)\n", name, vector ? "vector" : "scalar", rematerialize ? ", rematerializing" : "", (unsigned)error, node,
+            printf("test-tier1-wide: %s%s: emission error %u at node %u (cause %u, error %u)\n", name, rematerialize ? ", rematerializing" : "", (unsigned)error, node,
                    (unsigned)diagnostic.cause, diagnostic.error);
             if (test->failures <= 2)
             {
@@ -728,7 +727,7 @@ static void tier1_wide_test_native(Tier1WideTest* test, const char* name, const 
     }
     uint64_t mapped = 0;
     const bool print = test->print;
-    test->print = print && vector && rematerialize;
+    test->print = print && rematerialize;
     if (test->print && ok)
     {
         printf("test-tier1-wide: %s:\n", name);
@@ -763,7 +762,7 @@ static void tier1_wide_test_native(Tier1WideTest* test, const char* name, const 
             {
                 if (actual[byte] != wanted[byte])
                 {
-                    printf("test-tier1-wide: %s, %s path, input %u: byte %u is %02x, the interpreter's %02x\n", name, vector ? "vector" : "scalar", input, byte, actual[byte], wanted[byte]);
+                    printf("test-tier1-wide: %s, input %u: byte %u is %02x, the interpreter's %02x\n", name, input, byte, actual[byte], wanted[byte]);
                     byte = BUSTER_TIER1_WIDE_TEST_BUFFER;
                 }
             }
@@ -860,7 +859,7 @@ static void tier1_wide_test_program(Tier1WideTest* test, const char* name, const
     }
     for (uint32_t run = 0; ok && run < 2; run += 1)
     {
-        tier1_wide_test_native(test, name, &optimized.function, &dominance, true, run != 0, inputs, counts, expected);
+        tier1_wide_test_native(test, name, &optimized.function, &dominance, run != 0, inputs, counts, expected);
     }
     test->programs += 1;
     tier1_wide_test_expect(test, test->scratch.length == 0, "every stage returns the scratch arena");
@@ -1148,7 +1147,6 @@ static uint32_t tier1_wide_test_typed(Tier1WideTest* test, uint32_t count)
                 .diagnostic = &diagnostic,
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = true,
                 .rematerialize = true,
             };
             Tier1EmitResult emitted = { 0 };
@@ -1323,7 +1321,6 @@ static uint32_t tier1_wide_test_x87(Tier1WideTest* test, uint32_t count)
                 .diagnostic = &diagnostic,
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = true,
                 .rematerialize = true,
             };
             Tier1EmitResult emitted = { 0 };
@@ -1510,7 +1507,6 @@ static void tier1_wide_test_x87_phis(Tier1WideTest* test, char* text)
             .diagnostic = &diagnostic,
             .certify = true,
             .register_mask = tier1_liveness_register_mask(),
-            .vector = true,
         };
         Tier1EmitResult emitted = { 0 };
         const Tier1EmitError error = selected == TIER1_SELECT_OK ? tier1_emit_function(&plan, &options, test->baseline, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;

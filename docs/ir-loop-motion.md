@@ -18,22 +18,39 @@ Each loop is walked over its own blocks, once, rather than the whole function
 for each loop (#2781, #2979). In reverse postorder a value comes after its
 operands (a phi's aside, and a phi doesn't move), so one forward availability
 walk finds the loop's movable values; the unrestricted motion sends every one of
-them to the preheader. On the largest functions of sqlite3.c, Lua and musl under
-`+licm`, the whole-function sweeps this replaced took up to 1.6 times the
-worklist's ticks, and the worklist itself scanned the whole function for each
-loop.
+them to the preheader. A value of the loop is movable when it is a candidate
+(below) and each of its operands is either a movable value of the loop or a
+value outside it whose block dominates the preheader.
+
+The walk goes a value at a time, and it is LICM's one implementation (#2924).
+It replaced a whole-function algorithm that found each loop's movable values
+by vector sweeps to the fixed point of their readiness, 16 instructions at a
+time with gathers, with a use-worklist twin. On the 9700X under
+`--tier1-passes=+all` on sqlite3.c, Lua and musl, the sweeps took 1.07 to 3.00
+times the walk's ticks and the worklist 1.35 to 1.85, in every size bin; the
+objects were byte-identical
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-licm-2979)).
+The whole-function algorithm then stayed as the walk's test oracle until #2924
+deleted it, after `test-ir-licm`'s digest had been frozen where the two agreed.
 
 `IrLicmOptions.vectors` (#2781) restricts that motion to vector- and mask-typed
 values and the movable operands they need. Tier 1 enables it by default for a
 function that has such values, unless `+licm` requests unrestricted motion. A
-loop with no safe vector or mask value is skipped. The other loops take the
+loop with no safe vector or mask value is skipped, and so is a loop that holds
+a call (#2743): every vector and mask register is caller-saved, so a value
+moved out of such a loop is stored and reloaded around each of its calls.
+Before that rule, with the loop vectorizer on by default, unit inlining copied
+a vectorized loop into `sqlite3VdbeExec`, and its two splats moved out of the
+interpreter's loop: at znver5 the function grew from 87 KB to 131 KB, with
+1,788 more stores around calls (#2831); with it, 90 KB, and nothing moves
+there. The other loops take the
 forward walk, then a backward operand-closure walk over their own blocks.
-`IrLicmOptions.whole` retains the original whole-function algorithm, below, as
-the exact test oracle of both policies' walks. If nothing moves, the result
-borrows the input function and writes no output. `test-ir-licm` compares the
-walks with it on SIMD, width-change, permute2 and nested-loop fixtures, checks
-their interpreted behavior, and checks that scalar-only loops are skipped without
-an output rewrite.
+If nothing moves, the result borrows the input function and writes no output.
+`test-ir-licm` checks the walk's motion on SIMD, width-change, permute2 and
+nested-loop fixtures against the interpreter, and checks that scalar-only loops
+are skipped without an output rewrite; on nested loops with a call in the outer
+loop and in the inner one, it checks where the vector ends up (the inner
+preheader, and its own block) and the loops passed over for their calls.
 Candidate operations are total, pure computations: integer wrapping
 arithmetic and bit operations, comparisons, selects, exact conversions,
 floating sign negation, constants, parameters and address calculations.
@@ -49,30 +66,14 @@ scalar splats. Packed variable shifts are total for every count and may move;
 scalar shifts keep their existing exclusion. Floating lane arithmetic and
 comparisons remain in their original blocks, as do memory operations and
 undef-tainted vector values. The shared rewriter preserves wide constants and
-lane flags. A loop fixture checks the complete dependency chain on both paths,
-its interpreted result, and the unmoved floating effects; an undef variant
-checks that the chain stays in place.
+lane flags. A loop fixture checks the complete dependency chain, its
+interpreted result, and the unmoved floating effects; an undef variant checks
+that the chain stays in place.
 
-The whole-function oracle (`whole`): for one loop, a value is initially
-available if its current definition lies outside the loop and dominates the
-preheader. A candidate becomes invariant
-when all its operands are available. The vector path tests 16 candidates at
-a time, with exact masked dword operand loads and masked availability gathers.
-Only semantically present operands are gathered; no `NONE` index is accessed.
-The caller-facing IR columns need no padding. Value spaces above `INT32_MAX`
-use the scalar path because hardware dword gather indices are signed.
-
-The independent scalar path queues candidates, then revisits their users
-when a value becomes invariant. Each vector sweep reports newly available
-values, counting only 0-to-1 discoveries. Completion continues whole-function
-sweeps only while at least one value per 16 visited instructions becomes
-available, otherwise it preserves the sweeps' discoveries and completes
-through the exact worklist to the same least fixed point. A zero-progress
-sweep is already a fixed point, and an explicit zero sweep limit forces
-worklist completion. The vector sweep limit (64 by default) therefore bounds
-productive sweeps rather than paying the whole limit for a thin chain. The
-output set is exact, including dependencies that span partial batches.
-Neither path publishes partially converged motion decisions.
+The candidates are classified 16 instructions at a time (`ir_licm_classify`):
+the operations' kinds and free kinds come from 128-entry tables by byte
+permutes, with masked loads of the operation, type, flag and discriminator
+columns and masked stores of the results, so no column needs padding.
 
 The rewrite appends moved computations before each preheader terminator.
 Original reverse postorder and in-block order topologically order all moved
@@ -86,15 +87,19 @@ their original relative order and execution condition.
 
 `test-ir-licm [--seed N]` calls `run_ir_licm_tests(argc, argv)`, with the
 command in `argv[0]`. Include its file after `ir_optimize_licm.c` and
-`ir_optimize_test.c`. Fixtures check the walk's output against the oracle's
-sweeps, worklist and forced worklist completion,
-the independent bounded interpreter, dependent arithmetic chains, nested
+`ir_optimize_test.c`. Fixtures check the walk's motion counts against the
+independent bounded interpreter: dependent arithmetic chains, nested
 hoisting, missing dedicated preheaders, zero-iteration faulting division and
-loads, undef dependence, no-loop functions, random arithmetic loops, every
-guarded readiness tail and partial allocation rollback. Whole-pass progress
-fixtures cover thin, wide, mixed and phi-dependent chains at 255/256/257/4096
-lengths, asserting identical output and motion with bounded sweeps, visits
-and fallback for the oracle, and one visit of each loop instruction for the walk. The current motion policy has no profitability model, and its
+loads, undef dependence, no-loop functions, random arithmetic loops and
+partial allocation rollback. Long-loop fixtures cover independent values, a
+chain, a mixed chain and a phi-dependent one at 255/256/257/4096 lengths, with
+one visit of each loop instruction. The classification's columns are checked
+at every tail against an inaccessible page. Every result of the walk, by all
+three policies, folds into an FNV-1a digest that is frozen for the default
+seed; it was recorded where the walk and the whole-function oracle agreed.
+`test-ir-source --passes` gives LICM's result on every function of its
+corpora back to LICM, which must move nothing: each loop's one walk reaches
+the fixed point. The current motion policy has no profitability model, and its
 generated-code measurement says it needs one (below).
 
 ## In `--tier1`
@@ -211,7 +216,7 @@ instructions), and the instructions show why: those loops hold calls, or no
 invariant work. The kernels gain 6.2% of their cycles, and the compile costs
 3.4% more: the preparation's verification, use lists and dominator tree of
 every function with a loop. #2719 asks for gains on speedtest1 and Lua before
-a pass is on by default, as `+vectorize`, `+unroll` and `+storemotion` are
+a pass is on by default, as `+unroll` and `+storemotion` are
 measured, so `hoist` stays off.
 
 The implementation is original. LLVM's [loop terminology](

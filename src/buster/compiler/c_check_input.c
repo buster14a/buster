@@ -418,6 +418,15 @@ typedef enum CheckInputMessage
     // A _Generic selection whose controlling type (its lvalue conversion's) matches no association and which has no
     // default (#2914): clang's err_generic_sel_no_match at the controlling expression's first token, with that type.
     CHECK_INPUT_GENERIC_NO_MATCH,
+    // A _Generic association's type compatible with an earlier association's (#2914, clang's err_assoc_compatible_types):
+    // at the later type name's first token that isn't a qualifier, type and type_spelling its type, value the earlier
+    // one's type and detail its typedef spelling, with CHECK_INPUT_NOTE_GENERIC_COMPATIBLE at the earlier type name.
+    CHECK_INPUT_GENERIC_COMPATIBLE,
+    // A _Generic selection's second default association (#2914, clang's err_duplicate_default_assoc): at its `default`,
+    // with CHECK_INPUT_NOTE_GENERIC_DEFAULT at the first.
+    CHECK_INPUT_GENERIC_DEFAULT,
+    // A nullability specifier at the deduced base's level with a non-pointer deduction (#1844).
+    CHECK_INPUT_AUTO_TYPE_NULLABILITY,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -595,6 +604,9 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENUM_VALUE_TYPE] = "integer constant expression must have integer type",
     [CHECK_INPUT_AUTO_ATOMIC_POINTER] = "variable with atomic deduced pointee has incompatible initializer",
     [CHECK_INPUT_GENERIC_NO_MATCH] = "controlling expression type not compatible with any generic association type",
+    [CHECK_INPUT_GENERIC_COMPATIBLE] = "type in generic association compatible with previously specified type",
+    [CHECK_INPUT_GENERIC_DEFAULT] = "duplicate default generic association",
+    [CHECK_INPUT_AUTO_TYPE_NULLABILITY] = "nullability specifier cannot be applied to non-pointer type",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -653,6 +665,11 @@ typedef enum CheckInputNoteKind
     // constant expression".
     CHECK_INPUT_NOTE_CONSTANT_VOID,
     CHECK_INPUT_NOTE_CONSTANT_CONVERSION,
+    // A _Generic association's earlier compatible type (#2914): "compatible type 'T' specified here", T the report's value
+    // and detail (CHECK_INPUT_GENERIC_COMPATIBLE's).
+    CHECK_INPUT_NOTE_GENERIC_COMPATIBLE,
+    // A _Generic selection's first default association (#2914): "previous default generic association is here".
+    CHECK_INPUT_NOTE_GENERIC_DEFAULT,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,
@@ -10106,6 +10123,7 @@ struct CheckTagFrame
     CheckInputAttributes* member_attributes;
     CheckDeclaratorRun* member_run;
     uint32_t member_declarator;
+    uint32_t member_warning_start;
     // The member declaration's first token, for its attributes' warnings that clang places there.
     uint32_t member_begin;
     uint8_t member_abi_origin;
@@ -10742,6 +10760,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                 if (valid && frame->member_run == 0)
                 {
                     frame->member_declarator = i;
+                    frame->member_warning_start = reader->warning_events.count;
                     reader->specifier_abi_origin = frame->member_abi_origin;
                     reader->specifier_noderef = frame->member_noderef;
                     reader->declarator_common = frame->member_attributes;
@@ -10896,6 +10915,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             .bit_width = width,
                             .packed = attributes != 0 && attributes->packed,
                             .alignment_log2 = attributes != 0 ? attributes->alignment_log2 : 0,
+                            .invalid = name != BUSTER_CHECK_NONE && check_input_vla_modified(reader->types, type),
                         };
                         if (attributes != 0 && attributes->count != 0 && parser->language.standard >= 2023 && name != BUSTER_CHECK_NONE)
                         {
@@ -10924,12 +10944,28 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             const uint32_t at = name != BUSTER_CHECK_NONE ? name : failed_token;
                             check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_GC_WEAK_FIELD, at, CHECK_WARNING_COMPLETE_AT_TOKEN, at);
                         }
-                        // A block's record's variably modified member (#1447): clang's "fields must have a constant
-                        // size"; at file scope the bound gives it (check_input_vla_place).
-                        if (valid && name != BUSTER_CHECK_NONE && check_input_vla_modified(reader->types, type))
+                        // Clang rejects a variably modified field after reading its declarator. Keep the invalid field
+                        // bound so later fields and declarations still get their diagnostics (#2252).
+                        if (valid && member.invalid)
                         {
+                            // Folding a dimension did not make the entire field constant. Suppress the declarator's
+                            // fold warning while keeping warnings from evaluating each dimension.
+                            for (uint32_t warning = frame->member_warning_start; warning < reader->warning_events.count; warning += 1)
+                            {
+                                CheckWarningEvent* event = reader->warning_events.events + warning;
+                                if (event->kind == CHECK_WARNING_EVENT_GNU_ARRAY_FOLD && event->token == name)
+                                {
+                                    event->flags |= BUSTER_CHECK_WARNING_SUPPRESSED;
+                                }
+                            }
+                            const uint32_t before = reader->output->report_count;
                             check_input_report(reader, name, CHECK_INPUT_VLA_FIELD);
-                            valid = false;
+                            if (reader->output->report_count == before + 1)
+                            {
+                                reader->output->reports[before].sort = i;
+                            }
+                            check_input_lane_refuse(reader, reader->lane, "invalid member declarations recover in source order");
+                            valid = !reader->lane && check_input_recover_reports(reader, before);
                         }
                         valid = valid && type_check_member(reader->types, &member, true, &flexible) == TYPE_ERROR_NONE;
                         if (!valid && !type_is_complete(reader->types, type) && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&
@@ -14282,8 +14318,8 @@ static bool check_input_c23_auto_placeholder(const TypeTable* types, TypeId type
            kind != BUSTER_TYPE_KIND_QUALIFIED;
 }
 
-static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputReader* reader, TypeId declared, TypeId initializer, uint32_t name,
-                                                                     TypeId* base_out)
+static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputReader* reader, TypeId declared, TypeId initializer,
+                                                                     TypeId* base_out, TypeId* raw_base_out)
 {
     TypeTable* types = reader->types;
     const uint64_t mark = reader->scratch->length;
@@ -14294,6 +14330,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
     TypeId result = 0;
     bool valid = true;
     *base_out = 0;
+    *raw_base_out = 0;
     for (; valid;)
     {
         if (check_input_c23_auto_placeholder(types, declared_level))
@@ -14306,6 +14343,7 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
             const TypeId base = atomic_base != 0 ? type_qualify(types, atomic_base, qualifiers) : 0;
             valid = base != 0;
             *base_out = base;
+            *raw_base_out = deduced & ~(TypeId)qualifiers;
             result = base;
             for (CheckC23AutoLevel* level = top; valid && level != 0; level = level->previous)
             {
@@ -14416,7 +14454,6 @@ static __attribute__((noinline)) TypeId check_input_c23_auto_deduce(CheckInputRe
         }
     }
     arena_pop_to(reader->scratch, mark);
-    (void)name;
     return valid ? result : 0;
 }
 

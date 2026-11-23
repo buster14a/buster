@@ -312,6 +312,7 @@ typedef enum CheckDiagnostic
     // attributed type ...", at the member's expression, or at an assignment to it "cannot assign to 'B::p' ...", worded
     // with its two notes by c_check_semantic_diagnostic.c (check_graph_counted_uses).
     CHECK_DIAG_COUNTED_INCOMPLETE,
+    CHECK_DIAG_RECOVERED_MEMBER,
 } CheckDiagnostic;
 
 #define BUSTER_CHECK_CONVERT_LVALUE 0x01u
@@ -1086,6 +1087,14 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
     }
     else if (target_kind == BUSTER_TYPE_KIND_POINTER && check_action_null(table, value, BUSTER_CHECK_EXTENSION_GNU_CONSTANT))
     {
+        value->constant_kind = CHECK_CONSTANT_ADDRESS;
+        value->object = 0;
+        value->offset = 0;
+        value->integer = 0;
+    }
+    else if (target_kind == BUSTER_TYPE_KIND_NULLPTR && value->constant_kind != CHECK_CONSTANT_NONE && check_action_null(table, value, BUSTER_CHECK_EXTENSION_GNU_CONSTANT))
+    {
+        // A null pointer constant made a nullptr_t (#2914): the constant `nullptr` is (c_check_literals.c).
         value->constant_kind = CHECK_CONSTANT_ADDRESS;
         value->object = 0;
         value->offset = 0;
@@ -2667,6 +2676,11 @@ static inline __attribute__((always_inline)) void check_action_member(TypeTable*
         {
             check_action_diagnose(result, CHECK_DIAG_MEMBER, 0);
         }
+        else if (__builtin_expect((table->members.flags[member] & BUSTER_TYPE_MEMBER_INVALID) != 0, 0))
+        {
+            // The declaration already supplied the error. Poison uses without another diagnostic.
+            check_action_diagnose(result, CHECK_DIAG_RECOVERED_MEMBER, 0);
+        }
         else
         {
             result->member_offset = offset;
@@ -3006,7 +3020,8 @@ static inline __attribute__((always_inline)) void check_action_cast(TypeTable* t
     const uint8_t input_kind = check_action_kind(table, source.type);
     const bool target_pointer = target_kind == BUSTER_TYPE_KIND_POINTER;
     const bool source_pointer = input_kind == BUSTER_TYPE_KIND_POINTER;
-    const bool pointer_float = (target_pointer && !check_action_is_integer(table, source.type) && !source_pointer && input_kind != BUSTER_TYPE_KIND_NULLPTR) || (source_pointer && !target_pointer && !check_action_is_integer(table, target));
+    const bool pointer_float = (target_pointer && !check_action_is_integer(table, source.type) && !source_pointer && input_kind != BUSTER_TYPE_KIND_NULLPTR) ||
+                              (source_pointer && !target_pointer && target_kind != BUSTER_TYPE_KIND_NULLPTR && !check_action_is_integer(table, target));
     const bool scalar = check_action_is_scalar(table, target) && check_action_is_scalar(table, source.type) && !pointer_float;
     const bool record = (target_kind == BUSTER_TYPE_KIND_STRUCT || target_kind == BUSTER_TYPE_KIND_UNION) &&
                         target_kind == input_kind && check_action_compatible_at(table, target, type_unqualified(source.type), action, result);
@@ -3034,7 +3049,9 @@ static inline __attribute__((always_inline)) void check_action_cast(TypeTable* t
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 0);
     }
-    else if (target_kind == BUSTER_TYPE_KIND_NULLPTR && input_kind != BUSTER_TYPE_KIND_NULLPTR)
+    // A cast to nullptr_t takes a nullptr_t or a null pointer constant (C23 6.5.4p4, clang's CheckCStyleCast):
+    // `(nullptr_t)0` and `(nullptr_t)(void *)0` are valid, `(nullptr_t)(int *)0` isn't (#2914).
+    else if (target_kind == BUSTER_TYPE_KIND_NULLPTR && input_kind != BUSTER_TYPE_KIND_NULLPTR && !check_action_null(table, &source, action->context.extensions))
     {
         check_action_diagnose(result, CHECK_DIAG_INCOMPATIBLE, 0);
     }

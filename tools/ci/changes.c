@@ -1821,6 +1821,11 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "code",
     },
     {
+        .name = "Tier 1's mask IR and the IR parser's runtime fixtures and catalogs are code",
+        .files = "tests/tier1/masks/catalog.tsv tests/tier1/masks/0001.ir tests/ir/catalog.tsv",
+        .outputs_true = "code",
+    },
+    {
         .name = "a Markdown file under tests/ is documentation, so no fixture or catalog is one",
         .files = "tests/checker/sources/README.md",
         .outputs_false = "code",

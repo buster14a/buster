@@ -32,7 +32,7 @@ the binutils `nm` and `readelf`. CI stages the official Clang 23.1.4, CMake
 ./build.sh check-call-graph [--config C] [--jobs N]
 ./build.sh lexer-variant [--config C] [--jobs N] NAME=SOURCE...
 ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s
-./build.sh shifts [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
+./build.sh shifts [--checker-placements] [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
 ```
 
 - **build** (the default) builds Develop, the edit loop's configuration
@@ -387,7 +387,8 @@ they run, so that editing a case or adding one compiles, links and bakes
 nothing. A new ordinary regression program goes there, not into a C string.
 The checker's suites are its shared source fixtures, `tests/checker/sources/`,
 and ten test files' own tables beside them ([the checker
-guide](checker.md#runtime-fixtures)).
+guide](checker.md#runtime-fixtures)); Tier 1's mask IR is `tests/tier1/masks/`
+and the IR parser's fixtures `tests/ir/catalog.tsv`'s.
 C keeps what isn't data: independent oracles, generated inputs, guarded
 memory and the checks themselves. Nothing under `tests/` is a build input:
 no generated C array, `#include` or `#embed` brings it back.
@@ -1576,10 +1577,15 @@ shift moves code to other pages and 4 KB offsets but not within its 64-byte
 lines, where a function's place can change a small benchmark's time by more:
 the same main moved `run_c_environment_benchmark` by 16 to 48 bytes and ran
 `benchmark-environments` up to 1.5% slower, and `benchmark-unwind` up to 4.8%
-(#2728). The padding moves units' code, never the page-aligned
-`.text.buster_checker` that holds the checker's own code. To place that code, build with
-`BUSTER_BUILD_DEFINES=-DBUSTER_CHECKER_OFFSET=N` (`main.c`, a multiple of 16 below
-4,096), one full build per offset (#1233).
+(#2728).
+
+With `--checker-placements`, a static lld link instead adds SHIFT bytes at
+the page boundary of `main_unit_checker.c`'s input in `.text.buster_checker`.
+Use multiples of 16 below 4,096. The zero placement uses the ordinary link
+layout, and the post-link check verifies `check_input_run` moves by the
+requested amount within its page. The command reuses the same objects for
+every placement. `BUSTER_BUILD_DEFINES=-DBUSTER_CHECKER_OFFSET=N` remains
+available for source-level placement of every unit's checker section.
 
 ## Regressions and timings
 

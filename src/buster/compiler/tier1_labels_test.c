@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Independent native fixtures for labels and indirect jumps (#789), included after tier1_divide_test.c: the function of
-// tier1_select_test_indirect_function through tier1_emit_function, which gives it to the CFG consumer, by both paths,
+// tier1_select_test_indirect_function through tier1_emit_function, which gives it to the CFG consumer,
 // with constants rematerialized and not, with every register and with few. Its labels' first records
 // (Tier1EmitResult.label_records) are where the driver defines their symbols: label 0's is a stub after the indirect
 // jump, which moves its phi's value on that edge, since its block is entered directly too, and labels 1 and 2 are their
@@ -64,9 +64,9 @@ static bool tier1_labels_load(Tier1EmitTest* test, const Tier1EmitResult* emitte
     return ready && tier1_emit_test_native(test, code->records, code->count);
 }
 
-// One compile by one path and one set of options: the CFG consumer's, label 0's symbol on the stub after the indirect jump
+// One compile by one set of options: the CFG consumer's, label 0's symbol on the stub after the indirect jump
 // and the others' at their blocks, and the code run on the samples. Returns whether label 0's edge had its stub.
-static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool rematerialize, uint32_t register_mask)
+static bool tier1_labels_compile(Tier1EmitTest* test, bool rematerialize, uint32_t register_mask)
 {
     IrFunction function;
     const bool created = tier1_select_test_indirect_function(&test->input, &function);
@@ -79,7 +79,6 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
     const Tier1EmitOptions options = {
         .certify = true,
         .register_mask = register_mask,
-        .vector = vector,
         .rematerialize = rematerialize,
         .symbol_count = function.symbol_count,
     };
@@ -89,7 +88,7 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK && test->scratch.length == scratch_mark, "the labels' fixture emits through the CFG consumer");
     if (error != TIER1_EMIT_OK && planned && test->failures < 20)
     {
-        fprintf(stderr, "  labels emission error=%u node=%u vector=%u remat=%u mask=%x\n", error, node, vector, rematerialize, register_mask);
+        fprintf(stderr, "  labels emission error=%u node=%u remat=%u mask=%x\n", error, node, rematerialize, register_mask);
     }
     bool stub = false;
     if (error == TIER1_EMIT_OK)
@@ -115,7 +114,7 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
         uint64_t bytes = 0;
         if (placed && tier1_labels_load(test, &emitted, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x5ad1e7c30b9f2468) ^ ((uint64_t)register_mask << 8) ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0);
+            uint64_t random = UINT64_C(0x5ad1e7c30b9f2469) ^ ((uint64_t)register_mask << 8) ^ (rematerialize ? 2 : 0);
             for (uint32_t sample = 0; sample < BUSTER_TIER1_LABELS_SAMPLES; sample += 1)
             {
                 // Each label in turn, the first directly (s == 0) and through the jump (s == 1).
@@ -125,7 +124,7 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
                 const uint64_t actual = tier1_emit_test_call(executable, x, y);
                 if (actual != expected && test->failures < 20)
                 {
-                    fprintf(stderr, "  labels vector=%u remat=%u mask=%x x=%016" PRIx64 " y=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", vector, rematerialize, register_mask, x, y, actual,
+                    fprintf(stderr, "  labels remat=%u mask=%x x=%016" PRIx64 " y=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", rematerialize, register_mask, x, y, actual,
                             expected);
                 }
                 tier1_emit_test_expect(test, actual == expected, "an indirect jump reaches its labels natively, with their edges' moves");
@@ -142,10 +141,10 @@ static bool tier1_labels_compile(Tier1EmitTest* test, bool vector, bool remateri
 }
 
 // #1016's review, one compile of the chain's function (`fixture` 0) or of the shared labels' with phis (1), without (2),
-// or with an absent third label (3, the optimizer's representation of an unreachable label): by one path and one set
-// of options, its emission's error, and where the chain's or the shared labels' without phis emits, its code run on
-// the samples against its oracle. The arenas are as they were after a refusal.
-static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t fixture, bool vector, bool rematerialize, uint32_t register_mask)
+// or with an absent third label (3, the optimizer's representation of an unreachable label): by one set of options,
+// its emission's error, and where the chain's or the shared labels' without phis emits, its code run on the samples
+// against its oracle. The arenas are as they were after a refusal.
+static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t fixture, bool rematerialize, uint32_t register_mask)
 {
     IrFunction function;
     const bool created = fixture == 0 ? tier1_select_test_indirect_chain_function(&test->input, &function) : tier1_select_test_shared_labels_function(&test->input, fixture == 1, &function);
@@ -157,7 +156,7 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
         function.symbol_count += 1;
     }
     const bool verified = created && (fixture != 3 || (ir_verify(&function, &test->scratch, 0).error == IR_OK));
-    tier1_emit_test_expect(test, fixture != 3 || verified, "an absent label outside both indirect jumps' target lists is valid IR by both paths");
+    tier1_emit_test_expect(test, fixture != 3 || verified, "an absent label outside both indirect jumps' target lists is valid IR");
     IrDominance dominance;
     const bool dominated = verified && tier1_terminal_dominance(test, &function, &dominance);
     Tier1SelectPlan plan;
@@ -167,7 +166,6 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
     const Tier1EmitOptions options = {
         .certify = true,
         .register_mask = register_mask,
-        .vector = vector,
         .rematerialize = rematerialize,
         .symbol_count = function.symbol_count,
     };
@@ -186,7 +184,7 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
     tier1_emit_test_expect(test, error != TIER1_EMIT_OK || fixture == 1 || (kept && (loaded || test->native_skipped > skipped)), "an emitted review fixture keeps its live labels and any absent label marker and runs");
     if (loaded)
     {
-        uint64_t random = UINT64_C(0x3c5e7a91b2d4f608) ^ ((uint64_t)register_mask << 8) ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0) ^ ((uint64_t)fixture << 32);
+        uint64_t random = UINT64_C(0x3c5e7a91b2d4f609) ^ ((uint64_t)register_mask << 8) ^ (rematerialize ? 2 : 0) ^ ((uint64_t)fixture << 32);
         for (uint32_t sample = 0; sample < BUSTER_TIER1_LABELS_SAMPLES; sample += 1)
         {
             // Each path in turn: both labels, and in the shared labels' function both jumps.
@@ -196,7 +194,7 @@ static Tier1EmitError tier1_labels_review_compile(Tier1EmitTest* test, uint32_t 
             const uint64_t actual = tier1_emit_test_call(executable, x, y);
             if (actual != expected && test->failures < 20)
             {
-                fprintf(stderr, "  labels review fixture=%u vector=%u remat=%u mask=%x x=%016" PRIx64 " y=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", fixture, vector, rematerialize,
+                fprintf(stderr, "  labels review fixture=%u remat=%u mask=%x x=%016" PRIx64 " y=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", fixture, rematerialize,
                         register_mask, x, y, actual, expected);
             }
             tier1_emit_test_expect(test, actual == expected, "the review's indirect jumps reach their labels natively");
@@ -218,15 +216,14 @@ static void tier1_labels_review(Tier1EmitTest* test)
 {
     const uint32_t all = tier1_liveness_register_mask();
     const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDX);
-    for (uint32_t variant = 0; variant < 8; variant += 1)
+    for (uint32_t variant = 0; variant < 4; variant += 1)
     {
-        const bool vector = (variant & 1) != 0;
-        const bool rematerialize = (variant & 2) != 0;
-        const uint32_t mask = (variant & 4) != 0 ? few : all;
-        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 0, vector, rematerialize, mask) == TIER1_EMIT_OK, "a later block's chain that only earlier blocks read emits");
-        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 1, vector, rematerialize, mask) == TIER1_EMIT_UNSUPPORTED, "two jumps sharing a label whose edges have stubs are refused");
-        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 2, vector, rematerialize, mask) == TIER1_EMIT_OK, "two jumps sharing labels whose edges have no moves emit");
-        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 3, vector, rematerialize, mask) == TIER1_EMIT_OK, "two indirect jumps and an absent label emit without inventing a target at entry");
+        const bool rematerialize = (variant & 1) != 0;
+        const uint32_t mask = (variant & 2) != 0 ? few : all;
+        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 0, rematerialize, mask) == TIER1_EMIT_OK, "a later block's chain that only earlier blocks read emits");
+        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 1, rematerialize, mask) == TIER1_EMIT_UNSUPPORTED, "two jumps sharing a label whose edges have stubs are refused");
+        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 2, rematerialize, mask) == TIER1_EMIT_OK, "two jumps sharing labels whose edges have no moves emit");
+        tier1_emit_test_expect(test, tier1_labels_review_compile(test, 3, rematerialize, mask) == TIER1_EMIT_OK, "two indirect jumps and an absent label emit without inventing a target at entry");
     }
 }
 
@@ -238,11 +235,11 @@ static void tier1_labels_cases(Tier1EmitTest* test)
     test->terms = 0;
     test->width = 8;
     test->selects = false;
-    for (uint32_t variant = 0; variant < 8; variant += 1)
+    for (uint32_t variant = 0; variant < 4; variant += 1)
     {
-        stubs += tier1_labels_compile(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : all);
+        stubs += tier1_labels_compile(test, (variant & 1) != 0, (variant & 2) != 0 ? few : all);
     }
-    tier1_emit_test_expect(test, stubs == 8, "label 0's edge from the indirect jump has its stub, where its symbol goes, in every compile");
+    tier1_emit_test_expect(test, stubs == 4, "label 0's edge from the indirect jump has its stub, where its symbol goes, in every compile");
     tier1_labels_review(test);
 }
 

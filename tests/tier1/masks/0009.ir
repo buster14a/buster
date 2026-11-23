@@ -1,0 +1,60 @@
+function (ptr, i64) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = param.i64 1
+  %2 = load.m16 %0 align=2
+  %3 = address.ptr %0 offset=8
+  %4 = load.m64 %3 align=8
+  %5 = address.ptr %0 offset=16
+  %6 = load.m8 %5 align=1
+  %7 = address.ptr %0 offset=24
+  %8 = load.i64 %7 align=8
+  %9 = address.ptr %0 offset=32
+  %10 = load.i64 %9 align=8
+  %11 = const.i64 0x0000000000000000123456789abcdef0
+  %12 = const.i64 0x00000000000000000fedcba987654321
+  %13 = const.i64 0x00000000000000008000000000000001
+  %14 = const.i64 0x0000000000000000a5a5a5a55a5a5a5a
+  %15 = const.i64 0x00000000000000000000000700000003
+  %16 = const.i64 0x0000000000000000ffffffff00000000
+  %17 = const.i64 0x00000000000000007fffffffffffffff
+  %18 = const.i64 0x00000000000000000123456700000000
+  %19 = const.i64 0x00000000000000000000000000000007
+  %20 = udiv.i64 %8, %19
+  %21 = srem.i64 %10, %19
+  %22 = const.i64 0x00000000000000000000000000000001
+  %23 = or.i64 %1, %22
+  %24 = sdiv.i64 %10, %23
+  %25 = urem.i64 %8, %23
+  %26 = call.i64 @9(%20) fixed=(i64) variadic=0
+  %27 = not.m16 %2
+  %28 = not.m64 %4
+  %29 = xor.i64 %11, %12
+  %30 = xor.i64 %29, %13
+  %31 = xor.i64 %30, %14
+  %32 = xor.i64 %31, %15
+  %33 = xor.i64 %32, %16
+  %34 = xor.i64 %33, %17
+  %35 = xor.i64 %34, %18
+  %36 = address.ptr %0 offset=128
+  %37 = store.void %36, %27 align=2
+  %38 = address.ptr %0 offset=136
+  %39 = store.void %38, %28 align=8
+  %40 = address.ptr %0 offset=144
+  %41 = store.void %40, %6 align=1
+  %42 = address.ptr %0 offset=152
+  %43 = store.void %42, %20 align=8
+  %44 = address.ptr %0 offset=160
+  %45 = store.void %44, %21 align=8
+  %46 = address.ptr %0 offset=168
+  %47 = store.void %46, %24 align=8
+  %48 = address.ptr %0 offset=176
+  %49 = store.void %48, %25 align=8
+  %50 = address.ptr %0 offset=184
+  %51 = store.void %50, %26 align=8
+  %52 = address.ptr %0 offset=192
+  %53 = store.void %52, %2 align=2
+  %54 = address.ptr %0 offset=200
+  %55 = store.void %54, %35 align=8
+  %56 = ret.void
+}
