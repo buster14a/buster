@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Loop store motion (#3309). Include after ir.c, dominators.c and ir_optimize_unroll.c.
+// Loop store motion (#3309, #3346). Include after ir.c, dominators.c and ir_optimize_unroll.c.
 //
 // A loop that updates a global keeps it in memory: each iteration loads what the last one stored. Where the processor
 // doesn't forward that store for nothing, the loop runs at the forwarding's latency whatever its arithmetic costs: a
@@ -13,10 +13,10 @@
 // - each of the loop's loads of the key reads the slot instead;
 // - each of the loop's stores of the key stays as it is, and the value is stored in the slot too.
 // Promotion (ssa_ir.c) then makes the slot values and phis, as it does a local's: the loop's loads are gone and its
-// stores write a register's value. Memory holds the key's value after every store, as before: no store is added,
-// delayed or removed, so no other thread, signal handler or load through another address sees a difference, and the
-// function leaves no store that the source didn't make (a loop of no iteration stores nothing). The one access added
-// is the preheader's load, of bytes the options say are an object's of the unit (IrStoreMotionOptions.symbol_bytes).
+// stores write a register's value. Where the stores stay, memory holds the key's value after every store, as before:
+// no store is added, delayed or removed, so no other thread, signal handler or load through another address sees a
+// difference. The one access added is the preheader's load, of bytes the options say are an object's of the unit
+// (IrStoreMotionOptions.symbol_bytes). Where they sink, below, memory holds the key's value at every exit.
 //
 // A loop takes a key where all of these hold:
 // - the loop is reducible, has a preheader (one predecessor outside it, which ends in `br` to its header) and no
@@ -35,11 +35,17 @@
 // The outermost such loop takes the key, with every access of it in the loops inside; at most
 // IrStoreMotionOptions.key_limit keys a loop, since each holds a register across it (#2719's lesson of LICM).
 //
-// Loads through other addresses need no rule: memory is always current. That is why the stores stay. Sinking them to
-// the loop's exits would also need every load in the loop to be of a known object, an exit block for each edge and a
-// flag for the paths that stored nothing (a store the source didn't make is a data race the compiler added). It is a
-// follow-up for the loops whose every access is known: docs/tier1-store-motion.md's MEASUREMENTS has what the stores
-// cost on the 9700X, and why the pass is off by default.
+// Loads through other addresses need no rule while the stores stay: memory is always current. #3346 sinks a key's
+// stores to the loop's exits where that rule isn't needed: every read of memory in the loop is a plain load the pass
+// places (a stack slot's, or a symbol's), and none but the key's own meets its bytes. Then the loop's stores of the
+// key write the slot alone, and each exit writes the slot's value back once (IrStoreMotionMove.sink): through the
+// key's address where its bits differ from the preheader's load, and through a dummy frame slot where they don't, so
+// that a loop of no iteration, or one that changed nothing, stores nothing to the object (a store the source didn't
+// make would be a data race the compiler added; skipping one of the bits memory holds isn't, since nothing in the loop
+// synchronizes). An exit block whose every predecessor is in the loop gets the write-back first; an exit edge by a
+// `cbr` to a block that other paths reach too is split through a block of its own, after the function's last. A loop
+// with another exit to such a block (a switch's, an indirect branch's) keeps its stores. docs/tier1-store-motion.md's
+// MEASUREMENTS has what the stores cost on the 9700X, and why the pass is off by default.
 //
 // The scans over every instruction are vector code: the symbols' filter, which lets a function that names no listed
 // symbol go after one pass over its opcodes, and the classification, which compresses the loads, stores and barriers
@@ -607,12 +613,11 @@ static uint8_t ir_store_motion_compared(uint32_t type)
     return type == IR_F64 ? IR_I64 : type == IR_F32 || type == IR_I8 || type == IR_I16 ? IR_I32 : IR_VOID;
 }
 
-// The instructions of one write-back of a key of `type`: the slot's load, the compare with the preheader's load (after
-// the two values' conversions where ir_store_motion_compared has one), the dummy slot's address, the select and the
-// store.
+// The instructions of one write-back of a key of `type`: the slot's load, the key's, the compare of the two (after their
+// conversions where ir_store_motion_compared has one), the dummy slot's address, the select and the store.
 static uint32_t ir_store_motion_write_back_size(uint32_t type)
 {
-    return ir_store_motion_compared(type) != IR_VOID ? 7u : 5u;
+    return ir_store_motion_compared(type) != IR_VOID ? 8u : 6u;
 }
 
 // Whether two keys of one symbol meet: one of them is every byte of it, or their byte ranges do.
@@ -786,8 +791,8 @@ static IrStoreMotionOutcome ir_store_motion_loop(IrStoreMotionWork* work, uint32
         }
     }
     // Whether the loop's stores can sink (#3346): every read of memory in it is a plain load the pass places (a stack
-    // slot's, or a symbol's, which a listed key's bytes meet only where it is that symbol's), and every exit block is the
-    // loop's alone.
+    // slot's, or a symbol's, which a listed key's bytes meet only where it is that symbol's), and each exit has a place
+    // for the write-back (ir_store_motion_exits).
     bool opaque = false;
     for (uint64_t word = 0; word < words; word += 1)
     {
@@ -1168,26 +1173,33 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
             view.a[load + 2] = load + 1;
             view.b[load + 2] = load;
         }
-        // Each sunk move's write-backs: the slot's value, stored through the key's address where it differs from the
-        // preheader's load (by its bits: a float's -0.0 isn't 0.0 there, and a NaN is itself) and through the dummy
-        // slot's where it doesn't, so that a path that changed nothing stores nothing to the key.
+        // Each sunk move's write-backs: the slot's value, stored through the key's address where its bits differ from
+        // the key's own bytes, which the loop no longer wrote, and through the dummy slot's where they don't, so that a
+        // path that changed nothing stores nothing to the key. (The bits: a float's -0.0 isn't 0.0 here, and a NaN is
+        // itself.) The key is read again at the exit rather than the preheader's value held in a register across the
+        // loop, which costs a spill in a loop that needs its registers; memory holds that value, since nothing in the
+        // loop stores to the key and another thread's write in that time would race with the write-back itself.
         const bool always = (work->options->mutate & BUSTER_IR_STORE_MOTION_MUTATE_SINK_ALWAYS) != 0;
         for (uint32_t m = 0; m < work->move_count; m += 1)
         {
             const IrStoreMotionMove* move = &work->moves[m];
             const uint8_t compared = ir_store_motion_compared(move->type);
             const uint8_t conversion = move->type == IR_F32 || move->type == IR_F64 ? IR_BITCAST : IR_ZEXT;
-            const uint32_t initial = move->position + move->chain_count;
+            const uint32_t slot_address = move->position + move->chain_count + 1;
             for (uint32_t e = move->exit_first; e < move->exit_first + move->exit_count; e += 1)
             {
                 const uint32_t at = work->exit_positions[e];
                 view.op[at] = IR_LOAD;
                 view.type[at] = move->type;
                 view.alignment_log2[at] = (uint8_t)__builtin_ctz(ir_store_motion_bytes(move->type));
-                view.a[at] = initial + 1;
-                uint32_t next = at + 1;
+                view.a[at] = slot_address;
+                view.op[at + 1] = IR_LOAD;
+                view.type[at + 1] = move->type;
+                view.alignment_log2[at + 1] = move->alignment_log2;
+                view.a[at + 1] = move->key_address;
+                uint32_t next = at + 2;
                 uint32_t left = at;
-                uint32_t right = initial;
+                uint32_t right = at + 1;
                 if (compared != IR_VOID)
                 {
                     view.op[next] = conversion;
@@ -1195,7 +1207,7 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
                     view.a[next] = at;
                     view.op[next + 1] = conversion;
                     view.type[next + 1] = compared;
-                    view.a[next + 1] = initial;
+                    view.a[next + 1] = at + 1;
                     left = next;
                     right = next + 1;
                     next += 2;

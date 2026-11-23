@@ -12,7 +12,7 @@
 // value and end with the same status. A quarter of the trials bind the symbols read-only (#3346): the input that stores
 // nothing runs, and so must the result, which then may store nothing to a symbol either, not even the value it holds. The
 // promoted result has no slot the input's promotion hasn't but the sunk keys' dummy, and its loads are the input's less
-// those the pass gave a slot, plus one a key. Every fault (BUSTER_IR_STORE_MOTION_MUTATE_*) must be
+// those the pass gave a slot, plus one a key and one a write-back. Every fault (BUSTER_IR_STORE_MOTION_MUTATE_*) must be
 // rejected by the verification or the oracle on some fixture. The scans (the symbols' filter and the classification)
 // are checked against their definitions on random columns at every length, and the entry point's contract with arenas
 // of every short size. --print prints a fixture's result. Include after ir_store_motion.c, ir_optimize_text_test.c
@@ -29,7 +29,7 @@
 #define BUSTER_IR_STORE_MOTION_TEST_CALLEE 9u
 #define BUSTER_IR_STORE_MOTION_TEST_BUFFER_SYMBOL 10u
 #define BUSTER_IR_STORE_MOTION_TEST_MUTANTS 9u
-#define BUSTER_IR_STORE_MOTION_TEST_DIGEST UINT64_C(0xb81eda9ab4794607)
+#define BUSTER_IR_STORE_MOTION_TEST_DIGEST UINT64_C(0x3b4137df7ebe8689)
 
 // The options' list: the bytes of the test's distinct objects, by symbol.
 static const uint32_t ir_store_motion_test_bytes[BUSTER_IR_STORE_MOTION_TEST_SYMBOLS] = { 0, 8, 8, 64, 0, 0, 4, 16 };
@@ -333,9 +333,9 @@ static void ir_store_motion_test_fixture(IrStoreMotionTest* test, const IrStoreM
             ir_store_motion_test_expect(test, check.error == IR_OK && moved.keys[fixture->refusal] != 0, fixture->name, what);
         }
         // What it added: a load, a slot's address and a store a key, with the address's chain, a store a kept store and
-        // five instructions a write-back at least; a slot a key, and the dummy where a key sank.
+        // six instructions a write-back at least; a slot a key, and the dummy where a key sank.
         const uint32_t sunk = moved.sinks[IR_STORE_MOTION_SINK_SUNK];
-        ir_store_motion_test_expect(test, check.error != IR_OK || (moved.added >= 3 * moved.keys[IR_STORE_MOTION_KEY_MOVED] + 5 * moved.write_backs &&
+        ir_store_motion_test_expect(test, check.error != IR_OK || (moved.added >= 3 * moved.keys[IR_STORE_MOTION_KEY_MOVED] + 6 * moved.write_backs &&
                                                                     moved.function.instruction_count == function.instruction_count + moved.added &&
                                                                     moved.function.block_count == function.block_count + moved.blocks &&
                                                                     moved.slots == moved.keys[IR_STORE_MOTION_KEY_MOVED] + (moved.write_backs != 0) &&
@@ -362,10 +362,11 @@ static void ir_store_motion_test_fixture(IrStoreMotionTest* test, const IrStoreM
             snprintf(what, sizeof(what), "promotion takes the result (error %u at %u)", pc.error, pc.instruction);
             ir_store_motion_test_expect(test, pc.error == IR_OK && rc.error == IR_OK, fixture->name, what);
             const bool both = pc.error == IR_OK && rc.error == IR_OK;
-            snprintf(what, sizeof(what), "the promoted result has %u slots and %u loads; the input's %u and %u, %u keys and %u loads moved", promoted.slot_count, ir_store_motion_test_loads(&promoted),
-                     reference.slot_count, ir_store_motion_test_loads(&reference), moved.keys[IR_STORE_MOTION_KEY_MOVED], moved.loads);
+            snprintf(what, sizeof(what), "the promoted result has %u slots and %u loads; the input's %u and %u, %u keys, %u loads moved and %u write-backs", promoted.slot_count,
+                     ir_store_motion_test_loads(&promoted), reference.slot_count, ir_store_motion_test_loads(&reference), moved.keys[IR_STORE_MOTION_KEY_MOVED], moved.loads, moved.write_backs);
             ir_store_motion_test_expect(test, both && promoted.slot_count == reference.slot_count + (moved.write_backs != 0) &&
-                                                  ir_store_motion_test_loads(&promoted) + moved.loads == ir_store_motion_test_loads(&reference) + moved.keys[IR_STORE_MOTION_KEY_MOVED],
+                                                  ir_store_motion_test_loads(&promoted) + moved.loads ==
+                                                      ir_store_motion_test_loads(&reference) + moved.keys[IR_STORE_MOTION_KEY_MOVED] + moved.write_backs,
                                         fixture->name, what);
             IrOptimizeOptions optimize = ir_optimize_options();
             optimize.passes |= BUSTER_IR_OPTIMIZE_MERGE;

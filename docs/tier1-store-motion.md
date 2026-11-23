@@ -1,11 +1,13 @@
-# Tier 1 loop store motion (#3309)
+# Tier 1 loop store motion (#3309, #3346)
 
 Status: implemented, `src/buster/compiler/ir_store_motion.c`, and **off by
 default**: `--tier1-passes=+storemotion` turns it on, and so does `+all`.
 `test-ir-store-motion` and `tests/driver/tier1_store_motion.c` are its tests
 ([the IR optimization guide](commands/ir-optimization.md#loop-store-motion-3309)).
-The issue is [#3309](https://github.com/buster14a/buster/issues/3309).
-MEASUREMENTS below has the 9700X's record and what it decided.
+The issues are [#3309](https://github.com/buster14a/buster/issues/3309) and,
+for sinking the stores to the loop's exits,
+[#3346](https://github.com/buster14a/buster/issues/3346). MEASUREMENTS below
+has the 9700X's records and what they decided.
 
 **In one paragraph.** A loop that updates a global keeps it in memory under
 `--tier1`: each iteration loads what the last one stored. This pass runs on
@@ -22,6 +24,14 @@ was a cloud Xeon's. And of `sqlite3.c`'s, Lua's and musl's loops the pass
 changes one, which runs once at start-up: their loops over globals call
 functions. A `--tier1` compile of `sqlite3.c` costs 0.4% more with it. So it
 is opt-in.
+
+**Sinking the stores (#3346).** Where every read of memory in the loop is a
+load the pass places, the stores move too: the loop's stores of the global
+write the slot alone, and each of the loop's exits writes the slot's value
+back once, through the global's address where its bits changed and through a
+dummy frame slot where they didn't, so that a path that changed nothing stores
+nothing. The issue's integer kernel then runs as clang's does
+([Sinking the stores](#sinking-the-stores-3346) below).
 
 ## What a loop keeps in memory, and why the stores stay
 
@@ -51,7 +61,9 @@ depends on the processor and on the value's type (MEASUREMENTS): nothing for
 these integers on the 9700X, 2.4 times for a `double`.
 
 clang -O2 also removes the stores: it loads before the loop and stores once
-after it. This pass doesn't, for three reasons.
+after it. #3309's pass didn't, for three reasons, which #3346's sinking answers
+where it can ([Sinking the stores](#sinking-the-stores-3346)); where it can't,
+these still hold.
 
 - **Loads through pointers stay right.** With the stores in place, memory
   holds the global's value after every store, so a load through any other
@@ -65,10 +77,89 @@ after it. This pass doesn't, for three reasons.
   or a compare for each key at each exit.
 - **The exits are left alone.** No block is added and no phi's entries change.
 
-What the stores cost is in MEASUREMENTS: on the 9700X they are what is left of
-the gap to clang on the integer kernel. A follow-up can sink them where every
-access in the loop is known; this pass's keys and slots are what it would
-start from.
+What the stores cost is in MEASUREMENTS: on the 9700X they were what was left
+of the gap to clang on the integer kernel, which sinking them closes.
+
+## Sinking the stores (#3346)
+
+```c
+long g_a, g_b;
+void f(int n) { for (int i = 0; i < n; i++) { g_a += i; g_b ^= g_a; } }
+```
+
+`--tier1 --tier1-passes=+storemotion`'s code for it, with the stores sunk:
+
+```text
+     xor    %eax,%eax
+     lea    g_a(%rip),%rcx           ; the keys' addresses and first values
+     mov    g_a(%rip),%rdx
+     lea    g_b(%rip),%rsi
+     mov    g_b(%rip),%r8
+     mov    %rdx,%r9
+     mov    %r8,%r10
+     jmp    test
+loop:add    %rax,%r9
+     xor    %r9,%r10
+     add    $0x1,%eax
+test:cmp    %edi,%eax
+     jl     loop
+     lea    -0x8(%rsp),%rax          ; the dummy slot
+     cmp    %rdx,%r9                 ; g_a changed?
+     cmovne %rcx,%rax
+     mov    %r9,(%rax)               ; to g_a where it did, to the dummy where it didn't
+     lea    -0x8(%rsp),%rax
+     cmp    %r8,%r10
+     cmovne %rsi,%rax
+     mov    %r10,(%rax)
+     ret
+```
+
+**What it takes.** A key's stores sink where all of these hold, and stay as
+the section before says otherwise (`--tier1-report`'s `sink.` counts name the
+first that failed):
+
+| Rule | Otherwise |
+| --- | --- |
+| Every load in the loop has an address the pass places (a stack slot's, or a symbol's), and no masked load or gather is in it. A load through any other address may read the key's bytes, which memory would no longer hold. | `sink.load` |
+| No load in the loop that isn't the key's meets its bytes: one of half of it, or of its array at an index. | `sink.met` |
+| Each exit edge either goes to a block whose every predecessor is in the loop, or leaves by a `cbr` to two blocks, so that the edge can be split; at most 16 exits. | `sink.exit` |
+
+A key the loop stores and never loads, which the pass without sinking refuses
+(`key.unread`: it would gain nothing), is taken where its stores sink.
+
+**The write-back.** Each exit gets, for each sunk key:
+
+```text
+x  = load slot
+c  = icmp ne x, v0        ; v0 the preheader's load; a float's bits as an integer's,
+                          ; an i8's or an i16's widened to an i32 (Tier 1 compares those)
+d  = stack_addr $dummy    ; a frame slot no one reads, its address taken
+a  = select c, key, d
+store a, x
+```
+
+- **No store the source didn't make.** A loop of no iteration, or one whose
+  stores left the key's bits as they were, stores to the dummy. That is not a
+  store skipped: nothing in the loop synchronizes (no call, fence or atomic
+  access), so another thread that wrote the object while the loop ran would
+  race with the loop's own store, and memory holds `v0`'s bits. A store
+  through a `select` keeps the decision off the branches: `cmov` and one
+  store, as above.
+- **Where.** An exit block whose every predecessor is in the loop gets the
+  write-back before its first instruction that isn't a phi: the block after a
+  `for` loop, a `return`'s block in the loop. An exit edge to a block that
+  other paths reach too (the block after the loop, where a `break`'s block
+  also goes, or a `goto`'s label after the loop) is split: a block of its own
+  after the function's last, with the write-backs and a `br` to the exit
+  block; the loop block's `cbr` goes to it, and the exit block's phis take its
+  value from it. A switch's or an indirect branch's edge isn't split, since
+  its other cases may go to the same block.
+- **Order.** An exit block that is the next loop's preheader writes the key
+  back before that preheader loads it.
+
+A sunk key's value at an exit is the slot's, which promotion makes a phi of the
+loop's values, as for any local. `v0` and the key's address are the
+preheader's, which dominates every exit block the pass writes to.
 
 ## What it takes
 
@@ -219,8 +310,11 @@ time) and a loop's keys (its accesses of listed symbols, a few).
 
 ## What it leaves
 
-- **The stores.** Sinking them to the exits where every access in the loop is
-  known, as above.
+- **Loops with a load through a pointer.** Their stores stay (`sink.load`).
+  Sinking them needs the load's address apart from the key's: a pointer
+  parameter that the function is known not to have received for the global.
+- **A switch's exit to a shared block.** Splitting a switch's edge needs a
+  block for each case that goes there.
 - **Keys behind a pointer** (`p->count += 1`). The preheader's load would be a
   load through `p` that a loop of no iteration never made, and `p` may be
   null there. It needs the loop's test before the preheader (a rotated loop)
@@ -231,7 +325,7 @@ time) and a loop's keys (its accesses of listed symbols, a few).
 
 ## Tests
 
-- **`test-ir-store-motion`** (`ir_store_motion_test.c`): 27 text fixtures and
+- **`test-ir-store-motion`** (`ir_store_motion_test.c`): 33 text fixtures and
   the callee of those that call, `tests/ir/store-motion/*.ir`, by both parser
   paths. Each expects its moved
   loops and keys, the loads and stores given a slot, and the outcome or the
@@ -239,21 +333,35 @@ time) and a loop's keys (its accesses of listed symbols, a few).
   A changed result must verify, promote and optimize. It then runs in the
   shared interpreter as it is, promoted and optimized, against the input, on
   equal memory, with a pointer parameter at the first symbol's bytes, in
-  another's or in a buffer of its own, at bounds from zero up. The promoted
-  result must have no slot the input's promotion lacks, and the input's loads
-  less those the pass gave a slot, plus one a key. Six faults
+  another's or in a buffer of its own, at bounds from zero up; a quarter of
+  the trials bind the symbols read-only, so that a store the source didn't
+  make faults, even of the value the object held. The promoted result must
+  have no slot the input's promotion lacks but the dummy, and the input's
+  loads less those the pass gave a slot, plus one a key and one a write-back.
+  Nine faults
   (`BUSTER_IR_STORE_MOTION_MUTATE_*`: a barrier passed over, an unknown store
   passed over, a key beside an indexed store, a key beside an overlapping
-  one, a store the slot doesn't get, a key past its object's bytes) must each
-  be rejected on some fixture. The two scans are checked against their
+  one, a store the slot doesn't get, a key past its object's bytes; #3346's
+  key sunk past a load it can't place, exit given no write-back, and
+  write-back to the key on a path that didn't change it) must each be
+  rejected on some fixture. The two scans are checked against their
   definitions on random columns at every length to 200, and the entry point
   with arenas of every short size.
-- **`tests/driver/tier1_store_motion.c`**: 21 functions of loops over
-  globals (23 loops that store to one, with `main`'s), compiled by clang -O0
+- **`tests/driver/tier1_store_motion.c`**: 26 functions of loops over
+  globals (26 loops that store to one; `main` has a volatile store, which keeps
+  the pass off its body), compiled by clang -O0
   and by `--tier1 --tier1-strict --verify` with the pass (`+storemotion`) and
   without it on both host paths; the programs print the same lines. The
   report's counts are pinned, and `objdump` finds the issue's kernel with four
-  references to its two globals with the pass and five without. Then 29
+  references to its two globals with the pass, all outside the loop, and five without. #3346's: a
+  loop left by a break, a return and a goto; the issue's `double` kernel; a
+  page `mprotect`ed read-only while a loop that stores nothing to it runs (of
+  no iteration, and of iterations whose condition never holds); a `volatile
+  sig_atomic_t` flag a signal handler sets; a global's address that escapes to
+  a pointer the loop reads through; and a program built without
+  `--tier1-strict`, whose loop's write-backs must come before its callee's
+  `longjmp` to a `setjmp` (Tier 1 doesn't admit the function that calls
+  `setjmp`). Then 29
   declarations, each in a unit whose one loop updates the object: the list
   takes the unit's own definitions and leaves the others.
 - **`test-ir-source --passes`**'s `store-motion` row runs the pass on every

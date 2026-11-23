@@ -5,7 +5,8 @@
 // file's SUBJECT, loops over globals in every shape the pass takes or refuses, by Clang -O0 and by Buster's --tier1 with
 // the pass and without it, on both host paths, strictly and verified, and requires the three programs to print the
 // same lines. Buster's report must give the pass's counts for the subject, and GNU objdump must find the issue's kernel
-// with one load and one store of each global (five references to the two without the pass, four with it). Then the
+// with its globals referenced only outside the loop (five references to the two without the pass, six with it: each
+// global's address, the preheader's load and the write-back's compare). Then the
 // symbols: for each declaration below, a unit whose one loop updates the object must move its key or leave it, as the
 // emission's list of the unit's distinct objects says (check_program_store_motion_symbols).
 
@@ -764,11 +765,12 @@ int main(int argc, char** argv)
                 valid = false;
             }
         }
-        // The issue's kernel: a load and a store of each global with the pass, and a second load of the first without it.
+        // The issue's kernel: with the pass, three references a global, all outside the loop (its address, the
+        // preheader's load and the write-back's compare of the key's bytes); without it, five, two of them in the loop.
         const unsigned references = valid ? motion_references(assembly, "motion_basic") : 0;
-        if (valid && references != (moved ? 4u : 5u))
+        if (valid && references != (moved ? 6u : 5u))
         {
-            fprintf(stderr, "store motion: motion_basic has %u references to its globals, %u expected\n", references, moved ? 4u : 5u);
+            fprintf(stderr, "store motion: motion_basic has %u references to its globals, %u expected\n", references, moved ? 6u : 5u);
             valid = false;
         }
         printf("Tier 1 store motion %s, %s: %s\n", moved ? "on" : "off", scalar ? "scalar" : "default", valid ? "pass" : "FAIL");
