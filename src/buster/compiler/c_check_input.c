@@ -8295,6 +8295,12 @@ struct CheckDeclaratorRun
     bool parameter_invalid;
 };
 
+// (check_input_declarator_begin's one push: each record after another starts where its alignment lets it.)
+_Static_assert(sizeof(CheckDeclaratorRun) % _Alignof(CheckDeclaratorFrame) == 0 && sizeof(CheckDeclaratorFrame) % _Alignof(CheckDeclaratorPart) == 0 &&
+               sizeof(CheckDeclaratorPart) % _Alignof(CheckDeclaratorParameter) == 0 && _Alignof(CheckDeclaratorRun) >= _Alignof(CheckDeclaratorFrame) &&
+               _Alignof(CheckDeclaratorRun) >= _Alignof(CheckDeclaratorPart) && _Alignof(CheckDeclaratorRun) >= _Alignof(CheckDeclaratorParameter),
+               "a declarator run's records follow each other in one push");
+
 // A declarator error of a recovering run's own frame (#1447, CheckDeclaratorRun.recover), its one report from `before`:
 // clang marks the declaration invalid and keeps it bound, its uses quiet (check_input_invalid_declare). The report moves to
 // the recovered ones, so the reader goes on, and the run goes on with a stand-in type where clang's has its error. Whether
@@ -8388,10 +8394,16 @@ static inline __attribute__((always_inline)) CheckDeclaratorRun* check_input_dec
     }
     const uint32_t capacity = stop - cursor + 1;
     const uint64_t mark = reader->scratch->length;
-    CheckDeclaratorRun* run = arena_push(reader->scratch, sizeof(CheckDeclaratorRun), _Alignof(CheckDeclaratorRun));
-    CheckDeclaratorFrame* frames = run != 0 ? arena_push_array(reader->scratch, capacity, sizeof(CheckDeclaratorFrame), 8) : 0;
-    CheckDeclaratorPart* parts = frames != 0 ? arena_push_array(reader->scratch, capacity, sizeof(CheckDeclaratorPart), 8) : 0;
-    CheckDeclaratorParameter* parameters = parts != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, CheckDeclaratorParameter, capacity) : 0;
+    // The run, its frames, its parts and its parameters in one push, where four pushes would place them (#2694: 17,453 of
+    // sqlite3.c's declarators take a run).
+    const uint64_t frames_at = sizeof(CheckDeclaratorRun);
+    const uint64_t parts_at = frames_at + (uint64_t)capacity * sizeof(CheckDeclaratorFrame);
+    const uint64_t parameters_at = parts_at + (uint64_t)capacity * sizeof(CheckDeclaratorPart);
+    uint8_t* const block = arena_push(reader->scratch, parameters_at + (uint64_t)capacity * sizeof(CheckDeclaratorParameter), _Alignof(CheckDeclaratorRun));
+    CheckDeclaratorRun* run = (CheckDeclaratorRun*)block;
+    CheckDeclaratorFrame* frames = block != NULL ? (CheckDeclaratorFrame*)(block + frames_at) : NULL;
+    CheckDeclaratorPart* parts = block != NULL ? (CheckDeclaratorPart*)(block + parts_at) : NULL;
+    CheckDeclaratorParameter* parameters = block != NULL ? (CheckDeclaratorParameter*)(block + parameters_at) : NULL;
     reader->output->resource |= parameters == 0;
     if (run != 0)
     {

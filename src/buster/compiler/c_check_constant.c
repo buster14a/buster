@@ -5249,6 +5249,8 @@ static bool check_constant_raw_prepare(CheckConstantInput* input)
     return valid;
 }
 
+// (check_constant_input_initialize sets these columns of a new reading by two fills of its block: one that sets another
+// here sets it there too.)
 static void check_constant_values_reset(CheckConstantInput* input)
 {
     const uint32_t count = input->end - input->first;
@@ -5321,6 +5323,15 @@ static bool check_constant_proof_initialize(CheckConstantInput* input)
     return valid;
 }
 
+// A column of `bytes` placed in a reading's block of `*size` bytes so far, at the next 16 bytes: its offset; *size grows to
+// its end.
+static inline __attribute__((always_inline)) uint64_t check_constant_column(uint64_t* size, uint64_t bytes)
+{
+    const uint64_t offset = (*size + 15) & ~(uint64_t)15;
+    *size = offset + bytes;
+    return offset;
+}
+
 static bool check_constant_input_initialize(CheckConstantInput* input, CheckInputReader* reader, uint32_t first, uint32_t end, bool cached, uint32_t* failed_token)
 {
     const uint32_t count = end >= first ? end - first : 0;
@@ -5352,39 +5363,65 @@ static bool check_constant_input_initialize(CheckConstantInput* input, CheckInpu
         *failed_token = BUSTER_CHECK_NONE;
     }
     bool valid = count != 0 && end <= reader->parser->tokens.count;
-#define BUSTER_CHECK_CONSTANT_ARRAY(field, element) input->field = valid ? arena_push_array(reader->scratch, count, sizeof(element), 16) : 0; valid &= input->field != 0
-    BUSTER_CHECK_CONSTANT_ARRAY(values, CheckValue);
-    BUSTER_CHECK_CONSTANT_ARRAY(present, uint8_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(syntax, uint8_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(statement_syntax, uint8_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(first_value, uint32_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(last_value, uint32_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(next_value, uint32_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(type_begin, uint32_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(warning_begin, uint32_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(queries, TypeId);
-    BUSTER_CHECK_CONSTANT_ARRAY(abi_origins, uint8_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(attribute_syntax, uint8_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(attribute_starts, CheckConstantAttributes*);
-    BUSTER_CHECK_CONSTANT_ARRAY(attribute_ends, CheckConstantAttributes*);
-    BUSTER_CHECK_CONSTANT_ARRAY(tag_next, uint32_t);
-    BUSTER_CHECK_CONSTANT_ARRAY(prototype_marks, uint32_t);
-    input->tag_finishes = valid ? arena_push_array(reader->scratch, (uint64_t)count + 1, sizeof(uint32_t), 4) : 0;
-    valid &= input->tag_finishes != 0;
-#undef BUSTER_CHECK_CONSTANT_ARRAY
+    // The columns, one entry a token (tag_finishes one more), in one push and two fills (#2694): sqlite3.c's 5,113 readings
+    // average 1.8 tokens, where a push and a fill a column cost more than the reading. Each column starts on 16 bytes, as
+    // its own push started it. Those that start all ones are one run of the block, then those that start zero; values and
+    // tag_next start as the scratch left them, as before.
+    const uint64_t words = (uint64_t)count * sizeof(uint32_t);
+    uint64_t size = 0;
+    const uint64_t first_value = check_constant_column(&size, words);
+    const uint64_t last_value = check_constant_column(&size, words);
+    const uint64_t next_value = check_constant_column(&size, words);
+    const uint64_t warning_begin = check_constant_column(&size, words);
+    const uint64_t type_begin = check_constant_column(&size, words);
+    const uint64_t ones_end = size;
+    const uint64_t present = check_constant_column(&size, count);
+    const uint64_t queries = check_constant_column(&size, (uint64_t)count * sizeof(TypeId));
+    const uint64_t abi_origins = check_constant_column(&size, count);
+    const uint64_t syntax = check_constant_column(&size, count);
+    const uint64_t statement_syntax = check_constant_column(&size, count);
+    const uint64_t attribute_syntax = check_constant_column(&size, count);
+    const uint64_t attribute_starts = check_constant_column(&size, (uint64_t)count * sizeof(CheckConstantAttributes*));
+    const uint64_t attribute_ends = check_constant_column(&size, (uint64_t)count * sizeof(CheckConstantAttributes*));
+    const uint64_t tag_finishes = check_constant_column(&size, words + sizeof(uint32_t));
+    const uint64_t prototype_marks = check_constant_column(&size, words);
+    const uint64_t zeros_end = size;
+    const uint64_t values = check_constant_column(&size, (uint64_t)count * sizeof(CheckValue));
+    const uint64_t tag_next = check_constant_column(&size, words);
+    uint8_t* const block = valid ? arena_push(reader->scratch, size, 16) : NULL;
+    valid &= block != NULL;
+    if (valid)
+    {
+        input->first_value = (uint32_t*)(block + first_value);
+        input->last_value = (uint32_t*)(block + last_value);
+        input->next_value = (uint32_t*)(block + next_value);
+        input->warning_begin = (uint32_t*)(block + warning_begin);
+        input->type_begin = (uint32_t*)(block + type_begin);
+        input->present = block + present;
+        input->queries = (TypeId*)(block + queries);
+        input->abi_origins = block + abi_origins;
+        input->syntax = block + syntax;
+        input->statement_syntax = block + statement_syntax;
+        input->attribute_syntax = block + attribute_syntax;
+        input->attribute_starts = (CheckConstantAttributes**)(block + attribute_starts);
+        input->attribute_ends = (CheckConstantAttributes**)(block + attribute_ends);
+        input->tag_finishes = (uint32_t*)(block + tag_finishes);
+        input->prototype_marks = (uint32_t*)(block + prototype_marks);
+        input->values = (CheckValue*)(block + values);
+        input->tag_next = (uint32_t*)(block + tag_next);
+    }
     valid = valid && check_constant_proof_initialize(input);
     reader->output->resource |= count != 0 && end <= reader->parser->tokens.count && !valid;
     if (valid)
     {
-        check_constant_values_reset(input);
-        memset(input->syntax, 0, count);
-        memset(input->statement_syntax, 0, count);
-        memset(input->type_begin, 0xff, (uint64_t)count * sizeof(uint32_t));
-        memset(input->attribute_syntax, 0, count);
-        memset(input->attribute_starts, 0, (uint64_t)count * sizeof(CheckConstantAttributes*));
-        memset(input->attribute_ends, 0, (uint64_t)count * sizeof(CheckConstantAttributes*));
-        memset(input->tag_finishes, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-        memset(input->prototype_marks, 0, (uint64_t)count * sizeof(uint32_t));
+        // What check_constant_values_reset sets, and the columns it leaves alone: syntax, statement_syntax, type_begin,
+        // attribute_syntax, attribute_starts, attribute_ends, tag_finishes and prototype_marks.
+        memset(block, 0xff, ones_end);
+        memset(block + present, 0, zeros_end - present);
+        if (input->proof_values != 0)
+        {
+            memset(input->proof_values, 0, (uint64_t)count * sizeof(CheckValue));
+        }
         for (uint32_t token = first; token < end; token += 1)
         {
             const uint8_t kind = reader->parser->tokens.kinds[token];
