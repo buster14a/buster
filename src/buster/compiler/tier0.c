@@ -15318,15 +15318,17 @@ static Tier0Code tier0_compile_once(const Tier0Function* function, Arena* output
 
 // Rewrites a function's legacy SSE records as their VEX twins (x86_vex_forms_tier0, #3335), for a target with AVX
 // (Tier0Function.avx), but in a function with an asm body, whose records are the program's own. One record for one, so
-// that every index into the records (branches, references, entries, labels, tail calls, the frame's) stays. Sixteen
-// records a step: their forms gathered, each one's entry gathered from the table by its row (x86_vex_lookup), the records
-// with an entry rewritten one by one. Each twin computes its legacy form's low 128 bits and zeroes the rest, which no
-// later record of Tier 0's reads (test-tier1-emit runs each pair natively, and test-tier0 Tier 0's programs).
+// that every index into the records (branches, references, entries, labels, tail calls, the frame's) stays. Thirty-two
+// records a step: their forms read four records a load, each one's entry from the table's window in registers
+// (x86_vex_find, #2874), the records with an entry rewritten one by one. Each twin computes its legacy form's low 128
+// bits and zeroes the rest, which no later record of Tier 0's reads (test-tier1-emit runs each pair natively, and
+// test-tier0 Tier 0's programs).
 static void tier0_vex(const Tier0Function* function, Tier0Code* code)
 {
-    for (uint32_t first = 0; function->asm_body_count == 0 && first < code->count; first += 16)
+    const X86VexWindow window = x86_vex_window(x86_vex_forms_tier0);
+    for (uint32_t first = 0; function->asm_body_count == 0 && first < code->count; first += 32)
     {
-        uint32_t found = x86_vex_lookup(code->records + first, code->count - first, x86_vex_forms_tier0);
+        uint32_t found = x86_vex_find(code->records + first, code->count - first, &window);
         while (found != 0)
         {
             const uint32_t r = first + (uint32_t)__builtin_ctz(found);

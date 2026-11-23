@@ -1324,6 +1324,12 @@ Tier 0 keeps the state clean as clang's code does, with Tier 1's pieces
   `movhps`). A function with an asm body keeps its legacy records. Each twin
   computes its legacy form's low 128 bits and zeroes the rest, which no later
   record of Tier 0's reads; `test-tier1-emit` runs each pair natively.
+  The scan reads 32 records a step with no gather (`x86_vex_find`, #2874):
+  their forms four records a load, and each form's entry from the table's
+  192 rows from `movss`'s, which hold every legacy form with a twin, in six
+  registers. Its first form gathered the forms and then their entries, two
+  gathers every 16 records: `tier0` 0.15 ms more on `-c sqlite3.c` (the
+  9700X), the same objects.
 
 The issue's kernel at `-march=znver5`:
 

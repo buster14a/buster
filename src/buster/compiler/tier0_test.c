@@ -2015,6 +2015,77 @@ static void tier0_test_moves(Tier0TestTally* tally)
     }
 }
 
+// The records with a VEX twin from a forward table's window (x86_vex_find, #2874) against the table itself: every value
+// of a record's form (each row, with each segment override, the fixup flag or neither), 32 records a block, in Tier 0's
+// table and Tier 1's, the records' other fields arbitrary; and a block's live records alone, at every count to 32, also
+// at the end of a page before one it can't read.
+static void tier0_test_vex_window(Tier0TestTally* tally)
+{
+    static const uint16_t* const tables[2] = { x86_vex_forms_tier0, x86_vex_forms };
+    X86Instruction records[32];
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        const X86VexWindow window = x86_vex_window(tables[t]);
+        uint32_t wrong = UINT32_MAX;
+        for (uint32_t first = 0; first < 0x10000; first += 32)
+        {
+            uint32_t expected = 0;
+            for (uint32_t r = 0; r < 32; r += 1)
+            {
+                const uint32_t form = first + r;
+                const uint32_t number = form & BUSTER_X86_FORM_NUMBER;
+                const uint64_t noise = (uint64_t)form * 0x9e3779b97f4a7c15ull;
+                records[r] = (X86Instruction){
+                    .immediate = (int32_t)noise,
+                    .displacement = (int32_t)(noise >> 32),
+                    .reg = (uint8_t)(noise >> 8),
+                    .rm = (uint8_t)(noise >> 16),
+                    .index = (uint8_t)(noise >> 24),
+                    .mode = (uint8_t)(noise >> 40),
+                    .form = (uint16_t)form,
+                    .vvvv = (uint8_t)(noise >> 48),
+                    .decorations = (uint8_t)(noise >> 56),
+                };
+                expected |= number < BUSTER_X86_FORM_SS && tables[t][number % X86_FORM_COUNT] != 0 ? 1u << r : 0;
+            }
+            const uint32_t found = x86_vex_find(records, 32, &window);
+            wrong = wrong == UINT32_MAX && found != expected ? first + (uint32_t)__builtin_ctz(found ^ expected) : wrong;
+        }
+        tier0_test_expect(tally, wrong == UINT32_MAX, "VEX window", "table %u: form %u's record is found where the table has no entry, or missed where it has one", t, wrong);
+    }
+    // Every record a legacy form with a twin: a block of `count` finds its live records alone.
+    for (uint32_t r = 0; r < 32; r += 1)
+    {
+        records[r] = (X86Instruction){ .form = (uint16_t)(r % 2 == 0 ? X86_FORM_ADDSD_X_XM64 : X86_FORM_MOVQ_XM64_X + BUSTER_X86_FORM_GS) };
+    }
+    const X86VexWindow window = x86_vex_window(x86_vex_forms_tier0);
+    uint32_t short_count = UINT32_MAX;
+    for (uint32_t count = 0; count <= 32; count += 1)
+    {
+        const uint32_t expected = count == 32 ? UINT32_MAX : (1u << count) - 1;
+        short_count = short_count == UINT32_MAX && x86_vex_find(records, count, &window) != expected ? count : short_count;
+    }
+    tier0_test_expect(tally, short_count == UINT32_MAX, "VEX window", "a block of %u records finds records past them, or misses one", short_count);
+    // And a block that ends where its page does, before a page it can't read: its loads stay inside its records.
+    const uint64_t page = 4096;
+    uint8_t* pages = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool guarded = pages != MAP_FAILED && mprotect(pages + page, page, PROT_NONE) == 0;
+    uint32_t edge_count = UINT32_MAX;
+    for (uint32_t count = 0; guarded && count <= 32; count += 1)
+    {
+        X86Instruction* edge = (X86Instruction*)(pages + page) - count;
+        memcpy(edge, records, count * sizeof(X86Instruction));
+        const uint32_t expected = count == 32 ? UINT32_MAX : (1u << count) - 1;
+        edge_count = edge_count == UINT32_MAX && x86_vex_find(edge, count, &window) != expected ? count : edge_count;
+    }
+    tier0_test_expect(tally, guarded && edge_count == UINT32_MAX, "VEX window", "a block of %u records at its page's end finds other records (or the page can't be guarded)",
+                      edge_count);
+    if (pages != MAP_FAILED)
+    {
+        munmap(pages, 2 * page);
+    }
+}
+
 // The chosen forms' application, the vector path's (tier0_apply_choices_vector, from a byte per form) against the
 // scalar path's (tier0_apply_choice, through x86_choice_instruction): random records, each given a candidate form of a
 // random row, or X86_FORM_NONE (which keeps the record), and a random value, in batches of 1 to 64.
@@ -6754,6 +6825,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_applies(&tally);
                 tier0_test_report("applies", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_vex_window(&tally);
+                tier0_test_report("VEX window", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
