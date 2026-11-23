@@ -1297,9 +1297,8 @@ jobs:
         # functions' samples. Where this tree changes what -c writes, the step says so and gives both objects' sizes:
         # diagnostic-only changes to selected warning sources are expected to leave the object unchanged and fail if
         # it differs; other checker changes can legitimately alter output and warn with sizes instead (#1572).
-        # The placements pad .text, so they move the backend's, the encoder's and Tier 0's code;
-        # the checker's own code sits in the page-aligned .text.buster_checker, which wild places first, and every
-        # shift is a multiple of 64, so the checker unit's own placement is not one of the samples (#1312).
+        # Both revisions sample the same placements. An older base without checker placements uses the
+        # earlier .text sweep in both revisions (#1312).
         if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
         timeout-minutes: 6
         env:
@@ -1314,7 +1313,17 @@ jobs:
           ab="${BUSTER_BENCHMARK_BUILDS:?}"
           test "$(git -C "$ab/base" rev-parse HEAD)" = "$AB_BASE_SHA"
           # The early build barrier prepared both revisions and every placement; do not compile during measurement.
-          shifts=(0 1088 2112 3136)
+          case "${BUSTER_CHECKER_PLACEMENTS:?}" in
+              checker)
+                  shifts=(0 16 32 48)
+                  echo "== checker unit's page-relative shifts: ${shifts[*]} bytes (verified at check_input_run)"
+                  ;;
+              legacy)
+                  shifts=(0 1088 2112 3136)
+                  echo "== legacy base: both builds sample ordinary .text shifts of ${shifts[*]} bytes"
+                  ;;
+              *) echo "::error::missing checker placement manifest"; exit 1 ;;
+          esac
           "$ab/main/compiler-0" "${options[@]}" -o "$ab/main.o"
           "$ab/head/compiler-0" "${options[@]}" -o "$ab/head.o"
           if ! cmp -s "$ab/main.o" "$ab/head.o"; then
@@ -1326,10 +1335,6 @@ jobs:
               fi
               echo "== this change may legitimately affect generated objects; continuing"
           fi
-          echo "== what the placements move: ./build.sh shifts pads .text, so the four shifts move the backend's, the"
-          echo "== encoder's and Tier 0's code; the checker's own code sits in the page-aligned .text.buster_checker,"
-          echo "== which wild places first, and every shift is a multiple of 64, so the checker unit's own placement is"
-          echo "== not one of the samples (#1312)"
           builds=()
           for build in main:main head:head main-again:main; do
               for shift in "${shifts[@]}"; do

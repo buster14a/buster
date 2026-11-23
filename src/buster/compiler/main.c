@@ -514,8 +514,8 @@ int run_type_benchmark(int argc, char** argv);
 // their unit or in another, moved them by any number of bytes. In their section, only the checker's own code moves
 // them. Its tests and the builtins' actions, which the driver seldom runs, stay in .text.
 // BUSTER_CHECKER_OFFSET (0 unless BUSTER_BUILD_DEFINES sets it: a multiple of 16 below a page) starts the checker's
-// code that many bytes into its page, after int3 padding. Builds of one tree at several offsets sample where its hot
-// loops fall, which ./build.sh shifts can't: it moves units' .text, never this section (#1233, docs/profiling.md).
+// code that many bytes into its page, after int3 padding. Ordinary ./build.sh shifts moves units' .text;
+// shifts --checker-placements moves this section's checker unit at link time (#1312, docs/commands/build.md).
 #ifndef BUSTER_CHECKER_OFFSET
 #define BUSTER_CHECKER_OFFSET 0
 #endif
