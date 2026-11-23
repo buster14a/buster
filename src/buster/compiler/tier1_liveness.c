@@ -40,7 +40,7 @@ struct Tier1Liveness
     uint32_t cross_block_values;
     uint64_t iterations;
     uint64_t retained_bytes;
-    // Upper bound includes dataflow_postorder's bounded visit stack and alignment gaps.
+    // Upper bound includes dataflow_postorder's scratch (dataflow_postorder_scratch_bytes) and alignment gaps.
     uint64_t scratch_bytes;
     uint64_t matrix_bytes;
 };
@@ -494,7 +494,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
             memcpy(dataflow.successors, cfg.successors, (uint64_t)cfg.edge_count * sizeof(uint32_t));
         }
         tier1_liveness_rows(plan, &cfg, dense_ids, &dataflow);
-        live.scratch_bytes = scratch->length - scratch_mark + (uint64_t)function->block_count * (sizeof(DataflowVisit) + 1) + 2 * _Alignof(DataflowVisit);
+        live.scratch_bytes = scratch->length - scratch_mark + dataflow_postorder_scratch_bytes(dataflow.block_count, dataflow.edge_count);
         if (!dataflow_postorder(&dataflow, scratch))
         {
             error = TIER1_LIVENESS_MEMORY;

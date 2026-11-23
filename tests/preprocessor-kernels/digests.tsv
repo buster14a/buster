@@ -1048,6 +1048,9 @@ history/include: an absolute name too long for a path	7572e45299add087
 history/include: an angled name too long for a path	539b1adbf36aadc3
 history/include: extra tokens after a name written out	6dffe95ce1e1a0a7
 history/include: the depth limit at a name a macro made	cc92ba0a65903c25
+history/unused macros, preprocessed	493acc8721a715b1
+history/gnu line markers, preprocessed	d3f8d5a2c68782da
+history/unused macros: defined, push_macro and pop_macro, preprocessed	d38c2b16874e5352
 history/include: the header refused at the depth limit	e78f10b9c56e8033
 history/invalid paste	918bf824ccced5bb
 history/line/include	5d1180ec7a586604

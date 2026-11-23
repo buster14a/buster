@@ -83,11 +83,11 @@ struct CheckTier1DebugConstants
 // Decode exact low-byte copies, not arithmetic or reconstructed SSA values. Each carrier names one admitted
 // immutable parameter; ordinary writes kill the whole carrier. Keeping fewer bytes than that parameter is a kill.
 // GPR and XMM facts never cross classes: the DWARF home describes its source type's register class. At a target with
-// AVX the copies are VEX twins of the legacy ones (#2830, tier1_emit_vex), decoded as those (tier1_emit_vex_canonical):
+// AVX the copies are VEX twins of the legacy ones (#2830, tier1_emit_vex), decoded as those (x86_vex_canonical):
 // `vmovaps x, y` as `movaps x, y`, and `vmovss x, x, y` (its VEX.vvvv the destination) as the merge `movss x, y`.
 static CheckTier1DebugTransfer check_tier1_debug_transfer(const X86Instruction* original)
 {
-    const X86Instruction canonical = tier1_emit_vex_canonical(*original);
+    const X86Instruction canonical = x86_vex_canonical(*original);
     const X86Instruction* record = &canonical;
     uint64_t read = 0;
     uint64_t written = 0;
