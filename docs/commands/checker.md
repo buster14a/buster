@@ -979,7 +979,10 @@ out).
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
 run, pair each case with data of their own, or pick cases by index (#2053 lists
-them).
+them). Outside the checker, Tier 1's mask IR (`tests/tier1/masks`,
+[the selection guide](../tier1-selection.md)) and the IR parser's canonical
+fixtures (`tests/ir/catalog.tsv`, [the IR tools guide](ir-tools.md)) are runtime
+data too.
 
 ## System-header token bitmap and MSan (#1610)
 

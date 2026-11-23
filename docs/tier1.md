@@ -189,7 +189,8 @@ vector or mask value: [the loop motion guide](ir-loop-motion.md#the-pressure-pol
 policy: [the value numbering guide](ir-value-numbering.md#the-pressure-policy-2719)),
 `gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
 `all`. The default is SCCP, dead-code removal, CFG cleanup, its merges, the
-inlining, `vectors` and `tables`. The restricted
+inlining, `vectors`, `tables` and `vectorize` (#2743's stage 4, [its
+guide](tier1-loop-vectorization.md#by-default-2743s-stage-4)). The restricted
 value numbering runs before promotion, `numbering` after the switches of
 constants; LICM runs after it, before the optimizer, which cleans up after it,
 then the loop vectorizer, then the unroller. Explicit `+gvn` or `+licm` runs
@@ -207,7 +208,7 @@ SROA, as with the solver, a candidate compiles from its own pipeline.
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
 (slots), `gvn_removed`, `loads_forwarded` (value numbering with memory's) and
 `value_tables` (the switches whose jump tables hold their constants);
-with `vectorize`, a `tier1-vectorize` line gives the loops examined (each back
+with `vectorize`, where it examined a loop, a `tier1-vectorize` line gives the loops examined (each back
 edge's header once, outer loops included), those vectorized by their widest
 vector (`bytes16`, `bytes32`, `bytes64`), their reductions and run-time overlap
 tests (`guards`), and the refused loops by reason (`refused.shape` to
@@ -1073,8 +1074,9 @@ clang -O2 at x86-64 and 17.50 at znver5 over the 19 loops clang vectorizes,
 with vectorization components of 2.18 and 9.36 against 1.41 and 1.64 for
 unrolling. Its explicit-vector probe leaves a separate 1.29 same-source
 back-end gap at znver5. It designs a data-parallel loop vectorizer over the existing vector
-IR, with exact scalar twins, run-time overlap guards and strict floating-point
-reductions left scalar. This is design only; no such pass runs in the pipeline.
+IR, with run-time overlap guards and strict floating-point reductions left
+scalar. `ir_vectorize_loops.c` implements it, and `--tier1` runs it by default
+([its results](tier1-loop-vectorization.md#by-default-2743s-stage-4)).
 
 ## #138's acceptance
 

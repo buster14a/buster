@@ -312,6 +312,7 @@ typedef enum CheckDiagnostic
     // attributed type ...", at the member's expression, or at an assignment to it "cannot assign to 'B::p' ...", worded
     // with its two notes by c_check_semantic_diagnostic.c (check_graph_counted_uses).
     CHECK_DIAG_COUNTED_INCOMPLETE,
+    CHECK_DIAG_RECOVERED_MEMBER,
 } CheckDiagnostic;
 
 #define BUSTER_CHECK_CONVERT_LVALUE 0x01u
@@ -2674,6 +2675,11 @@ static inline __attribute__((always_inline)) void check_action_member(TypeTable*
         if (member == 0)
         {
             check_action_diagnose(result, CHECK_DIAG_MEMBER, 0);
+        }
+        else if (__builtin_expect((table->members.flags[member] & BUSTER_TYPE_MEMBER_INVALID) != 0, 0))
+        {
+            // The declaration already supplied the error. Poison uses without another diagnostic.
+            check_action_diagnose(result, CHECK_DIAG_RECOVERED_MEMBER, 0);
         }
         else
         {

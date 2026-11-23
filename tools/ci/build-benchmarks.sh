@@ -26,11 +26,12 @@ case "${1:-prepare}" in
     compiler)
         [ "$#" -eq 4 ]
         cd -- "$2"
-        if [ "$4" = true ]; then
-            ./build.sh shifts --config Release --jobs "${BUSTER_BUILD_JOBS:?}" "$3" main_unit_checker.c 0 1088 2112 3136
-        else
-            ./build.sh --config Release --jobs "${BUSTER_BUILD_JOBS:?}"
-        fi
+        case "$4" in
+            checker) ./build.sh shifts --checker-placements --config Release --jobs "${BUSTER_BUILD_JOBS:?}" "$3" main_unit_checker.c 0 16 32 48 ;;
+            legacy) ./build.sh shifts --config Release --jobs "${BUSTER_BUILD_JOBS:?}" "$3" main_unit_checker.c 0 1088 2112 3136 ;;
+            none) ./build.sh --config Release --jobs "${BUSTER_BUILD_JOBS:?}" ;;
+            *) exit 2 ;;
+        esac
         exit 0
         ;;
     oracle)
@@ -87,7 +88,6 @@ trap 'interrupted 129' HUP
 # Bash waits for the supervisor as a tracked job; the supervisor forwards cancellation and reaps its build groups.
 # Do not remove their worktree from a signal trap before the supervisor has finished.
 cc -std=c17 -O2 -Wall -Wextra -Werror "$root/tools/ci/build-budget.c" -o "$directory/build-budget"
-commands=(build bash "$script" compiler "$root" "$directory/head" "$AB_CHECKER")
 if [ "$base" = true ]; then
     if ! git cat-file -e "${AB_BASE_SHA}^{commit}" 2>/dev/null; then
         GIT_TERMINAL_PROMPT=0 timeout 60s git -c credential.helper= -c http.extraHeader= fetch \
@@ -95,7 +95,21 @@ if [ "$base" = true ]; then
     fi
     git worktree add --detach "$directory/base" "$AB_BASE_SHA"
     [ "$(git -C "$directory/base" rev-parse HEAD)" = "$AB_BASE_SHA" ]
-    commands+=(::: build bash "$script" compiler "$directory/base" "$directory/main" "$AB_CHECKER")
+fi
+placements=none
+if [ "$AB_CHECKER" = true ]; then
+    if grep -q '^#   \./build\.sh shifts \[--checker-placements\]' "$root/build.sh" &&
+       grep -q '^#   \./build\.sh shifts \[--checker-placements\]' "$directory/base/build.sh"; then
+        placements=checker
+        shifts=(0 16 32 48)
+    else
+        placements=legacy
+        shifts=(0 1088 2112 3136)
+    fi
+fi
+commands=(build bash "$script" compiler "$root" "$directory/head" "$placements")
+if [ "$base" = true ]; then
+    commands+=(::: build bash "$script" compiler "$directory/base" "$directory/main" "$placements")
 fi
 oracle="$directory/preprocessor-pragma-oracle"
 commands+=(::: single bash "$script" oracle "$oracle")
@@ -108,7 +122,7 @@ test build/compiler -ef "$compiler"
 if [ "$base" = true ]; then test -x "$directory/base/build/compiler"; fi
 if [ "$AB_CHECKER" = true ]; then
     for side in main head; do
-        for shift in 0 1088 2112 3136; do test -x "$directory/$side/compiler-$shift"; done
+        for shift in "${shifts[@]}"; do test -x "$directory/$side/compiler-$shift"; done
     done
 fi
 clang -dM -E -march="$BUSTER_HOST_ARCH" -fwrapv -funsigned-char -x c /dev/null > build/predefines.h
@@ -116,4 +130,5 @@ clang -dM -E -march="$BUSTER_HOST_ARCH" -fwrapv -funsigned-char -x c /dev/null >
     printf 'BUSTER_COMPILER=%s\n' "$compiler"
     printf 'BUSTER_PPF_PRAGMA_ORACLE=%s\n' "$oracle"
     printf 'BUSTER_BENCHMARK_BUILDS=%s\n' "$directory"
+    printf 'BUSTER_CHECKER_PLACEMENTS=%s\n' "$placements"
 } >> "$GITHUB_ENV"

@@ -41,7 +41,11 @@ LLVM object/DWARF tools and lld. Each row also builds the clang server that
 the semantic driver's checks send the oracle clang's runs to (#2071), from the
 release's static clang and LLVM archives: each item of the `native` row, and a
 vector configuration's builder, once for its items (see "Shared row products").
-The plain rows' `--differential` compares every served run with a child's.
+The native plain row's `--differential` compares every in-process and served
+run with a child's. It alone runs it (the owner's choice on 2026-11-23,
+#2071), on every merge-queue candidate, nightly run and full dispatch. The
+vector row's plain configuration, a pull request's row, runs those commands
+in-process and served alone, as the sanitizer configurations do.
 The installer runs only on disposable hosted runners. GCC remains the `cc`
 oracle for fixtures that require GNU C extensions.
 
@@ -478,12 +482,19 @@ call of the row workflow, whose `sanitizer` lists the configurations
 build can't run on a hosted CPU without it, so the native plain row draws its
 runners as the vector row does (the owner's choice on 2026-11-17): the same
 probe, items `n1` to `n4` (the `none` configuration), 3 candidates per item in
-the first draw, collectors and a verdict. It differs in two ways. Each of its
+the first draw, collectors and a verdict. It differs in three ways. Each of its
 items builds its own compiler for the CPU it drew, as its shards did, so it
 has no shared product (`vector-draw.sh take` makes no native item a builder,
-and its evidence records the compiler it built). And its artifacts are named
+and its evidence records the compiler it built). Its artifacts are named
 by the row (`native-OOPT-ATTEMPT-...`, the vector row's `vector-OOPT-...`), so
-the two rows' draws in one run never meet. Its verdict job, `Tests on Ubuntu
+the two rows' draws in one run never meet. And its items alone run the
+converted oracle commands with `--differential` (`BUSTER_DRIVER_DIFFERENTIAL`,
+#2071): the semantic driver's parts, the preprocessor's and the parser's
+`--clang` commands also run each in-process and served run as a child, and
+fail on a difference. Every plain row ran it until 2026-11-23, when the owner
+chose this row: a merge-queue candidate ran it twice, on this row and on the
+vector pool's plain configuration, and a pull request's vector row ran it too,
+which doubled those commands' cost there. Its verdict job, `Tests on Ubuntu
 26.04 (native, none, O3) / Vector row verdict (Clang 23, none, O3)`, is the
 native row's credit: `tools/ci/nightly.c`'s plain verdict and the merge queue's
 coverage read it, as they read an older run's native shards.
@@ -560,8 +571,9 @@ the item the candidate holds:
    and takes the item it names: its configuration (`BUSTER_SANITIZER`), its
    shard (`BUSTER_SHARD`) of its configuration's items (`BUSTER_VECTOR_SHARDS`)
    and whether it builds (`BUSTER_VECTOR_BUILDER`, item 1), which a step checks
-   before setting the configuration's linker and differential checks as the
-   workflow's environment gives a row of that sanitizer. The take prints
+   before setting the configuration's linker as the workflow's environment
+   gives a row of that sanitizer, and the differential checks, which only the
+   native row's items run (see "The native row"). The take prints
    `Vector item ITEM: SANITIZER, shard K of N`, which `tools/ci/costs.c` reads
    for the row of the candidate's log. The candidate then gets its compiler
    (below) and runs its shard as any shard does, after the confirmation below.
@@ -1285,7 +1297,16 @@ its window independently after taking the shared lock.
 States move between `not-required`, `complete`, `in-flight`, `ready`,
 `preparing` and `needs-preparation`; `blocked-hosted`, `blocked-native` and
 `failed` (three failed or interrupted measurements) are reported and skipped,
-and never block later states. A rerun keeps its run's ID and takes the next
+and never block later states. A state is `blocked-hosted` when its plain rows
+fail, or after three of the coordinator's preparations of it (its `defer`
+requests) end with no plain verdict: a job the rows need failed, or they were
+cancelled or skipped. The report links the latest such preparation. Without that
+limit a state whose own revision can't run its plain rows took every
+preparation of every evening: #2308's merge fails its selector's self-test
+(`rerun --self-test`), and from 11 to 23 November the prepare job dispatched it
+every five minutes until the cycle's 40 were spent, 478 runs in all. A later
+conclusive pass of the plain rows, such as a person's `full` dispatch of that
+commit, still makes the state ready. A rerun keeps its run's ID and takes the next
 attempt. So a state's hosted and native verdicts are its latest run's latest
 attempt's, whatever order the ledger holds them in. Each failed attempt counts
 toward the three, since each one occupied the 9700X. The cycle's report counts

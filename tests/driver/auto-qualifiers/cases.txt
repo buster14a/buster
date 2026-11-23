@@ -17,3 +17,7 @@ valid 0 0 0 0
 constexpr-group 0 0 0 1
 deduced-mismatch 0 9 0 0
 deduced-mismatch-auto 0 3 0 1
+nullability-deduced 0 9 1 0
+nullability-comma 1 1 0 0
+nullability-pointers 0 0 0 0
+nullability-recovery 0 4 0 0

@@ -3173,18 +3173,48 @@ static uint64_t object_test_section_named(const ObjectView* view, const char* na
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, const ObjectView* b, uint64_t j)
 {
-    return a->sections[i].sh_type == b->sections[j].sh_type &&
-           object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
-           object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j));
+    const Elf64_Shdr* a_section = &a->sections[i];
+    const Elf64_Shdr* b_section = &b->sections[j];
+    const uint64_t a_data = a_section->sh_type == SHT_RELA ? a_section->sh_info : i;
+    const uint64_t b_data = b_section->sh_type == SHT_RELA ? b_section->sh_info : j;
+    const bool a_ordered = a_data < a->section_count && (a->sections[a_data].sh_flags & SHF_LINK_ORDER) != 0;
+    const bool b_ordered = b_data < b->section_count && (b->sections[b_data].sh_flags & SHF_LINK_ORDER) != 0;
+    bool same = a_section->sh_type == b_section->sh_type &&
+                object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
+                object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j)) &&
+                a_ordered == b_ordered;
+    if (same && a_ordered)
+    {
+        const uint32_t a_link = a->sections[a_data].sh_link;
+        const uint32_t b_link = b->sections[b_data].sh_link;
+        same = a_link != 0 && b_link != 0 && a_link < a->section_count && b_link < b->section_count &&
+               a->sections[a_link].sh_type == b->sections[b_link].sh_type &&
+               object_test_same_string(object_view_section_name(a, a_link), object_view_section_name(b, b_link)) &&
+               object_test_same_string(object_test_section_group(a, a_link), object_test_section_group(b, b_link));
+    }
+    return same;
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static uint64_t object_test_matching_section(const ObjectView* view, const ObjectView* source, uint64_t index)
 {
+    // Repeated linked-order names can even refer to the same code section. Pair their occurrences in object order.
+    const Elf64_Shdr* section = &source->sections[index];
+    const uint64_t data = section->sh_type == SHT_RELA ? section->sh_info : index;
+    const bool ordered = data < source->section_count && (source->sections[data].sh_flags & SHF_LINK_ORDER) != 0;
+    uint64_t occurrence = 0;
+    for (uint64_t i = 1; ordered && i < index; i += 1)
+    {
+        occurrence += object_test_same_section_identity(source, i, source, index);
+    }
     uint64_t result = 0;
     for (uint64_t i = 1; result == 0 && i < view->section_count; i += 1)
     {
-        result = object_test_same_section_identity(view, i, source, index) ? i : 0;
+        if (object_test_same_section_identity(view, i, source, index))
+        {
+            result = occurrence == 0 ? i : 0;
+            occurrence -= occurrence != 0;
+        }
     }
     return result;
 }

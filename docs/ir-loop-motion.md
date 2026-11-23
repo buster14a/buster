@@ -26,14 +26,23 @@ loop.
 `IrLicmOptions.vectors` (#2781) restricts that motion to vector- and mask-typed
 values and the movable operands they need. Tier 1 enables it by default for a
 function that has such values, unless `+licm` requests unrestricted motion. A
-loop with no safe vector or mask value is skipped. The other loops take the
+loop with no safe vector or mask value is skipped, and so is a loop that holds
+a call (#2743): every vector and mask register is caller-saved, so a value
+moved out of such a loop is stored and reloaded around each of its calls.
+Before that rule, with the loop vectorizer on by default, unit inlining copied
+a vectorized loop into `sqlite3VdbeExec`, and its two splats moved out of the
+interpreter's loop: at znver5 the function grew from 87 KB to 131 KB, with
+1,788 more stores around calls (#2831); with it, 90 KB, and nothing moves
+there. The other loops take the
 forward walk, then a backward operand-closure walk over their own blocks.
 `IrLicmOptions.whole` retains the original whole-function algorithm, below, as
 the exact test oracle of both policies' walks. If nothing moves, the result
 borrows the input function and writes no output. `test-ir-licm` compares the
 walks with it on SIMD, width-change, permute2 and nested-loop fixtures, checks
 their interpreted behavior, and checks that scalar-only loops are skipped without
-an output rewrite.
+an output rewrite; on nested loops with a call in the outer loop and in the
+inner one, it checks where the vector ends up (the inner preheader, and its
+own block) and the loops passed over for their calls.
 Candidate operations are total, pure computations: integer wrapping
 arithmetic and bit operations, comparisons, selects, exact conversions,
 floating sign negation, constants, parameters and address calculations.
@@ -211,7 +220,7 @@ instructions), and the instructions show why: those loops hold calls, or no
 invariant work. The kernels gain 6.2% of their cycles, and the compile costs
 3.4% more: the preparation's verification, use lists and dominator tree of
 every function with a loop. #2719 asks for gains on speedtest1 and Lua before
-a pass is on by default, as `+vectorize`, `+unroll` and `+storemotion` are
+a pass is on by default, as `+unroll` and `+storemotion` are
 measured, so `hoist` stays off.
 
 The implementation is original. LLVM's [loop terminology](

@@ -745,8 +745,8 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         }
         stage = outcome.stage;
     }
-    // --tier1-passes=+vectorize (#2743's measurement): the loop vectorizer, in steps[10], after LICM and before the
-    // optimizer, whose SCCP, dead-code removal, CFG cleanup and final verification take its result (its scalar loops
+    // The loop vectorizer (#2743, on by default: --tier1-passes=-vectorize turns it off), in steps[10], after LICM and
+    // before the optimizer, whose SCCP, dead-code removal, CFG cleanup and final verification take its result (its scalar loops
     // and its vector ones alike). A function without a loop it takes goes on as it was, borrowed.
     if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 && !input->vectorize_volatile)
     {
@@ -1433,8 +1433,8 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
             report->schedule_moved, report->sunk, report->folded, report->removed_instructions, report->removed_blocks, report->merged_blocks, report->licm_moved,
             report->sroa_split, report->gvn_removed, report->loads_forwarded, report->value_tables, report->dead_functions);
-    // The loop vectorizer's (--tier1-passes=+vectorize, #2743): a line of its own, so that the line above keeps its
-    // fields.
+    // The loop vectorizer's (#2743, on by default), where it examined a loop: a line of its own, so that the line above
+    // keeps its fields.
     static const char* const refusals[IR_VECTORIZE_REFUSALS] = { "shape", "induction", "phi", "operation", "address", "use", "dependence", "width" };
     if (report->vectorize[0] != 0)
     {

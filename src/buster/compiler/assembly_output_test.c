@@ -1066,6 +1066,41 @@ static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, co
     return passed;
 }
 
+// Exercise multiple same-name table sections, including two associated with .text and one with named code. The
+// comparison checks their sh_link and relocations, as well as the NOP bytes and the function symbols in their sleds.
+static void assembly_test_patchable(AssemblyTest* test)
+{
+    static const char fixture[] =
+        "__attribute__((noinline, patchable_function_entry(18,4))) int first(int x) { return x + 3; }\n"
+        "__attribute__((noinline, patchable_function_entry(6,6), section(\".text.patchable\"))) int second(int x) { return first(x) + 1; }\n"
+        "__attribute__((noinline, patchable_function_entry(3))) int third(int x) { return second(x) * 2; }\n"
+        "__attribute__((noinline, patchable_function_entry(7,1,\".custom.patch\"))) static int fourth(int x) { return third(x) + 2; }\n"
+        "int main(int argc, char** argv) { return fourth(argc) != 12; }\n";
+    char compiler[PATH_MAX];
+    const ssize_t length = readlink("/proc/self/exe", compiler, sizeof(compiler) - 1);
+    compiler[length > 0 ? length : 0] = 0;
+    char source[PATH_MAX];
+    char expected[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/patchable-input.c", test->directory);
+    snprintf(expected, sizeof(expected), "%s/patchable-expected.txt", test->directory);
+    const bool ready = length > 0 && object_write_file(source, (const uint8_t*)fixture, sizeof(fixture) - 1) == OBJECT_ERROR_NONE &&
+                       object_write_file(expected, (const uint8_t*)"", 0) == OBJECT_ERROR_NONE;
+    assembly_test_check(test, ready, "write patchable function entry fixture", 0);
+    for (uint32_t tier = 0; ready && tier < 2; tier += 1)
+    {
+        char name[32];
+        char error[512] = { 0 };
+        snprintf(name, sizeof(name), "patchable-tier%u", tier);
+        const bool same = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, error, sizeof(error));
+        assembly_test_check(test, same, "patchable entry tables, code and symbols round-trip through GNU as", error);
+    }
+    if (!test->keep)
+    {
+        unlink(source);
+        unlink(expected);
+    }
+}
+
 // --compare SOURCE: -S of a C source by this executable (`compiler`), with `tier1` or not, assembled by GNU as into -c's
 // object, but for the form contract's normalizations; no link. For sources larger than the c-testsuite's programs.
 static bool assembly_test_compare(AssemblyTest* test, const char* compiler, const char* source, const char* name, bool tier1, char* error, uint64_t error_size)
@@ -1235,6 +1270,7 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_refusal(&test, ASSEMBLY_TEST_BND_CALL, ASSEMBLY_UNSUPPORTED, "GNU as encodes otherwise");
         if (test.cross_check)
         {
+            assembly_test_patchable(&test);
             assembly_test_forms(&test, 2);
         }
         if (c_testsuite != 0)
