@@ -11416,6 +11416,22 @@ static void tier0_positions_scalar(const Tier0Function* function, Tier0Entries* 
     entries->positions[function->count] = (uint32_t)position;
 }
 
+// The next of the columns one push holds, `bytes` of them at `*offset` from its start, which then moves past them; 0 if
+// the push failed (base 0). A body's columns take a push or two this way, not one each: each push cost Tier 0 about 10
+// cycles, about 250 a body in all (#2874).
+static void* tier0_column(uint8_t* base, uint64_t* offset, uint64_t bytes)
+{
+    void* column = base != 0 ? base + *offset : 0;
+    *offset += bytes;
+    return column;
+}
+
+// `bytes` rounded up to a cache line: where the next column of a push starts.
+static uint64_t tier0_column_bytes(uint64_t bytes)
+{
+    return (bytes + 63) & ~(uint64_t)63;
+}
+
 // The output's columns, pushed from `output`: room for the records and, past them, the vector expansion's last store;
 // and the entries' first records (`entries` of them and the epilogue's) when asked for (`positions` not null).
 static bool tier0_push_output(Tier0Code* code, Arena* output, uint64_t records, Tier0Counts counts, const uint32_t* positions, uint32_t entries)
@@ -11425,13 +11441,21 @@ static bool tier0_push_output(Tier0Code* code, Arena* output, uint64_t records, 
     bool room = records <= UINT32_MAX - BUSTER_TIER0_TEMPLATE_RECORDS;
     if (room)
     {
-        code->records = BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, records + BUSTER_TIER0_TEMPLATE_RECORDS);
+        // The columns in one push (tier0_column), each 8-byte aligned (LinkReference's addend).
+        const uint64_t record_bytes = (records + BUSTER_TIER0_TEMPLATE_RECORDS) * sizeof(X86Instruction);
         // #892: 8 past the last branch — the vector emitter's compressed stores write whole vectors.
-        code->branches = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 8);
-        code->targets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)counts.branches + 8);
-        code->references = BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)counts.references + 1);
+        const uint64_t branch_bytes = ((((uint64_t)counts.branches + 8) * sizeof(uint32_t)) + 7) & ~(uint64_t)7;
+        const uint64_t reference_bytes = ((uint64_t)counts.references + 1) * sizeof(LinkReference);
+        const uint64_t entry_bytes = positions != 0 ? ((uint64_t)entries + 1) * sizeof(uint32_t) : 0;
+        _Static_assert(sizeof(X86Instruction) % 8 == 0 && sizeof(LinkReference) % 8 == 0 && _Alignof(LinkReference) <= 8, "each column 8-byte aligned in the push");
+        uint8_t* base = arena_push(output, record_bytes + 2 * branch_bytes + reference_bytes + entry_bytes, 64);
+        uint64_t offset = 0;
+        code->records = tier0_column(base, &offset, record_bytes);
+        code->branches = tier0_column(base, &offset, branch_bytes);
+        code->targets = tier0_column(base, &offset, branch_bytes);
+        code->references = tier0_column(base, &offset, reference_bytes);
         // The entries' positions are final once measured: emission writes each entry's records from its position.
-        code->entry_records = positions != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)entries + 1) : 0;
+        code->entry_records = positions != 0 ? tier0_column(base, &offset, entry_bytes) : 0;
         code->count = (uint32_t)records;
         code->entry_count = positions != 0 ? entries : 0;
         room = code->records != 0 && code->branches != 0 && code->targets != 0 && code->references != 0 && (positions == 0 || code->entry_records != 0);
@@ -11608,19 +11632,27 @@ static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* e
 static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t count)
 {
     const uint64_t padded = (uint64_t)count + 64;
-    entries->key_kinds = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries->key_classes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries->variants = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries->absorbed = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries->integer_effects = BUSTER_ARENA_PUSH_ARRAY(scratch, int8_t, padded);
-    entries->floating_effects = BUSTER_ARENA_PUSH_ARRAY(scratch, int8_t, padded);
-    entries->depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries->floating_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries->templates = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, padded);
-    entries->lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
-    entries->positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
-    entries->words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, padded);
-    entries->deferred_entries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
+    // The thirteen columns in one push, each from a cache line: eight of bytes, the templates' 16 bits, three of 32 bits
+    // and the words.
+    const uint64_t bytes = tier0_column_bytes(padded);
+    const uint64_t halves = tier0_column_bytes(2 * padded);
+    const uint64_t dwords = tier0_column_bytes(4 * padded);
+    const uint64_t qwords = tier0_column_bytes(8 * padded);
+    uint8_t* base = arena_push(scratch, 8 * bytes + halves + 3 * dwords + qwords, 64);
+    uint64_t offset = 0;
+    entries->key_kinds = tier0_column(base, &offset, bytes);
+    entries->key_classes = tier0_column(base, &offset, bytes);
+    entries->variants = tier0_column(base, &offset, bytes);
+    entries->absorbed = tier0_column(base, &offset, bytes);
+    entries->integer_effects = tier0_column(base, &offset, bytes);
+    entries->floating_effects = tier0_column(base, &offset, bytes);
+    entries->depths = tier0_column(base, &offset, bytes);
+    entries->floating_depths = tier0_column(base, &offset, bytes);
+    entries->templates = tier0_column(base, &offset, halves);
+    entries->lengths = tier0_column(base, &offset, dwords);
+    entries->positions = tier0_column(base, &offset, dwords);
+    entries->deferred_entries = tier0_column(base, &offset, dwords);
+    entries->words = tier0_column(base, &offset, qwords);
     entries->deferred_count = 0;
     entries->deferred_references = 0;
     entries->deep = 0;
@@ -12005,8 +12037,13 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         code->node = unsupported;
     }
     const uint32_t locals = function->local_count;
-    Tier0Home* homes = BUSTER_ARENA_PUSH_ARRAY(scratch, Tier0Home, locals + 1);
-    uint32_t* references = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, locals + 1);
+    // The homes and the references' counts in one push (tier0_column).
+    const uint64_t home_bytes = tier0_column_bytes(((uint64_t)locals + 1) * sizeof(Tier0Home));
+    const uint64_t count_bytes = tier0_column_bytes(((uint64_t)locals + 1) * sizeof(uint32_t));
+    uint8_t* local_columns = arena_push(scratch, home_bytes + count_bytes, 64);
+    uint64_t local_offset = 0;
+    Tier0Home* homes = tier0_column(local_columns, &local_offset, home_bytes);
+    uint32_t* references = tier0_column(local_columns, &local_offset, count_bytes);
     uint32_t order[2 * BUSTER_TIER0_HOME_CANDIDATES];
     if (error == TIER0_OK && (homes == 0 || references == 0))
     {
@@ -12062,16 +12099,22 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
             tier0_emit_epilogue(function, &frame, &counter);
             epilogue = counter.count;
         }
-        // The requests' columns have room for the vector path's last compressed store of 8.
-        choices.records = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, counts.choices + 8);
-        choices.rows = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
-        choices.values = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, counts.choices + 8);
-        choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
-        choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
-        // The vector path's deferred entries' references, before emission merges them with the templates' (#2874).
-        entries->deferred_references = BUSTER_VECTOR_PATH(vector) ? BUSTER_ARENA_PUSH_ARRAY(scratch, LinkReference, (uint64_t)counts.references + 1) : 0;
-        const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0 &&
-                          (!BUSTER_VECTOR_PATH(vector) || entries->deferred_references != 0);
+        // The requests' columns, with room for the vector path's last compressed store of 8, and the vector path's deferred
+        // entries' references, before emission merges them with the templates' (#2874), in one push (tier0_column).
+        const uint64_t requests = (uint64_t)counts.choices + 8;
+        const uint64_t request_dwords = tier0_column_bytes(4 * requests);
+        const uint64_t request_halves = tier0_column_bytes(2 * requests);
+        const uint64_t request_qwords = tier0_column_bytes(8 * requests);
+        const uint64_t side_bytes = BUSTER_VECTOR_PATH(vector) ? tier0_column_bytes(((uint64_t)counts.references + 1) * sizeof(LinkReference)) : 0;
+        uint8_t* request_columns = arena_push(scratch, request_dwords + 3 * request_halves + request_qwords + side_bytes, 64);
+        uint64_t request_offset = 0;
+        choices.records = tier0_column(request_columns, &request_offset, request_dwords);
+        choices.rows = tier0_column(request_columns, &request_offset, request_halves);
+        choices.values = tier0_column(request_columns, &request_offset, request_qwords);
+        choices.contexts = tier0_column(request_columns, &request_offset, request_halves);
+        choices.forms = tier0_column(request_columns, &request_offset, request_halves);
+        entries->deferred_references = BUSTER_VECTOR_PATH(vector) ? tier0_column(request_columns, &request_offset, side_bytes) : 0;
+        const bool room = request_columns != 0;
         if (!room || !tier0_push_output(code, output, entries->record_count + epilogue, counts, function->entry_records ? entries->positions : 0,
                                         function->count))
         {
@@ -15209,8 +15252,9 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
     // asm body's (#1839) come after the templates', which the sort below puts in order, as a deep entry's.
     if (!deep)
     {
-        LinkReference* side = entries->deferred_references;
+        // With no template's reference (most functions), they go in place, with nothing to merge.
         const uint32_t template_references = writer.reference_count;
+        LinkReference* side = template_references != 0 ? entries->deferred_references : links;
         writer.references = side;
         writer.reference_count = 0;
         for (uint32_t k = 0; k < entries->deferred_count; k += 1)
@@ -15232,7 +15276,7 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
         const uint32_t deferred_references = writer.reference_count;
         uint32_t from_templates = template_references;
         uint32_t from_side = deferred_references;
-        for (uint32_t at = template_references + deferred_references; from_side > 0; at -= 1)
+        for (uint32_t at = template_references + deferred_references; side != links && from_side > 0; at -= 1)
         {
             const bool template_last = from_templates > 0 && links[from_templates - 1].instruction > side[from_side - 1].instruction;
             links[at - 1] = template_last ? links[from_templates - 1] : side[from_side - 1];
