@@ -171,6 +171,40 @@ static __attribute__((noinline)) void check_test_body_binding_exit_points(CheckT
             }
         }
     }
+    // A file-scope activation inside a body other than at its opening (a reader's mistake): the body's slice can't hold
+    // it, so neither planner gives the body a span.
+    arena_pop_to(&storage, 0);
+    arena_pop_to(&scratch, 0);
+    CBindings late;
+    bool built = ready && c_bindings_initialize(&late, &storage, 6, 32);
+    built = built && c_bindings_declare(&late, C_BINDING_ORDINARY, 3, C_BINDING_FUNCTION, 2, 2, 0) != 0 &&
+            c_bindings_declare(&late, C_BINDING_ORDINARY, 2, C_BINDING_OBJECT, 3, 3, 1) != 0 &&
+            c_bindings_declare(&late, C_BINDING_ORDINARY, 4, C_BINDING_OBJECT, 5, 5, 0) != 0 &&
+            c_bindings_use(&late, C_BINDING_ORDINARY, 2, 6, 6) != 0 && c_bindings_restore(&late, 1, 8) && c_bindings_restore(&late, 0, 8);
+    CEnvironment late_file;
+    built = built && c_environment_build(&late_file, &late, &storage, &scratch);
+    check_test_expect(test, built, "body late file activation trace construction");
+    if (built)
+    {
+        CBodyRange body =
+        {
+            .begin = 2,
+            .end = 8,
+        };
+        const CheckEnvironment environment =
+        {
+            .bindings = &late,
+            .file = late_file,
+            .bodies = &body,
+            .body_count = 1,
+            .token_count = 8,
+            .valid = true,
+        };
+        CBodyBindingSpan span;
+        uint32_t maximum = UINT32_MAX;
+        check_test_expect(test, !c_body_bindings_spans(&span, 1, &environment, &maximum) && !c_body_bindings_span(&span, &environment, 0),
+                          "a body span accepted a file-scope activation past the body's opening");
+    }
     arena_release(&output);
     arena_release(&scratch);
     arena_release(&storage);
@@ -370,6 +404,20 @@ static void check_test_body_binding_environment(CheckTest* test, const CheckEnvi
                 preceding_file += source->operation[event] == C_BINDING_DECLARE && source->depth[event] == 0;
             }
             check_test_expect(test, scalar[slot].base == preceding_file, "body undo base differs from independently counted preceding file activations");
+            // The span's uses and declarations, counted again an event at a time, and its events: the body's, from its first
+            // event at or after its opening to its last restore that keeps the file's prefix.
+            uint32_t uses = 0;
+            uint32_t declarations = 0;
+            for (uint32_t event = vector[slot].begin; event < vector[slot].end; event += 1)
+            {
+                uses += source->operation[event] == C_BINDING_USE;
+                declarations += source->operation[event] == C_BINDING_DECLARE;
+            }
+            const CBodyRange body = environment->bodies[slot];
+            const bool first = vector[slot].begin == 0 || source->point[vector[slot].begin - 1] < body.begin;
+            const bool started = vector[slot].begin == source->count || source->point[vector[slot].begin] >= body.begin;
+            check_test_expect(test, vector[slot].uses == uses && vector[slot].declarations == declarations && vector[slot].slot == slot && first && started,
+                              "body span's counts differ from its events counted one at a time");
         }
     }
     CBodyBindingSpan invalid;

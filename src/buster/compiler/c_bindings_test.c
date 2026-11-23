@@ -226,6 +226,7 @@ static void c_binding_test_sort_edges(CBindingTest* test)
     {
         uint64_t twin[128];
         uint64_t twin_temporary[128];
+        uint64_t original[128];
         for (uint32_t length = 0; length <= 96; length += 1)
         {
             uint64_t* keys = (uint64_t*)(mapping + page) - length;
@@ -252,14 +253,19 @@ static void c_binding_test_sort_edges(CBindingTest* test)
                     varying |= key ^ first;
                     keys[i] = ((uint64_t)key << 32) | i;
                     twin[i] = keys[i];
+                    original[i] = keys[i];
                 }
                 const uint64_t* sorted = c_bindings_sort(keys, temporary, length, true, varying);
                 c_bindings_sort(twin, twin_temporary, length, false, UINT32_MAX);
                 c_binding_test_check(test, sorted == keys || sorted == temporary, "sort returned an unowned buffer");
                 c_binding_test_check(test, memcmp(sorted, twin, (uint64_t)length * 8) == 0, "guarded sort differs from scalar twin");
-                for (uint32_t i = 1; i < length; i += 1)
+                // Every key came in at the position its low half names (twin holds them as they came in), and they come
+                // out strictly ascending: a permutation, sorted by the high half, stable among equal ones.
+                for (uint32_t i = 0; i < length; i += 1)
                 {
-                    c_binding_test_check(test, sorted[i - 1] < sorted[i], "guarded sort lost stable order");
+                    const uint32_t position = (uint32_t)sorted[i];
+                    c_binding_test_check(test, position < length && original[position] == sorted[i], "guarded sort lost or invented a key");
+                    c_binding_test_check(test, i == 0 || sorted[i - 1] < sorted[i], "guarded sort lost stable order");
                 }
             }
         }
