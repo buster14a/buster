@@ -1053,7 +1053,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     }
     const bool symbols_added = valid;
     // Every symbol of the program's exists: the runtime joins now, before the program's atoms.
-    if (valid && !bind_begin(binding->bind, link, binding->runtime, binding->path, bytes, count, binding->arena))
+    if (valid && !check_program_bind_begin(binding, link, bytes, count))
     {
         const NameId name = binding->bind->name;
         if (name != 0 && name < link->names.count)
@@ -1769,7 +1769,7 @@ static void check_units_merge_lane(void* argument)
         }
         merge->symbols_added = merge->valid;
         CheckProgramBinding* binding = merge->binding;
-        if (merge->valid && !bind_begin(binding->bind, link, binding->runtime, binding->path, merge->bytes, count, binding->arena))
+        if (merge->valid && !check_program_bind_begin(binding, link, merge->bytes, count))
         {
             const NameId name = binding->bind->name;
             if (name != 0 && name < link->names.count)

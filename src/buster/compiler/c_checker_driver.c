@@ -11410,6 +11410,9 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             .bind = &bind,
             .path = BUSTER_SCALAR_PATH(scalar) ? BIND_PATH_EXACT : BIND_PATH_VECTOR,
             .arena = &arena,
+            // One link against the runtime just opened: a snapshot's atoms' bytes are borrowed, and the write below
+            // stages the chunks that hold them (#2546).
+            .borrow = true,
             .data_objects = data != NULL ? data->objects : NULL,
             .data_count = data != NULL ? data->count : 0,
         };
@@ -11655,6 +11658,8 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     .debug = debug ? &dwarf.attach : NULL,
                     .symbols = selected != NULL ? &symbols : NULL,
                     .exact = BUSTER_SCALAR_PATH(scalar),
+                    .borrowed = bind.borrow ? runtime.snapshot : NULL,
+                    .borrowed_bytes = bind.borrow ? runtime.snapshot_bytes : 0,
                 },
             };
             // Several units' executable is written on their lanes (`lanes`' count), a round of their flow on those the

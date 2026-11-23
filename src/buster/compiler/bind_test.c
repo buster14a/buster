@@ -195,8 +195,8 @@ static bool bind_test_dirty_arena(Arena* arena, uint64_t bytes)
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // Generates the program with room for the runtime, joins the runtime's first objects after its symbols, adds its atoms,
 // and binds the rest, numbering the runtime's units after the program's; with `dirty`, over binding's arena dirtied that
-// far (bind_test_dirty_arena).
-static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path, uint64_t dirty)
+// far (bind_test_dirty_arena); with `borrow`, by bind_begin_borrowed.
+static bool bind_test_program_with(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path, uint64_t dirty, bool borrow)
 {
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
@@ -205,12 +205,18 @@ static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runt
     test->bind = (Bind){ 0 };
     bool result = link_program_generate_begin(&test->program, options, extra, name_bytes, atom_bytes) && test->arena.base != 0;
     result = result && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
-    result = result && bind_begin(&test->bind, &test->program.link, runtime, path, &test->program.bytes, options.units, &test->arena);
+    result = result && (borrow ? bind_begin_borrowed(&test->bind, &test->program.link, runtime, path, &test->program.bytes, options.units, &test->arena) :
+                                 bind_begin(&test->bind, &test->program.link, runtime, path, &test->program.bytes, options.units, &test->arena));
     result = result && link_program_generate_atoms(&test->program);
     result = result && bind_end(&test->bind, &test->program.link);
     result = result && link_program_generate_end(&test->program);
     test->bound = result;
     return result;
+}
+
+static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path, uint64_t dirty)
+{
+    return bind_test_program_with(test, runtime, options, path, dirty, false);
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC

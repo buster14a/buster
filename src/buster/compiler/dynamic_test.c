@@ -130,6 +130,9 @@ struct DynamicTestWrite
     bool starve;
     uint32_t starved_lane;
     uint64_t room;
+    // ExecutableOptions.borrowed: a loaded runtime's mapping that a borrowed binding's atoms point into, or null.
+    const uint8_t* borrowed;
+    uint64_t borrowed_bytes;
     bool succeeded;
 };
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
@@ -220,6 +223,8 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
         .entry = library ? 0 : dynamic_global(runtime, bind, "_start"),
         .dynamic = &dynamic,
         .exact = write->exact,
+        .borrowed = write->borrowed,
+        .borrowed_bytes = write->borrowed_bytes,
     };
     write->succeeded = false;
     const bool checked = prepared && dynamic_test_gcc_s_inputs(&dynamic, link, bind, runtime);

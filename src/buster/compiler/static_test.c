@@ -146,6 +146,8 @@ static bool static_test_write_with(DynamicTestWrite* write, Link* link, const Bi
         .dynamic = pie ? &dynamic : 0,
         .runtime = &inputs,
         .exact = write->exact,
+        .borrowed = write->borrowed,
+        .borrowed_bytes = write->borrowed_bytes,
     };
     write->succeeded = false;
     const bool ran = lane_run(lanes, dynamic_test_lane_main, write, 0);

@@ -41,9 +41,19 @@ struct CheckProgramBinding
     // as the bodies' and the helpers', for the program's definitions before their atoms join.
     const CheckDataObject* data_objects;
     uint32_t data_count;
+    // Whether the runtime's atoms' bytes are borrowed rather than copied (bind_begin_borrowed): the driver's, which
+    // binds once against the runtime it opened and writes the executable staged (ExecutableOptions.stage).
+    bool borrow;
     // When bind_begin fails about a name (Bind.name), its bytes, since a failed emission rolls its link back.
     char failed_name[256];
 };
+
+// bind_begin, or bind_begin_borrowed for a binding that borrows the runtime's bytes.
+static bool check_program_bind_begin(CheckProgramBinding* binding, Link* link, Arena* bytes, uint32_t unit_base)
+{
+    return binding->borrow ? bind_begin_borrowed(binding->bind, link, binding->runtime, binding->path, bytes, unit_base, binding->arena) :
+                             bind_begin(binding->bind, link, binding->runtime, binding->path, bytes, unit_base, binding->arena);
+}
 
 // A file-scope assembly label that names a C definition of the unit (#1848, check_program_emit_asm_symbols): clang's
 // assembler reports "symbol 'NAME' is already defined" without a source location as the module's definition is
@@ -5490,7 +5500,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         result->link.symbols.source[result->lowered.case_symbol_base + t] = BUSTER_LINK_SOURCE_PROGRAM;
     }
-    if (valid && binding != NULL && !bind_begin(binding->bind, &result->link, binding->runtime, binding->path, bytes, 1, binding->arena))
+    if (valid && binding != NULL && !check_program_bind_begin(binding, &result->link, bytes, 1))
     {
         const NameId name = binding->bind->name;
         if (name != 0 && name < result->link.names.count)
