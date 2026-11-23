@@ -80,11 +80,12 @@ struct that holds one. The table keeps the union's own row, which those take,
 and the code generator gives `abi_assign` and `abi_va_arg` the member's type
 (`check_lower_passed_as`; the checker guide's "Transparent unions (#147)").
 A union aligned or packed otherwise than its member has a slot of its own
-(`AbiTable.transparent`): `abi_assign_call` assigns the member's registers,
-and where clang has none for them the union's byval slot, or the member's
-alignment for a member in memory; past 16 bytes its locations in registers or
-eightbytes' slots carry the union's first 16 bytes (`BUSTER_ABI_FLAG_FIRST`,
-#1844).
+(`AbiTable.transparent`): the per-call kernel, `abi_assign_lanes`, assigns
+the member's registers (its eightbytes, a pair's two or a 16-byte vector's
+one), and where clang has none for them the union's byval slot, or the
+member's alignment for a member in memory; past 16 bytes every location of
+the member's own (registers, eightbytes' slots, or a pair's or vector's value
+slot) carries the union's first 16 bytes (`BUSTER_ABI_FLAG_FIRST`, #1844).
 
 `vector_bytes`, which `abi_initialize` takes, is the widest vector register
 the generated code may use: 16, 32 or 64 (no AVX, AVX, AVX-512F), clang's
@@ -2143,7 +2144,7 @@ are implemented; source-to-function construction is still an integration.
 | --- | --- |
 | Completed TypeTable rows → `abi_classify` / `abi_classify_all` | Type-indexed 16-byte class rows plus pass/storage/layout/result metadata. Member/element dependencies must be classified first; level discovery is part of the cost. |
 | Classified member rows → aggregate fold → `abi_finish` | Reuses shifted rows instead of recursive reclassification. LLVM-shape/storage exceptional rules still inspect member/type data; psABI classes alone are insufficient. |
-| Signature ranges/types → `abi_assign` → argument locations and `AbiCall` | Contiguous arguments and per-call boundaries, named/variadic counts and result metadata. Register demand is a segmented scan; a call that exceeds vector limits goes whole to the per-call fallback, `abi_assign_call`. |
+| Signature ranges/types → `abi_assign` → argument locations and `AbiCall` | Contiguous arguments and per-call boundaries, named/variadic counts and result metadata. Register demand is a segmented scan; a call the sums can't place goes whole to the per-call kernel, `abi_assign_lanes`, eight calls at a time. |
 | ABI metadata → Tier 0 generated-function inputs / frame planner / `abi_va_arg` | Consumers use locations, hidden result, outgoing bytes/alignment, variadic state and copy/storage rules; they must not reclassify from size alone. Cross-link tests are real machine-code consumers. |
 
 The ABI table is caller-owned arena storage tied to the same live TypeTable;

@@ -3297,8 +3297,8 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
 
 // Original diagnostic regressions kept as runtime data. Each catalog row is FILE, WARNINGS, ERRORS, NOTES, NAME,
 // separated by tabs; source files and the catalog live together below the checker fixture root.
-static void check_test_driver_warning_catalog(CheckTest* test, const char* clang, const char* executable, const char* directory,
-                                              const char* suite)
+static void check_test_driver_warning_catalog_language(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                       const char* suite, bool c23)
 {
     CheckTestFixtures storage = { .storage = arena_reserve(UINT64_C(1) << 26) };
     char path[PATH_MAX];
@@ -3321,7 +3321,7 @@ static void check_test_driver_warning_catalog(CheckTest* test, const char* clang
             {
                 char file[128];
                 char name[512];
-                CheckDriverDefaultWarningFixture fixture = { 0 };
+                CheckDriverDefaultWarningFixture fixture = { .c23 = c23 };
                 int consumed = 0;
                 valid = sscanf(cursor, "%127[^\t]\t%u\t%u\t%u\t%511[^\n]%n", file, &fixture.warnings, &fixture.errors,
                                &fixture.notes, name, &consumed) == 5 && cursor[consumed] == 0 && check_test_fixture_word(file, 127);
@@ -3346,6 +3346,12 @@ static void check_test_driver_warning_catalog(CheckTest* test, const char* clang
     }
     check_test_expect(test, valid && cases != 0, "runtime warning catalog is complete and nonempty");
     arena_release(&storage.storage);
+}
+
+static void check_test_driver_warning_catalog(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                              const char* suite)
+{
+    check_test_driver_warning_catalog_language(test, clang, executable, directory, suite, false);
 }
 
 // The default warnings' sweep, the driver's longest: a long sweep, one unit per fixture, which its caller doesn't deal.

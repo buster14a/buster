@@ -315,7 +315,8 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 // abi_vector_payload_bytes: the slot, its vector register's width and aligned to it, holds the payload alone, the C
 // type's bytes past it lost as they are in the register, #2113), and FIRST (the parts, or a STACK location's slots, are
 // those of the value's first 16 bytes alone, as a value of 16 bytes would have them: a transparent union of a slot of its
-// own past 16 bytes, its member's eightbytes, AbiTable.transparent, #1844; the union's bytes past them are padding).
+// own past 16 bytes, its member's eightbytes, pair or 16-byte vector, AbiTable.transparent, #1844; the union's bytes
+// past them are padding).
 #define BUSTER_ABI_LOCATION_IGNORE 0
 #define BUSTER_ABI_LOCATION_REGISTERS 1
 #define BUSTER_ABI_LOCATION_STACK 2
@@ -2177,8 +2178,9 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
 
 // A transparent union's first member's index where the union's stack slot differs from the member's (#1844,
 // AbiTable.transparent), or 0: a union whose own attribute aligns or packs it otherwise, of a member that passes in its
-// registers' eightbytes (a scalar or an aggregate, not a pair, a vector, or a value of another kind), which clang's
-// classification of the member puts in registers, or else gives the union's bytes their own byval slot; or of an
+// registers (a scalar or an aggregate of eightbytes, a pair's two general registers or a vector's xmm one, not a vector
+// wider than 16 bytes or an _Atomic value in memory), which clang's classification of the member puts in registers, or
+// else gives the union's bytes their own byval slot; or of an
 // aggregate member in memory, which clang passes as the member (getIndirectResult of it: byval at its alignment, the
 // union's bytes, or as an integer of its size where it has 8 bytes or less, aligned to 8 or less, and clang no general
 // register left). Another member keeps its refusal (check_lower_transparent_passed).
@@ -2189,7 +2191,7 @@ static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* tab
     {
         const uint32_t tag = table->types.index[index];
         const uint32_t member = table->tags.member_count[tag] != 0 ? table->members.type[table->tags.member_begin[tag]] >> BUSTER_TYPE_INDEX_SHIFT : 0;
-        const uint32_t refused = BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE |
+        const uint32_t refused = BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE |
                                  BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_END_MEMORY;
         const uint32_t pass = member != 0 && member < abi->capacity ? abi->pass[member] : 0;
         const bool in_memory = (pass & BUSTER_ABI_PASS_MEMORY) != 0;
@@ -3586,6 +3588,8 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, cons
         first_register = _mm512_mask_mov_epi64(first_register, late_general, next_general);
         integers = _mm512_mask_add_epi64(integers, late_general, integers, one);
         kind = _mm512_mask_mov_epi64(kind, late_vector | late_general, registers_kind);
+        // The lanes that take a transparent union's own byval slot (getIndirectResult of it, or of its member in memory).
+        __mmask8 own_slot = 0;
         {
             // With no general register free, clang passes an aggregate of 8 bytes or less, aligned to 8 or less, as an
             // integer of its size, MEMORY or not: LLVM gives it a general register if it has one left, else 8 bytes of
@@ -3615,6 +3619,7 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, cons
             kind = _mm512_mask_mov_epi64(kind, in_register, registers_kind);
             kind = _mm512_mask_mov_epi64(kind, stacked, stack_kind);
             flags = _mm512_mask_or_epi64(flags, integer & (__mmask8)~in_register & transparent & _mm512_cmpgt_epu64_mask(own_bytes, slot_bytes), flags, _mm512_set1_epi64(BUSTER_ABI_FLAG_LOW));
+            own_slot = memory & transparent & (__mmask8)~integer;
         }
         // What clang counts for the rest.
         clang_integers = _mm512_mask_sub_epi64(clang_integers, whole | halves, clang_integers, need_integers);
@@ -3695,9 +3700,9 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, cons
             kind = _mm512_mask_mov_epi64(kind, halves & stacked & all_stacked, stack_kind);
             kind = _mm512_mask_mov_epi64(kind, halves & stacked & (__mmask8)~all_stacked, split_kind);
         }
-        // A transparent union past 16 bytes in its member's registers or eightbytes' slots: those of its first 16 bytes.
-        const __mmask8 member_parts = _mm512_cmpeq_epi64_mask(kind, registers_kind) | _mm512_cmpeq_epi64_mask(kind, split_kind) | halves |
-                                      _mm512_test_epi64_mask(flags, _mm512_set1_epi64(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW));
+        // A transparent union past 16 bytes in its member's registers, eightbytes' slots or value's slot (a PAIR's i128, a
+        // vector's 16 bytes, where LLVM has no register left): those of its first 16 bytes.
+        const __mmask8 member_parts = _mm512_cmpneq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_ABI_LOCATION_IGNORE)) & (__mmask8)~own_slot;
         const __m512i union_bytes = abi_lanes_gather(passed & transparent, own, abi->stack_bytes);
         flags = _mm512_mask_or_epi64(flags, passed & transparent & member_parts & _mm512_cmpgt_epu64_mask(union_bytes, _mm512_set1_epi64(BUSTER_ABI_REGISTER_BYTES)), flags,
                                      _mm512_set1_epi64(BUSTER_ABI_FLAG_FIRST));

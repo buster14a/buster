@@ -10055,6 +10055,8 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_asm_label_auto_driver_test.c"
 #include "c_check_assert_const_driver_test.c"
 #include "c_check_assert_bool_driver_test.c"
+#include "c_check_node_bodies_driver_test.c"
+#include "c_check_node_gate_driver_test.c"
 #include "c_check_constant_logical_driver_test.c"
 #include "c_check_query_bool_driver_test.c"
 #include "c_check_ident_driver_test.c"
@@ -10311,6 +10313,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool malformed_calls_only = false;
     // --operand-diagnostics-only: rejected record and atomic operands, including constant contexts (#2441).
     bool operand_diagnostics_only = false;
+    // --initializer-diagnostics-only: initializer recovery, comma warnings and atomic deduction (#2441).
+    bool initializer_diagnostics_only = false;
     // --assert-bool-only: static assertion boolean conversions, including rejected trees (#2409).
     bool assert_bool_only = false;
     // --query-bool-only: source conversions retained through query/type operands and selections (#2899).
@@ -10389,6 +10393,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--operand-diagnostics-only") == 0)
         {
             operand_diagnostics_only = true;
+        }
+        else if (strcmp(argv[i], "--initializer-diagnostics-only") == 0)
+        {
+            initializer_diagnostics_only = true;
         }
         else if (strcmp(argv[i], "--assert-bool-only") == 0)
         {
@@ -10486,7 +10494,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
-                             (uint32_t)constant_logical_only + (uint32_t)pic_only;
+                             (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)initializer_diagnostics_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -11002,7 +11010,6 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && semantic_recovery_only)
     {
         check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/initializer-comma");
-        check_test_driver_initializer_compound_boundary(&test, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_semantic_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_statement_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_type_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
@@ -11036,6 +11043,12 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && operand_diagnostics_only)
     {
         check_test_driver_operand_diagnostics(&test, clang, executable, directory);
+    }
+    if (temporary && initializer_diagnostics_only)
+    {
+        check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/initializer-comma");
+        check_test_driver_warning_catalog_language(&test, clang, executable != NULL ? executable : "./build/compiler", directory,
+                                                   "checker/initializer-comma", true);
     }
     if (temporary && auto_qualifiers_only)
     {
@@ -11298,6 +11311,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_asm_label_auto,
             check_test_driver_assert_const,
             check_test_driver_assert_bool,
+            check_test_driver_node_bodies,
+            check_test_driver_node_gate,
             check_test_driver_constant_logical,
             check_test_driver_query_bool,
             check_test_driver_ident,
@@ -11577,6 +11592,12 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/cfg-pruning");
+            }
+            // -Wreturn-type past calls (#1393): direct ones, ones through pointers by their callee's type, and the query
+            // builtins, whole, in each policy, mode, lane request and reader.
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/return-calls");
             }
             // Functions and variables an attribute uses (#3300): a constructor's or destructor's definition, and an alias's
             // or ifunc's target declared before it, which clang's -Wunused-function and -Wunused-variable never name.
