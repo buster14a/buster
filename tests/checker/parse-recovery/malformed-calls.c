@@ -603,4 +603,60 @@ void later(void)
 {
     after_dropped_loop;
 }
+#elif BUSTER_CASE == 78
+int known(int, int);
+void check(int n)
+{
+    known(int, missing_later; after_semicolon);
+    known(int, 1 / 0; n);
+}
+#elif BUSTER_CASE == 79
+int known(int, int);
+void check(int a, int x)
+{
+    known(int, missing_operand, a +; x);
+    after_incomplete;
+}
+#elif BUSTER_CASE == 80
+#define ARGUMENTS int, inner(int, missing_inner), 1 / 0
+int known(int, int);
+int inner(int, int);
+void check(int n)
+{
+    known(n, ARGUMENTS; n);
+    after_macro_call;
+}
+#elif BUSTER_CASE == 81
+int known(int, int);
+void check(int n)
+{
+    known(int, ; n);
+    known(int, n /, missing_later; n);
+    after_empty_argument;
+}
+#elif BUSTER_CASE == 82
+int known(int, int);
+void check(int n)
+{
+    known(int, missing_earlier, double; n);
+    after_second_type;
+}
+#elif BUSTER_CASE == 83
+struct Pair { int x; };
+int known(int, int);
+void check(struct Pair p, int n)
+{
+    known(int, 1 + p., missing_member_argument; n);
+    known(int, n ? 1; n);
+    after_missing_operands;
+}
+#elif BUSTER_CASE == 84
+int known(int, int);
+void check(int n)
+{
+    known(int, { skipped_name }, missing_later; n);
+    known(int, (n n); n);
+    known(int, n n; n);
+    after_bad_arguments;
+}
 #endif

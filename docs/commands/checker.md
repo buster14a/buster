@@ -303,11 +303,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   keeping independent argument checks and warnings. Type-first repairs after valid
   arguments and nested calls retain their original parse errors through successive
   rounds, without duplicating earlier arguments' diagnostics. Block expression
-  calls also recover at their first outer semicolon, checking subsequent clauses
-  as statements and preserving Clang's C23 loop-typo correction. Builtin controls
+  calls also recover at their first outer semicolon. The reader checks the other arguments
+  up to that boundary, including complete operands before a second syntax error (#3372).
+  It then checks subsequent clauses as statements and preserves Clang's C23 loop-typo correction. Builtin controls
   keep lookup/header diagnostics and independent arguments without imposing
   intrinsic constraints on the synthetic call. Boundary controls exclude empty
-  later arguments, mismatched delimiters, member callees and semicolon crossings
+  later arguments in normally closed calls, mismatched delimiters, member callees and semicolon crossings
   in nested calls, initializers or returns. Rejected output is preserved and valid
   cast/`sizeof` controls must produce an ELF object.
   `--string-plus-only` runs both string-addition warning suites, including the

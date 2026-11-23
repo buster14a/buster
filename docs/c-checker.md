@@ -5286,8 +5286,8 @@ while independent operands, such as `pair.missing` in `known(int) +
 pair.missing`, remain checked. Arguments with nested parentheses, brackets and
 braces may be skipped through that argument's next top-level comma. Arguments
 before and after the rejected one retain their original tokens and independent
-diagnostics. A final rejected argument also removes its preceding separator;
-otherwise that separator joins the retained prefix and suffix. This applies
+diagnostics. A placeholder for the rejected argument keeps the original
+separators, including where a preceding operand's lookup completes. This applies
 again when a later argument has a new parse error, including after a nested
 call's recovery. Callee source/use records are sorted together and deduplicated
 after all rounds, independently of the parse errors' token order, so an outer
@@ -5304,13 +5304,17 @@ keeps the undeclared-identifier error.
 A type-first error in a call that is itself a block expression statement may
 also stop at its first outer semicolon. The parser proves that statement context;
 the private view closes the call at the semicolon's source and keeps the original
-semicolon and following tokens. In `foo(int i = 0; i < n; i++) s += i;`, the
+semicolon and following tokens. Comma-separated arguments before that semicolon
+keep their lookup and expression diagnostics (#3372). If the parser encounters
+a missing operand in one of them, the checker treats that operand as invalid
+and continues checking the rest of the call and subsequent statements.
+In `foo(int i = 0; i < n; i++) s += i;`, the
 following clauses are then checked as statements. Before C23, lookup errors in
 the increment suppress the cascading orphan-parenthesis errors; a valid
 increment retains those parse errors. C23's successful `foo` to `for` correction
 reparses the original tokens as a loop. Orphan closers discard only through the
 next proven statement semicolon, so later statements remain checked. Empty
-arguments, member callees, mismatched delimiters, and semicolon crossings in
+arguments in normally closed calls, member callees, mismatched delimiters, and semicolon crossings in
 nested calls, initializers or return expressions retain the existing recovery.
 
 `test-checker-driver --malformed-calls-only` reads the original runtime source

@@ -5536,6 +5536,14 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
     const bool call_statement = call != NULL && call->role == PARSE_ROLE_OPEN_CALL && call->mode == PARSE_MODE_OPERAND &&
                                 parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION && parse_frame_is_block(caller) &&
                                 caller->statement == PARSE_ITEM_EXPRESSION && (caller->flags & BUSTER_PARSE_FRAME_DECLARATION) == 0;
+    const uint32_t at = parser->error_token;
+    if (call != NULL && call->role == PARSE_ROLE_OPEN_TERNARY && parser->error_message == PARSE_MESSAGE_EXPECTED_COLON &&
+        at < parser->count && parse_argument_delimiter(parser->kinds[at]) && (parser->flags[at] & BUSTER_PARSE_RECOVERY_ARGUMENT) != 0)
+    {
+        // The retained conditional still needs its ':' and third operand. Reparse each at the same boundary.
+        parser->error_resume_colon = true;
+        parser->error_note = call->opener;
+    }
     const uint32_t expression_begin = parse_scalar_resume_orphan_closer(parser);
     parse_scalar_resume_block_item(parser);
     const bool resumed = parser->error_resumed && parser->error_resume_end == 0 && parser->frame_count == 1 &&
@@ -11660,7 +11668,8 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             const uint8_t opener_kind = opener < parser->tokens.count ? parser->tokens.kinds[opener] : PARSE_KIND_END;
             const PPOutputDiagnosticNote note = {
                 .token = opener < parser->tokens.count ? parse_source_index(&parser->tokens, opener) : 0,
-                .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
+                .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" :
+                           opener_kind == PARSE_KIND_QUESTION ? "to match this '?'" : "to match this '('",
             };
             const uint32_t source = parse_source_index(&parser->tokens, diagnostic->token);
             // Published where the parser knew it (ParseDiagnostic.publication), after an earlier error of its token's.

@@ -347,6 +347,9 @@ static const char* const parse_predeclared_typedefs[] =
 // The same private bit on a recovery view's `;` that ends a statement the repair deleted whole (#2406): clang's
 // StmtError, which is neither an empty body nor a statement after a loop (ParseDiagnostic.resume_statement).
 #define BUSTER_PARSE_DROPPED_STATEMENT BUSTER_PARSE_RECOVERED_TYPE
+// On a recovered call's opener and its retained argument delimiters, this marks where a later error can
+// resume. On a placeholder operand or member name, it tells the checker to cut the invalid expression.
+#define BUSTER_PARSE_RECOVERY_ARGUMENT BUSTER_PARSE_RECOVERED_TYPE
 _Static_assert(BUSTER_PARSE_RECOVERED_TYPE == BUSTER_PP_NAME_LINE, "private parser flag cleared during preprocessing-token conversion");
 // Private recovery views mark an inserted suppress argument ')' when clang dropped the attribute. Its original
 // arguments still produce diagnostics; the repaired closer must not make the attribute applicable. The parser
@@ -354,6 +357,12 @@ _Static_assert(BUSTER_PARSE_RECOVERED_TYPE == BUSTER_PP_NAME_LINE, "private pars
 #define BUSTER_PARSE_DROPPED_ATTRIBUTE 0x20u
 #define BUSTER_PARSE_PP_FLAGS ((uint8_t)~(BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE))
 _Static_assert(BUSTER_PARSE_DROPPED_ATTRIBUTE == BUSTER_PP_NAME_SPACE, "private parser flag cleared during preprocessing-token conversion");
+// An argument can synchronize at a comma or at the end of a call, group or subscript.
+BUSTER_INLINE bool parse_argument_delimiter(uint8_t kind)
+{
+    return kind == PARSE_KIND_COMMA || kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE;
+}
+
 // A `#pragma pack` comes just before the token (parse_mark_pragma_packs, #1127): clang reads it among a declaration's
 // specifiers, after a tag's body too, where it takes it for what may follow a type. The preprocessor's output tokens
 // never have this bit, which is a context's pending flag alone (BUSTER_PP_JOIN_LINE), so the parser's tokens take it.
@@ -876,14 +885,15 @@ struct ParseDiagnostic
     uint32_t recovery_expression_begin;
     // The callee can precede the diagnostic, where an argument is a type instead of an expression.
     uint32_t resume_callee;
-    // The first later argument to retain through the closing parenthesis, or zero for an empty lookup-only call.
-    uint32_t resume_call_arguments;
+    // The comma ending the rejected argument, or the closing delimiter if no later argument remains.
+    uint32_t resume_call_tail;
     // An ordinary call uses its callee's value; an attribute-led call only classifies the name before rejecting it.
     bool resume_call_value;
     // A malformed argument stopped at a semicolon before the call's closer. The diagnostic-only view keeps its
-    // callee and valid argument prefix, appends a synthetic ')', and resumes at the original semicolon. It never
-    // consumes the statements after that boundary; resume_call_arguments is zero for this form.
+    // callee and the other arguments, appends a synthetic ')', and resumes at the original semicolon.
     bool resume_call_semi;
+    // Insert a diagnostic-only missing operand before a delimiter in a retained argument (#3372).
+    bool resume_operand;
     // A K&R parameter declaration's missing semicolon skips its malformed tail through the next semicolon, or up
     // to the mandatory body brace. Its recovery view replaces [token, resume_end) with one semicolon; zero means
     // the ordinary insertion before token. This is diagnostic-only metadata, never acceptance of the input.
