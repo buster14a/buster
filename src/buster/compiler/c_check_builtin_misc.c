@@ -189,7 +189,7 @@ static CheckValue check_builtin_misc_argument(TypeTable* table, const CheckBuilt
     return value;
 }
 
-static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value, uint32_t index, TypeId destination)
+static bool check_builtin_misc_convert_one(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value, uint32_t index, TypeId destination)
 {
     const CheckAction context = {
         .node = input->node,
@@ -251,12 +251,56 @@ static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscA
     }
     if (!accepted && destination != 0 && output->action.diagnostic == CHECK_DIAG_INCOMPATIBLE && output->action.diagnostic_operand == index)
     {
-        // The parameter its argument didn't convert to (#2460), for the error's words (check_driver_builtin_conversion).
+        // The parameter its argument didn't convert to (#2460), for the error's words (check_driver_builtin_conversion). (Every
+        // `unsigned long` parameter here is clang's size_t, which the words spell '__size_t', #2914: a builtin of a genuine
+        // `unsigned long` one is checked elsewhere.)
         output->argument_conversions[index] = (CheckConversion){ .type = destination, .flags = BUSTER_CHECK_CONVERT_FAILED };
     }
     if (accepted)
     {
         check_action_conversion(table, value, destination, BUSTER_CHECK_CONVERT_ASSIGNMENT, output->argument_conversions + index, input->node);
+    }
+    return accepted;
+}
+
+// Whether a builtin's arguments are still converted to their parameters: none has failed but by its conversion, which
+// clang goes on after (#2914, check_builtin_misc_convert).
+static bool check_builtin_misc_converting(const CheckBuiltinMiscResult* output)
+{
+    const uint32_t failed = output->action.diagnostic_operand;
+    return output->action.diagnostic == CHECK_DIAG_NONE ||
+           (output->action.diagnostic == CHECK_DIAG_INCOMPATIBLE && failed < BUSTER_ARRAY_LENGTH(output->argument_conversions) &&
+            output->argument_conversions[failed].flags == BUSTER_CHECK_CONVERT_FAILED);
+}
+
+// An argument converted to its parameter (check_builtin_misc_convert_one). After an earlier argument's failed conversion,
+// clang goes on to the later arguments (#2914, GatherArgumentsForCall: a default error such as -Wint-conversion leaves
+// the call valid), so a later one's own failure is recorded too (BUSTER_CHECK_CONVERT_FAILED, which the driver reports
+// until a hard one, check_driver_builtin_later_arguments), the first's diagnostic and the warnings kept as they were. The
+// action is refused either way.
+static bool check_builtin_misc_convert(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value, uint32_t index, TypeId destination)
+{
+    const uint32_t failed = output->action.diagnostic_operand;
+    const bool later = destination != 0 && output->action.diagnostic == CHECK_DIAG_INCOMPATIBLE && failed < index &&
+                       failed < BUSTER_ARRAY_LENGTH(output->argument_conversions) && output->argument_conversions[failed].flags == BUSTER_CHECK_CONVERT_FAILED;
+    bool accepted = false;
+    if (later)
+    {
+        const CheckActionResult action = output->action;
+        const uint32_t warnings = output->warnings;
+        const uint32_t warning_operands = output->warning_operands;
+        const uint32_t unsupported = output->unsupported;
+        output->action.diagnostic = CHECK_DIAG_NONE;
+        output->action.diagnostic_operand = 0;
+        check_builtin_misc_convert_one(table, input, output, value, index, destination);
+        output->action = action;
+        output->warnings = warnings;
+        output->warning_operands = warning_operands;
+        output->unsupported = unsupported;
+    }
+    else
+    {
+        accepted = check_builtin_misc_convert_one(table, input, output, value, index, destination);
     }
     return accepted;
 }
@@ -695,7 +739,7 @@ static void check_builtin_misc_memory(TypeTable* table, const CheckBuiltinMiscAc
     {
         check_action_diagnose(&output->action, CHECK_DIAG_RESOURCE, 0);
     }
-    for (uint32_t i = 0; i < input->argument_count && output->action.diagnostic == CHECK_DIAG_NONE; i += 1)
+    for (uint32_t i = 0; i < input->argument_count && check_builtin_misc_converting(output); i += 1)
     {
         check_builtin_misc_convert(table, input, output, values + i, i, parameters[i]);
         check_action_inherit(&output->action.value, values + i);
@@ -1226,10 +1270,9 @@ static void check_builtin_misc_last(TypeTable* table, const CheckBuiltinMiscActi
     {
         const TypeId string = check_builtin_misc_pointer(table, BUSTER_TYPE_CHAR, BUSTER_TYPE_CONST);
         const uint32_t text = id == CBUILTIN_XRAY_TYPEDEVENT ? 1 : 0;
-        bool accepted = string != 0;
-        for (uint32_t i = 0; accepted && i < input->argument_count; i += 1)
+        for (uint32_t i = 0; string != 0 && i < input->argument_count && check_builtin_misc_converting(output); i += 1)
         {
-            accepted = check_builtin_misc_convert(table, input, output, values + i, i, i == text ? string : BUSTER_TYPE_ULONG);
+            check_builtin_misc_convert(table, input, output, values + i, i, i == text ? string : BUSTER_TYPE_ULONG);
         }
         if (string == 0)
         {
