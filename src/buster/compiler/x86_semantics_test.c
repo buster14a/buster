@@ -21,7 +21,8 @@
 //     each chosen record validated and run against a reference sequence that holds the value in R11 (movabs, whose field
 //     is the value itself) and uses the operation's register form, which must leave the same registers, memory and live
 //     flags (and a record with an imm8 of 0xc8 for 200 must not: the check is sensitive to it);
-//   - the vector paths against their scalar twins (x86_choose_forms and x86_instructions_effects) on random inputs, and
+//   - the vector paths (x86_choose_forms and x86_instructions_effects) on random inputs, by a frozen digest of their
+//     outputs, each item alone against the batch, and
 //     with their columns ending at a PROT_NONE page;
 //   - x86_match.c's immediate ranges against the shared rule on the forms the assembler's syntax supports;
 //   - #180's check: every row's forms allowed at the baseline target, and every chosen record valid there;
@@ -32,7 +33,7 @@
 //
 // Layout: the tally; the harness (X86SemanticsState, x86_semantics_test_enter, X86SemanticsMachine); the fixtures of the
 // effects; the effects table's execution check; the immediate's contract; form choice (its fixtures, the reference
-// sequences, the semantic check); the vector paths' twins; x86_match's agreement; GNU as; run_x86_semantics_tests.
+// sequences, the semantic check); the vector paths on random columns; x86_match's agreement; GNU as; run_x86_semantics_tests.
 
 #include "buster/compiler/test_paths.h"
 #include <stdarg.h>
@@ -1259,28 +1260,42 @@ static bool x86_semantics_check_resolved(void)
             .what = "vp2intersectd k2, zmm1, zmm3: writes k2 and k3",
         },
     };
+    // Each case alone and all of them in one batch (each in another lane).
+    X86Instruction opmask_records[BUSTER_ARRAY_LENGTH(opmask_cases)];
+    uint64_t batch_reads[BUSTER_ARRAY_LENGTH(opmask_cases)];
+    uint64_t batch_writes[BUSTER_ARRAY_LENGTH(opmask_cases)];
+    uint64_t batch_plain_reads[BUSTER_ARRAY_LENGTH(opmask_cases)];
+    uint64_t batch_plain_writes[BUSTER_ARRAY_LENGTH(opmask_cases)];
+    // Zeroed: MSan doesn't model the opmask column's down-converting masked store (vpmovqw) as writing it.
+    uint16_t batch_opmasks[BUSTER_ARRAY_LENGTH(opmask_cases)] = { 0 };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(opmask_cases); i += 1)
+    {
+        opmask_records[i] = opmask_cases[i].record;
+    }
+    x86_instructions_effects_opmasks(opmask_records, BUSTER_ARRAY_LENGTH(opmask_cases), batch_reads, batch_writes, batch_opmasks);
+    x86_instructions_effects(opmask_records, BUSTER_ARRAY_LENGTH(opmask_cases), batch_plain_reads, batch_plain_writes);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(opmask_cases); i += 1)
     {
         const X86SemanticsOpmaskCase* entry = &opmask_cases[i];
-        uint64_t reads[2] = { 0 };
-        uint64_t writes[2] = { 0 };
-        uint16_t opmasks[2] = { 0 };
-        x86_instruction_effects_opmasks_scalar(&entry->record, &reads[0], &writes[0], &opmasks[0]);
+        uint64_t reads[2] = { batch_reads[i], 0 };
+        uint64_t writes[2] = { batch_writes[i], 0 };
+        uint16_t opmasks[2] = { batch_opmasks[i], 0 };
         x86_instructions_effects_opmasks(&entry->record, 1, &reads[1], &writes[1], &opmasks[1]);
         for (uint32_t path = 0; path < 2; path += 1)
         {
             x86_semantics_expect(&tally, reads[path] == entry->reads && writes[path] == entry->writes && opmasks[path] == entry->opmasks,
-                                 "%s, by the %s path: reads %#llx, writes %#llx and opmasks %#x, not %#llx, %#llx and %#x", entry->what, path == 0 ? "scalar" : "vector",
+                                 "%s, %s: reads %#llx, writes %#llx and opmasks %#x, not %#llx, %#llx and %#x", entry->what, path == 0 ? "in the batch" : "alone",
                                  (unsigned long long)reads[path], (unsigned long long)writes[path], opmasks[path], (unsigned long long)entry->reads,
                                  (unsigned long long)entry->writes, entry->opmasks);
         }
         const bool touches = (entry->record.decorations & BUSTER_X86_DECORATION_MASK) != 0 || (x86_effects(entry->record.form)->properties & BUSTER_X86_EFFECT_OPMASKS) != 0;
-        x86_instruction_effects_scalar(&entry->record, &reads[0], &writes[0]);
+        reads[0] = batch_plain_reads[i];
+        writes[0] = batch_plain_writes[i];
         x86_instructions_effects(&entry->record, 1, &reads[1], &writes[1]);
         for (uint32_t path = 0; path < 2; path += 1)
         {
             x86_semantics_expect(&tally, !touches || (reads[path] == BUSTER_X86_RESOURCE_ALL && writes[path] == BUSTER_X86_RESOURCE_ALL),
-                                 "%s, by the %s path without opmasks: reads %#llx and writes %#llx, not everything", entry->what, path == 0 ? "scalar" : "vector",
+                                 "%s, %s without opmasks: reads %#llx and writes %#llx, not everything", entry->what, path == 0 ? "in the batch" : "alone",
                                  (unsigned long long)reads[path], (unsigned long long)writes[path]);
         }
     }
@@ -2491,18 +2506,15 @@ typedef enum X86SemanticsDestination
     X86_SEMANTICS_DESTINATION_MEMORY,
 } X86SemanticsDestination;
 
-// One request's form, by both paths, which must agree.
-static uint16_t x86_semantics_choose(X86SemanticsTally* tally, uint32_t row, int64_t value, uint16_t context)
+// One request's form.
+static uint16_t x86_semantics_choose(uint32_t row, int64_t value, uint16_t context)
 {
     const uint16_t rows[1] = { (uint16_t)row };
     const int64_t values[1] = { value };
     const uint16_t contexts[1] = { context };
-    uint16_t scalar = 0xffff;
-    uint16_t vector = 0xffff;
-    x86_choose_forms_scalar(rows, values, contexts, 1, &scalar);
-    x86_choose_forms(rows, values, contexts, 1, &vector);
-    x86_semantics_expect(tally, scalar == vector, "row %u, value %lld, context %#x: scalar %u, vector %u", row, (long long)value, context, scalar, vector);
-    return scalar;
+    uint16_t form = 0xffff;
+    x86_choose_forms(rows, values, contexts, 1, &form);
+    return form;
 }
 
 // The context word for a destination, live flags and inc and dec allowed or not.
@@ -2645,7 +2657,7 @@ static bool x86_semantics_check_choice_fixtures(void)
         if (x86_semantics_expect(&tally, row != BUSTER_X86_CHOICE_NO_ROW, "operation %u at width %u has a row", fixture->operation, fixture->width))
         {
             const uint16_t context = x86_semantics_context(fixture->destination, fixture->live, fixture->inc_dec);
-            const uint16_t form = x86_semantics_choose(&tally, row, fixture->value, context);
+            const uint16_t form = x86_semantics_choose(row, fixture->value, context);
             x86_semantics_expect(&tally, form == fixture->form, "operation %u at %u bytes, %lld, context %#x: %s, not %s", fixture->operation, fixture->width,
                                  (long long)fixture->value, context, x86_semantics_test_name(form), x86_semantics_test_name(fixture->form));
         }
@@ -2888,7 +2900,7 @@ static bool x86_semantics_check_choices(X86SemanticsMachine* machine, uint64_t s
                     const X86SemanticsDestination destination = (X86SemanticsDestination)d;
                     const bool inc_dec = (l & 1) != 0;
                     const uint16_t context = x86_semantics_context(destination, lives[l], inc_dec);
-                    const uint16_t form = x86_semantics_choose(&tally, row, value, context);
+                    const uint16_t form = x86_semantics_choose(row, value, context);
                     requests += 1;
                     if (form != X86_FORM_NONE)
                     {
@@ -2937,7 +2949,7 @@ static bool x86_semantics_check_choices(X86SemanticsMachine* machine, uint64_t s
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// The vector paths' twins
+// The vector paths on random columns
 
 // The vector paths' random columns: `count` requests of random rows, values (boundaries, small, any) and context words
 // (every bit, the unused ones too), and `count` records of covered and uncovered forms (with segment overrides and the
@@ -2987,7 +2999,7 @@ static void x86_semantics_random_columns(uint64_t seed, uint32_t count, uint16_t
 }
 
 // The random columns' outputs at seed 1 and 20,000 items (x86_semantics_check_columns' digest), frozen on 2026-11-23
-// while the scalar twins (#2924) still agreed with the vector paths on every item.
+// while the scalar twins (deleted by #2924) still agreed with the vector paths on every item.
 #define BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST UINT64_C(0x700e64f6f8320e55)
 
 static uint64_t x86_semantics_fold(uint64_t digest, const void* bytes, uint64_t size)
@@ -3119,147 +3131,6 @@ static bool x86_semantics_check_columns(uint64_t seed, uint32_t count)
     return x86_semantics_report(&tally);
 }
 
-// Maps `bytes` rounded up to whole pages before a PROT_NONE page, and returns the end of the readable part (as the
-// encoder's tests do, x86_map_guarded).
-static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
-{
-    X86SemanticsTally tally = {
-        .check = "twins: the vector paths against the scalar ones",
-    };
-    uint16_t* rows = malloc(count * sizeof(uint16_t));
-    int64_t* values = malloc(count * sizeof(int64_t));
-    uint16_t* contexts = malloc(count * sizeof(uint16_t));
-    uint16_t* scalar_forms = malloc(count * sizeof(uint16_t));
-    uint16_t* vector_forms = malloc(count * sizeof(uint16_t));
-    X86Instruction* records = malloc(count * sizeof(X86Instruction));
-    uint64_t* scalar_reads = malloc(count * sizeof(uint64_t));
-    uint64_t* scalar_writes = malloc(count * sizeof(uint64_t));
-    uint64_t* vector_reads = malloc(count * sizeof(uint64_t));
-    uint64_t* vector_writes = malloc(count * sizeof(uint64_t));
-    const bool allocated = rows && values && contexts && scalar_forms && vector_forms && records && scalar_reads && scalar_writes && vector_reads && vector_writes;
-    if (x86_semantics_expect(&tally, allocated, "the columns"))
-    {
-        x86_semantics_random_columns(seed, count, rows, values, contexts, records);
-        x86_choose_forms_scalar(rows, values, contexts, count, scalar_forms);
-        x86_choose_forms(rows, values, contexts, count, vector_forms);
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            x86_semantics_expect(&tally, scalar_forms[i] == vector_forms[i], "request %u (row %u, %lld, context %#x): scalar %u, vector %u", i, rows[i], (long long)values[i],
-                                 contexts[i], scalar_forms[i], vector_forms[i]);
-        }
-        x86_instructions_effects_scalar(records, count, scalar_reads, scalar_writes);
-        x86_instructions_effects(records, count, vector_reads, vector_writes);
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            x86_semantics_expect(&tally, scalar_reads[i] == vector_reads[i] && scalar_writes[i] == vector_writes[i],
-                                 "record %u (%s, reg %u, rm %u, mode %#x, immediate %d): scalar %#llx %#llx, vector %#llx %#llx", i, x86_semantics_test_name(records[i].form),
-                                 records[i].reg, records[i].rm, records[i].mode, records[i].immediate, (unsigned long long)scalar_reads[i], (unsigned long long)scalar_writes[i],
-                                 (unsigned long long)vector_reads[i], (unsigned long long)vector_writes[i]);
-        }
-        // With the opmasks: the same records' sets and opmask columns.
-        uint64_t* opmask_scalar_reads = malloc(count * sizeof(uint64_t));
-        uint64_t* opmask_scalar_writes = malloc(count * sizeof(uint64_t));
-        uint64_t* opmask_vector_reads = malloc(count * sizeof(uint64_t));
-        uint64_t* opmask_vector_writes = malloc(count * sizeof(uint64_t));
-        uint16_t* scalar_opmasks = malloc(count * sizeof(uint16_t));
-        // Zeroed: MSan doesn't model the vector path's down-converting masked store (vpmovqw) as writing it.
-        uint16_t* vector_opmasks = calloc(count, sizeof(uint16_t));
-        if (x86_semantics_expect(&tally, opmask_scalar_reads && opmask_scalar_writes && opmask_vector_reads && opmask_vector_writes && scalar_opmasks && vector_opmasks,
-                                 "the opmask columns"))
-        {
-            x86_instructions_effects_opmasks_scalar(records, count, opmask_scalar_reads, opmask_scalar_writes, scalar_opmasks);
-            x86_instructions_effects_opmasks(records, count, opmask_vector_reads, opmask_vector_writes, vector_opmasks);
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                x86_semantics_expect(&tally,
-                                     opmask_scalar_reads[i] == opmask_vector_reads[i] && opmask_scalar_writes[i] == opmask_vector_writes[i] &&
-                                         scalar_opmasks[i] == vector_opmasks[i],
-                                     "record %u (%s, reg %u, rm %u, vvvv %u, mode %#x, decorations %#x) with opmasks: scalar %#llx %#llx %#x, vector %#llx %#llx %#x", i,
-                                     x86_semantics_test_name(records[i].form), records[i].reg, records[i].rm, records[i].vvvv, records[i].mode, records[i].decorations,
-                                     (unsigned long long)opmask_scalar_reads[i], (unsigned long long)opmask_scalar_writes[i], scalar_opmasks[i],
-                                     (unsigned long long)opmask_vector_reads[i], (unsigned long long)opmask_vector_writes[i], vector_opmasks[i]);
-            }
-            // Page edges for the opmask column: every count to 100, the column ending at a PROT_NONE page.
-            const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-            uint64_t opmask_mapped = 0;
-            uint8_t* opmask_end = x86_map_guarded(100 * sizeof(uint16_t), page, &opmask_mapped);
-            if (x86_semantics_expect(&tally, opmask_end != 0, "the guarded opmask column"))
-            {
-                for (uint32_t edge_count = 0; edge_count <= 100 && edge_count <= count; edge_count += 1)
-                {
-                    snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "the vector path's opmasks on %u items at a page's end", edge_count);
-                    uint16_t* edge_opmasks = (uint16_t*)(opmask_end - edge_count * sizeof(uint16_t));
-                    x86_instructions_effects_opmasks(records, edge_count, opmask_vector_reads, opmask_vector_writes, edge_opmasks);
-                    x86_semantics_expect(&tally, memcmp(edge_opmasks, scalar_opmasks, edge_count * sizeof(uint16_t)) == 0, "%u items' opmasks at a page's end", edge_count);
-                }
-                munmap(opmask_end - (opmask_mapped - 2 * page) - page, opmask_mapped);
-            }
-        }
-        free(opmask_scalar_reads);
-        free(opmask_scalar_writes);
-        free(opmask_vector_reads);
-        free(opmask_vector_writes);
-        free(scalar_opmasks);
-        free(vector_opmasks);
-    }
-    // Page edges: every count to 100, each column ending at a PROT_NONE page (a read past it faults: the handler names the
-    // case), and the outputs too.
-    const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
-    uint64_t mapped[7] = { 0 };
-    uint8_t* ends[7];
-    for (uint32_t i = 0; i < 7; i += 1)
-    {
-        ends[i] = x86_map_guarded(100 * sizeof(X86Instruction), page, &mapped[i]);
-    }
-    bool mapped_all = true;
-    for (uint32_t i = 0; i < 7; i += 1)
-    {
-        mapped_all &= ends[i] != 0;
-    }
-    if (x86_semantics_expect(&tally, mapped_all && allocated, "the guarded columns"))
-    {
-        for (uint32_t edge_count = 0; edge_count <= 100; edge_count += 1)
-        {
-            snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "the vector paths on %u items at a page's end", edge_count);
-            uint16_t* edge_rows = (uint16_t*)(ends[0] - edge_count * sizeof(uint16_t));
-            int64_t* edge_values = (int64_t*)(ends[1] - edge_count * sizeof(int64_t));
-            uint16_t* edge_contexts = (uint16_t*)(ends[2] - edge_count * sizeof(uint16_t));
-            uint16_t* edge_forms = (uint16_t*)(ends[3] - edge_count * sizeof(uint16_t));
-            X86Instruction* edge_records = (X86Instruction*)(ends[4] - edge_count * sizeof(X86Instruction));
-            uint64_t* edge_reads = (uint64_t*)(ends[5] - edge_count * sizeof(uint64_t));
-            uint64_t* edge_writes = (uint64_t*)(ends[6] - edge_count * sizeof(uint64_t));
-            memcpy(edge_rows, rows, edge_count * sizeof(uint16_t));
-            memcpy(edge_values, values, edge_count * sizeof(int64_t));
-            memcpy(edge_contexts, contexts, edge_count * sizeof(uint16_t));
-            memcpy(edge_records, records, edge_count * sizeof(X86Instruction));
-            x86_choose_forms(edge_rows, edge_values, edge_contexts, edge_count, edge_forms);
-            x86_instructions_effects(edge_records, edge_count, edge_reads, edge_writes);
-            x86_semantics_expect(&tally,
-                                 memcmp(edge_forms, scalar_forms, edge_count * sizeof(uint16_t)) == 0 && memcmp(edge_reads, scalar_reads, edge_count * sizeof(uint64_t)) == 0 &&
-                                     memcmp(edge_writes, scalar_writes, edge_count * sizeof(uint64_t)) == 0,
-                                 "%u items at a page's end", edge_count);
-        }
-    }
-    for (uint32_t i = 0; i < 7; i += 1)
-    {
-        if (ends[i] != 0)
-        {
-            munmap(ends[i] - (mapped[i] - 2 * page) - page, mapped[i]);
-        }
-    }
-    free(rows);
-    free(values);
-    free(contexts);
-    free(scalar_forms);
-    free(vector_forms);
-    free(records);
-    free(scalar_reads);
-    free(scalar_writes);
-    free(vector_reads);
-    free(vector_writes);
-    printf("twins: %u requests and %u records, and every count to 100 at a page's end\n", count, count);
-    return x86_semantics_report(&tally);
-}
 #endif
 // ---------------------------------------------------------------------------------------------------------------------
 // #180's target
@@ -3411,7 +3282,7 @@ static bool x86_semantics_check_assembler(uint64_t seed, const char* parent, boo
                     {
                         const int64_t value = x86_semantics_values[v];
                         const uint16_t context = x86_semantics_context((X86SemanticsDestination)d, lives[l], l != 0);
-                        const uint16_t form = x86_semantics_choose(&tally, row, value, context);
+                        const uint16_t form = x86_semantics_choose(row, value, context);
                         if (form != X86_FORM_NONE && count < capacity)
                         {
                             X86Instruction target = { 0 };
@@ -3577,7 +3448,6 @@ static int run_x86_semantics_tests(int argc, char** argv)
             result = x86_semantics_check_resolved() && result;
             result = x86_semantics_check_immediates() && result;
             result = x86_semantics_check_choice_fixtures() && result;
-            result = x86_semantics_check_twins(seed, 20000) && result;
             result = x86_semantics_check_columns(seed, 20000) && result;
             result = x86_semantics_check_target() && result;
             result = x86_semantics_check_match() && result;

@@ -262,7 +262,7 @@ static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const Check
     const bool body = old >= emitted->body_record && origin != TIER1_ORIGIN_FRAME && registers.control != BUSTER_X86_CONTROL_RETURN;
     uint64_t read = 0;
     uint64_t written = 0;
-    x86_instruction_effects_scalar(&record, &read, &written);
+    x86_instructions_effects(&record, 1, &read, &written);
     const bool store = (written & BUSTER_X86_RESOURCE_MEMORY) != 0;
     const bool based = record.mode == BUSTER_X86_MEMORY_BASE && record.rm == emitted->frame.base_register && record.form < X86_FORM_COUNT;
     const bool frame_base = (record.mode & (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE)) == (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE) &&

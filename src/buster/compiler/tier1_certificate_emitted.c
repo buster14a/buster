@@ -178,6 +178,8 @@ struct Tier1CertEmittedStats
 #define BUSTER_CERT_EMITTED_VECTOR_UNIT 128u
 // A kernel's records past which the regeneration's room ends: a fixed rule's sequence, a call's and a node's.
 #define BUSTER_CERT_EMITTED_KERNEL (BUSTER_TIER1_SELECT_FIXED_RECORDS + BUSTER_TIER1_SELECT_RECORDS_PER_NODE + 8)
+// The records whose effects one call resolves where a check walks a record run of any length (#2924).
+#define BUSTER_CERT_EMITTED_EFFECTS 64u
 // Source records per node at most: its uses' (up to 15 of a call's, in eights), its clobbers' (16 general, 16 xmm, 8
 // opmask registers and a frame range, in eights) and its definition's.
 #define BUSTER_CERT_EMITTED_NODE_SOURCES 10u
@@ -241,11 +243,31 @@ struct Tier1CertEmittedStep
     uint32_t room;
 };
 
+// The immediates' requests a check takes the emitted records' forms for until x86_choose_forms checks them, 32 at a
+// time (its batch) and at the end (tier1_cert_emitted_choices_check): a request alone would pay a whole batch's work
+// (#2924). Each entry is a request (row, value, context, destination), the record the code holds for it, and that
+// record's index; `canonical` compares as tier1_cert_emitted_exactly does, else byte by byte.
+#define BUSTER_CERT_EMITTED_CHOICES 32u
+typedef struct Tier1CertEmittedChoices Tier1CertEmittedChoices;
+struct Tier1CertEmittedChoices
+{
+    int64_t values[BUSTER_CERT_EMITTED_CHOICES];
+    X86Instruction records[BUSTER_CERT_EMITTED_CHOICES];
+    uint32_t at[BUSTER_CERT_EMITTED_CHOICES];
+    uint16_t rows[BUSTER_CERT_EMITTED_CHOICES];
+    uint16_t contexts[BUSTER_CERT_EMITTED_CHOICES];
+    uint8_t destinations[BUSTER_CERT_EMITTED_CHOICES];
+    uint32_t count;
+    bool canonical;
+};
+
 typedef struct Tier1CertEmittedBuild Tier1CertEmittedBuild;
 struct Tier1CertEmittedBuild
 {
     const Tier1SelectPlan* plan;
     const Tier1EmitResult* emitted;
+    // The nodes' immediates' requests, checked a batch at a time (canonically).
+    Tier1CertEmittedChoices choices;
     // Optional per-node scalar definition candidates. They are usable only after the complete decoded program
     // passes tier1_certificate_check; a kernel's matching bytes alone do not prove its operands' provenance.
     Tier1DebugDefinition* debug_definitions;
@@ -742,6 +764,13 @@ struct Tier1CertEmittedKernel
     X86Instruction records[BUSTER_CERT_EMITTED_KERNEL];
     LinkReference reference;
     uint32_t count;
+    // The record whose immediate's form a request chooses (tier1_cert_emitted_choices), or UINT32_MAX: its request's row,
+    // value, context and destination.
+    uint32_t request;
+    int64_t request_value;
+    uint16_t request_row;
+    uint16_t request_context;
+    uint8_t request_destination;
     // The record that has `reference`, or UINT32_MAX.
     uint32_t referenced;
     // A conditional branch's condition's form (its comparison's jcc), else X86_FORM_NONE.
@@ -861,11 +890,17 @@ static bool tier1_cert_emitted_into(const Tier1CertEmittedBuild* build, uint32_t
 static bool tier1_cert_emitted_inside(const X86Instruction* records, uint32_t count, uint8_t base, int32_t to, uint32_t room)
 {
     bool inside = true;
+    uint64_t reads[BUSTER_CERT_EMITTED_EFFECTS];
+    uint64_t writes[BUSTER_CERT_EMITTED_EFFECTS];
     for (uint32_t k = 0; k < count; k += 1)
     {
-        uint64_t read = 0;
-        uint64_t written = 0;
-        x86_instruction_effects_scalar(&records[k], &read, &written);
+        const uint32_t lane = k % BUSTER_CERT_EMITTED_EFFECTS;
+        if (lane == 0)
+        {
+            const uint32_t left = count - k;
+            x86_instructions_effects(records + k, left < BUSTER_CERT_EMITTED_EFFECTS ? left : BUSTER_CERT_EMITTED_EFFECTS, reads, writes);
+        }
+        const uint64_t written = writes[lane];
         const X86FormDescription* description = x86_form_description(records[k].form & (BUSTER_X86_FORM_FIXUP - 1));
         const int64_t at = records[k].displacement;
         const int64_t end = at + (description->operand_bytes != 0 ? description->operand_bytes : BUSTER_CERT_MAX_WIDTH);
@@ -1457,6 +1492,7 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
     const uint32_t destination = defines ? tier1_cert_emitted_definition(emitted, node, use + 1) : UINT32_MAX;
     *kernel = (Tier1CertEmittedKernel){
         .referenced = UINT32_MAX,
+        .request = UINT32_MAX,
         .condition = X86_FORM_NONE,
         .definition = defines ? value : BUSTER_TIER1_CFG_NONE,
         .definition_location = defines && destination != UINT32_MAX ? tier1_cert_emitted_register(build, value, destination) : BUSTER_CERT_NONE,
@@ -1526,13 +1562,6 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
             Tier1SelectRecords records = { 0 };
             bool referenced = false;
             valid = tier1_emit_cfg_kernel(plan, emitted, &holes, node, &records, &kernel->reference, &referenced) == TIER1_EMIT_OK;
-            // The immediate's form, as the function's batch chooses it: the scalar twin's choice is the batch's.
-            if (valid && records.requested)
-            {
-                uint16_t form = X86_FORM_NONE;
-                x86_choose_forms_scalar(&records.row, &records.value, &records.context, 1, &form);
-                records.records[records.request] = form != X86_FORM_NONE ? x86_choice_instruction(form, (X86Instruction){ .rm = records.destination }, records.value) : (X86Instruction){ 0 };
-            }
             uint32_t count = records.count;
             // A conditional branch with two successors keeps its comparison: its last two records are the consumer's own
             // jumps, the first of them its condition's.
@@ -1545,6 +1574,16 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
             else if (op == IR_BR || ((op == IR_CBR || op == IR_BR_INDIRECT) && successors == 1))
             {
                 count = 0;
+            }
+            // The immediate's record, as the function's batch chooses its form: checked against the code's record a batch at
+            // a time (tier1_cert_emitted_choices), where it is compared.
+            if (valid && records.requested && records.request < count)
+            {
+                kernel->request = kernel->count + records.request;
+                kernel->request_row = records.row;
+                kernel->request_value = records.value;
+                kernel->request_context = records.context;
+                kernel->request_destination = records.destination;
             }
             for (uint32_t r = 0; valid && r < count; r += 1)
             {
@@ -1703,13 +1742,22 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         holds[reg] = (uint8_t)reg;
     }
     bool valid = true;
+    // The records' effects with their opmask registers, a batch of BUSTER_CERT_EMITTED_EFFECTS at a time.
+    uint64_t batch_reads[BUSTER_CERT_EMITTED_EFFECTS];
+    uint64_t batch_writes[BUSTER_CERT_EMITTED_EFFECTS];
+    // Zeroed: MSan doesn't model the opmask column's down-converting masked store (vpmovqw) as writing it.
+    uint16_t batch_opmasks[BUSTER_CERT_EMITTED_EFFECTS] = { 0 };
     for (uint32_t r = 0; valid && r < count; r += 1)
     {
-        uint64_t read = 0;
-        uint64_t written = 0;
-        uint16_t opmasks = 0;
+        const uint32_t lane = r % BUSTER_CERT_EMITTED_EFFECTS;
+        if (lane == 0)
+        {
+            const uint32_t left = count - r;
+            x86_instructions_effects_opmasks(records + r, left < BUSTER_CERT_EMITTED_EFFECTS ? left : BUSTER_CERT_EMITTED_EFFECTS, batch_reads, batch_writes, batch_opmasks);
+        }
+        uint64_t written = batch_writes[lane];
+        uint16_t opmasks = batch_opmasks[lane];
         const X86Instruction record = records[r];
-        x86_instruction_effects_opmasks_scalar(&record, &read, &written, &opmasks);
         // An asm body's record of a form the semantics' tables don't cover (cpuid, the x87's, MMX's): its registers are
         // the body's touched ones, killed below, and of the rest it writes at most memory through its operand; the front
         // end placed no record of the stack's or control's in a body (check_asm_inline_touched).
@@ -2040,7 +2088,7 @@ static bool tier1_cert_emitted_writes_flags(const X86Instruction* record)
 {
     uint64_t read = 0;
     uint64_t written = 0;
-    x86_instruction_effects_scalar(record, &read, &written);
+    x86_instructions_effects(record, 1, &read, &written);
     return (written & BUSTER_X86_RESOURCE_FLAGS) != 0;
 }
 
@@ -2104,6 +2152,40 @@ static bool tier1_cert_emitted_exactly(X86Instruction record, X86Instruction exp
     const X86Instruction a = x86_vex_canonical(record);
     const X86Instruction b = x86_vex_canonical(expected);
     return memcmp(&a, &b, sizeof(a)) == 0;
+}
+
+// The held requests' forms in one x86_choose_forms batch (a request alone takes the form it takes in any batch): each
+// held record must be its form's record (x86_choice_instruction) for the request's destination and value, and a request
+// with no form refuses. False with `failed` the first refused record's index; the buffer is emptied either way.
+static bool tier1_cert_emitted_choices_check(Tier1CertEmittedChoices* choices, uint32_t* failed)
+{
+    uint16_t forms[BUSTER_CERT_EMITTED_CHOICES] = { 0 };
+    x86_choose_forms(choices->rows, choices->values, choices->contexts, choices->count, forms);
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < choices->count; i += 1)
+    {
+        const X86Instruction expected = x86_choice_instruction(forms[i], (X86Instruction){ .rm = choices->destinations[i] }, choices->values[i]);
+        const bool same = choices->canonical ? tier1_cert_emitted_exactly(choices->records[i], expected) : memcmp(&choices->records[i], &expected, sizeof(expected)) == 0;
+        valid = forms[i] != X86_FORM_NONE && same;
+        *failed = valid ? *failed : choices->at[i];
+    }
+    choices->count = 0;
+    return valid;
+}
+
+// Holds a request and the record `at` the code holds for it, checking the batch when it is full.
+static bool tier1_cert_emitted_choices_defer(Tier1CertEmittedChoices* choices, uint16_t row, int64_t value, uint16_t context, uint8_t destination, X86Instruction record,
+                                             uint32_t at, uint32_t* failed)
+{
+    const uint32_t i = choices->count;
+    choices->rows[i] = row;
+    choices->values[i] = value;
+    choices->contexts[i] = context;
+    choices->destinations[i] = destination;
+    choices->records[i] = record;
+    choices->at[i] = at;
+    choices->count = i + 1;
+    return choices->count < BUSTER_CERT_EMITTED_CHOICES || tier1_cert_emitted_choices_check(choices, failed);
 }
 
 // An immediate's form for the frame's add and sub: its imm8 one where the value fits it, else its imm32 one.
@@ -2537,19 +2619,34 @@ static bool tier1_cert_emitted_row(Tier1CertEmittedBuild* build, uint32_t node, 
     uint64_t writes = 0;
     uint32_t mask_writes = 0;
     bool covered = true;
+    uint64_t explicit_registers[BUSTER_TIER0_OPERATION_RECORDS];
+    uint32_t explicit_masks[BUSTER_TIER0_OPERATION_RECORDS];
+    uint32_t placed_count = 0;
     for (uint32_t k = 0; valid && k < row->record_count; k += 1)
     {
-        uint64_t explicit_registers = 0;
-        uint32_t explicit_masks = 0;
-        valid = tier1_cert_emitted_row_place(row->records[k], k, placement, &placed[k], &named, &explicit_registers, &explicit_masks);
+        explicit_registers[k] = 0;
+        explicit_masks[k] = 0;
+        valid = tier1_cert_emitted_row_place(row->records[k], k, placement, &placed[k], &named, &explicit_registers[k], &explicit_masks[k]);
         valid = valid && tier1_cert_emitted_exactly(emitted->code.records[r + k], placed[k]) && x86_validate(&placed[k], 1) == 1 && tier1_cert_emitted_take_reference(build, r + k, 0);
-        uint64_t read = 0;
-        uint64_t written = 0;
-        uint16_t opmasks = 0;
-        x86_instruction_effects_opmasks_scalar(&placed[k], &read, &written, &opmasks);
+        placed_count = valid ? k + 1 : placed_count;
+    }
+    // The placed records' effects with their opmask registers, in one batch.
+    uint64_t reads[BUSTER_TIER0_OPERATION_RECORDS];
+    uint64_t writes_of[BUSTER_TIER0_OPERATION_RECORDS];
+    // Zeroed: MSan doesn't model the opmask column's down-converting masked store (vpmovqw) as writing it.
+    uint16_t opmasks_of[BUSTER_TIER0_OPERATION_RECORDS] = { 0 };
+    if (valid)
+    {
+        x86_instructions_effects_opmasks(placed, placed_count, reads, writes_of, opmasks_of);
+    }
+    for (uint32_t k = 0; valid && k < placed_count; k += 1)
+    {
+        const uint64_t read = reads[k];
+        const uint64_t written = writes_of[k];
+        const uint16_t opmasks = opmasks_of[k];
         covered = covered && x86_effects(placed[k].form)->operation != X86_OPERATION_NONE;
-        implicit |= (read | written) & (BUSTER_X86_RESOURCE_GPRS | BUSTER_X86_RESOURCE_VECTORS) & ~explicit_registers;
-        implicit_masks |= ((uint32_t)opmasks | (uint32_t)opmasks >> 8) & 0xffu & ~explicit_masks;
+        implicit |= (read | written) & (BUSTER_X86_RESOURCE_GPRS | BUSTER_X86_RESOURCE_VECTORS) & ~explicit_registers[k];
+        implicit_masks |= ((uint32_t)opmasks | (uint32_t)opmasks >> 8) & 0xffu & ~explicit_masks[k];
         writes |= written;
         mask_writes |= (uint32_t)opmasks >> 8;
     }
@@ -3051,6 +3148,7 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
     valid = valid && (tier1_cert_emitted_kernel(build, node, &kernel) || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r));
     build->step_next = calls ? build->step_before : build->step_next;
     X86Instruction found[BUSTER_CERT_EMITTED_KERNEL];
+    uint32_t found_at[BUSTER_CERT_EMITTED_KERNEL];
     uint32_t found_count = 0;
     uint32_t at = r;
     bool epilogue = false;
@@ -3067,6 +3165,7 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
         {
             valid = tier1_cert_emitted_take_reference(build, at, found_count == kernel.referenced ? &kernel.reference : 0);
             found[found_count] = emitted->code.records[at];
+            found_at[found_count] = at;
             found_count += 1;
             at += 1;
             // After the epilogue, the ret ends the run.
@@ -3097,11 +3196,14 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
         }
     }
     valid = valid && found_count == kernel.count;
+    uint32_t failed = r;
     for (uint32_t k = 0; valid && k < found_count; k += 1)
     {
-        valid = tier1_cert_emitted_exactly(found[k], kernel.records[k]);
+        valid = k == kernel.request ? tier1_cert_emitted_choices_defer(&build->choices, kernel.request_row, kernel.request_value, kernel.request_context,
+                                                                       kernel.request_destination, found[k], found_at[k], &failed)
+                                    : tier1_cert_emitted_exactly(found[k], kernel.records[k]);
     }
-    valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
+    valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, failed);
     if (returns)
     {
         // A return: its records before its ret, then its epilogue (none where the frame has none), then the ret, which
@@ -3321,6 +3423,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
         .stats = &tally,
         .base = (uint8_t)emitted->frame.base_register,
         .base_position = 2 * added,
+        .choices = { .canonical = true },
     };
     for (uint32_t node = 0; definitions != NULL && node < count; node += 1)
     {
@@ -3996,7 +4099,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
                 // The prologue: first in the entry block (tier1_cert_emitted_prologue), writing no parameter's register.
                 uint64_t read = 0;
                 uint64_t written = 0;
-                x86_instruction_effects_scalar(&code->records[r], &read, &written);
+                x86_instructions_effects(&code->records[r], 1, &read, &written);
                 valid = (b == 0 && !body && r < prologue_end && (written & entry_registers) == 0) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, r);
                 valid = valid && tier1_cert_emitted_prologue_record(&build, r);
             }
@@ -4180,6 +4283,9 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
             }
         }
     }
+    // The requests still held.
+    uint32_t failed = UINT32_MAX;
+    valid = valid && (tier1_cert_emitted_choices_check(&build.choices, &failed) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_KERNEL, failed));
     valid = valid && (build.location_count <= BUSTER_CERT_MAX_RECORDS || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
     if (valid)
     {

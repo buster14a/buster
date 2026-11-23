@@ -1923,7 +1923,7 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
         uint64_t writes = 0;
         // With the opmask registers it reads and writes: a record that names one otherwise resolves as everything.
         uint16_t opmasks = 0;
-        x86_instruction_effects_opmasks_scalar(record, &reads, &writes, &opmasks);
+        x86_instructions_effects_opmasks(record, 1, &reads, &writes, &opmasks);
         opmask_writes |= (uint32_t)opmasks >> 8;
         if (effects->operation == X86_OPERATION_NONE)
         {

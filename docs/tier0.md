@@ -1929,7 +1929,7 @@ Before the programs, checks of their own:
   rsp restored. Each must compile into valid records with deep entries, a frame pointer exactly in the
   cases that have one, the realigned frames published as such, write no callee-saved register that its prologue
   doesn't push (by
-  `x86_instructions_effects_scalar`), be encoded, and give this file's model of it natively on
+  `x86_instructions_effects`), be encoded, and give this file's model of it natively on
   six inputs.
 - **copies:**
   - `tier0_validate` must refuse a copy of no bytes or past 256, of a class, or from or to a constant, and take 256.
