@@ -764,7 +764,12 @@ blocks keep their numbers and a block's phis stay first:
   no count reaches 64), and selects on its bit 6;
 - a comparison: equality from the halves' `xor`s, `or`ed; an order from the high
   halves' (strict, of the predicate's signedness) where they differ, else the
-  low halves' (unsigned);
+  low halves' (unsigned); of two sign extensions, or two zero extensions, from
+  the same 32- or 64-bit type (C's `(__int128)a < b` of two longs, #3035), the
+  sources' own comparison, by the predicate for sign extensions (which keep
+  both orders) and by its unsigned twin for zero extensions (whose values are
+  never negative), one `cmp` and `setcc` where the halves' took three compares
+  and a `cmov`; mixed extensions and any other operands keep the general form;
 - an extension: the value as the low half (a 64-bit one itself) and zero or its
   sign as the high half; a truncation, the low half (to 64 bits the half
   itself); a pointer's conversions, through the low half;
