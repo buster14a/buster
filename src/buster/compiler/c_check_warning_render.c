@@ -1957,6 +1957,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND:
             result = payload->data != 0 ? "use of logical '||' with constant operand" : "use of logical '&&' with constant operand";
             break;
+        case CHECK_WARNING_EVENT_ALIGN_MISMATCH:
+        {
+            const String8 function = check_driver_warning_name(pp, payload->name);
+            result = check_warning_text(scratch, "passing %u-byte aligned argument to %u-byte aligned parameter 1 of '%.*s' may result in an unaligned pointer access",
+                                        1u << (payload->data & 63u), 1u << ((payload->data >> 8) & 63u), (int)function.length, function.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
             // _Complex is "complex" in clang's words (DeclSpec::getSpecifierName), as its other errors name it.
             result = payload->name == C_NAME_COMPLEX_C99 ? "duplicate 'complex' declaration specifier" :

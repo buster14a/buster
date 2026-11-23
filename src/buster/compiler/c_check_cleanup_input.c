@@ -33,6 +33,90 @@ static bool check_input_cleanup_parameter(CheckInputReader* reader, TypeId param
     return accepted;
 }
 
+// The typedef a cleanup function's parameter spells its type's base with, for its error's text (#1844), or 0: the
+// function's declarator `function`'s parameter list, where it has no parentheses of its own, read back from its `)` as a
+// declaration's specifiers are (check_input_typedef_use).
+static uint32_t check_input_cleanup_parameter_spelling(const CheckInputReader* reader, uint32_t function)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const bool listed = function != BUSTER_CHECK_NONE && function + 1 < count && parser->tokens.kinds[function + 1] == PARSE_KIND_L_PAREN;
+    uint32_t close = listed ? function + 2 : count;
+    while (close < count && parser->tokens.kinds[close] != PARSE_KIND_R_PAREN && parser->tokens.kinds[close] != PARSE_KIND_L_PAREN)
+    {
+        close += 1;
+    }
+    uint32_t use = 0;
+    return close < count && parser->tokens.kinds[close] == PARSE_KIND_R_PAREN ? check_input_typedef_use(reader->output, parser, close, &use) : 0;
+}
+
+// The qualifiers a cleanup function's parameter declares itself with (`L *const p`), which its function's type drops and
+// clang's error prints (#1844): its name's declaration's, the last token of a parameter list without parentheses of its
+// own, where its declared type is a pointer's; none otherwise.
+static uint32_t check_input_cleanup_parameter_qualifiers(const CheckInputReader* reader, uint32_t function)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    const uint32_t count = parser->tokens.count;
+    const bool listed = function != BUSTER_CHECK_NONE && function + 1 < count && parser->tokens.kinds[function + 1] == PARSE_KIND_L_PAREN;
+    uint32_t close = listed ? function + 2 : count;
+    while (close < count && parser->tokens.kinds[close] != PARSE_KIND_R_PAREN && parser->tokens.kinds[close] != PARSE_KIND_L_PAREN)
+    {
+        close += 1;
+    }
+    const uint32_t name = close < count && parser->tokens.kinds[close] == PARSE_KIND_R_PAREN ? close - 1 : BUSTER_CHECK_NONE;
+    const bool declared = name < input->token_count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations[name] == name;
+    const TypeId type = declared ? reader->declared_types[name] : 0;
+    const bool pointer = type != 0 && type_kind(reader->types, type_unqualified(type_strip_aligned(reader->types, type))) == BUSTER_TYPE_KIND_POINTER;
+    return pointer ? type_qualifiers(type) & BUSTER_TYPE_QUALIFIERS : 0;
+}
+
+// The cleanup type error (#1844): clang's names the parameter's type, as its declaration spells it, and a pointer to the
+// variable's, as the variable's declaration `name` spells its base (CheckInputReport.value: the type, then its spelling).
+static void check_input_cleanup_type_error(CheckInputReader* reader, uint32_t argument, uint32_t function, TypeId parameter, uint32_t name, TypeId type)
+{
+    const TypeId pointer = type_pointer(reader->types, type);
+    const uint32_t spelling = name < reader->parser->tokens.count ? check_input_typedef_spelling(reader->output, reader->parser, name) : 0;
+    const uint64_t value = (uint64_t)pointer | (uint64_t)spelling << 32;
+    const uint32_t qualifiers = check_input_cleanup_parameter_qualifiers(reader, function);
+    const TypeId declared = qualifiers != 0 ? type_qualify(reader->types, parameter, qualifiers) : parameter;
+    const uint32_t before = reader->output->report_count;
+    check_input_report_typed(reader, argument, CHECK_INPUT_CLEANUP_TYPE, declared != 0 ? declared : parameter, BUSTER_CHECK_NONE, value);
+    if (reader->output->report_count > before)
+    {
+        reader->output->reports[before].type_spelling = check_input_cleanup_parameter_spelling(reader, function);
+    }
+}
+
+// clang's -Walign-mismatch of a cleanup's call (#1844, CheckArgAlignment, which handleCleanupAttr runs before it checks the
+// parameter's type): a pointer parameter to a complete type more aligned than the variable's type `type`, its typedefs'
+// alignment attributes among it, at the attribute's argument, naming the function `function`.
+static void check_input_cleanup_alignment(CheckInputReader* reader, uint32_t argument, uint32_t function, TypeId parameter, TypeId type)
+{
+    const TypeTable* types = reader->types;
+    const TypeId pointer = type_unqualified(type_strip_aligned(types, parameter));
+    const TypeId pointee = type_kind(types, pointer) == BUSTER_TYPE_KIND_POINTER ? type_element(types, pointer) : 0;
+    const bool complete = pointee != 0 && type_kind(types, type_strip_aligned(types, pointee)) != BUSTER_TYPE_KIND_VOID && type_is_complete(types, pointee) &&
+                          type_is_complete(types, type);
+    const uint32_t parameter_log2 = complete ? type_alignment_log2(types, pointee) : 0;
+    const uint32_t argument_log2 = complete ? type_alignment_log2(types, type) : 0;
+    if (complete && argument_log2 < parameter_log2 && function < reader->parser->tokens.count)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_ALIGN_MISMATCH,
+            .kind = CHECK_WARNING_EVENT_ALIGN_MISMATCH,
+            .token = argument,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            // Published before the argument's own error, as clang gives it first.
+            .completion = argument - 1,
+            .payload = { .name = reader->parser->tokens.names[function], .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = argument_log2 | parameter_log2 << 8 },
+        };
+        check_input_warning_event(reader, &event, NULL, 0);
+    }
+}
+
 static bool check_input_cleanup_record(CheckInputReader* reader, CheckInputCleanup cleanup)
 {
     CheckInput* input = reader->output;
@@ -100,6 +184,12 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, const Chec
         const TypeId* parameter_types = function_type != 0 && type_kind(reader->types, function_type) == BUSTER_TYPE_KIND_FUNCTION ?
                                         type_parameters(reader->types, function_type, &parameters) : NULL;
         const bool prototype = function_type != 0 && (reader->types->types.flags[type_index(function_type)] & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
+        // The call's alignment warning comes before the parameter's type's error, where the function takes one parameter.
+        if (applies && !applied->cleanup_expression && function != BUSTER_CHECK_NONE && parameter_types != NULL && prototype && parameters == 1 &&
+            !check_input_auto_type(reader->types, type))
+        {
+            check_input_cleanup_alignment(reader, argument, function, parameter_types[0], type);
+        }
         if (applies && (applied->cleanup_expression || (function != BUSTER_CHECK_NONE && parameter_types == NULL)))
         {
             check_input_report(reader, argument, CHECK_INPUT_CLEANUP_FUNCTION);
@@ -113,7 +203,7 @@ static bool check_input_cleanup_declaration(CheckInputReader* reader, const Chec
         else if (applies && function != BUSTER_CHECK_NONE && !check_input_auto_type(reader->types, type) &&
                  !check_input_cleanup_parameter(reader, parameter_types[0], type))
         {
-            check_input_report(reader, argument, CHECK_INPUT_CLEANUP_TYPE);
+            check_input_cleanup_type_error(reader, argument, function, parameter_types[0], name, type);
             valid = false;
         }
         else if (applies && function != BUSTER_CHECK_NONE && reader->scope_count != 0)
@@ -161,10 +251,11 @@ static bool check_input_cleanup_deduced(CheckInputReader* reader, uint32_t decla
             const TypeId function_type = type_strip_aligned(reader->types, reader->declared_types[cleanup->function]);
             uint32_t parameters = 0;
             const TypeId* parameter_types = type_parameters(reader->types, function_type, &parameters);
+            check_input_cleanup_alignment(reader, cleanup->argument, cleanup->function, parameter_types[0], type);
             valid = check_input_cleanup_parameter(reader, parameter_types[0], type);
             if (!valid)
             {
-                check_input_report(reader, cleanup->argument, CHECK_INPUT_CLEANUP_TYPE);
+                check_input_cleanup_type_error(reader, cleanup->argument, cleanup->function, parameter_types[0], declaration, type);
             }
         }
     }
