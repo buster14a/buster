@@ -15534,6 +15534,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         options.node_front = BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER;
         options.node_reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | BUSTER_NODE_READER_ALONE_FIRST | BUSTER_NODE_READER_PRODUCE | BUSTER_NODE_READER_PRODUCE_LEAN;
     }
+#else
+    // (The option is the checker's unit's: elsewhere it is read and does nothing.)
+    (void)node_bodies;
 #endif
     const CheckDriverCommand command = {
         .options = options,
