@@ -19,7 +19,7 @@
 # read-only data and the code, which the bake makes read-only (baked.c's bake_seal), so that the exit helper can ask
 # for its ranges in huge pages as for the code's.
 #
-#   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE)
+#   buster_start_order_files(LIST SCRIPT SYMBOLS SHIFT_SOURCE CHECKER_SHIFT)
 #
 # writes SCRIPT, a linker script for lld that places each `UNIT NAME` line's function by its unit's object and its
 # section, which every unit compiled with -ffunction-sections has (.text.NAME, or .text.unlikely.NAME for a cold one,
@@ -48,7 +48,7 @@ function(buster_start_order_write path text)
     endif()
 endfunction()
 
-function(buster_start_order_files list script symbols shift_source)
+function(buster_start_order_files list script symbols shift_source checker_shift)
     file(STRINGS "${list}" lines)
     set(sections "")
     set(names "")
@@ -80,6 +80,25 @@ function(buster_start_order_files list script symbols shift_source)
     if(functions EQUAL 0)
         message(FATAL_ERROR "buster: ${list} names no function of main.c's units")
     endif()
+    set(checker_alignment "")
+    set(checker_sections "        *(.text.buster_checker)\n")
+    if(NOT checker_shift STREQUAL "")
+        # The source's p2align 12 makes every unity input page-aligned. Keep that layout for the other units,
+        # and use the same 16-byte granularity as BUSTER_CHECKER_OFFSET for this unit's placement experiment.
+        # The section still starts on a page and buster_start_end still covers the entire checker.
+        set(checker_alignment " ALIGN(4096) SUBALIGN(16)")
+        set(checker_sections "")
+        foreach(stem IN LISTS linked_names)
+            if(stem MATCHES "^main(_unit_[a-z0-9_]+)?$")
+                string(APPEND checker_sections "        . = ALIGN(4096);\n")
+                if("${stem}.c" STREQUAL "${shift_source}")
+                    string(APPEND checker_sections "        . += ${checker_shift};\n")
+                endif()
+                string(APPEND checker_sections "        */${stem}.c.o(.text.buster_checker)\n        */${stem}/native.o(.text.buster_checker)\n")
+            endif()
+        endforeach()
+        string(APPEND checker_sections "        *(.text.buster_checker)\n")
+    endif()
     string(CONCAT text
         "/* The start's code order (cmake/BusterStartOrder.cmake), from ${list}. */\n"
         "SECTIONS\n{\n"
@@ -87,7 +106,7 @@ function(buster_start_order_files list script symbols shift_source)
         "    .data.rel.ro.buster :\n    {\n        *.c.o(.data.rel.ro .data.rel.ro.*)\n        */native.o(.data.rel.ro .data.rel.ro.*)\n    }\n"
         "    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x20000;\n${sections}    }\n"
         "    ASSERT(SIZEOF(.text.buster_start) > 0x20000, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
-        "    .text.buster_checker :\n    {\n        *(.text.buster_checker)\n        buster_start_end = .;\n    }\n"
+        "    .text.buster_checker :${checker_alignment}\n    {\n${checker_sections}        buster_start_end = .;\n    }\n"
         "}\nINSERT BEFORE .text;\n")
     buster_start_order_write("${script}" "${text}")
     # A shifted link's padding before .text's code: the first section lld places there (absent elsewhere, which

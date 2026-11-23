@@ -2,7 +2,8 @@
 # Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 #
 # The step after each link: cmake -DINPUT=LINKED -DOUTPUT=EXECUTABLE -DBAKE=0|1 -DNM=PATH
-# [-DPADDING=1 [-DUNSHIFTED=EXECUTABLE [-DMOVED=1 -DSHIFT=BYTES]]] -P BusterPostLink.cmake
+# [-DPADDING=1 [-DUNSHIFTED=EXECUTABLE [-DMOVED=1 -DSHIFT=BYTES]]]
+# [-DCHECKER_SHIFT=BYTES -DUNSHIFTED=EXECUTABLE] -P BusterPostLink.cmake
 #
 # Writes OUTPUT from the linked INPUT, which it leaves as it is, so that an unchanged build links nothing. With BAKE,
 # INPUT writes itself with the backend's tables built (bake-tables, src/buster/compiler/baked.c, #590), so that a
@@ -20,6 +21,7 @@
 # first in .text, and some of the units' functions are aligned to 64, which takes up the rest, and the start's padding
 # can push the page-aligned checker's sections before .text by a page): before #2728 each unit's page-aligned checker
 # section and .text's page alignment absorbed every shift short of a page there.
+# With CHECKER_SHIFT, verify the within-page movement of the checker's check_input_run itself.
 #
 # OUTPUT is removed first and written last, by a rename of the finished file, so that a failed step leaves no
 # executable there, rather than one that the inputs no longer make.
@@ -60,7 +62,7 @@ endif()
 
 # Only shifted links and the no-objects fallback need the executable's full symbol table. Ordinary links check
 # the compiler's objects below, so reading the linked runtime's symbols as well would produce unused work.
-if(PADDING OR NOT DEFINED OBJECTS OR OBJECTS STREQUAL "")
+if(PADDING OR DEFINED CHECKER_SHIFT OR NOT DEFINED OBJECTS OR OBJECTS STREQUAL "")
     execute_process(COMMAND "${NM}" "${partial}" OUTPUT_VARIABLE symbols RESULT_VARIABLE status)
     if(NOT status EQUAL 0)
         post_link_fail("${NM} couldn't read ${partial}")
@@ -107,6 +109,21 @@ if(PADDING)
         if(NOT offset STREQUAL "${expected}")
             post_link_fail("build.sh shifts: ${OUTPUT}'s .text moved by '${moved}' bytes, not ${expected} bytes and whole pages")
         endif()
+    endif()
+endif()
+
+if(DEFINED CHECKER_SHIFT)
+    execute_process(COMMAND "${NM}" "${UNSHIFTED}" OUTPUT_VARIABLE unshifted RESULT_VARIABLE status)
+    set(checker "([0-9a-f]+) [tT] check_input_run(\\.buster_split)?\n")
+    set(offset "")
+    if(status EQUAL 0 AND unshifted MATCHES "${checker}")
+        set(before "${CMAKE_MATCH_1}")
+        if(symbols MATCHES "${checker}")
+            math(EXPR offset "(0x${CMAKE_MATCH_1} - 0x${before} + 4096) % 4096")
+        endif()
+    endif()
+    if(NOT offset STREQUAL "${CHECKER_SHIFT}")
+        post_link_fail("build.sh shifts: ${OUTPUT}'s check_input_run moved by '${offset}' within its page, not ${CHECKER_SHIFT}")
     endif()
 endif()
 

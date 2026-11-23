@@ -341,8 +341,10 @@ there at a time, so everything takes one lock:
 - A pull request that changes the checker's sources (the `changes` job's
   `checker` output isn't `false`) also compares `-c sqlite3.c` by its base and
   by its tree ("Compare check-expressions with the pull request's base over
-  placements", #1050). Each is built at four placements of
-  `main_unit_checker.c` (`./build.sh shifts`). The step then runs:
+  placements", #1050). Each is linked at four within-page placements of
+  `main_unit_checker.c` (`./build.sh shifts --checker-placements`).
+  For an older base, both sides use the legacy ordinary `.text` sweep.
+  The step then runs:
   - `time-runs` over the placements, with the base's executables again as the
     floor;
   - each placement's `measure-compile` stages;
