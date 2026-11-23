@@ -84,8 +84,12 @@ with its unreachable stub, an `int` induction's clamp, byte arithmetic through
 in-place `y[i] += k * x[i]`, an `fma`, an `sitofp` of `i32` to `f32`, an invariant start and index offset, a uniform load,
 a sum of a uniform (no vector load or store), two loops and a nested one; and one fixture per refusal (a prefix sum, a
 histogram, a strided store, the induction as data, a call, a volatile load, a
-division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
-than the limit, a reduction's partial value read, an early exit, a step of two).
+division, FNV-1a's recurrence, a float sum, bytes summed into a 64-bit total (a width no vector holds), more guards
+than the limit, a reduction's partial value read, an early exit, a step of two). #2808's fixtures, past the frozen
+digest's: counts of comparisons (`count-u8`, `count-i32`), strided loads (`aos-sum`, `rgb-gray` through 32-bit
+indices, `strided-pairs-i16`, `stride8-u8`, and `stride8-i64`, whose last element ends the interpreter's buffer, so a
+load past it faults) and a 32-bit index that wraps within a vector (`narrow-wrap`, whose input and result must fault
+alike).
 Each runs by both parser paths and the pass at six targets of every operation
 the IR has: at most 64, 32 and 16 bytes wide with masked moves, 64 bytes without
 them or masks from a general register, 64 bytes with them but no select of 32-
@@ -101,11 +105,12 @@ the ordinary optimizer (whose final verification checks dominance), runs in the
 shared interpreter against the input on one buffer, its pointers placed apart,
 at one address, a byte, an element and a vector apart either way, at lengths
 around the vectors' boundaries (signed bounds negative too): the same bytes,
-value and status. Five mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
+value and status. Seven mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
 test, an unrounded tail, a wrong reduction identity, lanes of the wrong width, a
-masked tail's mask of one lane more) must each be rejected on some fixture. `--print NAME` prints a fixture's
+masked tail's mask of one lane more, no 32-bit index wrap test, a strided load's
+wrong lane) must each be rejected on some fixture. `--print NAME` prints a fixture's
 64-byte result. `test-checker-driver`'s inlining unit compiles a C fixture of
-loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 by
+loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 and znver5 by
 both paths, checks the loops each target vectorizes and that both paths give one
 object, and runs it as clang -O0's build does. [The design and its
 status](../tier1-loop-vectorization.md) has the rules and the measurements.
