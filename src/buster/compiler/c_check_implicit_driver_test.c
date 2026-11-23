@@ -617,6 +617,12 @@ static void check_test_driver_unknown_builtins(CheckTest* test, const char* clan
         "int b(void* p) { return sizeof(__builtin_fprintf(p, \"x\")); }\n"
         "typedef struct Stream FILE;\n"
         "int c(FILE* p) { return __builtin_fprintf(p, \"x\"); }\n",
+        // In C23 a missing FILE builtin never became a declaration that could correct a later name.
+        "void a(void* p) { __builtin_fprintf(p, \"x\"); }\n"
+        "void b(void* p) { __builtin_fwrite(\"x\", 1, 1, p); }\n"
+        "typedef struct Stream FILE;\n"
+        "void c(FILE* p) { __builtin_fprintf(p, \"x\"); }\n"
+        "void d(FILE* p) { __builtin_fprintg(p, \"x\"); }\n",
     };
     static const char* const options[][2] =
     {
