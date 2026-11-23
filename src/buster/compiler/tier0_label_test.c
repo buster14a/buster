@@ -195,27 +195,25 @@ static void tier0_test_labels(Tier0TestTally* tally)
     Arena arena = arena_reserve(1ull << 26);
     uint8_t* image = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, 4 * BUSTER_TIER0_TEST_PAGE);
     const Tier0Check check = tier0_validate(&function);
-    const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
-    const Tier0Code vector = tier0_compile(&function, &arena);
-    bool ready = tier0_test_expect(tally, image != 0 && check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
-                                   "labels", "the function: rule \"%s\" at %u, errors %d and %d, or the paths differ", check.rule != 0 ? check.rule : "", check.node,
-                                   scalar.error, vector.error);
+    const Tier0Code code = tier0_compile(&function, &arena);
+    bool ready = tier0_test_expect(tally, image != 0 && check.error == TIER0_OK && code.error == TIER0_OK, "labels", "the function: rule \"%s\" at %u, error %d",
+                                   check.rule != 0 ? check.rule : "", check.node, code.error);
     // Each label's record is its first entry's: the one the jump to the loop's start, and a branch to a label, would go to.
     for (uint32_t k = 0; ready && k < BUSTER_TIER0_TEST_LABEL_COUNT; k += 1)
     {
-        ready = tier0_test_expect(tally, scalar.label_count == BUSTER_TIER0_TEST_LABEL_COUNT && scalar.label_records[k] < scalar.count &&
-                                             (k == 0 || scalar.label_records[k] > scalar.label_records[k - 1]),
-                                  "labels", "label %u: record %u of %u", k, scalar.label_count != 0 ? scalar.label_records[k] : 0, scalar.count);
+        ready = tier0_test_expect(tally, code.label_count == BUSTER_TIER0_TEST_LABEL_COUNT && code.label_records[k] < code.count &&
+                                             (k == 0 || code.label_records[k] > code.label_records[k - 1]),
+                                  "labels", "label %u: record %u of %u", k, code.label_count != 0 ? code.label_records[k] : 0, code.count);
     }
-    ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.reference_count == 0 &&
-                                                  branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
+    ready = ready && tier0_test_expect(tally, x86_validate(code.records, code.count) == code.count && code.reference_count == 0 &&
+                                                  branch_sizing_validate(code.records, code.count, code.branches, code.targets, code.branch_count).error ==
                                                       BRANCH_SIZING_OK,
                                        "labels", "an invalid record, a reference or an invalid branch column");
-    uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
-    const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
+    uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)code.count + 1) : 0;
+    const BranchSizing sizing = offsets != 0 ? size_branches(code.records, code.count, code.branches, code.targets, code.branch_count, offsets) : (BranchSizing){ 0 };
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "labels", "the branches can't be sized");
-    const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
-    const int64_t length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, image, room, 0, 0) : -1;
+    const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(code.count);
+    const int64_t length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(code.records, code.count, image, room, 0, 0) : -1;
     ready = ready && tier0_test_expect(tally, length > 0, "labels",
                                        "the encoder fails (%" PRId64 ")", length);
     Tier0TestLabelShared* shared = mmap(0, sizeof(Tier0TestLabelShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -223,7 +221,7 @@ static void tier0_test_labels(Tier0TestTally* tally)
     if (ready)
     {
         uint64_t inputs[BUSTER_TIER0_TEST_LABEL_INPUTS] = { 0, 1, 2, 3, 4, 0x1b, 0xe4, 0xaaaa, 0xffff, UINT64_MAX, UINT64_C(0x0123456789abcdef), UINT64_C(0x8000000000000000) };
-        const bool ran = tier0_test_label_native(image, (uint32_t)length, offsets, scalar.label_records, inputs, shared);
+        const bool ran = tier0_test_label_native(image, (uint32_t)length, offsets, code.label_records, inputs, shared);
         tier0_test_expect(tally, ran, "labels", "the function didn't run to its end");
         for (uint32_t r = 0; ran && r < BUSTER_TIER0_TEST_LABEL_INPUTS; r += 1)
         {
@@ -236,10 +234,11 @@ static void tier0_test_labels(Tier0TestTally* tally)
     {
         munmap(shared, sizeof(Tier0TestLabelShared));
     }
-    // Jump tables (#785): the second jump (entry 43) a table's of label 4 alone, the first a goto * of the others. Tier 0
-    // takes the columns, by both validators, and compiles the function into the same code; and each break of them is
-    // refused: a table's jump that isn't a JUMP_INDIRECT or past the end, tables' jumps out of order, a label past the
-    // tables, tables' labels out of their order, a table without a label and the columns' count without them.
+    // Jump tables (#785): the second jump (entry 43) a table's of label 4 alone, the first a goto * of the others. Tier
+    // 0 takes the columns, by both validators, and compiles the function into the code it makes without them; and each
+    // break of them is refused: a table's jump that isn't a JUMP_INDIRECT or past the end, tables' jumps out of order,
+    // a label past the tables, tables' labels out of their order, a table without a label and the columns' count
+    // without them.
     static const uint32_t tables[] = { 0, 0, 0, 0, 1 };
     static const uint32_t jumps[] = { 43 };
     Tier0Function tabled = function;
@@ -247,11 +246,10 @@ static void tier0_test_labels(Tier0TestTally* tally)
     tabled.table_jumps = jumps;
     tabled.table_count = 1;
     // Against a fresh compile without them: branch sizing rewrote the first one's records for the native run.
-    const Tier0Code plain = tier0_compile_scalar(&function, &arena);
-    const Tier0Code tabled_code = tier0_compile_scalar(&tabled, &arena);
-    const Tier0Code tabled_vector = tier0_compile(&tabled, &arena);
+    const Tier0Code plain = tier0_compile(&function, &arena);
+    const Tier0Code tabled_code = tier0_compile(&tabled, &arena);
     tier0_test_expect(tally, tier0_validate(&tabled).error == TIER0_OK && tier0_validate_scalar(&tabled).error == TIER0_OK && plain.error == TIER0_OK &&
-                                 tier0_test_same_code(&plain, &tabled_code) && tier0_test_same_code(&plain, &tabled_vector),
+                                 tier0_test_same_code(&plain, &tabled_code),
                       "labels", "a jump table's columns change Tier 0's code or aren't taken");
     typedef struct Tier0TestTableBreak Tier0TestTableBreak;
     struct Tier0TestTableBreak

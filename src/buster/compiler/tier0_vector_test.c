@@ -12,8 +12,8 @@
 //     a float under a statement, stored after it), against this file's own stack machine over the same stream
 //     (tier0_test_vector_interpret), whose rows' model is plain C (tier0_test_vector_model);
 //   - placement: each row under as many floating values as leave its VECTOR registers room, past 16 for the EVEX ones,
-//     and one past the room of a VEX form's, and a scratch register past the integer depths' table, which both paths
-//     take through the deep slots (#780);
+//     and one past the room of a VEX form's, and a scratch register past the integer depths' table, which the compile
+//     takes through the deep slots (#780);
 //   - aggregates in one vector register: functions of 16-, 32- and 64-byte vector parameters (in XMM, YMM and ZMM
 //     registers and on the stack) and results, as objects, as a front end hands them, called from C; and functions
 //     calling C functions of them, a vector argument on the stack among them;
@@ -1298,10 +1298,9 @@ static uint32_t tier0_test_vector_upper(const Tier0Function* function, const Tie
     return wrong == code->count && seen != expected ? 0 : wrong;
 }
 
-// A function compiled by both paths, which must agree (and tier0_validate take it), its records valid, its branches
-// sized, and encoded by the encoder into `image`. Returns the code's length, 0 for a failure or a refusal, and in *error
-// Tier 0's error: only `allowed` may refuse it (TIER0_ERROR_DEPTH where the depths may pass the tables), and every other
-// must compile.
+// A function compiled (tier0_validate taking it), its records valid, its branches sized, and encoded by the encoder
+// into `image`. Returns the code's length, 0 for a failure or a refusal, and in *error Tier 0's error: only `allowed`
+// may refuse it (TIER0_ERROR_DEPTH where the depths may pass the tables), and every other must compile.
 static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, Tier0Error allowed,
                                          Tier0Error* error)
 {
@@ -1311,16 +1310,14 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
     targeted.avx = function->vector_bytes != 16;
     function = &targeted;
     const Tier0Check check = tier0_validate(function);
-    const Tier0Code scalar = tier0_compile_scalar(function, arena);
     const Tier0Code vector = tier0_compile(function, arena);
-    *error = scalar.error;
-    bool ready = tier0_test_expect(tally, check.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "vectors", "%s: rule \"%s\" at %u, or the paths differ (%d, %d)",
-                                   name, check.rule != 0 ? check.rule : "", check.node, scalar.error, vector.error);
-    ready = ready && tier0_test_expect(tally, scalar.error == TIER0_OK || scalar.error == allowed, "vectors", "%s: both paths refuse it with error %d at entry %u", name,
-                                       scalar.error, scalar.node);
-    ready = ready && scalar.error == TIER0_OK;
-    ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count &&
-                                                  branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
+    *error = vector.error;
+    bool ready = tier0_test_expect(tally, check.error == TIER0_OK, "vectors", "%s: rule \"%s\" at %u", name, check.rule != 0 ? check.rule : "", check.node);
+    ready = ready && tier0_test_expect(tally, vector.error == TIER0_OK || vector.error == allowed, "vectors", "%s: the compile refuses it with error %d at entry %u", name,
+                                       vector.error, vector.node);
+    ready = ready && vector.error == TIER0_OK;
+    ready = ready && tier0_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count &&
+                                                  branch_sizing_validate(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count).error ==
                                                       BRANCH_SIZING_OK,
                                        "vectors", "%s: an invalid record or an invalid branch column", name);
     if (ready && function->vector_bytes != 0)
@@ -1331,19 +1328,19 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
         {
             x86_target_forms_scalar(&target, allowed_forms);
         }
-        ready = tier0_test_expect(tally, allowed_forms != NULL && x86_target_validate(allowed_forms, scalar.records, scalar.count) == scalar.count,
+        ready = tier0_test_expect(tally, allowed_forms != NULL && x86_target_validate(allowed_forms, vector.records, vector.count) == vector.count,
                                   "vectors", "%s: target-illegal emitted instruction", name);
     }
-    ready = ready && tier0_test_covered(tally, "vectors", name, &scalar);
+    ready = ready && tier0_test_covered(tally, "vectors", name, &vector);
     bool dirty = false;
-    const uint32_t upper = ready && function->asm_body_count == 0 ? tier0_test_vector_upper(function, &scalar, &dirty) : scalar.count;
-    ready = ready && tier0_test_expect(tally, upper == scalar.count, "vectors", "%s: record %u has a vzeroupper where clang's code has none, or lacks one (#3335)", name, upper);
+    const uint32_t upper = ready && function->asm_body_count == 0 ? tier0_test_vector_upper(function, &vector, &dirty) : vector.count;
+    ready = ready && tier0_test_expect(tally, upper == vector.count, "vectors", "%s: record %u has a vzeroupper where clang's code has none, or lacks one (#3335)", name, upper);
     tier0_test_vector_dirty[dirty ? 1 : 0] += ready ? 1 : 0;
-    uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
-    const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
+    uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)vector.count + 1) : 0;
+    const BranchSizing sizing = offsets != 0 ? size_branches(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count, offsets) : (BranchSizing){ 0 };
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "vectors", "%s: the branches can't be sized", name);
-    const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
-    const int64_t vector_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, image, room, 0, 0) : -1;
+    const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(vector.count);
+    const int64_t vector_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(vector.records, vector.count, image, room, 0, 0) : -1;
     ready = ready && tier0_test_expect(tally, vector_length > 0, "vectors",
                                        "%s: the encoder fails (%" PRId64 ")", name, vector_length);
     return ready ? (uint32_t)vector_length : 0;
@@ -1588,7 +1585,7 @@ static void tier0_test_vector_immediate_placement(Tier0TestTally* tally, const c
 {
     Tier0Function mapped = *function;
     mapped.entry_records = true;
-    const Tier0Code code = tier0_compile_scalar(&mapped, arena);
+    const Tier0Code code = tier0_compile(&mapped, arena);
     const Tier0TestVectorKind* kind = &tier0_test_vector_kinds[k];
     const bool deep = floats + kind->vex_reach > BUSTER_TIER0_FLOATING_DEPTHS;
     const uint32_t base = deep ? 0 : floats;
@@ -1624,12 +1621,12 @@ static void tier0_test_vector_immediate_placement(Tier0TestTally* tally, const c
 }
 
 // Each kind at placements whose outcome this file works out apart from Tier 0: under no live values and under 8 floats
-// and 3 integers (which every kind fits); under 15 floats, the most a stream keeps live across an entry of another class
-// (their consumer's DUP, before it, takes the 16th: tier0_test_vector_adjacent), for the kinds without a VEX form, whose
-// VECTOR registers then go from xmm15 on past the XMM registers (from VECTOR(0) on where a floating operand takes the
-// 16th); and a VEX form's edge, under as many floats as leave its registers below 16 (its VECTOR registers from the
-// floating stack's depth, one past a floating result's where no floating operand takes its place), and one more; and a
-// scratch register (the andn row's) at the integer table's last depth, and past it. Each compiles by both paths and runs
+// and 3 integers (which every kind fits); under 15 floats, the most a stream keeps live across an entry of another
+// class (their consumer's DUP, before it, takes the 16th: tier0_test_vector_adjacent), for the kinds without a VEX
+// form, whose VECTOR registers then go from xmm15 on past the XMM registers (from VECTOR(0) on where a floating operand
+// takes the 16th); and a VEX form's edge, under as many floats as leave its registers below 16 (its VECTOR registers
+// from the floating stack's depth, one past a floating result's where no floating operand takes its place), and one
+// more; and a scratch register (the andn row's) at the integer table's last depth, and past it. Each compiles and runs
 // against the model: past a table, its stack's values in their deep slots and the row's operands in its first registers
 // (tier0_select_deep, #780), as under 15 floats a VEX form's row is.
 static void tier0_test_vector_placement(Tier0TestTally* tally, uint64_t seed, Tier0TestVectorShared* shared)
@@ -1979,7 +1976,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_widen
     _mm512_storeu_si512(shared->results[0], widen(tier0_test_vector_z(shared, 0)));
 }
 
-// Each hand-written function compiled by both paths and run natively, called from C (whose code, clang's, is the
+// Each hand-written function compiled and run natively, called from C (whose code, clang's, is the
 // oracle of the convention for the vectors), its result and what it wrote against this file's C of the same operations.
 static void tier0_test_vector_aggregates(Tier0TestTally* tally, const Tier0TestVectorAbi* abi, Tier0TestVectorShared* shared, uint64_t seed)
 {

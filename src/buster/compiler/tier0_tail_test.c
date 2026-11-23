@@ -3,15 +3,15 @@
 //
 // Tail calls (TAIL_CALL entries, #147's musttail), on what the C programs of test-checker reach rarely: functions that
 // pass their own parameters on to the aggregate probe (tier0_test_aggregate_probe) by a TAIL_CALL, one per fixture of
-// tier0_test_passings in each of five frames, compiled by both paths into the same records, encoded by both encoders
-// and run natively from a driver. The probe must find each parameter where its location says, the driver's slots past
-// the call's arguments as the driver stored them, rsp where the driver's call left it and the callee-saved registers as
-// the driver had them, which only a jump that released the whole frame leaves; what it returns must reach the driver,
-// through the hidden pointer too. And tier0_validate's rules for tail calls, each broken once. The same functions whose
-// result goes through a hidden pointer, with their tail call made a call that passes that pointer on (#2684,
-// BUSTER_TIER0_RESULT_HIDDEN) and a return of it after: the probe must find the driver's hidden pointer in rdi and its
-// bytes must reach the driver; and that call's rules, each broken once. tier0_test.c includes it after the aggregates'
-// tests, whose helpers it uses, for its "tail errors", "tail calls" and "forwarded calls" checks.
+// tier0_test_passings in each of five frames, compiled into valid records, encoded and run natively from a driver. The
+// probe must find each parameter where its location says, the driver's slots past the call's arguments as the driver
+// stored them, rsp where the driver's call left it and the callee-saved registers as the driver had them, which only a
+// jump that released the whole frame leaves; what it returns must reach the driver, through the hidden pointer too. And
+// tier0_validate's rules for tail calls, each broken once. The same functions whose result goes through a hidden
+// pointer, with their tail call made a call that passes that pointer on (#2684, BUSTER_TIER0_RESULT_HIDDEN) and a
+// return of it after: the probe must find the driver's hidden pointer in rdi and its bytes must reach the driver; and
+// that call's rules, each broken once. tier0_test.c includes it after the aggregates' tests, whose helpers it uses, for
+// its "tail errors", "tail calls" and "forwarded calls" checks.
 
 // The frames: none but the parameters' homes; a frame pointer, rsp moved by an ALLOCA; a call first (of a function that
 // clobbers every register a call may), with a local in a callee-saved register across it; an object aligned to 64, which
@@ -179,7 +179,7 @@ static void tier0_test_tail_function(Tier0TestTail* tail, const Tier0TestPassing
 }
 
 // A break of a fixture's tail-calling function (plain) that tier0_validate must refuse by `rule`, at the TAIL_CALL's
-// entry, or for BUSTER_TIER0_TEST_METADATA's at entry 0, which both compile paths must refuse too.
+// entry, or for BUSTER_TIER0_TEST_METADATA's at entry 0, which the compile must refuse too.
 typedef struct Tier0TestTailBreak Tier0TestTailBreak;
 struct Tier0TestTailBreak
 {
@@ -273,7 +273,7 @@ static void tier0_test_tail_break(uint32_t b, Tier0TestTail* tail, AbiCall* inco
 }
 
 // Each break of a plain tail-calling function, built afresh: tier0_validate must refuse it by its rule, at its place,
-// and for the metadata both compile paths must refuse it too; and the variadic function's metadata must be valid
+// and for the metadata the compile must refuse it too; and the variadic function's metadata must be valid
 // without the tail call, so that its refusal is the tail call's.
 static void tier0_test_tail_errors(Tier0TestTally* tally)
 {
@@ -289,12 +289,11 @@ static void tier0_test_tail_errors(Tier0TestTally* tally)
         tier0_test_tail_break(b, &tail, &incoming);
         const Tier0Check after = tier0_validate(&tail.function);
         const bool metadata = strcmp(broken->rule, BUSTER_TIER0_TEST_METADATA) == 0;
-        const Tier0Code scalar = metadata ? tier0_compile_scalar(&tail.function, &arena) : (Tier0Code){ .error = TIER0_ERROR_UNSUPPORTED };
         const Tier0Code vector = metadata ? tier0_compile(&tail.function, &arena) : (Tier0Code){ .error = TIER0_ERROR_UNSUPPORTED };
         const bool refused = after.error == TIER0_ERROR_INVALID && after.rule != 0 && strcmp(after.rule, broken->rule) == 0 && after.node == (metadata ? 0 : tail.tail);
-        tier0_test_expect(tally, before.error == TIER0_OK && refused && scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == TIER0_ERROR_UNSUPPORTED, check,
-                          "%s: before it, \"%s\"; after it, \"%s\" at %u, and the paths' errors %d and %d", broken->name, before.rule != 0 ? before.rule : "valid",
-                          after.rule != 0 ? after.rule : "valid", after.node, scalar.error, vector.error);
+        tier0_test_expect(tally, before.error == TIER0_OK && refused && vector.error == TIER0_ERROR_UNSUPPORTED, check,
+                          "%s: before it, \"%s\"; after it, \"%s\" at %u, and the compile's error %d", broken->name, before.rule != 0 ? before.rule : "valid",
+                          after.rule != 0 ? after.rule : "valid", after.node, vector.error);
         arena_pop_to(&arena, 0);
     }
     Tier0TestTail control;
@@ -332,8 +331,8 @@ static void tier0_test_tail_forward(Tier0TestTail* tail, const Tier0TestPassing*
 // The fixture whose result goes through a hidden pointer, of tier0_test_passings.
 #define BUSTER_TIER0_TEST_TAIL_HIDDEN 12
 
-// The breaks of a forwarding function (tier0_test_tail_forward's), which tier0_validate must refuse as metadata, and both
-// compile paths too: the function's own result not through a hidden pointer, the call's not, no bytes or an alignment
+// The breaks of a forwarding function (tier0_test_tail_forward's), which tier0_validate must refuse as metadata, and
+// the compile too: the function's own result not through a hidden pointer, the call's not, no bytes or an alignment
 // past Tier 0's for it, an argument in rdi, which the hidden pointer takes, and a tail call that names it.
 static const char* const tier0_test_forward_breaks[] = {
     "a forwarded call in a function whose result isn't through a hidden pointer",
@@ -345,7 +344,7 @@ static const char* const tier0_test_forward_breaks[] = {
 };
 
 // The forwarding function of the hidden fixture, valid, then each break of it: refused as metadata at entry 0 by
-// tier0_validate and by both compile paths.
+// tier0_validate and by the compile.
 static void tier0_test_forward_errors(Tier0TestTally* tally)
 {
     static const char check[] = "forwarded calls";
@@ -385,21 +384,18 @@ static void tier0_test_forward_errors(Tier0TestTally* tally)
                 break;
         }
         const Tier0Check validation = tier0_validate(function);
-        const Tier0Code scalar = tier0_compile_scalar(function, &arena);
         const Tier0Code vector = tier0_compile(function, &arena);
         if (b == 0)
         {
-            tier0_test_expect(tally, validation.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
-                              check, "the forwarding function: \"%s\" at %u, the paths' errors %d and %d, or the paths differ",
-                              validation.rule != 0 ? validation.rule : "valid", validation.node, scalar.error, vector.error);
+            tier0_test_expect(tally, validation.error == TIER0_OK && vector.error == TIER0_OK, check, "the forwarding function: \"%s\" at %u, the compile's error %d",
+                              validation.rule != 0 ? validation.rule : "valid", validation.node, vector.error);
         }
         else
         {
             const bool refused = validation.error == TIER0_ERROR_INVALID && validation.rule != 0 && strcmp(validation.rule, BUSTER_TIER0_TEST_METADATA) == 0 &&
                                  validation.node == 0;
-            tier0_test_expect(tally, refused && scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == TIER0_ERROR_UNSUPPORTED, check,
-                              "%s: \"%s\" at %u, and the paths' errors %d and %d", tier0_test_forward_breaks[b - 1], validation.rule != 0 ? validation.rule : "valid",
-                              validation.node, scalar.error, vector.error);
+            tier0_test_expect(tally, refused && vector.error == TIER0_ERROR_UNSUPPORTED, check, "%s: \"%s\" at %u, and the compile's error %d",
+                              tier0_test_forward_breaks[b - 1], validation.rule != 0 ? validation.rule : "valid", validation.node, vector.error);
         }
         arena_pop_to(&arena, 0);
     }
@@ -421,8 +417,8 @@ static const uint8_t tier0_test_tail_saved[BUSTER_TIER0_TEST_TAIL_SAVED_REGISTER
     X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15,
 };
 
-// A run of a function's code by each encoder.
-#define BUSTER_TIER0_TEST_TAIL_RUNS 2
+// A run of a function's code.
+#define BUSTER_TIER0_TEST_TAIL_RUNS 1
 
 // What the driver passes (`arguments`) and the probe returns (`returned`); what the probe saw (`seen`) and the driver's
 // call returned (`returns`); the registers at the driver's entry and at the probe's: the run in progress's ([0]),
@@ -439,11 +435,11 @@ struct Tier0TestTailShared
     uint8_t garbage[16];
 };
 
-// The pages of a function's runs: its code by each encoder, a driver of each, the probe and the clobbering function.
-#define BUSTER_TIER0_TEST_TAIL_DRIVERS 2
-#define BUSTER_TIER0_TEST_TAIL_PROBE 4
-#define BUSTER_TIER0_TEST_TAIL_CLOBBER 5
-#define BUSTER_TIER0_TEST_TAIL_PAGES 6
+// The pages of a function's runs: its code, its driver, the probe and the clobbering function.
+#define BUSTER_TIER0_TEST_TAIL_DRIVERS 1
+#define BUSTER_TIER0_TEST_TAIL_PROBE 2
+#define BUSTER_TIER0_TEST_TAIL_CLOBBER 3
+#define BUSTER_TIER0_TEST_TAIL_PAGES 4
 
 // Records that store the callee-saved registers and rsp into the Tier0TestTailRegisters at `address` (through r10, which
 // the driver and the probe after them set again). Returns the count.
@@ -541,12 +537,12 @@ static __attribute__((no_sanitize("function"))) bool tier0_test_tail_run(Tier0Te
     return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-// Each fixture's function in each frame, by both paths: a driver passes the fixture's bytes as its locations say (each
-// register's and each slot's other bytes their own), and the function passes them on to the probe by a tail call. With
-// `forwarded`, the hidden fixture's function alone (BUSTER_TIER0_TEST_TAIL_HIDDEN), whose tail call is a call that passes
-// the hidden pointer on (tier0_test_tail_forward), right before which rdi is loaded from parameter 0's home; its probe
-// runs in the function's frame, so that rsp, the slots and the callee-saved registers there are the function's, but rdi
-// must be the driver's hidden pointer, the bytes the probe writes there must reach the driver and rax must return it.
+// Each fixture's function in each frame: a driver passes the fixture's bytes as its locations say (each register's and
+// each slot's other bytes their own), and the function passes them on to the probe by a tail call. With `forwarded`,
+// the hidden fixture's function alone (BUSTER_TIER0_TEST_TAIL_HIDDEN), whose tail call is a call that passes the hidden
+// pointer on (tier0_test_tail_forward), right before which rdi is loaded from parameter 0's home; its probe runs in the
+// function's frame, so that rsp, the slots and the callee-saved registers there are the function's, but rdi must be the
+// driver's hidden pointer, the bytes the probe writes there must reach the driver and rax must return it.
 static void tier0_test_tail_calls_by(Tier0TestTally* tally, bool forwarded)
 {
     const char* check = forwarded ? "forwarded calls" : "tail calls";
@@ -612,7 +608,7 @@ static void tier0_test_tail_calls_by(Tier0TestTally* tally, bool forwarded)
         {
             shared->returned.hidden[i] = (uint8_t)(0xe0 ^ (7 * i));
         }
-        // The function, by both paths; its frame as its shape makes it, and its jump to the probe.
+        // The function; its frame as its shape makes it, and its jump to the probe.
         Tier0TestTail tail;
         tier0_test_tail_function(&tail, fixture, shape, (uint64_t)(uintptr_t)(code + BUSTER_TIER0_TEST_TAIL_PROBE * BUSTER_TIER0_TEST_PAGE),
                                  (uint64_t)(uintptr_t)(code + BUSTER_TIER0_TEST_TAIL_CLOBBER * BUSTER_TIER0_TEST_PAGE));

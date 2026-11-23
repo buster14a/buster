@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Runtime builtin recipes against Clang's actual builtin operations, independently of c_builtin.c's fold kernels.
-// Every recipe is appended by both paths, validated, compiled by both Tier 0 paths and executed in a child. Overflow
-// tests cover every ordinary 8/16/32/64 signed/unsigned and _Bool input/destination combination, wrapped bytes and
-// untouched surrounding bytes, _BitInt operands and destinations narrower than their class, and 128-bit operands and
-// destinations (__int128's) mixed with 64-bit operands and narrower destinations. Guard-page tests exercise exact output
-// tails and transactional capacity failures.
-// This tests a typed-stream consumer; it does not claim source checking or C-to-Tier-1 integration.
+// Runtime builtin recipes against Clang's actual builtin operations, independently of c_builtin.c's fold kernels. Every
+// recipe is appended by both paths, validated, compiled by Tier 0 and executed in a child. Overflow tests cover every
+// ordinary 8/16/32/64 signed/unsigned and _Bool input/destination combination, wrapped bytes and untouched surrounding
+// bytes, _BitInt operands and destinations narrower than their class, and 128-bit operands and destinations
+// (__int128's) mixed with 64-bit operands and narrower destinations. Guard-page tests exercise exact output tails and
+// transactional capacity failures. This tests a typed-stream consumer; it does not claim source checking or C-to-Tier-1
+// integration.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -362,9 +362,9 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_case(CB
     const uint64_t mark = arena->length;
     const Tier0Check checked = tier0_validate(&function);
     ok = cbuiltin_lower_test_expect(tally, ok && checked.error == TIER0_OK, checked.rule != 0 ? checked.rule : "typed validation", call.id, checked.node) && ok;
-    Tier0Code scalar = ok ? tier0_compile_scalar(&function, arena) : (Tier0Code){ 0 };
-    Tier0Code vector = ok ? tier0_compile(&function, arena) : (Tier0Code){ 0 };
-    ok = cbuiltin_lower_test_expect(tally, ok && cbuiltin_lower_test_same_code(&scalar, &vector), "Tier 0 twins", call.id, scalar.node) && ok;
+    Tier0Code compiled = ok ? tier0_compile(&function, arena) : (Tier0Code){ 0 };
+    ok = cbuiltin_lower_test_expect(tally, ok && compiled.error == TIER0_OK && x86_validate(compiled.records, compiled.count) == compiled.count, "Tier 0 code", call.id,
+                                    compiled.node) && ok;
     uint8_t* code = MAP_FAILED;
     uint64_t code_pages = 0;
     CBuiltinLowerTestNative* native = MAP_FAILED;
@@ -388,16 +388,16 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_case(CB
     }
     if (ok)
     {
-        const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
+        const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(compiled.count);
         code_pages = (capacity + BUSTER_CBUILTIN_LOWER_TEST_PAGE - 1) & ~(uint64_t)(BUSTER_CBUILTIN_LOWER_TEST_PAGE - 1);
         code = mmap(0, code_pages + BUSTER_CBUILTIN_LOWER_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         native = mmap(0, sizeof(*native) * BUSTER_CBUILTIN_LOWER_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-        uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1);
+        uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)compiled.count + 1);
         ok = cbuiltin_lower_test_expect(tally, code != MAP_FAILED && native != MAP_FAILED && offsets != 0, "native memory", call.id, 0);
         if (ok)
         {
-            const BranchSizing sized = size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets);
-            const int64_t encoded = sized.error == BRANCH_SIZING_OK ? x86_encode(scalar.records, scalar.count, code, capacity, 0, 0) : -1;
+            const BranchSizing sized = size_branches(compiled.records, compiled.count, compiled.branches, compiled.targets, compiled.branch_count, offsets);
+            const int64_t encoded = sized.error == BRANCH_SIZING_OK ? x86_encode(compiled.records, compiled.count, code, capacity, 0, 0) : -1;
             ok = cbuiltin_lower_test_expect(tally, encoded >= 0 && mprotect(code, code_pages, PROT_READ | PROT_EXEC) == 0 &&
                                             mprotect(code + code_pages, BUSTER_CBUILTIN_LOWER_TEST_PAGE, PROT_NONE) == 0, "native encoding", call.id, 0);
         }
@@ -699,9 +699,9 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_wide_ca
     const uint64_t mark = arena->length;
     const Tier0Check checked = tier0_validate(&function);
     ok = cbuiltin_lower_test_expect(tally, ok && checked.error == TIER0_OK, checked.rule != 0 ? checked.rule : "wide typed validation", call.id, checked.node) && ok;
-    Tier0Code scalar = ok ? tier0_compile_scalar(&function, arena) : (Tier0Code){ 0 };
-    Tier0Code vector = ok ? tier0_compile(&function, arena) : (Tier0Code){ 0 };
-    ok = cbuiltin_lower_test_expect(tally, ok && cbuiltin_lower_test_same_code(&scalar, &vector), "wide Tier 0 twins", call.id, scalar.node) && ok;
+    Tier0Code compiled = ok ? tier0_compile(&function, arena) : (Tier0Code){ 0 };
+    ok = cbuiltin_lower_test_expect(tally, ok && compiled.error == TIER0_OK && x86_validate(compiled.records, compiled.count) == compiled.count, "wide Tier 0 code", call.id,
+                                    compiled.node) && ok;
     uint8_t* code = MAP_FAILED;
     uint64_t code_pages = 0;
     CBuiltinLowerTestNative* native = MAP_FAILED;
@@ -714,16 +714,16 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_lower_test_wide_ca
     }
     if (ok)
     {
-        const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
+        const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(compiled.count);
         code_pages = (capacity + BUSTER_CBUILTIN_LOWER_TEST_PAGE - 1) & ~(uint64_t)(BUSTER_CBUILTIN_LOWER_TEST_PAGE - 1);
         code = mmap(0, code_pages + BUSTER_CBUILTIN_LOWER_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         native = mmap(0, sizeof(*native) * BUSTER_CBUILTIN_LOWER_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-        uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1);
+        uint32_t* offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)compiled.count + 1);
         ok = cbuiltin_lower_test_expect(tally, code != MAP_FAILED && native != MAP_FAILED && offsets != 0, "wide native memory", call.id, 0);
         if (ok)
         {
-            const BranchSizing sized = size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets);
-            const int64_t encoded = sized.error == BRANCH_SIZING_OK ? x86_encode(scalar.records, scalar.count, code, capacity, 0, 0) : -1;
+            const BranchSizing sized = size_branches(compiled.records, compiled.count, compiled.branches, compiled.targets, compiled.branch_count, offsets);
+            const int64_t encoded = sized.error == BRANCH_SIZING_OK ? x86_encode(compiled.records, compiled.count, code, capacity, 0, 0) : -1;
             ok = cbuiltin_lower_test_expect(tally, encoded >= 0 && mprotect(code, code_pages, PROT_READ | PROT_EXEC) == 0 &&
                                             mprotect(code + code_pages, BUSTER_CBUILTIN_LOWER_TEST_PAGE, PROT_NONE) == 0, "wide native encoding", call.id, 0);
         }

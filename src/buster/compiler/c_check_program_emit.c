@@ -2448,7 +2448,7 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                 Tier0Inlined inlined;
                 const bool spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->code, &inlined);
                 const Tier0Function* source = spliced ? &inlined.function : function;
-                Tier0Code compiled = naked != 0 ? naked->code : run->scalar ? tier0_compile_scalar(source, lane->code) : tier0_compile(source, lane->code);
+                Tier0Code compiled = naked != 0 ? naked->code : tier0_compile(source, lane->code);
                 if (spliced)
                 {
                     tier0_inline_code(&compiled, function, &inlined, lane->code);

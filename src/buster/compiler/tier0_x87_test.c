@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// test-tier0's x87 check (#136's item 8): long double in Tier 0. Functions over long doubles are compiled by both paths,
-// which must give the same records, encoded by both encoders, which must give the same bytes, and run natively in a child
+// test-tier0's x87 check (#136's item 8): long double in Tier 0. Functions over long doubles are compiled into valid
+// records, encoded, and run natively in a child
 // process, called from C through function pointers, so that this file's C (clang's code) is the oracle of the calling
 // convention for long double arguments, parameters and results, and its long double arithmetic (the x87's, as Tier 0's)
 // the oracle of their values:
@@ -911,33 +911,30 @@ static bool tier0_test_x87_interpret(const Tier0TestX87Program* program, const u
 // ---------------------------------------------------------------------------------------------------------------------
 // Compiling and running
 
-// A function compiled by both paths, which must make the same code, its records valid, its branches sized, and encoded by
-// the encoder into `image`. Returns the code's length, 0 for a failure, and in *error Tier 0's error. Only random programs
-// may refuse excess depth.
+// A function compiled, its records valid, its branches sized, and encoded by the encoder into `image`. Returns the
+// code's length, 0 for a failure, and in *error Tier 0's error. Only random programs may refuse excess depth.
 static uint32_t tier0_test_x87_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, bool depth_allowed,
                                       Tier0Error* error)
 {
     const Tier0Check check = tier0_validate(function);
-    const Tier0Code scalar = tier0_compile_scalar(function, arena);
     const Tier0Code vector = tier0_compile(function, arena);
-    *error = scalar.error;
-    bool ready = tier0_test_expect(tally, check.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "x87", "%s: rule \"%s\" at %u, or the paths differ (%d, %d)", name,
-                                   check.rule != 0 ? check.rule : "", check.node, scalar.error, vector.error);
-    const char* error_name = scalar.error == TIER0_ERROR_UNSUPPORTED ? "TIER0_ERROR_UNSUPPORTED" : scalar.error == TIER0_ERROR_DEPTH ? "TIER0_ERROR_DEPTH"
-                             : scalar.error == TIER0_ERROR_MEMORY ? "TIER0_ERROR_MEMORY" : scalar.error == TIER0_ERROR_INVALID ? "TIER0_ERROR_INVALID" : "unknown";
-    ready = ready && tier0_test_expect(tally, scalar.error == TIER0_OK || (depth_allowed && scalar.error == TIER0_ERROR_DEPTH), "x87",
-                                       "%s: both paths refuse it with %s (%d) at entry %u", name, error_name, scalar.error, scalar.node);
-    ready = ready && scalar.error == TIER0_OK;
-    ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.reference_count == 0 &&
-                                                  branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
+    *error = vector.error;
+    bool ready = tier0_test_expect(tally, check.error == TIER0_OK, "x87", "%s: rule \"%s\" at %u", name, check.rule != 0 ? check.rule : "", check.node);
+    const char* error_name = vector.error == TIER0_ERROR_UNSUPPORTED ? "TIER0_ERROR_UNSUPPORTED" : vector.error == TIER0_ERROR_DEPTH ? "TIER0_ERROR_DEPTH"
+                             : vector.error == TIER0_ERROR_MEMORY ? "TIER0_ERROR_MEMORY" : vector.error == TIER0_ERROR_INVALID ? "TIER0_ERROR_INVALID" : "unknown";
+    ready = ready && tier0_test_expect(tally, vector.error == TIER0_OK || (depth_allowed && vector.error == TIER0_ERROR_DEPTH), "x87",
+                                       "%s: the compile refuses it with %s (%d) at entry %u", name, error_name, vector.error, vector.node);
+    ready = ready && vector.error == TIER0_OK;
+    ready = ready && tier0_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count && vector.reference_count == 0 &&
+                                                  branch_sizing_validate(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count).error ==
                                                       BRANCH_SIZING_OK,
                                        "x87", "%s: an invalid record, a reference or an invalid branch column", name);
-    ready = ready && tier0_test_covered(tally, "x87", name, &scalar);
-    uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
-    const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
+    ready = ready && tier0_test_covered(tally, "x87", name, &vector);
+    uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)vector.count + 1) : 0;
+    const BranchSizing sizing = offsets != 0 ? size_branches(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count, offsets) : (BranchSizing){ 0 };
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "x87", "%s: the branches can't be sized", name);
-    const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
-    const int64_t vector_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, image, room, 0, 0) : -1;
+    const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(vector.count);
+    const int64_t vector_length = ready && room <= 4 * BUSTER_TIER0_TEST_PAGE ? x86_encode(vector.records, vector.count, image, room, 0, 0) : -1;
     ready = ready && tier0_test_expect(tally, vector_length > 0, "x87",
                                        "%s: the encoder fails (%" PRId64 ")", name, vector_length);
     return ready ? (uint32_t)vector_length : 0;
@@ -1719,7 +1716,7 @@ static void tier0_test_x87_transfers(Tier0TestTally* tally, const Tier0TestX87Ab
         tier0_test_x87_emit(&program, BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_VOID, 0);
         const Tier0Function function = tier0_test_x87_function(&program, abi);
         arena_pop_to(&arena, 0);
-        const Tier0Code code = tier0_compile_scalar(&function, &arena);
+        const Tier0Code code = tier0_compile(&function, &arena);
         uint32_t memory_stores = 0;
         for (uint32_t r = 0; r < code.count; r += 1)
         {

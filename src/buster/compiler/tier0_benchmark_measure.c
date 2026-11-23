@@ -3,11 +3,11 @@
 //
 // The backend's measurement (#136), which its two commands share: benchmark-backend's generated programs
 // (tier0_benchmark.c, a translation unit of its own) and benchmark-backend-source's C files (tier0_source_benchmark.c,
-// in main.c's checker unit). A corpus of Tier 0's functions, each compiled by both paths, which must give the same
-// records, then timed: the vector path, its scalar twin, branch sizing and encoding, the stream's validation
-// (tier0_validate, the lowering's check of every function it lowers, #569) and its scalar twin, and the immediates' form
-// choice on each function's own requests (x86_choose_forms, #221, as tier0_compile calls it) and its scalar twin, each a
-// run over every function. Include after x86_64_encoder.c, branch_sizing.c, x86_semantics.c and tier0.c.
+// in main.c's checker unit). A corpus of Tier 0's functions, each compiled, then timed: the compile (tier0_compile),
+// branch sizing and encoding, the stream's validation (tier0_validate, the lowering's check of every function it
+// lowers, #569) and its scalar validator, and the immediates' form choice on each function's own requests
+// (x86_choose_forms, #221, as tier0_compile calls it) and its scalar twin, each a run over every function. Include
+// after x86_64_encoder.c, branch_sizing.c, x86_semantics.c and tier0.c.
 //
 // Layout: the clock and the counters; the corpus (tier0_benchmark_reserve, tier0_benchmark_add); the variants
 // (tier0_benchmark_run); tier0_benchmark_measure.
@@ -25,18 +25,16 @@
 #define BUSTER_TIER0_BENCHMARK_THROTTLE_EVENT 0x1000008a0ull
 
 #define BUSTER_TIER0_BENCHMARK_VECTOR 0
-#define BUSTER_TIER0_BENCHMARK_SCALAR 1
-#define BUSTER_TIER0_BENCHMARK_SIZING 2
-#define BUSTER_TIER0_BENCHMARK_ENCODE 3
-#define BUSTER_TIER0_BENCHMARK_VALIDATE 4
-#define BUSTER_TIER0_BENCHMARK_VALIDATE_SCALAR 5
-#define BUSTER_TIER0_BENCHMARK_CHOOSE 6
-#define BUSTER_TIER0_BENCHMARK_CHOOSE_SCALAR 7
-#define BUSTER_TIER0_BENCHMARK_VARIANTS 8
+#define BUSTER_TIER0_BENCHMARK_SIZING 1
+#define BUSTER_TIER0_BENCHMARK_ENCODE 2
+#define BUSTER_TIER0_BENCHMARK_VALIDATE 3
+#define BUSTER_TIER0_BENCHMARK_VALIDATE_SCALAR 4
+#define BUSTER_TIER0_BENCHMARK_CHOOSE 5
+#define BUSTER_TIER0_BENCHMARK_CHOOSE_SCALAR 6
+#define BUSTER_TIER0_BENCHMARK_VARIANTS 7
 
 static const char* const tier0_benchmark_names[BUSTER_TIER0_BENCHMARK_VARIANTS] = {
     "vector",
-    "scalar",
     "sizing",
     "encode",
     "validate",
@@ -194,34 +192,29 @@ static uint64_t tier0_benchmark_record_bytes(const X86Instruction* record)
     return length > 0 ? (uint64_t)length : 0;
 }
 
-// What tier0_benchmark_add made of a function: it joined the corpus; Tier 0 refused it alike by both paths, with an
-// error other than a resource's; the paths disagree on it; or memory ran out (the corpus is full, an arena has no room,
-// or a path's own TIER0_ERROR_MEMORY), which never leaves a function out unnoticed.
+// What tier0_benchmark_add made of a function: it joined the corpus; Tier 0 refused it, with an error other than a
+// resource's; or memory ran out (the corpus is full, an arena has no room, or the compile's own TIER0_ERROR_MEMORY),
+// which never leaves a function out unnoticed.
 typedef enum Tier0BenchmarkAdd
 {
     TIER0_BENCHMARK_ADDED,
     TIER0_BENCHMARK_REFUSED,
-    TIER0_BENCHMARK_DISAGREE,
     TIER0_BENCHMARK_MEMORY,
 } Tier0BenchmarkAdd;
 
-// `function`, compiled by both paths into `code_arena`, joins the corpus with room for its sized records and machine
-// code from `arena`, when both paths give it the same records and the corpus has room. Changes nothing otherwise.
+// `function`, compiled into `code_arena`, joins the corpus with room for its sized records and machine code from
+// `arena`, when it compiles and the corpus has room. Changes nothing otherwise.
 static Tier0BenchmarkAdd tier0_benchmark_add(Tier0BenchmarkCorpus* corpus, const Tier0Function* function, Arena* arena, Arena* code_arena)
 {
     const uint32_t index = corpus->count;
     Tier0BenchmarkAdd result = TIER0_BENCHMARK_MEMORY;
     if (index < corpus->capacity)
     {
-        // The vector path's code with its choice's requests, which make the same records.
+        // The code with its choice's requests, which make the same records.
         Tier0Function requesting = *function;
         requesting.choice_requests = true;
-        const Tier0Code scalar = tier0_compile_scalar(function, code_arena);
         const Tier0Code vector = tier0_compile(&requesting, code_arena);
-        const bool same = scalar.error == vector.error && scalar.count == vector.count && scalar.branch_count == vector.branch_count &&
-                          (scalar.count == 0 || memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0);
-        const bool memory = scalar.error == TIER0_ERROR_MEMORY || vector.error == TIER0_ERROR_MEMORY;
-        result = memory ? TIER0_BENCHMARK_MEMORY : !same ? TIER0_BENCHMARK_DISAGREE : vector.error != TIER0_OK ? TIER0_BENCHMARK_REFUSED : TIER0_BENCHMARK_ADDED;
+        result = vector.error == TIER0_ERROR_MEMORY ? TIER0_BENCHMARK_MEMORY : vector.error != TIER0_OK ? TIER0_BENCHMARK_REFUSED : TIER0_BENCHMARK_ADDED;
         X86Instruction* sized = result == TIER0_BENCHMARK_ADDED ? BUSTER_ARENA_PUSH_ARRAY(arena, X86Instruction, (uint64_t)vector.count + 1) : 0;
         uint32_t* offsets = sized != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)vector.count + 1) : 0;
         uint32_t* ends = offsets != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(vector.reference_count)) : 0;
@@ -288,11 +281,6 @@ static Tier0BenchmarkReading tier0_benchmark_run(uint32_t variant, Tier0Benchmar
             failures += tier0_compile(corpus->functions[f], scratch).error != TIER0_OK;
             arena_pop_to(scratch, mark);
         }
-        else if (variant == BUSTER_TIER0_BENCHMARK_SCALAR)
-        {
-            failures += tier0_compile_scalar(corpus->functions[f], scratch).error != TIER0_OK;
-            arena_pop_to(scratch, mark);
-        }
         else if (variant == BUSTER_TIER0_BENCHMARK_SIZING)
         {
             failures += size_branches(corpus->sized[f], code->count, code->branches, code->targets, code->branch_count, corpus->offsets[f]).error != BRANCH_SIZING_OK;
@@ -332,15 +320,15 @@ static Tier0BenchmarkReading tier0_benchmark_run(uint32_t variant, Tier0Benchmar
     return taken;
 }
 
-// Times the variants over the corpus, each after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which
-// compile path runs first, and which validation and choice (sizing before encoding, which takes the sized records), and
-// prints the report under `name`: the corpus's totals and its choice's requests, then each variant's medians per typed
-// entry and per record. `only`, unless it is BUSTER_TIER0_BENCHMARK_VARIANTS, times one variant alone (encoding's sizing
-// untimed), back to back; `after_scalar` runs the scalar twin, untimed, for that many ms before each pass of the vector
-// path, of the validation and of the choice. A run in which a function's compile, sizing, encoding or validation failed (`scratch` out of room, for
-// one) measured less than the corpus: the first one, warm-up or timed, ends the measurement, which then prints that
-// instead of a report and returns false. So does a corpus without a typed entry or a record, which has nothing to
-// measure per entry: no run times it.
+// Times the variants over the corpus, each after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate
+// which validation and which choice runs first (sizing before encoding, which takes the sized records), and prints the
+// report under `name`: the corpus's totals and its choice's requests, then each variant's medians per typed entry and
+// per record. `only`, unless it is BUSTER_TIER0_BENCHMARK_VARIANTS, times one variant alone (encoding's sizing
+// untimed), back to back; `after_scalar` runs the scalar twin, untimed, for that many ms before each pass of the
+// validation and of the choice. A run in which a function's compile, sizing, encoding or validation failed (`scratch`
+// out of room, for one) measured less than the corpus: the first one, warm-up or timed, ends the measurement, which
+// then prints that instead of a report and returns false. So does a corpus without a typed entry or a record, which has
+// nothing to measure per entry: no run times it.
 static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch, uint32_t only, uint64_t after_scalar, const char* name)
 {
     const Tier0BenchmarkCounters counters = {
@@ -364,10 +352,8 @@ static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch
     {
         for (uint32_t k = 0; k < BUSTER_TIER0_BENCHMARK_VARIANTS && failed == BUSTER_TIER0_BENCHMARK_VARIANTS; k += 1)
         {
-            // The compile paths alternate which runs first, and so do the validations and the choices; encoding always
-            // follows sizing.
-            const uint32_t v = k < 2 ? ((pass & 1) != 0 ? 1 - k : k)
-                               : k >= BUSTER_TIER0_BENCHMARK_CHOOSE && (pass & 1) != 0 ? BUSTER_TIER0_BENCHMARK_CHOOSE + BUSTER_TIER0_BENCHMARK_CHOOSE_SCALAR - k
+            // The validations alternate which runs first, and so do the choices; encoding always follows sizing.
+            const uint32_t v = k >= BUSTER_TIER0_BENCHMARK_CHOOSE && (pass & 1) != 0 ? BUSTER_TIER0_BENCHMARK_CHOOSE + BUSTER_TIER0_BENCHMARK_CHOOSE_SCALAR - k
                                : k >= BUSTER_TIER0_BENCHMARK_VALIDATE && k <= BUSTER_TIER0_BENCHMARK_VALIDATE_SCALAR && (pass & 1) != 0
                                    ? BUSTER_TIER0_BENCHMARK_VALIDATE + BUSTER_TIER0_BENCHMARK_VALIDATE_SCALAR - k
                                    : k;
@@ -375,11 +361,9 @@ static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch
             {
                 continue;
             }
-            if ((v == BUSTER_TIER0_BENCHMARK_VECTOR || v == BUSTER_TIER0_BENCHMARK_VALIDATE || v == BUSTER_TIER0_BENCHMARK_CHOOSE) && after_scalar != 0)
+            if ((v == BUSTER_TIER0_BENCHMARK_VALIDATE || v == BUSTER_TIER0_BENCHMARK_CHOOSE) && after_scalar != 0)
             {
-                const uint32_t twin = v == BUSTER_TIER0_BENCHMARK_VECTOR     ? BUSTER_TIER0_BENCHMARK_SCALAR
-                                      : v == BUSTER_TIER0_BENCHMARK_VALIDATE ? BUSTER_TIER0_BENCHMARK_VALIDATE_SCALAR
-                                                                             : BUSTER_TIER0_BENCHMARK_CHOOSE_SCALAR;
+                const uint32_t twin = v == BUSTER_TIER0_BENCHMARK_VALIDATE ? BUSTER_TIER0_BENCHMARK_VALIDATE_SCALAR : BUSTER_TIER0_BENCHMARK_CHOOSE_SCALAR;
                 const uint64_t until = tier0_benchmark_now() + after_scalar * 1000000ull;
                 while (tier0_benchmark_now() < until && failed == BUSTER_TIER0_BENCHMARK_VARIANTS)
                 {
@@ -402,7 +386,7 @@ static bool tier0_benchmark_measure(Tier0BenchmarkCorpus* corpus, Arena* scratch
     {
         printf("%s: a function's %s failed, so its runs measured less than the corpus: no report\n", name, failed >= BUSTER_TIER0_BENCHMARK_CHOOSE ? "form choice" :
                failed == BUSTER_TIER0_BENCHMARK_SIZING ? "sizing" : failed == BUSTER_TIER0_BENCHMARK_ENCODE ? "encoding" :
-               failed == BUSTER_TIER0_BENCHMARK_VECTOR ? "vector path's compile" : failed == BUSTER_TIER0_BENCHMARK_SCALAR ? "scalar path's compile" :
+               failed == BUSTER_TIER0_BENCHMARK_VECTOR ? "compile" :
                failed == BUSTER_TIER0_BENCHMARK_VALIDATE ? "validation" : "scalar validation");
     }
     else

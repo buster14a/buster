@@ -1384,13 +1384,12 @@ static void ir_lower_test_cas_parameter(IrLowerTestTally* tally)
         function.parameters = parameters;
         const bool second = f == 1;
         const Tier0Check check = tier0_validate(&function);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        bool ready = ir_lower_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector),
-                                          "a compare-exchange whose address is a parameter's only use compiles alike by both Tier 0 paths", 0, f);
-        ready = ready && ir_lower_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0 && scalar.reference_count == 0,
+        bool ready = ir_lower_test_expect(tally, check.error == TIER0_OK && vector.error == TIER0_OK,
+                                          "a compare-exchange whose address is a parameter's only use compiles", 0, f);
+        ready = ready && ir_lower_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count && vector.branch_count == 0 && vector.reference_count == 0,
                                               "a compare-exchange parameter's records are valid, without branches or references", 0, f);
-        const uint64_t room = ready ? BUSTER_X86_ENCODER_CAPACITY(scalar.count) : 0;
+        const uint64_t room = ready ? BUSTER_X86_ENCODER_CAPACITY(vector.count) : 0;
         uint8_t* image = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room) : 0;
         const int64_t length = image != 0 ? x86_encode(vector.records, vector.count, image, room, 0, 0) : -1;
         ready = ready && ir_lower_test_expect(tally, length > 0, "a compare-exchange parameter's code encodes", 0, f);

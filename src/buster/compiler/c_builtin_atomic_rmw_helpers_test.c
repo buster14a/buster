@@ -5,8 +5,9 @@
 // Tier 0/branch-sizing/encoder test dependencies. Independently spelled Clang __atomic/__sync calls provide
 // object, expected-value and result oracles. BOOL_BITS checks the leaf's canonical 0/1 representation contract
 // against byte operations; source-language eligibility of individual legacy bool spellings belongs to checking.
-// Every helper executes through both encoders, and through scalar/vector Tier 0 CALLs with and without a live
-// U64 stack prefix. All native work runs in an alarm-bounded child. Guard pages expose oversized narrow accesses;
+// Every helper executes through both encoders, and through Tier 0 CALLs (by the emitter and by the calls' memo) with
+// and without a live U64 stack prefix. All native work runs in an alarm-bounded child. Guard pages expose oversized
+// narrow accesses;
 // CAS success uses read-only expected storage and expected==object. A finite contention/handoff run is a real
 // consumer fixture, not a proof of the memory model. No source capability or Tier 1 support is inferred here.
 
@@ -545,15 +546,20 @@ static bool cbuiltin_atomic_rmw_test_caller(CBuiltinAtomicRmwTest* test, Arena* 
     };
     const Tier0Check checked = tier0_validate(&function);
     bool result = cbuiltin_atomic_rmw_test_expect(test, checked.error == TIER0_OK, checked.rule != NULL ? checked.rule : "Tier 0 caller validation", ordinal);
+    // Path 0 compiles with an empty table of calls, whose call's records its emitter writes (tier0_emit_call); path 1
+    // with that table, which then holds them (the calls' memo, #2874): the two must make the same bytes.
+    const Tier0CallMemo thread_memo = tier0_call_memo_swap((Tier0CallMemo){ 0 });
     for (uint32_t path = 0; result && path < 2; path += 1)
     {
-        const Tier0Code code = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+        const Tier0Code code = tier0_compile(&function, arena);
         result = cbuiltin_atomic_rmw_test_expect(test, code.error == TIER0_OK && code.branch_count == 0 && code.reference_count == 1, "Tier 0 CALL compiles with retained live prefix", ordinal);
         if (result)
         {
             result = cbuiltin_atomic_rmw_test_map(test, &helper->code, &code, &item->programs[path][variant], ordinal);
         }
     }
+    Tier0CallMemo used = tier0_call_memo_swap(thread_memo);
+    arena_release(&used.arena);
     arena_pop_to(arena, mark);
     return result;
 }
@@ -723,7 +729,7 @@ static bool cbuiltin_atomic_rmw_test_prepare(CBuiltinAtomicRmwTest* test, Arena*
         const CBuiltinAtomicRmwTestProgram* a = &item->programs[0][variant];
         const CBuiltinAtomicRmwTestProgram* b = &item->programs[1][variant];
         result = cbuiltin_atomic_rmw_test_expect(test, a->byte_count == b->byte_count && memcmp(a->entry, b->entry, a->byte_count) == 0,
-            "scalar/vector branch sizing, encoding and ordinary CALL bytes agree", ordinal);
+            "the emitter's and the memo's branch sizing, encoding and ordinary CALL bytes agree", ordinal);
     }
     arena_pop_to(arena, mark);
     return result;
