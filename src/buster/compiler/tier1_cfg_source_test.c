@@ -10,7 +10,8 @@
 // of the one run, which is no measurement (benchmark-tier1-cfg-source is one). Each allocation's certificate (#939,
 // tier1_certificate_cfg.c) must pass tier1_certificate_check too, and the report gives its sizes: facts, edits, source
 // records and operands, and the storage units the checker read and wrote. Beside them, the frame's memory traffic: the
-// IR's loads and stores of its slots, with the allocation's stores and reloads added. Tier 0's code for the same functions comes from its
+// IR's loads and stores of its slots, with the allocation's stores and reloads added. Every function is allocated again
+// with the sparse liveness (#1353), which must give the same allocation. Tier 0's code for the same functions comes from its
 // own tools (-c's objects, benchmark-backend-source): ir_source_prepare's emission initializes Tier 0's tables in the
 // checker's unit, its home, and this command runs in the backend's, whose copies a call here would split from them.
 // Include after ir_source_test.c and tier1_cfg_ir.c.
@@ -91,6 +92,10 @@ struct Tier1CfgSourceTotals
     uint64_t two_freed;
     uint64_t two_fixed;
     uint64_t two_disagreed;
+    // #1353: the functions allocated again with the sparse liveness, and those whose allocation differs from the dense
+    // solve's in any field tier1_cfg_differs compares, but for the two solves' own counters.
+    uint64_t sparse_same;
+    uint64_t sparse_differed;
     Tier1CfgSourcePath path;
 };
 
@@ -250,6 +255,22 @@ static void tier1_cfg_source_check(Tier1CfgSourceTotals* totals, const IrSourceF
                 {
                     printf("tier1-cfg-source: %s blocks=%u edges=%u values=%u phis=%u positions=%u error=%u intervals=%u spills=%u moves=%u split_edges=%u\n", source->name, input->block_count, input->edge_count, input->value_count, input->phi_count, input->position_count, (unsigned)error, result.intervals.count, result.allocation.spill_count, result.move_count, result.split_edges);
                 }
+                {
+                    const uint64_t sparse_mark = output->length;
+                    Tier1CfgAllocation sparse = { 0 };
+                    const Tier1CfgError sparse_error = tier1_cfg_allocate_sparse(input, output, scratch, &sparse);
+                    sparse.liveness_bytes = result.liveness_bytes;
+                    sparse.liveness_iterations = result.liveness_iterations;
+                    const bool same = sparse_error == error && (error != TIER1_CFG_OK || tier1_cfg_differs(input, &result, &sparse) == 0);
+                    totals->sparse_same += same;
+                    totals->sparse_differed += !same;
+                    if (!same)
+                    {
+                        printf("tier1-cfg-source: file=%s function=%s sparse liveness differs (error %u, dense %u)\n", name, source->name, (unsigned)sparse_error, (unsigned)error);
+                    }
+                    failed = failed || !same;
+                    arena_pop_to(output, sparse_mark);
+                }
                 failed = failed || (error != TIER1_CFG_OK && error != TIER1_CFG_CONSTRAINT) || (error == TIER1_CFG_OK && !verified) || certified != TIER1_CERT_OK;
                 arena_pop_to(output, output_mark);
             }
@@ -385,6 +406,7 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
         tier1_cfg_source_print_path("allocation", &totals.path, totals.instructions);
         printf("tier1-cfg-source: frame traffic: slot_accesses=%" PRIu64 " with spills=%" PRIu64 "\n", totals.slot_accesses, totals.slot_accesses + totals.path.stores + totals.path.reloads);
         printf("tier1-cfg-source: two problems in one call and in two: cases=%" PRIu64 " taken=%" PRIu64 " freed=%" PRIu64 " fixed=%" PRIu64 " disagreed=%" PRIu64 "\n", totals.two_cases, totals.two_taken, totals.two_freed, totals.two_fixed, totals.two_disagreed);
+        printf("tier1-cfg-source: sparse liveness (#1353): same=%" PRIu64 " differed=%" PRIu64 "\n", totals.sparse_same, totals.sparse_differed);
     }
     else
     {
@@ -399,5 +421,5 @@ static __attribute__((unused)) int run_tier1_cfg_source_tests(int count, char** 
     arena_release(&lowered);
     free(files);
     free(options);
-    return valid && totals.failed_files == 0 && totals.unpromoted == 0 && totals.malformed == 0 && totals.two_disagreed == 0 && refused == 0 && totals.functions != 0 && (!simd || totals.mask_values != 0) ? 0 : 1;
+    return valid && totals.failed_files == 0 && totals.unpromoted == 0 && totals.malformed == 0 && totals.two_disagreed == 0 && totals.sparse_differed == 0 && refused == 0 && totals.functions != 0 && (!simd || totals.mask_values != 0) ? 0 : 1;
 }

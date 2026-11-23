@@ -73,6 +73,29 @@ counts excluded phi operands, and `liveness_bytes` counts the four dense
 matrices only. The general nonlocal case remains dense; see the allocation
 guide for its storage formula and scope.
 
+## Sparse liveness past the dense ceiling (#1353)
+
+Where the four dense matrices would pass 16 MiB, `tier1_cfg_prepare` solves
+the global values' liveness 512 values at a time over only the blocks each
+group touches (`tier1_cfg_live_sparse`), into per-block lists that the interval
+builder, the boundary sweep and the edge moves read through `Tier1CfgLive`;
+within the ceiling they scan dataflow.c's rows as before. The
+allocation guide's "Allocation over a CFG (#140)" has the method and storage.
+
+`test-tier1-cfg` allocates every fixture and generated case again with the
+sparse solve forced (`tier1_cfg_allocate_sparse`) and requires every field
+`tier1_cfg_differs` compares to match, but the solves' own counters. A
+generated function of N scoped loops, #1353's shape (`tier1_cfg_test_loops`),
+compares both solves' per-block lists for 1, 2, 255, 300 and 1,200 loops, the
+last 2,401 global values in five groups; and at 3,000 and 6,000 loops, past
+the ceiling, the preparation must be sparse, take less scratch than the dense
+matrices alone (18 and 74 MiB) and grow at most 2.2 times as the loops double.
+`test-tier1-cfg-source` allocates every function twice the same way and fails
+on any difference. Breaking the sparse solve (no phi-edge OUT, a dropped
+predecessor, no merge narrowing, a wrong group base, no phi-edge USE) fails
+these checks. These are capacity and semantic checks, not timing or RSS
+measurements.
+
 ## One allocation for two problems (#2538)
 
 `tier1_cfg_allocate` is three functions in a row: `tier1_cfg_prepare`

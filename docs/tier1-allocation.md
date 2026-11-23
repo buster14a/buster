@@ -414,8 +414,30 @@ four remaining matrices cost `4 * blocks * 64 * ceil(global_values / 512)`
 bytes, zero when no global value remains. `cross_block_values`,
 `edge_local_values` and `liveness_bytes` report that partition and matrix cost;
 the last excludes CFG columns and other allocator state. Short-circuit chains
-whose global set stays bounded therefore have linear matrix storage. This does
-not impose a sparse fallback or memory ceiling on genuinely nonlocal values.
+whose global set stays bounded therefore have linear matrix storage.
+
+Where those four matrices would pass 16 MiB
+(`BUSTER_TIER1_CFG_DENSE_LIVENESS_BYTES`), the solve is sparse (#1353):
+`tier1_cfg_live_sparse` takes the global values 512 at a time, one 512-bit
+vector per row, and gives a row only to the blocks a group's definitions, uses
+and live values touch. A block's newly live values go to each predecessor once,
+as one OR, until no row changes: the dense equations' least fixpoint, which the
+worklist's order doesn't change. Each group is solved twice, once to count each
+block's live pairs (and to check SSA and narrow which blocks merge), then, the
+lists allocated exactly, to fill them, so storage is the per-block in and out
+lists, the phi operand occurrences, one group's touched rows (256 bytes each)
+and a few block columns: no blocks-by-values matrix is allocated or cleared.
+Everything after the solve reads either form through `Tier1CfgLive`: each
+reader takes the form once a block, the dense one keeping its row scans and the
+sparse one, kept out of line, walking the lists. Copying a dense row's ids out
+for a shared reader, or inlining the sparse code into the preparation, cost
+`sqlite3.c`'s allocation about 2% on a cloud AVX-512 host, so neither is done.
+The ceiling is a storage policy, as SSA's is, not a measured speed crossover; `sparse_liveness` reports the form, and for it `liveness_bytes` is
+the peak rows and `liveness_iterations` the counting solve's block visits. The
+allocation is the same either way: the tests and `test-tier1-cfg-source`
+allocate every case and function again with the sparse solve forced and compare
+every field. Genuinely long overlapping live ranges still make the lists, and
+the work, grow with their live pairs.
 
 The successor-edge-to-predecessor-ordinal column is built once in
 `O(blocks + edges)` and retained with the preparation. Its transpose is mapped

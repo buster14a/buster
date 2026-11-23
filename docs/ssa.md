@@ -204,7 +204,8 @@ The public output, ownership, rollback and undef contracts remain unchanged.
 This removes unconditional Cartesian storage. It does not promise linear time
 or linear SSA output for every CFG: many locals that genuinely span the whole
 function can require repeated predecessor work and many retained phis. The
-allocator's separate liveness matrices remain owned by #1384. Changing the
+allocator's own liveness goes sparse past its dense ceiling (#1353,
+"Allocation over a CFG" in the allocation guide). Changing the
 storage bound changes algorithm selection, not the published SSA semantics.
 
 ### Shared cleanup
