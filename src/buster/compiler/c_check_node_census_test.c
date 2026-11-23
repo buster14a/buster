@@ -1971,12 +1971,13 @@ struct NodeProducerExpected
 
 // The refusals that stand for what the walk's actions and the passes after it would say (#2850's gate against the
 // diagnostics), each with a body beside it that is taken. Taken: `present` and `calls` (an internal function the unit
-// defines, named), `same` (one enumeration's values stored, passed and compared), `kept`, `exact` and `halves` (a
+// defines, named; and the unit declares a function with a result's attribute, which is no unit's reason), `same` (one
+// enumeration's values stored, passed and compared), `kept`, `exact` and `halves` (a
 // conditional whose arms its conversion keeps: small integers to a floating type, floats to a double), `narrow` (a
 // compound shift inside its operand's own width). A root that may be warned of: `mixed` (two enumerations' enumerators
 // compared), `stored` and `passed` (an enumeration's value to another's object and parameter), `armed` and `started` (a
 // conditional's floating arms converted to an integer, by a return and by an initialization), `inexact` (an integer arm
-// a float does not hold). A token's kind: `pragmatic` (a pragma in the body), `undefined` (an internal function the
+// a float does not hold), `narrowed` (double arms to a float). A token's kind: `pragmatic` (a pragma in the body), `undefined` (an internal function the
 // unit does not define, named). The machine's: `shifted` (a compound shift by its operand's own width, the census's
 // constants'). Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility). An
 // initialization of another form: `aligned` and `typed` (an object aligned past 8 bytes, by its attribute and by its
@@ -1984,6 +1985,7 @@ struct NodeProducerExpected
 // function's entry evaluates).
 static const char node_producer_test_text[] =
     "enum A { A0, A1 };\nenum B { B0, B1 };\nstruct S { enum A a; enum B b; unsigned char c; int n; };\nvoid take(enum A);\n"
+    "__attribute__((warn_unused_result)) int must(int);\n"
     "static int missing(void);\nstatic int present(void) { return 1; }\n"
     "int calls(void) { return present(); }\n"
     "int same(struct S *p) { take(p->a); p->a = A1; return p->a == A1; }\n"
@@ -1991,6 +1993,7 @@ static const char node_producer_test_text[] =
     "float exact(int c) { return c ? 3 : 1; }\n"
     "double halves(int c) { return c ? 1.5f : 2.5f; }\n"
     "float inexact(int c) { return c ? 16777217 : 1; }\n"
+    "float narrowed(int c) { return c ? 1.5 : 2.5; }\n"
     "int said(void) { int g(struct hidden *); return 1; }\n"
     "int narrow(struct S *p) { p->c <<= 7; return p->c; }\n"
     "int mixed(void) { return A1 == B1; }\n"
@@ -7798,7 +7801,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     NodeProducerExpected produced_silent = {
         .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_GATE] = 1, [NODE_PRODUCER_MACHINE] = 1,
                      [NODE_PRODUCER_INITIALIZER] = 2,
-                     [NODE_PRODUCER_LOUD] = 6 },
+                     [NODE_PRODUCER_LOUD] = 7 },
     };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), false,
                                                                  &produced_silent),
