@@ -1019,6 +1019,14 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         result = result && tier0_test_expect(tally, scalar.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, scalar.error,
                                              scalar.node);
         result = result && tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector), "twins", "seed %" PRIu64 " function %u: the paths differ", seed, f);
+        // The calls' memo (#2874): the same code with an empty table, whatever the thread's held from the functions and
+        // programs compiled before this one.
+        const Tier0CallMemo thread_memo = tier0_call_memo_swap((Tier0CallMemo){ 0 });
+        const Tier0Code fresh = result ? tier0_compile(&wanted, arena) : (Tier0Code){ 0 };
+        Tier0CallMemo emptied = tier0_call_memo_swap(thread_memo);
+        arena_release(&emptied.arena);
+        result = result && tier0_test_expect(tally, tier0_test_same_code(&fresh, &vector), "calls' memo",
+                                             "seed %" PRIu64 " function %u: an empty table of calls gives other code", seed, f);
         // A frame pointer the options keep (#177): every function's, or with the leaf rule every one's that calls.
         bool calls = false;
         for (uint32_t i = 0; i < function->count; i += 1)
@@ -1048,6 +1056,14 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             const uint32_t unbroken = tier0_test_unbroken_conversion(scalar.records, scalar.count, &conversions);
             result = result && tier0_test_expect(tally, unbroken == scalar.count, "conversions",
                                                  "seed %" PRIu64 " function %u: record %u converts into a register it doesn't zero first (#3308)", seed, f, unbroken);
+            // #3335: at a target with AVX, no legacy SSE record that has a VEX twin is left, but an asm body's.
+            uint32_t legacy = scalar.count;
+            for (uint32_t r = 0; function->avx && function->asm_body_count == 0 && r < scalar.count; r += 1)
+            {
+                legacy = legacy == scalar.count && x86_vex_forms_tier0[(scalar.records[r].form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT] != 0 ? r : legacy;
+            }
+            result = result && tier0_test_expect(tally, legacy == scalar.count, "VEX twins",
+                                                 "seed %" PRIu64 " function %u: record %u is a legacy SSE record at a target with AVX (#3335)", seed, f, legacy);
         }
         if (result)
         {
@@ -1392,10 +1408,19 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             // -fstack-clash-protection): ALLOCA's loop runs natively against the same oracle, and its branches and the
             // prologue's are both paths' twins.
             const bool probe_stack = (program_seed / 4) % 2 == 1;
+            // Half the programs, in each of those eighths, at a target with AVX (#3335) where the host has it: their legacy
+            // SSE records' VEX twins (tier0_vex) run natively against the same oracle.
+            // Half of those clear the upper state as a dirty function does (Tier0Function.zero_upper, which a scalar program
+            // never is on its own): a vzeroupper before each call, each musttail call's teardown and the epilogue's, which
+            // the frame's and the branches' columns and the native runs take.
+            const bool avx = (program_seed / 8) % 2 == 1 && __builtin_cpu_supports("avx");
+            const bool zero_upper = avx && (program_seed / 16) % 2 == 1;
             for (uint32_t f = 0; ok && f < functions->count; f += 1)
             {
                 functions->functions[f].frame_pointer = frame_pointer;
                 functions->functions[f].probe_stack = probe_stack;
+                functions->functions[f].avx = avx;
+                functions->functions[f].zero_upper = zero_upper;
             }
             code->records = 0;
             code->entries = 0;
@@ -1987,6 +2012,133 @@ static void tier0_test_moves(Tier0TestTally* tally)
             right &= file[base + r] == expected;
         }
         tier0_test_expect(tally, right, "moves", "round %u: %u moves, %u cycles, %u records", round, moves, cycles, writer.count);
+    }
+}
+
+// A call's effects on the stacks (tier0_raw_effects, #2874), its arguments' classes counted 64 at a time, against the
+// stacks' definition (tier0_stack): each argument pops its class's stack (none for VOID and MASK), an indirect call its
+// callee from the integer stack, and the call pushes its result's; for calls and tail calls of 0 to 200 arguments of
+// random classes, every class among them, around each 64-class boundary, direct and indirect.
+static void tier0_test_call_effects(Tier0TestTally* tally)
+{
+    static const uint32_t argument_counts[] = { 0, 1, 2, 7, 16, 63, 64, 65, 127, 128, 129, 200 };
+    static const uint8_t results[] = { BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_MASK };
+    uint64_t random = 0x6a09e667f3bcc909ull;
+    uint8_t argument_classes[200];
+    uint32_t wrong = UINT32_MAX;
+    for (uint32_t round = 0; round < 64; round += 1)
+    {
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(argument_counts); c += 1)
+        {
+            const uint32_t arguments = argument_counts[c];
+            int32_t integer_expected = 0;
+            int32_t floating_expected = 0;
+            for (uint32_t a = 0; a < arguments; a += 1)
+            {
+                // Every class in turn in the first round, random ones after it.
+                argument_classes[a] = (uint8_t)(round == 0 ? a % BUSTER_TYPED_CLASS_LIMIT : tier0_generate_below(&random, BUSTER_TYPED_CLASS_LIMIT));
+                const uint32_t stack = tier0_stack(argument_classes[a]);
+                integer_expected -= stack == 1 ? 1 : 0;
+                floating_expected -= stack == 2 ? 1 : 0;
+            }
+            const bool indirect = tier0_generate_below(&random, 2) != 0;
+            const uint8_t kind = tier0_generate_below(&random, 2) != 0 ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL;
+            const uint8_t result = kind == BUSTER_TYPED_TAIL_CALL ? BUSTER_TYPED_CLASS_VOID : results[tier0_generate_below(&random, BUSTER_ARRAY_LENGTH(results))];
+            integer_expected -= indirect ? 1 : 0;
+            integer_expected += tier0_stack(result) == 1 ? 1 : 0;
+            floating_expected += tier0_stack(result) == 2 ? 1 : 0;
+            const uint64_t value = 0;
+            const uint32_t first = 0;
+            const SymbolId target = indirect ? 0 : 1;
+            Tier0Function function;
+            memset(&function, 0, sizeof(function));
+            function.kinds = &kind;
+            function.classes = &result;
+            function.values = &value;
+            function.count = 1;
+            function.call_targets = &target;
+            function.call_first = &first;
+            function.call_argument_counts = &arguments;
+            function.argument_classes = argument_classes;
+            function.call_count = 1;
+            int32_t integer = 0;
+            int32_t floating = 0;
+            tier0_raw_effects(&function, 0, &integer, &floating);
+            wrong = wrong == UINT32_MAX && (integer != integer_expected || floating != floating_expected) ? round * 1000 + arguments : wrong;
+        }
+    }
+    tier0_test_expect(tally, wrong == UINT32_MAX, "call effects", "round %u, %u arguments: a call's effects aren't its arguments' and result's stacks", wrong / 1000,
+                      wrong % 1000);
+}
+
+// The records with a VEX twin from a forward table's window (x86_vex_find, #2874) against the table itself: every value
+// of a record's form (each row, with each segment override, the fixup flag or neither), 32 records a block, in Tier 0's
+// table and Tier 1's, the records' other fields arbitrary; and a block's live records alone, at every count to 32, also
+// at the end of a page before one it can't read.
+static void tier0_test_vex_window(Tier0TestTally* tally)
+{
+    static const uint16_t* const tables[2] = { x86_vex_forms_tier0, x86_vex_forms };
+    X86Instruction records[32];
+    for (uint32_t t = 0; t < 2; t += 1)
+    {
+        const X86VexWindow window = x86_vex_window(tables[t]);
+        uint32_t wrong = UINT32_MAX;
+        for (uint32_t first = 0; first < 0x10000; first += 32)
+        {
+            uint32_t expected = 0;
+            for (uint32_t r = 0; r < 32; r += 1)
+            {
+                const uint32_t form = first + r;
+                const uint32_t number = form & BUSTER_X86_FORM_NUMBER;
+                const uint64_t noise = (uint64_t)form * 0x9e3779b97f4a7c15ull;
+                records[r] = (X86Instruction){
+                    .immediate = (int32_t)noise,
+                    .displacement = (int32_t)(noise >> 32),
+                    .reg = (uint8_t)(noise >> 8),
+                    .rm = (uint8_t)(noise >> 16),
+                    .index = (uint8_t)(noise >> 24),
+                    .mode = (uint8_t)(noise >> 40),
+                    .form = (uint16_t)form,
+                    .vvvv = (uint8_t)(noise >> 48),
+                    .decorations = (uint8_t)(noise >> 56),
+                };
+                expected |= number < BUSTER_X86_FORM_SS && tables[t][number % X86_FORM_COUNT] != 0 ? 1u << r : 0;
+            }
+            const uint32_t found = x86_vex_find(records, 32, &window);
+            wrong = wrong == UINT32_MAX && found != expected ? first + (uint32_t)__builtin_ctz(found ^ expected) : wrong;
+        }
+        tier0_test_expect(tally, wrong == UINT32_MAX, "VEX window", "table %u: form %u's record is found where the table has no entry, or missed where it has one", t, wrong);
+    }
+    // Every record a legacy form with a twin: a block of `count` finds its live records alone.
+    for (uint32_t r = 0; r < 32; r += 1)
+    {
+        records[r] = (X86Instruction){ .form = (uint16_t)(r % 2 == 0 ? X86_FORM_ADDSD_X_XM64 : X86_FORM_MOVQ_XM64_X + BUSTER_X86_FORM_GS) };
+    }
+    const X86VexWindow window = x86_vex_window(x86_vex_forms_tier0);
+    uint32_t short_count = UINT32_MAX;
+    for (uint32_t count = 0; count <= 32; count += 1)
+    {
+        const uint32_t expected = count == 32 ? UINT32_MAX : (1u << count) - 1;
+        short_count = short_count == UINT32_MAX && x86_vex_find(records, count, &window) != expected ? count : short_count;
+    }
+    tier0_test_expect(tally, short_count == UINT32_MAX, "VEX window", "a block of %u records finds records past them, or misses one", short_count);
+    // And a block that ends where its page does, before a page it can't read: its loads stay inside its records.
+    const uint64_t page = 4096;
+    uint8_t* pages = mmap(0, 2 * page, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    bool guarded = pages != MAP_FAILED && mprotect(pages + page, page, PROT_NONE) == 0;
+    uint32_t edge_count = UINT32_MAX;
+    for (uint32_t count = 0; guarded && count <= 32; count += 1)
+    {
+        X86Instruction* edge = (X86Instruction*)(pages + page) - count;
+        memcpy(edge, records, count * sizeof(X86Instruction));
+        const uint32_t expected = count == 32 ? UINT32_MAX : (1u << count) - 1;
+        edge_count = edge_count == UINT32_MAX && x86_vex_find(edge, count, &window) != expected ? count : edge_count;
+    }
+    tier0_test_expect(tally, guarded && edge_count == UINT32_MAX, "VEX window", "a block of %u records at its page's end finds other records (or the page can't be guarded)",
+                      edge_count);
+    if (pages != MAP_FAILED)
+    {
+        munmap(pages, 2 * page);
     }
 }
 
@@ -6729,6 +6881,20 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_applies(&tally);
                 tier0_test_report("applies", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_vex_window(&tally);
+                tier0_test_report("VEX window", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_call_effects(&tally);
+                tier0_test_report("call effects", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

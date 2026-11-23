@@ -1,0 +1,535 @@
+function (i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = const.i64 0x00000000000000000000000000000000
+  %2 = br.void b1
+b1:
+  %3 = phi.i64 [%1, b0], [%524, b2]
+  %4 = icmp.i1 %3, %0 ult
+  %5 = cbr.void %4, b2, b3
+b2:
+  %6 = symbol_addr.ptr @3
+  %7 = address.ptr %6 offset=0
+  %8 = load.i8 %7 align=1
+  %9 = symbol_addr.ptr @3
+  %10 = address.ptr %9 offset=0
+  %11 = const.i8 0x00000000000000000000000000000001
+  %12 = add.i8 %8, %11
+  %13 = store.void %10, %12 align=1
+  %14 = symbol_addr.ptr @3
+  %15 = address.ptr %14 offset=1
+  %16 = load.i8 %15 align=1
+  %17 = symbol_addr.ptr @3
+  %18 = address.ptr %17 offset=1
+  %19 = const.i8 0x00000000000000000000000000000002
+  %20 = add.i8 %16, %19
+  %21 = store.void %18, %20 align=1
+  %22 = symbol_addr.ptr @3
+  %23 = address.ptr %22 offset=2
+  %24 = load.i8 %23 align=1
+  %25 = symbol_addr.ptr @3
+  %26 = address.ptr %25 offset=2
+  %27 = const.i8 0x00000000000000000000000000000003
+  %28 = add.i8 %24, %27
+  %29 = store.void %26, %28 align=1
+  %30 = symbol_addr.ptr @3
+  %31 = address.ptr %30 offset=3
+  %32 = load.i8 %31 align=1
+  %33 = symbol_addr.ptr @3
+  %34 = address.ptr %33 offset=3
+  %35 = const.i8 0x00000000000000000000000000000004
+  %36 = add.i8 %32, %35
+  %37 = store.void %34, %36 align=1
+  %38 = symbol_addr.ptr @3
+  %39 = address.ptr %38 offset=4
+  %40 = load.i8 %39 align=1
+  %41 = symbol_addr.ptr @3
+  %42 = address.ptr %41 offset=4
+  %43 = const.i8 0x00000000000000000000000000000005
+  %44 = add.i8 %40, %43
+  %45 = store.void %42, %44 align=1
+  %46 = symbol_addr.ptr @3
+  %47 = address.ptr %46 offset=5
+  %48 = load.i8 %47 align=1
+  %49 = symbol_addr.ptr @3
+  %50 = address.ptr %49 offset=5
+  %51 = const.i8 0x00000000000000000000000000000006
+  %52 = add.i8 %48, %51
+  %53 = store.void %50, %52 align=1
+  %54 = symbol_addr.ptr @3
+  %55 = address.ptr %54 offset=6
+  %56 = load.i8 %55 align=1
+  %57 = symbol_addr.ptr @3
+  %58 = address.ptr %57 offset=6
+  %59 = const.i8 0x00000000000000000000000000000007
+  %60 = add.i8 %56, %59
+  %61 = store.void %58, %60 align=1
+  %62 = symbol_addr.ptr @3
+  %63 = address.ptr %62 offset=7
+  %64 = load.i8 %63 align=1
+  %65 = symbol_addr.ptr @3
+  %66 = address.ptr %65 offset=7
+  %67 = const.i8 0x00000000000000000000000000000008
+  %68 = add.i8 %64, %67
+  %69 = store.void %66, %68 align=1
+  %70 = symbol_addr.ptr @3
+  %71 = address.ptr %70 offset=8
+  %72 = load.i8 %71 align=1
+  %73 = symbol_addr.ptr @3
+  %74 = address.ptr %73 offset=8
+  %75 = const.i8 0x00000000000000000000000000000009
+  %76 = add.i8 %72, %75
+  %77 = store.void %74, %76 align=1
+  %78 = symbol_addr.ptr @3
+  %79 = address.ptr %78 offset=9
+  %80 = load.i8 %79 align=1
+  %81 = symbol_addr.ptr @3
+  %82 = address.ptr %81 offset=9
+  %83 = const.i8 0x0000000000000000000000000000000a
+  %84 = add.i8 %80, %83
+  %85 = store.void %82, %84 align=1
+  %86 = symbol_addr.ptr @3
+  %87 = address.ptr %86 offset=10
+  %88 = load.i8 %87 align=1
+  %89 = symbol_addr.ptr @3
+  %90 = address.ptr %89 offset=10
+  %91 = const.i8 0x0000000000000000000000000000000b
+  %92 = add.i8 %88, %91
+  %93 = store.void %90, %92 align=1
+  %94 = symbol_addr.ptr @3
+  %95 = address.ptr %94 offset=11
+  %96 = load.i8 %95 align=1
+  %97 = symbol_addr.ptr @3
+  %98 = address.ptr %97 offset=11
+  %99 = const.i8 0x0000000000000000000000000000000c
+  %100 = add.i8 %96, %99
+  %101 = store.void %98, %100 align=1
+  %102 = symbol_addr.ptr @3
+  %103 = address.ptr %102 offset=12
+  %104 = load.i8 %103 align=1
+  %105 = symbol_addr.ptr @3
+  %106 = address.ptr %105 offset=12
+  %107 = const.i8 0x0000000000000000000000000000000d
+  %108 = add.i8 %104, %107
+  %109 = store.void %106, %108 align=1
+  %110 = symbol_addr.ptr @3
+  %111 = address.ptr %110 offset=13
+  %112 = load.i8 %111 align=1
+  %113 = symbol_addr.ptr @3
+  %114 = address.ptr %113 offset=13
+  %115 = const.i8 0x0000000000000000000000000000000e
+  %116 = add.i8 %112, %115
+  %117 = store.void %114, %116 align=1
+  %118 = symbol_addr.ptr @3
+  %119 = address.ptr %118 offset=14
+  %120 = load.i8 %119 align=1
+  %121 = symbol_addr.ptr @3
+  %122 = address.ptr %121 offset=14
+  %123 = const.i8 0x0000000000000000000000000000000f
+  %124 = add.i8 %120, %123
+  %125 = store.void %122, %124 align=1
+  %126 = symbol_addr.ptr @3
+  %127 = address.ptr %126 offset=15
+  %128 = load.i8 %127 align=1
+  %129 = symbol_addr.ptr @3
+  %130 = address.ptr %129 offset=15
+  %131 = const.i8 0x00000000000000000000000000000010
+  %132 = add.i8 %128, %131
+  %133 = store.void %130, %132 align=1
+  %134 = symbol_addr.ptr @3
+  %135 = address.ptr %134 offset=16
+  %136 = load.i8 %135 align=1
+  %137 = symbol_addr.ptr @3
+  %138 = address.ptr %137 offset=16
+  %139 = const.i8 0x00000000000000000000000000000011
+  %140 = add.i8 %136, %139
+  %141 = store.void %138, %140 align=1
+  %142 = symbol_addr.ptr @3
+  %143 = address.ptr %142 offset=17
+  %144 = load.i8 %143 align=1
+  %145 = symbol_addr.ptr @3
+  %146 = address.ptr %145 offset=17
+  %147 = const.i8 0x00000000000000000000000000000012
+  %148 = add.i8 %144, %147
+  %149 = store.void %146, %148 align=1
+  %150 = symbol_addr.ptr @3
+  %151 = address.ptr %150 offset=18
+  %152 = load.i8 %151 align=1
+  %153 = symbol_addr.ptr @3
+  %154 = address.ptr %153 offset=18
+  %155 = const.i8 0x00000000000000000000000000000013
+  %156 = add.i8 %152, %155
+  %157 = store.void %154, %156 align=1
+  %158 = symbol_addr.ptr @3
+  %159 = address.ptr %158 offset=19
+  %160 = load.i8 %159 align=1
+  %161 = symbol_addr.ptr @3
+  %162 = address.ptr %161 offset=19
+  %163 = const.i8 0x00000000000000000000000000000014
+  %164 = add.i8 %160, %163
+  %165 = store.void %162, %164 align=1
+  %166 = symbol_addr.ptr @3
+  %167 = address.ptr %166 offset=20
+  %168 = load.i8 %167 align=1
+  %169 = symbol_addr.ptr @3
+  %170 = address.ptr %169 offset=20
+  %171 = const.i8 0x00000000000000000000000000000015
+  %172 = add.i8 %168, %171
+  %173 = store.void %170, %172 align=1
+  %174 = symbol_addr.ptr @3
+  %175 = address.ptr %174 offset=21
+  %176 = load.i8 %175 align=1
+  %177 = symbol_addr.ptr @3
+  %178 = address.ptr %177 offset=21
+  %179 = const.i8 0x00000000000000000000000000000016
+  %180 = add.i8 %176, %179
+  %181 = store.void %178, %180 align=1
+  %182 = symbol_addr.ptr @3
+  %183 = address.ptr %182 offset=22
+  %184 = load.i8 %183 align=1
+  %185 = symbol_addr.ptr @3
+  %186 = address.ptr %185 offset=22
+  %187 = const.i8 0x00000000000000000000000000000017
+  %188 = add.i8 %184, %187
+  %189 = store.void %186, %188 align=1
+  %190 = symbol_addr.ptr @3
+  %191 = address.ptr %190 offset=23
+  %192 = load.i8 %191 align=1
+  %193 = symbol_addr.ptr @3
+  %194 = address.ptr %193 offset=23
+  %195 = const.i8 0x00000000000000000000000000000018
+  %196 = add.i8 %192, %195
+  %197 = store.void %194, %196 align=1
+  %198 = symbol_addr.ptr @3
+  %199 = address.ptr %198 offset=24
+  %200 = load.i8 %199 align=1
+  %201 = symbol_addr.ptr @3
+  %202 = address.ptr %201 offset=24
+  %203 = const.i8 0x00000000000000000000000000000019
+  %204 = add.i8 %200, %203
+  %205 = store.void %202, %204 align=1
+  %206 = symbol_addr.ptr @3
+  %207 = address.ptr %206 offset=25
+  %208 = load.i8 %207 align=1
+  %209 = symbol_addr.ptr @3
+  %210 = address.ptr %209 offset=25
+  %211 = const.i8 0x0000000000000000000000000000001a
+  %212 = add.i8 %208, %211
+  %213 = store.void %210, %212 align=1
+  %214 = symbol_addr.ptr @3
+  %215 = address.ptr %214 offset=26
+  %216 = load.i8 %215 align=1
+  %217 = symbol_addr.ptr @3
+  %218 = address.ptr %217 offset=26
+  %219 = const.i8 0x0000000000000000000000000000001b
+  %220 = add.i8 %216, %219
+  %221 = store.void %218, %220 align=1
+  %222 = symbol_addr.ptr @3
+  %223 = address.ptr %222 offset=27
+  %224 = load.i8 %223 align=1
+  %225 = symbol_addr.ptr @3
+  %226 = address.ptr %225 offset=27
+  %227 = const.i8 0x0000000000000000000000000000001c
+  %228 = add.i8 %224, %227
+  %229 = store.void %226, %228 align=1
+  %230 = symbol_addr.ptr @3
+  %231 = address.ptr %230 offset=28
+  %232 = load.i8 %231 align=1
+  %233 = symbol_addr.ptr @3
+  %234 = address.ptr %233 offset=28
+  %235 = const.i8 0x0000000000000000000000000000001d
+  %236 = add.i8 %232, %235
+  %237 = store.void %234, %236 align=1
+  %238 = symbol_addr.ptr @3
+  %239 = address.ptr %238 offset=29
+  %240 = load.i8 %239 align=1
+  %241 = symbol_addr.ptr @3
+  %242 = address.ptr %241 offset=29
+  %243 = const.i8 0x0000000000000000000000000000001e
+  %244 = add.i8 %240, %243
+  %245 = store.void %242, %244 align=1
+  %246 = symbol_addr.ptr @3
+  %247 = address.ptr %246 offset=30
+  %248 = load.i8 %247 align=1
+  %249 = symbol_addr.ptr @3
+  %250 = address.ptr %249 offset=30
+  %251 = const.i8 0x0000000000000000000000000000001f
+  %252 = add.i8 %248, %251
+  %253 = store.void %250, %252 align=1
+  %254 = symbol_addr.ptr @3
+  %255 = address.ptr %254 offset=31
+  %256 = load.i8 %255 align=1
+  %257 = symbol_addr.ptr @3
+  %258 = address.ptr %257 offset=31
+  %259 = const.i8 0x00000000000000000000000000000020
+  %260 = add.i8 %256, %259
+  %261 = store.void %258, %260 align=1
+  %262 = symbol_addr.ptr @3
+  %263 = address.ptr %262 offset=32
+  %264 = load.i8 %263 align=1
+  %265 = symbol_addr.ptr @3
+  %266 = address.ptr %265 offset=32
+  %267 = const.i8 0x00000000000000000000000000000021
+  %268 = add.i8 %264, %267
+  %269 = store.void %266, %268 align=1
+  %270 = symbol_addr.ptr @3
+  %271 = address.ptr %270 offset=33
+  %272 = load.i8 %271 align=1
+  %273 = symbol_addr.ptr @3
+  %274 = address.ptr %273 offset=33
+  %275 = const.i8 0x00000000000000000000000000000022
+  %276 = add.i8 %272, %275
+  %277 = store.void %274, %276 align=1
+  %278 = symbol_addr.ptr @3
+  %279 = address.ptr %278 offset=34
+  %280 = load.i8 %279 align=1
+  %281 = symbol_addr.ptr @3
+  %282 = address.ptr %281 offset=34
+  %283 = const.i8 0x00000000000000000000000000000023
+  %284 = add.i8 %280, %283
+  %285 = store.void %282, %284 align=1
+  %286 = symbol_addr.ptr @3
+  %287 = address.ptr %286 offset=35
+  %288 = load.i8 %287 align=1
+  %289 = symbol_addr.ptr @3
+  %290 = address.ptr %289 offset=35
+  %291 = const.i8 0x00000000000000000000000000000024
+  %292 = add.i8 %288, %291
+  %293 = store.void %290, %292 align=1
+  %294 = symbol_addr.ptr @3
+  %295 = address.ptr %294 offset=36
+  %296 = load.i8 %295 align=1
+  %297 = symbol_addr.ptr @3
+  %298 = address.ptr %297 offset=36
+  %299 = const.i8 0x00000000000000000000000000000025
+  %300 = add.i8 %296, %299
+  %301 = store.void %298, %300 align=1
+  %302 = symbol_addr.ptr @3
+  %303 = address.ptr %302 offset=37
+  %304 = load.i8 %303 align=1
+  %305 = symbol_addr.ptr @3
+  %306 = address.ptr %305 offset=37
+  %307 = const.i8 0x00000000000000000000000000000026
+  %308 = add.i8 %304, %307
+  %309 = store.void %306, %308 align=1
+  %310 = symbol_addr.ptr @3
+  %311 = address.ptr %310 offset=38
+  %312 = load.i8 %311 align=1
+  %313 = symbol_addr.ptr @3
+  %314 = address.ptr %313 offset=38
+  %315 = const.i8 0x00000000000000000000000000000027
+  %316 = add.i8 %312, %315
+  %317 = store.void %314, %316 align=1
+  %318 = symbol_addr.ptr @3
+  %319 = address.ptr %318 offset=39
+  %320 = load.i8 %319 align=1
+  %321 = symbol_addr.ptr @3
+  %322 = address.ptr %321 offset=39
+  %323 = const.i8 0x00000000000000000000000000000028
+  %324 = add.i8 %320, %323
+  %325 = store.void %322, %324 align=1
+  %326 = symbol_addr.ptr @3
+  %327 = address.ptr %326 offset=40
+  %328 = load.i8 %327 align=1
+  %329 = symbol_addr.ptr @3
+  %330 = address.ptr %329 offset=40
+  %331 = const.i8 0x00000000000000000000000000000029
+  %332 = add.i8 %328, %331
+  %333 = store.void %330, %332 align=1
+  %334 = symbol_addr.ptr @3
+  %335 = address.ptr %334 offset=41
+  %336 = load.i8 %335 align=1
+  %337 = symbol_addr.ptr @3
+  %338 = address.ptr %337 offset=41
+  %339 = const.i8 0x0000000000000000000000000000002a
+  %340 = add.i8 %336, %339
+  %341 = store.void %338, %340 align=1
+  %342 = symbol_addr.ptr @3
+  %343 = address.ptr %342 offset=42
+  %344 = load.i8 %343 align=1
+  %345 = symbol_addr.ptr @3
+  %346 = address.ptr %345 offset=42
+  %347 = const.i8 0x0000000000000000000000000000002b
+  %348 = add.i8 %344, %347
+  %349 = store.void %346, %348 align=1
+  %350 = symbol_addr.ptr @3
+  %351 = address.ptr %350 offset=43
+  %352 = load.i8 %351 align=1
+  %353 = symbol_addr.ptr @3
+  %354 = address.ptr %353 offset=43
+  %355 = const.i8 0x0000000000000000000000000000002c
+  %356 = add.i8 %352, %355
+  %357 = store.void %354, %356 align=1
+  %358 = symbol_addr.ptr @3
+  %359 = address.ptr %358 offset=44
+  %360 = load.i8 %359 align=1
+  %361 = symbol_addr.ptr @3
+  %362 = address.ptr %361 offset=44
+  %363 = const.i8 0x0000000000000000000000000000002d
+  %364 = add.i8 %360, %363
+  %365 = store.void %362, %364 align=1
+  %366 = symbol_addr.ptr @3
+  %367 = address.ptr %366 offset=45
+  %368 = load.i8 %367 align=1
+  %369 = symbol_addr.ptr @3
+  %370 = address.ptr %369 offset=45
+  %371 = const.i8 0x0000000000000000000000000000002e
+  %372 = add.i8 %368, %371
+  %373 = store.void %370, %372 align=1
+  %374 = symbol_addr.ptr @3
+  %375 = address.ptr %374 offset=46
+  %376 = load.i8 %375 align=1
+  %377 = symbol_addr.ptr @3
+  %378 = address.ptr %377 offset=46
+  %379 = const.i8 0x0000000000000000000000000000002f
+  %380 = add.i8 %376, %379
+  %381 = store.void %378, %380 align=1
+  %382 = symbol_addr.ptr @3
+  %383 = address.ptr %382 offset=47
+  %384 = load.i8 %383 align=1
+  %385 = symbol_addr.ptr @3
+  %386 = address.ptr %385 offset=47
+  %387 = const.i8 0x00000000000000000000000000000030
+  %388 = add.i8 %384, %387
+  %389 = store.void %386, %388 align=1
+  %390 = symbol_addr.ptr @3
+  %391 = address.ptr %390 offset=48
+  %392 = load.i8 %391 align=1
+  %393 = symbol_addr.ptr @3
+  %394 = address.ptr %393 offset=48
+  %395 = const.i8 0x00000000000000000000000000000031
+  %396 = add.i8 %392, %395
+  %397 = store.void %394, %396 align=1
+  %398 = symbol_addr.ptr @3
+  %399 = address.ptr %398 offset=49
+  %400 = load.i8 %399 align=1
+  %401 = symbol_addr.ptr @3
+  %402 = address.ptr %401 offset=49
+  %403 = const.i8 0x00000000000000000000000000000032
+  %404 = add.i8 %400, %403
+  %405 = store.void %402, %404 align=1
+  %406 = symbol_addr.ptr @3
+  %407 = address.ptr %406 offset=50
+  %408 = load.i8 %407 align=1
+  %409 = symbol_addr.ptr @3
+  %410 = address.ptr %409 offset=50
+  %411 = const.i8 0x00000000000000000000000000000033
+  %412 = add.i8 %408, %411
+  %413 = store.void %410, %412 align=1
+  %414 = symbol_addr.ptr @3
+  %415 = address.ptr %414 offset=51
+  %416 = load.i8 %415 align=1
+  %417 = symbol_addr.ptr @3
+  %418 = address.ptr %417 offset=51
+  %419 = const.i8 0x00000000000000000000000000000034
+  %420 = add.i8 %416, %419
+  %421 = store.void %418, %420 align=1
+  %422 = symbol_addr.ptr @3
+  %423 = address.ptr %422 offset=52
+  %424 = load.i8 %423 align=1
+  %425 = symbol_addr.ptr @3
+  %426 = address.ptr %425 offset=52
+  %427 = const.i8 0x00000000000000000000000000000035
+  %428 = add.i8 %424, %427
+  %429 = store.void %426, %428 align=1
+  %430 = symbol_addr.ptr @3
+  %431 = address.ptr %430 offset=53
+  %432 = load.i8 %431 align=1
+  %433 = symbol_addr.ptr @3
+  %434 = address.ptr %433 offset=53
+  %435 = const.i8 0x00000000000000000000000000000036
+  %436 = add.i8 %432, %435
+  %437 = store.void %434, %436 align=1
+  %438 = symbol_addr.ptr @3
+  %439 = address.ptr %438 offset=54
+  %440 = load.i8 %439 align=1
+  %441 = symbol_addr.ptr @3
+  %442 = address.ptr %441 offset=54
+  %443 = const.i8 0x00000000000000000000000000000037
+  %444 = add.i8 %440, %443
+  %445 = store.void %442, %444 align=1
+  %446 = symbol_addr.ptr @3
+  %447 = address.ptr %446 offset=55
+  %448 = load.i8 %447 align=1
+  %449 = symbol_addr.ptr @3
+  %450 = address.ptr %449 offset=55
+  %451 = const.i8 0x00000000000000000000000000000038
+  %452 = add.i8 %448, %451
+  %453 = store.void %450, %452 align=1
+  %454 = symbol_addr.ptr @3
+  %455 = address.ptr %454 offset=56
+  %456 = load.i8 %455 align=1
+  %457 = symbol_addr.ptr @3
+  %458 = address.ptr %457 offset=56
+  %459 = const.i8 0x00000000000000000000000000000039
+  %460 = add.i8 %456, %459
+  %461 = store.void %458, %460 align=1
+  %462 = symbol_addr.ptr @3
+  %463 = address.ptr %462 offset=57
+  %464 = load.i8 %463 align=1
+  %465 = symbol_addr.ptr @3
+  %466 = address.ptr %465 offset=57
+  %467 = const.i8 0x0000000000000000000000000000003a
+  %468 = add.i8 %464, %467
+  %469 = store.void %466, %468 align=1
+  %470 = symbol_addr.ptr @3
+  %471 = address.ptr %470 offset=58
+  %472 = load.i8 %471 align=1
+  %473 = symbol_addr.ptr @3
+  %474 = address.ptr %473 offset=58
+  %475 = const.i8 0x0000000000000000000000000000003b
+  %476 = add.i8 %472, %475
+  %477 = store.void %474, %476 align=1
+  %478 = symbol_addr.ptr @3
+  %479 = address.ptr %478 offset=59
+  %480 = load.i8 %479 align=1
+  %481 = symbol_addr.ptr @3
+  %482 = address.ptr %481 offset=59
+  %483 = const.i8 0x0000000000000000000000000000003c
+  %484 = add.i8 %480, %483
+  %485 = store.void %482, %484 align=1
+  %486 = symbol_addr.ptr @3
+  %487 = address.ptr %486 offset=60
+  %488 = load.i8 %487 align=1
+  %489 = symbol_addr.ptr @3
+  %490 = address.ptr %489 offset=60
+  %491 = const.i8 0x0000000000000000000000000000003d
+  %492 = add.i8 %488, %491
+  %493 = store.void %490, %492 align=1
+  %494 = symbol_addr.ptr @3
+  %495 = address.ptr %494 offset=61
+  %496 = load.i8 %495 align=1
+  %497 = symbol_addr.ptr @3
+  %498 = address.ptr %497 offset=61
+  %499 = const.i8 0x0000000000000000000000000000003e
+  %500 = add.i8 %496, %499
+  %501 = store.void %498, %500 align=1
+  %502 = symbol_addr.ptr @3
+  %503 = address.ptr %502 offset=62
+  %504 = load.i8 %503 align=1
+  %505 = symbol_addr.ptr @3
+  %506 = address.ptr %505 offset=62
+  %507 = const.i8 0x0000000000000000000000000000003f
+  %508 = add.i8 %504, %507
+  %509 = store.void %506, %508 align=1
+  %510 = symbol_addr.ptr @3
+  %511 = address.ptr %510 offset=63
+  %512 = load.i8 %511 align=1
+  %513 = symbol_addr.ptr @3
+  %514 = address.ptr %513 offset=63
+  %515 = const.i8 0x00000000000000000000000000000040
+  %516 = add.i8 %512, %515
+  %517 = store.void %514, %516 align=1
+  %518 = symbol_addr.ptr @1
+  %519 = load.i64 %518 align=8
+  %520 = symbol_addr.ptr @1
+  %521 = add.i64 %519, %3
+  %522 = store.void %520, %521 align=8
+  %523 = const.i64 0x00000000000000000000000000000001
+  %524 = add.i64 %3, %523
+  %525 = br.void b1
+b3:
+  %526 = symbol_addr.ptr @1
+  %527 = load.i64 %526 align=8
+  %528 = ret.void %527
+}

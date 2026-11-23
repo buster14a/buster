@@ -30,14 +30,22 @@
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
 #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
 #: unmeasured Test the caret display against clang
-#: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
-#: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
-#: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
-#: derived Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
-#: derived Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
-#: derived Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
-#: derived Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
-#: derived Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 2 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 3 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 4 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 5 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 6 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 7 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 8 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 9 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 10 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 11 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 12 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 13 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 14 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 15 of 16)
+#: derived Test the semantic driver's diagnostics and emission against clang (part 16 of 16)
 #: unmeasured Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
 #: derived Test the C lexer as C++
 #: derived Test the C lexer with C11's raw-string prefixes
@@ -46,6 +54,7 @@
 #: unmeasured Compile the lexer's benchmark unit by Tier 1 on one lane and on four [4 CPUs]
 #: unmeasured Link Tier 1's literal pools with clang's and merge their equal entries
 #: unmeasured Test volatile accesses and compiler barriers through the IR and Tier 1's opt-in passes
+#: unmeasured Test Tier 1's loop store motion against Clang's output, its report and the unit's distinct objects
 #: peak 61 Check unity fixture ownership without rebuilding
 #: peak 187 Test the foreign inputs [8 CPUs]
 #: peak 1756 Check the no-recursion rule on the call graph [8 CPUs]
@@ -82,14 +91,22 @@
 #: peak 197 Test the preprocessor's cases against clang (part 3 of 4)
 #: peak 112 Test the preprocessor's cases against clang (part 4 of 4)
 #: peak 923 Test the parser's snippets against clang
-#: peak 2095 Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
-#: peak 1397 Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
-#: peak 1279 Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
-#: peak 1439 Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
-#: peak 2095 Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
-#: peak 1397 Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
-#: peak 1279 Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
-#: peak 1439 Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
+#: peak 2095 Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+#: peak 1397 Test the semantic driver's diagnostics and emission against clang (part 2 of 16)
+#: peak 1279 Test the semantic driver's diagnostics and emission against clang (part 3 of 16)
+#: peak 1439 Test the semantic driver's diagnostics and emission against clang (part 4 of 16)
+#: peak 2095 Test the semantic driver's diagnostics and emission against clang (part 5 of 16)
+#: peak 1397 Test the semantic driver's diagnostics and emission against clang (part 6 of 16)
+#: peak 1279 Test the semantic driver's diagnostics and emission against clang (part 7 of 16)
+#: peak 1439 Test the semantic driver's diagnostics and emission against clang (part 8 of 16)
+#: peak 2095 Test the semantic driver's diagnostics and emission against clang (part 9 of 16)
+#: peak 1397 Test the semantic driver's diagnostics and emission against clang (part 10 of 16)
+#: peak 1279 Test the semantic driver's diagnostics and emission against clang (part 11 of 16)
+#: peak 1439 Test the semantic driver's diagnostics and emission against clang (part 12 of 16)
+#: peak 2095 Test the semantic driver's diagnostics and emission against clang (part 13 of 16)
+#: peak 1397 Test the semantic driver's diagnostics and emission against clang (part 14 of 16)
+#: peak 1279 Test the semantic driver's diagnostics and emission against clang (part 15 of 16)
+#: peak 1439 Test the semantic driver's diagnostics and emission against clang (part 16 of 16)
 #: peak 96 Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
 #: peak 784 Test the per-file jobs on the frozen musl units
 #: peak 4138 Test the per-file jobs on the repository's translation units
@@ -233,14 +250,22 @@
 211.3 Test the preprocessor's cases against clang (part 3 of 4)
 162.8 Test the preprocessor's cases against clang (part 4 of 4)
 174.4 Test the parser's snippets against clang
-751.2 Test the semantic driver's diagnostics and emission against clang (part 1 of 8)
-320.9 Test the semantic driver's diagnostics and emission against clang (part 2 of 8)
-355.3 Test the semantic driver's diagnostics and emission against clang (part 3 of 8)
-427.7 Test the semantic driver's diagnostics and emission against clang (part 4 of 8)
-357.1 Test the semantic driver's diagnostics and emission against clang (part 5 of 8)
-422.4 Test the semantic driver's diagnostics and emission against clang (part 6 of 8)
-307.9 Test the semantic driver's diagnostics and emission against clang (part 7 of 8)
-491.8 Test the semantic driver's diagnostics and emission against clang (part 8 of 8)
+375.6 Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
+160.4 Test the semantic driver's diagnostics and emission against clang (part 2 of 16)
+177.6 Test the semantic driver's diagnostics and emission against clang (part 3 of 16)
+213.8 Test the semantic driver's diagnostics and emission against clang (part 4 of 16)
+178.5 Test the semantic driver's diagnostics and emission against clang (part 5 of 16)
+211.2 Test the semantic driver's diagnostics and emission against clang (part 6 of 16)
+153.9 Test the semantic driver's diagnostics and emission against clang (part 7 of 16)
+245.9 Test the semantic driver's diagnostics and emission against clang (part 8 of 16)
+375.6 Test the semantic driver's diagnostics and emission against clang (part 9 of 16)
+160.4 Test the semantic driver's diagnostics and emission against clang (part 10 of 16)
+177.6 Test the semantic driver's diagnostics and emission against clang (part 11 of 16)
+213.8 Test the semantic driver's diagnostics and emission against clang (part 12 of 16)
+178.5 Test the semantic driver's diagnostics and emission against clang (part 13 of 16)
+211.2 Test the semantic driver's diagnostics and emission against clang (part 14 of 16)
+153.9 Test the semantic driver's diagnostics and emission against clang (part 15 of 16)
+245.9 Test the semantic driver's diagnostics and emission against clang (part 16 of 16)
 16.3 Check narrow-unsigned sign comparisons and admitted deferred diagnostics [2 CPUs]
 254.7 Test the per-file jobs on the frozen musl units
 439.5 Test the per-file jobs on the repository's translation units
@@ -349,3 +374,4 @@
 1.7 Test Tier 1 integer truth round trips against native and instruction-shape oracles
 5.5 Test Tier 1's truth values across blocks, stored constants, identities and computed-goto dispatch against native and shape oracles
 1.9 Test Tier 1's rip-relative symbols against a linked native oracle and their instruction shapes
+23.7 Test Tier 1's loop store motion against Clang's output, its report and the unit's distinct objects

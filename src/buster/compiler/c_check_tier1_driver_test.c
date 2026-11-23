@@ -1463,8 +1463,8 @@ static bool check_test_tier1_field(const char* text, const char* name, uint64_t*
 // The function `name` in `-c`'s object at `path`: its bytes, decoded by the scalar disassembler into `records` (room for
 // `capacity`), and its relocations, each one's offset from the function's start and type (as R_X86_64_PC32) in
 // `offsets` and `types` (room for `capacity` too). Returns how many records, *relocation_count set, or 0 on a failure.
-// It sets the disassembler's tables up itself: test-checker-driver deals its units to --part's parts in turn, so no
-// caller may count on an earlier unit of its part having done it.
+// It sets the disassembler's tables up itself: test-checker-driver deals its units to --part's parts by their weights,
+// so no caller may count on an earlier unit of its part having done it.
 static uint32_t check_test_tier1_function(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types, uint32_t* relocation_count)
 {
     uint64_t length = 0;
@@ -4502,9 +4502,9 @@ static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, con
 // The 128-bit integers' fixture (#3299): __int128 and unsigned __int128 values passed and returned in rdi:rsi and
 // rax:rdx, on the stack where one register is left, and kept in a loop's phis, through every operation Tier 1 splits
 // into halves (additions and subtractions whose carries and borrows cross the 64-bit boundary, products, shifts by
-// constants and variable counts, signed and unsigned comparisons, negations, logic and extensions) and libgcc's
-// divisions, remainders and conversions, signed and unsigned, over edge values. Each crosses between this unit (Tier
-// 1's) and the other (clang -O2's) both ways, as arguments and results.
+// constants and variable counts, signed and unsigned comparisons, of two extensions of one kind among them (#3035),
+// negations, logic and extensions) and libgcc's divisions, remainders and conversions, signed and unsigned, over edge
+// values. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results.
 static const char check_test_tier1_int128_header[] =
     "#include <stdio.h>\n"
     "typedef unsigned __int128 U;\n"
@@ -4517,7 +4517,8 @@ static const char check_test_tier1_int128_header[] =
     "S a_sops(S a, S b, unsigned k);\n"
     "U a_stack(long r1, long r2, long r3, long r4, long r5, U a, U b);\n"
     "U a_chain(U t, unsigned long n);\n"
-    "unsigned long a_loop(unsigned long n);\n";
+    "unsigned long a_loop(unsigned long n);\n"
+    "unsigned long a_extended(long a, long b, int c, int d);\n";
 
 static const char check_test_tier1_int128_other_source[] =
     "#include \"tier1-int128.h\"\n"
@@ -4563,6 +4564,17 @@ static const char check_test_tier1_int128_source[] =
     "    return (S)h;\n"
     "}\n"
     "U a_stack(long r1, long r2, long r3, long r4, long r5, U a, U b) { return b_stack(r1, r2, r3, r4, r5, a ^ b, b + (U)r5) * 3 + a - (U)r1; }\n"
+    "#define ALL(T, x, y) (((T)(x) < (T)(y)) | ((T)(x) <= (T)(y)) << 1 | ((T)(x) > (T)(y)) << 2 | ((T)(x) >= (T)(y)) << 3 | ((T)(x) == (T)(y)) << 4 | ((T)(x) != (T)(y)) << 5)\n"
+    "unsigned long a_extended(long a, long b, int c, int d)\n"
+    "{\n"
+    "    unsigned long m = 0;\n"
+    "    m = m << 6 | ALL(S, a, b); m = m << 6 | ALL(U, (S)a, (S)b);\n"
+    "    m = m << 6 | ALL(S, (unsigned long)a, (unsigned long)b); m = m << 6 | ALL(U, (unsigned long)a, (unsigned long)b);\n"
+    "    m = m << 6 | ALL(S, c, d); m = m << 6 | ALL(U, (S)c, (S)d);\n"
+    "    m = m << 6 | ALL(S, (unsigned)c, (unsigned)d); m = m << 6 | ALL(U, (unsigned)c, (unsigned)d);\n"
+    "    m = m << 6 | ALL(S, a, (unsigned long)b);\n"
+    "    return m;\n"
+    "}\n"
     "__attribute__((noinline)) static U a_step(U a, unsigned long b) { return a * b + (a >> 3); }\n"
     "U a_chain(U t, unsigned long n) { for (unsigned long i = 0; i < n; i += 1) t = a_step(t, i | 1); return t; }\n"
     "unsigned long a_loop(unsigned long n)\n"
@@ -4600,6 +4612,16 @@ static const char check_test_tier1_int128_source[] =
     "        }\n"
     "        printf(\"%u %016lx%016lx\\n\", i, (unsigned long)(total >> 64), (unsigned long)total);\n"
     "    }\n"
+    "    static const long words[] = { 0, 1, -1, 2, -2, 0x7fffffffffffffffl, -0x7fffffffffffffffl - 1, 0x7fffffff, -0x80000000l, 0x80000000l, 0xffffffffl, -0x100000000l };\n"
+    "    unsigned long compared = 0;\n"
+    "    for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i += 1)\n"
+    "    {\n"
+    "        for (unsigned j = 0; j < sizeof(words) / sizeof(words[0]); j += 1)\n"
+    "        {\n"
+    "            compared = compared * 1000003 ^ a_extended(words[i], words[j], (int)words[i], (int)words[j]);\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%lx\\n\", compared);\n"
     "    const U chain = a_chain(1, 1000);\n"
     "    printf(\"%016lx%016lx %lx\\n\", (unsigned long)(chain >> 64), (unsigned long)chain, a_loop(1000));\n"
     "    return 0;\n"
@@ -6785,11 +6807,12 @@ static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* c
 // #2743's loop vectorizer (--tier1-passes=+vectorize): loops over arrays as C programmers write them (element-wise
 // operations of each width, a fill, a copy, sums, a dot product, a conditional sum, a clamp of an int induction, byte
 // arithmetic through 32-bit lanes, population counts, a stencil, float and double operations without contraction, a
-// xor reduction, and a prefix sum the vectorizer must leave), called at lengths around the vectors' boundaries and on
-// overlapping arrays, a digest of every result and array printed. By each path at x86-64, x86-64-v2, x86-64-v3 and
-// x86-64-v4, with --verify's certificates: no fallback, the loops each target vectorizes (its 16- and 32-byte
-// element-wise loops; AVX-512's conversions, compares, selects and reductions too), the same object by both paths, and
-// clang -O0's output.
+// xor reduction, and a prefix sum the vectorizer must leave; #2808's counts of comparisons, a sum over an array of
+// structs and RGB to gray, whose loads are strided), called at lengths around the vectors' boundaries and on
+// overlapping arrays, a digest of every result and array printed. By each path at x86-64, x86-64-v2, x86-64-v3,
+// x86-64-v4 and znver5, with --verify's certificates: no fallback, the loops each target vectorizes (its 16- and 32-byte
+// element-wise loops; AVX-512's conversions, compares, selects, reductions, counts and de-interleaves too), the same
+// object by both paths, and clang -O0's output.
 static const char check_test_tier1_vectorize_source[] =
     "#include <stdint.h>\n"
     "#include <stdio.h>\n"
@@ -6809,7 +6832,13 @@ static const char check_test_tier1_vectorize_source[] =
     "__attribute__((noinline)) void add_f64(double* d, const double* a, const double* b, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = a[i] + b[i]; }\n"
     "__attribute__((noinline)) uint32_t xor_u32(const uint32_t* a, size_t n) { uint32_t s = 0x5a5a5a5au; for (size_t i = 0; i < n; i += 1) s ^= a[i]; return s; }\n"
     "__attribute__((noinline)) void prefix_i32(int32_t* a, size_t n) { for (size_t i = 1; i < n; i += 1) a[i] = (int32_t)((uint32_t)a[i] + (uint32_t)a[i - 1]); }\n"
+    "__attribute__((noinline)) size_t count_eq_u8(const uint8_t* a, size_t n, uint8_t v) { size_t c = 0; for (size_t i = 0; i < n; i += 1) c += a[i] == v; return c; }\n"
+    "__attribute__((noinline)) int count_gt_i32(const int32_t* a, size_t n, int32_t t) { int c = 0; for (size_t i = 0; i < n; i += 1) c += a[i] > t; return c; }\n"
+    "typedef struct { int32_t x, y, w, pad; } Particle;\n"
+    "__attribute__((noinline)) int64_t aos_sum(const Particle* p, size_t n) { int64_t s = 0; for (size_t i = 0; i < n; i += 1) s += (int64_t)p[i].x * p[i].w; return s; }\n"
+    "__attribute__((noinline)) void rgb_to_gray(uint8_t* g, const uint8_t* rgb, int n) { for (int i = 0; i < n; i += 1) g[i] = (uint8_t)((77 * rgb[3 * i] + 150 * rgb[3 * i + 1] + 29 * rgb[3 * i + 2]) >> 8); }\n"
     "static int32_t x[600], y[600], z[600];\n"
+    "static Particle particles[300];\n"
     "static uint8_t b8[1200], c8[1200];\n"
     "static int16_t h[600], g[600];\n"
     "static uint64_t q[600];\n"
@@ -6828,6 +6857,14 @@ static const char check_test_tier1_vectorize_source[] =
     "        const size_t n = lengths[l];\n"
     "        for (size_t i = 0; i < 600; i += 1) { x[i] = (int32_t)next(); y[i] = (int32_t)next(); h[i] = (int16_t)next(); g[i] = (int16_t)next(); q[i] = next(); f[i] = (float)(int32_t)next() / 65536.0f; u[i] = (double)(int64_t)next() / 3.0; v[i] = (double)(int32_t)next(); }\n"
     "        for (size_t i = 0; i < 1200; i += 1) { b8[i] = (uint8_t)next(); c8[i] = (uint8_t)next(); }\n"
+    "        for (size_t i = 0; i < 300; i += 1) { particles[i].x = (int32_t)next(); particles[i].y = (int32_t)next(); particles[i].w = (int32_t)next(); }\n"
+    "        mix64(count_eq_u8(b8, n, b8[n / 2]));\n"
+    "        mix64(count_eq_u8(b8, n, (uint8_t)(n & 3)));\n"
+    "        mix64((uint64_t)count_gt_i32(x, n, (int32_t)next()));\n"
+    "        mix64((uint64_t)aos_sum(particles, n));\n"
+    "        rgb_to_gray(c8, b8, (int)n);\n"
+    "        rgb_to_gray(b8 + 1, b8, (int)n);\n"
+    "        rgb_to_gray(b8 + 900, b8 + 899, (int)n / 4);\n"
     "        add_i32(z, x, y, n);\n"
     "        add_i32(x + 1, x, y, n);\n"
     "        add_i32(y, y + 3, x, n);\n"
@@ -6874,12 +6911,13 @@ static bool check_test_tier1_vectorize_field(const char* text, const char* name,
 
 static void check_test_driver_tier1_vectorize(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char* const targets[4] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4" };
+    static const char* const targets[5] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5" };
     // The loops each target vectorizes: add_i32, copy_u8, fill_u32, scale_f32 and add_f64 at 16 or 32 bytes; at
-    // x86-64-v4 also the sums, the dot product, the conditional sum, the clamp, the bytes' scaling, the stencil and the xor
-    // reduction (its population count is VPOPCNTDQ's, which x86-64-v4 hasn't). main's loops call next(), and the prefix sum
+    // x86-64-v4 also the sums, the dot product, the conditional sum, the clamp, the bytes' scaling, the stencil, the xor
+    // reduction, the counts and the array of structs' sum (its population count is VPOPCNTDQ's and RGB to gray's byte
+    // permute VBMI's, which x86-64-v4 hasn't); at znver5 those two too. main's loops call next(), and the prefix sum
     // carries a dependence: none of theirs.
-    static const uint64_t vectorized[4] = { 5, 5, 5, 13 };
+    static const uint64_t vectorized[5] = { 5, 5, 5, 16, 18 };
     char unit[512];
     snprintf(unit, sizeof(unit), "%s/tier1-vectorize.c", directory);
     const bool written = parse_test_write(unit, check_test_tier1_vectorize_source, strlen(check_test_tier1_vectorize_source));

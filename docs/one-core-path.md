@@ -125,7 +125,7 @@ token; the issue has each row's source:
 | the redesign, 3 | A body's entries from the program's controls and its roots' tapes | every attempted body's entries the lowered function's, kind, class and value | measured, in the shadow: exact on the four corpora with the default warnings, with `-g` and with `-Wall -Wextra` (12,768 bodies); 44.35% of `sqlite3.c`'s body tokens attempted, where the machine after the pipeline takes every root of 48.58% |
 | the redesign, 4 | The same comparison before the walk: the entries from the tapes kept there, and the controls from the tokens | no attempted body differs, in either | measured, in the shadow: exact on the four corpora in the three flag sets (11,145 bodies from the kept tapes, 11,120 from the twin); 32.79% and 32.18% of `sqlite3.c`'s body tokens attempted, of the 35.62% whole before the walk; no body attempted where the program folded an `if` |
 | 3 | The front's row, into the window | 35 cycles a token or less | first part measured, in the shadow: the node machine's front writes the kernel's window and the kernel reads it in place, exact; the kernel with its inputs 29.9 TSC ticks a record on `sqlite3.c` (gate 35), 38.4 on Lua, 61.5 on musl. The lexer's and the parser's rows are not started |
-| 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates. Designed (#2874): a body's row at 14 cycles a typed entry. Its first piece, Tier 0's back half on byte templates, measured in the shadow: exact, and refuted on its cost (62.8 cycles an entry where today's back half takes 43.7). Its second, in the compile: a fixed frame's unwind descriptor from Tier 0's frame, the objects unchanged, 403 cycles a body where main's frame events take 1,512 (its gate 300), 4.0 cycles a token less on `sqlite3.c` |
+| 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates. Designed (#2874): a body's row at 14 cycles a typed entry. Its first piece, Tier 0's back half on byte templates, measured in the shadow: exact, and refuted on its cost (62.8 cycles an entry where today's back half takes 43.7). Its second, in the compile: a fixed frame's unwind descriptor from Tier 0's frame, the objects unchanged, 403 cycles a body where main's frame events take 1,512 (its gate 300), 4.0 cycles a token less on `sqlite3.c`. Its third, in the compile: a call's records from a memo of the thread's, the objects unchanged, `tier0` 0.26 ms less on `sqlite3.c` (its gate 0.30); the VEX scan without gathers, 0.15 ms less; and the deferred entries in loops of their own, 0.33 ms less, and emission's after its blocks, 0.16 ms less; a body's columns in a few pushes, 0.05 ms less; fusion's and the labels' lanes in lists, 0.03 ms less |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted. Allocated: 14.3 to 15.0 on `sqlite3.c` and 25.0 on musl as one command, each row to the issue that removes it or kept. The kept rows optimized in the compile since (#2885, #2903, #2941): the row about 12 on `sqlite3.c`. Whether the budget's line moves to it is not settled |
 
 ## Step 0: the lanes on the real nodes
@@ -3472,6 +3472,71 @@ benchmarks' rates.
   unwind table and the atoms become, since they are 10 cycles a token by
   themselves.
 
+## Step 4's row on main, and calls from a memo
+
+[The record of the row on main](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-row-main-2874-2026-11-23)
+and [the memo's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-calls-memo-2874-2026-11-23),
+[#2874](https://github.com/buster14a/buster/issues/2874). Main `9d927943`,
+`-c sqlite3.c`, the 9700X, CPU 2.
+
+**The row then** is 8.27 ms, 63.8 cycles a token, and `lower.validate` 1.15 ms
+more. Its stages take no fault and no system time.
+
+- **Tier 0 is about 165 instructions and 0.52 mispredicted branches a typed
+  entry.** Emission takes 33 of the instructions, measuring 26, fusion 21, the
+  deferred entries' emitter 19 and selection 15.
+- **A warm Tier 0 is 50.9 cycles an entry against 71.4.** Warm means the same
+  body compiled again at once. The gap shows at every body size, so it is not a
+  body's fixed part. It is not the output's fresh memory either (+1.3 cycles
+  with it), nor the interleave with the lowering (`--emit-window=0` gives
+  4.70 ms against 4.78). What remains is Tier 0's own predictors and caches
+  between one body and the next.
+- **The calls:** counting and emitting every call once more costs 2.27 M
+  cycles, about 175 cycles a call, warm.
+
+**Calls from a memo** (tier0.md's "The calls' memo"): a call's records from a
+table of the thread's, keyed by every input of the emitter, with the save
+area's base and displacements and the callee patched in.
+
+- **Exact:** every object is main's on `sqlite3.c` (with and without `-g`),
+  Lua, musl's units, `main.c` and `tests/**/*.c` (2,928 compiles). A call's
+  key holds every input of its records, a `vzeroupper` before it (#3335)
+  among them; `test-tier0` compiles each generated function again with an
+  empty table and requires the same code.
+- **Cost:** `tier0` from 5.032 to 4.774 ms on main `e5c975f1` (medians of 9
+  in turn), 0.26 ms less; 0.20 less on `9d927943`. The piece's gate was
+  0.30 ms less, refuted under 0.15: missed, not refuted.
+- **Its first form, measured too,** kept a byte key built an argument at a
+  time, hashed it a word at a time and compared and copied with `memcmp` and
+  `memcpy`, and saved 0.09 ms: a call's cost is its chain of dependent loads and branches more than
+  its instructions.
+
+**The VEX scan without gathers** (tier0.md's "VEX forms"): #3388's rewrite of
+a function's legacy SSE records at a target with AVX found them by two gathers
+every 16 records; `x86_vex_find` reads 32 records' forms four records a load
+and their entries from the table's window of 192 rows in six registers.
+`tier0` from 4.779 to 4.633 ms on the memo's branch (medians of 11 in turn), the
+objects unchanged ([its record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-vex-scan-2874-2026-11-23)).
+
+**The deferred entries in loops of their own** (tier0.md's "The two paths"):
+selection's touches and measuring's counts of the deferred entries (calls
+above all) ran an entry at a time inside each pass's loop over the blocks,
+whose end at a block's last deferred lane mispredicted and kept the blocks
+behind it waiting. Both passes now list them and count them in a loop of their
+own, measuring's prefix sums run in a third, and fusion counts a call's
+arguments' stacks 64 classes at a time. `tier0` from 4.642 to 4.317 ms on the
+VEX scan's commit (medians of 11 in turn), the objects unchanged. Emission's
+deferred entries then went after its blocks too, their references merged with
+the templates' by instruction: from 4.313 to 4.156 ms. And a body's columns
+went into a few pushes of the arena, where each took one (about 30 a body, 10
+cycles each): from 4.138 to 4.084 ms. The same loops over a block's lanes in
+fusion (its global entries' accesses, its calls' effects) and in the labels
+(their branches' targets) went into loops over lists too: from 4.081 to 4.053
+ms.
+
+**What the row needs** is still about 40 instructions an entry where Tier 0
+takes 165. No single pass holds the rest: emission is one fifth of it.
+
 ## Step 5's first piece: a census of the kernel's time and fresh memory
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/kernel-census-2873-2026-11-16)
@@ -3776,6 +3841,93 @@ the option off, head against head: `sqlite3.c` +0.025 ms, the compiler's own sou
   tokens, not by the bodies it reads; that, the machine's run and the reading are the next cuts, in that order of
   ease.
 
+## The redesign's ninth piece: a unit pays for the bodies its producer reads
+
+The eighth piece left a unit that takes bodies paying for its size. Stage tables and profiles of the same binary with
+and without `--node-bodies` on `sqlite3.c` say where the option's 23.4 ms were: check-input +33.5 ms and the stages
+after it -9.8; of the 34.5 ms the option adds, 5.3 the kernel's clearing of pages and 2.6 the setup's own code. An
+experiment's patch (`mincore` on each range the setup pushes) read 367 MB reserved and 157 resident, 74.5 of them
+before the producer reads a body: every column was made for the unit's nodes (a capacity of 780,125) where the bodies
+the producer reads have 258,430 positions, and a second set of results and of the tests' state stood for the walk's
+nodes, which no machine runs on in a compile.
+
+The producer now asks what it asks before any reading of every body first, and the machine's columns are made for the
+positions of the bodies that are left; a compile makes nothing that only the shadow reads
+([`commands/lowering.md`](commands/lowering.md), "Compiling with the bodies taken"). The option's line under
+`--time-stages` says the positions, the room and the bytes made, and the driver's test holds them: a unit of 300
+thousand tokens outside its two small bodies takes 7.8 MB of the reader's arenas for the machine's state, where it
+took 135.
+
+### What it measured
+
+The 9700X, Release, CPU 2, paired, seven rounds on `sqlite3.c` and five on the others
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)).
+The option against without, before (`b0ee1afaa`) and after (`0f7795acd`), with what its specification predicted and
+the line it named as refuting it:
+
+| | before | predicted | refuted above | after; its least and most |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, the reader's peak added, MB | +145.6 | +55 | +75 | +60.2 |
+| `sqlite3.c`, kernel cycles added, M | +31.0 | +12 | +18 | +12.5; +11.2, +13.5 |
+| `sqlite3.c`, ms | +23.659 | +18.0 | +19.7 | +18.876; +18.291, +19.185 |
+| musl, ms | +93.419 | +65 | +78 | **+80.265; +79.432, +81.342** |
+| Lua, ms | +10.650 | +8.5 | +9.7 | +8.053; +7.969, +8.413 |
+
+With the option in both arms, the head before against this one: `sqlite3.c` -4.598 ms (-5.166 to -4.329, seven of
+seven lower), musl -12.794 (-13.396 to -12.056, five of five). The two units that take no body are unmoved: the
+compiler's own source -0.938 ms with the option, `sqlite3.c` with `-Wall -Wextra` +0.163.
+
+**musl's prediction is refuted:** 12.8 ms gained where 28 were predicted. Its profile at this head says why. Of the
+79.8 ms the option still adds there, the kernel is 30.3 (`clear_page_erms` 20.5): a unit of a few thousand tokens has
+3.3 MB of the machine's state whatever its bodies (two fronts' arrays, the machine's own columns, a tape's store), the
+scratch's pages past what the driver keeps go back to the kernel after each unit's reader, and the next unit's state
+takes them again, cleared. And the setup still reads the unit's tokens several times over (the bodies' list, the
+objects' columns, the functions the unit defines, its enumerations): `node_alone_begin` is 5.9 ms and
+`node_front_started` 2.7 over the 1,336 units, 1.7 and 0.5 on `sqlite3.c`. What the cut removed is what grew with
+the unit's nodes; what a small unit pays is fixed state and passes over its tokens, which it did not touch.
+
+With the option off, head against head: `sqlite3.c` +0.305 ms (two of seven lower), the compiler's own source -1.062,
+Lua +0.042, musl +1.996 (none of five lower). Each of the four runs the same instructions to within 0.004% (musl
+6,707.4 M and 6,707.1 M): the option's code is not on that path, and what differs between the two binaries is where
+the rest of the code is placed. Pairs of other heads on musl have read -2.6 and +0.7 ms the same way.
+
+### Against its gates
+
+- **Z1, the same decisions: met.** The producer against the oracle on the four corpora, twenty runs, each status 0, none
+  taken outside the set, every count the unit's cut read. Under the tests with the option forced the gate reads 36,510
+  bodies taken in 4,985 units of 112,860, none with a diagnostic in one: the 36,485 in 4,962 of the unit's cut, the
+  test's own two new compiles (4 bodies), and 88 more runs of the reservations' test (21 bodies), which fails each
+  reservation of two units' compile in turn and so runs as many compiles as the compile makes reservations. No body
+  is refused for room.
+- **Z2, exact by its outputs: met.** The corpora's objects, diagnostics and statuses plain, with `-fPIC`, with
+  `-Wall -Wextra` and with each half of the bodies; the 349 units; the option sets' 31,016 pairs; the driver's eight
+  parts and the producer's fixtures; the 34 blocks forced with every body and with each half, and their journal's
+  44,274 commands replayed, every output and status the same and 22 differing in `--time-stages`' text; the memory
+  and the address rows forced, 34 blocks each and no report, and the sanitized compiler on 418 of the corpora's units;
+  main.c compiled by itself; the no-recursion rule; the inventory, where no block fails that passes on main's own
+  build.
+- **Z3, its price:** `sqlite3.c` and Lua inside what was predicted, **musl refuted** (above).
+- **Z4, the option off: the same instructions,** and times within what two builds differ by (above).
+- **Z5, single faults:** seven single changes (a body's positions counted as one; a body's stored answer read for its
+  neighbour; every other body left out of the count; the room without its slack; the columns made for the unit's
+  nodes; the walk's report given the unit's nodes in a compile; the roots by token made in a compile), each built and
+  run against the driver's test: each fails it. The last passed under the first bound the test had on the large
+  unit's state (9,437,184 bytes, where the fault makes 9,046,976 of it); the bound is 8,912,896 now.
+
+### What it means
+
+- **The option is 4.6 ms cheaper on `sqlite3.c` and still 18.9 ms slower than without it.** What the producer adds is
+  about 30 ms at this head (the tests 7.0, the sweeps and their keeping 7.8, the loop that reads a body and writes
+  its graph 3.0, the front 3.3, the twin's controls 2.2, the kernel 2.2, the setup 2.2, what it asks before a reading
+  0.9, the splice 1.1) against 10 to 11 saved. **It stays off by default and moves nothing on #2850's acceptance.**
+- **What is left of the setup is small and named:** the passes over the unit's tokens, a small unit's fixed state on a
+  lane of many units, and the 60 MB the swept bodies' columns still touch, which a machine that kept one body's
+  records at a time would not.
+- **Three tenths of what it sweeps is for nothing:** 77,372 of the 258,430 positions are of bodies the machine
+  refuses after their sweeps, and a body of under 1,024 positions is swept to its end whichever root refuses it.
+- **Main itself is 5 ms slower than at `e9cbc3d72`** (buster14a/buster#3296 +0.87 ms, buster14a/buster#3324 +1.79, the
+  ten merges after it +2.42, paired), on the path every compile takes: that is the next piece, before more of this one.
+
 ## Step 5's allocation, and its kept rows in the compile
 
 [#2873](https://github.com/buster14a/buster/issues/2873). After the census,
@@ -3913,6 +4065,87 @@ Cycles a token on `sqlite3.c`:
 - **The census's per-fault attribution is high for reads:** #1167's step 1
   removed 1,093 of the reader's faults, mostly zero-page reads, for about 1 M
   kernel cycles, where the census's samples gave them about 2.8 M.
+
+## The default path since `e9cbc3d72`: a warning's replay of what can only be 0 or 1
+
+The redesign's pieces above are behind an option; this one is on the path every compile takes. Main compiled the
+frozen `sqlite3.c` in 113.1 ms at `e9cbc3d72` and in 117.6 at `89362fd0f`, 24 merges later. Paired on the 9700X, each
+merge against its parent ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)):
+[#3296](https://github.com/buster14a/buster/pull/3296), which folds a condition that reads a `const` object, +0.868 ms;
+[#3324](https://github.com/buster14a/buster/pull/3324), the CFG builder's heuristics, +1.785; and the ten merges after it
++2.415, where [#2937](https://github.com/buster14a/buster/pull/2937), `-Wconstant-logical-operand`, is the one that adds
+work to a default compile. Each is right. A build with counters says what each does on a unit that has none of what it
+looks for:
+
+| on `sqlite3.c` | calls | that answer |
+| --- | ---: | ---: |
+| the logical operand's replay, its right operand a comparison, a `!`, a `&&`, a `\|\|` or a condition | 2,524 | 0 |
+| the same, any other right operand | 441 | 71 a literal |
+| `check_program_branch_truth` | 16,964, of 16,573 conditions | 61 |
+| its equality's check; its relational's | 15,347; 5,734 | 0; 0 |
+| `check_program_const_integer` | 37,686, of 14,350 nodes | 0 |
+
+Three cuts were specified, built and paired, a commit each, and one is kept.
+
+- **R1, kept.** The warning's pass does not replay a right operand whose own operator can only give 0 or 1
+  (`check_warning_logical_boolean`, [`c-checker.md`](c-checker.md)): the warning is of an integer constant that is
+  neither. `BUSTER_TEST_DEFAULT_PATH_LOG=FILE` is the tests' switch for it: the operand is replayed all the same, and
+  the command writes a line to the file of how many, and of them how many give the warning's event or make a type.
+- **R2, reverted.** The CFG's equality and relational checks asking first whether an operand is a literal with a `&`, a
+  `|` or a boolean value beside it, before they work out the operands' common type: 19,134 of the 21,081 comparisons
+  answered without it, and 1.7 M instructions of 1,276 fewer.
+- **R3, reverted.** `check_program_const_integer`'s no kept by node, a byte each: 23,336 of its 37,686 walks not
+  walked, 3.2 M instructions fewer.
+
+### What it measured
+
+The 9700X, Release, CPU 2, paired; each cut against its parent on `sqlite3.c`, seven rounds, with what its
+specification predicted and the line it named as refuting it:
+
+| | predicted, ms | refuted under | paired; its least and most | lower | instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| R1, `96fac43e0` to `0e446262f` | -1.3 | -0.7 | -1.742; -1.869, -0.928 | 7/7 | -11.477 |
+| R2, to `c24e2a52d` | -0.6 | -0.3 | **-0.122; -0.501, +0.160** | 5/7 | -1.700 |
+| R3, to `e61c039fc` | -0.5 | -0.25 | **+0.415; -0.023, +1.411** | 1/7 | -3.234 |
+| the three, `96fac43e0` to `e61c039fc` | -2.4 | -1.3 | -1.460; -1.819, -1.085 | 7/7 | -16.411 |
+
+**R2 and R3 are refuted, and reverted.** R2 took 1.7 M of 1,276 M instructions away, and 0.12 ms; R3 took 3.2 M away
+and ran 1.643 M more cycles, one of seven rounds lower. The three together read 0.28 ms worse than R1 alone.
+The predictions came from a build with a clock's read around each call, which overstates a call made tens of thousands
+of times for a few hundred ticks (R2's, R3's) beside one made 2,524 times for 3,776 (R1's): the next piece's are to
+come from instructions or a profile without them.
+
+The head, R1 alone (`0db36d75e`; the commit after it adds a line to a test's list), against main `96fac43e0`:
+
+| | rounds | paired, ms; its least and most | lower | instructions, M |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 7 | -1.500; -17.143, -1.204 | 7/7 | -11.478 of 1,287.8 |
+| `sqlite3.c -Wall -Wextra` | 5 | -1.738; -2.117, -1.025 | 5/5 | -11.478 of 1,427.4 |
+| the compiler's own source | 5 | -10.050; -89.676, -7.411 | 5/5 | -50.347 of 9,152.2 |
+| Lua | 5 | -0.061; -0.274, +0.004 | 3/5 | -1.270 of 744.2 |
+| musl | 5 | -0.432; -0.915, +0.691 | 3/5 | -4.668 of 6,707.2 |
+
+Main compiles the frozen `sqlite3.c` in 115.6 ms there where it took 117.4, and its own source in 616.7 where it took
+628.7. Of the 5 ms this section began with, 1.5 are back; the CFG's heuristics' 1.8 and the constant conditions' 0.9
+stand, and the two cuts that were to take from them did not.
+
+### Against its gates
+
+- **E1, exact: met.** The four corpora by main's compiler and by this one, plain and with `-Wall -Wextra`: every
+  object, every diagnostic and every status the same (1,372 units; 251 of musl's say something plain, 858 with the
+  warnings). The whole inventory, where no block fails that passes on main's own build; the memory and the address rows
+  on the 34 blocks, no report; the driver's eight parts; main.c compiled by itself; the no-recursion rule.
+- **E2, the rule against what it replaces: met.** With the switch the pass replays what it would not: 14,891 operands
+  over the corpora and 243,095 over the whole inventory's 111,863 commands. None gives the warning's event and none
+  makes a type.
+- **E3, its price:** R1 inside what was predicted; R2 and R3 refuted (above).
+- **E4, single faults:** the rule inverted, asked of the left operand's operator, and widened by a sum: each fails the
+  driver's test.
+
+One block of the inventory failed on the branch and not on main, and was the branch's: the test that every field of the
+reader's state has a class did not know the counts' field. The rule's test is not a section of its own in the driver's
+test: it runs in the warning's, so that the parts are dealt as on main
+([#2263](https://github.com/buster14a/buster/issues/2263)).
 
 ## Related
 

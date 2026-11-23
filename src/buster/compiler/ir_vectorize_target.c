@@ -125,6 +125,8 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
             // The masked tail's (#2807): a masked load and store of the lanes (tier1_select_masked_move's).
             const bool masked = ir_vectorize_target_allows(allowed, ir_simd_masked_moves[from][0][w]) && ir_vectorize_target_allows(allowed, ir_simd_masked_moves[from][1][w]);
             target->masked[from] |= !legacy && masked ? bit : 0;
+            // A strided load's de-interleave (#2808): vpermt2b to vpermt2q.
+            target->permute2[from] |= !legacy && ir_vectorize_target_allows(allowed, ir_simd_permute2_forms[from][w]) ? bit : 0;
         }
         // A reduction: tier1_select_reduce's halvings down to one lane, each with its combining form, then lane 0's move.
         for (uint32_t size = 2; moves && size < 4; size += 1)
@@ -150,6 +152,10 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
         const uint32_t lanes = 1u << k;
         const uint32_t mask_bytes = lanes <= 8 ? 1 : lanes / 8;
         target->mask |= ir_vectorize_target_allows(allowed, tier1_select_mask_forms(mask_bytes)->from_general) ? (uint8_t)(1u << k) : 0;
+        // A count's (#2808): TIER1_RULE_MASK_TO_INTEGER's kmov of the mask's bytes, then popcnt of 32 or 64 bits.
+        const bool counted = ir_vectorize_target_allows(allowed, tier1_select_mask_forms(mask_bytes)->to_general) && ir_vectorize_target_allows(allowed, X86_FORM_POPCNT_R32_RM32) &&
+                             ir_vectorize_target_allows(allowed, X86_FORM_POPCNT_R64_RM64);
+        target->count |= counted ? (uint8_t)(1u << k) : 0;
     }
 }
 

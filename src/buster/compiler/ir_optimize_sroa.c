@@ -1769,3 +1769,271 @@ static __attribute__((unused)) IrError ir_sroa_scalarize(const IrFunction* funct
     arena_pop_to(scratch, sm);
     return error;
 }
+
+// #3311's call sites: a call's by-value aggregate argument in one or two eightbyte registers (ir_sroa_scalar_register's
+// shape: general or xmm, no flags, at most 16 bytes) was its object's ptr, which Tier 1 copied through the red zone into
+// those registers, and which made the object escape, so that SROA left it in memory: a struct passed in a loop went
+// through memory twice an iteration. ir_sroa_scalarize_calls, for a function's own code alone (a candidate's inline
+// summary keeps its calls' aggregates, which an expansion maps to its callee's parameters), passes such an argument as
+// its parts instead: before the call, each part loaded from the ptr at its own width (ir_sroa_call_part_type: an
+// integer for a general register, an f32 or f64 for an xmm one, the second through an IR_ADDRESS of offset 8), and the call takes those values, with records of no
+// size in the part's register. The object's only use is then those loads, which SROA's widening and promotion make
+// values. A variadic call, a row's or an asm body's, and an argument of any other shape stay as they are. The call's
+// argument list, its parameter types and its records are new slices; the inserted loads go before the call in its
+// block, with the unroller's remapping, as ir_sroa_widen's do.
+
+// The type part `k` of a call argument's record is loaded as (#3311): exactly the part's bytes, so that the load reads
+// nothing past the object (a 12-byte struct's second part is 4 bytes, and the object may end at a page's end): an
+// i32 or i64 of 4 or 8 bytes for a general register, an f32 or f64 of 4 or 8 for an xmm one; IR_VOID for any other
+// size (3, 5, 6 or 7 bytes, which no single load reads, and 1 or 2, an i8 or i16 argument, which Tier 1's call
+// selection refuses), whose argument then stays its object's ptr.
+static uint32_t ir_sroa_call_part_type(const IrPassed* record, uint32_t k)
+{
+    const uint8_t reg = ir_sroa_scalar_register(record, k);
+    const uint32_t size = record->size > 8 * k ? (record->size - 8 * k > 8 ? 8 : record->size - 8 * k) : 0;
+    const bool general = reg != BUSTER_ABI_REGISTER_NONE && reg < 16;
+    const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+    return general ? (size == 8 ? IR_I64 : size == 4 ? IR_I32 : IR_VOID) :
+           vector  ? (size == 8 ? IR_F64 : size == 4 ? IR_F32 : IR_VOID) :
+                     IR_VOID;
+}
+
+// The parts of call argument `argument`'s record that ir_sroa_scalarize_calls passes as scalars: 1 or 2, or 0.
+static uint32_t ir_sroa_call_parts(const IrFunction* f, const IrCall* call, uint32_t argument)
+{
+    const IrPassed* record = call->abi != 0 && !call->variadic && call->row == 0 && call->body == 0 && argument < call->parameter_count ?
+                                 &f->passed[f->abi_calls[call->abi - 1].passed + argument] : NULL;
+    const uint32_t value = record != NULL ? f->extra[call->argument_first + argument] : BUSTER_IR_NONE;
+    const bool first = record != NULL && value < f->instruction_count && f->type[value] == IR_PTR && ir_sroa_call_part_type(record, 0) != IR_VOID;
+    const bool second = first && record->size > 8;
+    return first && (!second || ir_sroa_call_part_type(record, 1) != IR_VOID) ? (second ? 2u : 1u) : 0u;
+}
+
+// The scalar type a call's aggregate result of one part comes back as (#3311): an integer of its 1, 2, 4 or 8 bytes in
+// rax, or an f32 or f64 of its 4 or 8 in xmm0; IR_VOID where it isn't such a result. The call then returns that value,
+// and a store of it after the call fills the object its `into` operand points to, which is then private.
+static uint32_t ir_sroa_call_result(const IrFunction* f, const IrCall* call)
+{
+    const IrAbiCall* abi = call->abi != 0 && call->row == 0 && call->body == 0 ? &f->abi_calls[call->abi - 1] : NULL;
+    const AbiReturn result = abi != NULL ? abi->call.result : (AbiReturn){ 0 };
+    const uint32_t size = abi != NULL ? abi->result_size : 0;
+    const bool one = abi != NULL && size != 0 && result.kind == BUSTER_ABI_RESULT_REGISTERS && result.flags == 0 && result.registers[1] == BUSTER_ABI_REGISTER_NONE &&
+                     result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE && call->result_type == IR_VOID;
+    const bool general = one && result.registers[0] == BUSTER_ABI_RAX;
+    const bool vector = one && result.registers[0] == BUSTER_ABI_REGISTER_VECTOR;
+    return general ? (size == 8 ? IR_I64 : size == 4 ? IR_I32 : size == 2 ? IR_I16 : size == 1 ? IR_I8 : IR_VOID) :
+           vector  ? (size == 8 ? IR_F64 : size == 4 ? IR_F32 : IR_VOID) :
+                     IR_VOID;
+}
+
+static __attribute__((unused)) IrError ir_sroa_scalarize_calls(const IrFunction* function, Arena* output, Arena* scratch, IrFunction* result, uint32_t* arguments)
+{
+    const IrFunction* f = function;
+    *result = *f;
+    *arguments = 0;
+    const uint64_t om = output->length;
+    const uint64_t sm = scratch->length;
+    // The instructions inserted before each call, and the totals.
+    uint64_t inserted = 0;
+    uint64_t addresses = 0;
+    uint64_t extra_words = 0;
+    uint64_t type_words = 0;
+    uint64_t passed_words = 0;
+    const bool eligible = f->abi_call_count != 0 && f->debug == NULL;
+    for (uint32_t i = 0; eligible && i < f->instruction_count; i += 1)
+    {
+        if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
+        {
+            const IrCall* call = &f->calls[f->b[i]];
+            uint32_t parts = 0;
+            uint32_t taken = 0;
+            for (uint32_t k = 0; k < call->argument_count; k += 1)
+            {
+                const uint32_t count = ir_sroa_call_parts(f, call, k);
+                parts += count;
+                taken += count != 0;
+                inserted += count == 0 ? 0 : 2 * (uint64_t)count - 1;
+                addresses += count == 2;
+            }
+            const bool returned = ir_sroa_call_result(f, call) != IR_VOID;
+            inserted += returned;
+            *arguments += taken + returned;
+            const uint64_t grown = (uint64_t)call->argument_count + parts - taken;
+            const bool changed = taken != 0 || returned;
+            extra_words += changed ? grown : 0;
+            type_words += changed ? grown : 0;
+            passed_words += changed ? grown : 0;
+        }
+    }
+    bool ok = true;
+    IrError error = IR_OK;
+    if (*arguments != 0)
+    {
+        const uint64_t n = f->instruction_count;
+        const uint64_t total = n + inserted;
+        const uint64_t extras = (uint64_t)f->extra_count + ir_unroll_extra_words(f, 0, f->instruction_count) + extra_words;
+        uint32_t* map = ir_allocate(scratch, n, 4, &ok);
+        uint32_t* before = ir_allocate(scratch, n, 4, &ok);
+        IrFunction view = *f;
+        view.instruction_count = (uint32_t)total;
+        view.op = ir_allocate(output, total, 1, &ok);
+        view.type = ir_allocate(output, total, 1, &ok);
+        view.flags = ir_allocate(output, total, 1, &ok);
+        view.alignment_log2 = ir_allocate(output, total, 1, &ok);
+        view.a = ir_allocate(output, total, 4, &ok);
+        view.b = ir_allocate(output, total, 4, &ok);
+        view.c = ir_allocate(output, total, 4, &ok);
+        view.block_offsets = ir_allocate(output, (uint64_t)f->block_count + 1, 4, &ok);
+        view.extra = ir_allocate(output, extras, 4, &ok);
+        view.calls = ir_allocate(output, f->call_count, sizeof(IrCall), &ok);
+        view.addresses = ir_allocate(output, (uint64_t)f->address_count + addresses, sizeof(IrAddress), &ok);
+        view.call_types = ir_allocate(output, (uint64_t)f->call_type_count + type_words, 1, &ok);
+        view.passed = ir_allocate(output, (uint64_t)f->passed_count + passed_words, sizeof(IrPassed), &ok);
+        view.abi_calls = ir_allocate(output, f->abi_call_count, sizeof(IrAbiCall), &ok);
+        const bool fits = total < UINT32_MAX && extras <= UINT32_MAX && (uint64_t)f->address_count + addresses <= UINT32_MAX &&
+                          (uint64_t)f->call_type_count + type_words <= UINT32_MAX && (uint64_t)f->passed_count + passed_words <= UINT32_MAX;
+        error = !ok ? IR_ERROR_MEMORY : !fits ? IR_ERROR_LIMIT : IR_OK;
+        if (error == IR_OK)
+        {
+            uint32_t out = 0;
+            for (uint32_t block = 0; block < f->block_count; block += 1)
+            {
+                view.block_offsets[block] = out;
+                for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+                {
+                    uint32_t count = 0;
+                    if (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT)
+                    {
+                        const IrCall* call = &f->calls[f->b[i]];
+                        for (uint32_t k = 0; k < call->argument_count; k += 1)
+                        {
+                            const uint32_t parts = ir_sroa_call_parts(f, call, k);
+                            count += parts == 0 ? 0 : 2 * parts - 1;
+                        }
+                    }
+                    // A one-part result's store goes after the call.
+                    const bool returned = (f->op[i] == IR_CALL || f->op[i] == IR_CALL_INDIRECT) && ir_sroa_call_result(f, &f->calls[f->b[i]]) != IR_VOID;
+                    before[i] = count + returned;
+                    out += count;
+                    map[i] = out;
+                    out += 1 + returned;
+                }
+            }
+            view.block_offsets[f->block_count] = out;
+            if (f->extra_count != 0)
+            {
+                memcpy(view.extra, f->extra, (uint64_t)f->extra_count * 4);
+            }
+            if (f->address_count != 0)
+            {
+                memcpy(view.addresses, f->addresses, (uint64_t)f->address_count * sizeof(IrAddress));
+            }
+            if (f->call_type_count != 0)
+            {
+                memcpy(view.call_types, f->call_types, f->call_type_count);
+            }
+            if (f->passed_count != 0)
+            {
+                memcpy(view.passed, f->passed, (uint64_t)f->passed_count * sizeof(IrPassed));
+            }
+            memcpy(view.abi_calls, f->abi_calls, (uint64_t)f->abi_call_count * sizeof(IrAbiCall));
+            IrUnrollEmit emit = {
+                .view = &view,
+                .extra = f->extra_count,
+                .call = 0,
+                .constant = f->constant_count,
+                .address = f->address_count,
+            };
+            uint32_t types = f->call_type_count;
+            uint32_t records = f->passed_count;
+            for (uint32_t block = 0; block < f->block_count; block += 1)
+            {
+                uint32_t first = f->block_offsets[block];
+                const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+                for (uint32_t i = first; i <= end; i += 1)
+                {
+                    const bool kept = i < end && before[i] == 0;
+                    if (!kept && first < i)
+                    {
+                        ir_unroll_remap(f, first, i - first, map, &view, map[first]);
+                        ir_unroll_extras(&emit, f, first, i, map[first], map, NULL);
+                    }
+                    if (!kept && i < end)
+                    {
+                        // The call's parts' loads, then the call with its new argument, type and record slices.
+                        const IrCall* call = &f->calls[f->b[i]];
+                        const IrAbiCall* abi = &f->abi_calls[call->abi - 1];
+                        ir_unroll_remap(f, i, 1, map, &view, map[i]);
+                        const uint32_t returned = ir_sroa_call_result(f, call);
+                        uint32_t at = map[i] - (before[i] - (returned != IR_VOID));
+                        IrCall rewritten = *call;
+                        rewritten.argument_first = emit.extra;
+                        rewritten.type_first = types;
+                        view.abi_calls[call->abi - 1].passed = records;
+                        uint32_t count = 0;
+                        for (uint32_t k = 0; k < call->argument_count; k += 1)
+                        {
+                            const uint32_t parts = ir_sroa_call_parts(f, call, k);
+                            const uint32_t value = map[f->extra[call->argument_first + k]];
+                            const IrPassed* record = &f->passed[abi->passed + k];
+                            for (uint32_t j = 0; j < parts; j += 1)
+                            {
+                                const uint8_t reg = ir_sroa_scalar_register(record, j);
+                                const uint32_t type = ir_sroa_call_part_type(record, j);
+                                uint32_t pointer = value;
+                                if (j != 0)
+                                {
+                                    pointer = at++;
+                                    ir_sroa_widen_address(&emit, pointer, value, 8);
+                                }
+                                const uint32_t loaded = at++;
+                                ir_unroll_put(&emit, loaded, IR_LOAD, type, pointer, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                                view.extra[emit.extra++] = loaded;
+                                view.call_types[types++] = (uint8_t)type;
+                                view.passed[records++] = (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { reg, BUSTER_ABI_REGISTER_NONE } }, .size = 0 };
+                                count += 1;
+                            }
+                            if (parts == 0)
+                            {
+                                view.extra[emit.extra++] = value;
+                                view.call_types[types++] = f->call_types[call->type_first + k];
+                                view.passed[records++] = *record;
+                                count += 1;
+                            }
+                        }
+                        rewritten.argument_count = count;
+                        rewritten.parameter_count = count;
+                        if (returned != IR_VOID)
+                        {
+                            // The call returns the part's value, which a store after it puts where `into` points.
+                            rewritten.result_type = (uint8_t)returned;
+                            view.abi_calls[call->abi - 1].result_size = 0;
+                            view.type[map[i]] = (uint8_t)returned;
+                            view.c[map[i]] = BUSTER_IR_NONE;
+                            ir_unroll_put(&emit, map[i] + 1, IR_STORE, IR_VOID, map[f->c[i]], map[i], BUSTER_IR_NONE);
+                        }
+                        view.calls[emit.call] = rewritten;
+                        view.b[map[i]] = emit.call;
+                        emit.call += 1;
+                    }
+                    first = kept ? first : i + 1;
+                }
+            }
+            view.extra_count = emit.extra;
+            view.call_count = emit.call;
+            view.address_count = emit.address;
+            view.call_type_count = types;
+            view.passed_count = records;
+            view.arena_bytes = 0;
+            *result = view;
+        }
+    }
+    if (error != IR_OK)
+    {
+        *result = *f;
+        *arguments = 0;
+        arena_pop_to(output, om);
+    }
+    arena_pop_to(scratch, sm);
+    return error;
+}

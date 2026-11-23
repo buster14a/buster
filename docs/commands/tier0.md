@@ -117,6 +117,11 @@ conversion's destination before `cvtsi2ss`/`cvtsi2sd`, and before
 `cvtss2sd`/`cvtsd2ss` but in place, which would otherwise wait on the
 register's last value (#3308); `conversion zeroes` checks the same of every
 class's conversion to `float` and `double`, of a home and of a register.
+Half the programs, on a host with AVX, compile at a target with AVX (#3335) and run natively
+through their VEX twins, no legacy SSE record with a twin left, and half of
+those clear the upper state at every exit (`Tier0Function.zero_upper`); the
+vectors check compiles each function at its transport's target and checks each
+`vzeroupper`'s place (docs/tier0.md's "The upper vector state").
 Their calls pass up to 12
 arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has

@@ -80,11 +80,20 @@ struct that holds one. The table keeps the union's own row, which those take,
 and the code generator gives `abi_assign` and `abi_va_arg` the member's type
 (`check_lower_passed_as`; the checker guide's "Transparent unions (#147)").
 A union aligned or packed otherwise than its member has a slot of its own
-(`AbiTable.transparent`): `abi_assign_call` assigns the member's registers,
-and where clang has none for them the union's byval slot, or the member's
-alignment for a member in memory; past 16 bytes its locations in registers or
-eightbytes' slots carry the union's first 16 bytes (`BUSTER_ABI_FLAG_FIRST`,
-#1844).
+(`AbiTable.transparent`): the per-call kernel, `abi_assign_lanes`, assigns
+the member's registers (its eightbytes, a pair's two or a 16-byte vector's
+one), and where clang has none for them the union's byval slot, or the
+member's alignment for a member in memory; past 16 bytes every location of
+the member's own (registers, eightbytes' slots, or a pair's or vector's value
+slot) carries the union's first 16 bytes (`BUSTER_ABI_FLAG_FIRST`, #1844).
+A member in memory may be `LARGER` (#3400): `getIndirectResult` reads its C
+size and alignment, not its copy's, and the byval slot is the union's bytes
+(a union is never `LARGER`: clang lays it out in its own bytes), so a `GROWN`
+member is the integer of its C size once clang has no general register, in
+the register LLVM has left or an 8-byte slot, as it is alone. clang 23.1.4
+passes `union __attribute__((transparent_union, aligned(16))) { struct
+__attribute__((packed)) { _Atomic(struct { long x[0]; }) z; } g; }` after four
+longs, a `nullptr` and an `__int128` as `i8` in r9.
 
 `vector_bytes`, which `abi_initialize` takes, is the widest vector register
 the generated code may use: 16, 32 or 64 (no AVX, AVX, AVX-512F), clang's
@@ -740,10 +749,11 @@ own. The two counts differ wherever clang counts otherwise than LLVM assigns:
   8 bytes of the stack (a `GROWN` one too, whose copy would take more); one
   of no size is an `i0`, which takes none (`EMPTY`).
 
-So the per-call assignment, `abi_assign_call` (one call; `abi_assign_scalar`
-runs it over every call), the vector path's fallback, keeps both counts: clang's free registers, 6 and 8 (5 general
-with a hidden pointer that isn't `DEMOTED`), and LLVM's used ones. For each
-argument in order:
+So the per-call kernel, `abi_assign_lanes`, which takes the calls the prefix
+sums below can't place, keeps both counts: clang's free registers, 6 and 8 (5
+general with a hidden pointer that isn't `DEMOTED`), and LLVM's used ones. For
+each argument in order (each rule a mask over 16 of a call's arguments: see
+"The per-call kernel" below for how it takes them at once):
 
 1. `IGNORE`: nothing.
 2. `UNCOUNTED`: its value takes LLVM's next general register, its next two
@@ -792,20 +802,70 @@ _Atomic double, struct {long, double}, long)` the struct is `SPLIT` between
 rdi and the stack (xmm7 went to the `_Atomic double`). The other way, for
 `f(long × 4, nullptr_t, __int128, long)` LLVM has r9 alone for the `__int128`,
 which goes on the stack at 0, and the last `long`, which clang sends to
-memory as a value, takes r9. Each slot is placed by `abi_stack_place`: aligned
-up to its alignment, the area growing past it and its alignment to the
-slot's.
+memory as a value, takes r9. Each slot is placed by `abi_lanes_place` (16 at
+once; `abi_stack_place`, the interpreter's, one): aligned up to its
+alignment, the area growing past it and its alignment to the slot's.
+
+### The per-call kernel: rounds of prefix sums
+
+The rules above go through a call's arguments in order, but an argument's
+location depends on the arguments before it only through the four register
+counts, clang's free ones and LLVM's used ones of each class, and on those only
+through a few thresholds: LLVM's general registers below 6 or 5 (one, or two
+for a `PAIR`, a `HALVES` value's second half or an eightbyte after a general
+one), its vector ones below 8 or 7, and clang's short of the argument's needs
+or out of general registers. The stack slots before it set its offset alone,
+and nothing decides by them. So `abi_assign_lanes` (#3375) takes a call's
+arguments 16 at a time, one per 32-bit lane, with the four counts as the four
+bytes of a word (`BUSTER_ABI_LANES_LLVM_VECTOR`'s comment):
+
+1. **Loads:** a masked load of 16 `TypeId`s and three `vpgatherdd`, of the
+   transparent unions' members, then of the pass bits and the stack bytes of
+   what each lane passes as; the unions' own bytes and alignment, and the
+   results of vectors on the stack, only for a vector that has such lanes.
+2. **What doesn't depend on the counts** (`AbiLanesArguments`): each rule's
+   candidate lanes, from the pass bits, the call's named count and whether it
+   is variadic, worked out once.
+3. **Rounds:** `abi_lanes_decide` takes each lane's counts and gives, by the
+   rules as masks, which rule takes it and what it adds to the counts (a byte
+   each, 0 to 2). Each lane's counts are the call's counts before the vector
+   plus the inclusive sums of the lanes before it (`abi_lanes_sum`, four
+   `valignd` and adds), so the rules decide again from the sums of their last
+   decisions until those come out the same, which is then the sequential
+   answer. Lane i's counts are right once every lane before it decided right,
+   so a vector takes at most 17 rounds; the first sums are what the prefix sums
+   would take (every argument not in memory its registers, an `UNCOUNTED` one
+   its value's), and a call takes one round where those are right and about
+   one more for each argument that changes them otherwise, all the lanes after
+   it changing in the same round.
+4. **Locations:** the registers from each lane's counts (a `vpermd` from a
+   16-entry table for the general ones, an OR for the vector ones), and each
+   lane's one stack slot (its value's, or the 8 or 16 bytes of the eightbytes
+   on the stack) placed by `abi_lanes_place`: the slots' sums from the call's
+   stack so far, in two vectors of 8 64-bit lanes (an alignment may be 2^32
+   or more), then, while some slot's offset isn't aligned, the lanes from the
+   first such one moved up by its padding. Two masked stores write the 16
+   locations, which are consecutive: no scatter.
+
+The vector's last lane's counts, stack and alignment carry to the next 16
+arguments, and after the last they are the call's totals. A call's cost
+follows its arguments, not the rules' count: the eight-call kernel #2958
+merged before (one call per 64-bit lane, an argument of each per step, with a
+gather per column and a scatter of the locations per step) ran one lane of
+eight for a call alone, about 585 instructions per argument on the 9700X.
 
 ### The vector path: segmented prefix sums
 
 `abi_assign` takes every call's arguments in order, 16 at a time whatever call
-they belong to, after a scalar setup over the calls that has no loop over a
-call's arguments: it writes each call's result, starting totals and first
+they belong to, in windows of 4,096 arguments whose marks are on its stack: it
+needs no other memory (#2958). Before each window, a scalar setup over the
+calls that start in it, with no loop over a call's arguments, it writes each call's result, starting totals and first
 argument, and its marks, a byte per argument (zeroed first): at the call's
 first argument `START`, `HIDDEN` (its result goes in memory: the hidden pointer
 takes rdi before it), `DEMOTED`, `VARIADIC` and `LONG` (more arguments than
 its 16-bit register sums count), and `UNNAMED` at its first unnamed one. Past
-the last argument, a `START` ends it.
+the window's last argument, a `START` where a call starts (or the arguments
+end); a call's `UNNAMED` mark past its window waits for the window it falls in.
 
 1. **Loads:** a masked load of 16 `TypeId`s, two `vpgatherdd` of their pass
    bits and stack bytes, and the marks of the 16 arguments and of the 16
@@ -830,21 +890,22 @@ the last argument, a `START` ends it.
 5. **The stack:** the slots of the arguments on the stack in another
    segmented scan, whose exclusive sums are their offsets, and an OR scan of
    their alignments, whose highest bit is the call's, with bit 0 (below every
-   slot's alignment, 8 or more) set by a lane `abi_assign_call` must assign.
+   slot's alignment, 8 or more) set by a lane `abi_assign_lanes` must assign.
 6. **Stores:** each lane's 8-byte location (its offset, and a word of its
    registers, kind and flags), interleaved with `vpermt2d` and stored with two
    masked 64-bit stores of 8; and at the lanes that end a call, the three
-   scans' inclusive values, its totals, into columns of their own (three
-   masked stores).
+   scans' inclusive values, its totals, compressed (`vpcompressd`) into 16
+   entries on the stack, in the order of the calls that have arguments.
 
-A last pass over the calls reads each call's totals at its last argument (a
-call without arguments keeps its starting ones): the registers used, clamped
-to 6 and 8, the stack bytes and the largest alignment. The calls with bit 0
-set go to `abi_assign_call`. The setup's marks and the totals' columns replace a loop
-over each call's arguments, whose random lengths mispredicted at their exits,
-and a loop per vector over the calls that end in it.
+Each vector's ended calls then take their totals from those entries (a call
+without arguments keeps its starting ones): the registers used, clamped to 6
+and 8, the stack bytes and the largest alignment. A call with bit 0 set goes
+to a window of 64 deferred calls, which `abi_assign_lanes` assigns, a call at
+a time, when it fills and at the end, over what the sums wrote. The setup's
+marks replace a loop over each call's arguments, whose random lengths
+mispredicted at their exits.
 
-Where nothing makes clang's and LLVM's counts differ, `abi_assign_call`'s two
+Where nothing makes clang's and LLVM's counts differ, the per-call rules' two
 counts are complements, so one sum serves both; an argument that spills adds its
 needs to the sums, but only past a class's limit, where no argument after it
 finds a register of that class anyway; and with every slot a multiple of 8
@@ -855,7 +916,7 @@ sums are its placements. That is exactly its assignment unless a lane:
   with one free, or one of both classes with one class full), which the sums
   count as used though it stays free for the arguments after;
 - is on the stack at an offset its alignment doesn't divide, where
-  `abi_assign_call` would pad, or aligned to 2^32 or more, which a 32-bit lane can't hold;
+  the per-call rules would pad, or aligned to 2^32 or more, which a 32-bit lane can't hold;
 - makes the counts differ: it is `UNCOUNTED` or `LOW_GENERAL`, a named
   `WIDE` vector in a variadic call, or the first of a call whose result is
   `DEMOTED`;
@@ -866,12 +927,15 @@ sums are its placements. That is exactly its assignment unless a lane:
   more, 65,535 in all, and past that the general registers' sum would carry
   into the vector ones'.
 
-A call with such a lane carries bit 0 in its totals, and after the loop
-`abi_assign_call` assigns it again, over what the vector path wrote: 1.7% of
-the benchmark's calls, which hold 5.2% of its arguments (see "Measurements on
-the 9700X"). Without scratch memory for the setup's columns, `abi_assign` runs
-`abi_assign_call` on every call. Both stay as the vector path's fallbacks
-until they are vectorized (#2924's phase D).
+A call with such a lane carries bit 0 in its totals, and `abi_assign_lanes`
+assigns it again, over what the sums wrote: 1.7% of the benchmark's calls,
+which hold 5.2% of its arguments (see "Measurements on the 9700X"), and in
+real compiles almost none (#2958, by a counting build: none of sqlite3.c's
+16,104 calls or Lua's 11,440, and 7 of the 13,927 in this compiler's
+`main.c`, all inexact). The kernel takes any alignment and any count, so no
+call needs another assignment, and `abi_assign_call` and
+`abi_assign_scalar`, the per-call assignment the vector path fell back to,
+went in #2958.
 
 ## va_arg
 
@@ -1537,8 +1601,8 @@ files. The counts below are the defaults'
 - **Assignment** (33,417 arguments of random calls, 473,942 checks): random
   calls over a world's types, at each vector width, named and variadic, short
   and past the registers, with results in memory and in registers, assigned by
-  the vector path and by its fallback (`abi_assign` with every scratch arena
-  exhausted, which assigns each call by `abi_assign_call`), each on its own:
+  `abi_assign` and by its per-call kernel over every call (`abi_assign_lanes`,
+  with every scratch arena exhausted), each on its own:
   at seed 1, locations and totals against digests frozen from main; at any
   seed, every call within the registers there are, its stack arguments
   aligned, in order and within its stack bytes, and a call assigned again
@@ -1972,6 +2036,24 @@ of records larger than 16 bytes, and as fast as before for the assignment.
   calls, 6%; before the marks, the setup's loops over each call's arguments
   took about 30% of the vector path's time, mostly at their mispredicted
   exits.
+- **The per-call kernel on a lone call (#3375):** #2958's kernel, eight calls
+  at a time, ran one lane of eight for a call assigned alone. A call's
+  arguments 16 at a time (see "The per-call kernel"), against main's
+  per-call scalar code before #3364 and #3364's kernel, six runs of each by
+  turns, ns per argument (buster-performance's
+  [`calling-convention-lone-call-3375-2026-11-23`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/calling-convention-lone-call-3375-2026-11-23)):
+
+  | Row | scalar | eight calls | 16 arguments | instructions |
+  | --- | ---: | ---: | ---: | ---: |
+  | `deferred-alone` | 11.77 | 54.41 | 10.89 | 233 → 585 → 134 |
+  | `assign-alone` | 14.67 | 16.01 | 13.80 | 187 → 154 → 130 |
+  | `assign` | 3.37 | 3.42 | 3.22 | 48 → 48 → 47 |
+
+  `deferred-alone` assigns the 567 calls the prefix sums leave (14.1
+  arguments each) one at a time; its mispredictions per argument fell from
+  0.134 and 0.076 to 0.001. Real compiles barely reach the kernel (7 calls
+  of this compiler's `main.c`, none of sqlite3.c's), and their objects are
+  the same bytes.
 - **The power cap (#199):** the throttle takes 0.056 to 0.062 of the vector
   classification's dispatch slots per cycle in `classify-all`, 0.010 to 0.024
   in the batches and 0.009 to 0.010 in the assignment, in every state. These
@@ -2136,7 +2218,7 @@ are implemented; source-to-function construction is still an integration.
 | --- | --- |
 | Completed TypeTable rows → `abi_classify` / `abi_classify_all` | Type-indexed 16-byte class rows plus pass/storage/layout/result metadata. Member/element dependencies must be classified first; level discovery is part of the cost. |
 | Classified member rows → aggregate fold → `abi_finish` | Reuses shifted rows instead of recursive reclassification. LLVM-shape/storage exceptional rules still inspect member/type data; psABI classes alone are insufficient. |
-| Signature ranges/types → `abi_assign` → argument locations and `AbiCall` | Contiguous arguments and per-call boundaries, named/variadic counts and result metadata. Register demand is a segmented scan; a call that exceeds vector limits goes whole to the per-call fallback, `abi_assign_call`. |
+| Signature ranges/types → `abi_assign` → argument locations and `AbiCall` | Contiguous arguments and per-call boundaries, named/variadic counts and result metadata. Register demand is a segmented scan; a call the sums can't place goes whole to the per-call kernel, `abi_assign_lanes`, its arguments 16 at a time. |
 | ABI metadata → Tier 0 generated-function inputs / frame planner / `abi_va_arg` | Consumers use locations, hidden result, outgoing bytes/alignment, variadic state and copy/storage rules; they must not reclassify from size alone. Cross-link tests are real machine-code consumers. |
 
 The ABI table is caller-owned arena storage tied to the same live TypeTable;

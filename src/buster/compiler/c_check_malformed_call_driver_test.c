@@ -145,9 +145,14 @@ static void check_test_malformed_call_views(CheckTest* test)
     }
 }
 
+// A long sweep (32 s on a 4-CPU Xeon VM, #3399): the views' check and each case are units of test-checker-driver's deal
+// (check_test_driver_takes).
 static void check_test_driver_malformed_calls(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    check_test_malformed_call_views(test);
+    if (check_test_driver_takes())
+    {
+        check_test_malformed_call_views(test);
+    }
     CheckTestFixtures files = { .storage = arena_reserve(CHECK_TEST_FIXTURE_BYTES + 4096) };
     uint64_t length = 0;
     char* catalog = files.storage.base != NULL ? check_test_fixture_read(&files, "tests/checker/parse-recovery/malformed-calls.cases", &length) : NULL;
@@ -186,6 +191,10 @@ static void check_test_driver_malformed_calls(CheckTest* test, const char* clang
         char define[64];
         snprintf(define, sizeof(define), "-DBUSTER_CASE=%u", id);
         fixtures += valid;
+        if (!check_test_driver_takes())
+        {
+            continue;
+        }
         for (uint32_t s = 0; valid && s < BUSTER_ARRAY_LENGTH(standards); s += 1)
         {
             if ((languages & (1u << s)) == 0)

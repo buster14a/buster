@@ -418,6 +418,9 @@ typedef enum CheckInputMessage
     // An _Atomic __auto_type pointee is never compatible with its initializer (#1844). The pointer placeholder's
     // type and the initializer's unconverted type (value's low half; typedef spelling in its high half) survive recovery.
     CHECK_INPUT_AUTO_ATOMIC_POINTER,
+    // A _Generic selection whose controlling type (its lvalue conversion's) matches no association and which has no
+    // default (#2914): clang's err_generic_sel_no_match at the controlling expression's first token, with that type.
+    CHECK_INPUT_GENERIC_NO_MATCH,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -595,6 +598,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENUM_INVALID_BASE] = "non-integral type is an invalid underlying type",
     [CHECK_INPUT_ENUM_VALUE_TYPE] = "integer constant expression must have integer type",
     [CHECK_INPUT_AUTO_ATOMIC_POINTER] = "variable with atomic deduced pointee has incompatible initializer",
+    [CHECK_INPUT_GENERIC_NO_MATCH] = "controlling expression type not compatible with any generic association type",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -765,6 +769,26 @@ struct CheckInputKrDiagnostic
 #define BUSTER_CHECK_EXPRESSION_PART_ACTIONS 2u
 #define BUSTER_CHECK_EXPRESSION_PART_VISITS 3u
 #define BUSTER_CHECK_EXPRESSION_PARTS 4u
+
+// #2850's default path: a rule that answers early what a longer way answered, against that way. A logical operator's right
+// operand that can only be 0 or 1 is not replayed for -Wconstant-logical-operand (c_check_warning_graph.c). With a
+// test's switch (BUSTER_TEST_DEFAULT_PATH_LOG, a file's path) it is replayed all the same, and the command writes one
+// line of these counts at its end: the events and the types stay 0.
+typedef enum CheckDefaultPathCount
+{
+    // Right operands the warning's pass did not replay; of them, those whose replay gives the warning's event; and those
+    // whose replay makes a type the table did not have.
+    CHECK_DEFAULT_PATH_LOGICAL_SKIPPED,
+    CHECK_DEFAULT_PATH_LOGICAL_EVENTS,
+    CHECK_DEFAULT_PATH_LOGICAL_TYPES,
+    CHECK_DEFAULT_PATH_COUNTS,
+} CheckDefaultPathCount;
+
+// (The passes of a unit may run on several lanes.)
+static inline __attribute__((unused)) void check_default_path_count(uint64_t* counts, CheckDefaultPathCount which, uint64_t by)
+{
+    __atomic_fetch_add(counts + which, by, __ATOMIC_RELAXED);
+}
 
 typedef struct CheckInput CheckInput;
 typedef struct CheckInputEnumValue CheckInputEnumValue;
@@ -1269,6 +1293,9 @@ struct CheckInput
     // program keeps it with no control of its own, and the lowering writes its function from what `node_front` keeps of
     // it (its controls, each control's root's tape and what is beside it).
     bool node_bodies;
+    // The default path's rule against what it replaces (#2850), where a test asks (BUSTER_TEST_DEFAULT_PATH_LOG): the
+    // command's counts (CHECK_DEFAULT_PATH_*), which the unit's pass adds to. Null in every other run.
+    uint64_t* default_path_counts;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -12872,10 +12899,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t vla_reports = reader->output->report_count;
             const bool placed = check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
             // A block's static or extern variable-length array or variably modified object (#1447): clang's error at its name,
-            // the declaration invalid, a stand-in int, and the reader goes on. (One with an initializer still stops.)
+            // the declaration invalid, a stand-in int, and the reader goes on. A static VLA's initializer is dropped so its
+            // bound still reaches the graph's warning walk (#2252).
             const CheckInputMessage vla_error = !placed && reader->output->report_count == vla_reports + 1 ? reader->output->reports[vla_reports].message :
                                                 CHECK_INPUT_UNSUPPORTED;
-            const bool vla_recovered = valid && !placed && !initialized && !reader->lane &&
+            const bool vla_drop_initializer = initialized && !direct_initializer && vla_error == CHECK_INPUT_VLA_STATIC;
+            const bool vla_recovered = valid && !placed && (!initialized || vla_drop_initializer) && !reader->lane &&
                                        (vla_error == CHECK_INPUT_VLA_STATIC || vla_error == CHECK_INPUT_VLA_EXTERN || vla_error == CHECK_INPUT_VM_EXTERN) &&
                                        check_input_recover_reports(reader, vla_reports);
             check_input_lane_refuse(reader, valid && !placed && reader->lane && (vla_error == CHECK_INPUT_VLA_STATIC || vla_error == CHECK_INPUT_VLA_EXTERN ||
@@ -12884,6 +12913,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             type = vla_recovered ? BUSTER_TYPE_INT : type;
             invalid |= vla_recovered;
             valid &= placed || vla_recovered;
+            reader->vla_initializer_dropped |= vla_recovered && vla_drop_initializer;
             if (__builtin_expect(valid && reader->vla_initializer_dropped, 0))
             {
                 // Its initializer, which clang doesn't check against the type (#1447): skipped, to the declarator's end.
@@ -13909,6 +13939,19 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 }
             }
         }
+        else if (__builtin_expect(reader->output->symbol_pragmas != NULL && reader->output->symbol_pragmas->has_referenced_clone, 0))
+        {
+            // A reference before the first ordinary declaration may already have named the pragma clone's symbol.
+            const CheckInputSymbolPragmas* history = reader->output->symbol_pragmas;
+            for (uint32_t i = 0; i < history->count; i += 1)
+            {
+                const CheckInputSymbolPragma* record = history->records + i;
+                if (record->name == name && record->first_use != 0)
+                {
+                    reader->objects[token] = reader->objects[record->first_use - 1];
+                }
+            }
+        }
         if (!dropped && !kept_invalid && (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED)))
         {
             reader->linked_declarations[name] = token + 1;
@@ -14519,6 +14562,7 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
 {
     const Parser* parser = reader->parser;
     const uint32_t identifier = parser->tokens.names[i];
+    bool pragma_name = false;
     if (__builtin_expect(reader->name_hooks, 0))
     {
         const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
@@ -14528,7 +14572,14 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
         }
         if (__builtin_expect(reader->output->symbol_pragmas != NULL, 0))
         {
-            check_input_symbol_overload_use(reader, i, handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE);
+            if (handle == 0 && role == PARSE_ROLE_OPERAND)
+            {
+                pragma_name = check_input_symbol_unbound_use(reader, i);
+            }
+            else if (handle != 0)
+            {
+                check_input_symbol_overload_use(reader, i, reader->bindings.declaration[handle - 1]);
+            }
         }
     }
     const uint16_t builtin = check_input_builtin_id(reader, i);
@@ -14538,7 +14589,7 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
     // In a function whose no_builtin names the function, its call is the declaration's (#1958).
     const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) && !check_input_no_builtin(reader, identifier, i) :
                          bound == 0 || (check_input_builtin_kept(reader, bound, builtin) && !check_input_no_builtin(reader, identifier, i));
-    if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
+    if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed && !pragma_name)
     {
         // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
         // are dropped with it.
@@ -14608,7 +14659,7 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
             }
         }
     }
-    else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
+    else if (!pragma_name && reader->output->declarations[i] == BUSTER_CHECK_NONE)
     {
         const CheckInputIntrinsicStatus intrinsic = check_input_intrinsic_prepare(reader, i);
         if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && role == PARSE_ROLE_OPERAND)
@@ -18243,11 +18294,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
         check_input_intrinsic_initialize(&reader);
         const uint32_t pragma_aliases = check_input_symbol_alias_count(input->symbol_pragmas);
-        const bool overload_capacity = pragma_aliases <= UINT32_MAX - counts.operands;
+        // A clone can participate in two immutable chains, before and after the first ordinary declaration.
+        const bool overload_capacity = pragma_aliases <= (UINT32_MAX - counts.operands) / 2;
         input->resource |= !overload_capacity;
         if (overload_capacity)
         {
-            check_input_overload_initialize(&reader, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] != 0, counts.operands + pragma_aliases, counts.calls,
+            check_input_overload_initialize(&reader, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] != 0, counts.operands + pragma_aliases * 2, counts.calls,
                                             reader.scratch);
         }
         if (!check_input_target_supported(&pp->options))

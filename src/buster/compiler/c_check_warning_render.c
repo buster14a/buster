@@ -643,6 +643,7 @@ static bool check_driver_warning_promoted(Preprocessor* pp, const CheckInput* in
                                     event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER && event->completion >= repair->original_closed;
         promoted = !unit_end && !open_parameter && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                    event->kind != CHECK_WARNING_EVENT_SHIFT_SIGN && event->kind != CHECK_WARNING_EVENT_BOOL_CONVERSION &&
+                   event->kind != CHECK_WARNING_EVENT_FLOAT_COMPARE &&
                    (repair == NULL || check_repair_warning_event(repair, event)) &&
                    check_driver_warning_severity(pp, input, event) >= CHECK_WARNING_ERROR;
     }
@@ -1912,6 +1913,39 @@ static const char* check_warning_objc_macro(const Parser* parser, Preprocessor* 
 // c_check_semantic_diagnostic.c's: a record's name as clang's -Wodr and incompatible-definition errors spell it.
 static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
 
+static uint32_t check_semantic_operator_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
+static TypeId check_semantic_value_type(const TypeTable* types, TypeId type, bool value_only);
+
+// -Wcompare-distinct-pointer-types's or -Wpointer-integer-compare's text (`warning`) at a comparison's operator `token`,
+// with its two operands' types, "('A' and 'B')", as clang names them (#2914, Sema's diagnoseDistinctPointerComparison and
+// pointer-integer comparison): each after its lvalue conversion (an array's decay, a qualified lvalue's), not the
+// comparison's to their common type, its typedef's sugar kept where the conversion kept the type. The bare text where the token is no comparison's.
+static const char* check_driver_comparison_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                   CheckWarningSpelling* spell, uint32_t token, uint32_t warning, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = stream != NULL && stream->graph == graph && input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] :
+                          BUSTER_CHECK_NONE;
+    const bool compared = node < graph->count && node < stream->count && graph->ops[node] >= CHECK_OP_LESS && graph->ops[node] <= CHECK_OP_NOT_EQUAL &&
+                          graph->operand0[node] < stream->count && graph->operand1[node] < stream->count;
+    const char* result = check_diagnostic_message(warning);
+    if (compared)
+    {
+        String8 sides[2];
+        for (uint32_t side = 0; side < 2; side += 1)
+        {
+            const uint32_t operand = side == 0 ? graph->operand0[node] : graph->operand1[node];
+            const TypeId written = check_stream_type(stream, operand);
+            const TypeId converted = check_semantic_value_type(types, written, true);
+            const uint32_t spelling = converted == written ? check_semantic_operator_spelling(parser, input, stream, types, operand) : 0;
+            sides[side] = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, converted, operand, spelling);
+        }
+        result = sides[0].length != 0 && sides[1].length != 0 ?
+                 check_warning_text(scratch, "%s (%.*s and %.*s)", result, (int)sides[0].length, sides[0].pointer, (int)sides[1].length, sides[1].pointer) : result;
+    }
+    return result;
+}
+
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
@@ -1923,6 +1957,13 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND:
             result = payload->data != 0 ? "use of logical '||' with constant operand" : "use of logical '&&' with constant operand";
             break;
+        case CHECK_WARNING_EVENT_ALIGN_MISMATCH:
+        {
+            const String8 function = check_driver_warning_name(pp, payload->name);
+            result = check_warning_text(scratch, "passing %u-byte aligned argument to %u-byte aligned parameter 1 of '%.*s' may result in an unaligned pointer access",
+                                        1u << (payload->data & 63u), 1u << ((payload->data >> 8) & 63u), (int)function.length, function.pointer);
+            break;
+        }
         case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
             // _Complex is "complex" in clang's words (DeclSpec::getSpecifierName), as its other errors name it.
             result = payload->name == C_NAME_COMPLEX_C99 ? "duplicate 'complex' declaration specifier" :
@@ -2996,6 +3037,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
         const bool late = event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END;
         const bool retained = late == (step >= view->count) && event->kind != CHECK_WARNING_EVENT_MESSAGE && event->kind != CHECK_WARNING_EVENT_ENUM_MIX &&
                               event->kind != CHECK_WARNING_EVENT_SHIFT_SIGN && event->kind != CHECK_WARNING_EVENT_BOOL_CONVERSION &&
+                   event->kind != CHECK_WARNING_EVENT_FLOAT_COMPARE &&
                               (event->token < parser->tokens.count || (event->kind == CHECK_WARNING_EVENT_PRAGMA && event->token == parser->tokens.count)) &&
                               (repair == NULL || check_repair_warning_event(repair, event)) &&
                               (input->interrupt_range_count == 0 || check_driver_interrupt_kept(input, event->token));

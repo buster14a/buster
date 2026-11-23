@@ -1288,6 +1288,10 @@ static void x86_print_instruction(FILE* file, const X86Instruction* instruction,
         // In 16-bit mode, {disp16} for a rel16, and for a rel32 nothing (data32 picks it: see x86_print_mnemonic).
         fprintf(file, x86_test_mode != X86_ENCODER_MODE_16 ? "{disp32} " : form->relative_bytes == 2 ? "{disp16} " : "");
     }
+    if (instruction->mode & BUSTER_X86_MODE_DISP32)
+    {
+        fprintf(file, "{disp32} ");
+    }
     fprintf(file, "%s", x86_printed_address_prefix(instruction));
     x86_print_mnemonic(file, instruction);
     if (dfv && instruction->vvvv != 0)
@@ -1602,6 +1606,10 @@ static const KnownEncoding x86_known_encodings[] = {
     { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x10 }, 3, { 0x8b, 0x43, 0x10 } },
     { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = -0x80 }, 3, { 0x8b, 0x43, 0x80 } },
     { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE, .displacement = 0x80 }, 6, { 0x8b, 0x83, 0x80, 0x00, 0x00, 0x00 } },
+    // {disp32} mov eax, [rbx]; {disp32} vaddps zmm1, zmm2, [rax+64] (one unit of EVEX's displacement scale).
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_DISP32 }, 6, { 0x8b, 0x83, 0, 0, 0, 0 } },
+    { { .form = X86_FORM_VADDPS_Z_Z_ZM512, .reg = 1, .vvvv = 2, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_DISP32, .displacement = 64 },
+      10, { 0x62, 0xf1, 0x6c, 0x48, 0x58, 0x88, 0x40, 0, 0, 0 } },
     // mov r9, [r10+r11*8+0x12345678]; mov eax, [rbp+rcx*4]; mov eax, [rcx*4+0x10]; mov eax, ds:0x1000; mov eax, [rip+0x100]
     { { .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_R9, .rm = X86_REGISTER_R10, .index = X86_REGISTER_R11, .mode = BUSTER_X86_MEMORY_BASE_INDEX(3), .displacement = 0x12345678 },
       8, { 0x4f, 0x8b, 0x8c, 0xda, 0x78, 0x56, 0x34, 0x12 } },
@@ -2830,6 +2838,8 @@ static const KnownEncoding x86_known_encodings[] = {
 
 // The same with 32-bit addresses (x86_encode_address32), from GNU as.
 static const KnownEncoding x86_known_encodings_address32[] = {
+    // {disp32} mov al, [ebx+4]
+    { { .form = X86_FORM_MOV_R8_RM8, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_DISP32, .displacement = 4 }, 7, { 0x67, 0x8a, 0x83, 4, 0, 0, 0 } },
     // mov eax, [eax]; mov rax, [r9d+r10d*8-0x80] (67 before REX); [ebp] and [r13d] with an 8-bit zero, [esp] and [r12d]
     // with SIB; [ecx*2+0x10], and [ecx*1+0x10], which GNU as keeps with a 32-bit address; an absolute address (with
     // addr32) and [eip+0x10]; mov rax, fs:[eax] (64 67 48); lea eax, [ecx+edx*2]; add eax, ecx (no memory, no 67);
@@ -2877,6 +2887,8 @@ static const KnownEncoding x86_known_encodings_address32[] = {
 
 // The same with APX's registers 16 to 31 (x86_encode_apx), from GNU as.
 static const KnownEncoding x86_known_encodings_apx[] = {
+    // {disp32} mov eax, [r17+4]
+    { { .form = X86_FORM_MOV_R32_RM32, .rm = 17, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_DISP32, .displacement = 4 }, 8, { 0xd5, 0x10, 0x8b, 0x81, 4, 0, 0, 0 } },
     // Map 0: r16 in rm and in reg; add r31, r17 (W); add r16w, ax (66 before D5); mov sil, r16b (SIL with REX2); test
     // r16b, r17b; and the +r forms: mov r16b, 1 (B0+r), mov r31d, 1 (B8+r, B3 too), movabs r16, push r31, pop r17 and
     // xchg r16, rax (90+r)
@@ -3071,6 +3083,8 @@ static const KnownEncoding x86_known_encodings_apx[] = {
 // Known encodings in 32-bit mode (x86_encode_mode32), with bytes from GNU as's .code32: the mode's operand and
 // address sizes and the other ones', and its own forms.
 static const KnownEncoding x86_known_encodings_32[] = {
+    // {disp32} mov al, [ebx+4]
+    { { .form = X86_FORM_MOV_R8_RM8, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_DISP32, .displacement = 4 }, 6, { 0x8a, 0x83, 4, 0, 0, 0 } },
     // 32- and 16-bit operands, and a high byte register: add eax, ebx; add ax, bx; add dl, ah
     { { .form = X86_FORM_ADD_RM32_R32, .reg = X86_REGISTER_RBX }, 2, { 0x01, 0xd8 } },
     { { .form = X86_FORM_ADD_RM16_R16, .reg = X86_REGISTER_RBX }, 3, { 0x66, 0x01, 0xd8 } },
@@ -3279,6 +3293,9 @@ static const KnownEncoding x86_known_encodings_32[] = {
 // Known encodings in 16-bit mode (x86_encode_mode16), with bytes from GNU as's .code16: ModRM's 16-bit addresses,
 // the mode's operand and address sizes and the other ones', and its own forms.
 static const KnownEncoding x86_known_encodings_16[] = {
+    // {disp32} mov al, [ebx+4] (32-bit address)
+    { { .form = X86_FORM_MOV_R8_RM8, .rm = X86_REGISTER_RBX, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_ADDRESS_SIZE | BUSTER_X86_MODE_DISP32, .displacement = 4 },
+      7, { 0x67, 0x8a, 0x83, 4, 0, 0, 0 } },
     // 16- and 32-bit operands, and high byte registers: add ax, bx; add eax, ebx; add bh, ch
     { { .form = X86_FORM_ADD_RM16_R16, .reg = X86_REGISTER_RBX }, 2, { 0x01, 0xd8 } },
     { { .form = X86_FORM_ADD_RM32_R32, .reg = X86_REGISTER_RBX }, 3, { 0x66, 0x01, 0xd8 } },
@@ -4663,13 +4680,12 @@ static bool x86_break_instruction(uint64_t* state, X86Instruction* instruction, 
             break;
         case 12:
         {
-            // Unknown mode bits (but in 16- and 32-bit modes, BUSTER_X86_MODE_ADDRESS_SIZE's, which there an
-            // instruction can't have without an address: without a memory operand, in a form whose instructions make
-            // none).
+            // A size bit the mode forbids, disp32 without a base, or RIP with a base.
             const bool unaddressed = legacy && !memory && !(x86_form_legacy[form - x86_form_descriptions] & BUSTER_X86_LEGACY_IMPLICIT_ADDRESS);
             if (form->rm != BUSTER_X86_OPERAND_NONE || unaddressed)
             {
-                instruction->mode |= x86_random_below(state, 2) == 0 && (!legacy || unaddressed) ? BUSTER_X86_MODE_ADDRESS_SIZE : 0x80;
+                const uint8_t invalid = (instruction->mode & BUSTER_X86_MODE_BASE) ? BUSTER_X86_MODE_RIP : BUSTER_X86_MODE_DISP32;
+                instruction->mode |= x86_random_below(state, 2) == 0 && (!legacy || unaddressed) ? BUSTER_X86_MODE_ADDRESS_SIZE : invalid;
             }
             else
             {

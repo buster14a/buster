@@ -1065,6 +1065,7 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
         twin->input = input;
         twin->types = reader->types;
         twin->roots = shadow->alone_control_roots;
+        // (The machine's results are made after what the producer asks before any reading: node_producer_kept.)
         twin->kept = alone->types;
         producer->lean = (reader->pp->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0;
         // What the passes before the walk have said, by its token's place in the preprocessor's output (which a published
@@ -1134,6 +1135,13 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
         shadow->produced_events_walked = UINT32_MAX;
     }
     return valid ? producer : NULL;
+}
+
+// The machine's results by node, which the twin reads each control's root's kept tape and facts from: made after the
+// producer (node_alone_begin sizes them by what the producer will read).
+static void node_producer_kept(struct NodeProducer* producer, const NodeFrontTypes* kept)
+{
+    producer->twin.kept = kept;
 }
 
 // The unit's enumerations' definitions for the machine `machine` (NodeMachine.reader_enums).
