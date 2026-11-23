@@ -25,14 +25,16 @@ struct CheckDriverFixture
 // packs beside the others: alone, the driver's checks were the list's longest command (197 s on a hosted runner, 48 s
 // on the 9700X). A check deals one unit, or, where it is a long sweep (check_test_driver_recovery,
 // check_test_driver_error_limits, check_test_driver_semantic_recovery), one per case. Each unit weighs about what it
-// takes, in hundredths of a second of one CPU, BUSTER_CHECK_DRIVER_UNIT_WEIGHT unless its deal names another
-// (check_test_driver_takes_weighing), and goes to the part that weighs the least so far (of those, the first). Dealt in
-// turn instead, a few costly units fell on one part, and a unit a pull request added moved every later one to the next
-// part: one part took 535 s of parallel's 600 s on a hosted runner, and the one that took over its units timed out
-// (#3399). Every part goes through the same units in the same order and weighs them alike, whatever the others'
-// outcomes, since each unit is dealt before anything it runs decides the next: so the parts together run each unit
-// once, as the whole run runs it: no check draws from CheckTest.random, which the driver leaves at 0, and those that
-// draw numbers seed their own. Without --part, the one part takes every unit.
+// takes, in hundredths of a second of one CPU on a 4-CPU Xeon VM, BUSTER_CHECK_DRIVER_UNIT_WEIGHT unless its deal names
+// another (check_test_driver_takes_weighing, for a unit of 2 s or more), and goes to the part that weighs the least so
+// far (of those, the first). A sweep that would take more than about 20 s deals each of its cases instead: a unit that
+// long, dealt late in the order, makes its part the longest whatever the weights. Dealt in turn instead, a few costly
+// units fell on one part, and a unit a pull request added moved every later one to the next part: one part took 535 s
+// of parallel's 600 s on a hosted runner, and the one that took over its units timed out (#3399). Every part goes
+// through the same units in the same order and weighs them alike, whatever the others' outcomes, since each unit is
+// dealt before anything it runs decides the next: so the parts together run each unit once, as the whole run runs it:
+// no check draws from CheckTest.random, which the driver leaves at 0, and those that draw numbers seed their own.
+// Without --part, the one part takes every unit.
 #define BUSTER_CHECK_DRIVER_MAX_PARTS 64
 #define BUSTER_CHECK_DRIVER_UNIT_WEIGHT 20
 typedef struct CheckDriverPart CheckDriverPart;
