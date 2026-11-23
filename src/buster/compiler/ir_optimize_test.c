@@ -31,6 +31,9 @@ struct IrOptimizeTest
     // Value numbering with memory's generated programs' and overflow fixture's results (ir_optimize_memory_test.c), in
     // order, frozen where the pass's vector path and its scalar twin agreed: with the default seed, which generates them.
     uint64_t memory_digest;
+    // test-ir-licm's: every fixture's moved function and counts by LICM's per-loop walk (ir_licm_test_fold), in order,
+    // frozen where the walk and its whole-function oracle agreed (#2979): with the default seed, which generates the chains.
+    uint64_t licm_digest;
 };
 
 #define BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
@@ -40,6 +43,7 @@ struct IrOptimizeTest
 #define BUSTER_IR_OPTIMIZE_TEST_UNROLL_DIGEST UINT64_C(0xc92a6941c51cf4e2)
 #define BUSTER_IR_OPTIMIZE_TEST_SEED UINT64_C(139)
 #define BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST UINT64_C(0x5d860cd5f67a13ce)
+#define BUSTER_IR_OPTIMIZE_TEST_LICM_DIGEST UINT64_C(0xfb593fcec3c4c344)
 
 static void ir_optimize_test_expect(IrOptimizeTest* test, bool condition, const char* description)
 {

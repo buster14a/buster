@@ -481,6 +481,20 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
         result = type.length == 0 ? NULL : check_warning_text(scratch, "controlling expression type %.*s not compatible with any generic association type",
                                                               (int)type.length, type.pointer);
     }
+    else if (report->message == CHECK_INPUT_GENERIC_COMPATIBLE && report->type != 0 && report->value != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+        const String8 earlier = check_driver_warning_type(parser, pp, input, types, spell, scratch, (TypeId)report->value, report->detail);
+        result = type.length == 0 || earlier.length == 0 ? NULL :
+                 check_warning_text(scratch, "type %.*s in generic association compatible with previously specified type %.*s", (int)type.length, type.pointer,
+                                    (int)earlier.length, earlier.pointer);
+    }
+    else if (report->message == CHECK_INPUT_AUTO_TYPE_NULLABILITY && report->type != 0 && name.length != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+        result = type.length == 0 ? NULL : check_warning_text(scratch, "nullability specifier '%.*s' cannot be applied to non-pointer type %.*s",
+                                                              (int)name.length, name.pointer, (int)type.length, type.pointer);
+    }
     else if (report->message == CHECK_INPUT_AUTO_ATOMIC_POINTER && report->type != 0 && name.length != 0)
     {
         const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, token, scratch);
@@ -3151,6 +3165,21 @@ static uint32_t check_semantic_cast_pointer_arithmetic(const TypeTable* types, T
     return source_pointer && target_fractional ? 1u : target_kind == BUSTER_TYPE_KIND_POINTER && source_fractional ? 2u : 0u;
 }
 
+// Whether a cast from `source` (before its lvalue conversion) to `target` is one clang's CheckCStyleCast refuses for
+// nullptr_t (#2914, err_bad_cstyle_cast_generic): to nullptr_t from anything but a nullptr_t or a null pointer constant
+// (check_action_cast refused those alone), or from a nullptr_t to a type other than a pointer, bool, void or nullptr_t;
+// an _Atomic target's value type decides.
+static bool check_semantic_cast_nullptr(const TypeTable* types, TypeId target, TypeId source)
+{
+    TypeId value = type_strip_aligned(types, target);
+    value = type_kind(types, value) == BUSTER_TYPE_KIND_ATOMIC ? types->types.base[type_index(value)] : value;
+    const uint8_t target_kind = check_action_kind(types, value);
+    const bool from_nullptr = check_action_kind(types, source) == BUSTER_TYPE_KIND_NULLPTR;
+    const bool kept = target_kind == BUSTER_TYPE_KIND_POINTER || target_kind == BUSTER_TYPE_KIND_VOID || target_kind == BUSTER_TYPE_KIND_NULLPTR ||
+                      type_unqualified(value) == BUSTER_TYPE_BOOL;
+    return (target_kind == BUSTER_TYPE_KIND_NULLPTR && !from_nullptr) || (from_nullptr && !kept);
+}
+
 // A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
 
@@ -3459,6 +3488,33 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             result = type.length == 0 ? NULL :
                      to_pointer ? check_warning_text(scratch, "operand of type %.*s cannot be cast to a pointer type", (int)type.length, type.pointer) :
                                   check_warning_text(scratch, "pointer cannot be cast to type %.*s", (int)type.length, type.pointer);
+        }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CAST && operand_type != 0 && token + 1 < parser->tokens.count &&
+                 parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST && node < stream->count && graph->types != NULL &&
+                 check_semantic_cast_nullptr(types, graph->types[node], operand_type))
+        {
+            // A cast to or from nullptr_t that C23 6.5.4p4 doesn't allow (#2914, clang's err_bad_cstyle_cast_generic), at
+            // the operand's first token: "cannot cast an object of type 'S' to 'T'", S the operand's type after its lvalue
+            // conversion, its sugar kept, and T the target as written (an _Atomic one's value type); the nullptr_t side
+            // is 'nullptr_t', its sugar dropped, as clang prints it. (An array or a function as its decay made it.)
+            const uint8_t operand_kind = check_action_kind(types, operand_type);
+            const bool decays = type_kind_is_array(operand_kind) || operand_kind == BUSTER_TYPE_KIND_FUNCTION;
+            const TypeId converted = decays && stream->conversions[node].operands[0].type != 0 ? stream->conversions[node].operands[0].type :
+                                     type_unqualified(type_strip_aligned(types, operand_type));
+            const bool cast = operand < count && graph->ops[operand] == CHECK_OP_CAST;
+            const bool from_nullptr = check_action_kind(types, converted) == BUSTER_TYPE_KIND_NULLPTR;
+            const uint32_t spelling = converted != operand_type || from_nullptr ? 0 :
+                                      cast ? check_input_operand_type_spelling(input, parser, operand) : check_semantic_operand_spelling(parser, input, stream, types, operand);
+            const TypeId target = type_strip_aligned(types, graph->types[node]);
+            const bool atomic = type_kind(types, target) == BUSTER_TYPE_KIND_ATOMIC;
+            const String8 from = check_driver_warning_type(parser, pp, input, types, spell, scratch, from_nullptr ? BUSTER_TYPE_NULLPTR : converted, spelling);
+            const String8 to = !from_nullptr ? check_driver_warning_type(parser, pp, input, types, spell, scratch, BUSTER_TYPE_NULLPTR, 0) :
+                               atomic ? check_driver_warning_type(parser, pp, input, types, spell, scratch, types->types.base[type_index(target)], 0) :
+                                        check_driver_warning_type(parser, pp, input, types, spell, scratch, graph->types[node],
+                                                                  check_input_operand_type_spelling(input, parser, node));
+            *location = token + 1;
+            result = from.length == 0 || to.length == 0 ? NULL :
+                     check_warning_text(scratch, "cannot cast an object of type %.*s to %.*s", (int)from.length, from.pointer, (int)to.length, to.pointer);
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_SUBTRACT && operand_type != 0 && graph->operand1[node] < stream->count &&
                  check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER &&

@@ -6,9 +6,10 @@
 // ranges and writes location lists. Only final Tier 0 homes are described; a value without a proved home has no
 // location. Nothing here changes instruction selection or forces a register value to memory for debugging.
 //
-// Types are a bounded worklist, never a recursive walk (records may point back to themselves). First measure all
-// DIEs and fix their CU-relative offsets, then write the same layout, so forward references require no relocation.
-// NativeDebugExtra retains only section references and global definition addresses for the two native writers.
+// Types are a bounded worklist, never a recursive walk (records may point back to themselves). The types' DIEs come first
+// and are measured alone, which fixes every type's CU-relative offset; then every DIE and list is written once, into
+// sections that grow (CheckDebugStream), and the references to abstract instances written later are patched at the end
+// (#2542). NativeDebugExtra retains only section references and global definition addresses for the two native writers.
 // DWARF 5 sections 2.6, 3.3/3.5, 4.1, 5 and 7 define the format; no third-party implementation is used.
 
 typedef enum CheckDebugAbbreviation
@@ -103,6 +104,33 @@ struct CheckDebugInlineSpans
     uint32_t end;
 };
 
+// A section or table the writer appends to once (#2542): its writer, its room and the arena that holds it. It grows in
+// place while it is that arena's last push, and is otherwise moved to the arena's end at twice its room. One that runs out
+// of memory stops storing bytes but goes on counting them (a DebugWriter without bytes), and `failed` says so.
+typedef struct CheckDebugStream CheckDebugStream;
+struct CheckDebugStream
+{
+    DebugWriter out;
+    uint64_t capacity;
+    Arena* arena;
+    bool failed;
+};
+
+// A reference to an abstract instance written after it (check_debug_value_origin): kept as the reference's offset in
+// .debug_info, shifted left once, and this bit where it names the body's DW_TAG_subprogram rather than an entry of it.
+#define CHECK_DEBUG_ORIGIN_FUNCTION 1u
+// The most bytes a DIE of the writer's other than a type's has but its name's: a DW_TAG_subprogram's, its code, its
+// name's end, its type, address index, size, file and line, 25.
+#define CHECK_DEBUG_DIE_BYTES 32u
+// A list's DW_RLE/DW_LLE_base_addressx entry: its code and its index, a ULEB128 of 32 bits.
+#define CHECK_DEBUG_LIST_BASE_BYTES 6u
+// A DW_RLE/DW_LLE_offset_pair entry's bytes but its expression's: its code, two offsets and the expression's length.
+#define CHECK_DEBUG_PAIR_OFFSETS_BYTES 16u
+// A location list's pair of an expression of at most 16 bytes (check_debug_home_expression's, an implicit value's).
+#define CHECK_DEBUG_PAIR_BYTES (CHECK_DEBUG_PAIR_OFFSETS_BYTES + 16u)
+// A stream's room at first (check_debug_value_stream): a page.
+#define CHECK_DEBUG_STREAM_BYTES 4096u
+
 typedef struct CheckDebugValues CheckDebugValues;
 struct CheckDebugValues
 {
@@ -120,27 +148,29 @@ struct CheckDebugValues
     // Beside each open scope of a body's walk, its block's opening token: in check_debug_value_own_blocks, the block its
     // declarations mark; in the write, where it has a DIE to close (BUSTER_CHECK_NONE where it has none, #2543).
     uint32_t* scope_tokens;
-    // Whether each body's blocks have their CHECK_DEBUG_OWN marks, which the first of the writer's two passes sets.
-    bool blocks_marked;
     // By token: CHECK_DEBUG_ROOT where the token is in one of the unit's roots, CHECK_DEBUG_USED at a file-scope typedef's
     // name that one names (check_debug_value_roots).
     uint8_t* marks;
     // By token, the last token of its statement's subtree. The parser's column where it kept one; otherwise derived for a
     // body's tokens when the body's first lexical block needs them (check_debug_body_ends, #2544), with `ends_ready`
-    // marking those bodies for the second pass and `ends_children`, `ends_queue` its scratch.
+    // marking those bodies for the write's walk, which follows check_debug_value_own_blocks' over the same body, and
+    // `ends_children`, `ends_queue` its scratch.
     const uint32_t* ends;
     uint32_t* derived_ends;
     uint32_t* ends_children;
     uint32_t* ends_queue;
     uint8_t* ends_ready;
     bool ends_failed;
-    DebugWriter info;
-    DebugWriter ranges;
-    DebugWriter locations;
-    NativeDebugField* fields;
-    NativeDebugAddress* addresses;
-    uint32_t field_count;
-    uint32_t address_count;
+    // The sections, .debug_info in the output arena and the others in scratch until they are copied there at their
+    // sizes; the fields that point into the other sections (NativeDebugField) and the defined objects' addresses
+    // (NativeDebugAddress), each in its order in .debug_info; and the references to abstract instances not yet written
+    // (check_debug_value_origin).
+    CheckDebugStream info;
+    CheckDebugStream ranges;
+    CheckDebugStream locations;
+    CheckDebugStream fields;
+    CheckDebugStream addresses;
+    CheckDebugStream origins;
     // The spans' index of the function `span_body` names (#1640, check_debug_value_index): each span's next address break,
     // the starts of its runs of non-decreasing tokens (and the span count after them), and the runs' token tree. Null where
     // the scratch had no room, which leaves every list to check_debug_value_range_scan.
@@ -151,9 +181,9 @@ struct CheckDebugValues
     uint32_t span_segment_count;
     uint32_t span_body;
     // Each expanded callee's abstract instance's offset in the unit (a DW_TAG_subprogram with DW_AT_inline and no code,
-    // written before its own DW_TAG_subprogram), which the measuring pass sets and the writing pass reads, its instances'
-    // abstract origin; which bodies some instance expands; and, for a function's instances, the open ones (a stack) and
-    // their order by call token (CheckDebugInline, #2541 step 3), room for the most a function has. An instance's origin
+    // written before its own DW_TAG_subprogram), its instances' abstract origin (check_debug_value_origin); which bodies
+    // some instance expands; and, for a function's instances, the open ones (a stack) and their order by call token
+    // (CheckDebugInline, #2541 step 3), room for the most a function has. An instance's origin
     // can't be the out-of-line DW_TAG_subprogram: a debugger reads an attribute an entry lacks from its origin, and gdb 18
     // (and CI's) takes the inherited DW_AT_low_pc over the instance's DW_AT_ranges, which drops the instance.
     uint32_t* function_offsets;
@@ -174,14 +204,6 @@ struct CheckDebugValues
     uint32_t event_count;
     uint32_t* root_ends;
     uint32_t root_count;
-    // The lists' memo (check_debug_value_range_clipped, #2542): the measuring pass writes each list it computes into
-    // `memo`, in `memo_arena` (its length, four bytes, then its bytes), and the writing pass copies them in the same
-    // order from `memo_read` on, rather than walking the spans again. `memo_failed` where there was no room.
-    Arena* memo_arena;
-    uint8_t* memo;
-    uint64_t memo_size;
-    uint64_t memo_read;
-    bool memo_failed;
 };
 
 static String8 check_debug_name(const CheckDebugValues* values, uint32_t identifier)
@@ -189,6 +211,64 @@ static String8 check_debug_name(const CheckDebugValues* values, uint32_t identif
     const InternTable* table = values->program->identifiers;
     const String8 result = { .pointer = (char*)intern_bytes(table, identifier), .length = intern_length(table, identifier) };
     return result;
+}
+
+// A stream of `capacity` bytes at first, in `arena`; failed where there is no room.
+static CheckDebugStream check_debug_value_stream(Arena* arena, uint64_t capacity)
+{
+    uint8_t* bytes = arena_push(arena, capacity, 16);
+    const CheckDebugStream result = { .out = { .bytes = bytes }, .capacity = bytes != NULL ? capacity : 0, .arena = arena, .failed = bytes == NULL };
+    return result;
+}
+
+// Room in `stream` for `bytes` more (CheckDebugStream), and its writer, which every write takes after the room for it: the
+// room a DIE or a list needs at most is reserved before it is written, so the DebugWriter's own writes never check.
+static DebugWriter* check_debug_value_room(CheckDebugStream* stream, uint64_t bytes)
+{
+    DebugWriter* out = &stream->out;
+    const uint64_t need = out->size + bytes;
+    if (out->bytes != NULL && need > stream->capacity)
+    {
+        Arena* arena = stream->arena;
+        const uint64_t doubled = 2 * stream->capacity;
+        const uint64_t grown = need > doubled ? need : doubled;
+        // In place where it is the arena's last push; else moved to the arena's end, the bytes it holds copied.
+        const bool last = arena->base + arena->length == out->bytes + stream->capacity;
+        uint8_t* more = last ? arena_push(arena, grown - stream->capacity, 1) : NULL;
+        uint8_t* moved = more == NULL ? arena_push(arena, grown, 16) : NULL;
+        if (moved != NULL)
+        {
+            memcpy(moved, out->bytes, out->size);
+        }
+        out->bytes = more != NULL ? out->bytes : moved;
+        stream->capacity = out->bytes != NULL ? grown : 0;
+        stream->failed = stream->failed || out->bytes == NULL;
+    }
+    return out;
+}
+
+// A DIE's last child's end: a zero entry.
+static void check_debug_value_close(CheckDebugValues* values)
+{
+    debug_integer(check_debug_value_room(&values->info, 1), 0, 1);
+}
+
+// A reference (DW_FORM_ref4) to body `callee`'s abstract instance, or with `entry` to its parameter's or local's entry
+// `token` (CheckDebugValues.function_offsets, parameter_dies), from body `body`'s DIEs. An abstract instance is written
+// at the start of its body's turn (check_debug_values_write), before the body's own DIEs, so one at or before `body`'s
+// has its offset; a later one's is written in its place once every DIE is (check_debug_value_origins), and until then the
+// reference holds the index it reads that offset at, the token or the callee.
+static void check_debug_value_origin(CheckDebugValues* values, uint32_t body, uint32_t callee, uint32_t token, bool entry)
+{
+    const bool written = callee <= body;
+    const uint32_t index = entry ? token : callee;
+    const uint32_t offset = !written ? index : entry ? values->parameter_dies[token] : values->function_offsets[callee];
+    if (!written)
+    {
+        const uint64_t origin = values->info.out.size << 1 | (entry ? 0 : CHECK_DEBUG_ORIGIN_FUNCTION);
+        debug_integer(check_debug_value_room(&values->origins, sizeof(origin)), origin, sizeof(origin));
+    }
+    debug_integer(&values->info.out, offset, 4);
 }
 
 static void check_debug_type_add(CheckDebugValues* values, TypeId type)
@@ -202,19 +282,16 @@ static void check_debug_type_add(CheckDebugValues* values, TypeId type)
 
 static void check_debug_type_reference(CheckDebugValues* values, TypeId type)
 {
-    // Every reference was reached by the worklist. The measuring pass may see a forward offset of 1, but its
-    // fixed-width ref4 is the same size. Writing starts only after the whole measuring pass has assigned offsets.
-    debug_integer(&values->info, values->type_offsets[type], 4);
+    // Every reference was reached by the worklist. Measuring the types may see a forward offset of 1, but its
+    // fixed-width ref4 is the same size. Writing starts only after the whole measurement has assigned offsets.
+    debug_integer(&values->info.out, values->type_offsets[type], 4);
 }
 
 static void check_debug_value_field(CheckDebugValues* values, uint32_t section, uint64_t offset)
 {
-    if (values->fields != NULL)
-    {
-        values->fields[values->field_count] = (NativeDebugField){ .offset = (uint32_t)values->info.size, .section = section };
-    }
-    values->field_count += 1;
-    debug_integer(&values->info, offset, 4);
+    const NativeDebugField field = { .offset = (uint32_t)values->info.out.size, .section = section };
+    debug_bytes(check_debug_value_room(&values->fields, sizeof(field)), &field, sizeof(field));
+    debug_integer(&values->info.out, offset, 4);
 }
 
 static void check_debug_value_type(CheckDebugValues* values, TypeId type)
@@ -224,7 +301,7 @@ static void check_debug_value_type(CheckDebugValues* values, TypeId type)
     const uint32_t qualifiers = type_qualifiers(type);
     const uint32_t kind = table->types.kind[index];
     const TypeId base = table->types.base[index];
-    DebugWriter* info = &values->info;
+    DebugWriter* info = &values->info.out;
     values->type_offsets[type] = (uint32_t)info->size;
     if (qualifiers != 0)
     {
@@ -698,55 +775,24 @@ static void check_debug_value_range_clipped(CheckDebugValues* values, uint32_t b
                                            uint32_t bytes, CheckDebugRangeClip clip)
 {
     const CheckDebugBody* source = values->rows->values + body;
-    DebugWriter* out = expression != NULL ? &values->locations : &values->ranges;
-    if (out->bytes == NULL)
+    // Room for the list, at most a pair per span and one more, each an entry's code, two offsets and the expression with
+    // its length, and the list's base and end.
+    const uint64_t bound = CHECK_DEBUG_LIST_BASE_BYTES + 1 + ((uint64_t)source->span_count + 1) * (CHECK_DEBUG_PAIR_OFFSETS_BYTES + (uint64_t)bytes);
+    DebugWriter* out = check_debug_value_room(expression != NULL ? &values->locations : &values->ranges, bound);
+    if (values->span_breaks != NULL && values->span_body != body)
     {
-        // The measuring pass: the list into the memo, at most a pair per span and one more, each an entry's code, two
-        // offsets and the expression with its length, and the list's base and end.
-        const uint64_t mark = values->memo_arena->length;
-        const uint64_t bound = 4 + 7 + ((uint64_t)source->span_count + 1) * (16 + (uint64_t)bytes);
-        uint8_t* record = arena_push(values->memo_arena, bound, 1);
-        values->memo = values->memo == NULL ? record : values->memo;
-        const bool room = record != NULL && record == values->memo + values->memo_size;
-        values->memo_failed = values->memo_failed || !room;
-        DebugWriter list = { .bytes = room ? record + 4 : NULL };
-        if (values->span_breaks != NULL && values->span_body != body)
-        {
-            values->span_body = body;
-            values->span_leaves = check_debug_value_index(source->spans, source->span_count, values->span_breaks, values->span_segments, values->span_tree,
-                                                          &values->span_segment_count);
-        }
-        if (values->span_breaks != NULL)
-        {
-            check_debug_value_range_indexed_clipped(source, values->span_breaks, values->span_segments, values->span_segment_count, values->span_tree,
-                                                    values->span_leaves, &list, values->address_indices[body], first, last, expression, bytes, clip);
-        }
-        else
-        {
-            check_debug_value_range_scan_clipped(source, &list, values->address_indices[body], first, last, expression, bytes, clip);
-        }
-        if (room)
-        {
-            const uint32_t length = (uint32_t)list.size;
-            memcpy(record, &length, sizeof(length));
-            arena_pop_to(values->memo_arena, mark + sizeof(length) + list.size);
-            values->memo_size += sizeof(length) + list.size;
-        }
-        debug_bytes(out, NULL, list.size);
+        values->span_body = body;
+        values->span_leaves = check_debug_value_index(source->spans, source->span_count, values->span_breaks, values->span_segments, values->span_tree,
+                                                      &values->span_segment_count);
+    }
+    if (values->span_breaks != NULL)
+    {
+        check_debug_value_range_indexed_clipped(source, values->span_breaks, values->span_segments, values->span_segment_count, values->span_tree,
+                                                values->span_leaves, out, values->address_indices[body], first, last, expression, bytes, clip);
     }
     else
     {
-        // The writing pass: the measuring pass's list, the next in the memo.
-        uint32_t length = 0;
-        const bool held = !values->memo_failed && values->memo_read + sizeof(length) <= values->memo_size;
-        if (held)
-        {
-            memcpy(&length, values->memo + values->memo_read, sizeof(length));
-        }
-        const bool whole = held && values->memo_read + sizeof(length) + length <= values->memo_size;
-        values->memo_failed = values->memo_failed || !whole;
-        debug_bytes(out, whole ? values->memo + values->memo_read + sizeof(length) : NULL, whole ? length : 0);
-        values->memo_read += whole ? sizeof(length) + length : 0;
+        check_debug_value_range_scan_clipped(source, out, values->address_indices[body], first, last, expression, bytes, clip);
     }
 }
 
@@ -806,29 +852,29 @@ static void check_debug_value_variable(CheckDebugValues* values, uint32_t token,
                         source->location_first[id] < source->location_first[id + 1];
     const uint32_t abbreviation = defined ? CHECK_DEBUG_GLOBAL : bytes != 0 || ranged ? (parameter ? CHECK_DEBUG_PARAMETER : CHECK_DEBUG_LOCAL) :
                                   local ? (parameter ? CHECK_DEBUG_UNAVAILABLE_PARAMETER : CHECK_DEBUG_UNAVAILABLE_LOCAL) : CHECK_DEBUG_UNAVAILABLE_GLOBAL;
-    debug_uleb(&values->info, abbreviation);
-    debug_string(&values->info, check_debug_name(values, values->parser->tokens.names[token]));
+    const String8 name = check_debug_name(values, values->parser->tokens.names[token]);
+    DebugWriter* info = check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES + name.length);
+    debug_uleb(info, abbreviation);
+    debug_string(info, name);
     check_debug_type_reference(values, type);
     if (defined || !local)
     {
-        debug_integer(&values->info, check_input_linkage(input->declaration_bits, token) == 2, 1);
+        debug_integer(info, check_input_linkage(input->declaration_bits, token) == 2, 1);
     }
     if (defined)
     {
-        debug_uleb(&values->info, 9);
-        debug_integer(&values->info, 0x03, 1); // DW_OP_addr, relocated against this definition's section
-        if (values->addresses != NULL)
-        {
-            values->addresses[values->address_count] = (NativeDebugAddress){ .offset = (uint32_t)values->info.size, .symbol = symbol };
-        }
-        values->address_count += 1;
-        debug_integer(&values->info, 0, 8);
+        debug_uleb(info, 9);
+        debug_integer(info, 0x03, 1); // DW_OP_addr, relocated against this definition's section
+        const NativeDebugAddress address = { .offset = (uint32_t)info->size, .symbol = symbol };
+        debug_bytes(check_debug_value_room(&values->addresses, sizeof(address)), &address, sizeof(address));
+        debug_integer(info, 0, 8);
     }
     else if (ranged)
     {
-        check_debug_value_field(values, BUSTER_NATIVE_DEBUG_LOCLISTS, values->locations.size);
-        debug_integer(&values->locations, 1, 1); // DW_LLE_base_addressx
-        debug_uleb(&values->locations, values->address_indices[body]);
+        check_debug_value_field(values, BUSTER_NATIVE_DEBUG_LOCLISTS, values->locations.out.size);
+        DebugWriter* list = check_debug_value_room(&values->locations, CHECK_DEBUG_LIST_BASE_BYTES);
+        debug_integer(list, 1, 1); // DW_LLE_base_addressx
+        debug_uleb(list, values->address_indices[body]);
         const uint32_t begin = source->location_first[id];
         const uint32_t end = source->location_first[id + 1];
         const CheckDebugLocation* locations = source->locations;
@@ -856,7 +902,7 @@ static void check_debug_value_variable(CheckDebugValues* values, uint32_t token,
                 {
                     // Incoming parameter provenance can be proved before the first source statement. Its lexical
                     // scope is the subprogram; the producer's machine ranges already exclude every unproven PC.
-                    check_debug_value_pair(&values->locations, location.begin, location.end, expression, size);
+                    check_debug_value_pair(check_debug_value_room(&values->locations, CHECK_DEBUG_PAIR_BYTES), location.begin, location.end, expression, size);
                 }
                 else
                 {
@@ -865,19 +911,21 @@ static void check_debug_value_variable(CheckDebugValues* values, uint32_t token,
                 }
             }
         }
-        debug_integer(&values->locations, 0, 1);
+        debug_integer(check_debug_value_room(&values->locations, 1), 0, 1);
     }
     else if (bytes != 0)
     {
-        check_debug_value_field(values, BUSTER_NATIVE_DEBUG_LOCLISTS, values->locations.size);
+        check_debug_value_field(values, BUSTER_NATIVE_DEBUG_LOCLISTS, values->locations.out.size);
         check_debug_value_range(values, body, parameter ? 0 : token, scope_end, expression, bytes);
     }
 }
 
 static void check_debug_value_typedef(CheckDebugValues* values, uint32_t token)
 {
-    debug_uleb(&values->info, CHECK_DEBUG_TYPEDEF);
-    debug_string(&values->info, check_debug_name(values, values->parser->tokens.names[token]));
+    const String8 name = check_debug_name(values, values->parser->tokens.names[token]);
+    DebugWriter* info = check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES + name.length);
+    debug_uleb(info, CHECK_DEBUG_TYPEDEF);
+    debug_string(info, name);
     check_debug_type_reference(values, values->program->input->declared_types[token]);
 }
 
@@ -1009,11 +1057,12 @@ static void check_debug_inline_parameters(CheckDebugValues* values, uint32_t bod
         const bool ranged = (owned || local) && id < source->local_count && source->location_first != NULL && source->location_first[id] < source->location_first[id + 1];
         if (ranged)
         {
-            debug_uleb(&values->info, owned ? CHECK_DEBUG_INLINED_PARAMETER : CHECK_DEBUG_INLINED_VARIABLE);
-            debug_integer(&values->info, values->parameter_dies[token], 4);
-            check_debug_value_field(values, BUSTER_NATIVE_DEBUG_LOCLISTS, values->locations.size);
-            debug_integer(&values->locations, 1, 1); // DW_LLE_base_addressx
-            debug_uleb(&values->locations, values->address_indices[body]);
+            debug_uleb(check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES), owned ? CHECK_DEBUG_INLINED_PARAMETER : CHECK_DEBUG_INLINED_VARIABLE);
+            check_debug_value_origin(values, body, instance.body, token, true);
+            check_debug_value_field(values, BUSTER_NATIVE_DEBUG_LOCLISTS, values->locations.out.size);
+            DebugWriter* list = check_debug_value_room(&values->locations, CHECK_DEBUG_LIST_BASE_BYTES);
+            debug_integer(list, 1, 1); // DW_LLE_base_addressx
+            debug_uleb(list, values->address_indices[body]);
             for (uint32_t r = source->location_first[id]; r < source->location_first[id + 1]; r += 1)
             {
                 const CheckDebugLocation location = source->locations[r];
@@ -1034,10 +1083,10 @@ static void check_debug_inline_parameters(CheckDebugValues* values, uint32_t bod
                 // The instance's own ranges scope it: the producer's machine ranges already exclude every unproven PC.
                 if (size != 0)
                 {
-                    check_debug_value_pair(&values->locations, location.begin, location.end, expression, size);
+                    check_debug_value_pair(check_debug_value_room(&values->locations, CHECK_DEBUG_PAIR_BYTES), location.begin, location.end, expression, size);
                 }
             }
-            debug_integer(&values->locations, 0, 1);
+            debug_integer(check_debug_value_room(&values->locations, 1), 0, 1);
         }
     }
 }
@@ -1056,22 +1105,27 @@ static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, ui
         const CheckDebugInline instance = source->inlines[j];
         while (depth != 0 && values->inline_open[depth - 1] != instance.parent)
         {
-            debug_integer(&values->info, 0, 1);
+            check_debug_value_close(values);
             depth -= 1;
         }
         const bool placed = j == k || depth != 0;
         const uint32_t subtree = check_debug_inline_end(source, j);
         // A list without spans writes nothing. Save its start so the DIE can refer to the list after writing it.
-        const uint64_t range_offset = values->ranges.size;
+        const uint64_t range_offset = values->ranges.out.size;
         const CheckDebugInlineSpans spans = values->inline_spans != NULL && source->inline_count > 1 ? values->inline_spans[j] : (CheckDebugInlineSpans){ .end = source->span_count };
-        const bool spanned = placed && instance.described && check_debug_inline_ranges(source, &values->ranges, values->address_indices[body], j, subtree, spans) != 0;
+        // Room for the list: at most a pair per span of the subtree's bounds and one more, and the list's base and end.
+        const uint64_t covered = spans.end > spans.first ? spans.end - spans.first : 0;
+        const bool listed = placed && instance.described;
+        DebugWriter* ranges = listed ? check_debug_value_room(&values->ranges, CHECK_DEBUG_LIST_BASE_BYTES + 1 + (covered + 1) * CHECK_DEBUG_PAIR_OFFSETS_BYTES) : &values->ranges.out;
+        const bool spanned = listed && check_debug_inline_ranges(source, ranges, values->address_indices[body], j, subtree, spans) != 0;
         if (spanned)
         {
-            debug_uleb(&values->info, CHECK_DEBUG_INLINED);
-            debug_integer(&values->info, values->function_offsets[instance.body], 4);
+            DebugWriter* info = check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES);
+            debug_uleb(info, CHECK_DEBUG_INLINED);
+            check_debug_value_origin(values, body, instance.body, 0, false);
             check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, range_offset);
-            debug_uleb(&values->info, instance.call_file);
-            debug_uleb(&values->info, instance.call_line);
+            debug_uleb(info, instance.call_file);
+            debug_uleb(info, instance.call_line);
             check_debug_inline_parameters(values, body, instance);
             values->inline_open[depth++] = j;
         }
@@ -1082,7 +1136,7 @@ static void check_debug_inline_write(CheckDebugValues* values, uint32_t body, ui
     }
     while (depth != 0)
     {
-        debug_integer(&values->info, 0, 1);
+        check_debug_value_close(values);
         depth -= 1;
     }
 }
@@ -1306,7 +1360,7 @@ static bool check_debug_value_scoped(const CheckDebugValues* values, uint32_t to
 // without children and gives the children of one that holds only scopes to its parent (DwarfCompileUnit). A block that
 // declares nothing told a debugger nothing, and cost a DIE, a range list and, in an object, a relocation: sqlite3.c's
 // 24,839 blocks are 2,139 (clang's 2,120). The walk check_debug_values_write takes, with its stack of the scopes' ends,
-// once per body before the first of its two passes, so that both write the same blocks.
+// over each body before its own: a block's DIE is written at its opening, before the declarations that mark it.
 static void check_debug_value_own_blocks(CheckDebugValues* values, uint32_t b, uint32_t opening, uint32_t closing)
 {
     const CheckInput* input = values->program->input;
@@ -1347,6 +1401,10 @@ static void check_debug_value_own_blocks(CheckDebugValues* values, uint32_t b, u
     }
 }
 
+// The unit's DIEs, written once (#2542): the types', measured alone first, whose offsets every later DIE refers to; the
+// file scope's typedefs and objects; and each body's abstract instance, where some instance expands it, and its own
+// DW_TAG_subprogram with what it holds. Each DIE and list is given its room before it is written (check_debug_value_room),
+// and a reference to an abstract instance written later is patched afterwards (check_debug_value_origins).
 static void check_debug_values_write(CheckDebugValues* values)
 {
     const CheckProgram* program = values->program;
@@ -1354,13 +1412,25 @@ static void check_debug_values_write(CheckDebugValues* values)
     const Parser* parser = values->parser;
     const CheckDebug* original = values->original;
     const uint32_t prefix = original->output.fields[DEBUG_SECTION_RNGLISTS] + 4;
-    debug_bytes(&values->info, original->output.sections[DEBUG_SECTION_INFO].bytes, prefix);
-    debug_bytes(&values->ranges, original->output.sections[DEBUG_SECTION_RNGLISTS].bytes, original->output.sections[DEBUG_SECTION_RNGLISTS].size);
-    debug_integer(&values->locations, 0, 4);
-    debug_integer(&values->locations, 5, 2);
-    debug_integer(&values->locations, 8, 1);
-    debug_integer(&values->locations, 0, 1);
-    debug_integer(&values->locations, 0, 4); // no offset table: DW_FORM_sec_offset refers directly to each list
+    const DebugSection original_ranges = original->output.sections[DEBUG_SECTION_RNGLISTS];
+    debug_bytes(check_debug_value_room(&values->info, prefix), original->output.sections[DEBUG_SECTION_INFO].bytes, prefix);
+    debug_bytes(check_debug_value_room(&values->ranges, original_ranges.size), original_ranges.bytes, original_ranges.size);
+    DebugWriter* locations = check_debug_value_room(&values->locations, 12);
+    debug_integer(locations, 0, 4);
+    debug_integer(locations, 5, 2);
+    debug_integer(locations, 8, 1);
+    debug_integer(locations, 0, 1);
+    debug_integer(locations, 0, 4); // no offset table: DW_FORM_sec_offset refers directly to each list
+    // The types, measured (a writer without bytes, which counts them), then written at the offsets the measure gave.
+    const DebugWriter types_start = values->info.out;
+    values->info.out = (DebugWriter){ .size = types_start.size };
+    for (uint32_t t = 0; t < values->type_count; t += 1)
+    {
+        check_debug_value_type(values, values->types[t]);
+    }
+    const uint64_t types_size = values->info.out.size - types_start.size;
+    values->info.out = types_start;
+    check_debug_value_room(&values->info, types_size);
     for (uint32_t t = 0; t < values->type_count; t += 1)
     {
         check_debug_value_type(values, values->types[t]);
@@ -1391,18 +1461,21 @@ static void check_debug_values_write(CheckDebugValues* values)
         // The abstract instance its instances refer to (#2541 step 3): its name, type, line and parameters, no code.
         if (values->expanded[b] != 0)
         {
-            values->function_offsets[b] = (uint32_t)values->info.size;
-            debug_uleb(&values->info, CHECK_DEBUG_ABSTRACT);
-            debug_string(&values->info, function.name);
+            DebugWriter* info = check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES + function.name.length);
+            values->function_offsets[b] = (uint32_t)info->size;
+            debug_uleb(info, CHECK_DEBUG_ABSTRACT);
+            debug_string(info, function.name);
             check_debug_type_reference(values, type_return(program->types, type));
-            debug_uleb(&values->info, function.file);
-            debug_uleb(&values->info, function.line);
-            debug_integer(&values->info, 1, 1); // DW_INL_inlined
+            debug_uleb(info, function.file);
+            debug_uleb(info, function.line);
+            debug_integer(info, 1, 1); // DW_INL_inlined
             for (uint32_t p = check_sparse_get(input->parameters, body.opening); p != BUSTER_CHECK_NONE; p = check_sparse_get(input->parameter_next, p))
             {
-                values->parameter_dies[p] = (uint32_t)values->info.size;
-                debug_uleb(&values->info, CHECK_DEBUG_UNAVAILABLE_PARAMETER);
-                debug_string(&values->info, check_debug_name(values, parser->tokens.names[p]));
+                const String8 name = check_debug_name(values, parser->tokens.names[p]);
+                check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES + name.length);
+                values->parameter_dies[p] = (uint32_t)info->size;
+                debug_uleb(info, CHECK_DEBUG_UNAVAILABLE_PARAMETER);
+                debug_string(info, name);
                 check_debug_type_reference(values, input->declared_types[p]);
             }
             // Its automatic locals, without a location (each instance's has its own, #2541), so that a debugger in an
@@ -1413,13 +1486,15 @@ static void check_debug_values_write(CheckDebugValues* values)
                 const uint32_t token = values->events[e];
                 if (check_debug_abstract_local(values, token))
                 {
-                    values->parameter_dies[token] = (uint32_t)values->info.size;
-                    debug_uleb(&values->info, CHECK_DEBUG_UNAVAILABLE_LOCAL);
-                    debug_string(&values->info, check_debug_name(values, parser->tokens.names[token]));
+                    const String8 name = check_debug_name(values, parser->tokens.names[token]);
+                    check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES + name.length);
+                    values->parameter_dies[token] = (uint32_t)info->size;
+                    debug_uleb(info, CHECK_DEBUG_UNAVAILABLE_LOCAL);
+                    debug_string(info, name);
                     check_debug_type_reference(values, input->declared_types[token]);
                 }
             }
-            debug_integer(&values->info, 0, 1); // abstract instance children
+            check_debug_value_close(values); // abstract instance children
         }
         // Its own DW_TAG_subprogram and what it holds, but for a dead body (CheckProgramRows.dead), which has no code.
         if (values->address_indices[b] != BUSTER_CHECK_NONE)
@@ -1446,21 +1521,19 @@ static void check_debug_values_write(CheckDebugValues* values)
                 next_inline += 1;
             }
             const uint32_t first_inline = next_inline;
-            debug_uleb(&values->info, CHECK_DEBUG_FUNCTION);
-            debug_string(&values->info, function.name);
+            DebugWriter* info = check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES + function.name.length);
+            debug_uleb(info, CHECK_DEBUG_FUNCTION);
+            debug_string(info, function.name);
             check_debug_type_reference(values, type_return(program->types, type));
-            debug_uleb(&values->info, values->address_indices[b]);
-            debug_integer(&values->info, function.size, 4);
-            debug_uleb(&values->info, function.file);
-            debug_uleb(&values->info, function.line);
+            debug_uleb(info, values->address_indices[b]);
+            debug_integer(info, function.size, 4);
+            debug_uleb(info, function.file);
+            debug_uleb(info, function.line);
             for (uint32_t p = check_sparse_get(input->parameters, body.opening); p != BUSTER_CHECK_NONE; p = check_sparse_get(input->parameter_next, p))
             {
                 check_debug_value_variable(values, p, b, closing, true);
             }
-            if (!values->blocks_marked)
-            {
-                check_debug_value_own_blocks(values, b, body.opening, closing);
-            }
+            check_debug_value_own_blocks(values, b, body.opening, closing);
             uint32_t depth = 0;
             // The body's events and its instances' calls, in token order; nothing else in it opens, declares or calls.
             // A scope that ended before the next of them closes first, as it would have at its end's token.
@@ -1476,7 +1549,7 @@ static void check_debug_values_write(CheckDebugValues* values)
                 {
                     if (values->scope_tokens[depth - 1] != BUSTER_CHECK_NONE)
                     {
-                        debug_integer(&values->info, 0, 1);
+                        check_debug_value_close(values);
                     }
                     depth -= 1;
                 }
@@ -1496,8 +1569,8 @@ static void check_debug_values_write(CheckDebugValues* values)
                     const bool own = (values->marks[token] & CHECK_DEBUG_OWN) != 0;
                     if (own)
                     {
-                        debug_uleb(&values->info, CHECK_DEBUG_BLOCK);
-                        check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.size);
+                        debug_uleb(check_debug_value_room(&values->info, CHECK_DEBUG_DIE_BYTES), CHECK_DEBUG_BLOCK);
+                        check_debug_value_field(values, DEBUG_SECTION_RNGLISTS, values->ranges.out.size);
                         check_debug_value_range(values, b, token, end, NULL, 0);
                     }
                     values->scopes[depth] = end;
@@ -1525,7 +1598,7 @@ static void check_debug_values_write(CheckDebugValues* values)
                 {
                     if (values->scope_tokens[depth - 1] != BUSTER_CHECK_NONE)
                     {
-                        debug_integer(&values->info, 0, 1);
+                        check_debug_value_close(values);
                     }
                     depth -= 1;
                 }
@@ -1535,7 +1608,7 @@ static void check_debug_values_write(CheckDebugValues* values)
             {
                 if (values->scope_tokens[depth - 1] != BUSTER_CHECK_NONE)
                 {
-                    debug_integer(&values->info, 0, 1);
+                    check_debug_value_close(values);
                 }
                 depth -= 1;
             }
@@ -1547,14 +1620,36 @@ static void check_debug_values_write(CheckDebugValues* values)
                     check_debug_inline_write(values, b, (uint32_t)values->inline_order[k]);
                 }
             }
-            debug_integer(&values->info, 0, 1); // subprogram children
+            check_debug_value_close(values); // subprogram children
         }
     }
-    debug_integer(&values->info, 0, 1); // compilation unit children
-    values->blocks_marked = true;
-    debug_length(&values->info, 0, values->info.size - 4);
-    debug_length(&values->ranges, 0, values->ranges.size - 4);
-    debug_length(&values->locations, 0, values->locations.size - 4);
+    check_debug_value_close(values); // compilation unit children
+    debug_length(&values->info.out, 0, values->info.out.size - 4);
+    debug_length(&values->ranges.out, 0, values->ranges.out.size - 4);
+    debug_length(&values->locations.out, 0, values->locations.out.size - 4);
+}
+
+// The references to abstract instances written after them (check_debug_value_origin), each given its offset, 8 at a time:
+// a reference's place in .debug_info and whether it names a body's DW_TAG_subprogram or an entry of it, the index its four
+// bytes hold, gathered, the offset at that index, gathered from function_offsets or parameter_dies, and scattered over it.
+static void check_debug_value_origins(CheckDebugValues* values)
+{
+    uint8_t* info = values->info.out.bytes;
+    const uint8_t* origins = values->origins.out.bytes;
+    const uint64_t count = info != NULL && origins != NULL ? values->origins.out.size / sizeof(uint64_t) : 0;
+    const __m512i function_bit = _mm512_set1_epi64(CHECK_DEBUG_ORIGIN_FUNCTION);
+    for (uint64_t at = 0; at < count; at += 8)
+    {
+        const uint32_t take = count - at < 8 ? (uint32_t)(count - at) : 8;
+        const __mmask8 valid = (__mmask8)_bzhi_u32(0xff, take);
+        const __m512i origin = _mm512_maskz_loadu_epi64(valid, origins + at * sizeof(uint64_t));
+        const __m512i place = _mm512_srli_epi64(origin, 1);
+        const __mmask8 function = _mm512_mask_test_epi64_mask(valid, origin, function_bit);
+        const __m256i index = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), valid, place, info, 1);
+        const __m256i entries = _mm256_mmask_i32gather_epi32(_mm256_setzero_si256(), valid & ~function, index, values->parameter_dies, 4);
+        const __m256i offset = _mm256_mmask_i32gather_epi32(entries, function, index, values->function_offsets, 4);
+        _mm512_mask_i64scatter_epi32(info, valid, place, offset, 1);
+    }
 }
 
 static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, const CheckProgramRows* rows, const Parser* parser, Arena* arena, Arena* scratch)
@@ -1563,7 +1658,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     const TypeTable* table = program->types;
     const uint64_t room = (uint64_t)table->types.count << BUSTER_TYPE_INDEX_SHIFT;
     const uint32_t tokens = input->token_count;
-    CheckDebugValues values = { .program = program, .rows = rows, .parser = parser, .original = debug, .memo_arena = scratch };
+    CheckDebugValues values = { .program = program, .rows = rows, .parser = parser, .original = debug };
     values.type_offsets = room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room) : NULL;
     values.types = room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, TypeId, room) : NULL;
     values.enum_definitions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, table->types.count);
@@ -1743,38 +1838,46 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
                 }
             }
         }
+        // .debug_info in the output arena, where it is the last push while it is written and stays; the rest in scratch.
+        values.info = check_debug_value_stream(arena, CHECK_DEBUG_STREAM_BYTES);
+        values.fields = check_debug_value_stream(scratch, CHECK_DEBUG_STREAM_BYTES);
+        values.addresses = check_debug_value_stream(scratch, CHECK_DEBUG_STREAM_BYTES);
+        values.origins = check_debug_value_stream(scratch, CHECK_DEBUG_STREAM_BYTES);
+        values.ranges = check_debug_value_stream(scratch, CHECK_DEBUG_STREAM_BYTES);
+        values.locations = check_debug_value_stream(scratch, CHECK_DEBUG_STREAM_BYTES);
         check_debug_values_write(&values);
-        valid = !values.ends_failed && !values.memo_failed && values.info.size < BUSTER_DEBUG_DWARF32_LIMIT && values.ranges.size < BUSTER_DEBUG_DWARF32_LIMIT && values.locations.size < BUSTER_DEBUG_DWARF32_LIMIT;
+        check_debug_value_origins(&values);
+        const bool failed = values.info.failed || values.ranges.failed || values.locations.failed || values.fields.failed || values.addresses.failed || values.origins.failed;
+        valid = !values.ends_failed && !failed && values.info.out.size < BUSTER_DEBUG_DWARF32_LIMIT && values.ranges.out.size < BUSTER_DEBUG_DWARF32_LIMIT &&
+                values.locations.out.size < BUSTER_DEBUG_DWARF32_LIMIT;
     }
-    const uint64_t info_size = values.info.size;
-    const uint64_t range_size = values.ranges.size;
-    const uint64_t location_size = values.locations.size;
-    const uint32_t fields = values.field_count;
-    const uint32_t addresses = values.address_count;
-    uint8_t* info = valid ? arena_push(arena, info_size, 1) : NULL;
+    // .debug_info at its size, then the other sections, the abbreviations and the tables copied after it at theirs.
+    uint8_t* info = valid ? values.info.out.bytes : NULL;
+    const uint64_t info_size = values.info.out.size;
+    if (valid && arena->base + arena->length == info + values.info.capacity)
+    {
+        arena_pop_to(arena, (uint64_t)(info + info_size - arena->base));
+    }
+    const uint64_t range_size = values.ranges.out.size;
+    const uint64_t location_size = values.locations.out.size;
+    const uint32_t fields = (uint32_t)(values.fields.out.size / sizeof(NativeDebugField));
+    const uint32_t addresses = (uint32_t)(values.addresses.out.size / sizeof(NativeDebugAddress));
     uint8_t* ranges = valid ? arena_push(arena, range_size, 1) : NULL;
     uint8_t* locations = valid ? arena_push(arena, location_size, 1) : NULL;
     const DebugSection old_abbrev = debug->output.sections[DEBUG_SECTION_ABBREV];
     const uint64_t abbrev_size = old_abbrev.size - 1 + sizeof(check_debug_value_abbreviations);
     uint8_t* abbreviations = valid ? arena_push(arena, abbrev_size, 1) : NULL;
-    values.fields = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, NativeDebugField, (uint64_t)fields + 1) : NULL;
-    values.addresses = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, NativeDebugAddress, (uint64_t)addresses + 1) : NULL;
-    valid = valid && info != NULL && ranges != NULL && locations != NULL && abbreviations != NULL && values.fields != NULL && values.addresses != NULL;
+    NativeDebugField* field_table = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, NativeDebugField, (uint64_t)fields + 1) : NULL;
+    NativeDebugAddress* address_table = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, NativeDebugAddress, (uint64_t)addresses + 1) : NULL;
+    valid = valid && ranges != NULL && locations != NULL && abbreviations != NULL && field_table != NULL && address_table != NULL;
     if (valid)
     {
         memcpy(abbreviations, old_abbrev.bytes, old_abbrev.size - 1);
         memcpy(abbreviations + old_abbrev.size - 1, check_debug_value_abbreviations, sizeof(check_debug_value_abbreviations));
-        values.info = (DebugWriter){ .bytes = info };
-        values.ranges = (DebugWriter){ .bytes = ranges };
-        values.locations = (DebugWriter){ .bytes = locations };
-        values.field_count = 0;
-        values.address_count = 0;
-        check_debug_values_write(&values);
-        valid = values.info.size == info_size && values.ranges.size == range_size && values.locations.size == location_size && values.field_count == fields && values.address_count == addresses &&
-                !values.memo_failed && values.memo_read == values.memo_size;
-    }
-    if (valid)
-    {
+        memcpy(ranges, values.ranges.out.bytes, range_size);
+        memcpy(locations, values.locations.out.bytes, location_size);
+        memcpy(field_table, values.fields.out.bytes, values.fields.out.size);
+        memcpy(address_table, values.addresses.out.bytes, values.addresses.out.size);
         debug->output.sections[DEBUG_SECTION_INFO] = (DebugSection){ .bytes = info, .capacity = info_size, .size = info_size };
         debug->output.sections[DEBUG_SECTION_ABBREV] = (DebugSection){ .bytes = abbreviations, .capacity = abbrev_size, .size = abbrev_size };
         debug->output.sections[DEBUG_SECTION_RNGLISTS] = (DebugSection){ .bytes = ranges, .capacity = range_size, .size = range_size };
@@ -1786,7 +1889,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
         }
         debug->object.sections[BUSTER_NATIVE_DEBUG_LOCLISTS] = (String8){ .pointer = (char*)locations, .length = location_size };
         debug->attach.sections[BUSTER_NATIVE_DEBUG_LOCLISTS] = debug->object.sections[BUSTER_NATIVE_DEBUG_LOCLISTS];
-        debug->object.extra = (NativeDebugExtra){ .fields = values.fields, .addresses = values.addresses, .field_count = fields, .address_count = addresses };
+        debug->object.extra = (NativeDebugExtra){ .fields = field_table, .addresses = address_table, .field_count = fields, .address_count = addresses };
         debug->attach.extra = debug->object.extra;
     }
     return valid;

@@ -141,7 +141,11 @@ static void check_input_constant_failure_report(CheckInputReader* reader, const 
     const CheckConstantError mapped = evidence ? check_constant_failure_error(reader, failure, failure->token) :
                                                  (CheckConstantError){ .error = CHECK_ARGUMENT_EXPECTED_EXPRESSION };
     const uint32_t before = reader->output->report_count;
-    if (mapped.error == CHECK_ARGUMENT_EXPECTED_EXPRESSION)
+    if (evidence && failure->diagnostic == CHECK_DIAG_RECOVERED_MEMBER)
+    {
+        check_input_report(reader, failure->token, CHECK_INPUT_INVALID_USE);
+    }
+    else if (mapped.error == CHECK_ARGUMENT_EXPECTED_EXPRESSION)
     {
         check_input_report(reader, fallback, CHECK_INPUT_DECLARATION);
     }

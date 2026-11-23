@@ -12,7 +12,7 @@
 #   ./build.sh check-call-graph [--config C] [--jobs N]
 #   ./build.sh lexer-variant [--config C] [--jobs N] NAME=SOURCE...
 #   ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s
-#   ./build.sh shifts [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
+#   ./build.sh shifts [--checker-placements] [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
 #
 # It builds with CI's toolchain, the official LLVM release, CMake and Ninja that tools/ci/hosted-tools.lock pins: PATH's
 # when its clang is the release's, or else tools/ci/session-toolchain.sh's, staged once in the user's cache (#2628);
@@ -78,6 +78,7 @@ jobs=""
 targets=()
 verbose=0
 clean_all=0
+checker_placements=0
 arguments=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -96,11 +97,13 @@ while [ $# -gt 0 ]; do
         -j?*) jobs="${1#-j}"; shift ;;
         --verbose|-v) verbose=1; shift ;;
         --all) clean_all=1; shift ;;
+        --checker-placements) checker_placements=1; shift ;;
         --) shift; arguments+=("$@"); break ;;
         -*) die "unknown option $1; ./build.sh --help lists the commands" ;;
         *) arguments+=("$1"); shift ;;
     esac
 done
+[ "$checker_placements" = 0 ] || [ "$command" = shifts ] || die "--checker-placements is shifts' option"
 # The default configuration: Develop for the edit loop; Release for the commands that measure and for BUSTER_PGO.
 if [ "$config_given" = 0 ]; then
     case "$command" in
@@ -417,6 +420,7 @@ configure_arguments=(
     "-DBUSTER_LEXER_VARIANTS=$lexer_variants"
     "-DBUSTER_SHIFT_SOURCE=$shift_source"
     "-DBUSTER_SHIFTS=$shift_bytes"
+    "-DBUSTER_CHECKER_PLACEMENTS=$checker_placements"
 )
 clang_version="$("$clang" --version)"
 toolchain="clang $clang ($(realpath "$clang")): ${clang_version%%$'\n'*}"
@@ -565,7 +569,11 @@ case "$command" in
         for bytes in "${shifted[@]}"; do
             output="$shift_directory/compiler-$bytes"
             ln -f -- "$tree/$config/shifts/compiler-$bytes" "$output" 2> /dev/null || cp -f -- "$tree/$config/shifts/compiler-$bytes" "$output"
-            echo "build.sh shifts: $output: $shift_source's code $bytes bytes later" >&2
+            if [ "$checker_placements" = 1 ]; then
+                echo "build.sh shifts: $output: $shift_source's checker code $bytes bytes later within its page" >&2
+            else
+                echo "build.sh shifts: $output: $shift_source's code $bytes bytes later" >&2
+            fi
         done
         ;;
 esac

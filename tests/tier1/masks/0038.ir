@@ -1,0 +1,20 @@
+function (ptr, i64, f64, f32) -> void {
+  row #0 (vector8) -> vector16
+  row #1 (vector4) -> vector16
+b0:
+  %0 = param.ptr 0
+  %1 = param.i64 1
+  %2 = param.f64 2
+  %3 = param.f32 3
+  %4 = call.v4i32 row #0(%2) fixed=(f64) variadic=0
+  %5 = call.v4i32 row #1(%3) fixed=(f32) variadic=0
+  %6 = call.f64 @9(%1) fixed=(i64) variadic=0
+  %7 = call.v4i32 row #0(%6) fixed=(f64) variadic=0
+  %8 = address.ptr %0 offset=128
+  %9 = store.void %8, %4 align=1
+  %10 = address.ptr %0 offset=144
+  %11 = store.void %10, %5 align=1
+  %12 = address.ptr %0 offset=160
+  %13 = store.void %12, %7 align=1
+  %14 = ret.void
+}

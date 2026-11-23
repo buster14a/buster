@@ -116,7 +116,7 @@ static bool tier1_extension_reads(const Tier1SelectPlan* plan, uint32_t node, ui
     return reads;
 }
 
-static void tier1_extension_compile(Tier1EmitTest* test, const Tier1ExtensionCase* shape, bool vector, bool branch)
+static void tier1_extension_compile(Tier1EmitTest* test, const Tier1ExtensionCase* shape, bool branch)
 {
     IrFunction function;
     Tier1ExtensionNodes nodes = { 0 };
@@ -139,11 +139,11 @@ static void tier1_extension_compile(Tier1EmitTest* test, const Tier1ExtensionCas
         tier1_emit_test_expect(test, !shape->alone || branch || folded, "a load the extension alone reads in its block is its memory operand");
         if ((shape->forwards ? !forwarded : !own) && test->failures < 20)
         {
-            fprintf(stderr, "  extensions type=%u extension=%u alone=%u vector=%u branch=%u: covered load %u extension %u, select reads %u %u %u\n", shape->type, shape->extension, shape->alone, vector, branch,
+            fprintf(stderr, "  extensions type=%u extension=%u alone=%u branch=%u: covered load %u extension %u, select reads %u %u %u\n", shape->type, shape->extension, shape->alone, branch,
                     plan.covered[nodes.load], plan.covered[nodes.extended], plan.patterns[nodes.select].values[0], plan.patterns[nodes.select].values[1], plan.patterns[nodes.select].values[2]);
         }
     }
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .rematerialize = true, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .rematerialize = true, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     // The CFG consumer certifies its code (Tier1EmitResult.code_checked); the straight-line one has none to check.
@@ -156,7 +156,7 @@ static void tier1_extension_compile(Tier1EmitTest* test, const Tier1ExtensionCas
         static const uint64_t boundaries[] = {
             0, 1, 5, 6, 0x7f, 0x80, 0xff, 0x105, 0x7fff, 0x8000, 0x8005, 0xffff, 0x7fffffff, 0x80000000, 0x80000006, 0xffffffff, UINT64_C(0xffffffff00000006),
         };
-        uint64_t random = UINT64_C(0x6a09e667f3bcc909) ^ shape->type ^ (uint64_t)shape->extension << 8 ^ (vector ? 1 : 0) ^ (branch ? 2 : 0) ^ (shape->alone ? 4 : 0);
+        uint64_t random = UINT64_C(0x6a09e667f3bcc908) ^ shape->type ^ (uint64_t)shape->extension << 8 ^ (branch ? 2 : 0) ^ (shape->alone ? 4 : 0);
         const uint32_t samples = BUSTER_ARRAY_LENGTH(boundaries) + 32;
         for (uint32_t sample = 0; sample < samples; sample += 1)
         {
@@ -167,7 +167,7 @@ static void tier1_extension_compile(Tier1EmitTest* test, const Tier1ExtensionCas
             const uint64_t expected = tier1_extension_oracle(shape, branch, word, x);
             if (actual != expected && test->failures < 20)
             {
-                fprintf(stderr, "  extensions type=%u extension=%u alone=%u vector=%u branch=%u word=%016" PRIx64 " x=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", shape->type, shape->extension, shape->alone, vector,
+                fprintf(stderr, "  extensions type=%u extension=%u alone=%u branch=%u word=%016" PRIx64 " x=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", shape->type, shape->extension, shape->alone,
                         branch, word, x, actual, expected);
             }
             tier1_emit_test_expect(test, actual == expected && cell == word, "the load, its comparison and its extension compute C's value");
@@ -186,9 +186,9 @@ static void tier1_extension_tests(Tier1EmitTest* test)
 {
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(tier1_extension_cases); c += 1)
     {
-        for (uint32_t variant = 0; variant < 4; variant += 1)
+        for (uint32_t branch = 0; branch < 2; branch += 1)
         {
-            tier1_extension_compile(test, &tier1_extension_cases[c], (variant & 1) != 0, (variant & 2) != 0);
+            tier1_extension_compile(test, &tier1_extension_cases[c], branch != 0);
         }
     }
 }

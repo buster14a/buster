@@ -161,9 +161,7 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 ir_test_expect(tally, checked.error == IR_OK && gvn.function.instruction_count == function.instruction_count && scratch->length == 0, "GVN preserves mask loads and stores");
                 arena_pop_to(output, 0);
                 IrLicmResult licm = { .function.instruction_count = 123 };
-                IrLicmOptions licm_options = ir_licm_options();
-                licm_options.scalar = scalar != 0;
-                checked = ir_optimize_licm(&function, output, scratch, licm_options, &licm);
+                checked = ir_optimize_licm(&function, output, scratch, ir_licm_options(), &licm);
                 ir_test_expect(tally, checked.error == IR_OK && licm.function.instruction_count == function.instruction_count && scratch->length == 0, "LICM preserves mask loads and stores");
                 arena_pop_to(output, 0);
                 IrSroaResult sroa = { .function.instruction_count = 123 };
@@ -387,9 +385,7 @@ static int run_ir_simd_tests(int argc, char** argv)
                            "GVN takes SIMD and preserves a vector constant's payload");
             arena_pop_to(&output, 0);
             IrLicmResult licm = { .function.instruction_count = 123 };
-            IrLicmOptions licm_options = ir_licm_options();
-            licm_options.scalar = scalar != 0;
-            checked = ir_optimize_licm(&function, &output, &scratch, licm_options, &licm);
+            checked = ir_optimize_licm(&function, &output, &scratch, ir_licm_options(), &licm);
             ir_test_expect(&tally, checked.error == IR_OK && licm.function.instruction_count == 2 && licm.function.vector_constant_count == 1 && scratch.length == 0,
                            "LICM takes SIMD and preserves a vector constant's payload");
             arena_pop_to(&output, 0);

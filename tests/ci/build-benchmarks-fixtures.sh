@@ -95,7 +95,9 @@ if [ "${FIXTURE_FAIL:-}" = "$side" ]; then outcome=7; fi
 if [ "${FIXTURE_HOLD:-}" = true ]; then outcome=hold; fi
 "$FIXTURE_PROBE" --probe "$FIXTURE_LOG" "$side" - "$outcome"
 shifted=false
+checker=false
 if [ "${1:-}" = shifts ]; then shifted=true; shift; fi
+if [ "${1:-}" = --checker-placements ]; then checker=true; shift; fi
 test "$1" = --config && test "$2" = Release && test "$3" = --jobs && test "$4" = "$BUSTER_BUILD_JOBS"
 shift 4
 mkdir -p build
@@ -104,7 +106,12 @@ chmod +x build/compiler
 if [ "$shifted" = true ]; then
     output=$1; shift
     test "$1" = main_unit_checker.c; shift
-    test "$*" = '0 1088 2112 3136'
+    if [ "$checker" = true ]; then
+        grep -q '^#   \./build\.sh shifts \[--checker-placements\]' ./build.sh
+        test "$*" = '0 16 32 48'
+    else
+        test "$*" = '0 1088 2112 3136'
+    fi
     mkdir -p "$output"
     for shift in "$@"; do ln -f build/compiler "$output/compiler-$shift"; done
 fi
@@ -166,10 +173,12 @@ for selection in false:false true:false false:true true:true; do
         test -x "$directory/base/build/compiler"
     fi
     if [ "$AB_CHECKER" = true ]; then
+        grep -qx 'BUSTER_CHECKER_PLACEMENTS=legacy' "$GITHUB_ENV"
         for side in main head; do
             for shift in 0 1088 2112 3136; do test -x "$directory/$side/compiler-$shift"; done
         done
     else
+        grep -qx 'BUSTER_CHECKER_PLACEMENTS=none' "$GITHUB_ENV"
         test ! -e "$directory/main/compiler-0"
         test ! -e "$directory/head/compiler-0"
     fi
@@ -184,6 +193,31 @@ for selection in false:false true:false false:true true:true; do
     bash "$helper" cleanup "$directory"
     test "$(git -C "$repo" worktree list --porcelain | grep -c '^worktree ')" -eq 1
 done
+
+# A new head must pair with an old base's .text placements. Once both support
+# the option, both should instead publish the same four checker placements.
+printf '%s\n' '#   ./build.sh shifts [--checker-placements]' >> "$repo/build.sh"
+git -C "$repo" add build.sh
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm checker-placements
+new_sha=$(git -C "$repo" rev-parse HEAD)
+for mode in legacy checker; do
+    reset_case "placements-$mode"
+    AB_BASE_SHA="$base_sha"
+    selected_shifts=(0 1088 2112 3136)
+    if [ "$mode" = checker ]; then
+        AB_BASE_SHA="$new_sha"
+        selected_shifts=(0 16 32 48)
+    fi
+    export AB_BASE_SHA AB_CHECKER=true AB_TIER1=false
+    bash "$helper"
+    grep -qx "BUSTER_CHECKER_PLACEMENTS=$mode" "$GITHUB_ENV"
+    directory=$(sed -n 's/^BUSTER_BENCHMARK_BUILDS=//p' "$GITHUB_ENV")
+    for side in head main; do
+        for shift in "${selected_shifts[@]}"; do test -x "$directory/$side/compiler-$shift"; done
+    done
+    bash "$helper" cleanup "$directory"
+done
+export AB_BASE_SHA="$base_sha"
 
 for event in push workflow_dispatch; do
     reset_case "event-$event"

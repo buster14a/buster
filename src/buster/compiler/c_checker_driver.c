@@ -96,7 +96,8 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_ADDRESS_SPACE_NESTED: result = "conversion changes address space of nested pointer"; break;
         case CHECK_DIAG_OVERFLOW_BIT_INT: result = "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits"; break;
         case CHECK_DIAG_COUNTED_INCOMPLETE: result = "cannot use a '__counted_by' attributed pointer whose pointee type is incomplete"; break;
-        case CHECK_DIAG_NONE: break;
+        case CHECK_DIAG_NONE:
+        case CHECK_DIAG_RECOVERED_MEMBER: break;
     }
     return result;
 }
@@ -195,6 +196,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_INITIALIZER: result = "declaration with deduced type '__auto_type' requires an initializer"; break;
         case CHECK_INPUT_AUTO_ATOMIC_POINTER: result = "variable with atomic deduced pointee has incompatible initializer"; break;
         case CHECK_INPUT_GENERIC_NO_MATCH: result = "controlling expression type not compatible with any generic association type"; break;
+        case CHECK_INPUT_GENERIC_COMPATIBLE: result = "type in generic association compatible with previously specified type"; break;
+        case CHECK_INPUT_GENERIC_DEFAULT: result = "duplicate default generic association"; break;
         case CHECK_INPUT_AUTO_TYPE_SELF: result = "variable declared with deduced type '__auto_type' cannot appear in its own initializer"; break;
         case CHECK_INPUT_AUTO_TYPE_CONTEXT: result = "'__auto_type' not allowed here"; break;
         case CHECK_INPUT_AUTO_TYPE_LIST: result = "cannot use '__auto_type' with initializer list in C"; break;
@@ -7040,6 +7043,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, x86_location), publication, "CFString literal is not a string constant");
                             }
                         }
+                        else if (phase == 0 && (input->reports[index].note_kind == CHECK_INPUT_NOTE_GENERIC_COMPATIBLE ||
+                                                input->reports[index].note_kind == CHECK_INPUT_NOTE_GENERIC_DEFAULT) && input->reports[index].note_token < count)
+                        {
+                            // A _Generic association's duplicate (#2914): its note at the earlier association's type name,
+                            // or at the first default.
+                            const CheckInputReport* report = input->reports + index;
+                            const String8 earlier = report->note_kind == CHECK_INPUT_NOTE_GENERIC_COMPATIBLE ?
+                                                    check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, report->detail) :
+                                                    (String8){ 0 };
+                            const char* compatible = earlier.length != 0 ?
+                                                     check_warning_text(scratch, "compatible type %.*s specified here", (int)earlier.length, earlier.pointer) : NULL;
+                            const PPOutputDiagnosticNote note = {
+                                .token = parse_source_index(&parser->tokens, report->note_token),
+                                .message = report->note_kind == CHECK_INPUT_NOTE_GENERIC_DEFAULT ? "previous default generic association is here" : compatible,
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, note.message != NULL ? 1u : 0u, "%s", message);
+                        }
                         else if (phase == 0 && input->reports[index].note_kind == CHECK_INPUT_NOTE_ATTRIBUTE_HERE &&
                                  input->reports[index].note_token < count)
                         {
@@ -10146,8 +10166,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
     const CheckProgramAsms* asms = &code->lowered.asms;
     const bool inline_assembly = asms->plan_count != 0 || asms->naked != 0 || asms->file_assembled || code->asm_atom_count != 0 || code->unit_atom_count != 0;
     const bool multiversioned = program->cpu_group_count != 0 || program->target_group_count != 0;
-    const char* refusal = inline_assembly ? "inline assembly" : code->patchable_count != 0 ? "patchable function entries" :
-                          multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
+    const char* refusal = inline_assembly ? "inline assembly" : multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
     uint8_t* temporary = 0;
     const bool linked = refusal == 0 && link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
     AssemblyResult printed = { .error = ASSEMBLY_FULL };

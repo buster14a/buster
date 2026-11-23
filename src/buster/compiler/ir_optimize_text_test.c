@@ -29,6 +29,8 @@ typedef enum IrOptimizeTextPass
     // LICM and GVN under #2719's pressure policy (IrLicmOptions.pressure, IrGvnOptions.pressure).
     IR_OPTIMIZE_TEXT_LICM_PRESSURE,
     IR_OPTIMIZE_TEXT_GVN_PRESSURE,
+    // SCCP, the identities and DCE, as the C driver's Tier 1 runs them (#3424).
+    IR_OPTIMIZE_TEXT_IDENTITIES,
 } IrOptimizeTextPass;
 
 typedef struct IrOptimizeTextFixture IrOptimizeTextFixture;
@@ -70,6 +72,9 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "licm-pressure-budget", .pass = IR_OPTIMIZE_TEXT_LICM_PRESSURE, .effects = true },
     // #2719: a free value is never merged, a truth value only within its block, a costly one across blocks.
     { .name = "gvn-pressure", .pass = IR_OPTIMIZE_TEXT_GVN_PRESSURE, .effects = true },
+    // #3424: an `and` of an undef is zero, not the undef: SROA's eightbyte with a field cleared in its padding's undef,
+    // set on one path, which the join's phi reads. The interpreter's undef is 0 and 1 by turns.
+    { .name = "identity-undef-and", .pass = IR_OPTIMIZE_TEXT_IDENTITIES, .effects = true },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
@@ -165,7 +170,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     else if (fixture->pass == IR_OPTIMIZE_TEXT_LICM || fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
     {
         IrLicmOptions options = ir_licm_options();
-        options.scalar = scalar;
         options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE;
         options.validated = validated;
         IrLicmResult pass = { 0 };
@@ -200,6 +204,7 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
                          fixture->pass == IR_OPTIMIZE_TEXT_DCE ? BUSTER_IR_OPTIMIZE_DCE :
                          fixture->pass == IR_OPTIMIZE_TEXT_CFG ? BUSTER_IR_OPTIMIZE_CFG :
                          fixture->pass == IR_OPTIMIZE_TEXT_MEMORY ? BUSTER_IR_OPTIMIZE_MEMORY | BUSTER_IR_OPTIMIZE_DCE :
+                         fixture->pass == IR_OPTIMIZE_TEXT_IDENTITIES ? BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_DCE :
                                                                  BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
         options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult pass = { 0 };

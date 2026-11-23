@@ -63,6 +63,7 @@ set(BUSTER_RELEASE_PARTS 0 CACHE STRING "1 builds Release's main.c units in part
 set(BUSTER_LEXER_VARIANTS "" CACHE STRING "NAME=SOURCE;... lexers compiled in for benchmark-lexer (build.sh lexer-variant)")
 set(BUSTER_SHIFT_SOURCE "" CACHE STRING "The source whose code the shifted links move (build.sh shifts)")
 set(BUSTER_SHIFTS "" CACHE STRING "The shifted links' padding sizes in bytes (build.sh shifts)")
+set(BUSTER_CHECKER_PLACEMENTS 0 CACHE BOOL "Shift the checker unit's page position instead of .text (build.sh shifts)")
 
 include(cmake/BusterSettings.cmake)
 buster_settings_normalize()
@@ -92,8 +93,7 @@ if(buster_static AND buster_lld)
     set(buster_start_order TRUE)
     set(start_order_script "${CMAKE_BINARY_DIR}/start-order.ld")
     set(start_order_symbols "${CMAKE_BINARY_DIR}/start-order.symbols")
-    buster_start_order_files("${start_order_list}" "${start_order_script}" "${start_order_symbols}" "${BUSTER_SHIFT_SOURCE}")
-    list(APPEND buster_linker_flags "-Wl,-T,${start_order_script}" "-Wl,--symbol-ordering-file=${start_order_symbols}" -Wl,--no-warn-symbol-ordering)
+    buster_start_order_files("${start_order_list}" "${start_order_script}" "${start_order_symbols}" "${BUSTER_SHIFT_SOURCE}" "")
 endif()
 message(STATUS "buster: variant ${buster_variant}, stage 1 linker: ${buster_linker}, static: ${buster_static}, start order: ${buster_start_order}")
 if(buster_pgo AND "Debug" IN_LIST CMAKE_CONFIGURATION_TYPES)
@@ -342,11 +342,18 @@ endforeach()
 # doesn't load libm.so.6 at its start, 24 microseconds and 12 page faults on the 9700X; a build whose code still calls
 # libm (a fuzzing runtime) takes it.
 function(buster_link_arguments before after)
-    set(${before} ${buster_link_mode} ${buster_sanitizer_flags} ${buster_linker_flags} PARENT_SCOPE)
+    set(options ${buster_link_mode} ${buster_sanitizer_flags} ${buster_linker_flags})
+    if(buster_start_order)
+        list(APPEND options "-Wl,-T,${start_order_script}" "-Wl,--symbol-ordering-file=${start_order_symbols}" -Wl,--no-warn-symbol-ordering)
+    endif()
+    set(${before} ${options} PARENT_SCOPE)
     set(${after} ${buster_fuzz_libraries} -Wl,--push-state,--as-needed -lm -Wl,--pop-state -ldl PARENT_SCOPE)
 endfunction()
 
 function(buster_link target)
+    if(ARGC GREATER 1)
+        set(start_order_script "${ARGV1}")
+    endif()
     set_target_properties(${target} PROPERTIES LINKER_LANGUAGE C)
     buster_link_arguments(before after)
     target_link_options(${target} PRIVATE ${before})
@@ -530,6 +537,9 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
     if(shift_index EQUAL -1 OR NOT BUSTER_SHIFT_SOURCE STREQUAL "${shift_name}.c")
         message(FATAL_ERROR "build.sh shifts: ${BUSTER_SHIFT_SOURCE} isn't a source's file name")
     endif()
+    if(BUSTER_CHECKER_PLACEMENTS AND (NOT buster_start_order OR NOT shift_name STREQUAL "main_unit_checker"))
+        message(FATAL_ERROR "build.sh shifts: --checker-placements requires main_unit_checker.c and a static lld link")
+    endif()
     find_program(BUSTER_READELF NAMES readelf llvm-readelf NO_CACHE REQUIRED)
     buster_native_object(shift_object "${shift_name}")
     foreach(bytes IN LISTS shifts)
@@ -537,32 +547,58 @@ if(NOT BUSTER_SHIFTS STREQUAL "")
             message(FATAL_ERROR "build.sh shifts: ${bytes} isn't a shift of 0 to 9,999,999 bytes")
         endif()
         set(directory "${CMAKE_BINARY_DIR}/$<CONFIG>/shifts")
-        set(padding "${directory}/padding-${bytes}.o")
-        # Where the start's code order puts the padding before the source's start-ordered functions, the padding also
-        # goes first in .text, which every unit's other code sits in (#2728).
-        set(text_padding 0)
-        if(buster_start_order AND buster_start_order_shift_padded)
-            set(text_padding 1)
-        endif()
-        add_custom_command(OUTPUT "${padding}"
-            COMMAND "${CMAKE_COMMAND}" "-DOBJECT=${shift_object}" "-DSOURCE=${BUSTER_SHIFT_SOURCE}" "-DSHIFT=${bytes}"
-                "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}" "-DTEXT=${text_padding}"
-                -P "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
-            DEPENDS "${shift_object}" "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
-            VERBATIM)
+        set(output "${directory}/compiler-${bytes}")
         set(shift_objects ${objects})
-        list(INSERT shift_objects ${shift_index} "${padding}")
+        set(shift_script "${start_order_script}")
+        set(post_link_args "")
+        set(post_link_depends "")
+        if(BUSTER_CHECKER_PLACEMENTS)
+            math(EXPR remainder "${bytes} % 16")
+            if(bytes GREATER_EQUAL 4096 OR remainder)
+                message(FATAL_ERROR "build.sh shifts: checker placements must be multiples of 16 below 4096")
+            endif()
+            if(bytes EQUAL 0)
+                # Use the ordinary executable as the exact layout control.
+                add_custom_command(OUTPUT "${output}"
+                    COMMAND "${CMAKE_COMMAND}" -E make_directory "${directory}"
+                    COMMAND "${CMAKE_COMMAND}" -E rm -f "${output}"
+                    COMMAND "${CMAKE_COMMAND}" -E create_hardlink "${compiler}" "${output}"
+                    DEPENDS "${compiler}"
+                    VERBATIM)
+                list(APPEND shifted "${output}")
+                continue()
+            endif()
+            set(shift_script "${CMAKE_BINARY_DIR}/start-order-checker-${bytes}.ld")
+            buster_start_order_files("${start_order_list}" "${shift_script}" "${start_order_symbols}" "${BUSTER_SHIFT_SOURCE}" "${bytes}")
+            set(post_link_args "-DCHECKER_SHIFT=${bytes}" "-DUNSHIFTED=${compiler}")
+            set(post_link_depends "${compiler}")
+        else()
+            set(padding "${directory}/padding-${bytes}.o")
+            # Where the start's code order puts the padding before the source's start-ordered functions, the padding
+            # also goes first in .text, which every unit's other code sits in (#2728).
+            set(text_padding 0)
+            if(buster_start_order AND buster_start_order_shift_padded)
+                set(text_padding 1)
+            endif()
+            add_custom_command(OUTPUT "${padding}"
+                COMMAND "${CMAKE_COMMAND}" "-DOBJECT=${shift_object}" "-DSOURCE=${BUSTER_SHIFT_SOURCE}" "-DSHIFT=${bytes}"
+                    "-DOUTPUT=${padding}" "-DCLANG=${CMAKE_C_COMPILER}" "-DREADELF=${BUSTER_READELF}" "-DTEXT=${text_padding}"
+                    -P "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
+                DEPENDS "${shift_object}" "${CMAKE_SOURCE_DIR}/cmake/BusterShiftPadding.cmake"
+                VERBATIM)
+            list(INSERT shift_objects ${shift_index} "${padding}")
+            set(post_link_args -DPADDING=1)
+            if(NOT bytes EQUAL 0)
+                list(APPEND post_link_args "-DUNSHIFTED=${compiler}" "-DMOVED=${text_padding}" "-DSHIFT=${bytes}")
+                set(post_link_depends "${compiler}")
+            endif()
+        endif()
         add_executable(compiler_shift_${bytes} EXCLUDE_FROM_ALL ${shift_objects})
         set_target_properties(compiler_shift_${bytes} PROPERTIES OUTPUT_NAME compiler-${bytes}.link
             RUNTIME_OUTPUT_DIRECTORY "${directory}")
-        buster_link(compiler_shift_${bytes})
-        set(output "${directory}/compiler-${bytes}")
-        if(bytes EQUAL 0)
-            buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 OBJECTS ${shift_objects})
-        else()
-            buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS -DPADDING=1 "-DUNSHIFTED=${compiler}"
-                "-DMOVED=${text_padding}" "-DSHIFT=${bytes}" DEPENDS "${compiler}" OBJECTS ${shift_objects})
-        endif()
+        buster_link(compiler_shift_${bytes} "${shift_script}")
+        buster_post_link(compiler_shift_${bytes} "${output}" ARGUMENTS ${post_link_args}
+            DEPENDS ${post_link_depends} OBJECTS ${shift_objects})
         list(APPEND shifted "${output}")
     endforeach()
     add_custom_target(shifts DEPENDS ${shifted})

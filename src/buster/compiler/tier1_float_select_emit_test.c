@@ -7,9 +7,8 @@
 // copy (if-conversion's truth simplification's) or through one of C's truth values' links, `ne` or `eq`, and returns it.
 // With `summed`, the function returns the select plus one instead, so that the select's result takes a tie to a value's
 // register (tier1_select_ties) as the return's doesn't. With `branch`, it branches on the condition instead, to blocks
-// that return each value: a branch reaches its comparison through the copy too, which the truth walk passes for both. By
-// both frame planners (the emit options' `vector`), with every general register and with the parameters' alone, and with
-// and without a kept frame pointer, the select must be TIER1_RULE_FLOAT_SELECT_COMPARE and the branch TIER1_RULE_FLOAT_BRANCH_COMPARE for an ordered predicate
+// that return each value: a branch reaches its comparison through the copy too, which the truth walk passes for both. With
+// every general register and with the parameters' alone, and with and without a kept frame pointer, the select must be TIER1_RULE_FLOAT_SELECT_COMPARE and the branch TIER1_RULE_FLOAT_BRANCH_COMPARE for an ordered predicate
 // in every shape, the select of == and != directly and through its copy, and the rest test the comparison's truth value
 // (a branch of == or != in every shape); the code must certify and set no flag into a register where it fuses, a summed
 // select with every register must take the register of the value it keeps (no move of its own), and the native result
@@ -356,11 +355,10 @@ static void tier1_float_select_loops(Tier1EmitTest* test, uint32_t* fused_loops)
                 for (uint32_t kind = 0; kind < BUSTER_TIER1_FLOAT_SELECT_LOOPS; kind += 1)
                 {
                     const bool fused = (predicate != IR_EQ && predicate != IR_NE) || (kind != 0 && kind != 4);
-                    for (uint32_t variant = 0; variant < 8; variant += 1)
+                    for (uint32_t variant = 0; variant < 4; variant += 1)
                     {
-                        const bool vector = (variant & 1) != 0;
-                        const bool narrow = (variant & 2) != 0;
-                        const bool pointer = (variant & 4) != 0;
+                        const bool narrow = (variant & 1) != 0;
+                        const bool pointer = (variant & 2) != 0;
                         IrFunction function;
                         uint32_t root = BUSTER_IR_NONE;
                         const bool created = tier1_float_select_loop_function(test, source_width, width, predicate, kind, &function, &root);
@@ -382,7 +380,6 @@ static void tier1_float_select_loops(Tier1EmitTest* test, uint32_t* fused_loops)
                         *fused_loops += rule == TIER1_RULE_FLOAT_SELECT_COMPARE;
                         const Tier1EmitOptions options = {
                             .register_mask = narrow ? few : tier1_liveness_register_mask(),
-                            .vector = vector,
                             .rematerialize = true,
                             .certify = true,
                             .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
@@ -444,14 +441,13 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
                 {
                     const bool ordered = predicate != IR_EQ && predicate != IR_NE;
                     const bool direct = shape <= 1;
-                    // 8 options each of a select, a summed select and a branch.
-                    for (uint32_t variant = 0; variant < 24; variant += 1)
+                    // 4 options each of a select, a summed select and a branch.
+                    for (uint32_t variant = 0; variant < 12; variant += 1)
                     {
-                        const bool vector = (variant & 1) != 0;
-                        const bool narrow = (variant & 2) != 0;
-                        const bool pointer = (variant & 4) != 0;
-                        const bool summed = variant >> 3 == 1;
-                        const bool branch = variant >> 3 == 2;
+                        const bool narrow = (variant & 1) != 0;
+                        const bool pointer = (variant & 2) != 0;
+                        const bool summed = variant >> 2 == 1;
+                        const bool branch = variant >> 2 == 2;
                         const bool fused = ordered || (direct && !branch);
                         IrFunction function;
                         uint32_t root = BUSTER_IR_NONE;
@@ -472,7 +468,6 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
                         fused_branches += rule == TIER1_RULE_FLOAT_BRANCH_COMPARE;
                         const Tier1EmitOptions options = {
                             .register_mask = narrow ? few : tier1_liveness_register_mask(),
-                            .vector = vector,
                             .rematerialize = true,
                             .certify = true,
                             .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
@@ -507,9 +502,9 @@ static void tier1_float_select_tests(Tier1EmitTest* test)
             }
         }
     }
-    tier1_emit_test_expect(test, fused_selects == 2 * 2 * (4 * BUSTER_TIER1_FLOAT_SELECT_SHAPES + 2 * 2) * 16 && fused_branches == 2 * 2 * 4 * BUSTER_TIER1_FLOAT_SELECT_SHAPES * 8,
+    tier1_emit_test_expect(test, fused_selects == 2 * 2 * (4 * BUSTER_TIER1_FLOAT_SELECT_SHAPES + 2 * 2) * 8 && fused_branches == 2 * 2 * 4 * BUSTER_TIER1_FLOAT_SELECT_SHAPES * 4,
                            "every shape the grammar takes fuses");
     uint32_t fused_loops = 0;
     tier1_float_select_loops(test, &fused_loops);
-    tier1_emit_test_expect(test, fused_loops == 2 * 2 * (4 * BUSTER_TIER1_FLOAT_SELECT_LOOPS + 2 * 3) * 8, "every loop's select the recurrence leaves fuses");
+    tier1_emit_test_expect(test, fused_loops == 2 * 2 * (4 * BUSTER_TIER1_FLOAT_SELECT_LOOPS + 2 * 3) * 4, "every loop's select the recurrence leaves fuses");
 }

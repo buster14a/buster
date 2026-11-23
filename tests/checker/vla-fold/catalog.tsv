@@ -1,2 +1,4 @@
 buster-fixtures v1 checker-warnings
 rejected-static-vla.c	10	3	2	Rejected block-scope static VLAs retain bound comma warnings
+rejected-member-vla.c	12	4	2	Rejected variably modified fields retain their bound and sibling diagnostics
+rejected-member-mixed-vla.c	12	6	0	Mixed-dimension and typedef fields recover without a whole-field fold warning

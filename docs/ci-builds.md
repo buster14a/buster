@@ -2,9 +2,8 @@
 
 The 9700X job prepares its current compiler, pragma oracle and any required
 pull-request base in one step, before its native correctness or measurements. This is
-build scheduling only: the [CI admission policy](commands/ci.md), host lock,
-benchmark selection, compiler flags, placement offsets, A/A controls and
-measurement commands are unchanged.
+build scheduling follows the [CI admission policy](commands/ci.md) and the
+shared host lock.
 
 ## Selection and reuse
 
@@ -15,8 +14,10 @@ selector outputs retain the workflow's existing `!= 'false'` behavior; the
 shell receives explicit booleans, never an implicit empty decision.
 
 When the checker comparison is selected, each revision runs `build.sh shifts`
-once, producing its ordinary Release compiler and placements 0, 1088, 2112 and
-3136 of `main_unit_checker.c` from shared objects. Otherwise each needed
+once, producing its ordinary Release compiler and placements 0, 16, 32 and
+48 within the page of `main_unit_checker.c` from shared objects. If either
+revision lacks `--checker-placements`, both use the legacy ordinary `.text`
+placements 0, 1088, 2112 and 3136. Otherwise each needed
 revision runs the ordinary Release build. The Tier 1 comparison uses that
 same base worktree's ordinary executable, including when the checker
 comparison also runs. There is no second base checkout or build in a

@@ -52,8 +52,8 @@ claim about every kernel or input:
 | Dataflow (`dataflow.c`) | `test-dataflow` | Scalar/vector fixpoints, independent reachability checks, boundary sizes and protected pages; see [dataflow](commands/dataflow.md). |
 | Checker, lowering, IR, allocation and emission | `test-checker` and corpus tests, `test-lowering`, `test-ir-*`, `test-tier1-*`, `test-emission-metadata` | Unit and end-to-end fixtures, independent oracles and scalar comparisons where those tests specify them. Consult each [command guide](commands/README.md); execution of every host kernel is not separately attested. |
 
-For a scalar host build, a test's request for a vector path can select its
-scalar fallback instead. Conversely, `-march=znver5`, `--simd`, and vector
+There is no scalar host build to fall back to: a host without the predicate
+can't build the compiler. Conversely, `-march=znver5`, `--simd`, and vector
 widths in a fixture can describe the **generated program**, not the host
 compiler. Those options alone do not establish host-vector execution.
 

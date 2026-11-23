@@ -3876,7 +3876,8 @@ static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, C
     {
         // Poisoned operands already have a primary error. Reporting their parents' invalid-type cascades
         // would move the first error to an earlier prefix/return token instead of the offending expression.
-        if (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node))
+        if (stream->diagnostics[node] != CHECK_DIAG_RECOVERED_MEMBER &&
+            (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node)))
         {
             check_graph_report(graph, stream, node, CHECK_MESSAGE_ACTION, stream->diagnostics[node], CHECK_FAULT_NONE);
             check_graph_report_arguments(types, graph, stream, node);

@@ -167,7 +167,8 @@ static CheckDataScalarShape check_data_scalar_shape(const TypeTable* types, Type
         shape.floating = shape.base == BUSTER_TYPE_FLOAT || shape.base == BUSTER_TYPE_DOUBLE || shape.base == BUSTER_TYPE_LONG_DOUBLE ||
                          check_action_half_format(shape.base) != CHECK_HALF_NONE;
         shape.complex = kind == BUSTER_TYPE_KIND_COMPLEX;
-        shape.pointer = kind == BUSTER_TYPE_KIND_POINTER;
+        // A nullptr_t object is a null pointer's 8 bytes (C23 6.2.5p11, clang's layout too).
+        shape.pointer = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_NULLPTR;
         // A __float128 object's bytes are zeros without an initializer (#137), or its constant's bits (#1250).
         shape.quad = shape.base == BUSTER_TYPE_FLOAT128;
         const uint64_t size = type_size(types, type);

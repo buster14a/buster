@@ -7,7 +7,11 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `ir_parse.c` reads the shared printer format through bounded scalar/vector
-  paths. `test-ir-parse` checks canonical `.ir` fixtures and diagnostics;
+  paths. `test-ir-parse [--fixtures DIR]` checks canonical `.ir` fixtures
+  and diagnostics; its fixtures are `tests/ir/catalog.tsv`'s cases (runtime
+  data, #2053: a line of ID, FILE and NAME each, under
+  `buster-fixtures v1 ir-parse`), and every `.ir` file in `tests/ir` must be
+  one, so that a new fixture is its file and its line, and rebuilds nothing;
   `test-ir-optimize` runs the pass fixtures in that form.
   `test-ir-reduce` checks deterministic structural reduction, exact failure classes,
   allocation rollback and canonical replay; `reduce-ir` writes a new reproducer

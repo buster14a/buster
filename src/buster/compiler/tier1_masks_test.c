@@ -13,7 +13,8 @@
 // encoders into the same bytes. Where the host has every feature of x86-64-v4, it runs in a child process on random
 // buffers, and the buffer it leaves must be the interpreter's, byte for byte (the bytes no store writes among them).
 //
-// The fixtures: and, or, xor, not and copies at the four widths; constants (zero, every bit and others); a loop whose
+// The fixtures are runtime data (#2053), tests/tier1/masks/'s catalog and IR files (the comment above
+// tier1_masks_test_fixture_root): and, or, xor, not and copies at the four widths; constants (zero, every bit and others); a loop whose
 // mask phis swap, a cycle through k0, beside a mask accumulated from the buffer; more masks live at once than k1 to k7
 // hold, so that some are spilled and reloaded at their widths; and masks live across calls, outside a loop and in one,
 // of a helper that clobbers every opmask register before it returns its argument plus one; masks of every width stored
@@ -26,8 +27,8 @@
 // vector scan by both paths, which must take masks and refuse a vector at any place, its columns ending at a PROT_NONE
 // page; and each width's kmov forms, none for a width no mask has. Then masks from the typed stream: Tier 0's random mask
 // programs (tier1_masks_test_typed) and every _k* builtin's row (tier1_masks_test_builtins) lowered to the IR, run by its
-// interpreter through SSA and the optimizer, and compiled by Tier 1 natively. --print prints each fixture's records by
-// the vector path, as GNU as reads them.
+// interpreter through SSA and the optimizer, and compiled by Tier 1 natively. --print prints each fixture's records,
+// as GNU as reads them.
 
 #include <inttypes.h>
 #include <signal.h>
@@ -83,7 +84,7 @@ struct Tier1MasksTest
     bool native_vnni;
     // The fixtures that ran natively, by both paths, with and without rematerialization.
     uint32_t native_fixtures;
-    // --print: each fixture's records, by the vector path, as GNU as reads them.
+    // --print: each fixture's records, as GNU as reads them.
     bool print;
     Arena output;
     Arena scratch;
@@ -633,2467 +634,379 @@ static __attribute__((no_sanitize("function"))) void tier1_masks_test_complex_mo
     }
 }
 
-static const Tier1MasksFixture tier1_masks_test_fixtures[] = {
-    {
-        .name = "logic at every width",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.m8 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=1\n"
-                "  %3 = load.m8 %2 align=1\n"
-                "  %4 = and.m8 %1, %3\n"
-                "  %5 = or.m8 %1, %3\n"
-                "  %6 = xor.m8 %4, %5\n"
-                "  %7 = not.m8 %6\n"
-                "  %8 = copy.m8 %7\n"
-                "  %9 = address.ptr %0 offset=128\n"
-                "  %10 = store.void %9, %8 align=1\n"
-                "  %11 = address.ptr %0 offset=129\n"
-                "  %12 = store.void %11, %4 align=1\n"
-                "  %13 = address.ptr %0 offset=2\n"
-                "  %14 = load.m16 %13 align=2\n"
-                "  %15 = address.ptr %0 offset=4\n"
-                "  %16 = load.m16 %15 align=2\n"
-                "  %17 = and.m16 %14, %16\n"
-                "  %18 = or.m16 %14, %16\n"
-                "  %19 = xor.m16 %17, %18\n"
-                "  %20 = not.m16 %19\n"
-                "  %21 = address.ptr %0 offset=130\n"
-                "  %22 = store.void %21, %20 align=2\n"
-                "  %23 = address.ptr %0 offset=132\n"
-                "  %24 = store.void %23, %18 align=2\n"
-                "  %25 = address.ptr %0 offset=8\n"
-                "  %26 = load.m32 %25 align=4\n"
-                "  %27 = address.ptr %0 offset=12\n"
-                "  %28 = load.m32 %27 align=4\n"
-                "  %29 = and.m32 %26, %28\n"
-                "  %30 = or.m32 %26, %28\n"
-                "  %31 = xor.m32 %29, %30\n"
-                "  %32 = not.m32 %31\n"
-                "  %33 = address.ptr %0 offset=136\n"
-                "  %34 = store.void %33, %32 align=4\n"
-                "  %35 = address.ptr %0 offset=140\n"
-                "  %36 = store.void %35, %30 align=4\n"
-                "  %37 = address.ptr %0 offset=16\n"
-                "  %38 = load.m64 %37 align=8\n"
-                "  %39 = address.ptr %0 offset=24\n"
-                "  %40 = load.m64 %39 align=8\n"
-                "  %41 = and.m64 %38, %40\n"
-                "  %42 = or.m64 %38, %40\n"
-                "  %43 = xor.m64 %41, %42\n"
-                "  %44 = not.m64 %43\n"
-                "  %45 = copy.m64 %44\n"
-                "  %46 = address.ptr %0 offset=144\n"
-                "  %47 = store.void %46, %45 align=8\n"
-                "  %48 = address.ptr %0 offset=152\n"
-                "  %49 = store.void %48, %42 align=8\n"
-                "  %50 = ret.void\n"
-                "}\n",
-    },
-    {
-        .name = "constants",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = const.m8 0x00000000000000000000000000000000\n"
-                "  %2 = address.ptr %0 offset=128\n"
-                "  %3 = store.void %2, %1 align=1\n"
-                "  %4 = const.m8 0x000000000000000000000000000000ff\n"
-                "  %5 = address.ptr %0 offset=129\n"
-                "  %6 = store.void %5, %4 align=1\n"
-                "  %7 = const.m8 0x0000000000000000000000000000005a\n"
-                "  %8 = address.ptr %0 offset=130\n"
-                "  %9 = store.void %8, %7 align=1\n"
-                "  %10 = const.m16 0x0000000000000000000000000000ffff\n"
-                "  %11 = address.ptr %0 offset=132\n"
-                "  %12 = store.void %11, %10 align=2\n"
-                "  %13 = const.m16 0x0000000000000000000000000000a5c3\n"
-                "  %14 = address.ptr %0 offset=134\n"
-                "  %15 = store.void %14, %13 align=2\n"
-                "  %16 = const.m32 0x000000000000000000000000ffffffff\n"
-                "  %17 = address.ptr %0 offset=136\n"
-                "  %18 = store.void %17, %16 align=4\n"
-                "  %19 = const.m32 0x00000000000000000000000080000001\n"
-                "  %20 = address.ptr %0 offset=140\n"
-                "  %21 = store.void %20, %19 align=4\n"
-                "  %22 = const.m64 0x0000000000000000ffffffffffffffff\n"
-                "  %23 = address.ptr %0 offset=144\n"
-                "  %24 = store.void %23, %22 align=8\n"
-                "  %25 = const.m64 0x00000000000000008000000000000001\n"
-                "  %26 = address.ptr %0 offset=152\n"
-                "  %27 = store.void %26, %25 align=8\n"
-                "  %28 = const.m64 0x00000000000000000000000012345678\n"
-                "  %29 = address.ptr %0 offset=160\n"
-                "  %30 = store.void %29, %28 align=8\n"
-                "  %31 = const.m64 0x00000000000000000000000000000000\n"
-                "  %32 = address.ptr %0 offset=168\n"
-                "  %33 = store.void %32, %31 align=8\n"
-                "  %34 = const.m16 0x00000000000000000000000000000000\n"
-                "  %35 = address.ptr %0 offset=176\n"
-                "  %36 = store.void %35, %34 align=2\n"
-                "  %37 = ret.void\n"
-                "}\n",
-    },
-    {
-        .name = "a loop whose mask phis swap",
-        .text = "function (ptr, i64) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = load.m16 %0 align=2\n"
-                "  %3 = address.ptr %0 offset=2\n"
-                "  %4 = load.m16 %3 align=2\n"
-                "  %5 = address.ptr %0 offset=8\n"
-                "  %6 = load.m32 %5 align=4\n"
-                "  %7 = const.i64 0x00000000000000000000000000000000\n"
-                "  %8 = br.void b1\n"
-                "b1:\n"
-                "  %9 = phi.m16 [%2, b0], [%10, b1]\n"
-                "  %10 = phi.m16 [%4, b0], [%9, b1]\n"
-                "  %11 = phi.m32 [%6, b0], [%16, b1]\n"
-                "  %12 = phi.i64 [%7, b0], [%18, b1]\n"
-                "  %13 = address.ptr %0 + %12 * 4 offset=16\n"
-                "  %14 = load.m32 %13 align=4\n"
-                "  %15 = not.m32 %14\n"
-                "  %16 = xor.m32 %11, %15\n"
-                "  %17 = const.i64 0x00000000000000000000000000000001\n"
-                "  %18 = add.i64 %12, %17\n"
-                "  %19 = icmp.i1 %18, %1 ult\n"
-                "  %20 = cbr.void %19, b1, b2\n"
-                "b2:\n"
-                "  %21 = address.ptr %0 offset=128\n"
-                "  %22 = store.void %21, %9 align=2\n"
-                "  %23 = address.ptr %0 offset=130\n"
-                "  %24 = store.void %23, %10 align=2\n"
-                "  %25 = address.ptr %0 offset=132\n"
-                "  %26 = store.void %25, %11 align=4\n"
-                "  %27 = address.ptr %0 offset=136\n"
-                "  %28 = store.void %27, %16 align=4\n"
-                "  %29 = ret.void\n"
-                "}\n",
-        .count = 20,
-        .cycle = true,
-    },
-    {
-        .name = "more masks than k1 to k7",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.m8 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=1\n"
-                "  %3 = load.m8 %2 align=1\n"
-                "  %4 = address.ptr %0 offset=2\n"
-                "  %5 = load.m16 %4 align=2\n"
-                "  %6 = address.ptr %0 offset=4\n"
-                "  %7 = load.m16 %6 align=2\n"
-                "  %8 = address.ptr %0 offset=8\n"
-                "  %9 = load.m32 %8 align=4\n"
-                "  %10 = address.ptr %0 offset=12\n"
-                "  %11 = load.m32 %10 align=4\n"
-                "  %12 = address.ptr %0 offset=16\n"
-                "  %13 = load.m64 %12 align=8\n"
-                "  %14 = address.ptr %0 offset=24\n"
-                "  %15 = load.m64 %14 align=8\n"
-                "  %16 = address.ptr %0 offset=32\n"
-                "  %17 = load.m64 %16 align=8\n"
-                "  %18 = address.ptr %0 offset=40\n"
-                "  %19 = load.m16 %18 align=2\n"
-                "  %20 = xor.m8 %1, %3\n"
-                "  %21 = and.m16 %5, %7\n"
-                "  %22 = or.m32 %9, %11\n"
-                "  %23 = xor.m64 %13, %15\n"
-                "  %24 = and.m64 %23, %17\n"
-                "  %25 = not.m16 %19\n"
-                "  %26 = address.ptr %0 offset=128\n"
-                "  %27 = store.void %26, %1 align=1\n"
-                "  %28 = address.ptr %0 offset=129\n"
-                "  %29 = store.void %28, %3 align=1\n"
-                "  %30 = address.ptr %0 offset=130\n"
-                "  %31 = store.void %30, %5 align=2\n"
-                "  %32 = address.ptr %0 offset=132\n"
-                "  %33 = store.void %32, %7 align=2\n"
-                "  %34 = address.ptr %0 offset=136\n"
-                "  %35 = store.void %34, %9 align=4\n"
-                "  %36 = address.ptr %0 offset=140\n"
-                "  %37 = store.void %36, %11 align=4\n"
-                "  %38 = address.ptr %0 offset=144\n"
-                "  %39 = store.void %38, %13 align=8\n"
-                "  %40 = address.ptr %0 offset=152\n"
-                "  %41 = store.void %40, %15 align=8\n"
-                "  %42 = address.ptr %0 offset=160\n"
-                "  %43 = store.void %42, %17 align=8\n"
-                "  %44 = address.ptr %0 offset=168\n"
-                "  %45 = store.void %44, %19 align=2\n"
-                "  %46 = address.ptr %0 offset=170\n"
-                "  %47 = store.void %46, %20 align=1\n"
-                "  %48 = address.ptr %0 offset=172\n"
-                "  %49 = store.void %48, %21 align=2\n"
-                "  %50 = address.ptr %0 offset=176\n"
-                "  %51 = store.void %50, %22 align=4\n"
-                "  %52 = address.ptr %0 offset=184\n"
-                "  %53 = store.void %52, %24 align=8\n"
-                "  %54 = address.ptr %0 offset=192\n"
-                "  %55 = store.void %54, %25 align=2\n"
-                "  %56 = ret.void\n"
-                "}\n",
-        .spills = true,
-    },
-    {
-        // #1839: masks live in opmask registers across an asm body whose records write k1 to k7, which Tier 1 saves
-        // and reloads around it as around a call (tier1_emit_cfg_asm).
-        .name = "masks across an asm body",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.m16 %0 align=2\n"
-                "  %2 = address.ptr %0 offset=8\n"
-                "  %3 = load.m64 %2 align=8\n"
-                "  %4 = address.ptr %0 offset=16\n"
-                "  %5 = load.m8 %4 align=1\n"
-                "  %6 = call.void @9() fixed=() variadic=0\n"
-                "  %7 = not.m16 %1\n"
-                "  %8 = address.ptr %0 offset=128\n"
-                "  %9 = store.void %8, %7 align=2\n"
-                "  %10 = address.ptr %0 offset=136\n"
-                "  %11 = store.void %10, %3 align=8\n"
-                "  %12 = address.ptr %0 offset=144\n"
-                "  %13 = store.void %12, %5 align=1\n"
-                "  %14 = ret.void\n"
-                "}\n",
-        .calls = true,
-        .asm_body = true,
-        .model = tier1_masks_test_asm_model,
-    },
-    {
-        .name = "masks across calls",
-        .text = "function (ptr, i64) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = load.m16 %0 align=2\n"
-                "  %3 = address.ptr %0 offset=8\n"
-                "  %4 = load.m64 %3 align=8\n"
-                "  %5 = address.ptr %0 offset=16\n"
-                "  %6 = load.m8 %5 align=1\n"
-                "  %7 = call.i64 @9(%1) fixed=(i64) variadic=0\n"
-                "  %8 = not.m16 %2\n"
-                "  %9 = call.i64 @9(%7) fixed=(i64) variadic=0\n"
-                "  %10 = not.m64 %4\n"
-                "  %11 = address.ptr %0 offset=128\n"
-                "  %12 = store.void %11, %2 align=2\n"
-                "  %13 = address.ptr %0 offset=130\n"
-                "  %14 = store.void %13, %8 align=2\n"
-                "  %15 = address.ptr %0 offset=136\n"
-                "  %16 = store.void %15, %4 align=8\n"
-                "  %17 = address.ptr %0 offset=144\n"
-                "  %18 = store.void %17, %10 align=8\n"
-                "  %19 = address.ptr %0 offset=152\n"
-                "  %20 = store.void %19, %6 align=1\n"
-                "  %21 = address.ptr %0 offset=160\n"
-                "  %22 = store.void %21, %9 align=8\n"
-                "  %23 = ret.void\n"
-                "}\n",
-        .count = 1000,
-        .calls = true,
-    },
-    {
-        .name = "a mask phi across a call in a loop",
-        .text = "function (ptr, i64) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = load.m32 %0 align=4\n"
-                "  %3 = address.ptr %0 offset=4\n"
-                "  %4 = load.m8 %3 align=1\n"
-                "  %5 = const.i64 0x00000000000000000000000000000000\n"
-                "  %6 = br.void b1\n"
-                "b1:\n"
-                "  %7 = phi.m32 [%2, b0], [%10, b1]\n"
-                "  %8 = phi.i64 [%5, b0], [%9, b1]\n"
-                "  %9 = call.i64 @9(%8) fixed=(i64) variadic=0\n"
-                "  %10 = not.m32 %7\n"
-                "  %11 = icmp.i1 %9, %1 ult\n"
-                "  %12 = cbr.void %11, b1, b2\n"
-                "b2:\n"
-                "  %13 = address.ptr %0 offset=128\n"
-                "  %14 = store.void %13, %10 align=4\n"
-                "  %15 = address.ptr %0 offset=132\n"
-                "  %16 = store.void %15, %4 align=1\n"
-                "  %17 = address.ptr %0 offset=136\n"
-                "  %18 = store.void %17, %9 align=8\n"
-                "  %19 = ret.void\n"
-                "}\n",
-        .count = 9,
-        .calls = true,
-    },
-    {
-        // Each access's frame object folded into its kmov's memory operand: the frame's base at the object's offset.
-        .name = "masks through a frame object",
-        .text = "function (ptr) -> void {\n"
-                "  slot $0 size=16 align=8 type=void flags=0x01\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.m8 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=2\n"
-                "  %3 = load.m16 %2 align=2\n"
-                "  %4 = address.ptr %0 offset=4\n"
-                "  %5 = load.m32 %4 align=4\n"
-                "  %6 = address.ptr %0 offset=8\n"
-                "  %7 = load.m64 %6 align=8\n"
-                "  %8 = stack_addr.ptr $0\n"
-                "  %9 = store.void %8, %7 align=8\n"
-                "  %10 = stack_addr.ptr $0\n"
-                "  %11 = address.ptr %10 offset=8\n"
-                "  %12 = store.void %11, %1 align=1\n"
-                "  %13 = stack_addr.ptr $0\n"
-                "  %14 = address.ptr %13 offset=10\n"
-                "  %15 = store.void %14, %3 align=2\n"
-                "  %16 = stack_addr.ptr $0\n"
-                "  %17 = address.ptr %16 offset=12\n"
-                "  %18 = store.void %17, %5 align=4\n"
-                "  %19 = stack_addr.ptr $0\n"
-                "  %20 = load.m64 %19 align=8\n"
-                "  %21 = stack_addr.ptr $0\n"
-                "  %22 = address.ptr %21 offset=8\n"
-                "  %23 = load.m8 %22 align=1\n"
-                "  %24 = stack_addr.ptr $0\n"
-                "  %25 = address.ptr %24 offset=10\n"
-                "  %26 = load.m16 %25 align=2\n"
-                "  %27 = stack_addr.ptr $0\n"
-                "  %28 = address.ptr %27 offset=12\n"
-                "  %29 = load.m32 %28 align=4\n"
-                "  %30 = not.m64 %20\n"
-                "  %31 = xor.m8 %23, %1\n"
-                "  %32 = not.m16 %26\n"
-                "  %33 = xor.m32 %29, %5\n"
-                "  %34 = address.ptr %0 offset=128\n"
-                "  %35 = store.void %34, %30 align=8\n"
-                "  %36 = address.ptr %0 offset=136\n"
-                "  %37 = store.void %36, %31 align=1\n"
-                "  %38 = address.ptr %0 offset=138\n"
-                "  %39 = store.void %38, %32 align=2\n"
-                "  %40 = address.ptr %0 offset=140\n"
-                "  %41 = store.void %40, %33 align=4\n"
-                "  %42 = address.ptr %0 offset=144\n"
-                "  %43 = store.void %42, %26 align=2\n"
-                "  %44 = ret.void\n"
-                "}\n",
-        .frame_accesses = 8,
-    },
-    {
-        // Masks live across divisions by a constant's reciprocal and by a register, whose fixed registers (rax and rdx)
-        // the consumer saves in the general call-save rows, and across a call, whose masks' rows come after those; and
-        // eight 64-bit constants, too wide for an immediate, live across all of them, which rematerialization recomputes.
-        .name = "masks across divisions and a call",
-        .text = "function (ptr, i64) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = load.m16 %0 align=2\n"
-                "  %3 = address.ptr %0 offset=8\n"
-                "  %4 = load.m64 %3 align=8\n"
-                "  %5 = address.ptr %0 offset=16\n"
-                "  %6 = load.m8 %5 align=1\n"
-                "  %7 = address.ptr %0 offset=24\n"
-                "  %8 = load.i64 %7 align=8\n"
-                "  %9 = address.ptr %0 offset=32\n"
-                "  %10 = load.i64 %9 align=8\n"
-                "  %11 = const.i64 0x0000000000000000123456789abcdef0\n"
-                "  %12 = const.i64 0x00000000000000000fedcba987654321\n"
-                "  %13 = const.i64 0x00000000000000008000000000000001\n"
-                "  %14 = const.i64 0x0000000000000000a5a5a5a55a5a5a5a\n"
-                "  %15 = const.i64 0x00000000000000000000000700000003\n"
-                "  %16 = const.i64 0x0000000000000000ffffffff00000000\n"
-                "  %17 = const.i64 0x00000000000000007fffffffffffffff\n"
-                "  %18 = const.i64 0x00000000000000000123456700000000\n"
-                "  %19 = const.i64 0x00000000000000000000000000000007\n"
-                "  %20 = udiv.i64 %8, %19\n"
-                "  %21 = srem.i64 %10, %19\n"
-                "  %22 = const.i64 0x00000000000000000000000000000001\n"
-                "  %23 = or.i64 %1, %22\n"
-                "  %24 = sdiv.i64 %10, %23\n"
-                "  %25 = urem.i64 %8, %23\n"
-                "  %26 = call.i64 @9(%20) fixed=(i64) variadic=0\n"
-                "  %27 = not.m16 %2\n"
-                "  %28 = not.m64 %4\n"
-                "  %29 = xor.i64 %11, %12\n"
-                "  %30 = xor.i64 %29, %13\n"
-                "  %31 = xor.i64 %30, %14\n"
-                "  %32 = xor.i64 %31, %15\n"
-                "  %33 = xor.i64 %32, %16\n"
-                "  %34 = xor.i64 %33, %17\n"
-                "  %35 = xor.i64 %34, %18\n"
-                "  %36 = address.ptr %0 offset=128\n"
-                "  %37 = store.void %36, %27 align=2\n"
-                "  %38 = address.ptr %0 offset=136\n"
-                "  %39 = store.void %38, %28 align=8\n"
-                "  %40 = address.ptr %0 offset=144\n"
-                "  %41 = store.void %40, %6 align=1\n"
-                "  %42 = address.ptr %0 offset=152\n"
-                "  %43 = store.void %42, %20 align=8\n"
-                "  %44 = address.ptr %0 offset=160\n"
-                "  %45 = store.void %44, %21 align=8\n"
-                "  %46 = address.ptr %0 offset=168\n"
-                "  %47 = store.void %46, %24 align=8\n"
-                "  %48 = address.ptr %0 offset=176\n"
-                "  %49 = store.void %48, %25 align=8\n"
-                "  %50 = address.ptr %0 offset=184\n"
-                "  %51 = store.void %50, %26 align=8\n"
-                "  %52 = address.ptr %0 offset=192\n"
-                "  %53 = store.void %52, %2 align=2\n"
-                "  %54 = address.ptr %0 offset=200\n"
-                "  %55 = store.void %54, %35 align=8\n"
-                "  %56 = ret.void\n"
-                "}\n",
-        .count = 1000,
-        .calls = true,
-        .divisions = true,
-    },
-    // Dot products (#2780) whose accumulators live past them, so that a destination isn't its accumulator's register
-    // and the accumulator is copied there first, and some of whose other operands die at them, so that a destination may
-    // be such an operand's register, which the vector class's scratch register then holds (tier1_select_dot): every
-    // operation at every width, an operand twice.
-    {
-        .name = "dot products whose accumulators live on",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.v16i32 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=64\n"
-                "  %3 = load.v16i32 %2 align=1\n"
-                "  %4 = intrinsic.v16i32 %1, %3, %3 dot 0\n"
-                "  %5 = intrinsic.v16i32 %3, %4, %1 dot 1\n"
-                "  %6 = add.v16i32 %1, %3\n"
-                "  %7 = intrinsic.v16i32 %6, %5, %6 dot 2\n"
-                "  %8 = xor.v16i32 %7, %5\n"
-                "  %9 = address.ptr %0 offset=128\n"
-                "  %10 = store.void %9, %8 align=1\n"
-                "  %11 = address.ptr %0 offset=16\n"
-                "  %12 = load.v8i32 %11 align=1\n"
-                "  %13 = address.ptr %0 offset=80\n"
-                "  %14 = load.v8i32 %13 align=1\n"
-                "  %15 = intrinsic.v8i32 %12, %14, %12 dot 3\n"
-                "  %16 = intrinsic.v8i32 %14, %15, %15 dot 0\n"
-                "  %17 = sub.v8i32 %16, %12\n"
-                "  %18 = address.ptr %0 offset=192\n"
-                "  %19 = store.void %18, %17 align=1\n"
-                "  %20 = load.v4i32 %2 align=1\n"
-                "  %21 = intrinsic.v4i32 %20, %20, %20 dot 1\n"
-                "  %22 = intrinsic.v4i32 %21, %20, %21 dot 2\n"
-                "  %23 = address.ptr %0 offset=224\n"
-                "  %24 = store.void %23, %22 align=1\n"
-                "  %25 = ret.void\n"
-                "}\n",
-        .vnni = true,
-    },
-    // The IR's vectors (#141), v4i32, v8i32 and v16i32, beside the masks their comparisons make: their operations,
-    // constants, phis, spills and saves around calls at their widths.
-    {
-        .name = "vector operations and comparisons at every width",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v4i32 %1 align=1\n"
-                "  %3 = address.ptr %0 offset=16\n"
-                "  %4 = load.v4i32 %3 align=1\n"
-                "  %5 = add.v4i32 %2, %4\n"
-                "  %6 = sub.v4i32 %2, %4\n"
-                "  %7 = mul.v4i32 %2, %4\n"
-                "  %8 = and.v4i32 %2, %4\n"
-                "  %9 = or.v4i32 %2, %4\n"
-                "  %10 = xor.v4i32 %2, %4\n"
-                "  %11 = not.v4i32 %2\n"
-                "  %12 = copy.v4i32 %11\n"
-                "  %13 = vcmp.m8 %5, %4 eq\n"
-                "  %14 = vselect.v4i32 %13, %6, %10\n"
-                "  %15 = xor.v4i32 %12, %14\n"
-                "  %16 = vcmp.m8 %6, %9 ne\n"
-                "  %17 = vselect.v4i32 %16, %7, %11\n"
-                "  %18 = add.v4i32 %15, %17\n"
-                "  %19 = vcmp.m8 %7, %4 lt\n"
-                "  %20 = vselect.v4i32 %19, %8, %5\n"
-                "  %21 = sub.v4i32 %18, %20\n"
-                "  %22 = vcmp.m8 %8, %11 le\n"
-                "  %23 = vselect.v4i32 %22, %9, %6\n"
-                "  %24 = xor.v4i32 %21, %23\n"
-                "  %25 = vcmp.m8 %9, %4 gt\n"
-                "  %26 = vselect.v4i32 %25, %10, %7\n"
-                "  %27 = add.v4i32 %24, %26\n"
-                "  %28 = vcmp.m8 %10, %6 ge\n"
-                "  %29 = vselect.v4i32 %28, %11, %8\n"
-                "  %30 = sub.v4i32 %27, %29\n"
-                "  %31 = vcmp.m8 %11, %4 ult\n"
-                "  %32 = vselect.v4i32 %31, %5, %9\n"
-                "  %33 = xor.v4i32 %30, %32\n"
-                "  %34 = vcmp.m8 %5, %8 ule\n"
-                "  %35 = vselect.v4i32 %34, %6, %10\n"
-                "  %36 = add.v4i32 %33, %35\n"
-                "  %37 = vcmp.m8 %6, %4 ugt\n"
-                "  %38 = vselect.v4i32 %37, %7, %11\n"
-                "  %39 = sub.v4i32 %36, %38\n"
-                "  %40 = vcmp.m8 %7, %10 uge\n"
-                "  %41 = vselect.v4i32 %40, %8, %5\n"
-                "  %42 = xor.v4i32 %39, %41\n"
-                "  %43 = address.ptr %0 offset=128\n"
-                "  %44 = store.void %43, %42 align=1\n"
-                "  %45 = address.ptr %0 offset=242\n"
-                "  %46 = store.void %45, %25 align=1\n"
-                "  %47 = address.ptr %0 offset=32\n"
-                "  %48 = load.v8i32 %47 align=1\n"
-                "  %49 = address.ptr %0 offset=64\n"
-                "  %50 = load.v8i32 %49 align=1\n"
-                "  %51 = add.v8i32 %48, %50\n"
-                "  %52 = sub.v8i32 %48, %50\n"
-                "  %53 = mul.v8i32 %48, %50\n"
-                "  %54 = and.v8i32 %48, %50\n"
-                "  %55 = or.v8i32 %48, %50\n"
-                "  %56 = xor.v8i32 %48, %50\n"
-                "  %57 = not.v8i32 %48\n"
-                "  %58 = copy.v8i32 %57\n"
-                "  %59 = vcmp.m8 %51, %50 eq\n"
-                "  %60 = vselect.v8i32 %59, %52, %56\n"
-                "  %61 = xor.v8i32 %58, %60\n"
-                "  %62 = vcmp.m8 %52, %55 ne\n"
-                "  %63 = vselect.v8i32 %62, %53, %57\n"
-                "  %64 = add.v8i32 %61, %63\n"
-                "  %65 = vcmp.m8 %53, %50 lt\n"
-                "  %66 = vselect.v8i32 %65, %54, %51\n"
-                "  %67 = sub.v8i32 %64, %66\n"
-                "  %68 = vcmp.m8 %54, %57 le\n"
-                "  %69 = vselect.v8i32 %68, %55, %52\n"
-                "  %70 = xor.v8i32 %67, %69\n"
-                "  %71 = vcmp.m8 %55, %50 gt\n"
-                "  %72 = vselect.v8i32 %71, %56, %53\n"
-                "  %73 = add.v8i32 %70, %72\n"
-                "  %74 = vcmp.m8 %56, %52 ge\n"
-                "  %75 = vselect.v8i32 %74, %57, %54\n"
-                "  %76 = sub.v8i32 %73, %75\n"
-                "  %77 = vcmp.m8 %57, %50 ult\n"
-                "  %78 = vselect.v8i32 %77, %51, %55\n"
-                "  %79 = xor.v8i32 %76, %78\n"
-                "  %80 = vcmp.m8 %51, %54 ule\n"
-                "  %81 = vselect.v8i32 %80, %52, %56\n"
-                "  %82 = add.v8i32 %79, %81\n"
-                "  %83 = vcmp.m8 %52, %50 ugt\n"
-                "  %84 = vselect.v8i32 %83, %53, %57\n"
-                "  %85 = sub.v8i32 %82, %84\n"
-                "  %86 = vcmp.m8 %53, %56 uge\n"
-                "  %87 = vselect.v8i32 %86, %54, %51\n"
-                "  %88 = xor.v8i32 %85, %87\n"
-                "  %89 = address.ptr %0 offset=144\n"
-                "  %90 = store.void %89, %88 align=1\n"
-                "  %91 = address.ptr %0 offset=243\n"
-                "  %92 = store.void %91, %74 align=1\n"
-                "  %93 = address.ptr %0 offset=0\n"
-                "  %94 = load.v16i32 %93 align=1\n"
-                "  %95 = address.ptr %0 offset=64\n"
-                "  %96 = load.v16i32 %95 align=1\n"
-                "  %97 = add.v16i32 %94, %96\n"
-                "  %98 = sub.v16i32 %94, %96\n"
-                "  %99 = mul.v16i32 %94, %96\n"
-                "  %100 = and.v16i32 %94, %96\n"
-                "  %101 = or.v16i32 %94, %96\n"
-                "  %102 = xor.v16i32 %94, %96\n"
-                "  %103 = not.v16i32 %94\n"
-                "  %104 = copy.v16i32 %103\n"
-                "  %105 = vcmp.m16 %97, %96 eq\n"
-                "  %106 = vselect.v16i32 %105, %98, %102\n"
-                "  %107 = xor.v16i32 %104, %106\n"
-                "  %108 = vcmp.m16 %98, %101 ne\n"
-                "  %109 = vselect.v16i32 %108, %99, %103\n"
-                "  %110 = add.v16i32 %107, %109\n"
-                "  %111 = vcmp.m16 %99, %96 lt\n"
-                "  %112 = vselect.v16i32 %111, %100, %97\n"
-                "  %113 = sub.v16i32 %110, %112\n"
-                "  %114 = vcmp.m16 %100, %103 le\n"
-                "  %115 = vselect.v16i32 %114, %101, %98\n"
-                "  %116 = xor.v16i32 %113, %115\n"
-                "  %117 = vcmp.m16 %101, %96 gt\n"
-                "  %118 = vselect.v16i32 %117, %102, %99\n"
-                "  %119 = add.v16i32 %116, %118\n"
-                "  %120 = vcmp.m16 %102, %98 ge\n"
-                "  %121 = vselect.v16i32 %120, %103, %100\n"
-                "  %122 = sub.v16i32 %119, %121\n"
-                "  %123 = vcmp.m16 %103, %96 ult\n"
-                "  %124 = vselect.v16i32 %123, %97, %101\n"
-                "  %125 = xor.v16i32 %122, %124\n"
-                "  %126 = vcmp.m16 %97, %100 ule\n"
-                "  %127 = vselect.v16i32 %126, %98, %102\n"
-                "  %128 = add.v16i32 %125, %127\n"
-                "  %129 = vcmp.m16 %98, %96 ugt\n"
-                "  %130 = vselect.v16i32 %129, %99, %103\n"
-                "  %131 = sub.v16i32 %128, %130\n"
-                "  %132 = vcmp.m16 %99, %102 uge\n"
-                "  %133 = vselect.v16i32 %132, %100, %97\n"
-                "  %134 = xor.v16i32 %131, %133\n"
-                "  %135 = address.ptr %0 offset=176\n"
-                "  %136 = store.void %135, %134 align=1\n"
-                "  %137 = address.ptr %0 offset=240\n"
-                "  %138 = store.void %137, %114 align=2\n"
-                "  %139 = ret.void\n"
-                "}\n",
-    },
-    // A comparison into a mask ANDed with another mask (#1847, #1631's form of a masked comparison's row): the AND's
-    // pattern takes the comparison under the other mask as its writemask, one vpcmp or vcmpps, with the comparison
-    // either operand, at 64 and 32 bytes, of integers and of floats (NaNs among the random ones); and a comparison the
-    // function stores as well, which stays its own record and the AND a kand.
-    {
-        .name = "masked comparisons: a comparison into a mask ANDed with another, as its writemask",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v16i32 %1 align=1\n"
-                "  %3 = address.ptr %0 offset=64\n"
-                "  %4 = load.v16i32 %3 align=1\n"
-                "  %5 = load.m16 %0 align=2\n"
-                "  %6 = address.ptr %0 offset=2\n"
-                "  %7 = load.m8 %6 align=1\n"
-                "  %8 = vcmp.m16 %2, %4 lt\n"
-                "  %9 = and.m16 %8, %5\n"
-                "  %10 = address.ptr %0 offset=192\n"
-                "  %11 = store.void %10, %9 align=2\n"
-                "  %12 = address.ptr %0 offset=32\n"
-                "  %13 = load.v8i32 %12 align=1\n"
-                "  %14 = address.ptr %0 offset=96\n"
-                "  %15 = load.v8i32 %14 align=1\n"
-                "  %16 = vcmp.m8 %13, %15 ugt\n"
-                "  %17 = and.m8 %7, %16\n"
-                "  %18 = address.ptr %0 offset=194\n"
-                "  %19 = store.void %18, %17 align=1\n"
-                "  %20 = vcmp.m16 %4, %2 le lanes=f32\n"
-                "  %21 = and.m16 %20, %5\n"
-                "  %22 = address.ptr %0 offset=196\n"
-                "  %23 = store.void %22, %21 align=2\n"
-                "  %24 = vcmp.m16 %2, %4 eq\n"
-                "  %25 = and.m16 %24, %5\n"
-                "  %26 = address.ptr %0 offset=198\n"
-                "  %27 = store.void %26, %25 align=2\n"
-                "  %28 = address.ptr %0 offset=200\n"
-                "  %29 = store.void %28, %24 align=2\n"
-                "  %30 = ret.void\n"
-                "}\n",
-        .masked_compares = 3,
-    },
-    // Selects of an operation (#1840, tier1_select_masked_binary): each its operation's one record under the mask, merged
-    // into the false arm's register or zeroing where that is a zero vector; with the false arm either operand of the
-    // operation (the destination's move of it first keeps the other in the scratch register); of a lane operation and of
-    // floats; and an operation the function stores as well, which stays its own record and the select a vpblendmd.
-    {
-        .name = "masked operations: a select of an operation, as the operation under the mask",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.v8i32 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=32\n"
-                "  %3 = load.v8i32 %2 align=1\n"
-                "  %4 = address.ptr %0 offset=64\n"
-                "  %5 = load.v8i32 %4 align=1\n"
-                "  %6 = address.ptr %0 offset=96\n"
-                "  %7 = load.m8 %6 align=1\n"
-                "  %8 = address.ptr %0 offset=104\n"
-                "  %9 = load.v4i32 %8 align=1\n"
-                "  %10 = address.ptr %0 offset=120\n"
-                "  %11 = load.v4i32 %10 align=1\n"
-                "  %12 = add.v8i32 %1, %3\n"
-                "  %13 = vselect.v8i32 %7, %12, %5\n"
-                "  %14 = address.ptr %0 offset=128\n"
-                "  %15 = store.void %14, %13 align=1\n"
-                "  %16 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000\n"
-                "  %17 = sub.v8i32 %1, %3\n"
-                "  %18 = vselect.v8i32 %7, %17, %16\n"
-                "  %19 = address.ptr %0 offset=160\n"
-                "  %20 = store.void %19, %18 align=1\n"
-                "  %21 = intrinsic.v8i32 %1, %3 lane_op 2\n"
-                "  %22 = vselect.v8i32 %7, %21, %1\n"
-                "  %23 = address.ptr %0 offset=192\n"
-                "  %24 = store.void %23, %22 align=1\n"
-                "  %25 = mul.v8i32 %5, %3\n"
-                "  %26 = vselect.v8i32 %7, %25, %3\n"
-                "  %27 = address.ptr %0 offset=224\n"
-                "  %28 = store.void %27, %26 align=1\n"
-                "  %29 = fmul.v4f32 %9, %11\n"
-                "  %30 = vselect.v4f32 %7, %29, %11\n"
-                "  %31 = store.void %0, %30 align=1\n"
-                "  %32 = add.v8i32 %1, %5\n"
-                "  %33 = vselect.v8i32 %7, %32, %3\n"
-                "  %34 = address.ptr %0 offset=16\n"
-                "  %35 = store.void %34, %33 align=1\n"
-                "  %36 = address.ptr %0 offset=48\n"
-                "  %37 = store.void %36, %32 align=1\n"
-                "  %38 = ret.void\n"
-                "}\n",
-        .masked_operations = 5,
-    },
-    // The IR's lanes (#141's element types), at each width: 8-, 16- and 64-bit integers' arithmetic, products and shifts
-    // by each lane's count (masked to twice the lane's bits, so that half shift past it), floats' and doubles'
-    // arithmetic, and comparisons of each lanes by each predicate, into masks of a bit per lane and selections at those
-    // lanes; the interpreter's model of them against Tier 1's code, NaNs, infinities and denormals among the random
-    // floats. Generated by a script (the PR's description), kept as text so that a reader sees the IR.
-    {
-        .name = "16-byte vectors' lanes: 8-, 16- and 64-bit integers, floats and doubles (#141's element types)",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v4i32 %1 align=1\n"
-                "  %3 = address.ptr %0 offset=112\n"
-                "  %4 = load.v4i32 %3 align=1\n"
-                "  %5 = xor.v4i32 %2, %4\n"
-                "  %6 = add.v16i8 %2, %4\n"
-                "  %7 = sub.v16i8 %2, %4\n"
-                "  %8 = vcmp.m16 %2, %7 eq lanes=i8\n"
-                "  %9 = vselect.v16i8 %8, %6, %7\n"
-                "  %10 = xor.v4i32 %5, %9\n"
-                "  %11 = vcmp.m16 %7, %4 ne lanes=i8\n"
-                "  %12 = vselect.v16i8 %11, %7, %6\n"
-                "  %13 = xor.v4i32 %10, %12\n"
-                "  %14 = vcmp.m16 %2, %4 lt lanes=i8\n"
-                "  %15 = vselect.v16i8 %14, %6, %7\n"
-                "  %16 = xor.v4i32 %13, %15\n"
-                "  %17 = vcmp.m16 %7, %6 le lanes=i8\n"
-                "  %18 = vselect.v16i8 %17, %7, %6\n"
-                "  %19 = xor.v4i32 %16, %18\n"
-                "  %20 = vcmp.m16 %2, %4 gt lanes=i8\n"
-                "  %21 = vselect.v16i8 %20, %6, %7\n"
-                "  %22 = xor.v4i32 %19, %21\n"
-                "  %23 = vcmp.m16 %7, %4 ge lanes=i8\n"
-                "  %24 = vselect.v16i8 %23, %7, %6\n"
-                "  %25 = xor.v4i32 %22, %24\n"
-                "  %26 = vcmp.m16 %2, %7 ult lanes=i8\n"
-                "  %27 = vselect.v16i8 %26, %6, %7\n"
-                "  %28 = xor.v4i32 %25, %27\n"
-                "  %29 = vcmp.m16 %7, %4 ule lanes=i8\n"
-                "  %30 = vselect.v16i8 %29, %7, %6\n"
-                "  %31 = xor.v4i32 %28, %30\n"
-                "  %32 = vcmp.m16 %2, %4 ugt lanes=i8\n"
-                "  %33 = vselect.v16i8 %32, %6, %7\n"
-                "  %34 = xor.v4i32 %31, %33\n"
-                "  %35 = vcmp.m16 %7, %6 uge lanes=i8\n"
-                "  %36 = vselect.v16i8 %35, %7, %6\n"
-                "  %37 = xor.v4i32 %34, %36\n"
-                "  %38 = xor.v4i32 %37, %6\n"
-                "  %39 = xor.v4i32 %38, %7\n"
-                "  %40 = add.v8i16 %2, %4\n"
-                "  %41 = sub.v8i16 %2, %4\n"
-                "  %42 = mul.v8i16 %2, %4\n"
-                "  %43 = vconst.v4i32 0x001f001f001f001f001f001f001f001f\n"
-                "  %44 = and.v4i32 %4, %43\n"
-                "  %45 = shl.v8i16 %2, %44\n"
-                "  %46 = lshr.v8i16 %2, %44\n"
-                "  %47 = ashr.v8i16 %2, %44\n"
-                "  %48 = vcmp.m8 %2, %41 eq lanes=i16\n"
-                "  %49 = vselect.v8i16 %48, %40, %41\n"
-                "  %50 = xor.v4i32 %39, %49\n"
-                "  %51 = vcmp.m8 %41, %4 ne lanes=i16\n"
-                "  %52 = vselect.v8i16 %51, %41, %42\n"
-                "  %53 = xor.v4i32 %50, %52\n"
-                "  %54 = vcmp.m8 %2, %4 lt lanes=i16\n"
-                "  %55 = vselect.v8i16 %54, %42, %45\n"
-                "  %56 = xor.v4i32 %53, %55\n"
-                "  %57 = vcmp.m8 %45, %46 le lanes=i16\n"
-                "  %58 = vselect.v8i16 %57, %45, %46\n"
-                "  %59 = xor.v4i32 %56, %58\n"
-                "  %60 = vcmp.m8 %2, %4 gt lanes=i16\n"
-                "  %61 = vselect.v8i16 %60, %46, %47\n"
-                "  %62 = xor.v4i32 %59, %61\n"
-                "  %63 = vcmp.m8 %47, %4 ge lanes=i16\n"
-                "  %64 = vselect.v8i16 %63, %47, %40\n"
-                "  %65 = xor.v4i32 %62, %64\n"
-                "  %66 = vcmp.m8 %2, %41 ult lanes=i16\n"
-                "  %67 = vselect.v8i16 %66, %40, %41\n"
-                "  %68 = xor.v4i32 %65, %67\n"
-                "  %69 = vcmp.m8 %41, %4 ule lanes=i16\n"
-                "  %70 = vselect.v8i16 %69, %41, %42\n"
-                "  %71 = xor.v4i32 %68, %70\n"
-                "  %72 = vcmp.m8 %2, %4 ugt lanes=i16\n"
-                "  %73 = vselect.v8i16 %72, %42, %45\n"
-                "  %74 = xor.v4i32 %71, %73\n"
-                "  %75 = vcmp.m8 %45, %46 uge lanes=i16\n"
-                "  %76 = vselect.v8i16 %75, %45, %46\n"
-                "  %77 = xor.v4i32 %74, %76\n"
-                "  %78 = xor.v4i32 %77, %40\n"
-                "  %79 = xor.v4i32 %78, %41\n"
-                "  %80 = xor.v4i32 %79, %42\n"
-                "  %81 = xor.v4i32 %80, %45\n"
-                "  %82 = xor.v4i32 %81, %46\n"
-                "  %83 = xor.v4i32 %82, %47\n"
-                "  %84 = add.v2i64 %2, %4\n"
-                "  %85 = sub.v2i64 %2, %4\n"
-                "  %86 = mul.v2i64 %2, %4\n"
-                "  %87 = vconst.v4i32 0x000000000000007f000000000000007f\n"
-                "  %88 = and.v4i32 %4, %87\n"
-                "  %89 = shl.v2i64 %2, %88\n"
-                "  %90 = lshr.v2i64 %2, %88\n"
-                "  %91 = ashr.v2i64 %2, %88\n"
-                "  %92 = vcmp.m8 %2, %85 eq lanes=i64\n"
-                "  %93 = vselect.v2i64 %92, %84, %85\n"
-                "  %94 = xor.v4i32 %83, %93\n"
-                "  %95 = vcmp.m8 %85, %4 ne lanes=i64\n"
-                "  %96 = vselect.v2i64 %95, %85, %86\n"
-                "  %97 = xor.v4i32 %94, %96\n"
-                "  %98 = vcmp.m8 %2, %4 lt lanes=i64\n"
-                "  %99 = vselect.v2i64 %98, %86, %89\n"
-                "  %100 = xor.v4i32 %97, %99\n"
-                "  %101 = vcmp.m8 %89, %90 le lanes=i64\n"
-                "  %102 = vselect.v2i64 %101, %89, %90\n"
-                "  %103 = xor.v4i32 %100, %102\n"
-                "  %104 = vcmp.m8 %2, %4 gt lanes=i64\n"
-                "  %105 = vselect.v2i64 %104, %90, %91\n"
-                "  %106 = xor.v4i32 %103, %105\n"
-                "  %107 = vcmp.m8 %91, %4 ge lanes=i64\n"
-                "  %108 = vselect.v2i64 %107, %91, %84\n"
-                "  %109 = xor.v4i32 %106, %108\n"
-                "  %110 = vcmp.m8 %2, %85 ult lanes=i64\n"
-                "  %111 = vselect.v2i64 %110, %84, %85\n"
-                "  %112 = xor.v4i32 %109, %111\n"
-                "  %113 = vcmp.m8 %85, %4 ule lanes=i64\n"
-                "  %114 = vselect.v2i64 %113, %85, %86\n"
-                "  %115 = xor.v4i32 %112, %114\n"
-                "  %116 = vcmp.m8 %2, %4 ugt lanes=i64\n"
-                "  %117 = vselect.v2i64 %116, %86, %89\n"
-                "  %118 = xor.v4i32 %115, %117\n"
-                "  %119 = vcmp.m8 %89, %90 uge lanes=i64\n"
-                "  %120 = vselect.v2i64 %119, %89, %90\n"
-                "  %121 = xor.v4i32 %118, %120\n"
-                "  %122 = xor.v4i32 %121, %84\n"
-                "  %123 = xor.v4i32 %122, %85\n"
-                "  %124 = xor.v4i32 %123, %86\n"
-                "  %125 = xor.v4i32 %124, %89\n"
-                "  %126 = xor.v4i32 %125, %90\n"
-                "  %127 = xor.v4i32 %126, %91\n"
-                "  %128 = fadd.v4f32 %2, %4\n"
-                "  %129 = fsub.v4f32 %2, %4\n"
-                "  %130 = fmul.v4f32 %2, %4\n"
-                "  %131 = fdiv.v4f32 %2, %4\n"
-                "  %132 = vcmp.m8 %2, %129 eq lanes=f32\n"
-                "  %133 = vselect.v4f32 %132, %128, %129\n"
-                "  %134 = xor.v4i32 %127, %133\n"
-                "  %135 = vcmp.m8 %129, %4 ne lanes=f32\n"
-                "  %136 = vselect.v4f32 %135, %129, %130\n"
-                "  %137 = xor.v4i32 %134, %136\n"
-                "  %138 = vcmp.m8 %2, %4 lt lanes=f32\n"
-                "  %139 = vselect.v4f32 %138, %130, %131\n"
-                "  %140 = xor.v4i32 %137, %139\n"
-                "  %141 = vcmp.m8 %131, %128 le lanes=f32\n"
-                "  %142 = vselect.v4f32 %141, %131, %128\n"
-                "  %143 = xor.v4i32 %140, %142\n"
-                "  %144 = vcmp.m8 %2, %4 gt lanes=f32\n"
-                "  %145 = vselect.v4f32 %144, %128, %129\n"
-                "  %146 = xor.v4i32 %143, %145\n"
-                "  %147 = vcmp.m8 %129, %4 ge lanes=f32\n"
-                "  %148 = vselect.v4f32 %147, %129, %130\n"
-                "  %149 = xor.v4i32 %146, %148\n"
-                "  %150 = xor.v4i32 %149, %128\n"
-                "  %151 = xor.v4i32 %150, %129\n"
-                "  %152 = xor.v4i32 %151, %130\n"
-                "  %153 = xor.v4i32 %152, %131\n"
-                "  %154 = fadd.v2f64 %2, %4\n"
-                "  %155 = fsub.v2f64 %2, %4\n"
-                "  %156 = fmul.v2f64 %2, %4\n"
-                "  %157 = fdiv.v2f64 %2, %4\n"
-                "  %158 = vcmp.m8 %2, %155 eq lanes=f64\n"
-                "  %159 = vselect.v2f64 %158, %154, %155\n"
-                "  %160 = xor.v4i32 %153, %159\n"
-                "  %161 = vcmp.m8 %155, %4 ne lanes=f64\n"
-                "  %162 = vselect.v2f64 %161, %155, %156\n"
-                "  %163 = xor.v4i32 %160, %162\n"
-                "  %164 = vcmp.m8 %2, %4 lt lanes=f64\n"
-                "  %165 = vselect.v2f64 %164, %156, %157\n"
-                "  %166 = xor.v4i32 %163, %165\n"
-                "  %167 = vcmp.m8 %157, %154 le lanes=f64\n"
-                "  %168 = vselect.v2f64 %167, %157, %154\n"
-                "  %169 = xor.v4i32 %166, %168\n"
-                "  %170 = vcmp.m8 %2, %4 gt lanes=f64\n"
-                "  %171 = vselect.v2f64 %170, %154, %155\n"
-                "  %172 = xor.v4i32 %169, %171\n"
-                "  %173 = vcmp.m8 %155, %4 ge lanes=f64\n"
-                "  %174 = vselect.v2f64 %173, %155, %156\n"
-                "  %175 = xor.v4i32 %172, %174\n"
-                "  %176 = xor.v4i32 %175, %154\n"
-                "  %177 = xor.v4i32 %176, %155\n"
-                "  %178 = xor.v4i32 %177, %156\n"
-                "  %179 = xor.v4i32 %178, %157\n"
-                "  %180 = address.ptr %0 offset=240\n"
-                "  %181 = store.void %180, %179 align=1\n"
-                "  %182 = address.ptr %0 offset=128\n"
-                "  %183 = store.void %182, %158 align=1\n"
-                "  %184 = address.ptr %0 offset=129\n"
-                "  %185 = store.void %184, %161 align=1\n"
-                "  %186 = address.ptr %0 offset=130\n"
-                "  %187 = store.void %186, %164 align=1\n"
-                "  %188 = address.ptr %0 offset=131\n"
-                "  %189 = store.void %188, %167 align=1\n"
-                "  %190 = address.ptr %0 offset=132\n"
-                "  %191 = store.void %190, %170 align=1\n"
-                "  %192 = address.ptr %0 offset=133\n"
-                "  %193 = store.void %192, %173 align=1\n"
-                "  %194 = ret.void\n"
-                "}\n",
-    },
-    {
-        .name = "32-byte vectors' lanes: 8-, 16- and 64-bit integers, floats and doubles (#141's element types)",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v8i32 %1 align=1\n"
-                "  %3 = address.ptr %0 offset=96\n"
-                "  %4 = load.v8i32 %3 align=1\n"
-                "  %5 = xor.v8i32 %2, %4\n"
-                "  %6 = add.v32i8 %2, %4\n"
-                "  %7 = sub.v32i8 %2, %4\n"
-                "  %8 = vcmp.m32 %2, %7 eq lanes=i8\n"
-                "  %9 = vselect.v32i8 %8, %6, %7\n"
-                "  %10 = xor.v8i32 %5, %9\n"
-                "  %11 = vcmp.m32 %7, %4 ne lanes=i8\n"
-                "  %12 = vselect.v32i8 %11, %7, %6\n"
-                "  %13 = xor.v8i32 %10, %12\n"
-                "  %14 = vcmp.m32 %2, %4 lt lanes=i8\n"
-                "  %15 = vselect.v32i8 %14, %6, %7\n"
-                "  %16 = xor.v8i32 %13, %15\n"
-                "  %17 = vcmp.m32 %7, %6 le lanes=i8\n"
-                "  %18 = vselect.v32i8 %17, %7, %6\n"
-                "  %19 = xor.v8i32 %16, %18\n"
-                "  %20 = vcmp.m32 %2, %4 gt lanes=i8\n"
-                "  %21 = vselect.v32i8 %20, %6, %7\n"
-                "  %22 = xor.v8i32 %19, %21\n"
-                "  %23 = vcmp.m32 %7, %4 ge lanes=i8\n"
-                "  %24 = vselect.v32i8 %23, %7, %6\n"
-                "  %25 = xor.v8i32 %22, %24\n"
-                "  %26 = vcmp.m32 %2, %7 ult lanes=i8\n"
-                "  %27 = vselect.v32i8 %26, %6, %7\n"
-                "  %28 = xor.v8i32 %25, %27\n"
-                "  %29 = vcmp.m32 %7, %4 ule lanes=i8\n"
-                "  %30 = vselect.v32i8 %29, %7, %6\n"
-                "  %31 = xor.v8i32 %28, %30\n"
-                "  %32 = vcmp.m32 %2, %4 ugt lanes=i8\n"
-                "  %33 = vselect.v32i8 %32, %6, %7\n"
-                "  %34 = xor.v8i32 %31, %33\n"
-                "  %35 = vcmp.m32 %7, %6 uge lanes=i8\n"
-                "  %36 = vselect.v32i8 %35, %7, %6\n"
-                "  %37 = xor.v8i32 %34, %36\n"
-                "  %38 = xor.v8i32 %37, %6\n"
-                "  %39 = xor.v8i32 %38, %7\n"
-                "  %40 = add.v16i16 %2, %4\n"
-                "  %41 = sub.v16i16 %2, %4\n"
-                "  %42 = mul.v16i16 %2, %4\n"
-                "  %43 = vconst.v8i32 0x001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f\n"
-                "  %44 = and.v8i32 %4, %43\n"
-                "  %45 = shl.v16i16 %2, %44\n"
-                "  %46 = lshr.v16i16 %2, %44\n"
-                "  %47 = ashr.v16i16 %2, %44\n"
-                "  %48 = vcmp.m16 %2, %41 eq lanes=i16\n"
-                "  %49 = vselect.v16i16 %48, %40, %41\n"
-                "  %50 = xor.v8i32 %39, %49\n"
-                "  %51 = vcmp.m16 %41, %4 ne lanes=i16\n"
-                "  %52 = vselect.v16i16 %51, %41, %42\n"
-                "  %53 = xor.v8i32 %50, %52\n"
-                "  %54 = vcmp.m16 %2, %4 lt lanes=i16\n"
-                "  %55 = vselect.v16i16 %54, %42, %45\n"
-                "  %56 = xor.v8i32 %53, %55\n"
-                "  %57 = vcmp.m16 %45, %46 le lanes=i16\n"
-                "  %58 = vselect.v16i16 %57, %45, %46\n"
-                "  %59 = xor.v8i32 %56, %58\n"
-                "  %60 = vcmp.m16 %2, %4 gt lanes=i16\n"
-                "  %61 = vselect.v16i16 %60, %46, %47\n"
-                "  %62 = xor.v8i32 %59, %61\n"
-                "  %63 = vcmp.m16 %47, %4 ge lanes=i16\n"
-                "  %64 = vselect.v16i16 %63, %47, %40\n"
-                "  %65 = xor.v8i32 %62, %64\n"
-                "  %66 = vcmp.m16 %2, %41 ult lanes=i16\n"
-                "  %67 = vselect.v16i16 %66, %40, %41\n"
-                "  %68 = xor.v8i32 %65, %67\n"
-                "  %69 = vcmp.m16 %41, %4 ule lanes=i16\n"
-                "  %70 = vselect.v16i16 %69, %41, %42\n"
-                "  %71 = xor.v8i32 %68, %70\n"
-                "  %72 = vcmp.m16 %2, %4 ugt lanes=i16\n"
-                "  %73 = vselect.v16i16 %72, %42, %45\n"
-                "  %74 = xor.v8i32 %71, %73\n"
-                "  %75 = vcmp.m16 %45, %46 uge lanes=i16\n"
-                "  %76 = vselect.v16i16 %75, %45, %46\n"
-                "  %77 = xor.v8i32 %74, %76\n"
-                "  %78 = xor.v8i32 %77, %40\n"
-                "  %79 = xor.v8i32 %78, %41\n"
-                "  %80 = xor.v8i32 %79, %42\n"
-                "  %81 = xor.v8i32 %80, %45\n"
-                "  %82 = xor.v8i32 %81, %46\n"
-                "  %83 = xor.v8i32 %82, %47\n"
-                "  %84 = add.v4i64 %2, %4\n"
-                "  %85 = sub.v4i64 %2, %4\n"
-                "  %86 = mul.v4i64 %2, %4\n"
-                "  %87 = vconst.v8i32 0x000000000000007f000000000000007f000000000000007f000000000000007f\n"
-                "  %88 = and.v8i32 %4, %87\n"
-                "  %89 = shl.v4i64 %2, %88\n"
-                "  %90 = lshr.v4i64 %2, %88\n"
-                "  %91 = ashr.v4i64 %2, %88\n"
-                "  %92 = vcmp.m8 %2, %85 eq lanes=i64\n"
-                "  %93 = vselect.v4i64 %92, %84, %85\n"
-                "  %94 = xor.v8i32 %83, %93\n"
-                "  %95 = vcmp.m8 %85, %4 ne lanes=i64\n"
-                "  %96 = vselect.v4i64 %95, %85, %86\n"
-                "  %97 = xor.v8i32 %94, %96\n"
-                "  %98 = vcmp.m8 %2, %4 lt lanes=i64\n"
-                "  %99 = vselect.v4i64 %98, %86, %89\n"
-                "  %100 = xor.v8i32 %97, %99\n"
-                "  %101 = vcmp.m8 %89, %90 le lanes=i64\n"
-                "  %102 = vselect.v4i64 %101, %89, %90\n"
-                "  %103 = xor.v8i32 %100, %102\n"
-                "  %104 = vcmp.m8 %2, %4 gt lanes=i64\n"
-                "  %105 = vselect.v4i64 %104, %90, %91\n"
-                "  %106 = xor.v8i32 %103, %105\n"
-                "  %107 = vcmp.m8 %91, %4 ge lanes=i64\n"
-                "  %108 = vselect.v4i64 %107, %91, %84\n"
-                "  %109 = xor.v8i32 %106, %108\n"
-                "  %110 = vcmp.m8 %2, %85 ult lanes=i64\n"
-                "  %111 = vselect.v4i64 %110, %84, %85\n"
-                "  %112 = xor.v8i32 %109, %111\n"
-                "  %113 = vcmp.m8 %85, %4 ule lanes=i64\n"
-                "  %114 = vselect.v4i64 %113, %85, %86\n"
-                "  %115 = xor.v8i32 %112, %114\n"
-                "  %116 = vcmp.m8 %2, %4 ugt lanes=i64\n"
-                "  %117 = vselect.v4i64 %116, %86, %89\n"
-                "  %118 = xor.v8i32 %115, %117\n"
-                "  %119 = vcmp.m8 %89, %90 uge lanes=i64\n"
-                "  %120 = vselect.v4i64 %119, %89, %90\n"
-                "  %121 = xor.v8i32 %118, %120\n"
-                "  %122 = xor.v8i32 %121, %84\n"
-                "  %123 = xor.v8i32 %122, %85\n"
-                "  %124 = xor.v8i32 %123, %86\n"
-                "  %125 = xor.v8i32 %124, %89\n"
-                "  %126 = xor.v8i32 %125, %90\n"
-                "  %127 = xor.v8i32 %126, %91\n"
-                "  %128 = fadd.v8f32 %2, %4\n"
-                "  %129 = fsub.v8f32 %2, %4\n"
-                "  %130 = fmul.v8f32 %2, %4\n"
-                "  %131 = fdiv.v8f32 %2, %4\n"
-                "  %132 = vcmp.m8 %2, %129 eq lanes=f32\n"
-                "  %133 = vselect.v8f32 %132, %128, %129\n"
-                "  %134 = xor.v8i32 %127, %133\n"
-                "  %135 = vcmp.m8 %129, %4 ne lanes=f32\n"
-                "  %136 = vselect.v8f32 %135, %129, %130\n"
-                "  %137 = xor.v8i32 %134, %136\n"
-                "  %138 = vcmp.m8 %2, %4 lt lanes=f32\n"
-                "  %139 = vselect.v8f32 %138, %130, %131\n"
-                "  %140 = xor.v8i32 %137, %139\n"
-                "  %141 = vcmp.m8 %131, %128 le lanes=f32\n"
-                "  %142 = vselect.v8f32 %141, %131, %128\n"
-                "  %143 = xor.v8i32 %140, %142\n"
-                "  %144 = vcmp.m8 %2, %4 gt lanes=f32\n"
-                "  %145 = vselect.v8f32 %144, %128, %129\n"
-                "  %146 = xor.v8i32 %143, %145\n"
-                "  %147 = vcmp.m8 %129, %4 ge lanes=f32\n"
-                "  %148 = vselect.v8f32 %147, %129, %130\n"
-                "  %149 = xor.v8i32 %146, %148\n"
-                "  %150 = xor.v8i32 %149, %128\n"
-                "  %151 = xor.v8i32 %150, %129\n"
-                "  %152 = xor.v8i32 %151, %130\n"
-                "  %153 = xor.v8i32 %152, %131\n"
-                "  %154 = fadd.v4f64 %2, %4\n"
-                "  %155 = fsub.v4f64 %2, %4\n"
-                "  %156 = fmul.v4f64 %2, %4\n"
-                "  %157 = fdiv.v4f64 %2, %4\n"
-                "  %158 = vcmp.m8 %2, %155 eq lanes=f64\n"
-                "  %159 = vselect.v4f64 %158, %154, %155\n"
-                "  %160 = xor.v8i32 %153, %159\n"
-                "  %161 = vcmp.m8 %155, %4 ne lanes=f64\n"
-                "  %162 = vselect.v4f64 %161, %155, %156\n"
-                "  %163 = xor.v8i32 %160, %162\n"
-                "  %164 = vcmp.m8 %2, %4 lt lanes=f64\n"
-                "  %165 = vselect.v4f64 %164, %156, %157\n"
-                "  %166 = xor.v8i32 %163, %165\n"
-                "  %167 = vcmp.m8 %157, %154 le lanes=f64\n"
-                "  %168 = vselect.v4f64 %167, %157, %154\n"
-                "  %169 = xor.v8i32 %166, %168\n"
-                "  %170 = vcmp.m8 %2, %4 gt lanes=f64\n"
-                "  %171 = vselect.v4f64 %170, %154, %155\n"
-                "  %172 = xor.v8i32 %169, %171\n"
-                "  %173 = vcmp.m8 %155, %4 ge lanes=f64\n"
-                "  %174 = vselect.v4f64 %173, %155, %156\n"
-                "  %175 = xor.v8i32 %172, %174\n"
-                "  %176 = xor.v8i32 %175, %154\n"
-                "  %177 = xor.v8i32 %176, %155\n"
-                "  %178 = xor.v8i32 %177, %156\n"
-                "  %179 = xor.v8i32 %178, %157\n"
-                "  %180 = address.ptr %0 offset=224\n"
-                "  %181 = store.void %180, %179 align=1\n"
-                "  %182 = address.ptr %0 offset=128\n"
-                "  %183 = store.void %182, %158 align=1\n"
-                "  %184 = address.ptr %0 offset=129\n"
-                "  %185 = store.void %184, %161 align=1\n"
-                "  %186 = address.ptr %0 offset=130\n"
-                "  %187 = store.void %186, %164 align=1\n"
-                "  %188 = address.ptr %0 offset=131\n"
-                "  %189 = store.void %188, %167 align=1\n"
-                "  %190 = address.ptr %0 offset=132\n"
-                "  %191 = store.void %190, %170 align=1\n"
-                "  %192 = address.ptr %0 offset=133\n"
-                "  %193 = store.void %192, %173 align=1\n"
-                "  %194 = ret.void\n"
-                "}\n",
-    },
-    {
-        .name = "64-byte vectors' lanes: 8-, 16- and 64-bit integers, floats and doubles (#141's element types)",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v16i32 %1 align=1\n"
-                "  %3 = address.ptr %0 offset=64\n"
-                "  %4 = load.v16i32 %3 align=1\n"
-                "  %5 = xor.v16i32 %2, %4\n"
-                "  %6 = add.v64i8 %2, %4\n"
-                "  %7 = sub.v64i8 %2, %4\n"
-                "  %8 = vcmp.m64 %2, %7 eq lanes=i8\n"
-                "  %9 = vselect.v64i8 %8, %6, %7\n"
-                "  %10 = xor.v16i32 %5, %9\n"
-                "  %11 = vcmp.m64 %7, %4 ne lanes=i8\n"
-                "  %12 = vselect.v64i8 %11, %7, %6\n"
-                "  %13 = xor.v16i32 %10, %12\n"
-                "  %14 = vcmp.m64 %2, %4 lt lanes=i8\n"
-                "  %15 = vselect.v64i8 %14, %6, %7\n"
-                "  %16 = xor.v16i32 %13, %15\n"
-                "  %17 = vcmp.m64 %7, %6 le lanes=i8\n"
-                "  %18 = vselect.v64i8 %17, %7, %6\n"
-                "  %19 = xor.v16i32 %16, %18\n"
-                "  %20 = vcmp.m64 %2, %4 gt lanes=i8\n"
-                "  %21 = vselect.v64i8 %20, %6, %7\n"
-                "  %22 = xor.v16i32 %19, %21\n"
-                "  %23 = vcmp.m64 %7, %4 ge lanes=i8\n"
-                "  %24 = vselect.v64i8 %23, %7, %6\n"
-                "  %25 = xor.v16i32 %22, %24\n"
-                "  %26 = vcmp.m64 %2, %7 ult lanes=i8\n"
-                "  %27 = vselect.v64i8 %26, %6, %7\n"
-                "  %28 = xor.v16i32 %25, %27\n"
-                "  %29 = vcmp.m64 %7, %4 ule lanes=i8\n"
-                "  %30 = vselect.v64i8 %29, %7, %6\n"
-                "  %31 = xor.v16i32 %28, %30\n"
-                "  %32 = vcmp.m64 %2, %4 ugt lanes=i8\n"
-                "  %33 = vselect.v64i8 %32, %6, %7\n"
-                "  %34 = xor.v16i32 %31, %33\n"
-                "  %35 = vcmp.m64 %7, %6 uge lanes=i8\n"
-                "  %36 = vselect.v64i8 %35, %7, %6\n"
-                "  %37 = xor.v16i32 %34, %36\n"
-                "  %38 = xor.v16i32 %37, %6\n"
-                "  %39 = xor.v16i32 %38, %7\n"
-                "  %40 = add.v32i16 %2, %4\n"
-                "  %41 = sub.v32i16 %2, %4\n"
-                "  %42 = mul.v32i16 %2, %4\n"
-                "  %43 = vconst.v16i32 0x001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f001f\n"
-                "  %44 = and.v16i32 %4, %43\n"
-                "  %45 = shl.v32i16 %2, %44\n"
-                "  %46 = lshr.v32i16 %2, %44\n"
-                "  %47 = ashr.v32i16 %2, %44\n"
-                "  %48 = vcmp.m32 %2, %41 eq lanes=i16\n"
-                "  %49 = vselect.v32i16 %48, %40, %41\n"
-                "  %50 = xor.v16i32 %39, %49\n"
-                "  %51 = vcmp.m32 %41, %4 ne lanes=i16\n"
-                "  %52 = vselect.v32i16 %51, %41, %42\n"
-                "  %53 = xor.v16i32 %50, %52\n"
-                "  %54 = vcmp.m32 %2, %4 lt lanes=i16\n"
-                "  %55 = vselect.v32i16 %54, %42, %45\n"
-                "  %56 = xor.v16i32 %53, %55\n"
-                "  %57 = vcmp.m32 %45, %46 le lanes=i16\n"
-                "  %58 = vselect.v32i16 %57, %45, %46\n"
-                "  %59 = xor.v16i32 %56, %58\n"
-                "  %60 = vcmp.m32 %2, %4 gt lanes=i16\n"
-                "  %61 = vselect.v32i16 %60, %46, %47\n"
-                "  %62 = xor.v16i32 %59, %61\n"
-                "  %63 = vcmp.m32 %47, %4 ge lanes=i16\n"
-                "  %64 = vselect.v32i16 %63, %47, %40\n"
-                "  %65 = xor.v16i32 %62, %64\n"
-                "  %66 = vcmp.m32 %2, %41 ult lanes=i16\n"
-                "  %67 = vselect.v32i16 %66, %40, %41\n"
-                "  %68 = xor.v16i32 %65, %67\n"
-                "  %69 = vcmp.m32 %41, %4 ule lanes=i16\n"
-                "  %70 = vselect.v32i16 %69, %41, %42\n"
-                "  %71 = xor.v16i32 %68, %70\n"
-                "  %72 = vcmp.m32 %2, %4 ugt lanes=i16\n"
-                "  %73 = vselect.v32i16 %72, %42, %45\n"
-                "  %74 = xor.v16i32 %71, %73\n"
-                "  %75 = vcmp.m32 %45, %46 uge lanes=i16\n"
-                "  %76 = vselect.v32i16 %75, %45, %46\n"
-                "  %77 = xor.v16i32 %74, %76\n"
-                "  %78 = xor.v16i32 %77, %40\n"
-                "  %79 = xor.v16i32 %78, %41\n"
-                "  %80 = xor.v16i32 %79, %42\n"
-                "  %81 = xor.v16i32 %80, %45\n"
-                "  %82 = xor.v16i32 %81, %46\n"
-                "  %83 = xor.v16i32 %82, %47\n"
-                "  %84 = add.v8i64 %2, %4\n"
-                "  %85 = sub.v8i64 %2, %4\n"
-                "  %86 = mul.v8i64 %2, %4\n"
-                "  %87 = vconst.v16i32 0x000000000000007f000000000000007f000000000000007f000000000000007f000000000000007f000000000000007f000000000000007f000000000000007f\n"
-                "  %88 = and.v16i32 %4, %87\n"
-                "  %89 = shl.v8i64 %2, %88\n"
-                "  %90 = lshr.v8i64 %2, %88\n"
-                "  %91 = ashr.v8i64 %2, %88\n"
-                "  %92 = vcmp.m8 %2, %85 eq lanes=i64\n"
-                "  %93 = vselect.v8i64 %92, %84, %85\n"
-                "  %94 = xor.v16i32 %83, %93\n"
-                "  %95 = vcmp.m8 %85, %4 ne lanes=i64\n"
-                "  %96 = vselect.v8i64 %95, %85, %86\n"
-                "  %97 = xor.v16i32 %94, %96\n"
-                "  %98 = vcmp.m8 %2, %4 lt lanes=i64\n"
-                "  %99 = vselect.v8i64 %98, %86, %89\n"
-                "  %100 = xor.v16i32 %97, %99\n"
-                "  %101 = vcmp.m8 %89, %90 le lanes=i64\n"
-                "  %102 = vselect.v8i64 %101, %89, %90\n"
-                "  %103 = xor.v16i32 %100, %102\n"
-                "  %104 = vcmp.m8 %2, %4 gt lanes=i64\n"
-                "  %105 = vselect.v8i64 %104, %90, %91\n"
-                "  %106 = xor.v16i32 %103, %105\n"
-                "  %107 = vcmp.m8 %91, %4 ge lanes=i64\n"
-                "  %108 = vselect.v8i64 %107, %91, %84\n"
-                "  %109 = xor.v16i32 %106, %108\n"
-                "  %110 = vcmp.m8 %2, %85 ult lanes=i64\n"
-                "  %111 = vselect.v8i64 %110, %84, %85\n"
-                "  %112 = xor.v16i32 %109, %111\n"
-                "  %113 = vcmp.m8 %85, %4 ule lanes=i64\n"
-                "  %114 = vselect.v8i64 %113, %85, %86\n"
-                "  %115 = xor.v16i32 %112, %114\n"
-                "  %116 = vcmp.m8 %2, %4 ugt lanes=i64\n"
-                "  %117 = vselect.v8i64 %116, %86, %89\n"
-                "  %118 = xor.v16i32 %115, %117\n"
-                "  %119 = vcmp.m8 %89, %90 uge lanes=i64\n"
-                "  %120 = vselect.v8i64 %119, %89, %90\n"
-                "  %121 = xor.v16i32 %118, %120\n"
-                "  %122 = xor.v16i32 %121, %84\n"
-                "  %123 = xor.v16i32 %122, %85\n"
-                "  %124 = xor.v16i32 %123, %86\n"
-                "  %125 = xor.v16i32 %124, %89\n"
-                "  %126 = xor.v16i32 %125, %90\n"
-                "  %127 = xor.v16i32 %126, %91\n"
-                "  %128 = fadd.v16f32 %2, %4\n"
-                "  %129 = fsub.v16f32 %2, %4\n"
-                "  %130 = fmul.v16f32 %2, %4\n"
-                "  %131 = fdiv.v16f32 %2, %4\n"
-                "  %132 = vcmp.m16 %2, %129 eq lanes=f32\n"
-                "  %133 = vselect.v16f32 %132, %128, %129\n"
-                "  %134 = xor.v16i32 %127, %133\n"
-                "  %135 = vcmp.m16 %129, %4 ne lanes=f32\n"
-                "  %136 = vselect.v16f32 %135, %129, %130\n"
-                "  %137 = xor.v16i32 %134, %136\n"
-                "  %138 = vcmp.m16 %2, %4 lt lanes=f32\n"
-                "  %139 = vselect.v16f32 %138, %130, %131\n"
-                "  %140 = xor.v16i32 %137, %139\n"
-                "  %141 = vcmp.m16 %131, %128 le lanes=f32\n"
-                "  %142 = vselect.v16f32 %141, %131, %128\n"
-                "  %143 = xor.v16i32 %140, %142\n"
-                "  %144 = vcmp.m16 %2, %4 gt lanes=f32\n"
-                "  %145 = vselect.v16f32 %144, %128, %129\n"
-                "  %146 = xor.v16i32 %143, %145\n"
-                "  %147 = vcmp.m16 %129, %4 ge lanes=f32\n"
-                "  %148 = vselect.v16f32 %147, %129, %130\n"
-                "  %149 = xor.v16i32 %146, %148\n"
-                "  %150 = xor.v16i32 %149, %128\n"
-                "  %151 = xor.v16i32 %150, %129\n"
-                "  %152 = xor.v16i32 %151, %130\n"
-                "  %153 = xor.v16i32 %152, %131\n"
-                "  %154 = fadd.v8f64 %2, %4\n"
-                "  %155 = fsub.v8f64 %2, %4\n"
-                "  %156 = fmul.v8f64 %2, %4\n"
-                "  %157 = fdiv.v8f64 %2, %4\n"
-                "  %158 = vcmp.m8 %2, %155 eq lanes=f64\n"
-                "  %159 = vselect.v8f64 %158, %154, %155\n"
-                "  %160 = xor.v16i32 %153, %159\n"
-                "  %161 = vcmp.m8 %155, %4 ne lanes=f64\n"
-                "  %162 = vselect.v8f64 %161, %155, %156\n"
-                "  %163 = xor.v16i32 %160, %162\n"
-                "  %164 = vcmp.m8 %2, %4 lt lanes=f64\n"
-                "  %165 = vselect.v8f64 %164, %156, %157\n"
-                "  %166 = xor.v16i32 %163, %165\n"
-                "  %167 = vcmp.m8 %157, %154 le lanes=f64\n"
-                "  %168 = vselect.v8f64 %167, %157, %154\n"
-                "  %169 = xor.v16i32 %166, %168\n"
-                "  %170 = vcmp.m8 %2, %4 gt lanes=f64\n"
-                "  %171 = vselect.v8f64 %170, %154, %155\n"
-                "  %172 = xor.v16i32 %169, %171\n"
-                "  %173 = vcmp.m8 %155, %4 ge lanes=f64\n"
-                "  %174 = vselect.v8f64 %173, %155, %156\n"
-                "  %175 = xor.v16i32 %172, %174\n"
-                "  %176 = xor.v16i32 %175, %154\n"
-                "  %177 = xor.v16i32 %176, %155\n"
-                "  %178 = xor.v16i32 %177, %156\n"
-                "  %179 = xor.v16i32 %178, %157\n"
-                "  %180 = address.ptr %0 offset=192\n"
-                "  %181 = store.void %180, %179 align=1\n"
-                "  %182 = address.ptr %0 offset=128\n"
-                "  %183 = store.void %182, %158 align=1\n"
-                "  %184 = address.ptr %0 offset=129\n"
-                "  %185 = store.void %184, %161 align=1\n"
-                "  %186 = address.ptr %0 offset=130\n"
-                "  %187 = store.void %186, %164 align=1\n"
-                "  %188 = address.ptr %0 offset=131\n"
-                "  %189 = store.void %188, %167 align=1\n"
-                "  %190 = address.ptr %0 offset=132\n"
-                "  %191 = store.void %190, %170 align=1\n"
-                "  %192 = address.ptr %0 offset=133\n"
-                "  %193 = store.void %192, %173 align=1\n"
-                "  %194 = ret.void\n"
-                "}\n",
-    },
-    // The SSE targets' vectors (#141): 16-byte vectors' integer arithmetic of each lane width and the bitwise operations
-    // in every operand order (the destination the left operand, the right one or neither: the two-operand expansion's
-    // copies, and xmm15's for a subtraction into its right operand), floats' and doubles' arithmetic, a floating
-    // subtraction and division into their right operand's register, and constants, by legacy SSE's forms; at x86-64-v2
-    // with SSE4.1's pmulld, at the baseline without it. Generated by a script, kept as text.
-    {
-        .name = "16-byte vectors' lanes by legacy SSE's forms at x86-64-v2 (#141's SSE targets)",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v4i32 %1 align=1\n"
-                "  %3 = address.ptr %0 offset=16\n"
-                "  %4 = load.v4i32 %3 align=1\n"
-                "  %5 = address.ptr %0 offset=32\n"
-                "  %6 = load.v4i32 %5 align=1\n"
-                "  %7 = address.ptr %0 offset=48\n"
-                "  %8 = load.v4i32 %7 align=1\n"
-                "  %9 = vconst.v4i32 0x00000000000000000000000000000000\n"
-                "  %10 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
-                "  %11 = vconst.v4i32 0x12345679123456791234567912345679\n"
-                "  %12 = vconst.v4i32 0xdaa66d2b3c6ef3729e3779b900000000\n"
-                "  %13 = xor.v4i32 %2, %12\n"
-                "  %14 = add.v4i32 %13, %11\n"
-                "  %15 = add.v16i8 %14, %4\n"
-                "  %16 = xor.v4i32 %14, %15\n"
-                "  %17 = sub.v16i8 %15, %16\n"
-                "  %18 = xor.v4i32 %16, %17\n"
-                "  %19 = add.v8i16 %2, %6\n"
-                "  %20 = xor.v4i32 %18, %19\n"
-                "  %21 = sub.v8i16 %20, %19\n"
-                "  %22 = xor.v4i32 %20, %21\n"
-                "  %23 = mul.v8i16 %21, %22\n"
-                "  %24 = xor.v4i32 %22, %23\n"
-                "  %25 = add.v4i32 %2, %6\n"
-                "  %26 = xor.v4i32 %24, %25\n"
-                "  %27 = sub.v4i32 %26, %25\n"
-                "  %28 = xor.v4i32 %26, %27\n"
-                "  %29 = add.v2i64 %27, %28\n"
-                "  %30 = xor.v4i32 %28, %29\n"
-                "  %31 = sub.v2i64 %2, %6\n"
-                "  %32 = xor.v4i32 %30, %31\n"
-                "  %33 = and.v4i32 %32, %31\n"
-                "  %34 = xor.v4i32 %32, %33\n"
-                "  %35 = or.v4i32 %33, %34\n"
-                "  %36 = xor.v4i32 %34, %35\n"
-                "  %37 = xor.v4i32 %2, %6\n"
-                "  %38 = xor.v4i32 %36, %37\n"
-                "  %39 = mul.v4i32 %38, %37\n"
-                "  %40 = xor.v4i32 %38, %39\n"
-                "  %41 = fadd.v4f32 %6, %8\n"
-                "  %42 = fadd.v2f64 %6, %8\n"
-                "  %43 = fsub.v4f32 %8, %6\n"
-                "  %44 = fsub.v2f64 %8, %6\n"
-                "  %45 = fmul.v4f32 %6, %8\n"
-                "  %46 = fmul.v2f64 %6, %8\n"
-                "  %47 = fdiv.v4f32 %6, %8\n"
-                "  %48 = fdiv.v2f64 %6, %8\n"
-                "  %49 = fsub.v4f32 %41, %42\n"
-                "  %50 = fdiv.v2f64 %49, %41\n"
-                "  %51 = xor.v4i32 %40, %41\n"
-                "  %52 = xor.v4i32 %51, %42\n"
-                "  %53 = xor.v4i32 %52, %43\n"
-                "  %54 = xor.v4i32 %53, %44\n"
-                "  %55 = xor.v4i32 %54, %45\n"
-                "  %56 = xor.v4i32 %55, %46\n"
-                "  %57 = xor.v4i32 %56, %47\n"
-                "  %58 = xor.v4i32 %57, %48\n"
-                "  %59 = xor.v4i32 %58, %49\n"
-                "  %60 = xor.v4i32 %59, %50\n"
-                "  %61 = or.v4i32 %60, %9\n"
-                "  %62 = and.v4i32 %61, %10\n"
-                "  %63 = address.ptr %0 offset=128\n"
-                "  %64 = store.void %63, %62 align=1\n"
-                "  %65 = address.ptr %0 offset=144\n"
-                "  %66 = store.void %65, %39 align=1\n"
-                "  %67 = ret.void\n"
-                "}\n",
-        .v2 = true,
-    },
-    {
-        .name = "16-byte vectors' lanes by legacy SSE's forms at the x86-64 baseline (#141's SSE targets)",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v4i32 %1 align=1\n"
-                "  %3 = address.ptr %0 offset=16\n"
-                "  %4 = load.v4i32 %3 align=1\n"
-                "  %5 = address.ptr %0 offset=32\n"
-                "  %6 = load.v4i32 %5 align=1\n"
-                "  %7 = address.ptr %0 offset=48\n"
-                "  %8 = load.v4i32 %7 align=1\n"
-                "  %9 = vconst.v4i32 0x00000000000000000000000000000000\n"
-                "  %10 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
-                "  %11 = vconst.v4i32 0x12345679123456791234567912345679\n"
-                "  %12 = vconst.v4i32 0xdaa66d2b3c6ef3729e3779b900000000\n"
-                "  %13 = xor.v4i32 %2, %12\n"
-                "  %14 = add.v4i32 %13, %11\n"
-                "  %15 = add.v16i8 %14, %4\n"
-                "  %16 = xor.v4i32 %14, %15\n"
-                "  %17 = sub.v16i8 %15, %16\n"
-                "  %18 = xor.v4i32 %16, %17\n"
-                "  %19 = add.v8i16 %2, %6\n"
-                "  %20 = xor.v4i32 %18, %19\n"
-                "  %21 = sub.v8i16 %20, %19\n"
-                "  %22 = xor.v4i32 %20, %21\n"
-                "  %23 = mul.v8i16 %21, %22\n"
-                "  %24 = xor.v4i32 %22, %23\n"
-                "  %25 = add.v4i32 %2, %6\n"
-                "  %26 = xor.v4i32 %24, %25\n"
-                "  %27 = sub.v4i32 %26, %25\n"
-                "  %28 = xor.v4i32 %26, %27\n"
-                "  %29 = add.v2i64 %27, %28\n"
-                "  %30 = xor.v4i32 %28, %29\n"
-                "  %31 = sub.v2i64 %2, %6\n"
-                "  %32 = xor.v4i32 %30, %31\n"
-                "  %33 = and.v4i32 %32, %31\n"
-                "  %34 = xor.v4i32 %32, %33\n"
-                "  %35 = or.v4i32 %33, %34\n"
-                "  %36 = xor.v4i32 %34, %35\n"
-                "  %37 = xor.v4i32 %2, %6\n"
-                "  %38 = xor.v4i32 %36, %37\n"
-                "  %39 = fadd.v4f32 %6, %8\n"
-                "  %40 = fadd.v2f64 %6, %8\n"
-                "  %41 = fsub.v4f32 %8, %6\n"
-                "  %42 = fsub.v2f64 %8, %6\n"
-                "  %43 = fmul.v4f32 %6, %8\n"
-                "  %44 = fmul.v2f64 %6, %8\n"
-                "  %45 = fdiv.v4f32 %6, %8\n"
-                "  %46 = fdiv.v2f64 %6, %8\n"
-                "  %47 = fsub.v4f32 %39, %40\n"
-                "  %48 = fdiv.v2f64 %47, %39\n"
-                "  %49 = xor.v4i32 %38, %39\n"
-                "  %50 = xor.v4i32 %49, %40\n"
-                "  %51 = xor.v4i32 %50, %41\n"
-                "  %52 = xor.v4i32 %51, %42\n"
-                "  %53 = xor.v4i32 %52, %43\n"
-                "  %54 = xor.v4i32 %53, %44\n"
-                "  %55 = xor.v4i32 %54, %45\n"
-                "  %56 = xor.v4i32 %55, %46\n"
-                "  %57 = xor.v4i32 %56, %47\n"
-                "  %58 = xor.v4i32 %57, %48\n"
-                "  %59 = or.v4i32 %58, %9\n"
-                "  %60 = and.v4i32 %59, %10\n"
-                "  %61 = address.ptr %0 offset=128\n"
-                "  %62 = store.void %61, %60 align=1\n"
-                "  %63 = address.ptr %0 offset=144\n"
-                "  %64 = store.void %63, %37 align=1\n"
-                "  %65 = ret.void\n"
-                "}\n",
-        .baseline = true,
-    },
-    {
-        // A complement into another register (%2 stays live) and in place (%6 dies), #1425's review.
-        .name = "a 16-byte vector's complement at the x86-64 baseline, apart and in place (#1425's review)",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v4i32 %1 align=1\n"
-                "  %3 = address.ptr %0 offset=16\n"
-                "  %4 = load.v4i32 %3 align=1\n"
-                "  %5 = not.v4i32 %2\n"
-                "  %6 = add.v4i32 %5, %4\n"
-                "  %7 = not.v4i32 %6\n"
-                "  %8 = xor.v4i32 %7, %2\n"
-                "  %9 = address.ptr %0 offset=128\n"
-                "  %10 = store.void %9, %8 align=1\n"
-                "  %11 = address.ptr %0 offset=144\n"
-                "  %12 = store.void %11, %5 align=1\n"
-                "  %13 = ret.void\n"
-                "}\n",
-        .baseline = true,
-    },
-    {
-        .name = "vector constants: zeros, every bit, a splat and others",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v4i32 %1 align=1\n"
-                "  %3 = vconst.v4i32 0x00000000000000000000000000000000\n"
-                "  %4 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
-                "  %5 = vconst.v4i32 0x12345679123456791234567912345679\n"
-                "  %6 = vconst.v4i32 0xdaa66d2b3c6ef3729e3779b900000000\n"
-                "  %7 = vconst.v4i32 0x00000000fffffffffffffffefffffffd\n"
-                "  %8 = add.v4i32 %2, %5\n"
-                "  %9 = xor.v4i32 %8, %6\n"
-                "  %10 = sub.v4i32 %9, %7\n"
-                "  %11 = vcmp.m8 %10, %3 ne\n"
-                "  %12 = vselect.v4i32 %11, %10, %4\n"
-                "  %13 = undef.v4i32\n"
-                "  %14 = or.v4i32 %12, %3\n"
-                "  %15 = address.ptr %0 offset=128\n"
-                "  %16 = store.void %15, %14 align=1\n"
-                "  %17 = address.ptr %0 offset=32\n"
-                "  %18 = load.v8i32 %17 align=1\n"
-                "  %19 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000\n"
-                "  %20 = vconst.v8i32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"
-                "  %21 = vconst.v8i32 0x1234567a1234567a1234567a1234567a1234567a1234567a1234567a1234567a\n"
-                "  %22 = vconst.v8i32 0x53845410b54cda571715609e78dde6e5daa66d2c3c6ef3739e3779ba00000001\n"
-                "  %23 = vconst.v8i32 0x0000000400000003000000020000000100000000fffffffffffffffefffffffd\n"
-                "  %24 = add.v8i32 %18, %21\n"
-                "  %25 = xor.v8i32 %24, %22\n"
-                "  %26 = sub.v8i32 %25, %23\n"
-                "  %27 = vcmp.m8 %26, %19 ne\n"
-                "  %28 = vselect.v8i32 %27, %26, %20\n"
-                "  %29 = undef.v8i32\n"
-                "  %30 = or.v8i32 %28, %19\n"
-                "  %31 = address.ptr %0 offset=144\n"
-                "  %32 = store.void %31, %30 align=1\n"
-                "  %33 = address.ptr %0 offset=0\n"
-                "  %34 = load.v16i32 %33 align=1\n"
-                "  %35 = vconst.v16i32 0x00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000\n"
-                "  %36 = vconst.v16i32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"
-                "  %37 = vconst.v16i32 0x1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b1234567b\n"
-                "  %38 = vconst.v16i32 0x454021d9a708a82008d12e676a99b4aecc623af52e2ac13c8ff34783f1bbcdca53845411b54cda581715609f78dde6e6daa66d2d3c6ef3749e3779bb00000002\n"
-                "  %39 = vconst.v16i32 0x0000000c0000000b0000000a00000009000000080000000700000006000000050000000400000003000000020000000100000000fffffffffffffffefffffffd\n"
-                "  %40 = add.v16i32 %34, %37\n"
-                "  %41 = xor.v16i32 %40, %38\n"
-                "  %42 = sub.v16i32 %41, %39\n"
-                "  %43 = vcmp.m16 %42, %35 ne\n"
-                "  %44 = vselect.v16i32 %43, %42, %36\n"
-                "  %45 = undef.v16i32\n"
-                "  %46 = or.v16i32 %44, %35\n"
-                "  %47 = address.ptr %0 offset=176\n"
-                "  %48 = store.void %47, %46 align=1\n"
-                "  %49 = ret.void\n"
-                "}\n",
-    },
-    {
-        .name = "a loop whose vector phis swap",
-        .text = "function (ptr, i64) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = load.v8i32 %0 align=1\n"
-                "  %3 = address.ptr %0 offset=32\n"
-                "  %4 = load.v8i32 %3 align=1\n"
-                "  %5 = address.ptr %0 offset=64\n"
-                "  %6 = load.v16i32 %5 align=1\n"
-                "  %7 = const.i64 0x00000000000000000000000000000000\n"
-                "  %8 = br.void b1\n"
-                "b1:\n"
-                "  %9 = phi.v8i32 [%2, b0], [%10, b1]\n"
-                "  %10 = phi.v8i32 [%4, b0], [%9, b1]\n"
-                "  %11 = phi.v16i32 [%6, b0], [%15, b1]\n"
-                "  %12 = phi.i64 [%7, b0], [%17, b1]\n"
-                "  %13 = address.ptr %0 + %12 * 4 offset=0\n"
-                "  %14 = load.v16i32 %13 align=4\n"
-                "  %15 = add.v16i32 %11, %14\n"
-                "  %16 = const.i64 0x00000000000000000000000000000001\n"
-                "  %17 = add.i64 %12, %16\n"
-                "  %18 = icmp.i1 %17, %1 ult\n"
-                "  %19 = cbr.void %18, b1, b2\n"
-                "b2:\n"
-                "  %20 = address.ptr %0 offset=128\n"
-                "  %21 = store.void %20, %9 align=1\n"
-                "  %22 = address.ptr %0 offset=160\n"
-                "  %23 = store.void %22, %10 align=1\n"
-                "  %24 = address.ptr %0 offset=192\n"
-                "  %25 = store.void %24, %15 align=1\n"
-                "  %26 = ret.void\n"
-                "}\n",
-        .count = 16,
-        .vector_cycle = true,
-    },
-    {
-        .name = "more vectors than xmm0 to xmm14",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v16i32 %1 align=4\n"
-                "  %3 = address.ptr %0 offset=4\n"
-                "  %4 = load.v16i32 %3 align=4\n"
-                "  %5 = address.ptr %0 offset=8\n"
-                "  %6 = load.v16i32 %5 align=4\n"
-                "  %7 = address.ptr %0 offset=12\n"
-                "  %8 = load.v16i32 %7 align=4\n"
-                "  %9 = address.ptr %0 offset=16\n"
-                "  %10 = load.v16i32 %9 align=4\n"
-                "  %11 = address.ptr %0 offset=20\n"
-                "  %12 = load.v16i32 %11 align=4\n"
-                "  %13 = address.ptr %0 offset=24\n"
-                "  %14 = load.v16i32 %13 align=4\n"
-                "  %15 = address.ptr %0 offset=28\n"
-                "  %16 = load.v16i32 %15 align=4\n"
-                "  %17 = address.ptr %0 offset=32\n"
-                "  %18 = load.v16i32 %17 align=4\n"
-                "  %19 = address.ptr %0 offset=36\n"
-                "  %20 = load.v16i32 %19 align=4\n"
-                "  %21 = address.ptr %0 offset=40\n"
-                "  %22 = load.v16i32 %21 align=4\n"
-                "  %23 = address.ptr %0 offset=44\n"
-                "  %24 = load.v16i32 %23 align=4\n"
-                "  %25 = address.ptr %0 offset=48\n"
-                "  %26 = load.v16i32 %25 align=4\n"
-                "  %27 = address.ptr %0 offset=52\n"
-                "  %28 = load.v16i32 %27 align=4\n"
-                "  %29 = address.ptr %0 offset=56\n"
-                "  %30 = load.v16i32 %29 align=4\n"
-                "  %31 = address.ptr %0 offset=60\n"
-                "  %32 = load.v16i32 %31 align=4\n"
-                "  %33 = address.ptr %0 offset=0\n"
-                "  %34 = load.v16i32 %33 align=4\n"
-                "  %35 = address.ptr %0 offset=4\n"
-                "  %36 = load.v16i32 %35 align=4\n"
-                "  %37 = xor.v16i32 %2, %34\n"
-                "  %38 = sub.v16i32 %37, %32\n"
-                "  %39 = mul.v16i32 %38, %30\n"
-                "  %40 = add.v16i32 %39, %28\n"
-                "  %41 = xor.v16i32 %40, %26\n"
-                "  %42 = sub.v16i32 %41, %24\n"
-                "  %43 = mul.v16i32 %42, %22\n"
-                "  %44 = add.v16i32 %43, %20\n"
-                "  %45 = xor.v16i32 %44, %18\n"
-                "  %46 = sub.v16i32 %45, %16\n"
-                "  %47 = mul.v16i32 %46, %14\n"
-                "  %48 = add.v16i32 %47, %12\n"
-                "  %49 = xor.v16i32 %48, %10\n"
-                "  %50 = sub.v16i32 %49, %8\n"
-                "  %51 = mul.v16i32 %50, %6\n"
-                "  %52 = add.v16i32 %51, %4\n"
-                "  %53 = xor.v16i32 %52, %2\n"
-                "  %54 = xor.v16i32 %36, %34\n"
-                "  %55 = add.v16i32 %54, %32\n"
-                "  %56 = xor.v16i32 %55, %30\n"
-                "  %57 = add.v16i32 %56, %28\n"
-                "  %58 = xor.v16i32 %57, %26\n"
-                "  %59 = add.v16i32 %58, %24\n"
-                "  %60 = xor.v16i32 %59, %22\n"
-                "  %61 = add.v16i32 %60, %20\n"
-                "  %62 = xor.v16i32 %61, %18\n"
-                "  %63 = add.v16i32 %62, %16\n"
-                "  %64 = xor.v16i32 %63, %14\n"
-                "  %65 = add.v16i32 %64, %12\n"
-                "  %66 = xor.v16i32 %65, %10\n"
-                "  %67 = add.v16i32 %66, %8\n"
-                "  %68 = xor.v16i32 %67, %6\n"
-                "  %69 = add.v16i32 %68, %4\n"
-                "  %70 = xor.v16i32 %69, %2\n"
-                "  %71 = address.ptr %0 offset=128\n"
-                "  %72 = store.void %71, %53 align=1\n"
-                "  %73 = address.ptr %0 offset=192\n"
-                "  %74 = store.void %73, %70 align=1\n"
-                "  %75 = ret.void\n"
-                "}\n",
-        .spills = true,
-    },
-    {
-        .name = "vectors across calls",
-        .text = "function (ptr, i64) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = load.v16i32 %0 align=1\n"
-                "  %3 = address.ptr %0 offset=16\n"
-                "  %4 = load.v4i32 %3 align=1\n"
-                "  %5 = address.ptr %0 offset=32\n"
-                "  %6 = load.v8i32 %5 align=1\n"
-                "  %7 = call.i64 @9(%1) fixed=(i64) variadic=0\n"
-                "  %8 = add.v16i32 %2, %2\n"
-                "  %9 = call.i64 @9(%7) fixed=(i64) variadic=0\n"
-                "  %10 = not.v4i32 %4\n"
-                "  %11 = xor.v8i32 %6, %6\n"
-                "  %12 = sub.v8i32 %11, %6\n"
-                "  %13 = address.ptr %0 offset=128\n"
-                "  %14 = store.void %13, %8 align=1\n"
-                "  %15 = address.ptr %0 offset=192\n"
-                "  %16 = store.void %15, %10 align=1\n"
-                "  %17 = address.ptr %0 offset=208\n"
-                "  %18 = store.void %17, %12 align=1\n"
-                "  %19 = address.ptr %0 offset=240\n"
-                "  %20 = store.void %19, %9 align=8\n"
-                "  %21 = ret.void\n"
-                "}\n",
-        .count = 1000,
-        .calls = true,
-    },
-    {
-        // #141: machine rows beside seven word masks live in k1 to k7 across them: one naming k1 and k2 by number and one
-        // taking a mask scratch register, both of which borrow live masks' registers; and rows reading their result as
-        // their first operand, as Tier 0 places them, and a row of no records, its result its operand.
-        .name = "machine rows under opmask pressure",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (u32) -> u32 [KMOVW_K_R32 0x01 0x00 0x80 0x00 0x00 0x00 0 0] [KNOTW_K_K 0x02 0x00 0x01 0x00 0x00 0x00 0 0] [KMOVW_R32_K 0x90 0x00 0x02 0x00 0x00 0x00 0 0]\n"
-                "  row #1 (mask2, mask2) -> mask2 [KANDW_K_K_K 0xa0 0x80 0x81 0x00 0x00 0x00 0 0] [KXORW_K_K_K 0x90 0xa0 0x90 0x00 0x00 0x00 0 0]\n"
-                "  row #2 (u32, u32) -> u32 [ADD_R32_RM32 0x90 0x00 0x81 0x00 0x00 0x00 0 0]\n"
-                "  row #3 (u32) -> u32\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.m16 %0 align=2\n"
-                "  %2 = address.ptr %0 offset=2\n"
-                "  %3 = load.m16 %2 align=2\n"
-                "  %4 = address.ptr %0 offset=4\n"
-                "  %5 = load.m16 %4 align=2\n"
-                "  %6 = address.ptr %0 offset=6\n"
-                "  %7 = load.m16 %6 align=2\n"
-                "  %8 = address.ptr %0 offset=8\n"
-                "  %9 = load.m16 %8 align=2\n"
-                "  %10 = address.ptr %0 offset=10\n"
-                "  %11 = load.m16 %10 align=2\n"
-                "  %12 = address.ptr %0 offset=12\n"
-                "  %13 = load.m16 %12 align=2\n"
-                "  %14 = address.ptr %0 offset=16\n"
-                "  %15 = load.i32 %14 align=4\n"
-                "  %16 = address.ptr %0 offset=20\n"
-                "  %17 = load.i32 %16 align=4\n"
-                "  %18 = call.i32 row #0(%15) fixed=(i32) variadic=0\n"
-                "  %19 = call.m16 row #1(%1, %3) fixed=(m16, m16) variadic=0\n"
-                "  %20 = call.i32 row #2(%15, %17) fixed=(i32, i32) variadic=0\n"
-                "  %21 = call.i32 row #3(%17) fixed=(i32) variadic=0\n"
-                "  %22 = address.ptr %0 offset=128\n"
-                "  %23 = store.void %22, %1 align=2\n"
-                "  %24 = address.ptr %0 offset=130\n"
-                "  %25 = store.void %24, %3 align=2\n"
-                "  %26 = address.ptr %0 offset=132\n"
-                "  %27 = store.void %26, %5 align=2\n"
-                "  %28 = address.ptr %0 offset=134\n"
-                "  %29 = store.void %28, %7 align=2\n"
-                "  %30 = address.ptr %0 offset=136\n"
-                "  %31 = store.void %30, %9 align=2\n"
-                "  %32 = address.ptr %0 offset=138\n"
-                "  %33 = store.void %32, %11 align=2\n"
-                "  %34 = address.ptr %0 offset=140\n"
-                "  %35 = store.void %34, %13 align=2\n"
-                "  %36 = address.ptr %0 offset=160\n"
-                "  %37 = store.void %36, %18 align=4\n"
-                "  %38 = address.ptr %0 offset=164\n"
-                "  %39 = store.void %38, %19 align=2\n"
-                "  %40 = address.ptr %0 offset=168\n"
-                "  %41 = store.void %40, %20 align=4\n"
-                "  %42 = address.ptr %0 offset=172\n"
-                "  %43 = store.void %42, %21 align=4\n"
-                "  %44 = ret.void\n"
-                "}\n",
-        .borrows = true,
-        .model = tier1_masks_test_rows_model,
-    },
-    {
-        // #141: a floating row of an EVEX form, its floating roles in zmm16 and on, its result read as its first operand.
-        .name = "a floating machine row",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128_EVEX 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.f32 %0 align=4\n"
-                "  %2 = address.ptr %0 offset=4\n"
-                "  %3 = load.f32 %2 align=4\n"
-                "  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0\n"
-                "  %5 = address.ptr %0 offset=128\n"
-                "  %6 = store.void %5, %4 align=4\n"
-                "  %7 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_floating_model,
-    },
-    {
-        // #1281: its VEX twin, whose floating roles only registers below 16 can be: its result in its destination, read
-        // as its first operand.
-        .name = "a floating machine row of a VEX form",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.f32 %0 align=4\n"
-                "  %2 = address.ptr %0 offset=4\n"
-                "  %3 = load.f32 %2 align=4\n"
-                "  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0\n"
-                "  %5 = address.ptr %0 offset=128\n"
-                "  %6 = store.void %5, %4 align=4\n"
-                "  %7 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_floating_model,
-    },
-    {
-        // #1281: the same at a target without AVX-512, its copies movaps.
-        .name = "a floating machine row of a VEX form at x86-64-v3",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.f32 %0 align=4\n"
-                "  %2 = address.ptr %0 offset=4\n"
-                "  %3 = load.f32 %2 align=4\n"
-                "  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0\n"
-                "  %5 = address.ptr %0 offset=128\n"
-                "  %6 = store.void %5, %4 align=4\n"
-                "  %7 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_floating_model,
-        .v3 = true,
-    },
-    {
-        // #1281: machine rows at a target without AVX-512, their vector roles in free registers below 16 and
-        // their floating ones below 16 too: a VEX row of 32-byte vectors, x live past it; a floating row whose result is
-        // read as its first operand, and one that writes its second floating operand, a and b live past both; and a
-        // 16-byte vector's row. Its vectors move, spill and compute by VEX forms.
-        .name = "machine rows at x86-64-v3",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (vector32, vector32) -> vector32 [VPADDB_Y_Y_YM256 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
-                "  row #1 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]\n"
-                "  row #2 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xa1 0xa1 0xa0 0x00 0x00 0x00 0 0] [VPXOR_X_X_XM128 0xb0 0xa1 0xb0 0x00 0x00 0x00 0 0]\n"
-                "  row #3 (vector16) -> vector16 [VPSHUFD_X_XM128_IMM8 0x80 0x00 0x80 0x00 0x00 0x00 27 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.v8i32 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=32\n"
-                "  %3 = load.v8i32 %2 align=1\n"
-                "  %4 = call.v8i32 row #0(%1, %3) fixed=(v8i32, v8i32) variadic=0\n"
-                "  %5 = add.v8i32 %4, %1\n"
-                "  %6 = address.ptr %0 offset=96\n"
-                "  %7 = load.f32 %6 align=4\n"
-                "  %8 = address.ptr %0 offset=100\n"
-                "  %9 = load.f32 %8 align=4\n"
-                "  %10 = call.f32 row #1(%7, %9) fixed=(f32, f32) variadic=0\n"
-                "  %11 = call.f32 row #2(%7, %9) fixed=(f32, f32) variadic=0\n"
-                "  %12 = address.ptr %0 offset=64\n"
-                "  %13 = load.v4i32 %12 align=1\n"
-                "  %14 = call.v4i32 row #3(%13) fixed=(v4i32) variadic=0\n"
-                "  %15 = address.ptr %0 offset=128\n"
-                "  %16 = store.void %15, %5 align=1\n"
-                "  %17 = address.ptr %0 offset=160\n"
-                "  %18 = store.void %17, %1 align=1\n"
-                "  %19 = address.ptr %0 offset=192\n"
-                "  %20 = store.void %19, %10 align=4\n"
-                "  %21 = address.ptr %0 offset=196\n"
-                "  %22 = store.void %21, %11 align=4\n"
-                "  %23 = address.ptr %0 offset=200\n"
-                "  %24 = store.void %23, %7 align=4\n"
-                "  %25 = address.ptr %0 offset=204\n"
-                "  %26 = store.void %25, %9 align=4\n"
-                "  %27 = address.ptr %0 offset=224\n"
-                "  %28 = store.void %27, %14 align=1\n"
-                "  %29 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_vex_rows_model,
-        .v3 = true,
-    },
-    // #1281: the IR's vectors at x86-64-v3, a target without AVX-512, by VEX forms: v4i32's and v8i32's operations,
-    // constants (zeros by vpxor, every bit by vpcmpeqd, a splat by vmovd and vpshufd or vpbroadcastd, others loaded) and
-    // copies; their phis' swap through xmm15; their spills past xmm14; and their saves around calls.
-    {
-        .name = "vector operations and constants at x86-64-v3",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.v4i32 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=16\n"
-                "  %3 = load.v4i32 %2 align=1\n"
-                "  %4 = add.v4i32 %1, %3\n"
-                "  %5 = sub.v4i32 %4, %3\n"
-                "  %6 = mul.v4i32 %5, %3\n"
-                "  %7 = and.v4i32 %6, %1\n"
-                "  %8 = or.v4i32 %7, %3\n"
-                "  %9 = xor.v4i32 %8, %4\n"
-                "  %10 = copy.v4i32 %9\n"
-                "  %11 = vconst.v4i32 0x00000000000000000000000000000000\n"
-                "  %12 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
-                "  %13 = vconst.v4i32 0x12345679123456791234567912345679\n"
-                "  %14 = vconst.v4i32 0xdaa66d2b3c6ef3729e3779b900000000\n"
-                "  %15 = add.v4i32 %10, %13\n"
-                "  %16 = xor.v4i32 %15, %14\n"
-                "  %17 = sub.v4i32 %16, %12\n"
-                "  %18 = or.v4i32 %17, %11\n"
-                "  %19 = undef.v4i32\n"
-                "  %20 = address.ptr %0 offset=128\n"
-                "  %21 = store.void %20, %18 align=1\n"
-                "  %22 = address.ptr %0 offset=32\n"
-                "  %23 = load.v8i32 %22 align=1\n"
-                "  %24 = address.ptr %0 offset=64\n"
-                "  %25 = load.v8i32 %24 align=1\n"
-                "  %26 = add.v8i32 %23, %25\n"
-                "  %27 = sub.v8i32 %26, %25\n"
-                "  %28 = mul.v8i32 %27, %25\n"
-                "  %29 = and.v8i32 %28, %23\n"
-                "  %30 = or.v8i32 %29, %25\n"
-                "  %31 = xor.v8i32 %30, %26\n"
-                "  %32 = copy.v8i32 %31\n"
-                "  %33 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000\n"
-                "  %34 = vconst.v8i32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"
-                "  %35 = vconst.v8i32 0x1234567a1234567a1234567a1234567a1234567a1234567a1234567a1234567a\n"
-                "  %36 = vconst.v8i32 0x53845410b54cda571715609e78dde6e5daa66d2c3c6ef3739e3779ba00000001\n"
-                "  %37 = add.v8i32 %32, %35\n"
-                "  %38 = xor.v8i32 %37, %36\n"
-                "  %39 = sub.v8i32 %38, %34\n"
-                "  %40 = or.v8i32 %39, %33\n"
-                "  %41 = undef.v8i32\n"
-                "  %42 = address.ptr %0 offset=144\n"
-                "  %43 = store.void %42, %40 align=1\n"
-                "  %44 = address.ptr %0 offset=176\n"
-                "  %45 = store.void %44, %34 align=1\n"
-                "  %46 = address.ptr %0 offset=208\n"
-                "  %47 = store.void %46, %35 align=1\n"
-                "  %48 = address.ptr %0 offset=240\n"
-                "  %49 = store.void %48, %13 align=1\n"
-                "  %50 = ret.void\n"
-                "}\n",
-        .v3 = true,
-    },
-    {
-        .name = "a loop whose vector phis swap at x86-64-v3",
-        .text = "function (ptr, i64) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = load.v8i32 %0 align=1\n"
-                "  %3 = address.ptr %0 offset=32\n"
-                "  %4 = load.v8i32 %3 align=1\n"
-                "  %5 = address.ptr %0 offset=64\n"
-                "  %6 = load.v4i32 %5 align=1\n"
-                "  %7 = const.i64 0x00000000000000000000000000000000\n"
-                "  %8 = br.void b1\n"
-                "b1:\n"
-                "  %9 = phi.v8i32 [%2, b0], [%10, b1]\n"
-                "  %10 = phi.v8i32 [%4, b0], [%9, b1]\n"
-                "  %11 = phi.v4i32 [%6, b0], [%15, b1]\n"
-                "  %12 = phi.i64 [%7, b0], [%17, b1]\n"
-                "  %13 = address.ptr %0 + %12 * 4 offset=0\n"
-                "  %14 = load.v4i32 %13 align=4\n"
-                "  %15 = add.v4i32 %11, %14\n"
-                "  %16 = const.i64 0x00000000000000000000000000000001\n"
-                "  %17 = add.i64 %12, %16\n"
-                "  %18 = icmp.i1 %17, %1 ult\n"
-                "  %19 = cbr.void %18, b1, b2\n"
-                "b2:\n"
-                "  %20 = address.ptr %0 offset=128\n"
-                "  %21 = store.void %20, %9 align=1\n"
-                "  %22 = address.ptr %0 offset=160\n"
-                "  %23 = store.void %22, %10 align=1\n"
-                "  %24 = address.ptr %0 offset=192\n"
-                "  %25 = store.void %24, %15 align=1\n"
-                "  %26 = ret.void\n"
-                "}\n",
-        .count = 16,
-        .vector_cycle = true,
-        .v3 = true,
-    },
-    {
-        .name = "more vectors than xmm0 to xmm14 at x86-64-v3",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v8i32 %1 align=4\n"
-                "  %3 = address.ptr %0 offset=4\n"
-                "  %4 = load.v8i32 %3 align=4\n"
-                "  %5 = address.ptr %0 offset=8\n"
-                "  %6 = load.v8i32 %5 align=4\n"
-                "  %7 = address.ptr %0 offset=12\n"
-                "  %8 = load.v8i32 %7 align=4\n"
-                "  %9 = address.ptr %0 offset=16\n"
-                "  %10 = load.v8i32 %9 align=4\n"
-                "  %11 = address.ptr %0 offset=20\n"
-                "  %12 = load.v8i32 %11 align=4\n"
-                "  %13 = address.ptr %0 offset=24\n"
-                "  %14 = load.v8i32 %13 align=4\n"
-                "  %15 = address.ptr %0 offset=28\n"
-                "  %16 = load.v8i32 %15 align=4\n"
-                "  %17 = address.ptr %0 offset=32\n"
-                "  %18 = load.v8i32 %17 align=4\n"
-                "  %19 = address.ptr %0 offset=36\n"
-                "  %20 = load.v8i32 %19 align=4\n"
-                "  %21 = address.ptr %0 offset=40\n"
-                "  %22 = load.v8i32 %21 align=4\n"
-                "  %23 = address.ptr %0 offset=44\n"
-                "  %24 = load.v8i32 %23 align=4\n"
-                "  %25 = address.ptr %0 offset=48\n"
-                "  %26 = load.v8i32 %25 align=4\n"
-                "  %27 = address.ptr %0 offset=52\n"
-                "  %28 = load.v8i32 %27 align=4\n"
-                "  %29 = address.ptr %0 offset=56\n"
-                "  %30 = load.v8i32 %29 align=4\n"
-                "  %31 = address.ptr %0 offset=60\n"
-                "  %32 = load.v8i32 %31 align=4\n"
-                "  %33 = address.ptr %0 offset=64\n"
-                "  %34 = load.v8i32 %33 align=4\n"
-                "  %35 = xor.v8i32 %2, %34\n"
-                "  %36 = sub.v8i32 %35, %32\n"
-                "  %37 = mul.v8i32 %36, %30\n"
-                "  %38 = add.v8i32 %37, %28\n"
-                "  %39 = xor.v8i32 %38, %26\n"
-                "  %40 = sub.v8i32 %39, %24\n"
-                "  %41 = mul.v8i32 %40, %22\n"
-                "  %42 = add.v8i32 %41, %20\n"
-                "  %43 = xor.v8i32 %42, %18\n"
-                "  %44 = sub.v8i32 %43, %16\n"
-                "  %45 = mul.v8i32 %44, %14\n"
-                "  %46 = add.v8i32 %45, %12\n"
-                "  %47 = xor.v8i32 %46, %10\n"
-                "  %48 = sub.v8i32 %47, %8\n"
-                "  %49 = mul.v8i32 %48, %6\n"
-                "  %50 = add.v8i32 %49, %4\n"
-                "  %51 = xor.v8i32 %34, %32\n"
-                "  %52 = add.v8i32 %51, %30\n"
-                "  %53 = xor.v8i32 %52, %28\n"
-                "  %54 = add.v8i32 %53, %26\n"
-                "  %55 = xor.v8i32 %54, %24\n"
-                "  %56 = add.v8i32 %55, %22\n"
-                "  %57 = xor.v8i32 %56, %20\n"
-                "  %58 = add.v8i32 %57, %18\n"
-                "  %59 = xor.v8i32 %58, %16\n"
-                "  %60 = add.v8i32 %59, %14\n"
-                "  %61 = xor.v8i32 %60, %12\n"
-                "  %62 = add.v8i32 %61, %10\n"
-                "  %63 = xor.v8i32 %62, %8\n"
-                "  %64 = add.v8i32 %63, %6\n"
-                "  %65 = xor.v8i32 %64, %4\n"
-                "  %66 = add.v8i32 %65, %2\n"
-                "  %67 = address.ptr %0 offset=128\n"
-                "  %68 = store.void %67, %50 align=1\n"
-                "  %69 = address.ptr %0 offset=192\n"
-                "  %70 = store.void %69, %66 align=1\n"
-                "  %71 = ret.void\n"
-                "}\n",
-        .spills = true,
-        .v3 = true,
-    },
-    {
-        // #1281's review: 32-byte vectors at a target with AVX but not AVX2, whose ymm integer forms are AVX2's: their
-        // bitwise operations by vandps, vorps and vxorps, every bit by vpcmpeqd of the xmm register and vinsertf128, a
-        // splat by vmovd, vpshufd and vinsertf128, zeros by vpxor of the xmm register, others loaded, and copies, loads
-        // and stores by vmovdqa and vmovdqu; and 16-byte vectors' AVX operations beside them. Its native runs start with
-        // a signaling NaN in every ymm register and MXCSR's flags clear, which must stay clear: no record reads a
-        // register's old bits as floats (#1293's review).
-        .name = "vectors at a target with AVX but not AVX2",
-        .text = "function (ptr) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.v8i32 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=32\n"
-                "  %3 = load.v8i32 %2 align=1\n"
-                "  %4 = and.v8i32 %1, %3\n"
-                "  %5 = or.v8i32 %4, %1\n"
-                "  %6 = xor.v8i32 %5, %3\n"
-                "  %7 = copy.v8i32 %6\n"
-                "  %8 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000\n"
-                "  %9 = vconst.v8i32 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n"
-                "  %10 = vconst.v8i32 0x1234567a1234567a1234567a1234567a1234567a1234567a1234567a1234567a\n"
-                "  %11 = vconst.v8i32 0x53845410b54cda571715609e78dde6e5daa66d2c3c6ef3739e3779ba00000001\n"
-                "  %12 = xor.v8i32 %7, %10\n"
-                "  %13 = and.v8i32 %12, %11\n"
-                "  %14 = or.v8i32 %13, %8\n"
-                "  %15 = xor.v8i32 %14, %9\n"
-                "  %16 = address.ptr %0 offset=128\n"
-                "  %17 = store.void %16, %15 align=1\n"
-                "  %18 = address.ptr %0 offset=160\n"
-                "  %19 = store.void %18, %9 align=1\n"
-                "  %20 = address.ptr %0 offset=192\n"
-                "  %21 = store.void %20, %10 align=1\n"
-                "  %22 = address.ptr %0 offset=64\n"
-                "  %23 = load.v4i32 %22 align=1\n"
-                "  %24 = address.ptr %0 offset=80\n"
-                "  %25 = load.v4i32 %24 align=1\n"
-                "  %26 = mul.v4i32 %23, %25\n"
-                "  %27 = add.v4i32 %26, %23\n"
-                "  %28 = sub.v4i32 %27, %25\n"
-                "  %29 = vconst.v4i32 0x12345679123456791234567912345679\n"
-                "  %30 = vconst.v4i32 0xffffffffffffffffffffffffffffffff\n"
-                "  %31 = xor.v4i32 %28, %29\n"
-                "  %32 = and.v4i32 %31, %30\n"
-                "  %33 = address.ptr %0 offset=224\n"
-                "  %34 = store.void %33, %32 align=1\n"
-                "  %35 = ret.void\n"
-                "}\n",
-        .avx = true,
-    },
-    {
-        // #1281's review: a 64-byte EVEX row at x86-64-v3 with AVX512F but not VL (Knights Landing's AVX-512), its two
-        // operands dying at it and 13 vectors live across it, so that xmm0 to xmm14 are taken and only xmm15 is free
-        // below 16: its roles stay in place or take zmm16, rather than a run of two free registers below 16, which isn't
-        // there.
-        .name = "a 64-byte row under register pressure at AVX512F without VL",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x81 0x81 0x80 0x00 0x00 0x00 0 0] [VPXORD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v16i32 %1 align=4\n"
-                "  %3 = address.ptr %0 offset=4\n"
-                "  %4 = load.v16i32 %3 align=4\n"
-                "  %5 = address.ptr %0 offset=8\n"
-                "  %6 = load.v16i32 %5 align=4\n"
-                "  %7 = address.ptr %0 offset=12\n"
-                "  %8 = load.v16i32 %7 align=4\n"
-                "  %9 = address.ptr %0 offset=16\n"
-                "  %10 = load.v16i32 %9 align=4\n"
-                "  %11 = address.ptr %0 offset=20\n"
-                "  %12 = load.v16i32 %11 align=4\n"
-                "  %13 = address.ptr %0 offset=24\n"
-                "  %14 = load.v16i32 %13 align=4\n"
-                "  %15 = address.ptr %0 offset=28\n"
-                "  %16 = load.v16i32 %15 align=4\n"
-                "  %17 = address.ptr %0 offset=32\n"
-                "  %18 = load.v16i32 %17 align=4\n"
-                "  %19 = address.ptr %0 offset=36\n"
-                "  %20 = load.v16i32 %19 align=4\n"
-                "  %21 = address.ptr %0 offset=40\n"
-                "  %22 = load.v16i32 %21 align=4\n"
-                "  %23 = address.ptr %0 offset=44\n"
-                "  %24 = load.v16i32 %23 align=4\n"
-                "  %25 = address.ptr %0 offset=48\n"
-                "  %26 = load.v16i32 %25 align=4\n"
-                "  %27 = address.ptr %0 offset=52\n"
-                "  %28 = load.v16i32 %27 align=4\n"
-                "  %29 = address.ptr %0 offset=56\n"
-                "  %30 = load.v16i32 %29 align=4\n"
-                "  %31 = call.v16i32 row #0(%2, %4) fixed=(v16i32, v16i32) variadic=0\n"
-                "  %32 = xor.v16i32 %6, %8\n"
-                "  %33 = xor.v16i32 %32, %10\n"
-                "  %34 = xor.v16i32 %33, %12\n"
-                "  %35 = xor.v16i32 %34, %14\n"
-                "  %36 = xor.v16i32 %35, %16\n"
-                "  %37 = xor.v16i32 %36, %18\n"
-                "  %38 = xor.v16i32 %37, %20\n"
-                "  %39 = xor.v16i32 %38, %22\n"
-                "  %40 = xor.v16i32 %39, %24\n"
-                "  %41 = xor.v16i32 %40, %26\n"
-                "  %42 = xor.v16i32 %41, %28\n"
-                "  %43 = xor.v16i32 %42, %30\n"
-                "  %44 = address.ptr %0 offset=128\n"
-                "  %45 = store.void %44, %43 align=1\n"
-                "  %46 = address.ptr %0 offset=192\n"
-                "  %47 = store.void %46, %31 align=1\n"
-                "  %48 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_pressure_model64,
-        .foundation = true,
-    },
-    {
-        // #1281's review: its VEX twin at x86-64-v3, 13 32-byte vectors live across it beside its two dying operands: its
-        // roles stay in place (the result in a dying operand's register), or take xmm15, the one free register below 16,
-        // one at a time, not a run of two.
-        .name = "a VEX row under register pressure at x86-64-v3",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (vector32, vector32) -> vector32 [VPADDD_Y_Y_YM256 0x81 0x81 0x80 0x00 0x00 0x00 0 0] [VPXOR_Y_Y_YM256 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v8i32 %1 align=4\n"
-                "  %3 = address.ptr %0 offset=4\n"
-                "  %4 = load.v8i32 %3 align=4\n"
-                "  %5 = address.ptr %0 offset=8\n"
-                "  %6 = load.v8i32 %5 align=4\n"
-                "  %7 = address.ptr %0 offset=12\n"
-                "  %8 = load.v8i32 %7 align=4\n"
-                "  %9 = address.ptr %0 offset=16\n"
-                "  %10 = load.v8i32 %9 align=4\n"
-                "  %11 = address.ptr %0 offset=20\n"
-                "  %12 = load.v8i32 %11 align=4\n"
-                "  %13 = address.ptr %0 offset=24\n"
-                "  %14 = load.v8i32 %13 align=4\n"
-                "  %15 = address.ptr %0 offset=28\n"
-                "  %16 = load.v8i32 %15 align=4\n"
-                "  %17 = address.ptr %0 offset=32\n"
-                "  %18 = load.v8i32 %17 align=4\n"
-                "  %19 = address.ptr %0 offset=36\n"
-                "  %20 = load.v8i32 %19 align=4\n"
-                "  %21 = address.ptr %0 offset=40\n"
-                "  %22 = load.v8i32 %21 align=4\n"
-                "  %23 = address.ptr %0 offset=44\n"
-                "  %24 = load.v8i32 %23 align=4\n"
-                "  %25 = address.ptr %0 offset=48\n"
-                "  %26 = load.v8i32 %25 align=4\n"
-                "  %27 = address.ptr %0 offset=52\n"
-                "  %28 = load.v8i32 %27 align=4\n"
-                "  %29 = address.ptr %0 offset=56\n"
-                "  %30 = load.v8i32 %29 align=4\n"
-                "  %31 = call.v8i32 row #0(%2, %4) fixed=(v8i32, v8i32) variadic=0\n"
-                "  %32 = xor.v8i32 %6, %8\n"
-                "  %33 = xor.v8i32 %32, %10\n"
-                "  %34 = xor.v8i32 %33, %12\n"
-                "  %35 = xor.v8i32 %34, %14\n"
-                "  %36 = xor.v8i32 %35, %16\n"
-                "  %37 = xor.v8i32 %36, %18\n"
-                "  %38 = xor.v8i32 %37, %20\n"
-                "  %39 = xor.v8i32 %38, %22\n"
-                "  %40 = xor.v8i32 %39, %24\n"
-                "  %41 = xor.v8i32 %40, %26\n"
-                "  %42 = xor.v8i32 %41, %28\n"
-                "  %43 = xor.v8i32 %42, %30\n"
-                "  %44 = address.ptr %0 offset=128\n"
-                "  %45 = store.void %44, %43 align=1\n"
-                "  %46 = address.ptr %0 offset=160\n"
-                "  %47 = store.void %46, %31 align=1\n"
-                "  %48 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_pressure_model32,
-        .v3 = true,
-    },
-    {
-        // #1293's review: a VEX row whose result is its first operand, which no record writes, and which writes its second
-        // operand, live past it, at x86-64-v3 under the same pressure: 14 vectors live across it beside its dying first
-        // operand, so that only xmm15 is free below 16. VECTOR(0) stays in the first operand's register, taking none, and
-        // the second operand is staged in xmm15.
-        .name = "a VEX row of a read-only result under register pressure at x86-64-v3",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (vector32, vector32) -> vector32 [VPADDD_Y_Y_YM256 0x81 0x81 0x80 0x00 0x00 0x00 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = address.ptr %0 offset=0\n"
-                "  %2 = load.v8i32 %1 align=4\n"
-                "  %3 = address.ptr %0 offset=4\n"
-                "  %4 = load.v8i32 %3 align=4\n"
-                "  %5 = address.ptr %0 offset=8\n"
-                "  %6 = load.v8i32 %5 align=4\n"
-                "  %7 = address.ptr %0 offset=12\n"
-                "  %8 = load.v8i32 %7 align=4\n"
-                "  %9 = address.ptr %0 offset=16\n"
-                "  %10 = load.v8i32 %9 align=4\n"
-                "  %11 = address.ptr %0 offset=20\n"
-                "  %12 = load.v8i32 %11 align=4\n"
-                "  %13 = address.ptr %0 offset=24\n"
-                "  %14 = load.v8i32 %13 align=4\n"
-                "  %15 = address.ptr %0 offset=28\n"
-                "  %16 = load.v8i32 %15 align=4\n"
-                "  %17 = address.ptr %0 offset=32\n"
-                "  %18 = load.v8i32 %17 align=4\n"
-                "  %19 = address.ptr %0 offset=36\n"
-                "  %20 = load.v8i32 %19 align=4\n"
-                "  %21 = address.ptr %0 offset=40\n"
-                "  %22 = load.v8i32 %21 align=4\n"
-                "  %23 = address.ptr %0 offset=44\n"
-                "  %24 = load.v8i32 %23 align=4\n"
-                "  %25 = address.ptr %0 offset=48\n"
-                "  %26 = load.v8i32 %25 align=4\n"
-                "  %27 = address.ptr %0 offset=52\n"
-                "  %28 = load.v8i32 %27 align=4\n"
-                "  %29 = address.ptr %0 offset=56\n"
-                "  %30 = load.v8i32 %29 align=4\n"
-                "  %31 = call.v8i32 row #0(%2, %4) fixed=(v8i32, v8i32) variadic=0\n"
-                "  %32 = xor.v8i32 %4, %6\n"
-                "  %33 = xor.v8i32 %32, %8\n"
-                "  %34 = xor.v8i32 %33, %10\n"
-                "  %35 = xor.v8i32 %34, %12\n"
-                "  %36 = xor.v8i32 %35, %14\n"
-                "  %37 = xor.v8i32 %36, %16\n"
-                "  %38 = xor.v8i32 %37, %18\n"
-                "  %39 = xor.v8i32 %38, %20\n"
-                "  %40 = xor.v8i32 %39, %22\n"
-                "  %41 = xor.v8i32 %40, %24\n"
-                "  %42 = xor.v8i32 %41, %26\n"
-                "  %43 = xor.v8i32 %42, %28\n"
-                "  %44 = xor.v8i32 %43, %30\n"
-                "  %45 = address.ptr %0 offset=128\n"
-                "  %46 = store.void %45, %44 align=1\n"
-                "  %47 = address.ptr %0 offset=160\n"
-                "  %48 = store.void %47, %31 align=1\n"
-                "  %49 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_read_only_model,
-        .v3 = true,
-    },
-    {
-        .name = "vectors across calls at x86-64-v3",
-        .text = "function (ptr, i64) -> void {\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = load.v8i32 %0 align=1\n"
-                "  %3 = address.ptr %0 offset=16\n"
-                "  %4 = load.v4i32 %3 align=1\n"
-                "  %5 = address.ptr %0 offset=32\n"
-                "  %6 = load.v8i32 %5 align=1\n"
-                "  %7 = call.i64 @9(%1) fixed=(i64) variadic=0\n"
-                "  %8 = add.v8i32 %2, %2\n"
-                "  %9 = call.i64 @9(%7) fixed=(i64) variadic=0\n"
-                "  %10 = mul.v4i32 %4, %4\n"
-                "  %11 = xor.v8i32 %6, %6\n"
-                "  %12 = sub.v8i32 %11, %6\n"
-                "  %13 = address.ptr %0 offset=128\n"
-                "  %14 = store.void %13, %8 align=1\n"
-                "  %15 = address.ptr %0 offset=160\n"
-                "  %16 = store.void %15, %10 align=1\n"
-                "  %17 = address.ptr %0 offset=176\n"
-                "  %18 = store.void %17, %12 align=1\n"
-                "  %19 = address.ptr %0 offset=240\n"
-                "  %20 = store.void %19, %9 align=8\n"
-                "  %21 = ret.void\n"
-                "}\n",
-        .count = 1000,
-        .calls = true,
-        .v3 = true,
-    },
-    {
-        // #1280: SSE carriers from a double and a float parameter and a call's double result, whose registers' bytes
-        // past them aren't zero, read whole by rows of no records: each zero-extended into its role.
-        .name = "SSE carriers with dirty upper lanes",
-        .text = "function (ptr, i64, f64, f32) -> void {\n"
-                "  row #0 (vector8) -> vector16\n"
-                "  row #1 (vector4) -> vector16\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = param.f64 2\n"
-                "  %3 = param.f32 3\n"
-                "  %4 = call.v4i32 row #0(%2) fixed=(f64) variadic=0\n"
-                "  %5 = call.v4i32 row #1(%3) fixed=(f32) variadic=0\n"
-                "  %6 = call.f64 @9(%1) fixed=(i64) variadic=0\n"
-                "  %7 = call.v4i32 row #0(%6) fixed=(f64) variadic=0\n"
-                "  %8 = address.ptr %0 offset=128\n"
-                "  %9 = store.void %8, %4 align=1\n"
-                "  %10 = address.ptr %0 offset=144\n"
-                "  %11 = store.void %10, %5 align=1\n"
-                "  %12 = address.ptr %0 offset=160\n"
-                "  %13 = store.void %12, %7 align=1\n"
-                "  %14 = ret.void\n"
-                "}\n",
-        .count = 1000,
-        .model = tier1_masks_test_carriers_model,
-    },
-    {
-        // #1281: the same at a target without AVX-512, each zero-extended by VEX vmovq or vinsertps.
-        .name = "SSE carriers with dirty upper lanes at x86-64-v3",
-        .text = "function (ptr, i64, f64, f32) -> void {\n"
-                "  row #0 (vector8) -> vector16\n"
-                "  row #1 (vector4) -> vector16\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = param.i64 1\n"
-                "  %2 = param.f64 2\n"
-                "  %3 = param.f32 3\n"
-                "  %4 = call.v4i32 row #0(%2) fixed=(f64) variadic=0\n"
-                "  %5 = call.v4i32 row #1(%3) fixed=(f32) variadic=0\n"
-                "  %6 = call.f64 @9(%1) fixed=(i64) variadic=0\n"
-                "  %7 = call.v4i32 row #0(%6) fixed=(f64) variadic=0\n"
-                "  %8 = address.ptr %0 offset=128\n"
-                "  %9 = store.void %8, %4 align=1\n"
-                "  %10 = address.ptr %0 offset=144\n"
-                "  %11 = store.void %10, %5 align=1\n"
-                "  %12 = address.ptr %0 offset=160\n"
-                "  %13 = store.void %12, %7 align=1\n"
-                "  %14 = ret.void\n"
-                "}\n",
-        .count = 1000,
-        .model = tier1_masks_test_carriers_model,
-        .v3 = true,
-    },
-    {
-        // #1283: vector rows placed one role at a time: a two-operand form's (its first operand read in its own register
-        // up to the result's first write, which the destination takes), a tied operand's (copied into the destination),
-        // a merging opmask's, an operand written and dying at the node (kept in its own register) under an integer
-        // result, a VEX form's /is4 blend in the run below xmm16, a narrow result written at a wider width (moved at its
-        // width), a narrow operand read at a wider one (copied at its width) and a widening conversion's pure write.
-        .name = "vector machine rows",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]\n"
-                "  row #1 (vector64, vector64, vector64) -> vector64 [VPTERNLOGD_Z_Z_ZM512_IMM8 0x80 0x81 0x82 0x00 0x00 0x00 150 0]\n"
-                "  row #2 (vector64) -> u32 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0] [VMOVD_RM32_X_EVEX 0x80 0x00 0x90 0x00 0x00 0x00 0 0]\n"
-                "  row #3 (vector32, vector32, vector32) -> vector32 [VPBLENDVB_Y_Y_YM256_Y 0x80 0x80 0x81 0x00 0x00 0x00 32 0]\n"
-                "  row #4 (vector64, vector64, mask2) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x0a 0 0]\n"
-                "  row #5 (vector64) -> vector16 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]\n"
-                "  row #6 (vector16) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]\n"
-                "  row #7 (vector16) -> vector64 [VPMOVZXBD_Z_XM128 0x80 0x00 0x80 0x00 0x00 0x00 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.v16i32 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=64\n"
-                "  %3 = load.v16i32 %2 align=1\n"
-                "  %4 = load.m16 %0 align=2\n"
-                "  %5 = call.v16i32 row #0(%1, %3) fixed=(v16i32, v16i32) variadic=0\n"
-                "  %6 = call.v16i32 row #1(%5, %1, %3) fixed=(v16i32, v16i32, v16i32) variadic=0\n"
-                "  %7 = call.v16i32 row #4(%1, %6, %4) fixed=(v16i32, v16i32, m16) variadic=0\n"
-                "  %8 = call.v4i32 row #5(%3) fixed=(v16i32) variadic=0\n"
-                "  %9 = call.v16i32 row #6(%8) fixed=(v4i32) variadic=0\n"
-                "  %10 = call.v16i32 row #7(%8) fixed=(v4i32) variadic=0\n"
-                "  %11 = call.v16i32 row #1(%9, %10, %7) fixed=(v16i32, v16i32, v16i32) variadic=0\n"
-                "  %12 = call.i32 row #2(%7) fixed=(v16i32) variadic=0\n"
-                "  %13 = address.ptr %0 offset=128\n"
-                "  %14 = store.void %13, %11 align=1\n"
-                "  %15 = load.v8i32 %0 align=1\n"
-                "  %16 = address.ptr %0 offset=32\n"
-                "  %17 = load.v8i32 %16 align=1\n"
-                "  %18 = load.v8i32 %2 align=1\n"
-                "  %19 = call.v8i32 row #3(%15, %17, %18) fixed=(v8i32, v8i32, v8i32) variadic=0\n"
-                "  %20 = address.ptr %0 offset=192\n"
-                "  %21 = store.void %20, %19 align=1\n"
-                "  %22 = address.ptr %0 offset=224\n"
-                "  %23 = store.void %22, %8 align=1\n"
-                "  %24 = address.ptr %0 offset=240\n"
-                "  %25 = store.void %24, %12 align=4\n"
-                "  %26 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_vector_rows_model,
-        // Tier 0's placement moved 25: each vector operand in (17) and each vector result out (8). What is left, by
-        // either path's allocation: the merging opmask's first operand in and the result out (its destination is
-        // the second operand's register), the narrow result's move into itself at its width, the narrow operand's
-        // copy at its width, and the tied operand's in and out (its destination is the second's).
-        .rows = 9,
-        .row_moves = 6,
-    },
-    {
-        // #1283's review: a gather (the front end's row of _mm512_mask_i32gather_epi32) whose destination can be none of
-        // its index's and mask's registers, #UD otherwise: its source and index one value dying at it, whose register
-        // the allocation gives the result, so the gather writes another and the result moves there; and one of a source
-        // and an index apart, the index dying at it.
-        .name = "gathers whose index dies at them",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (vector64, u64, vector64, mask2) -> vector64 [VPGATHERDD_Z_VM32Z 0x80 0x00 0x81 0x82 0x1e 0x0b 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = ptrtoint.i64 %0\n"
-                "  %2 = address.ptr %0 offset=64\n"
-                "  %3 = load.v16i32 %2 align=1\n"
-                "  %4 = load.m16 %0 align=2\n"
-                "  %5 = call.v16i32 row #0(%3, %1, %3, %4) fixed=(v16i32, i64, v16i32, m16) variadic=0\n"
-                "  %6 = load.v16i32 %0 align=1\n"
-                "  %7 = load.v16i32 %2 align=1\n"
-                "  %8 = load.m16 %0 align=2\n"
-                "  %9 = call.v16i32 row #0(%6, %1, %7, %8) fixed=(v16i32, i64, v16i32, m16) variadic=0\n"
-                "  %10 = address.ptr %0 offset=128\n"
-                "  %11 = store.void %10, %5 align=1\n"
-                "  %12 = address.ptr %0 offset=192\n"
-                "  %13 = store.void %12, %9 align=1\n"
-                "  %14 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_gather_model,
-        .prepare = tier1_masks_test_gather_prepare,
-        .exclusive = true,
-        // Each gather's source copied into zmm16, its mask (which it clears) into a free opmask register and its result
-        // moved out, on either production path.
-        .rows = 2,
-        .row_moves = 6,
-    },
-    {
-        // #1283's review: AVX512-FP16's complex multiplication, whose destination can be neither factor's register, #UD
-        // otherwise: a row whose result is the product alone, its factors dying at it, one of whose registers the
-        // allocation gives the result, so it writes another and the result moves there; and the front end's row of
-        // _mm512_fmul_pch, its result the copy of the product its third operand (the first factor again) holds.
-        .name = "complex multiplications whose factors die at them",
-        .text = "function (ptr) -> void {\n"
-                "  row #0 (u32, vector64, vector64) -> vector64 [VFMULCPH_Z_Z_ZM512 0x80 0x81 0x82 0x00 0x00 0x00 0 0]\n"
-                "  row #1 (vector64, vector64, vector64, u32) -> vector64 [VFMULCPH_Z_Z_ZM512 0x82 0x80 0x81 0x00 0x00 0x00 0 0] [VMOVDQU64_Z_ZM512 0x80 0x00 0x82 0x00 0x00 0x00 0 0]\n"
-                "b0:\n"
-                "  %0 = param.ptr 0\n"
-                "  %1 = load.v16i32 %0 align=1\n"
-                "  %2 = address.ptr %0 offset=64\n"
-                "  %3 = load.v16i32 %2 align=1\n"
-                "  %4 = const.i32 0x00000000000000000000000000000000\n"
-                "  %5 = call.v16i32 row #0(%4, %1, %3) fixed=(i32, v16i32, v16i32) variadic=0\n"
-                "  %6 = load.v16i32 %0 align=1\n"
-                "  %7 = load.v16i32 %2 align=1\n"
-                "  %8 = call.v16i32 row #1(%6, %7, %6, %4) fixed=(v16i32, v16i32, v16i32, i32) variadic=0\n"
-                "  %9 = address.ptr %0 offset=128\n"
-                "  %10 = store.void %9, %5 align=1\n"
-                "  %11 = address.ptr %0 offset=192\n"
-                "  %12 = store.void %11, %8 align=1\n"
-                "  %13 = ret.void\n"
-                "}\n",
-        .model = tier1_masks_test_complex_model,
-        .fp16 = true,
-        .exclusive = true,
-        // The first's product moved out of zmm16; the second's third operand copied out of the first factor's register
-        // it shares, and its result written in the destination, the dying second factor's register, after it is read.
-        .rows = 2,
-        .row_moves = 2,
-    },
+// The fixtures are runtime data (#2053): tests/tier1/masks/ under the fixture root, a catalog and a file of a function's
+// IR text a case, which the test reads when it runs, so that editing a case or adding one compiles, links and bakes
+// nothing. The catalog's first line is `buster-fixtures v1 tier1-masks`; each later line not starting with '#' is a case,
+// four tab-separated fields: its ID, unique, of letters, digits, '.', '_' and '-'; its FILE, in the same directory,
+// unique, of the same characters, ending in .ir; its FLAGS, comma-separated, or - for none; and its NAME, what it checks,
+// which a failure prints. The flags are Tier1MasksFixture's fields: count=N, spills, calls, cycle, frame-accesses=N,
+// divisions, vector-cycle, borrows, v3, avx, v2, baseline, foundation, rows=N, row-moves=N, masked-compares=N,
+// masked-operations=N, fp16, vnni, exclusive and asm-body; and its C functions by name, model=NAME of
+// tier1_masks_test_models' and prepare=NAME of tier1_masks_test_prepares'. A case's file is its text's bytes as they
+// are; one with a NUL in it is refused, since the parser reads the text to its first NUL. The cases run in the catalog's
+// order. A missing, unreadable or malformed catalog, a missing or unreadable file, a repeated ID or file, an unknown or
+// repeated flag, a file in the directory that no case names, or no case at all fails the run: no case is skipped.
+#include <dirent.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stddef.h>
+#include <sys/stat.h>
+
+// The fixture root: tests/ under the working directory, or test-tier1-masks' --fixtures DIR.
+static const char* tier1_masks_test_fixture_root = "tests";
+static const char tier1_masks_test_fixture_header[] = "buster-fixtures v1 tier1-masks";
+
+enum
+{
+    // A catalog's cases, and a catalog's or a case file's bytes, at most.
+    BUSTER_TIER1_MASKS_TEST_CASES = 1024,
+    BUSTER_TIER1_MASKS_TEST_FILE_BYTES = 1 << 20,
 };
+
+// The runtime fixtures: their cases, and their names and texts, in `storage`.
+typedef struct Tier1MasksFixtures Tier1MasksFixtures;
+struct Tier1MasksFixtures
+{
+    Arena storage;
+    Tier1MasksFixture* cases;
+    const char** files;
+    uint32_t count;
+    char problem[512];
+};
+
+// The C models a catalog's model=NAME names: the buffer after a run where the interpreter can't run the fixture.
+typedef struct Tier1MasksTestModel Tier1MasksTestModel;
+struct Tier1MasksTestModel
+{
+    const char* name;
+    void (*model)(const uint8_t* input, uint64_t count, uint8_t* output);
+};
+
+static const Tier1MasksTestModel tier1_masks_test_models[] = {
+    { "asm", tier1_masks_test_asm_model },
+    { "rows", tier1_masks_test_rows_model },
+    { "vex-rows", tier1_masks_test_vex_rows_model },
+    { "pressure64", tier1_masks_test_pressure_model64 },
+    { "pressure32", tier1_masks_test_pressure_model32 },
+    { "read-only", tier1_masks_test_read_only_model },
+    { "floating", tier1_masks_test_floating_model },
+    { "carriers", tier1_masks_test_carriers_model },
+    { "vector-rows", tier1_masks_test_vector_rows_model },
+    { "gather", tier1_masks_test_gather_model },
+    { "complex", tier1_masks_test_complex_model },
+};
+
+// The C preparations a catalog's prepare=NAME names: what makes a random input one the fixture can run on.
+typedef struct Tier1MasksTestPrepare Tier1MasksTestPrepare;
+struct Tier1MasksTestPrepare
+{
+    const char* name;
+    void (*prepare)(uint8_t* input);
+};
+
+static const Tier1MasksTestPrepare tier1_masks_test_prepares[] = {
+    { "gather", tier1_masks_test_gather_prepare },
+};
+
+// The flags of a field of its own: a bool's, or a count's (NAME=N).
+typedef struct Tier1MasksTestFlag Tier1MasksTestFlag;
+struct Tier1MasksTestFlag
+{
+    const char* name;
+    uint32_t offset;
+    bool count;
+};
+
+static const Tier1MasksTestFlag tier1_masks_test_flags[] = {
+    { "count", offsetof(Tier1MasksFixture, count), true },
+    { "spills", offsetof(Tier1MasksFixture, spills), false },
+    { "calls", offsetof(Tier1MasksFixture, calls), false },
+    { "cycle", offsetof(Tier1MasksFixture, cycle), false },
+    { "frame-accesses", offsetof(Tier1MasksFixture, frame_accesses), true },
+    { "divisions", offsetof(Tier1MasksFixture, divisions), false },
+    { "vector-cycle", offsetof(Tier1MasksFixture, vector_cycle), false },
+    { "borrows", offsetof(Tier1MasksFixture, borrows), false },
+    { "v3", offsetof(Tier1MasksFixture, v3), false },
+    { "avx", offsetof(Tier1MasksFixture, avx), false },
+    { "v2", offsetof(Tier1MasksFixture, v2), false },
+    { "baseline", offsetof(Tier1MasksFixture, baseline), false },
+    { "foundation", offsetof(Tier1MasksFixture, foundation), false },
+    { "rows", offsetof(Tier1MasksFixture, rows), true },
+    { "row-moves", offsetof(Tier1MasksFixture, row_moves), true },
+    { "masked-compares", offsetof(Tier1MasksFixture, masked_compares), true },
+    { "masked-operations", offsetof(Tier1MasksFixture, masked_operations), true },
+    { "fp16", offsetof(Tier1MasksFixture, fp16), false },
+    { "vnni", offsetof(Tier1MasksFixture, vnni), false },
+    { "exclusive", offsetof(Tier1MasksFixture, exclusive), false },
+    { "asm-body", offsetof(Tier1MasksFixture, asm_body), false },
+};
+
+// The bytes of the file at `path`, NUL-terminated, in `storage`, and their count in `length`; null, with the reason in
+// `fixtures->problem`, when it can't be read, is larger than BUSTER_TIER1_MASKS_TEST_FILE_BYTES or holds a NUL.
+static char* tier1_masks_test_fixture_read(Tier1MasksFixtures* fixtures, const char* path, uint64_t* length)
+{
+    char* bytes = 0;
+    const int file = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat status;
+    const bool regular = file >= 0 && fstat(file, &status) == 0 && S_ISREG(status.st_mode);
+    if (!regular)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "can't read %s", path);
+    }
+    else if (status.st_size > BUSTER_TIER1_MASKS_TEST_FILE_BYTES)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "%s is larger than %u bytes", path, (unsigned)BUSTER_TIER1_MASKS_TEST_FILE_BYTES);
+    }
+    else
+    {
+        const uint64_t size = (uint64_t)status.st_size;
+        char* buffer = arena_push(&fixtures->storage, size + 1, 1);
+        uint64_t done = 0;
+        ssize_t got = 1;
+        while (buffer != 0 && done < size && got > 0)
+        {
+            got = read(file, buffer + done, size - done);
+            done += got > 0 ? (uint64_t)got : 0;
+        }
+        if (buffer == 0 || done != size)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "can't read %s whole", path);
+        }
+        else if (memchr(buffer, 0, size) != 0)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "%s holds a NUL byte", path);
+        }
+        else
+        {
+            buffer[size] = 0;
+            *length = size;
+            bytes = buffer;
+        }
+    }
+    if (file >= 0)
+    {
+        close(file);
+    }
+    return bytes;
+}
+
+// Whether `text` is 1 to `limit` letters, digits, '.', '_' and '-'.
+static bool tier1_masks_test_fixture_word(const char* text, size_t limit)
+{
+    const size_t length = strlen(text);
+    bool word = length != 0 && length <= limit;
+    for (size_t i = 0; word && i < length; i += 1)
+    {
+        const char c = text[i];
+        word = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '_' || c == '-';
+    }
+    return word;
+}
+
+// One flag into `fixture`, `seen` marking the fields set; false for an unknown or repeated one, or a count that isn't a
+// decimal number from 1 to UINT32_MAX.
+static bool tier1_masks_test_fixture_flag(Tier1MasksFixture* fixture, const char* flag, uint32_t* seen)
+{
+    const char* equals = strchr(flag, '=');
+    const size_t name_length = equals != 0 ? (size_t)(equals - flag) : strlen(flag);
+    const uint32_t flag_count = (uint32_t)BUSTER_ARRAY_LENGTH(tier1_masks_test_flags);
+    const uint32_t model_bit = flag_count;
+    const uint32_t prepare_bit = flag_count + 1;
+    bool known = false;
+    for (uint32_t f = 0; !known && f < flag_count; f += 1)
+    {
+        const Tier1MasksTestFlag* entry = &tier1_masks_test_flags[f];
+        const bool named = strlen(entry->name) == name_length && strncmp(entry->name, flag, name_length) == 0 && (*seen & (UINT32_C(1) << f)) == 0;
+        if (named && entry->count && equals != 0)
+        {
+            char* end = 0;
+            const unsigned long long value = equals[1] >= '1' && equals[1] <= '9' ? strtoull(equals + 1, &end, 10) : 0;
+            known = end != 0 && *end == 0 && value <= UINT32_MAX;
+            if (known)
+            {
+                const uint32_t number = (uint32_t)value;
+                memcpy((uint8_t*)fixture + entry->offset, &number, sizeof(number));
+            }
+        }
+        else if (named && !entry->count && equals == 0)
+        {
+            const bool set = true;
+            memcpy((uint8_t*)fixture + entry->offset, &set, sizeof(set));
+            known = true;
+        }
+        *seen |= known ? UINT32_C(1) << f : 0;
+    }
+    if (!known && equals != 0 && name_length == 5 && strncmp(flag, "model", 5) == 0 && (*seen & (UINT32_C(1) << model_bit)) == 0)
+    {
+        for (uint32_t m = 0; !known && m < BUSTER_ARRAY_LENGTH(tier1_masks_test_models); m += 1)
+        {
+            known = strcmp(equals + 1, tier1_masks_test_models[m].name) == 0;
+            fixture->model = known ? tier1_masks_test_models[m].model : fixture->model;
+        }
+        *seen |= known ? UINT32_C(1) << model_bit : 0;
+    }
+    if (!known && equals != 0 && name_length == 7 && strncmp(flag, "prepare", 7) == 0 && (*seen & (UINT32_C(1) << prepare_bit)) == 0)
+    {
+        for (uint32_t p = 0; !known && p < BUSTER_ARRAY_LENGTH(tier1_masks_test_prepares); p += 1)
+        {
+            known = strcmp(equals + 1, tier1_masks_test_prepares[p].name) == 0;
+            fixture->prepare = known ? tier1_masks_test_prepares[p].prepare : fixture->prepare;
+        }
+        *seen |= known ? UINT32_C(1) << prepare_bit : 0;
+    }
+    return known;
+}
+
+// A case's comma-separated flags, or -, into `fixture`; false, with the reason in `fixtures->problem`, for an unknown or
+// repeated one.
+static bool tier1_masks_test_fixture_flags(Tier1MasksFixtures* fixtures, char* flags, Tier1MasksFixture* fixture, uint32_t line)
+{
+    bool known = true;
+    uint32_t seen = 0;
+    if (strcmp(flags, "-") != 0)
+    {
+        char* flag = flags;
+        while (known && flag != 0)
+        {
+            char* comma = strchr(flag, ',');
+            if (comma != 0)
+            {
+                *comma = 0;
+            }
+            known = tier1_masks_test_fixture_flag(fixture, flag, &seen);
+            if (!known)
+            {
+                snprintf(fixtures->problem, sizeof(fixtures->problem), "catalog line %u: unknown or repeated flag '%s'", line, flag);
+            }
+            flag = comma != 0 ? comma + 1 : 0;
+        }
+    }
+    return known;
+}
+
+// Whether no file in `directory` but catalog.tsv is outside the catalog's.
+static bool tier1_masks_test_fixture_orphans(Tier1MasksFixtures* fixtures, const char* directory)
+{
+    DIR* listing = opendir(directory);
+    bool clean = listing != 0;
+    if (!clean)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "can't list %s", directory);
+    }
+    for (struct dirent* entry = clean ? readdir(listing) : 0; clean && entry != 0; entry = readdir(listing))
+    {
+        const char* name = entry->d_name;
+        bool named = strcmp(name, ".") == 0 || strcmp(name, "..") == 0 || strcmp(name, "catalog.tsv") == 0;
+        for (uint32_t i = 0; !named && i < fixtures->count; i += 1)
+        {
+            named = strcmp(fixtures->files[i], name) == 0;
+        }
+        if (!named)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "%s/%s is in no catalog line", directory, name);
+            clean = false;
+        }
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
+    return clean;
+}
+
+// The cases of tests/tier1/masks/'s catalog under the fixture root, and their texts; false, with the reason in
+// `fixtures->problem`, when any of it is wrong (the comment above tier1_masks_test_fixture_root).
+static bool tier1_masks_test_fixtures_load(Tier1MasksFixtures* fixtures)
+{
+    *fixtures = (Tier1MasksFixtures){ .storage = arena_reserve(UINT64_C(1) << 28) };
+    char directory[PATH_MAX];
+    char path[PATH_MAX + 64];
+    snprintf(directory, sizeof(directory), "%s/tier1/masks", tier1_masks_test_fixture_root);
+    snprintf(path, sizeof(path), "%s/catalog.tsv", directory);
+    fixtures->cases = arena_push(&fixtures->storage, sizeof(Tier1MasksFixture) * BUSTER_TIER1_MASKS_TEST_CASES, 8);
+    fixtures->files = arena_push(&fixtures->storage, sizeof(const char*) * BUSTER_TIER1_MASKS_TEST_CASES, 8);
+    const char** identifiers = arena_push(&fixtures->storage, sizeof(const char*) * BUSTER_TIER1_MASKS_TEST_CASES, 8);
+    uint64_t length = 0;
+    char* catalog = fixtures->cases != 0 && fixtures->files != 0 && identifiers != 0 ? tier1_masks_test_fixture_read(fixtures, path, &length) : 0;
+    bool valid = catalog != 0;
+    if (valid && (length == 0 || catalog[length - 1] != '\n'))
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "%s doesn't end with a newline", path);
+        valid = false;
+    }
+    uint32_t line = 0;
+    char* cursor = catalog;
+    while (valid && cursor < catalog + length)
+    {
+        char* end = strchr(cursor, '\n');
+        *end = 0;
+        line += 1;
+        if (line == 1)
+        {
+            valid = strcmp(cursor, tier1_masks_test_fixture_header) == 0;
+            if (!valid)
+            {
+                snprintf(fixtures->problem, sizeof(fixtures->problem), "%s's first line isn't '%s'", path, tier1_masks_test_fixture_header);
+            }
+        }
+        else if (cursor[0] != '#')
+        {
+            char* fields[4] = { cursor, 0, 0, 0 };
+            uint32_t count = 1;
+            for (char* tab = strchr(cursor, '\t'); tab != 0 && count < 5; tab = strchr(tab + 1, '\t'))
+            {
+                *tab = 0;
+                if (count < 4)
+                {
+                    fields[count] = tab + 1;
+                }
+                count += 1;
+            }
+            const size_t file_length = count == 4 ? strlen(fields[1]) : 0;
+            valid = count == 4 && tier1_masks_test_fixture_word(fields[0], 64) && tier1_masks_test_fixture_word(fields[1], 128) && file_length > 3 &&
+                    strcmp(fields[1] + file_length - 3, ".ir") == 0 && fields[3][0] != 0 && fixtures->count < BUSTER_TIER1_MASKS_TEST_CASES;
+            if (!valid)
+            {
+                snprintf(fixtures->problem, sizeof(fixtures->problem), "%s line %u isn't ID, FILE.ir, FLAGS and NAME, tab-separated", path, line);
+            }
+            for (uint32_t i = 0; valid && i < fixtures->count; i += 1)
+            {
+                valid = strcmp(identifiers[i], fields[0]) != 0 && strcmp(fixtures->files[i], fields[1]) != 0;
+                if (!valid)
+                {
+                    snprintf(fixtures->problem, sizeof(fixtures->problem), "%s line %u repeats an ID or a file", path, line);
+                }
+            }
+            Tier1MasksFixture* fixture = valid ? &fixtures->cases[fixtures->count] : 0;
+            if (valid)
+            {
+                *fixture = (Tier1MasksFixture){ .name = fields[3] };
+                valid = tier1_masks_test_fixture_flags(fixtures, fields[2], fixture, line);
+            }
+            if (valid)
+            {
+                char text_path[PATH_MAX + 256];
+                snprintf(text_path, sizeof(text_path), "%s/%s", directory, fields[1]);
+                uint64_t text_length = 0;
+                fixture->text = tier1_masks_test_fixture_read(fixtures, text_path, &text_length);
+                valid = fixture->text != 0;
+            }
+            if (valid)
+            {
+                identifiers[fixtures->count] = fields[0];
+                fixtures->files[fixtures->count] = fields[1];
+                fixtures->count += 1;
+            }
+        }
+        cursor = end + 1;
+    }
+    if (valid && fixtures->count == 0)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "%s names no case", path);
+        valid = false;
+    }
+    return valid && tier1_masks_test_fixture_orphans(fixtures, directory);
+}
 
 // Refusals: a vector, a mask's select.
 // A function returning a vector (#141), which no convention's place Tier 1 has (tier1_select_vector_signature): its
@@ -3460,7 +1373,7 @@ static uint8_t* tier1_masks_test_mxcsr_code(Tier1MasksTest* test, uint32_t op, u
         uint32_t node = BUSTER_IR_NONE;
         const Tier1SelectError selected = ok ? tier1_select_plan(out, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
         ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, "select MXCSR fixture");
-        const Tier1EmitOptions options = { .certify = true, .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true };
+        const Tier1EmitOptions options = { .certify = true, .register_mask = tier1_liveness_register_mask(), .rematerialize = true };
         Tier1EmitResult emitted = { 0 };
         const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->v4, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
         ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK, "emit MXCSR fixture");
@@ -4041,7 +1954,7 @@ static void tier1_masks_test_asm_mutants(Tier1MasksTest* test, const Tier1Select
     }
 }
 
-static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture* fixture, const IrFunction* function, const IrDominance* dominance, bool vector, bool rematerialize, const uint8_t* inputs,
+static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture* fixture, const IrFunction* function, const IrDominance* dominance, bool rematerialize, const uint8_t* inputs,
                                   const uint64_t* counts, const uint8_t* expected)
 {
     const uint64_t output_mark = test->output.length;
@@ -4051,12 +1964,11 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     bool ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, fixture->name);
     if (!ok)
     {
-        printf("test-tier1-masks: %s, %s path: selection error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)selected, node);
+        printf("test-tier1-masks: %s: selection error %u at node %u\n", fixture->name, (unsigned)selected, node);
     }
     const Tier1EmitOptions options = {
         .certify = true,
         .register_mask = tier1_liveness_register_mask(),
-        .vector = vector,
         .rematerialize = rematerialize,
     };
     Tier1EmitResult emitted = { 0 };
@@ -4066,7 +1978,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK && emitted.general, fixture->name);
         if (!ok)
         {
-            printf("test-tier1-masks: %s, %s path: emission error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)error, node);
+            printf("test-tier1-masks: %s: emission error %u at node %u\n", fixture->name, (unsigned)error, node);
         }
     }
     if (ok)
@@ -4138,7 +2050,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         const uint32_t row_moves = fixture->row_moves;
         if (fixture->rows != 0 && !tier1_masks_test_expect(test, emitted.machine_rows == fixture->rows && emitted.row_moves == row_moves, "a fixture's machine rows take the moves into and out of place it counts"))
         {
-            printf("test-tier1-masks: %s, %s path: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, vector ? "vector" : "scalar", emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);
+            printf("test-tier1-masks: %s: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);
         }
         // The masked comparisons' records (#1847): a vpcmp or a vcmpp under a writemask.
         uint32_t masked_compares = 0;
@@ -4151,7 +2063,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         }
         if (fixture->masked_compares != 0 && !tier1_masks_test_expect(test, masked_compares == fixture->masked_compares, "a comparison ANDed with a mask is one compare under it as its writemask"))
         {
-            printf("test-tier1-masks: %s, %s path: %u masked comparisons (%u expected)\n", fixture->name, vector ? "vector" : "scalar", masked_compares, fixture->masked_compares);
+            printf("test-tier1-masks: %s: %u masked comparisons (%u expected)\n", fixture->name, masked_compares, fixture->masked_compares);
         }
         // The masked operations' records (#1840): an arithmetic record under a writemask.
         uint32_t masked_operations = 0;
@@ -4165,7 +2077,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         }
         if (fixture->masked_operations != 0 && !tier1_masks_test_expect(test, masked_operations == fixture->masked_operations, "a select of an operation is the operation under its mask"))
         {
-            printf("test-tier1-masks: %s, %s path: %u masked operations (%u expected)\n", fixture->name, vector ? "vector" : "scalar", masked_operations, fixture->masked_operations);
+            printf("test-tier1-masks: %s: %u masked operations (%u expected)\n", fixture->name, masked_operations, fixture->masked_operations);
         }
         // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
         // frame's base, as the object's lea's.
@@ -4212,8 +2124,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         test->call_saves += emitted.call_stores;
     }
     uint64_t mapped = 0;
-    const bool print = test->print;
-    test->print = print && vector;
     if (test->print && ok)
     {
         printf("test-tier1-masks: %s:\n", fixture->name);
@@ -4223,7 +2133,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         tier1_masks_test_upper(test, &plan, &emitted, test->forms);
     }
     uint8_t* machine = ok ? tier1_masks_test_load(test, &emitted, &mapped) : MAP_FAILED;
-    test->print = print;
     ok = machine != MAP_FAILED;
     uint8_t* buffers = ok && test->native ? mmap(0, BUSTER_TIER1_MASKS_TEST_BUFFER * BUSTER_TIER1_MASKS_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
     if (ok && test->native)
@@ -4266,7 +2175,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
             {
                 if (actual[byte] != wanted[byte])
                 {
-                    printf("test-tier1-masks: %s, %s path, input %u: byte %u is %02x, the interpreter's %02x\n", fixture->name, vector ? "vector" : "scalar", input, byte, actual[byte], wanted[byte]);
+                    printf("test-tier1-masks: %s, input %u: byte %u is %02x, the interpreter's %02x\n", fixture->name, input, byte, actual[byte], wanted[byte]);
                     byte = BUSTER_TIER1_MASKS_TEST_BUFFER;
                 }
             }
@@ -4340,7 +2249,7 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
         // With rematerialization (as the C driver's --tier1 runs) and without.
         for (uint32_t run = 0; ok && run < 2; run += 1)
         {
-            tier1_masks_test_path(test, fixture, &function, &dominance, true, run != 0, inputs, counts, expected);
+            tier1_masks_test_path(test, fixture, &function, &dominance, run != 0, inputs, counts, expected);
         }
     }
     tier1_masks_test_expect(test, test->scratch.length == 0, "parsing returns the scratch arena");
@@ -4432,14 +2341,15 @@ static void tier1_masks_test_forms(Tier1MasksTest* test)
 }
 
 // What the selector or the consumer must refuse: a vector result and a mask's select at selection, a target without the
-// forms at emission, on both paths.
-static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* baseline, const uint8_t* foundation)
+// forms at emission, on both paths. `logic` is the catalog's first fixture, "logic at every width", whose masks of every
+// width the targets without them refuse.
+static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* baseline, const uint8_t* foundation, const char* logic)
 {
     const char* const texts[] = {
         tier1_masks_test_vector,
         tier1_masks_test_select,
-        tier1_masks_test_fixtures[0].text,
-        tier1_masks_test_fixtures[0].text,
+        logic,
+        logic,
         tier1_masks_test_words,
         tier1_masks_test_sse_compare,
     };
@@ -4481,7 +2391,6 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
             const Tier1EmitOptions options = {
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = true,
             };
             Tier1EmitResult emitted = { 0 };
             const Tier1EmitError error = selected == TIER1_SELECT_OK ? tier1_emit_function(&plan, &options, targets[c], &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_UNSUPPORTED;
@@ -4721,7 +2630,6 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             const Tier1EmitOptions options = {
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = true,
                 .rematerialize = true,
             };
             memset(&emitted[f], 0, sizeof(emitted[f]));
@@ -9237,6 +7145,12 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             seed = strtoull(argv[i], &end, 0);
             valid = argv[i][0] != 0 && *end == 0;
         }
+        else if (strcmp(argv[i], "--fixtures") == 0 && i + 1 < argc)
+        {
+            i += 1;
+            tier1_masks_test_fixture_root = argv[i];
+            valid = argv[i][0] != 0;
+        }
         else
         {
             valid = false;
@@ -9245,7 +7159,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: test-tier1-masks [--seed N] [--print]\n");
+        fprintf(stderr, "usage: test-tier1-masks [--seed N] [--print] [--fixtures DIRECTORY]\n");
     }
     else
     {
@@ -9301,9 +7215,15 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             test.native = parsed && (host.features & v4.features) == v4.features;
             test.native_fp16 = (host.extensions & BUSTER_X86_EXTENSION(AVX512FP16)) != 0;
             test.native_vnni = (host.features & BUSTER_X86_FEATURE(AVX512VNNI)) != 0;
-            for (uint32_t f_index = 0; f_index < BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures); f_index += 1)
+            Tier1MasksFixtures fixtures;
+            const bool loaded = tier1_masks_test_fixtures_load(&fixtures);
+            char problem[sizeof(fixtures.problem) + 64];
+            snprintf(problem, sizeof(problem), "IR fixtures (#2053): %s", fixtures.problem);
+            tier1_masks_test_expect(&test, loaded, problem);
+            const uint32_t fixture_count = loaded ? fixtures.count : 0;
+            for (uint32_t f_index = 0; f_index < fixture_count; f_index += 1)
             {
-                tier1_masks_test_fixture(&test, &tier1_masks_test_fixtures[f_index]);
+                tier1_masks_test_fixture(&test, &fixtures.cases[f_index]);
             }
             test.v4_features = v4.features;
             tier1_masks_test_mxcsr(&test);
@@ -9339,13 +7259,16 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             tier1_masks_test_lane_unaries(&test);
             tier1_masks_test_frounds(&test);
             tier1_masks_test_cvtts(&test);
-            tier1_masks_test_refusals(&test, baseline, foundation);
+            if (loaded)
+            {
+                tier1_masks_test_refusals(&test, baseline, foundation, fixtures.cases[0].text);
+            }
             tier1_masks_test_scan(&test);
             tier1_masks_test_forms(&test);
             uint32_t runnable = 0;
-            for (uint32_t f_index = 0; f_index < BUSTER_ARRAY_LENGTH(tier1_masks_test_fixtures); f_index += 1)
+            for (uint32_t f_index = 0; f_index < fixture_count; f_index += 1)
             {
-                const Tier1MasksFixture* fixture = &tier1_masks_test_fixtures[f_index];
+                const Tier1MasksFixture* fixture = &fixtures.cases[f_index];
                 runnable += (!fixture->fp16 || test.native_fp16) && (!fixture->vnni || test.native_vnni) ? 1 : 0;
             }
             const uint64_t expected_runs = test.native ? 2u * runnable * BUSTER_TIER1_MASKS_TEST_INPUTS : 0;
@@ -9416,6 +7339,8 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
             // The front end's rows: every rule of the five families, the shifts at every count.
             tier1_masks_test_expect(&test, test.builtin_attempts != 0 && test.builtin_rows == test.builtin_attempts, "every front-end opmask row goes through Tier 0, the IR and Tier 1");
             tier1_masks_test_expect(&test, !test.native || test.builtin_native == BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS * test.builtin_rows, "Tier 0 runs every front-end row natively");
+            printf("test-tier1-masks: %u IR fixtures from %s/tier1/masks (#2053), %u of them natively\n", fixture_count, tier1_masks_test_fixture_root, test.native_fixtures);
+            arena_release(&fixtures.storage);
         }
         printf("test-tier1-masks: Tier 0's mask programs: %u through the IR's interpreter, SSA, the optimizer and Tier 1 (%" PRIu64 " native runs), %u of them with machine rows, natively alone\n",
                test.typed_programs, test.typed_runs, test.typed_machine);
