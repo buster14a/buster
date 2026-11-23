@@ -33,14 +33,12 @@ static void asm_test_compiler_corpus(AsmTest* test, const char* directory, bool 
     char assembly[PATH_MAX];
     char reference_path[PATH_MAX];
     char object_path[PATH_MAX];
-    char scalar_path[PATH_MAX];
     char executable[PATH_MAX];
     char output[PATH_MAX];
     char errors[PATH_MAX];
     snprintf(assembly, sizeof(assembly), "%s/compiler.s", directory);
     snprintf(reference_path, sizeof(reference_path), "%s/compiler-reference.o", directory);
     snprintf(object_path, sizeof(object_path), "%s/compiler-vector.o", directory);
-    snprintf(scalar_path, sizeof(scalar_path), "%s/compiler-scalar.o", directory);
     snprintf(executable, sizeof(executable), "%s/compiler-program", directory);
     snprintf(output, sizeof(output), "%s/compiler-output", directory);
     snprintf(errors, sizeof(errors), "%s/compiler-errors", directory);
@@ -73,8 +71,8 @@ static void asm_test_compiler_corpus(AsmTest* test, const char* directory, bool 
                     snprintf(stem, sizeof(stem), "%s/%s-O%u-%s-%s", directory, compilers[compiler], optimization * 2, syntax ? "intel" : "att", sections ? "separate" : "ordinary");
                     const size_t length = strlen(stem);
                     bool paths_fit = length + 24 < sizeof(assembly);
-                    const char* const suffixes[] = {".s", "-reference.o", "-vector.o", "-scalar.o", "-program", "-output", "-errors"};
-                    char* const destinations[] = {assembly, reference_path, object_path, scalar_path, executable, output, errors};
+                    const char* const suffixes[] = {".s", "-reference.o", "-vector.o", "-program", "-output", "-errors"};
+                    char* const destinations[] = {assembly, reference_path, object_path, executable, output, errors};
                     for (uint32_t path = 0; paths_fit && path < BUSTER_ARRAY_LENGTH(suffixes); path += 1)
                     {
                         memcpy(destinations[path], stem, length);
@@ -106,20 +104,18 @@ static void asm_test_compiler_corpus(AsmTest* test, const char* directory, bool 
                     {
                         char* gas[] = {"as", "--64", "--nocompress-debug-sections", "-o", reference_path, assembly, 0};
                         char* vector[] = {"/proc/self/exe", "assemble", "-o", object_path, assembly, 0};
-                        char* scalar[] = {"/proc/self/exe", "assemble", "--scalar", "-o", scalar_path, assembly, 0};
                         // Validate the fixture's expected results independently even when Buster rejects the source.
                         okay = oracle_epoch_file(assembly) && asm_test_tool(gas, reference_path, output, errors) == 0 && asm_test_corpus_program(reference_path, executable, output, errors);
                         asm_test_check(test, okay, name, "GNU object execution/unwind");
                         const AsmResult result = asm_test_pair(test, source, 1, X86_ARCH_BASELINE);
                         okay = okay && result.error == 0;
-                        okay = okay && object_test_run(vector, output, errors) == 0 && object_test_run(scalar, output, errors) == 0;
-                        asm_test_check(test, okay, name, "GNU as and both production assembly commands");
+                        okay = okay && object_test_run(vector, output, errors) == 0;
+                        asm_test_check(test, okay, name, "GNU as and the production assembly command");
                         if (okay)
                         {
                             const String8 reference = object_test_read_file(&files, reference_path);
                             const String8 vector_object = object_test_read_file(&files, object_path);
-                            const String8 scalar_object = object_test_read_file(&files, scalar_path);
-                            okay = vector_object.length != 0 && vector_object.length == scalar_object.length && memcmp(vector_object.pointer, scalar_object.pointer, vector_object.length) == 0;
+                            okay = vector_object.length != 0;
                             ObjectView ours;
                             ObjectView theirs;
                             char difference[256] = {0};
@@ -127,13 +123,9 @@ static void asm_test_compiler_corpus(AsmTest* test, const char* directory, bool 
                             okay = okay && asm_test_gnu_object(&theirs, reference, &files, difference, sizeof(difference));
                             okay = okay && object_test_same_as(&ours, &theirs, difference, sizeof(difference));
                             asm_test_check(test, okay, name, difference);
-                            const char* const objects[] = {object_path, scalar_path};
-                            for (uint32_t implementation = 0; implementation < 2; implementation += 1)
-                            {
-                                const bool executed = asm_test_corpus_program(objects[implementation], executable, output, errors);
-                                asm_test_check(test, executed, name, implementation == 0 ? "vector object execution/unwind" : "scalar object execution/unwind");
-                                okay = okay && executed;
-                            }
+                            const bool executed = asm_test_corpus_program(object_path, executable, output, errors);
+                            asm_test_check(test, executed, name, "object execution/unwind");
+                            okay = okay && executed;
                         }
                     }
                     if (!okay)

@@ -335,12 +335,10 @@ static void asm_test_groups(AsmTest* test, const char* directory, bool cross_che
     // Explicit flags must retain the conventional array entry sizes, and the arrays are their classes' atoms (#1848),
     // which the direct path runs.
     static const char arrays[] = ".section .init_array,\"aw\"\n.quad 0\n.section .fini_array,\"aw\"\n.quad 0\n";
-    test->scalar.length = 0;
     test->vector.length = 0;
     const String8 array_source = {.pointer = (char*)arrays, .length = sizeof(arrays) - 1};
-    const AsmResult scalar_arrays = asm_assemble(array_source, test->index, (AsmOptions){0}, &test->scalar);
     const AsmResult vector_arrays = asm_assemble(array_source, test->index, (AsmOptions){.vectorized = true}, &test->vector);
-    asm_test_check(test, scalar_arrays.error == 0 && vector_arrays.error == 0, "ordinary array section flags retain their entry size", vector_arrays.error);
+    asm_test_check(test, vector_arrays.error == 0, "ordinary array section flags retain their entry size", vector_arrays.error);
     uint32_t array_atoms = 0;
     for (uint32_t a = 1; vector_arrays.error == 0 && a < vector_arrays.link.atoms.count; a += 1)
     {

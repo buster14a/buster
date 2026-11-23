@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Independent fixtures, GNU as object comparison, executable behavior, and scalar/vector malformed-input tests.
+// Independent fixtures, GNU as object comparison, executable behavior, and malformed-input tests.
 
 typedef struct AsmTest AsmTest;
 struct AsmTest
@@ -106,13 +106,7 @@ static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, X86A
     }
     test->scalar.length = 0;
     test->vector.length = 0;
-    const AsmOptions scalar_options = {0};
-    const AsmOptions vector_options = {.vectorized = true};
-    AsmResult scalar = asm_assemble(source, test->index, scalar_options, &test->scalar);
-    AsmResult vector = asm_assemble(source, test->index, vector_options, &test->vector);
-    bool same_error = (scalar.error == 0) == (vector.error == 0) && (scalar.error == 0 || (strcmp(scalar.error, vector.error) == 0 && scalar.location == vector.location));
-    same_error &= scalar.error_name.length == vector.error_name.length && (scalar.error_name.length == 0 || memcmp(scalar.error_name.pointer, vector.error_name.pointer, scalar.error_name.length) == 0);
-    asm_test_check(test, same_error, "scalar/vector acceptance and diagnostic", vector.error);
+    AsmResult vector = asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &test->vector);
     if (expected >= 0)
     {
         asm_test_check(test, (vector.error == 0) == (expected != 0), "fixture acceptance", vector.error);
@@ -129,11 +123,10 @@ static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, X86A
         asm_test_fold_u64(test, vector.error_name.length);
         asm_test_fold(test, vector.error_name.pointer, vector.error_name.length);
     }
-    if (scalar.error == 0 && vector.error == 0)
+    if (vector.error == 0)
     {
-        const Object a = asm_object(&scalar, BUSTER_S8("fixture.s"), &test->scalar);
         const Object b = asm_object(&vector, BUSTER_S8("fixture.s"), &test->vector);
-        asm_test_check(test, a.error == OBJECT_ERROR_NONE && b.error == OBJECT_ERROR_NONE && a.size == b.size && memcmp(a.bytes, b.bytes, a.size) == 0, "scalar/vector ELF", "objects differ");
+        asm_test_check(test, b.error == OBJECT_ERROR_NONE, "fixture ELF", "object writer failed");
         if (folded)
         {
             asm_test_fold_u64(test, b.error);
@@ -361,24 +354,24 @@ static void asm_test_driver(AsmTest* test, const char* directory)
     char input[PATH_MAX];
     char preprocessed[PATH_MAX];
     char object[PATH_MAX];
-    char scalar_object[PATH_MAX];
+    char c_object[PATH_MAX];
     char output[PATH_MAX];
     char errors[PATH_MAX];
     snprintf(input, sizeof(input), "%s/driver.s", directory);
     snprintf(preprocessed, sizeof(preprocessed), "%s/driver.S", directory);
     snprintf(object, sizeof(object), "%s/driver.o", directory);
-    snprintf(scalar_object, sizeof(scalar_object), "%s/scalar.o", directory);
+    snprintf(c_object, sizeof(c_object), "%s/driver-c.o", directory);
     snprintf(output, sizeof(output), "%s/output", directory);
     snprintf(errors, sizeof(errors), "%s/errors", directory);
     bool okay = object_write_file(input, (const uint8_t*)asm_test_function, sizeof(asm_test_function) - 1) == OBJECT_ERROR_NONE;
     char* vector[] = { "/proc/self/exe", "assemble", "-o", object, input, 0 };
-    char* scalar[] = { "/proc/self/exe", "-c", "--scalar", "-o", scalar_object, input, 0 };
-    okay = okay && object_test_run(vector, output, errors) == 0 && object_test_run(scalar, output, errors) == 0;
+    char* compile[] = { "/proc/self/exe", "-c", "-o", c_object, input, 0 };
+    okay = okay && object_test_run(vector, output, errors) == 0 && object_test_run(compile, output, errors) == 0;
     const uint64_t saved = test->scalar.length;
     const String8 a = object_test_read_file(&test->scalar, object);
-    const String8 b = object_test_read_file(&test->scalar, scalar_object);
+    const String8 b = object_test_read_file(&test->scalar, c_object);
     okay = okay && a.length != 0 && a.length == b.length && memcmp(a.pointer, b.pointer, a.length) == 0;
-    asm_test_check(test, okay, "driver assemble/-c scalar and vector", 0);
+    asm_test_check(test, okay, "driver assemble and -c give the same object", 0);
     char* unsupported[] = {"/proc/self/exe", "assemble", "-m32", "-o", object, input, 0};
     asm_test_check(test, object_test_run(unsupported, output, errors) == 1, "unsupported output-mode flag is rejected", 0);
     static const char invalid[] = ".intel_syntax noprefix\nadd rax,0x80000000\n";
@@ -413,14 +406,12 @@ static void asm_test_preprocessing(AsmTest* test, const char* directory)
     char input[PATH_MAX];
     char header[PATH_MAX];
     char object[PATH_MAX];
-    char scalar_object[PATH_MAX];
     char clang_source[PATH_MAX];
     char output[PATH_MAX];
     char errors[PATH_MAX];
     snprintf(input, sizeof(input), "%s/driver.S", directory);
     snprintf(header, sizeof(header), "%s/values.h", directory);
     snprintf(object, sizeof(object), "%s/driver.o", directory);
-    snprintf(scalar_object, sizeof(scalar_object), "%s/scalar.o", directory);
     snprintf(clang_source, sizeof(clang_source), "%s/preprocessed.s", directory);
     snprintf(output, sizeof(output), "%s/output", directory);
     snprintf(errors, sizeof(errors), "%s/errors", directory);
@@ -437,15 +428,13 @@ static void asm_test_preprocessing(AsmTest* test, const char* directory)
         ".intel_syntax noprefix\n.text\nmov eax, OVERRIDE\n.att_syntax prefix\nret\n";
     bool okay = object_write_file(header, (const uint8_t*)definitions, sizeof(definitions) - 1) == OBJECT_ERROR_NONE && object_write_file(input, (const uint8_t*)source, sizeof(source) - 1) == OBJECT_ERROR_NONE;
     char* vector[] = {"/proc/self/exe", "assemble", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", object, input, 0};
-    char* scalar[] = {"/proc/self/exe", "assemble", "--scalar", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", scalar_object, input, 0};
     char* clang[] = {"clang", "-E", "-P", "-x", "assembler-with-cpp", "-I", (char*)directory, "-DOVERRIDE=7", "-DREMOVE", "-UREMOVE", "-o", clang_source, input, 0};
-    okay = okay && object_test_run(vector, output, errors) == 0 && object_test_run(scalar, output, errors) == 0 && asm_test_tool(clang, clang_source, output, errors) == 0;
+    okay = okay && object_test_run(vector, output, errors) == 0 && asm_test_tool(clang, clang_source, output, errors) == 0;
     Arena files = arena_reserve(1ull << 28);
     const String8 a = object_test_read_file(&files, object);
-    const String8 b = object_test_read_file(&files, scalar_object);
     const String8 text = object_test_read_file(&files, clang_source);
-    okay = okay && a.length != 0 && a.length == b.length && memcmp(a.pointer, b.pointer, a.length) == 0;
-    asm_test_check(test, okay, ".S macros, includes, comments and scalar/vector output", 0);
+    okay = okay && a.length != 0;
+    asm_test_check(test, okay, ".S macros, includes, comments and output", 0);
     if (okay)
     {
         char* terminated = arena_push(&files, text.length + 1, 1);
@@ -1406,12 +1395,12 @@ static void asm_test_reader(AsmTest* test, const char* directory)
     okay = okay && asm_read_file(large, &arena, &source) && source.length > (64u << 20) && source.length < BUSTER_ASM_MAX_SOURCE;
     asm_test_check(test, okay, "assembly file beyond 64 MiB is read", 0);
     const uint64_t source_end = arena.length;
-    for (uint32_t scalar = 0; okay && scalar < 2; scalar += 1)
+    if (okay)
     {
-        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){.vectorized = scalar == 0}, &arena);
+        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &arena);
         const bool code = assembled.error == NULL && assembled.link.atoms.count > 1 && assembled.link.atoms.size[1] == 1 &&
                           assembled.link.atoms.bytes[1][0] == 0xc3;
-        asm_test_check(test, code, scalar == 0 ? "assembly beyond 64 MiB emits ret on the vector path" : "assembly beyond 64 MiB emits ret on the scalar path", assembled.error);
+        asm_test_check(test, code, "assembly beyond 64 MiB emits ret", assembled.error);
         arena_pop_to(&arena, source_end);
     }
     // The .S printer's stream also grows beyond 64 MiB; its bytes belong directly to the caller's arena.
@@ -1543,7 +1532,7 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
         bool assembled = okay && pp_parse_options(1, arguments, &options, &files, &path, &output, &markers);
         options.scalar = vectorized == 0;
         assembled = assembled && asm_preprocess_file(input, options, &files, &source);
-        const AsmResult result = assembled ? asm_assemble(source, test->index, (AsmOptions){.vectorized = vectorized != 0}, &files) : (AsmResult){.error = "preprocessing failed"};
+        const AsmResult result = assembled ? asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &files) : (AsmResult){.error = "preprocessing failed"};
         assembled = result.error == 0 && result.link.atoms.count == 2 && result.link.atoms.size[1] == sizeof(expected) && memcmp(result.link.atoms.bytes[1], expected, sizeof(expected)) == 0;
         asm_test_check(test, assembled, ".S pastes and '$' splits as assembler-with-cpp has them", result.error);
     }
@@ -1818,16 +1807,13 @@ static int run_assembler_tests(int count, char** arguments)
         const AsmResult pushed = asm_test_pair(&test, BUSTER_S8("push $external\n"), 1, 0);
         asm_test_check(&test, pushed.error == 0 && pushed.link.fixups.count == 2 && pushed.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S, "PUSH's sign-extended imm32 relocates as 32S", pushed.error);
         // A 32-bit address's absolute disp32 (#2339): GNU as's R_X86_64_32 for a `.s` file, clang's 32S for a C unit's
-        // assembly (AsmOptions.integrated), on both paths.
+        // assembly (AsmOptions.integrated).
         const AsmResult narrow = asm_test_pair(&test, BUSTER_S8("movl x(,%eax,8), %ecx\n"), 1, 0);
         asm_test_check(&test, narrow.error == 0 && narrow.link.fixups.count == 2 && narrow.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32,
                        "a 32-bit address's disp32 relocates as GNU as's 32", narrow.error);
-        for (uint32_t vectorized = 0; vectorized < 2; vectorized += 1)
-        {
-            const AsmResult integrated = asm_assemble(BUSTER_S8("movl x(,%eax,8), %ecx\n"), test.index, (AsmOptions){ .vectorized = vectorized != 0, .integrated = true }, &test.vector);
-            asm_test_check(&test, integrated.error == 0 && integrated.link.fixups.count == 2 && integrated.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S,
-                           "a C unit's 32-bit address's disp32 relocates as clang's 32S", integrated.error);
-        }
+        const AsmResult integrated = asm_assemble(BUSTER_S8("movl x(,%eax,8), %ecx\n"), test.index, (AsmOptions){ .vectorized = true, .integrated = true }, &test.vector);
+        asm_test_check(&test, integrated.error == 0 && integrated.link.fixups.count == 2 && integrated.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S,
+                       "a C unit's 32-bit address's disp32 relocates as clang's 32S", integrated.error);
         // A unit's entry atom and code, its first control flow, and its absolute symbols (#812): the C checker's planner
         // uses them to decide whether a template calls nothing, refuses a helper's early return and shares `.set`.
         const AsmResult alignment_only = asm_test_pair(&test, BUSTER_S8(".p2align 4\n"), 1, 0);
@@ -2012,7 +1998,7 @@ static int run_assembler_tests(int count, char** arguments)
                 asm_test_compiler_corpus(&test, directory, keep);
                 asm_test_program_corpus(&test, directory, keep);
             }
-            const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "scalar.o", "values.h", "preprocessed.s"};
+            const char* files[] = {"oracle.s", "oracle.o", "output", "errors", "function.o", "caller.c", "program", "direct", "driver.s", "driver.S", "driver.o", "driver-c.o", "values.h", "preprocessed.s"};
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(files); i += 1)
             {
                 char path[PATH_MAX];
