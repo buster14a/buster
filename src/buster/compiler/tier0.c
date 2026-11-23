@@ -14639,6 +14639,20 @@ static __m512i tier0_value_back(__m512i previous, __m512i current, __m512i offse
     return _mm512_permutex2var_epi64(previous, _mm512_sub_epi64(_mm512_set_epi64(15, 14, 13, 12, 11, 10, 9, 8), offset), current);
 }
 
+// The words of the eight entries from `first` (selection's): each one's slot's, gathered, or ABSORBED for an absorbed
+// entry and for a lane past the entries (a block past them all loads and gathers nothing).
+static inline __attribute__((always_inline)) __m512i tier0_select_words(const Tier0Entries* entries, uint64_t first, uint32_t count)
+{
+    const __mmask8 lanes = (__mmask8)tier0_lanes((int64_t)first, count);
+    const __m256i kind = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, entries->key_kinds + first)), _mm256_set1_epi32(BUSTER_TYPED_KIND_LIMIT - 1));
+    const __m256i class = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, entries->key_classes + first)), _mm256_set1_epi32(BUSTER_TYPED_CLASS_LIMIT - 1));
+    const __m256i variant = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, entries->variants + first)), _mm256_set1_epi32(BUSTER_TIER0_VARIANTS - 1));
+    const __m256i slot = _mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(kind, 9), _mm256_slli_epi32(class, 5)), variant);
+    const __m128i taken = _mm_maskz_loadu_epi8(lanes, entries->absorbed + first);
+    const __mmask8 own = lanes & (__mmask8)_mm_testn_epi8_mask(taken, taken);
+    return _mm512_mask_i32gather_epi64(_mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_NO_HOLES)), own, slot, tier0_slot_words, 8);
+}
+
 // Selection for the vector path, 8 entries at a time: each entry's word gathered from its slot's (an absorbed entry's
 // ABSORBED), the depth checks (a template whose fixed registers need another depth is deferred), the depths each stack
 // reaches and the fixed clobbers, as masks and lane maxima, and the deferred entries listed (Tier0Entries.
@@ -14648,10 +14662,6 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
                                                                                   Tier0Error* error, bool memory, bool realigned)
 {
     const uint32_t count = function->count;
-    const uint8_t* key_kinds = entries->key_kinds;
-    const uint8_t* key_classes = entries->key_classes;
-    const uint8_t* variants = entries->variants;
-    const uint8_t* absorbed = entries->absorbed;
     const uint8_t* depths = entries->depths;
     const uint8_t* floating_depths = entries->floating_depths;
     uint64_t* words = entries->words;
@@ -14676,16 +14686,14 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     const __m512i three = _mm512_set1_epi64(3);
     const __m512i fifteen = _mm512_set1_epi64(15);
     const __m512i not_template = _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_UNSUPPORTED));
+    // A block's words are gathered while the block before it is worked on (#2874): gathered in the block that reads
+    // them, the block's work waited for the gather (on the 9700X, 0.7 cycles an entry of `sqlite3.c`).
+    __m512i ahead = tier0_select_words(entries, 0, count);
     for (uint32_t first = 0; first < count; first += 8)
     {
         const __mmask8 lanes = (__mmask8)tier0_lanes(first, count);
-        const __m256i kind = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, key_kinds + first)), _mm256_set1_epi32(BUSTER_TYPED_KIND_LIMIT - 1));
-        const __m256i class = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, key_classes + first)), _mm256_set1_epi32(BUSTER_TYPED_CLASS_LIMIT - 1));
-        const __m256i variant = _mm256_and_si256(_mm256_cvtepu8_epi32(_mm_maskz_loadu_epi8(lanes, variants + first)), _mm256_set1_epi32(BUSTER_TIER0_VARIANTS - 1));
-        const __m256i slot = _mm256_or_si256(_mm256_or_si256(_mm256_slli_epi32(kind, 9), _mm256_slli_epi32(class, 5)), variant);
-        const __m128i taken = _mm_maskz_loadu_epi8(lanes, absorbed + first);
-        const __mmask8 own = lanes & (__mmask8)_mm_testn_epi8_mask(taken, taken);
-        __m512i word = _mm512_mask_i32gather_epi64(_mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_ABSORBED | BUSTER_TIER0_WORD_NO_HOLES)), own, slot, tier0_slot_words, 8);
+        __m512i word = ahead;
+        ahead = tier0_select_words(entries, (uint64_t)first + 8, count);
         const __m512i depth = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, depths + first));
         const __m512i floating = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, floating_depths + first));
         const __m512i required = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_DEPTH_SHIFT), fifteen);
