@@ -481,6 +481,12 @@ struct NodeMachine
     // (node_contexts_window_loop). At reader time, where no attribute's target is read, it is the options' target's, or
     // true in a unit with a function of a target of its own, whatever that names (node_machine_begin_reader).
     bool fuses;
+    // Whether C leaves a volatile lvalue's read, its store and its update to the lowering's tasks, which mark each access
+    // (#3310, check_lower_volatile; a local's by name has no mark and keeps its row). True for the pipeline's machine and
+    // for the reader's, but not where the window's forms run (BUSTER_NODE_READER_WINDOW): their records have no bit for
+    // a volatile access, C on the window takes one as before #3310, and so does its reference there, both then
+    // differing from the lowering's entries for it. No compile and no producer runs those forms.
+    bool marks;
     uint32_t* reader_declarations;
     uint8_t* reader_facts;
     uint32_t reader_objects;

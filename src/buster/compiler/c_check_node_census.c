@@ -9281,6 +9281,8 @@ static bool node_census_file(NodeCensus* census, const char* file, char** option
                 memset(s.object_stamps, 0, (uint64_t)objects * sizeof(uint32_t));
                 memset(s.local_stamps, 0, (uint64_t)locals * sizeof(uint32_t));
                 s.machine = &machine;
+                // As the reader's machine of the same run (NodeMachine.marks).
+                machine.marks = (shadow->reader & BUSTER_NODE_READER_WINDOW) == 0;
             }
             if (room && shadow->bodies)
             {

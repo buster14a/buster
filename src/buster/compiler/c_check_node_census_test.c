@@ -2089,6 +2089,17 @@ static const char node_producer_test_inlined_text[] = "__attribute__((always_inl
                                                       "int caller(int a) { return wrap(a); }\n"
                                                       "int beside(int a) { return a + 2; }\n";
 static const char node_producer_test_naked_text[] = "__attribute__((naked)) void bare(void) { }\nint beside(int a) { return a + 2; }\n";
+// Volatile lvalues, whose reads and stores the lowering's tasks mark (#3310): a global's read, its store, its updates and
+// a member's read through a pointer are no template's, and their bodies are left. A local's by name has no mark (the
+// tasks' entries are a local's as ever), and its body is taken, as is the one that reads the member beside the volatile
+// one.
+static const char node_producer_test_volatile_text[] = "volatile int v;\nstruct W { volatile int n; int m; };\n"
+                                                       "int reads(void) { return v; }\n"
+                                                       "void stores(int a) { v = a; }\n"
+                                                       "void updates(void) { v++; v += 2; }\n"
+                                                       "int through(struct W *w) { return w->n + w->m; }\n"
+                                                       "int local(int a) { volatile int x = a; x = x + 1; x++; return x; }\n"
+                                                       "int beside(struct W *w) { return w->m; }\n";
 static const char node_producer_test_unlowered_text[] = "static int unnamed(int a) { return a + 1; }\nint beside(int a) { return a + 2; }\n";
 static const char node_producer_test_results_text[] = "typedef int W __attribute__((warn_unused_result));\nW w(void);\nint result(void) { return 1; }\n";
 
@@ -7962,6 +7973,10 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_naked_text, sizeof(node_producer_test_naked_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_naked),
                       "node-producer: a naked function's body is left");
+    const NodeProducerExpected produced_volatile = { .reasons = { [NODE_PRODUCER_TAKEN] = 2, [NODE_PRODUCER_MACHINE] = 4 } };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_volatile_text, sizeof(node_producer_test_volatile_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_volatile),
+                      "node-producer: a body that reads, stores or updates a volatile lvalue is left, but for a local by its name");
     const NodeProducerExpected produced_unlowered = { .reasons = { [NODE_PRODUCER_TAKEN] = 1 }, .unlowered = 1 };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_unlowered_text, sizeof(node_producer_test_unlowered_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_unlowered),
