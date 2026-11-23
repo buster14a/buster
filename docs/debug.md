@@ -50,8 +50,7 @@ padding is assumed, including for vector tails.
 
 The C producer (`check_debug_build`) uses `debug_prepare` followed by
 `debug_emit`. Preparation validates and measures once into a stack-held
-`DebugPlan`: a copy of the unit descriptor, the five bases and sizes, and the
-scalar/vector encoder choice. It allocates no storage and retains no per-row
+`DebugPlan`: a copy of the unit descriptor and the five bases and sizes. It allocates no storage and retains no per-row
 encoding. After allocating the five sections from those sizes, emission checks
 their capacities and writes once. The plan and every borrowed name, file,
 function and row must stay unchanged until emission finishes; changes require
@@ -542,14 +541,15 @@ writer can emit four such rows in one four-byte store. In a mixed group,
 leading-zero counts determine the remaining rows' LEB128 lengths,
 `vpmultishiftqb` spreads their seven-bit groups and `vpcompressb` packs
 the selected bytes of all four rows. The store writes exactly that count.
-The scalar writer uses the same encoding for partial groups, file changes
-and rows marked with `DW_LNS_set_prologue_end`.
+The rows the groups stop before (partial groups, file changes and rows marked
+with `DW_LNS_set_prologue_end`) are written one at a time in the same encoding.
+The writer had an exact twin that wrote every row alone; #2924 deleted it after
+`benchmark-debug` on the 9700X found the groups at least as fast at every row
+count (see the PR's record).
 
-`benchmark-debug [--functions N] [--rows N] [--only scalar|vector]
-[--after-scalar MS]` measures validation, size calculation, all five section
-writes, and final address patching together. It compares the complete outputs
-before timing. Its default is 4,096 functions with 64 rows each, 21 alternating
-passes, and reused caller-owned output buffers. It reports elapsed nanoseconds
+`benchmark-debug [--functions N] [--rows N]` measures validation, size calculation, all five section
+writes, and final address patching together. Its default is 4,096 functions
+with 64 rows each, 21 passes, and reused caller-owned output buffers. It reports elapsed nanoseconds
 per row, the range across passes, milliseconds per unit, output bytes, byte
 throughput and hardware user cycles per row. Denied or multiplexed cycle counts
 are reported as unavailable. The emitter needs no scratch buffer; caller-owned row columns cost
@@ -584,8 +584,8 @@ compiler's SHA-256 was
 
 ## Checks
 
-`test-debug` compares the scalar and vector bytes, independently decodes every
-line row, tests unsigned and signed seven-bit boundaries and integer extrema,
+`test-debug` holds the units' bytes to a digest frozen while the vector writer
+and its deleted exact twin agreed, independently decodes every line row, tests unsigned and signed seven-bit boundaries and integer extrema,
 checks every row count through 129, and puts both input columns and the output
 at protected page boundaries for counts through 65. It checks all section
 capacity failures, invalid row/file/string inputs, empty units and sequences,

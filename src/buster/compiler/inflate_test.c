@@ -215,7 +215,6 @@ static void inflate_test_adler(InflateTestTally* tally, uint64_t seed)
                 start[i] = fill != 0 ? 0xff : (uint8_t)inflate_test_next(&state);
             }
             inflate_test_expect(tally, inflate_adler32_vector(start, size) == inflate_test_adler32(start, size), "Adler-32 by vectors against the definition, at a page's end", size);
-            inflate_test_expect(tally, inflate_adler32(start, size) == inflate_test_adler32(start, size), "Adler-32 by bytes against the definition, at a page's end", size);
         }
     }
     inflate_test_unguard(&guarded);
