@@ -105,11 +105,22 @@ static void check_test_driver_parse_statement_recovery(CheckTest* test, const ch
     free(actual_lines);
 }
 
+// A long sweep (62 s on a 4-CPU Xeon VM, #3399): each fixture, and each of the checks before and after them, is a unit of
+// test-checker-driver's deal (check_test_driver_takes).
 static void check_test_driver_statement_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    check_test_driver_parse_statement_recovery(test, clang, executable, directory);
-    check_test_driver_attribute_calls(test, clang, executable, directory);
-    check_test_driver_malformed_calls(test, clang, executable, directory);
+    if (check_test_driver_takes())
+    {
+        check_test_driver_parse_statement_recovery(test, clang, executable, directory);
+    }
+    if (check_test_driver_takes())
+    {
+        check_test_driver_attribute_calls(test, clang, executable, directory);
+    }
+    if (check_test_driver_takes())
+    {
+        check_test_driver_malformed_calls(test, clang, executable, directory);
+    }
     static const char* const fixtures[] = {
         // #2438: a case operand's non-integer type is diagnosed before its constant value, on ordinary and wide
         // switches. Parentheses and range endpoints retain their own beginning; integer nonconstants and faults keep
@@ -461,8 +472,13 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
     char source[PATH_MAX];
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/statement-recovery.o", directory);
-    for (uint32_t f = 0; expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
+        // Dealt whatever the buffers' allocation, so that every part deals the same units.
+        if (!check_test_driver_takes() || expected_lines == NULL || actual_lines == NULL)
+        {
+            continue;
+        }
         snprintf(source, sizeof(source), "%s/statement-recovery-%u.c", directory, f);
         const bool made = parse_test_write(source, fixtures[f], strlen(fixtures[f]));
         for (uint32_t s = 0; made && s < BUSTER_ARRAY_LENGTH(standards); s += 1)
@@ -564,6 +580,10 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
     };
     for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(walk_ended); w += 1)
     {
+        if (!check_test_driver_takes())
+        {
+            continue;
+        }
         snprintf(source, sizeof(source), "%s/statement-recovery-pragmas.c", directory);
         const bool pragmas_made = expected_lines != NULL && actual_lines != NULL && parse_test_write(source, walk_ended[w], strlen(walk_ended[w]));
         check_test_expect(test, pragmas_made, "statement recovery: the pragma fixture is written");
@@ -632,8 +652,12 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
     snprintf(source, sizeof(source), "%s/statement-recovery-capped.c", directory);
     const bool capped_made = expected_lines != NULL && actual_lines != NULL && parse_test_write(source, capped, sizeof(capped) - 1);
     check_test_expect(test, capped_made, "statement recovery: the capped fixture is written");
-    for (uint32_t l = 0; capped_made && l < BUSTER_ARRAY_LENGTH(limits); l += 1)
+    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(limits); l += 1)
     {
+        if (!check_test_driver_takes() || !capped_made)
+        {
+            continue;
+        }
         for (uint32_t mode = 0; mode < 3; mode += 1)
         {
             char* arguments[12] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", "-Wall", source, NULL };

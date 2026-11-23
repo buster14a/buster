@@ -20,14 +20,21 @@ struct CheckDriverFixture
     uint32_t column;
 };
 
-// test-checker-driver --part K/N: the command's checks are dealt in turn, in program order, to N parts, and this process
-// runs part K's (index K - 1), so that the correctness list runs the command as N commands of one CPU each, which the
-// runner packs beside the others: alone, the driver's checks were the list's longest command (197 s on a hosted
-// runner, 48 s on the 9700X). A check deals one unit, or, where it is a long sweep (check_test_driver_recovery,
-// check_test_driver_error_limits), one per case. Every part goes through the same units in the same order, whatever
-// the others' outcomes, since each unit is dealt before anything it runs decides the next: so the parts together run
-// each unit once, as the whole run runs it: no check draws from CheckTest.random, which the driver leaves at 0, and
-// those that draw numbers seed their own. Without --part, the one part takes every unit.
+// test-checker-driver --part K/N: the command's checks are dealt, in program order, to N parts, and this process runs
+// part K's (index K - 1), so that the correctness list runs the command as N commands of one CPU each, which the runner
+// packs beside the others: alone, the driver's checks were the list's longest command (197 s on a hosted runner, 48 s
+// on the 9700X). A check deals one unit, or, where it is a long sweep (check_test_driver_recovery,
+// check_test_driver_error_limits, check_test_driver_semantic_recovery), one per case. Each unit weighs about what it
+// takes, in hundredths of a second of one CPU, BUSTER_CHECK_DRIVER_UNIT_WEIGHT unless its deal names another
+// (check_test_driver_takes_weighing), and goes to the part that weighs the least so far (of those, the first). Dealt in
+// turn instead, a few costly units fell on one part, and a unit a pull request added moved every later one to the next
+// part: one part took 535 s of parallel's 600 s on a hosted runner, and the one that took over its units timed out
+// (#3399). Every part goes through the same units in the same order and weighs them alike, whatever the others'
+// outcomes, since each unit is dealt before anything it runs decides the next: so the parts together run each unit
+// once, as the whole run runs it: no check draws from CheckTest.random, which the driver leaves at 0, and those that
+// draw numbers seed their own. Without --part, the one part takes every unit.
+#define BUSTER_CHECK_DRIVER_MAX_PARTS 64
+#define BUSTER_CHECK_DRIVER_UNIT_WEIGHT 15
 typedef struct CheckDriverPart CheckDriverPart;
 struct CheckDriverPart
 {
@@ -36,6 +43,8 @@ struct CheckDriverPart
     // The units dealt so far, and of them this part's.
     uint32_t dealt;
     uint32_t taken;
+    // What each part's units weigh so far.
+    uint64_t weights[BUSTER_CHECK_DRIVER_MAX_PARTS];
 };
 
 static CheckDriverPart check_driver_part = { .index = 0, .count = 1 };
@@ -47,13 +56,26 @@ static CheckDriverPart check_driver_part = { .index = 0, .count = 1 };
 static bool check_driver_clang_reference = true;
 static char check_driver_clang_version[64] = "";
 
-// Whether this part runs the next unit, which it deals.
-static bool check_test_driver_takes(void)
+// Whether this part runs the next unit, which it deals: to the part that weighs the least so far (the first of those),
+// which then weighs `weight` more, in hundredths of a second of one CPU (CheckDriverPart).
+static bool check_test_driver_takes_weighing(uint32_t weight)
 {
-    const bool taken = check_driver_part.dealt % check_driver_part.count == check_driver_part.index;
+    uint32_t lightest = 0;
+    for (uint32_t part = 1; part < check_driver_part.count; part += 1)
+    {
+        lightest = check_driver_part.weights[part] < check_driver_part.weights[lightest] ? part : lightest;
+    }
+    check_driver_part.weights[lightest] += weight;
+    const bool taken = lightest == check_driver_part.index;
     check_driver_part.dealt += 1;
     check_driver_part.taken += taken;
     return taken;
+}
+
+// Whether this part runs the next unit, of the usual weight, which it deals.
+static bool check_test_driver_takes(void)
+{
+    return check_test_driver_takes_weighing(BUSTER_CHECK_DRIVER_UNIT_WEIGHT);
 }
 
 // #2071: the checks' compiler runs without a process each. With --in-process, buster's source commands (an option
@@ -10483,7 +10505,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             unsigned count = 0;
             int used = 0;
             const char* text = argv[++i];
-            options = sscanf(text, "%u/%u%n", &index, &count, &used) == 2 && text[used] == 0 && index >= 1 && index <= count && count <= 64;
+            options = sscanf(text, "%u/%u%n", &index, &count, &used) == 2 && text[used] == 0 && index >= 1 && index <= count && count <= BUSTER_CHECK_DRIVER_MAX_PARTS;
             check_driver_part = (CheckDriverPart){ .index = options ? index - 1 : 0, .count = options ? count : 1 };
         }
         else
@@ -11227,12 +11249,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_lane_attributes(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        // Long sweeps that deal their own fixtures and checks.
+        if (!lazy)
         {
             check_test_driver_semantic_recovery(&test, clang, executable, directory);
-        }
-        if (!lazy && check_test_driver_takes())
-        {
             check_test_driver_statement_recovery(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
@@ -11279,6 +11299,9 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_redefinitions(&test, clang, executable, directory);
             }
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_logical_unused(&test, clang, executable, directory);
             check_test_driver_format_bitints(&test, clang, executable, directory);
             check_test_driver_shift_counts(&test, clang, executable, directory);
@@ -11449,7 +11472,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_symbols(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_symbol_pragmas(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_weak_aliases(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -11519,7 +11548,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_patchable(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_cpu_dispatch(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
                 check_test_driver_target_versions(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
@@ -12077,8 +12112,14 @@ static int run_checker_driver_tests(int argc, char** argv)
     oracle_cache_report(oracle, "test-checker-driver");
     if (check_driver_part.count > 1)
     {
-        printf("checker-driver: part %u of %u: %u of the %u units dealt\n", check_driver_part.index + 1, check_driver_part.count, check_driver_part.taken,
-               check_driver_part.dealt);
+        uint64_t weight = 0;
+        for (uint32_t part = 0; part < check_driver_part.count; part += 1)
+        {
+            weight += check_driver_part.weights[part];
+        }
+        printf("checker-driver: part %u of %u: %u of the %u units dealt, weighing %.1f s of the deal's %.1f s\n", check_driver_part.index + 1,
+               check_driver_part.count, check_driver_part.taken, check_driver_part.dealt, (double)check_driver_part.weights[check_driver_part.index] / 100.0,
+               (double)weight / 100.0);
     }
     printf("checker-driver: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int returned = test.failures != 0;

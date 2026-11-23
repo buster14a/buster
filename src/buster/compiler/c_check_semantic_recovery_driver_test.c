@@ -1493,8 +1493,15 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     char source[PATH_MAX];
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/semantic-recovery.o", directory);
-    for (uint32_t f = 0; expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
+        // A long sweep, the driver's longest (188 s on a 4-CPU Xeon VM, #3399): each fixture is a unit of
+        // test-checker-driver's deal (check_test_driver_takes), dealt whatever the buffers' allocation, so that every
+        // part deals the same units.
+        if (!check_test_driver_takes() || expected_lines == NULL || actual_lines == NULL)
+        {
+            continue;
+        }
         bool mismatch_reported = false;
         snprintf(source, sizeof(source), "%s/semantic-recovery-%u.c", directory, f);
         const bool stress = strncmp(fixtures[f], "/* typo stress */", 17) == 0;
@@ -1605,8 +1612,20 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     unlink(object);
     free(expected_lines);
     free(actual_lines);
-    check_test_driver_attribute_recovery(test, clang, executable, directory);
-    check_test_driver_suppress_recovery(test, clang, executable, directory);
-    check_test_driver_label_order(test, clang, executable, directory);
-    check_test_driver_alias_redefinition(test, clang, executable, directory);
+    if (check_test_driver_takes())
+    {
+        check_test_driver_attribute_recovery(test, clang, executable, directory);
+    }
+    if (check_test_driver_takes())
+    {
+        check_test_driver_suppress_recovery(test, clang, executable, directory);
+    }
+    if (check_test_driver_takes())
+    {
+        check_test_driver_label_order(test, clang, executable, directory);
+    }
+    if (check_test_driver_takes())
+    {
+        check_test_driver_alias_redefinition(test, clang, executable, directory);
+    }
 }
