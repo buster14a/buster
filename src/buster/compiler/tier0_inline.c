@@ -350,6 +350,8 @@ struct Tier0InlinePlan
     bool int128;
     // Whether a LOAD, STORE or SET of G has a segment override (#1447, Tier0Function.segments).
     bool segments;
+    // Whether a LOAD, STORE or SET of G is a volatile access (#3310, Tier0Function.volatiles).
+    bool volatiles;
 };
 
 // How an aggregate of `size` bytes binds (BUSTER_TIER0_INLINE_BIND_*): as a vector where G has vectors and its transport
@@ -618,6 +620,7 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, Arena* arena, Tier0
     plan->x87 = caller->x87;
     plan->int128 = caller->int128;
     plan->segments = caller->segments;
+    plan->volatiles = caller->volatiles;
     for (uint32_t s = 0; valid && s < plan->site_count; s += 1)
     {
         const Tier0InlineSite* site = plan->sites + s;
@@ -635,6 +638,7 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, Arena* arena, Tier0
         plan->x87 = plan->x87 || callee->x87;
         plan->int128 = plan->int128 || callee->int128;
         plan->segments = plan->segments || callee->segments;
+        plan->volatiles = plan->volatiles || callee->volatiles;
     }
     plan->transport = caller->vectors ? caller->vector_bytes : plan->vectors ? input->vector_bytes : caller->vector_bytes;
     for (uint32_t d = 0; valid && d < plan->distinct_count; d += 1)
@@ -1456,6 +1460,7 @@ static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlin
         g.x87 = plan.x87;
         g.int128 = plan.int128;
         g.segments = plan.segments;
+        g.volatiles = plan.volatiles;
         g.vector_bytes = plan.transport;
         // Lifetimes are ir_lower's alone (Tier 0 ignores them), and G reaches only Tier 0.
         g.lifetime_entries = 0;

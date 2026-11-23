@@ -197,7 +197,14 @@ static CheckRepairStatus check_repair_make(CheckRepair* repair, const Parser* or
                     // there are not postponed until a synthetic close. A DO body still needs its while clause;
                     // retain the preceding statement candidate until that clause's semicolon completes it.
                     const bool awaiting_while = opener != 0 && original->tokens.kinds[opener - 1] == PARSE_KIND_DO;
-                    if (preceding_statement_block && !awaiting_while && depth != 0 && other == 0 && unsafe == 0)
+                    if (depth == 0)
+                    {
+                        // No enclosing original construct still needs this repair cut. Keeping an earlier inner
+                        // statement would repair an already closed declaration and hide later complete declarations
+                        // from the prefix reader. A later unfinished body or record establishes its own cut.
+                        cut = 0;
+                    }
+                    else if (preceding_statement_block && !awaiting_while && other == 0 && unsafe == 0)
                     {
                         cut = token + 1;
                     }

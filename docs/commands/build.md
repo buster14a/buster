@@ -357,7 +357,12 @@ intrinsic catalogue's exact table, #2654) write is in a section of its own (`bus
 `BUSTER_BAKED` for state main.c's units share, `BUSTER_BAKED_UNIT` for a
 module's statics, baked in the checker's unit, the C driver's), so a compile
 starts with them built; the file's build ID is recomputed over the baked
-bytes. A new table those initializers write goes there too: the bake fails
+bytes. Where lld's start order script placed the section in a segment of its
+own (["The executable in huge pages"](#the-executable-in-huge-pages)), the
+bake also makes that segment read-only (`bake_seal`, #2886): a compile only
+reads the tables, and every other command makes their pages writable as it
+starts (`main_baked_writable`, `main.c`), since tests and benchmarks build
+them again or reset them. A new table those initializers write goes there too: the bake fails
 the build when they write anything outside it, including when its own
 tracking arrays fill. PIEs (the sanitizers' builds) and `BUSTER_BAKE=0` build
 them when they run; `test-baked-tables` checks either kind and fails, rather
@@ -1448,6 +1453,18 @@ once, and the instruction TLB holds it in one entry (#2873).
   its place in the file, and the kernel could never map it by huge pages. The
   segments' contents are the same; the file is up to 2 MB longer, and the
   addresses between segments skip to the next 2 MB.
+- **The data a compile only reads** (#2886): the baked tables
+  (`buster_baked`, 6.5 MB) and the compiler's own objects' `.data.rel.ro`
+  (12.4 MB, pointers that a static link at a fixed address relocates in the
+  file) are never written by a compile, but a static link puts them with
+  writable data, which the kernel maps privately: no huge page maps such a
+  mapping. The script places the two (`.data.rel.ro.buster`) in a segment of
+  their own, from a 2 MB boundary before the code, and the bake makes it
+  read-only (`bake_seal`, `baked.c`), so that the look below asks for its
+  ranges as for the code's. The C library's `.data.rel.ro` (18 KB), which its
+  start writes, stays in the RELRO segment. Every command but a compile's
+  makes the tables' pages writable as it starts (`main_baked_writable`,
+  `main.c`); a compile that wrote them would fault.
 - **The asking:** the kernel makes a huge page of a file's pages for a process
   that lives long enough for `khugepaged` to reach it, which a compile
   doesn't, or when asked (`MADV_COLLAPSE`, Linux 6.1, of a kernel with

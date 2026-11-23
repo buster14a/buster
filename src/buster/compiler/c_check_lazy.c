@@ -11,7 +11,8 @@
 //
 // All token intervals retain their original identities and order. The selected reader visits the unit once in
 // that order, so later redeclarations, completions and pragmas cannot authorize an earlier selected body. It
-// checks every declaration/header, and skips only complete body intervals marked by deferred_tokens. A function
+// checks every declaration/header, and skips only complete body intervals marked by deferred_tokens, and the headers
+// before them the tree planner marks where nothing read names their definitions (#3307). A function
 // typedef that cannot be classified before type checking is retained conservatively. Assembly and attributes
 // with opaque symbol references also retain bodies; this adapter does not guess references from string spelling.
 //
@@ -31,6 +32,12 @@
 #define BUSTER_CHECK_LAZY_RETAIN UINT32_C(16)
 #define BUSTER_CHECK_LAZY_OPAQUE UINT32_C(32)
 #define BUSTER_CHECK_LAZY_TYPEDEF UINT32_C(64)
+// The name occurs at file scope outside its own definition's declarator: another declaration or a use (tree planner).
+#define BUSTER_CHECK_LAZY_NAMED UINT32_C(128)
+// A mask byte: 1 is a deferred body's token, 2 a token of a skipped definition's header, whose whole definition no read
+// token names (#3307): the reader jumps from it past the body, so its specifiers, declarator and attributes are not read.
+#define BUSTER_CHECK_LAZY_MASK_BODY UINT8_C(1)
+#define BUSTER_CHECK_LAZY_MASK_HEADER UINT8_C(2)
 
 typedef enum CheckLazyStatus
 {
@@ -60,6 +67,8 @@ struct CheckLazy
     uint32_t body_count;
     uint32_t selected_count;
     uint32_t deferred_count;
+    // Deferred definitions whose headers are skipped too (BUSTER_CHECK_LAZY_MASK_HEADER).
+    uint32_t skipped_count;
     uint32_t reference_count;
     uint32_t binding_event_count;
     uint32_t tree_tokens;
@@ -73,7 +82,8 @@ struct CheckLazy
 };
 
 // This checks shape, not eligibility. The producer owns system-header/root policy; the source consumer may use
-// this before copying a caller-supplied mask. Any nonzero run must include both braces of a complete function.
+// this before copying a caller-supplied mask. Any nonzero run must include both braces of a complete function, and may
+// start with a run of header bytes that ends at that body's opening.
 static bool check_lazy_mask_valid(const Parser* parser, const uint8_t* mask)
 {
     bool valid = parser != 0;
@@ -83,10 +93,15 @@ static bool check_lazy_mask_valid(const Parser* parser, const uint8_t* mask)
         valid = mask[count] == 0 && parser->tree.roles != 0 && parser->tree.parents != 0;
         for (uint32_t token = 0; valid && token < count; token += 1)
         {
-            if (mask[token] != 0)
+            while (valid && mask[token] == BUSTER_CHECK_LAZY_MASK_HEADER)
+            {
+                token += 1;
+                valid = token < count && (mask[token] == BUSTER_CHECK_LAZY_MASK_HEADER || mask[token] == BUSTER_CHECK_LAZY_MASK_BODY);
+            }
+            if (valid && mask[token] != 0)
             {
                 const uint32_t close = parser->tree.parents[token];
-                valid = mask[token] == 1 && parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY && close > token && close < count &&
+                valid = mask[token] == BUSTER_CHECK_LAZY_MASK_BODY && parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY && close > token && close < count &&
                         parser->tree.roles[close] == PARSE_ROLE_CLOSE_BODY;
                 for (uint32_t inside = token; valid && inside <= close; inside += 1)
                 {

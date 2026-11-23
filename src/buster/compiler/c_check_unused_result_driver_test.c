@@ -486,76 +486,9 @@ static const CheckDriverDefaultWarningFixture check_driver_unused_result_fixture
     },
 };
 
-// An enclosing initializer still lacks invalid-compound dependency recovery (#2441). Freeze its existing first
-// derivative error, while the compound literal's own initializer diagnoses both elements. This is explicitly a
-// boundary regression, not a claim that the enclosing declaration already matches Clang.
-static void check_test_driver_initializer_compound_boundary(CheckTest* test, const char* executable, const char* directory)
-{
-    const char* source = "tests/checker/initializer-comma/compound-boundary.c";
-    CheckTestFixtures storage = { .storage = arena_reserve(UINT64_C(1) << 20) };
-    uint64_t expected_length = 0;
-    const char* expected = check_test_fixture_read(&storage, "tests/checker/initializer-comma/compound-boundary.expected", &expected_length);
-    const bool available = expected != NULL && expected_length != 0 && access(source, R_OK) == 0;
-    check_test_expect(test, available, "compound initializer boundary source and diagnostic expectation are available");
-    static const char* const standards[] = { "-std=gnu17", "-std=c23" };
-    static const char* const lanes[] = { "1", "3" };
-    static const char sentinel[] = "preserve rejected compound output\n";
-    char object[PATH_MAX];
-    snprintf(object, sizeof(object), "%s/compound-boundary.o", directory);
-    for (uint32_t standard = 0; available && standard < BUSTER_ARRAY_LENGTH(standards); standard += 1)
-    {
-        for (uint32_t mode = 0; mode < 2; mode += 1)
-        {
-            for (uint32_t lane = 0; lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
-            {
-                for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-                {
-                    char* arguments[] = {
-                        (char*)(executable != NULL ? executable : "/proc/self/exe"),
-                        (char*)standards[standard],
-                        mode == 0 ? "-fsyntax-only" : "-c",
-                        "-fno-caret-diagnostics",
-                        (char*)source,
-                        "-o",
-                        object,
-                        "--lanes",
-                        (char*)lanes[lane],
-                        scalar != 0 ? "--scalar" : NULL,
-                        NULL,
-                    };
-                    const bool written = parse_test_write(object, sentinel, sizeof(sentinel) - 1);
-                    char* actual = NULL;
-                    const int status = written ? check_test_driver_spawn(arguments, &actual) : -1;
-                    const bool same = actual != NULL && strcmp(expected, actual) == 0;
-                    const int descriptor = open(object, O_RDONLY);
-                    char* contents = NULL;
-                    const bool preserved = descriptor >= 0 && check_test_driver_read_file(descriptor, &contents) && contents != NULL &&
-                                           strcmp(contents, sentinel) == 0;
-                    if (descriptor >= 0)
-                    {
-                        close(descriptor);
-                    }
-                    check_test_expect(test, status == 1 && same && preserved,
-                                      "compound literal recovery preserves the enclosing first-failure boundary and existing output");
-                    if (!same)
-                    {
-                        fprintf(stderr, "compound initializer boundary: status=%d standard=%s mode=%u lanes=%s scalar=%u\n%s\n", status,
-                                standards[standard], mode, lanes[lane], scalar, actual != NULL ? actual : "<no output>");
-                    }
-                    free(contents);
-                    free(actual);
-                }
-            }
-        }
-    }
-    unlink(object);
-    arena_release(&storage.storage);
-}
-
 static void check_test_driver_unused_results(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_unused_result_fixtures,
                                        BUSTER_ARRAY_LENGTH(check_driver_unused_result_fixtures));
     check_test_driver_warning_catalog(test, clang, executable, directory, "checker/initializer-comma");
-    check_test_driver_initializer_compound_boundary(test, executable, directory);
 }

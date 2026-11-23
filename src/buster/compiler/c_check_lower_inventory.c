@@ -619,7 +619,7 @@ struct LowerSource
 // PPOptions.node_front for the sources lower_source_open opens (measure-node-machine --shadow --front, #2524); 0 for none.
 static uint8_t lower_source_node_front;
 // PPOptions.node_reader for them (measure-node-machine --shadow --front-tests); 0 for none.
-static uint16_t lower_source_node_reader;
+static uint32_t lower_source_node_reader;
 
 // Whether the program's return flow runs for them (measure-node-machine --shadow --bodies reads each body's verdict of
 // it, CheckProgramBody.return_warning; nothing is reported).
