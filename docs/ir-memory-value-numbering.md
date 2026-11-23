@@ -233,6 +233,19 @@ The whole pass by each version, each over the corpus in runs of its own
 The record is buster-performance's
 [`memory-value-numbering-2718-2026-11-14`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/memory-value-numbering-2718-2026-11-14).
 
+**#2826's re-measurement** (main `9ba3d792`, the 9700X; record
+[`memory-value-numbering-2826-2026-11-23`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/memory-value-numbering-2826-2026-11-23)):
+`+memory` took 0.981 to 0.994 of speedtest1's cycles and 0.982 to 0.993 of
+Lua's over three runs, about the 1% between equal builds, for 3.1% of
+`sqlite3.c`'s compile (603.6 to 622.4 ms). The issue's restrictions (no
+forwarding from a load across blocks, from a single-use load an operation would
+fold, across a call; only stores' values; only within a block) did no better,
+and the last two lost Lua's gain. The pass keeps its rules and stays opt-in.
+With one root per symbol, #3309's kernel of two globals ran in 137.6 M cycles
+by `+memory` against 200.2 M without it (clang -O2: 187.8 M).
+
+The rest of this section is #2718's.
+
 **Run time decides the default.** On the final code (`566770b`, against main
 `750f6a0`), `measure-tier1-programs --runs 11 --variant
 --tier1-passes=-memory` on the 9700X gave, in user cycles with the pass and

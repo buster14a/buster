@@ -556,8 +556,8 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                     const uint64_t symbol = address >> 32;
                     const uint64_t within = address & UINT32_MAX;
                     const bool symbolic = symbol != 0 && symbol < BUSTER_IR_OPTIMIZE_TEST_SYMBOLS && within + bytes <= 32;
-                    uint8_t* bank = symbolic ? symbol_memory + symbol * 32 + within : memory + address - 1;
                     folded = symbolic || (address != 0 && address - 1 <= sizeof(memory) && bytes <= sizeof(memory) - (address - 1));
+                    uint8_t* bank = !folded ? NULL : symbolic ? symbol_memory + symbol * 32 + within : memory + address - 1;
                     if (folded)
                     {
                         if (op == IR_STORE)
