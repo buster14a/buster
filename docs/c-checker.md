@@ -7206,10 +7206,12 @@ arm a `_Generic` or `__builtin_choose_expr` selects. A dereference, a
 comparison, a comma's left operand, a `?:` condition (a GNU `?:` included), a
 selection's controlling expression and its other arms consume it or don't
 return it. `-Wempty-body` leaves an `if` that has an
-`else` alone. A statement a recovery view deleted whole (one that starts at an
-orphan `)`, #2406) keeps its `;` marked `BUSTER_PARSE_DROPPED_STATEMENT`. That
-was clang's StmtError, and so is a `for` or `while` whose body is one: neither
-is an empty body or a loop's following statement, and such a `for` gets no
+`else` alone. A statement a recovery view deleted whole keeps its `;` marked
+`BUSTER_PARSE_DROPPED_STATEMENT` (#2406): one that starts at an orphan `)`, a
+stray `else`, a control keyword without its `(`, a declaration before its first
+declarator. That was clang's StmtError, and so is a `for`, `while`, `switch` or
+`do` whose body is one, and an `if` without an `else` whose then-branch is one:
+none is an empty body or a loop's following statement, and such a `for` gets no
 `-Wfor-loop-analysis`. A repair that keeps the statement (an extraneous `)`
 before its `;`) leaves it an ordinary statement. A loop and its following statement use their outer macro
 invocations' columns, including an argument-first or nested expansion (#1339).
