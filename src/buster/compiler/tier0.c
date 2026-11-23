@@ -4817,13 +4817,18 @@ static __mmask64 tier0_lanes(int64_t first, uint32_t count);
 
 // tier0_count_references for the vector path: the referring entries of 64 at a time as a mask (vpshufbitqmb of their
 // kinds in the five kinds' bitset), then a count per set bit, without a branch per entry: an ATOMIC_CAS's local is its
-// value's bits from BUSTER_TYPED_CAS_LOCAL_SHIFT, the others' their whole value.
+// value's bits from BUSTER_TYPED_CAS_LOCAL_SHIFT, the others' their whole value. `references` is whole cache lines
+// (tier0_column_bytes), zeroed a vector at a time: a memset of under 64 bytes is one masked store, which gives the
+// counts' loads right after it nothing to take (#2874: a function waited 95 cycles there on the 9700X).
 static void tier0_count_references_vector(const Tier0Function* function, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
     const uint64_t* values = function->values;
     const uint32_t count = function->count;
-    memset(references, 0, function->local_count * sizeof(uint32_t));
+    for (uint32_t first = 0; first < function->local_count; first += 16)
+    {
+        _mm512_storeu_si512(references + first, _mm512_setzero_si512());
+    }
     const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL |
                                      1ull << BUSTER_TYPED_ATOMIC_CAS;
     const __m512i referring = _mm512_set1_epi64((int64_t)kinds_referring);
@@ -4967,35 +4972,26 @@ static uint32_t tier0_assign_registers_vector(const Tier0Function* function, Tie
     uint32_t saved = 0;
     if ((integers | floatings) != 0)
     {
-        // The free registers in the order the loop takes them: caller-saved then callee-saved, and XMM.
-        uint32_t general[16] = { 0 };
-        uint32_t callee[BUSTER_TIER0_CALLEE_SAVED + 1] = { 0 };
-        uint32_t xmm[16] = { 0 };
-        uint32_t callers = 0;
-        uint32_t callees = 0;
-        uint32_t xmms = 0;
-        for (uint32_t d = 0; d < BUSTER_TIER0_CALLER_SAVED_DEPTHS; d += 1)
-        {
-            const uint32_t reg = tier0_integer_depths[d];
-            general[callers] = reg;
-            callers += (taken >> reg & 1) == 0 ? 1 : 0;
-        }
-        for (uint32_t c = 0; c < BUSTER_TIER0_CALLEE_SAVED; c += 1)
-        {
-            const uint32_t reg = tier0_callee_saved[c];
-            general[callers + callees] = reg;
-            // The callee-saved registers the first n locals past the caller-saved ones take, as Tier0Frame.saved's bits.
-            callee[callees + 1] = callee[callees] | 1u << c;
-            callees += (taken >> reg & 1) == 0 ? 1 : 0;
-        }
-        for (uint32_t x = 0; x < 16; x += 1)
-        {
-            xmm[xmms] = x;
-            xmms += (taken >> BUSTER_TIER0_XMM(x) & 1) == 0 ? 1 : 0;
-        }
-        const __m512i list = _mm512_loadu_si512(general);
-        const __m512i xmm_list = _mm512_loadu_si512(xmm);
+        // The free registers in the order the loop takes them: caller-saved then callee-saved, and XMM. Each list is its
+        // candidates in that order (the depths' caller-saved registers, then the callee-saved ones; XMM 0 to 15)
+        // compressed by the mask of the free ones, in a register: stored a register at a time, one load of the sixteen
+        // waited on those stores (#2874: 82 cycles a function on the 9700X).
+        _Static_assert(BUSTER_TIER0_CALLER_SAVED_DEPTHS + BUSTER_TIER0_CALLEE_SAVED <= 16, "the general candidates are one vector's dwords");
         const __m512i one = _mm512_set1_epi32(1);
+        const __mmask16 caller_lanes_all = (__mmask16)((1u << BUSTER_TIER0_CALLER_SAVED_DEPTHS) - 1);
+        const __mmask16 callee_lanes_all = (__mmask16)(((1u << BUSTER_TIER0_CALLEE_SAVED) - 1) << BUSTER_TIER0_CALLER_SAVED_DEPTHS);
+        const __m512i caller_candidates = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(caller_lanes_all, tier0_integer_depths));
+        const __m512i callee_candidates = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8((__mmask16)((1u << BUSTER_TIER0_CALLEE_SAVED) - 1), tier0_callee_saved));
+        const __m512i candidates = _mm512_mask_expand_epi32(caller_candidates, callee_lanes_all, callee_candidates);
+        const __mmask16 free_general = (caller_lanes_all | callee_lanes_all) & _mm512_testn_epi32_mask(_mm512_sllv_epi32(one, candidates), _mm512_set1_epi32((int32_t)taken));
+        const __mmask16 free_xmm = (__mmask16)(~taken >> BUSTER_TIER0_XMM(0));
+        const __m512i list = _mm512_maskz_compress_epi32(free_general, candidates);
+        const __m512i xmm_list = _mm512_maskz_compress_epi32(free_xmm, _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0));
+        const uint32_t callers = (uint32_t)__builtin_popcount(free_general & caller_lanes_all);
+        // The free callee-saved registers, a bit each in their table's order (Tier0Frame.saved's bits).
+        const uint32_t free_callee = (uint32_t)free_general >> BUSTER_TIER0_CALLER_SAVED_DEPTHS;
+        const uint32_t callees = (uint32_t)__builtin_popcount(free_callee);
+        const uint32_t xmms = (uint32_t)__builtin_popcount(free_xmm);
         uint32_t callee_taken = 0;
         for (uint32_t first = 0; first < locals; first += 16)
         {
@@ -5029,7 +5025,9 @@ static uint32_t tier0_assign_registers_vector(const Tier0Function* function, Tie
             _mm512_mask_storeu_epi64(homes + first, (__mmask8)assigned, low);
             _mm512_mask_storeu_epi64(homes + first + 8, (__mmask8)(assigned >> 8), high);
         }
-        saved = callee[callee_taken];
+        // The callee-saved registers the first `callee_taken` locals past the caller-saved ones take: the first that many
+        // free ones.
+        saved = _pdep_u32((1u << callee_taken) - 1, free_callee);
     }
     return saved;
 }
@@ -14350,6 +14348,23 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
     }
 }
 
+// P3a: the direct absorbers' distances of a block's entries (0 for none; 0 past the entries), in a register. P3b takes
+// each block's and the next one's from here: stored to the `absorbed` column and loaded back, the load waited on the
+// masked store before it (#2874: 85 cycles a function of a block or two on the 9700X).
+static inline __attribute__((always_inline)) __m512i tier0_direct_distances(const Tier0Bits* bits, uint32_t block, uint32_t blocks, uint32_t count)
+{
+    const __mmask64 lanes = tier0_lanes((int64_t)block * 64, count);
+    const uint64_t by_one = tier0_bits_ahead(bits->leaf, block, blocks, 1) | tier0_bits_ahead(bits->home_const, block, blocks, 1) |
+                            tier0_bits_ahead(bits->one, block, blocks, 1);
+    const uint64_t by_two = tier0_bits_ahead(bits->home_const, block, blocks, 2) | tier0_bits_ahead(bits->two, block, blocks, 2);
+    const uint64_t by_three = tier0_bits_ahead(bits->rmw, block, blocks, 3);
+    __m512i distance = _mm512_setzero_si512();
+    distance = _mm512_mask_mov_epi8(distance, by_three, _mm512_set1_epi8(3));
+    distance = _mm512_mask_mov_epi8(distance, by_two, _mm512_set1_epi8(2));
+    distance = _mm512_mask_mov_epi8(distance, by_one, _mm512_set1_epi8(1));
+    return _mm512_maskz_mov_epi8(lanes, distance);
+}
+
 // P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, and up to BUSTER_TIER0_ABSORB_REACH
 // after one pointer-jump step for an absorber that is absorbed itself: the constant of the first of two tests behind a
 // branch is one before its test and four before the branch), the effects folded into the absorbers, and the depths,
@@ -14358,25 +14373,9 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
 {
     const uint32_t count = function->count;
     const uint32_t blocks = bits->blocks;
-    // P3a: the direct absorber's distance (0 for none), into the `absorbed` column (overwritten in P3b by the absorbed
-    // flag).
-    for (uint32_t block = 0; block < blocks; block += 1)
-    {
-        const uint32_t first = block * 64;
-        const __mmask64 lanes = tier0_lanes(first, count);
-        const uint64_t by_one = tier0_bits_ahead(bits->leaf, block, blocks, 1) | tier0_bits_ahead(bits->home_const, block, blocks, 1) |
-                                tier0_bits_ahead(bits->one, block, blocks, 1);
-        const uint64_t by_two = tier0_bits_ahead(bits->home_const, block, blocks, 2) | tier0_bits_ahead(bits->two, block, blocks, 2);
-        const uint64_t by_three = tier0_bits_ahead(bits->rmw, block, blocks, 3);
-        __m512i distance = _mm512_setzero_si512();
-        distance = _mm512_mask_mov_epi8(distance, by_three, _mm512_set1_epi8(3));
-        distance = _mm512_mask_mov_epi8(distance, by_two, _mm512_set1_epi8(2));
-        distance = _mm512_mask_mov_epi8(distance, by_one, _mm512_set1_epi8(1));
-        _mm512_mask_storeu_epi8(entries->absorbed + first, lanes, distance);
-    }
     // P3b: the ultimate absorber's distance (the direct one's plus its own), then the folded effects: an absorbed
-    // entry's effects count at its ultimate absorber. Both read the distances around the block: loads from the column
-    // (each block's lanes ahead are P3a's, which is done).
+    // entry's effects count at its ultimate absorber. Both read the distances around the block: this block's and the
+    // next one's (tier0_direct_distances), the next one's made a block ahead and carried.
     int32_t integer_depth = 0;
     int32_t floating_depth = 0;
     __m512i previous_ultimate = _mm512_setzero_si512();
@@ -14385,13 +14384,13 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
     const __m512i lane_index = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36,
                                                35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7,
                                                6, 5, 4, 3, 2, 1, 0);
-    __m512i next_direct = blocks > 0 ? _mm512_maskz_loadu_epi8(tier0_lanes(0, count), entries->absorbed) : _mm512_setzero_si512();
+    __m512i next_direct = blocks > 0 ? tier0_direct_distances(bits, 0, blocks, count) : _mm512_setzero_si512();
     for (uint32_t block = 0; block < blocks; block += 1)
     {
         const uint32_t first = block * 64;
         const __mmask64 lanes = tier0_lanes(first, count);
         const __m512i direct = next_direct;
-        next_direct = block + 1 < blocks ? _mm512_maskz_loadu_epi8(tier0_lanes(first + 64, count), entries->absorbed + first + 64) : _mm512_setzero_si512();
+        next_direct = block + 1 < blocks ? tier0_direct_distances(bits, block + 1, blocks, count) : _mm512_setzero_si512();
         // The absorber's own distance: lane j + direct[j], across into the next block.
         const __m512i at = _mm512_add_epi8(lane_index, direct);
         const __m512i absorber_direct = _mm512_permutex2var_epi8(direct, at, next_direct);
@@ -15171,6 +15170,12 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
     }
     __m512i carry = _mm512_set1_epi64(prologue);
     __m512i previous = zero;
+    // The templates' counts, in registers of their own beside the listed entries' (`counts`, which tier0_measure_listed
+    // stores a count at a time): added to those in place, two of the counts were loaded as one vector, which waited on
+    // their two stores (#2874: 72 cycles a function on the 9700X).
+    uint32_t branches = 0;
+    uint32_t references = 0;
+    uint32_t choices = 0;
     for (uint32_t first = 0; first < count; first += 8)
     {
         const __mmask8 lanes = (__mmask8)tier0_lanes(first, count);
@@ -15230,9 +15235,9 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
             _mm256_storeu_si256((__m256i*)(positions + first), _mm512_cvtepi64_epi32(_mm512_add_epi64(carry, _mm512_sub_epi64(sum, all))));
             carry = _mm512_add_epi64(carry, _mm512_permutexvar_epi64(seven, sum));
         }
-        counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
-        counts.references += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_FIXUP)));
-        counts.choices += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE)));
+        branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
+        references += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_FIXUP)));
+        choices += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE)));
         previous = current;
     }
     if (deep)
@@ -15252,7 +15257,12 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
     entries->record_count = (uint64_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
     positions[count] = (uint32_t)entries->record_count;
     entries->deferred_count = deferred_count;
-    return counts;
+    const Tier0Counts all = {
+        counts.branches + branches,
+        counts.references + references,
+        counts.choices + choices,
+    };
+    return all;
 }
 
 // The vector measuring of a function with values of the memory classes, out of line.
@@ -15832,18 +15842,17 @@ static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 #define BUSTER_TIER0_BATCH_JOBS 32
 #define BUSTER_TIER0_BATCH_ENTRIES 2048
 
-// A job's code as its passes left it: on an error, only the error and its entry.
-static Tier0Code tier0_job_code(const Tier0Job* job)
+// A job's code as its passes left it, to `code`: on an error, only the error and its entry.
+static void tier0_job_code(const Tier0Job* job, Tier0Code* code)
 {
-    Tier0Code code = job->code;
+    *code = job->code;
     if (job->error != TIER0_OK)
     {
-        const uint32_t node = code.node;
-        memset(&code, 0, sizeof(code));
-        code.node = node;
+        const uint32_t node = code->node;
+        memset(code, 0, sizeof(*code));
+        code->node = node;
     }
-    code.error = job->error;
-    return code;
+    code->error = job->error;
 }
 
 // Compiles `count` functions: codes[i] is functions[i]'s code, as tier0_compile makes it. The functions go a batch at a
@@ -15885,15 +15894,17 @@ static void tier0_compile_batch(const Tier0Function* const* functions, uint32_t 
             taken += 1;
         }
         tier0_run_jobs(jobs, job_count, scratch.arena, output);
+        // Each job's code copied once, to its place, and finished there: copied to a local and from it, the second
+        // copy's loads waited on the first one's stores, which lay otherwise (#2874).
         for (uint32_t j = 0; j < job_count; j += 1)
         {
             const Tier0Job* job = &jobs[j];
-            Tier0Code code = tier0_job_code(job);
-            if (code.error == TIER0_OK && job->function->avx)
+            Tier0Code* code = &codes[job->index];
+            tier0_job_code(job, code);
+            if (code->error == TIER0_OK && job->function->avx)
             {
-                tier0_vex(job->function, &code);
+                tier0_vex(job->function, code);
             }
-            codes[job->index] = code;
         }
         scratch_end(scratch);
         first += taken;

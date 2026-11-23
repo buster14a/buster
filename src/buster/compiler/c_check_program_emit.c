@@ -1424,8 +1424,9 @@ struct CheckEmitLane
     // With Tier 0's inlining (CheckEmitRun.tier0_inline), its cache of expanded callees; null without.
     CheckTier0InlineLane* tier0_inline;
     // The Tier 0 code of the body it is emitting, whose frame check_program_emit_code describes at its final offsets
-    // where EmittedCode.frame_direct says so.
-    Tier0Code frame_code;
+    // where EmittedCode.frame_direct says so: where its batch left it or the body's own copy, read in place (#2874);
+    // null for a body Tier 0 didn't compile.
+    const Tier0Code* frame_code;
     bool prepared;
     bool ready;
 };
@@ -2052,7 +2053,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             // frame its producer couldn't describe is the compiler's own failure; and with --verify, so are events its
             // records don't establish.
             const char* reason = 0;
-            const Tier0Code* direct = code->frame_direct ? &lane->frame_code : NULL;
+            const Tier0Code* direct = code->frame_direct ? lane->frame_code : NULL;
             failure = check_program_emit_frame_checked(code, direct, offsets, length, run->verify, run->scalar, frame_rows, scratch, &run->frames[b], &reason, &frame_verdict);
             valid = failure == CHECK_PROGRAM_OK;
             failure = valid ? CHECK_PROGRAM_BACKEND : failure;
@@ -2508,23 +2509,33 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
             }
             else
             {
+                // The body's code where its batch left it, read in place; a naked function's templates' code and the
+                // scalar path's are the body's own copy. Copied here and again to the lane, each copy's loads waited on
+                // the stores of the one before, which lay otherwise (#2874: 110 cycles a body on the 9700X).
+                Tier0Code own;
+                lane->frame_code = NULL;
                 if (!step->tier1 && !step->forbidden)
                 {
                     // Tier 0's code as the emission takes it (emitted_from_tier0), with its frame's events where the tables
                     // are written: a naked function's templates have none.
                     const Tier0Function* function = &run->lowered->functions[b];
                     const Tier0Function* source = step->source;
-                    Tier0Code code = naked != 0 ? naked->code : step->batched ? compiled[step->slot] : tier0_compile_scalar(source, lane->code);
+                    Tier0Code* code = &compiled[step->slot];
+                    if (naked != 0 || !step->batched)
+                    {
+                        own = naked != 0 ? naked->code : tier0_compile_scalar(source, lane->code);
+                        code = &own;
+                    }
                     if (step->spliced)
                     {
-                        tier0_inline_code(&code, function, &step->inlined, lane->code);
+                        tier0_inline_code(code, function, &step->inlined, lane->code);
                     }
                     // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
                     // read, as it doesn't a naked function's; and so does one that moves a value into rsp (#1846, tier0_asm_stack).
                     // A frame of the fixed shape alone has no events: its descriptor is made from the frame at its final offsets
                     // (check_program_emit_frame_checked).
-                    const bool direct = naked == 0 && emitted_tier0_frame_direct(&code);
-                    run->codes[b] = emitted_from_tier0(&code, run->unwind && naked == 0 && !direct, run->sources,
+                    const bool direct = naked == 0 && emitted_tier0_frame_direct(code);
+                    run->codes[b] = emitted_from_tier0(code, run->unwind && naked == 0 && !direct, run->sources,
                                                        naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source), lane->code);
                     run->codes[b].frame_direct = direct;
                     lane->frame_code = code;
