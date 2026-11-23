@@ -167,7 +167,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     else if (fixture->pass == IR_OPTIMIZE_TEXT_LICM || fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
     {
         IrLicmOptions options = ir_licm_options();
-        options.scalar = scalar;
         options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE;
         IrLicmResult pass = { 0 };
         check = ir_optimize_licm(input, output, scratch, options, &pass);

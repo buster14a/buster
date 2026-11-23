@@ -99,10 +99,8 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             }
             case 3:
             {
-                IrLicmOptions options = ir_licm_options();
-                options.scalar = scalar != 0;
                 IrLicmResult result = { 0 };
-                check = ir_optimize_licm(function, output, scratch, options, &result);
+                check = ir_optimize_licm(function, output, scratch, ir_licm_options(), &result);
                 transformed = result.function;
                 break;
             }
@@ -240,10 +238,8 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
             }
             case 3:
             {
-                IrLicmOptions options = ir_licm_options();
-                options.scalar = scalar != 0;
                 IrLicmResult result = { 0 };
-                check = ir_optimize_licm(&current, output, scratch, options, &result);
+                check = ir_optimize_licm(&current, output, scratch, ir_licm_options(), &result);
                 next = result.function;
                 break;
             }

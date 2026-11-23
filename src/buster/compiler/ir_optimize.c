@@ -42,7 +42,7 @@ struct IrOptimizeOptions
     // and SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
     uint32_t path;
     // The twin the internals run, resolved from `path` and the function's size by ir_optimize. The modules that call
-    // the internal pieces without ir_optimize set it directly (ir_optimize_licm.c, ir_optimize_sroa.c).
+    // the internal pieces without ir_optimize set it directly (ir_optimize_sroa.c).
     bool scalar;
 };
 
