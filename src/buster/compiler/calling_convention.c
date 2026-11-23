@@ -314,7 +314,9 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 // that LLVM hasn't, rather than a copy of the whole value, which takes a slot of its size), and PAYLOAD (a STACK
 // location of a VECTOR value that LLVM puts on the stack as its vector, of a record whose C size runs past its payload,
 // abi_vector_payload_bytes: the slot, its vector register's width and aligned to it, holds the payload alone, the C
-// type's bytes past it lost as they are in the register, #2113).
+// type's bytes past it lost as they are in the register, #2113), and FIRST (the parts, or a STACK location's slots, are
+// those of the value's first 16 bytes alone, as a value of 16 bytes would have them: a transparent union of a slot of its
+// own past 16 bytes, its member's eightbytes, AbiTable.transparent, #1844; the union's bytes past them are padding).
 #define BUSTER_ABI_LOCATION_IGNORE 0
 #define BUSTER_ABI_LOCATION_REGISTERS 1
 #define BUSTER_ABI_LOCATION_STACK 2
@@ -325,6 +327,7 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 #define BUSTER_ABI_FLAG_DEMOTED 0x08
 #define BUSTER_ABI_FLAG_LOW 0x10
 #define BUSTER_ABI_FLAG_PAYLOAD 0x20
+#define BUSTER_ABI_FLAG_FIRST 0x40
 
 typedef struct AbiLocation AbiLocation;
 struct AbiLocation
@@ -2372,10 +2375,12 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
 }
 
 // A transparent union's first member's index where the union's stack slot differs from the member's (#1844,
-// AbiTable.transparent), or 0: a union whose own attribute aligns or packs it otherwise, of a member that passes as one
-// value in its registers' eightbytes (a scalar, not an aggregate, a pair, a vector, or a value in memory), the union of
-// 16 bytes at most, which clang's classification of the member puts in a register, or else gives the union's bytes their
-// own byval slot. Another member keeps its refusal (check_lower_transparent_passed).
+// AbiTable.transparent), or 0: a union whose own attribute aligns or packs it otherwise, of a member that passes in its
+// registers' eightbytes (a scalar or an aggregate, not a pair, a vector, or a value of another kind), which clang's
+// classification of the member puts in registers, or else gives the union's bytes their own byval slot; or of an
+// aggregate member in memory, which clang passes as the member (getIndirectResult of it: byval at its alignment, the
+// union's bytes, or as an integer of its size where it has 8 bytes or less, aligned to 8 or less, and clang no general
+// register left). Another member keeps its refusal (check_lower_transparent_passed).
 static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     uint32_t result = 0;
@@ -2383,12 +2388,12 @@ static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* tab
     {
         const uint32_t tag = table->types.index[index];
         const uint32_t member = table->tags.member_count[tag] != 0 ? table->members.type[table->tags.member_begin[tag]] >> BUSTER_TYPE_INDEX_SHIFT : 0;
-        const uint32_t refused = BUSTER_ABI_PASS_AGGREGATE | BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_MEMORY |
-                                 BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY;
-        const bool simple = member != 0 && member < abi->capacity && (abi->pass[member] & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (abi->pass[member] & refused) == 0;
-        // Of 16 bytes at most, whose register parts a parameter's object of the union's size takes.
-        const bool differs = simple && table->types.size[index] <= BUSTER_ABI_REGISTER_BYTES &&
-                             (abi->stack_bytes[index] != abi->stack_bytes[member] || abi->alignment_log2[index] != abi->alignment_log2[member]);
+        const uint32_t refused = BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE |
+                                 BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_END_MEMORY;
+        const uint32_t pass = member != 0 && member < abi->capacity ? abi->pass[member] : 0;
+        const bool in_memory = (pass & BUSTER_ABI_PASS_MEMORY) != 0;
+        const bool simple = (pass & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (pass & refused) == 0 && (!in_memory || (pass & BUSTER_ABI_PASS_AGGREGATE) != 0);
+        const bool differs = simple && (abi->stack_bytes[index] != abi->stack_bytes[member] || abi->alignment_log2[index] != abi->alignment_log2[member]);
         result = differs ? member : 0;
     }
     return result;
@@ -3582,6 +3587,7 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
         const uint32_t own = arguments[i] >> BUSTER_TYPE_INDEX_SHIFT;
         const uint32_t member = abi->transparent[own];
         const uint32_t index = member != 0 ? member : own;
+        bool eightbytes = false;
         const uint32_t pass = abi->pass[index];
         const uint32_t bytes = abi->stack_bytes[index];
         const uint32_t alignment_log2 = (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
@@ -3666,18 +3672,26 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
             // left (after a count of clang's that LLVM's runs behind), else 8 bytes of the stack, as a copy would take
             // (a GROWN one's copy takes more: MEMORY, 8 bytes or less in C and aligned to 8 or less, it is never of no
             // size); one of no size is an i0, which takes none (EMPTY).
+            // A transparent union of a slot of its own (AbiTable.transparent) is the union to getIndirectResult where clang
+            // has no register for its member (its own bytes and alignment), and the member where the member is in memory
+            // (the member's size and alignment, the union's bytes); an integer of 8 bytes is the low eightbyte alone of
+            // a union larger than it (LOW).
             const bool grown = (pass & BUSTER_ABI_PASS_GROWN) != 0;
-            const bool integer = grown ? clang_integers == 0
-                                       : (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 && bytes == BUSTER_ABI_SLOT_BYTES && alignment_log2 == BUSTER_ABI_SLOT_LOG2 &&
-                                             clang_integers == 0;
+            const bool own_union = member != 0 && !in_memory;
+            const uint32_t own_log2 = abi->alignment_log2[own] > BUSTER_ABI_SLOT_LOG2 ? abi->alignment_log2[own] : BUSTER_ABI_SLOT_LOG2;
+            const uint32_t slot_log2 = own_union ? own_log2 : alignment_log2;
+            const uint32_t indirect_bytes = own_union ? abi->stack_bytes[own] : bytes;
+            const bool aggregate = member != 0 || (pass & BUSTER_ABI_PASS_AGGREGATE) != 0;
+            const bool integer = grown && member == 0 ? clang_integers == 0
+                                                      : aggregate && indirect_bytes == BUSTER_ABI_SLOT_BYTES && slot_log2 == BUSTER_ABI_SLOT_LOG2 && clang_integers == 0;
             const bool vanishes = integer && (pass & BUSTER_ABI_PASS_EMPTY) != 0;
             const bool in_register = integer && !vanishes && integers < BUSTER_ABI_INTEGER_ARGUMENTS;
+            const uint32_t slot_bytes = integer ? BUSTER_ABI_SLOT_BYTES : member != 0 ? abi->stack_bytes[own] : bytes;
             location.kind = vanishes ? BUSTER_ABI_LOCATION_IGNORE : in_register ? BUSTER_ABI_LOCATION_REGISTERS : BUSTER_ABI_LOCATION_STACK;
             location.registers[0] = in_register ? abi_integer_arguments[integers] : BUSTER_ABI_REGISTER_NONE;
+            location.flags |= integer && !in_register && member != 0 && abi->stack_bytes[own] > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
             integers += in_register ? 1 : 0;
-            const uint32_t own_log2 = abi->alignment_log2[own] > BUSTER_ABI_SLOT_LOG2 ? abi->alignment_log2[own] : BUSTER_ABI_SLOT_LOG2;
-            const uint32_t slot_bytes = member != 0 ? abi->stack_bytes[own] : integer ? BUSTER_ABI_SLOT_BYTES : bytes;
-            location.stack_offset = vanishes || in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, slot_bytes, member != 0 ? own_log2 : alignment_log2);
+            location.stack_offset = vanishes || in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, slot_bytes, slot_log2);
         }
         else if ((pass & (BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_PAIR)) != 0)
         {
@@ -3755,10 +3769,17 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
                 parts += classes[half] != 0 ? 1 : 0;
             }
             location.flags |= classes[0] == 0 ? BUSTER_ABI_FLAG_HIGH : 0;
-            // The low eightbyte alone in its slot, of a value larger than it: 8 bytes, the next argument's slot after them.
-            location.flags |= classes[1] == 0 && stacked != 0 && bytes > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
+            // The low eightbyte alone in its slot, of a value larger than it: 8 bytes, the next argument's slot after them
+            // (a transparent union's, of its own size, AbiTable.transparent).
+            const uint32_t value_bytes = member != 0 ? abi->stack_bytes[own] : bytes;
+            location.flags |= classes[1] == 0 && stacked != 0 && value_bytes > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
             location.kind = stacked == 0 ? BUSTER_ABI_LOCATION_REGISTERS : stacked == parts ? BUSTER_ABI_LOCATION_STACK : BUSTER_ABI_LOCATION_SPLIT;
+            eightbytes = true;
         }
+        // A transparent union past 16 bytes in its member's registers or eightbytes' slots: those of its first 16 bytes.
+        const bool member_parts = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT ||
+                                  (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0 || eightbytes;
+        location.flags |= member != 0 && abi->stack_bytes[own] > BUSTER_ABI_REGISTER_BYTES && member_parts ? BUSTER_ABI_FLAG_FIRST : 0;
         locations[i] = location;
     }
     call.stack_bytes = (uint32_t)stack;
