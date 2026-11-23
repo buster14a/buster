@@ -314,7 +314,7 @@ static bool check_test_program_static_objects_definition(CheckProgram* program, 
     return room;
 }
 
-// #530's scans in check_program against their definitions (above) and their `scalar` twins: at every count to 129 tokens, each column
+// #530's scans in check_program against their definitions (above): at every count to 129 tokens, each column
 // they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
 // initializers' storage durations; the initializer plans' statements (check_test_program_plans, #877); the
 // variable-length arrays' declarations; the reached builtins; the static objects' declarations,
@@ -472,16 +472,16 @@ static void check_test_program_scans(CheckTest* test)
             parser.tree.parents = parents;
             parser.tokens.kinds = kinds;
             parser.tokens.count = count;
-            uint32_t allocation_first[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t allocation_next[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t vla_blocks[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t vla_saves[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t allocation_first[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t allocation_next[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t vla_blocks[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t vla_saves[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             // Each path's walks to the statements keep their own answers (check_program_statement, #2995).
-            uint32_t statement_ends[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t statement_keys[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint64_t statement_known[3][(BUSTER_CHECK_TEST_SCAN_TOKENS + 64) / 64];
-            CheckProgram programs[3] = { 0 };
-            for (uint32_t path = 1; path < 3; path += 1)
+            uint32_t statement_ends[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t statement_keys[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint64_t statement_known[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 64) / 64];
+            CheckProgram programs[2] = { 0 };
+            for (uint32_t path = 0; path < 2; path += 1)
             {
                 programs[path] = (CheckProgram){ .input = &input, .types = &types.table, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
                 memset(allocation_first[path], 0xff, sizeof(allocation_first[path]));
@@ -494,7 +494,7 @@ static void check_test_program_scans(CheckTest* test)
                     .keys = statement_keys[path],
                     .known = statement_known[path],
                 };
-                if (path == 2)
+                if (path == 1)
                 {
                     check_test_program_allocations_definition(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path],
                                                               vla_saves[path], &statements);
@@ -505,32 +505,32 @@ static void check_test_program_scans(CheckTest* test)
                                               &statements);
                 }
             }
-            check_test_expect(test, programs[2].status == programs[1].status && programs[2].token == programs[1].token &&
-                                   memcmp(allocation_first[2], allocation_first[1], sizeof(allocation_first[1])) == 0 &&
-                                   memcmp(allocation_next[2], allocation_next[1], sizeof(allocation_next[1])) == 0 &&
-                                   memcmp(vla_blocks[2], vla_blocks[1], sizeof(vla_blocks[1])) == 0 && memcmp(vla_saves[2], vla_saves[1], sizeof(vla_saves[1])) == 0,
+            check_test_expect(test, programs[1].status == programs[0].status && programs[1].token == programs[0].token &&
+                                   memcmp(allocation_first[1], allocation_first[0], sizeof(allocation_first[0])) == 0 &&
+                                   memcmp(allocation_next[1], allocation_next[0], sizeof(allocation_next[0])) == 0 &&
+                                   memcmp(vla_blocks[1], vla_blocks[0], sizeof(vla_blocks[0])) == 0 && memcmp(vla_saves[1], vla_saves[0], sizeof(vla_saves[0])) == 0,
                               "check_program's variable-length array declarations are their definition's at every guarded tail");
             check_test_program_plans(test, &input, &parser, mappings + 18, page, count, true);
             check_test_program_plans(test, &input, &parser, mappings + 18, page, count / 3, true);
             check_test_program_plans(test, &input, &parser, mappings + 18, page, 0, false);
             const CheckGraph graph = { .ops = ops, .count = node_count };
-            uint32_t builtins[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t builtin_counts[3];
-            builtin_counts[2] = check_test_program_builtins_definition(&graph, reached, builtins[2]);
-            builtin_counts[1] = check_program_builtins(&graph, reached, NULL);
-            const uint32_t listed = check_program_builtins(&graph, reached, builtins[1]);
-            check_test_expect(test, listed == builtin_counts[1], "check_program's builtins count what they list");
-            check_test_expect(test, builtin_counts[1] == builtin_counts[2] && memcmp(builtins[1], builtins[2], builtin_counts[1] * sizeof(uint32_t)) == 0,
+            uint32_t builtins[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t builtin_counts[2];
+            builtin_counts[1] = check_test_program_builtins_definition(&graph, reached, builtins[1]);
+            builtin_counts[0] = check_program_builtins(&graph, reached, NULL);
+            const uint32_t listed = check_program_builtins(&graph, reached, builtins[0]);
+            check_test_expect(test, listed == builtin_counts[0], "check_program's builtins count what they list");
+            check_test_expect(test, builtin_counts[0] == builtin_counts[1] && memcmp(builtins[0], builtins[1], builtin_counts[0] * sizeof(uint32_t)) == 0,
                               "check_program's reached builtins are their definition's at every guarded tail");
-            uint8_t needed[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t object_declarations[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            bool rooms[3];
+            uint8_t needed[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t object_declarations[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            bool rooms[2];
             // The naked column in an arena of its own, every other time one with no room for it; and the target attributes'
             // keys in one of their own, which grows them by doubling, every other time one with no room.
-            _Alignas(64) uint8_t naked_bytes[3][(BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t) + 64];
-            _Alignas(64) uint8_t event_bytes[3][4 * (BUSTER_CHECK_TEST_SCAN_TOKENS + 64) * sizeof(uint64_t)];
-            CheckProgramTargetEvents events[3];
-            for (uint32_t path = 1; path < 3; path += 1)
+            _Alignas(64) uint8_t naked_bytes[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t) + 64];
+            _Alignas(64) uint8_t event_bytes[2][4 * (BUSTER_CHECK_TEST_SCAN_TOKENS + 64) * sizeof(uint64_t)];
+            CheckProgramTargetEvents events[2];
+            for (uint32_t path = 0; path < 2; path += 1)
             {
                 Arena naked = {
                     .base = naked_bytes[path],
@@ -545,7 +545,7 @@ static void check_test_program_scans(CheckTest* test)
                 memset(needed[path], 0, sizeof(needed[path]));
                 memset(object_declarations[path], 0xff, sizeof(object_declarations[path]));
                 needed[path][count / 2] = (uint8_t)(count % 2);
-                rooms[path] = path == 2 ? check_test_program_static_objects_definition(&programs[path], needed[path], &naked, &events[path]) :
+                rooms[path] = path == 1 ? check_test_program_static_objects_definition(&programs[path], needed[path], &naked, &events[path]) :
                                           check_program_static_objects(&programs[path], needed[path], &naked, &events[path]);
                 events[path].scratch = NULL;
             }
@@ -559,18 +559,18 @@ static void check_test_program_scans(CheckTest* test)
                 const bool event = declarations[token] == token && check_input_bit(declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && object != 0 && object <= count &&
                                    declaration_kinds[token] == C_BINDING_FUNCTION &&
                                    (attributes[token] == &kinds_of_attributes[3] || attributes[token] == &kinds_of_attributes[5]);
-                events_right &= !event || expected_events >= events[1].count || events[1].keys[expected_events] == (((uint64_t)object << 32) | token);
+                events_right &= !event || expected_events >= events[0].count || events[0].keys[expected_events] == (((uint64_t)object << 32) | token);
                 expected_events += event;
             }
             const bool limited = variant != 0 && expected_events != 0;
-            events_right &= limited ? !events[1].room && events[1].count == 0 : events[1].room && events[1].count == expected_events;
-            const bool defined_naked = (programs[2].object_naked == 0) == (programs[1].object_naked == 0) &&
-                                       (programs[2].object_naked == 0 ||
-                                        memcmp(programs[2].object_naked, programs[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
-            const bool defined_events = events[2].room == events[1].room && events[2].count == events[1].count &&
-                                        (events[2].count == 0 || memcmp(events[2].keys, events[1].keys, events[2].count * sizeof(uint64_t)) == 0);
-            check_test_expect(test, memcmp(needed[2], needed[1], sizeof(needed[1])) == 0 &&
-                                   memcmp(object_declarations[2], object_declarations[1], sizeof(object_declarations[1])) == 0 && rooms[2] == rooms[1] &&
+            events_right &= limited ? !events[0].room && events[0].count == 0 : events[0].room && events[0].count == expected_events;
+            const bool defined_naked = (programs[1].object_naked == 0) == (programs[0].object_naked == 0) &&
+                                       (programs[1].object_naked == 0 ||
+                                        memcmp(programs[1].object_naked, programs[0].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
+            const bool defined_events = events[1].room == events[0].room && events[1].count == events[0].count &&
+                                        (events[1].count == 0 || memcmp(events[1].keys, events[0].keys, events[1].count * sizeof(uint64_t)) == 0);
+            check_test_expect(test, memcmp(needed[1], needed[0], sizeof(needed[0])) == 0 &&
+                                   memcmp(object_declarations[1], object_declarations[0], sizeof(object_declarations[0])) == 0 && rooms[1] == rooms[0] &&
                                    defined_naked && defined_events && events_right,
                               "check_program's static objects, naked functions and target attributes are their definition's at every guarded tail");
             for (uint32_t block = 0; count % 64 == 0 && block < count; block += 64)
@@ -970,8 +970,8 @@ static void check_test_program_declaring(CheckTest* test)
         }
     }
     arena_release(&sparse);
-    printf("  declaring tokens and needed objects: %llu cases, both paths at PROT_NONE pages\n", (unsigned long long)checked);
-    check_test_expect(test, all, "declaring tokens and needed objects agree with the contract by both paths, at every count and density");
+    printf("  declaring tokens, initialized declarations (by both paths) and needed objects: %llu cases at PROT_NONE pages\n", (unsigned long long)checked);
+    check_test_expect(test, all, "declaring tokens, initialized declarations (by both paths) and needed objects agree with the contract at every count and density");
 }
 
 static bool check_test_program_column(const void* a, const void* b, uint64_t size)
