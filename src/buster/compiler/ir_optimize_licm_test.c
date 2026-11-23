@@ -166,6 +166,34 @@ static void ir_licm_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
     arena_pop_to(vector, vm);
 }
 
+// IrLicmOptions.pressure on ir_licm_test_chain's loop (#2719): its header's two phis and the parameter live through it,
+// so BUSTER_IR_LICM_REGISTERS less three of the chain's costly values move, the first ones in order, and the rest stay;
+// a loop where nothing moves returns its input without writing a replacement. Every result keeps the input's returns,
+// faults and effects.
+static void ir_licm_test_pressure_chain(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* scratch, uint32_t length)
+{
+    const uint64_t om = output->length;
+    const uint64_t tm = scratch->length;
+    IrLicmOptions options = ir_licm_options();
+    options.pressure = true;
+    IrLicmResult result = { 0 };
+    const IrCheck check = ir_optimize_licm(f, output, scratch, options, &result);
+    const uint32_t budget = BUSTER_IR_LICM_REGISTERS - 3;
+    const uint32_t expected = length < budget ? length : budget;
+    ir_optimize_test_expect(test, check.error == IR_OK && scratch->length == tm && result.moved == expected && result.called_loops == 0,
+                            "LICM's pressure policy moves the chain's first values while its budget lasts");
+    ir_optimize_test_expect(test, check.error != IR_OK || expected != 0 || (output->length == om && ir_optimize_test_equal(f, &result.function)),
+                            "LICM's pressure policy returns a loop that moves nothing as it was, unwritten");
+    for (uint32_t trial = 0; check.error == IR_OK && trial < 6; trial += 1)
+    {
+        const uint64_t parameter = trial == 5 ? UINT64_MAX : trial;
+        const IrOptimizeExecution before = ir_optimize_test_execute(f, scratch, parameter, trial & 1);
+        const IrOptimizeExecution after = ir_optimize_test_execute(&result.function, scratch, parameter, trial & 1);
+        ir_optimize_test_expect(test, before.status == after.status && before.value == after.value && before.effects == after.effects, "LICM's pressure policy keeps returns, faults and effects");
+    }
+    arena_pop_to(output, om);
+}
+
 static void ir_licm_test_guards(IrOptimizeTest* test)
 {
     const long page = sysconf(_SC_PAGESIZE);
@@ -299,6 +327,7 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
             if (chain_created)
             {
                 ir_licm_test_compare(test, &f, &vector, &scalar, &scratch, length);
+                ir_licm_test_pressure_chain(test, &f, &vector, &scratch, length);
             }
             arena_pop_to(&input, 0);
         }

@@ -364,3 +364,56 @@ acyclic numbering on the 9700X" above) later cut the option's added compile
 time on the frozen file from 127.1 to 74.1 ms with byte-identical objects. It
 changes what the option costs, not what it emits, so the reason to keep it off
 stands.
+
+## The pressure policy (#2719)
+
+`IrGvnOptions.pressure` applies only the congruences that pay for the live range
+they make, and `--tier1-passes=+numbering` runs the solver with it on the
+promoted function, after if-conversion and the switches of constants and
+before LICM (step 13's arena), where it sees the values promotion made of the
+locals. Before promotion, a local's reads are loads, which the solver never
+merges: what it merged there were constants, addresses and casts, each of which
+selection would fold into its user or recompute for nothing, and whose merged
+copy then held a register across blocks.
+
+- **A free value is never merged** (`ir_gvn_free`): a constant, a symbol's or a
+  frame object's address, an `address`, and the casts (`inttoptr`, `ptrtoint`,
+  `bitcast`, `copy`, `trunc`, `zext`, `sext`). The congruences are computed as
+  without the policy, so two sums of a value and equal constants are still one
+  class: the second sum merges, and its constant becomes dead.
+- **A truth value is merged only within its block.** A branch tests its
+  comparison's flags; a merged `i1` from another block takes a register and a
+  `setcc`.
+- **Any other value is merged across blocks.** A rule against merges with a call
+  on the dominator tree's path between the value and its representative changed
+  nothing measurable once the first two held (below), so there is none.
+
+A value the policy refuses becomes the representative of what it dominates.
+A function where nothing merges is returned as it was given, unwritten, which
+keeps the pass's cost to its analysis there. `test-ir-optimize`'s
+`gvn-pressure` pair has each rule.
+
+Measured before the clean implementation by an experiment's switches, in
+instructions by callgrind against `--tier1` (#2719's record; LICM's guide, "The
+pressure policy", has the programs and kernels):
+
+| Solver | Lua | speedtest1 | kernels |
+| --- | ---: | ---: | ---: |
+| before promotion, every value (`+gvn`) | +15.81% | +6.61% | +4.01% |
+| before promotion, within a block alone | +4.80% | +0.76% | |
+| before promotion, never a constant or address | +7.34% | +2.97% | |
+| before promotion, never a free value | −0.08% | +0.15% | ±0 |
+| promoted, never a free value | −0.60% | +1.21% | −4.79% |
+| that, never across a call | −0.65% | +0.37% | −4.79% |
+| that, a truth value within its block | −0.66% | −0.20% | −4.79% |
+| promoted, never a free value, a truth value within its block (the policy) | −0.65% | −0.24% | −4.79% |
+| promoted, never a free value, within a block alone | −0.17% | −0.16% | |
+
+With the policy and LICM's, `--tier1-passes=+hoist,+numbering` takes 0.64% of
+Lua's instructions and 0.45% of speedtest1's against `--tier1`, and 12.53% of
+the kernels'. On the 9700X ([#2719's record](https://github.com/buster14a/buster-performance/tree/d6732216ac9005ff91305d6d96ca2c42409ce295/docs/measurements/tier1-pressure-licm-gvn-2719-2026-11-23)),
+against `--tier1 --tier1-passes=+hoist` in one executable: speedtest1's
+cycles 0.9970 and instructions 0.9975, Lua's 0.9950 and 0.9932, the kernels'
+0.9682 and 0.9817, for 12.4% more of `sqlite3.c`'s `--tier1` compile than
+`+hoist` (16.2% more than neither). The programs move within code placement's
+noise, so it stays off by default.

@@ -550,16 +550,18 @@ SROA (`+sroa`); #866's solver (`+gvn`) or its vector/mask-only form
 (`vectors`); loop store motion (`+storemotion`, #3309: [its
 guide](tier1-store-motion.md)); promotion; the wide integers' halves and the wide vectors'
 pieces; truth simplification; threading; if-conversion; the switches of
-constants (`tables`, #3298); LICM (`+licm`) or its
-vector/mask-only form; the unroller (`+unroll`, #2755); and the optimizer,
+constants (`tables`, #3298); the value numbering of the promoted function
+(`+numbering`, #2719); LICM (`+licm`), its vector/mask-only form or its
+pressure policy (`hoist`, #2719); the unroller (`+unroll`, #2755); and the optimizer,
 which runs SCCP, the identities, value numbering with memory (`+memory`,
 #2718), dead-code removal, CFG cleanup and its merges and layout, then the
 final verification that selection reads. `--tier1-passes=` turns each pass on
 or off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
 cleanup, the merges, the inlining, the switches of constants and the
-vector/mask-only passes run;
-unrestricted LICM, SROA, the unroller, loop store motion, the solver and value
-numbering with memory don't, and none repeats. The measurements below decided this, and
+vector/mask-only passes run; unrestricted LICM and its pressure policy
+(`+hoist`, #2719), SROA, the unroller, loop store motion, the solver (before
+promotion or after, `+numbering`) and value numbering with memory don't, and
+none repeats. The measurements below decided this, and
 [#2718's](ir-memory-value-numbering.md#measurements) for value numbering with
 memory.
 
