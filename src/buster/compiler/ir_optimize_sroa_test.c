@@ -223,7 +223,7 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
         ready = mprotect((char*)mapping + p * page, page, PROT_NONE) == 0;
     }
     ir_optimize_test_expect(test, ready, "SROA guarded field column setup");
-    // Each root's chain (#1366) over fields whose roots interleave, as inlined calls leave them: both paths' queries
+    // Each root's chain (#1366) over fields whose roots interleave, as inlined calls leave them: the queries
     // against the scan of the function's whole field table that the chain replaces, with the columns ending at a guard
     // page so that a read past a column faults.
     uint32_t root_first[3];
@@ -276,11 +276,9 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
                 expected_overlap = expected_overlap || (!same && work.field_roots[i] == root && offset < work.field_offsets[i] + work.field_sizes[i] &&
                                                         work.field_offsets[i] < offset + size);
             }
-            bool scalar_overlap = false;
-            bool vector_overlap = false;
-            const uint32_t scalar = ir_sroa_field(&work, root, offset, type, size, true, &scalar_overlap);
-            const uint32_t vector = ir_sroa_field(&work, root, offset, type, size, false, &vector_overlap);
-            ir_optimize_test_expect(test, scalar == expected && vector == expected && scalar_overlap == expected_overlap && vector_overlap == expected_overlap,
+            bool overlap = false;
+            const uint32_t field = ir_sroa_field(&work, root, offset, type, size, &overlap);
+            ir_optimize_test_expect(test, field == expected && overlap == expected_overlap,
                                     "SROA guarded per-root field and overlap queries against the whole table's scan");
         }
     }

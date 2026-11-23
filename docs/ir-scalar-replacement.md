@@ -23,12 +23,14 @@ displacements without host overflow. Every pointer use is then examined.
 Calls, returns, pointer comparisons/conversions, stored addresses, phis,
 selects and unknown indexed addresses exclude the whole source slot.
 Address-taken or volatile slot flags and any volatile access also exclude it.
-The vector path packs observed pointer uses from the stable sparse use list
-into 16-use SoA packets, then classifies memory, forwarding and escaped uses
-with opcode/position/flag masks. Partial packets flush explicitly. Scalar
-reduction applies escaped roots, including repeated roots in one packet.
-The scalar oracle independently enumerates instruction operands. Both paths
-consider the same reachable uses, and the complete scan precedes rewriting.
+The scan packs observed pointer uses from the stable sparse use list into
+16-use SoA packets, then classifies memory, forwarding and escaped uses with
+opcode/position/flag masks. Partial packets flush explicitly. Scalar reduction
+applies escaped roots, including repeated roots in one packet. It considers the
+reachable uses alone, and the complete scan precedes rewriting. Its scalar twin,
+which enumerated every instruction's operands, went in #2924: timed alone in
+Tier 1's pipeline on the 9700X, the scan took 0.94 to 0.98 of its time at every
+function size.
 
 A field key is the source slot, byte offset and scalar type. Every access must
 fit within the original slot. Distinct keys must have disjoint byte ranges;
