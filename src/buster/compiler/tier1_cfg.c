@@ -39,10 +39,13 @@
 //    sequence's consumer saves no value around it.
 // 3. tier1_allocate assigns the intervals.
 // 4. Each edge moves its successor's live-in values and phis from their locations at the predecessor's last position
-//    to their entry locations (tier1_cfg_entry_location). A store of the same value to its own slot is omitted where
-//    the predecessor block already establishes that slot (tier1_cfg_slot_current, #1216). A changed phi operand still
-//    writes it. Those boundary locations are one forward sweep of each value's intervals (#1399), not a binary search
-//    per live value per edge. Emission resolves a position from the first interval that overlaps its block, when that
+//    to their entry locations (tier1_cfg_entry_location). A store of a value to its own slot is omitted where the slot
+//    already holds it at the predecessor's exit: the predecessor block establishes it (tier1_cfg_slot_current, #1216),
+//    or every path to the block's start stored it and the block keeps it (tier1_cfg_current_slots, #2553, a forward
+//    must-analysis that the allocation publishes per block as assertions, for its checkers and the emitter). An operand
+//    of a phi whose slot it shares counts as the value: the slot is its own. A changed phi operand still writes it.
+//    Those boundary locations are one forward sweep of each value's intervals (#1399), not a binary search per live
+//    value per edge. Emission resolves a position from the first interval that overlaps its block, when that
 //    column fits. tier1_resolve_moves orders each class's moves, breaking a
 //    cycle with the class's scratch register or, where one of the class's moves goes slot to slot, with the class's
 //    temporary slot; a slot-to-slot move then goes through the scratch register, which holds nothing from one move to
@@ -74,7 +77,8 @@
 // cut inside a block finds its value where the piece keeps it once the split's moves have run (whether or not a use
 // reads it there), and that no write lands on another value the allocation still keeps there, and applies each edge's
 // moves in order to the predecessor's final state, which must then hold every live-in value and each phi's operand
-// where the successor expects them.
+// where the successor expects them. The slots the allocation asserts current at a block's start (current_slots, #2553)
+// it takes as more of the block's entry state, and checks each on every edge into the block, as it checks the places.
 //
 // Interval construction, move resolution and the verifier's search stay scalar, around the vector liveness solver and
 // the vector allocator. The boundary sweep is scalar too: each value's intervals are a variable-length run, and one
@@ -243,6 +247,11 @@ struct Tier1CfgAllocation
     // Per interval, 1 where it enters its block as its recipe because no block it carries the value to reads its
     // register (tier1_cfg_carried_unread, #2734), or null for none.
     uint8_t* unread_entries;
+    // Per block, the values live into it whose slot holds them at its start whatever place their range enters it in
+    // (tier1_cfg_current_slots, #2553): block b's are current_slots[current_slot_offsets[b] .. current_slot_offsets[b + 1]).
+    // Null where no value has a slot, and in an allocation without them.
+    uint32_t* current_slot_offsets;
+    uint32_t* current_slots;
 };
 
 typedef enum Tier1CfgError
@@ -947,6 +956,10 @@ struct Tier1CfgEdge
     // Ordinary CFG edges only: each fragment's last spill end, and the predecessor's first position.
     const uint32_t* spill_ends;
     uint32_t block_start;
+    // Ordinary CFG edges only: the values, by dense id (`dense`, BUSTER_TIER1_CFG_NONE for a value without one), whose
+    // slots hold them at the predecessor's exit (tier1_cfg_current_slots), or null.
+    const uint64_t* current;
+    const uint32_t* dense;
 };
 
 static uint8_t tier1_cfg_kind_of_location(uint32_t location)
@@ -967,10 +980,13 @@ static uint8_t tier1_cfg_kind_of_location(uint32_t location)
 // recomputation. A matching pair, a rematerialized destination, or a slot the predecessor already holds, adds nothing.
 static void tier1_cfg_edge_place(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t from, uint8_t from_kind, uint32_t to, uint8_t to_kind, uint32_t exit)
 {
-    // A self-phi or an unchanged live-through value need not store a register back to its current slot. A different
-    // phi operand must still write it, even when the phi's old value is present there.
-    const bool current_slot = from_kind == BUSTER_TIER1_ALLOCATE_REGISTER && to_kind == BUSTER_TIER1_ALLOCATE_SPILL && value == carried &&
-                              edge->spill_ends != 0 && tier1_cfg_slot_current(result, edge->spill_ends, value, exit, edge->block_start);
+    // A self-phi, an unchanged live-through value, or an operand of a phi whose slot it shares, need not store a register
+    // back to its own slot where that slot already holds it: stored in the predecessor, or current at its exit
+    // (tier1_cfg_current_slots). A different phi operand must still write it, even when the phi's old value is present there.
+    const bool own_slot = from_kind == BUSTER_TIER1_ALLOCATE_REGISTER && to_kind == BUSTER_TIER1_ALLOCATE_SPILL && edge->spill_ends != 0 && result->allocation.spill_ids[carried] != UINT32_MAX &&
+                          to == BUSTER_TIER1_CFG_SPILL + result->allocation.spill_ids[carried];
+    const uint32_t dense = own_slot && edge->current != 0 ? edge->dense[carried] : BUSTER_TIER1_CFG_NONE;
+    const bool current_slot = own_slot && ((dense != BUSTER_TIER1_CFG_NONE && ((edge->current[dense >> 6] >> (dense & 63)) & 1) != 0) || tier1_cfg_slot_current(result, edge->spill_ends, carried, exit, edge->block_start));
     if (to_kind != BUSTER_TIER1_ALLOCATE_REMATERIALIZE && from != to && !current_slot)
     {
         if (from_kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
@@ -2810,6 +2826,125 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
     return error;
 }
 
+// Which values' slots hold them at each block's start, whatever place their ranges enter the block in (#2553): a forward
+// must-analysis over the dense values. Once stored, a value's slot holds it while it lives: an SSA value never changes,
+// and no other value writes the slot meanwhile, since slots are shared only by values never live at once
+// (tier1_cfg_share_slots). So a value's slot holds it at a block's start where it does at the exit of every
+// predecessor; and at a block's exit where it does at the block's start and the value lives through the block, or where
+// one of the value's fragments in the block is its slot (an edge or a transition stored it there, or it rests there).
+// With SLOT[b] those values:
+//
+//     IN[b] = AND over b's predecessors p of OUT[p]        OUT[b] = (IN[b] & LIVE_IN[b]) | SLOT[b]
+//
+// The entry's IN and that of a block without predecessors are empty. A value is live into no block its definition is in,
+// so a loop's earlier iteration proves nothing of the next. The solve starts every other block's IN full and sweeps the
+// blocks in layout order until none changes. `current_in` returns IN and `stored` SLOT, rows of the liveness's words on
+// `scratch`; the result gets each block's values live into it whose slots hold them (current_slot_offsets and
+// current_slots, on `output`). False where an arena is short.
+static bool tier1_cfg_current_slots(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Tier1CfgAllocation* result, Arena* output, Arena* scratch, uint64_t** current_in, uint64_t** stored)
+{
+    const uint32_t blocks = input->block_count;
+    const Dataflow* liveness = &prepared->liveness;
+    const uint64_t words = liveness->row_words;
+    const uint64_t cells = (uint64_t)blocks * words;
+    const Tier1Allocation* allocation = &result->allocation;
+    uint64_t* in = arena_push_array(scratch, cells + 1, sizeof(uint64_t), _Alignof(uint64_t));
+    uint64_t* slots = arena_push_array(scratch, cells + 1, sizeof(uint64_t), _Alignof(uint64_t));
+    uint64_t* row = arena_push_array(scratch, words + 1, sizeof(uint64_t), _Alignof(uint64_t));
+    bool ready = in != 0 && slots != 0 && row != 0;
+    if (ready)
+    {
+        memset(slots, 0, cells * sizeof(uint64_t));
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            const bool entered = b != 0 && input->predecessor_offsets[b + 1] != input->predecessor_offsets[b];
+            memset(in + (uint64_t)b * words, entered ? 0xff : 0, words * sizeof(uint64_t));
+        }
+        for (uint32_t i = 0; i < liveness->value_count; i += 1)
+        {
+            const uint32_t v = prepared->dense_values[i];
+            const uint32_t first = allocation->spill_ids[v] != UINT32_MAX ? result->value_interval_offsets[v] : 0;
+            const uint32_t end = allocation->spill_ids[v] != UINT32_MAX ? result->value_interval_offsets[v + 1] : 0;
+            for (uint32_t k = first; k < end; k += 1)
+            {
+                for (uint32_t f = allocation->fragment_offsets[k]; f < allocation->fragment_offsets[k + 1]; f += 1)
+                {
+                    if (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL)
+                    {
+                        const uint32_t last = tier1_cfg_block_at(input, result, allocation->ends[f] - 1);
+                        for (uint32_t b = tier1_cfg_block_at(input, result, allocation->starts[f]); b <= last; b += 1)
+                        {
+                            tier1_cfg_set(slots + (uint64_t)b * words, i);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    bool changed = ready;
+    while (changed)
+    {
+        changed = false;
+        for (uint32_t b = 1; b < blocks; b += 1)
+        {
+            const uint32_t first = input->predecessor_offsets[b];
+            const uint32_t end = input->predecessor_offsets[b + 1];
+            if (first != end)
+            {
+                memset(row, 0xff, words * sizeof(uint64_t));
+                for (uint32_t e = first; e < end; e += 1)
+                {
+                    const uint64_t p = input->predecessors[e];
+                    const uint64_t* p_in = in + p * words;
+                    const uint64_t* p_live = liveness->in + p * words;
+                    const uint64_t* p_slots = slots + p * words;
+                    for (uint64_t w = 0; w < words; w += 1)
+                    {
+                        row[w] &= (p_in[w] & p_live[w]) | p_slots[w];
+                    }
+                }
+                uint64_t* b_in = in + (uint64_t)b * words;
+                for (uint64_t w = 0; w < words; w += 1)
+                {
+                    changed |= b_in[w] != row[w];
+                    b_in[w] = row[w];
+                }
+            }
+        }
+    }
+    // Each block's values live into it whose slots hold them: counted, then filled.
+    uint32_t count = 0;
+    for (uint64_t c = 0; ready && c < cells; c += 1)
+    {
+        count += (uint32_t)__builtin_popcountll(in[c] & liveness->in[c]);
+    }
+    result->current_slot_offsets = ready ? arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    result->current_slots = ready ? arena_push_array(output, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    ready = ready && result->current_slot_offsets != 0 && result->current_slots != 0;
+    uint32_t fill = 0;
+    for (uint32_t b = 0; ready && b < blocks; b += 1)
+    {
+        result->current_slot_offsets[b] = fill;
+        for (uint64_t w = 0; w < words; w += 1)
+        {
+            uint64_t bits = in[(uint64_t)b * words + w] & liveness->in[(uint64_t)b * words + w];
+            while (bits != 0)
+            {
+                result->current_slots[fill] = prepared->dense_values[(uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits))];
+                bits &= bits - 1;
+                fill += 1;
+            }
+        }
+    }
+    if (ready)
+    {
+        result->current_slot_offsets[blocks] = fill;
+        *current_in = in;
+        *stored = slots;
+    }
+    return ready;
+}
+
 // Lookup columns, slot sharing, the splits' and the edges' moves (4. and 5. above) for an assignment of the prepared
 // intervals, `result` as tier1_cfg_assign left it, with `input` its problem. The scratch arena goes back to where this
 // found it, the preparation's state kept; failure restores the output arena too and leaves the result unchanged.
@@ -2887,7 +3022,22 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     {
         tier1_cfg_spill_prefix(&candidate, spill_ends);
     }
-    Tier1CfgEdge edge = { .spill_ends = spill_ends };
+    // The slots current at each block's start (#2553), and each dense value's id, for the edges' stores.
+    uint64_t* current_in = 0;
+    uint64_t* stored = 0;
+    ready = ready && (spills == 0 || tier1_cfg_current_slots(input, prepared, &candidate, output, scratch, &current_in, &stored));
+    uint32_t* dense_of = ready && spills != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint64_t* current_out = ready && spills != 0 ? arena_push_array(scratch, words + 1, sizeof(uint64_t), _Alignof(uint64_t)) : 0;
+    ready = ready && (spills == 0 || (dense_of != 0 && current_out != 0));
+    if (ready && spills != 0)
+    {
+        memset(dense_of, 0xff, ((uint64_t)input->value_count + 1) * sizeof(uint32_t));
+        for (uint32_t i = 0; i < liveness.value_count; i += 1)
+        {
+            dense_of[dense_values[i]] = i;
+        }
+    }
+    Tier1CfgEdge edge = { .spill_ends = spill_ends, .dense = dense_of };
     uint32_t* staged = ready ? arena_push_array(scratch, (bound + 2) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* sources = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* destinations = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
@@ -2918,6 +3068,13 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     {
         const uint32_t exit = input->block_starts[b + 1] - 1;
         edge.block_start = input->block_starts[b];
+        // The block's OUT row (tier1_cfg_current_slots).
+        for (uint64_t w = 0; current_in != 0 && w < words; w += 1)
+        {
+            const uint64_t cell = (uint64_t)b * words + w;
+            current_out[w] = (current_in[cell] & liveness.in[cell]) | stored[cell];
+        }
+        edge.current = current_in != 0 ? current_out : 0;
         if (bounds.ready)
         {
             uint32_t rank = 0;
@@ -3014,6 +3171,7 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     }
     // Slot-current elision is for CFG edges only; keep the existing split-move contract unchanged.
     edge.spill_ends = 0;
+    edge.current = 0;
     // Each split's moves: from the value's location just before the position to its new piece's.
     for (uint32_t q = 0; ready && q < input->position_count; q += 1)
     {
@@ -3856,6 +4014,22 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
         memset(state.stamps, 0, (uint64_t)locations * sizeof(uint32_t));
         memset(edge.stamps, 0, (uint64_t)locations * sizeof(uint32_t));
     }
+    // The slots the allocation asserts current at each block's start (tier1_cfg_current_slots, #2553): each a value live
+    // into the block, in its own slot there, which every edge into the block must bring, and none at a block no edge
+    // enters. `entered` stamps the values live into the block being checked.
+    const uint32_t* current_offsets = result->current_slot_offsets;
+    uint32_t* entered = valid ? arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    valid = valid && (entered != 0 || tier1_cfg_fail(check, "checker memory", 0, 0, 0));
+    valid = valid && (current_offsets == 0 || (result->current_slots != 0 && current_offsets[0] == 0) || tier1_cfg_fail(check, "the current slots' columns", 0, 0, 0));
+    for (uint32_t b = 0; valid && current_offsets != 0 && b < blocks; b += 1)
+    {
+        const bool reached = b != 0 && input->predecessor_offsets[b] != input->predecessor_offsets[b + 1];
+        valid = (current_offsets[b] <= current_offsets[b + 1] && (reached || current_offsets[b] == current_offsets[b + 1])) || tier1_cfg_fail(check, "a current slot at a block no edge enters", b, 0, input->block_starts[b]);
+    }
+    if (valid)
+    {
+        memset(entered, 0, ((uint64_t)values + 1) * sizeof(uint32_t));
+    }
     uint32_t split = 0;
     for (uint32_t b = 0; valid && b < blocks; b += 1)
     {
@@ -3874,6 +4048,23 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
             {
                 valid = tier1_cfg_state_get(&state, location) == BUSTER_TIER1_CFG_NONE || tier1_cfg_fail(check, "two values live in one location at a block's start", b, v, entry);
                 tier1_cfg_state_set(&state, location, v);
+            }
+            if (i < live_offsets[b + 1])
+            {
+                entered[v] = b + 1;
+            }
+            check->checks += 1;
+        }
+        for (uint32_t k = current_offsets != 0 ? current_offsets[b] : 0; valid && current_offsets != 0 && k < current_offsets[b + 1]; k += 1)
+        {
+            const uint32_t v = result->current_slots[k];
+            valid = (v < values && entered[v] == b + 1 && allocation->spill_ids[v] < allocation->spill_count) || tier1_cfg_fail(check, "a current slot of a value not live into its block", b, v, entry);
+            const uint32_t slot = valid ? BUSTER_TIER1_CFG_SPILL + allocation->spill_ids[v] : 0;
+            const uint32_t held = valid ? tier1_cfg_state_get(&state, slot) : BUSTER_TIER1_CFG_NONE;
+            valid = valid && ((held == BUSTER_TIER1_CFG_NONE || held == v) || tier1_cfg_fail(check, "two values live in one location at a block's start", b, v, entry));
+            if (valid)
+            {
+                tier1_cfg_state_set(&state, slot, v);
             }
             check->checks += 1;
         }
@@ -4031,6 +4222,13 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                 {
                     valid = undefined || tier1_cfg_state_get(&edge, location) == expected || tier1_cfg_fail(check, phi ? "an edge that doesn't bring a phi its operand" : "an edge that doesn't bring a live value", s, v, s_entry);
                 }
+                check->checks += 1;
+            }
+            for (uint32_t k = current_offsets != 0 ? current_offsets[s] : 0; valid && current_offsets != 0 && k < current_offsets[s + 1]; k += 1)
+            {
+                const uint32_t v = result->current_slots[k];
+                const bool slotted = v < values && allocation->spill_ids[v] < allocation->spill_count;
+                valid = (slotted && tier1_cfg_state_get(&edge, BUSTER_TIER1_CFG_SPILL + allocation->spill_ids[v]) == v) || tier1_cfg_fail(check, "an edge that doesn't bring a current slot", s, v, s_entry);
                 check->checks += 1;
             }
         }
