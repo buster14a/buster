@@ -12257,10 +12257,11 @@ keep the first emitted alias, ordered by when each target becomes visible,
 including targets declared after their directives. Ordinary object aliases
 retain deferred checking; function clone overload sets use the existing
 source-ordered overload path. This remains separate from ordinary weak binding.
-The clone can supply an ELF symbol where the unit never declares ALIAS; this
-does not add a synthetic parser declaration for C expression references to
-such an otherwise undeclared name (#2934's first shape: clang accepts such a
-reference, which buster still reports as an undeclared function or identifier).
+Where the unit never declares ALIAS, the pragma introduces the name when
+TARGET is visible. A later C reference uses the clone's type and weak ELF
+symbol, so a strong definition of ALIAS in another object can override it.
+Local declarations shadow it. Repeated function clones participate in overload
+resolution, and a lookup set containing an object reports ambiguity (#2934).
 
 A declared target without an emitted definition is accepted by syntax checking
 and diagnosed at object generation with "alias must point to a defined variable
