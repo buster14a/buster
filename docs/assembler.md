@@ -2,8 +2,9 @@
 
 The frontend in [#222](https://github.com/buster14a/buster/issues/222)
 is a callable GNU-syntax assembler in the existing compiler executable. It uses
-AVX-512 throughout; only its layout's relaxation keeps a scalar twin
-(`AsmOptions.vectorized`), until #2924 decides between them. It selects the
+AVX-512 throughout, one implementation per step (#2924). Its layout's
+relaxation is scalar: the 16-fragment vector arms lost to it on every input,
+and #3429 asks for a vectorized form that wins. It selects the
 existing 16-byte `X86Instruction` records and emits the existing `Link` tables
 and ELF writer's output. The direct compiler path still emits records itself.
 No production command invokes another assembler or a C parser.
@@ -35,8 +36,7 @@ arena buffer in place. Input no longer has a 64 MiB ceiling (#1368).
 Default input syntax is AT&T; `--intel` selects Intel without register
 prefixes. `.intel_syntax noprefix` and `.att_syntax prefix` switch syntax in
 the source. The `prefix`/`noprefix` arguments control register spelling.
-`--scalar` selects the relaxation's scalar arms and the `.S` preprocessing's
-scalar path, and `--timing` prints initialization,
+`--timing` prints initialization,
 read, frontend phase, object/write and total times plus arena usage.
 
 Output feature admission uses the shared [target policy](x86-target.md), separate
@@ -708,10 +708,11 @@ Each step is vectorized:
    separately as before. Encoder rows remain the encoding authority. This
    helper is the bounded shared slice of #221, not its IR semantics/effects work.
 4. Instruction-only layouts use the existing branch sizer after proving its
-   index-based contract (its vector path alone since #2924: `--scalar` no
-   longer selects a scalar sizer). Mixed assembly partitions fragments by
-   section and prefix-scans 16 sizes between alignment operations. The exact
-   path sums them individually. Scalar column loads/stores avoid Zen 5 gathers.
+   index-based contract (its vector path alone since #2924). Mixed assembly
+   partitions fragments by section and sums their sizes in order, recording
+   alignments', branches' and LEB128s' events. This step is scalar: summing 16
+   sizes at a time by a prefix network made layout 0.1% to 3.8% slower on every
+   input (#2924, #3429).
 5. Encoding batches up to 256 contiguous instructions through the existing
    AVX-512 encoder. The section allocation includes the
    encoder's required capacity and store padding beyond its logical size.
@@ -775,8 +776,7 @@ There is no implicit expansion that changes flags or registers.
 `test-assembler [--cross-check] [--keep] [--seed N] [--fuzz N]` folds token
 streams, diagnostics, ELF output, matches and inline code into a digest, which
 with the default seed and fuzz count must be the one recorded where the scalar
-paths gave the same outputs (#2924), and that the relaxation's scalar arms give
-the same objects. It checks valid
+paths gave the same outputs (#2924). It checks valid
 batches of 0..65 instructions at all 64 source misalignments, malformed text
 and binary bytes, and both ends of protected pages for lengths 0..1099.
 Fixtures cover immediate/operand boundaries, section changes, expressions,
@@ -844,8 +844,6 @@ standalone RIP operand to the full parser.
 ./build/compiler benchmark-assembler --workload registers
 ./build/compiler benchmark-assembler --workload simd
 ./build/compiler benchmark-assembler --workload att
-./build/compiler benchmark-assembler --only vector
-./build/compiler benchmark-assembler --only vector --after-scalar 100
 ./build/compiler benchmark-assembler --input /path/to/compiler-output.s --external
 ```
 
@@ -853,17 +851,14 @@ Run each separately under the 9700X lock with `taskset -c 2`. The default
 workload has 256 generated functions, including branches, memory, alignment,
 external references and section changes. These are controlled synthetic
 workloads, not a compatibility corpus. `--functions 1..2048` changes size.
-There are 21 interleaved samples after a warmup; output is checked outside the
+There are 21 samples after a warmup; output is checked outside the
 timed interval. Phase medians and whole-run medians are reported independently.
 `--input` reads a counted source once before timing, so the same phase/object
 measurements can cover frozen compiler output. Its printed function count is
 zero (unknown), not an inferred symbol count. The CFI column is a subset of
 encode/link time, not an additional phase to add to the total.
 Initialization and index/work-arena sizes are included in the report.
-`--only` measures one path back-to-back; `--after-scalar` warms scalar assembly
-outside each sample to expose the known Zen 5 transition state.
-
-`--external` rotates fresh Buster vector, Buster scalar, GNU as and Clang
+`--external` rotates fresh Buster, GNU as and Clang
 integrated-assembler processes. They read the same warm `.s` file and overwrite
 the same object path. All include startup, input and output I/O; none preprocess
 the input. The component benchmark excludes file I/O and reusable initialization,

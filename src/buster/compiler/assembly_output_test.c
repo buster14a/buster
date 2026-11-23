@@ -129,7 +129,7 @@ static SymbolId assembly_fixture_define(AssemblyFixture* fixture, const char* na
 static AtomId assembly_fixture_function(AssemblyTest* test, AssemblyFixture* fixture, const char* name, uint8_t flags, uint8_t alignment, const char* source)
 {
     const String8 text = { .pointer = (char*)source, .length = strlen(source) };
-    const AsmCode code = asm_assemble_code(text, test->index, (AsmOptions){ .vectorized = true, .intel = true }, &test->arena, &test->scratch);
+    const AsmCode code = asm_assemble_code(text, test->index, (AsmOptions){ .intel = true }, &test->arena, &test->scratch);
     uint32_t* offsets = code.error == 0 ? BUSTER_ARENA_PUSH_ARRAY(&test->arena, uint32_t, (uint64_t)code.count + 1) : 0;
     uint32_t* fixup_ends = offsets != 0 ? BUSTER_ARENA_PUSH_ARRAY(&test->arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(code.reference_count)) : 0;
     uint8_t* bytes = fixup_ends != 0 ? BUSTER_ARENA_PUSH_ARRAY(&test->arena, uint8_t, BUSTER_X86_ENCODER_CAPACITY(code.count)) : 0;
@@ -533,7 +533,7 @@ static void assembly_test_program(AssemblyTest* test)
         const uint64_t object_mark = test->scratch.length;
         const Object object = assembly_test_object(&fixture, &test->scratch);
         const String8 source = { .pointer = (char*)result.bytes, .length = result.length };
-        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){ .vectorized = true }, &test->scratch);
+        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){ 0 }, &test->scratch);
         const Object rebuilt = assembled.error == 0 ? asm_object(&assembled, BUSTER_S8("fixture.c"), &test->scratch) : (Object){0};
         char error[256] = { 0 };
         const String8 bytes = { .pointer = (char*)rebuilt.bytes, .length = rebuilt.size };

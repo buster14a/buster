@@ -106,7 +106,7 @@ static AsmResult asm_test_pair(AsmTest* test, String8 source, int expected, X86A
     }
     test->scalar.length = 0;
     test->vector.length = 0;
-    AsmResult vector = asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &test->vector);
+    AsmResult vector = asm_assemble(source, test->index, (AsmOptions){0}, &test->vector);
     if (expected >= 0)
     {
         asm_test_check(test, (vector.error == 0) == (expected != 0), "fixture acceptance", vector.error);
@@ -1121,7 +1121,7 @@ static void asm_test_code(AsmTest* test)
     Arena tiny = arena_reserve(4096);
     tiny.length = 16;
     tiny.capacity = 64;
-    const AsmCode exhausted = asm_assemble_code(BUSTER_S8("nop\nnop\nnop\n"), test->index, (AsmOptions){ .vectorized = true }, &test->vector, &tiny);
+    const AsmCode exhausted = asm_assemble_code(BUSTER_S8("nop\nnop\nnop\n"), test->index, (AsmOptions){0}, &test->vector, &tiny);
     asm_test_check(test, exhausted.error != 0 && exhausted.count == 0 && tiny.length == 16, "inline code: an exhausted scratch arena keeps nothing", 0);
     tiny.capacity = 4096;
     arena_release(&tiny);
@@ -1397,7 +1397,7 @@ static void asm_test_reader(AsmTest* test, const char* directory)
     const uint64_t source_end = arena.length;
     if (okay)
     {
-        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &arena);
+        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){0}, &arena);
         const bool code = assembled.error == NULL && assembled.link.atoms.count > 1 && assembled.link.atoms.size[1] == 1 &&
                           assembled.link.atoms.bytes[1][0] == 0xc3;
         asm_test_check(test, code, "assembly beyond 64 MiB emits ret", assembled.error);
@@ -1532,7 +1532,7 @@ static void asm_test_preprocessed(AsmTest* test, const char* directory)
         bool assembled = okay && pp_parse_options(1, arguments, &options, &files, &path, &output, &markers);
         options.scalar = vectorized == 0;
         assembled = assembled && asm_preprocess_file(input, options, &files, &source);
-        const AsmResult result = assembled ? asm_assemble(source, test->index, (AsmOptions){.vectorized = true}, &files) : (AsmResult){.error = "preprocessing failed"};
+        const AsmResult result = assembled ? asm_assemble(source, test->index, (AsmOptions){0}, &files) : (AsmResult){.error = "preprocessing failed"};
         assembled = result.error == 0 && result.link.atoms.count == 2 && result.link.atoms.size[1] == sizeof(expected) && memcmp(result.link.atoms.bytes[1], expected, sizeof(expected)) == 0;
         asm_test_check(test, assembled, ".S pastes and '$' splits as assembler-with-cpp has them", result.error);
     }
@@ -1640,7 +1640,7 @@ static int run_assembler_tests(int count, char** arguments)
         tiny.length = 16;
         char oversized[1024];
         memset(oversized, ' ', sizeof(oversized));
-        const AsmResult exhausted = asm_assemble((String8){.pointer = oversized, .length = sizeof(oversized)}, test.index, (AsmOptions){.vectorized = true}, &tiny);
+        const AsmResult exhausted = asm_assemble((String8){.pointer = oversized, .length = sizeof(oversized)}, test.index, (AsmOptions){0}, &tiny);
         asm_test_check(&test, exhausted.error != 0 && exhausted.link.atoms.count == 0 && tiny.length == 16, "arena failure rolls back the component", 0);
         arena_release(&tiny);
         static const char* const good[] =
@@ -1811,7 +1811,7 @@ static int run_assembler_tests(int count, char** arguments)
         const AsmResult narrow = asm_test_pair(&test, BUSTER_S8("movl x(,%eax,8), %ecx\n"), 1, 0);
         asm_test_check(&test, narrow.error == 0 && narrow.link.fixups.count == 2 && narrow.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32,
                        "a 32-bit address's disp32 relocates as GNU as's 32", narrow.error);
-        const AsmResult integrated = asm_assemble(BUSTER_S8("movl x(,%eax,8), %ecx\n"), test.index, (AsmOptions){ .vectorized = true, .integrated = true }, &test.vector);
+        const AsmResult integrated = asm_assemble(BUSTER_S8("movl x(,%eax,8), %ecx\n"), test.index, (AsmOptions){ .integrated = true }, &test.vector);
         asm_test_check(&test, integrated.error == 0 && integrated.link.fixups.count == 2 && integrated.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S,
                        "a C unit's 32-bit address's disp32 relocates as clang's 32S", integrated.error);
         // A unit's entry atom and code, its first control flow, and its absolute symbols (#812): the C checker's planner
