@@ -15,6 +15,13 @@
 // a link without the section exit with status 77, and build.sh keeps that executable as it is: its initializers build
 // the tables when it runs, as they did before.
 //
+// The baked file's tables are only read (#2886): where the link placed the section in a segment of its own, with the
+// compiler's own relocated read-only data (.data.rel.ro.buster: the start order's link script,
+// cmake/BusterStartOrder.cmake), the bake makes that segment read-only (bake_seal), so that the kernel maps it as it
+// maps the read-only data, which the exit helper can ask to have in huge pages (lane.c's lane_exit_segments), rather
+// than as private writable pages, which no huge page maps. A build of the tables in a process of such a file (this
+// command's, or test-baked-tables') first makes the section's pages writable.
+//
 // `test-baked-tables` makes the same build and checks in any executable, a PIE too (TSan, MSan and fuzzing builds,
 // which aren't baked): nothing written outside the section, a second build the same bytes as the first, and in a baked
 // executable the first the bytes it started with, which are the file's, and its build ID. A link without the section
@@ -29,6 +36,7 @@ static bool tier1_select_initialized(void);
 // OS-dependent includes
 #include <elf.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -288,12 +296,21 @@ static bool bake_build(const BakeImage* image)
     const uint64_t pages = outside_checked ? bake_hashes(image, NULL, NULL) : 0;
     uint64_t* before = outside_checked ? malloc((pages + 1) * sizeof(uint64_t)) : NULL;
     bool valid = !outside_checked || before != NULL;
+    if (valid && outside_checked)
+    {
+        bake_hashes(image, before, NULL);
+    }
+    // The section's pages, which a sealed file maps read-only (bake_seal), writable for the build.
+    const uintptr_t first = (uintptr_t)__start_buster_baked & ~(uintptr_t)(BUSTER_BAKE_PAGE - 1);
+    const uintptr_t last = ((uintptr_t)__stop_buster_baked + BUSTER_BAKE_PAGE - 1) & ~(uintptr_t)(BUSTER_BAKE_PAGE - 1);
+    const bool writable = valid && mprotect((void*)first, last - first, PROT_READ | PROT_WRITE) == 0;
+    if (valid && !writable)
+    {
+        fprintf(stderr, "bake-tables: can't make buster_baked's pages writable\n");
+    }
+    valid = writable;
     if (valid)
     {
-        if (outside_checked)
-        {
-            bake_hashes(image, before, NULL);
-        }
         memset(__start_buster_baked, 0, bake_section_size());
         const bool built = x86_encoder_initialize() && x86_semantics_initialize() && x86_zen5_initialize() && tier0_initialize() && unwind_initialize() &&
                            tier1_select_initialize() && parse_tables_initialize() && check_lower_runtime_names_initialize() && bake_node_machine_initialize() &&
@@ -307,6 +324,57 @@ static bool bake_build(const BakeImage* image)
     }
     free(before);
     return valid;
+}
+
+// Whether `index`'s section of the image is one the bake makes read-only with the section (bake_seal): the section, or
+// the compiler's relocated read-only data, which the start order's link script puts beside it.
+static bool bake_sealed_section(const BakeImage* image, const Elf64_Shdr* sections, uint32_t index)
+{
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)image->bytes;
+    const Elf64_Shdr* names = &sections[header->e_shstrndx];
+    const bool named = names->sh_offset <= image->length && sections[index].sh_name < image->length - names->sh_offset &&
+                       memchr(image->bytes + names->sh_offset + sections[index].sh_name, 0, image->length - names->sh_offset - sections[index].sh_name);
+    const char* name = named ? (const char*)image->bytes + names->sh_offset + sections[index].sh_name : "";
+    return strcmp(name, "buster_baked") == 0 || strcmp(name, ".data.rel.ro.buster") == 0;
+}
+
+// Makes the image's segment that holds the section read-only (#2886), where the link gave the section a segment of its
+// own: a fixed-address executable's writable PT_LOAD with no zeroed tail, whose every allocated section is one
+// bake_sealed_section names. Those sections' write flags go too. Any other layout (another linker's, a PIE's) stays as
+// it is. Returns whether it sealed the segment.
+static bool bake_seal(BakeImage* image)
+{
+    Elf64_Ehdr* header = (Elf64_Ehdr*)image->bytes;
+    Elf64_Shdr* sections = (Elf64_Shdr*)(image->bytes + header->e_shoff);
+    Elf64_Phdr* segments = (Elf64_Phdr*)(image->bytes + header->e_phoff);
+    Elf64_Phdr* segment = NULL;
+    for (uint32_t index = 0; index < header->e_phnum; index += 1)
+    {
+        const Elf64_Phdr* candidate = &segments[index];
+        const bool holds = candidate->p_type == PT_LOAD && image->section_offset >= candidate->p_offset &&
+                           image->section_offset - candidate->p_offset < candidate->p_filesz;
+        segment = holds ? &segments[index] : segment;
+    }
+    bool sealable = !image->position_independent && segment && (segment->p_flags & PF_W) && segment->p_filesz == segment->p_memsz;
+    for (uint32_t index = 0; sealable && index < header->e_shnum; index += 1)
+    {
+        const Elf64_Shdr* section = &sections[index];
+        const bool thread_zeroed = (section->sh_flags & SHF_TLS) && section->sh_type == SHT_NOBITS;
+        const bool inside = (section->sh_flags & SHF_ALLOC) && !thread_zeroed && section->sh_size != 0 && section->sh_addr < segment->p_vaddr + segment->p_memsz &&
+                            section->sh_addr + section->sh_size > segment->p_vaddr;
+        sealable = !inside || bake_sealed_section(image, sections, index);
+    }
+    if (sealable)
+    {
+        segment->p_flags &= ~(uint32_t)PF_W;
+        for (uint32_t index = 0; index < header->e_shnum; index += 1)
+        {
+            const bool inside = (sections[index].sh_flags & SHF_ALLOC) && bake_sealed_section(image, sections, index) &&
+                                sections[index].sh_addr >= segment->p_vaddr && sections[index].sh_addr < segment->p_vaddr + segment->p_memsz;
+            sections[index].sh_flags &= inside ? ~(uint64_t)SHF_WRITE : ~(uint64_t)0;
+        }
+    }
+    return sealable;
 }
 
 // Writes `length` bytes to a new file at `path` with the mode `mode`.
@@ -449,6 +517,7 @@ static int run_bake_command(int argc, char** argv)
     if (result == 0)
     {
         memcpy(image.bytes + image.section_offset, __start_buster_baked, bake_section_size());
+        bake_seal(&image);
         if (!bake_build_id_write(&image))
         {
             fprintf(stderr, "bake-tables: can't update the build ID\n");

@@ -1405,7 +1405,16 @@ static bool ir_optimize_root(const IrOptimizeWork* work, uint32_t i)
 #define BUSTER_IR_OPTIMIZE_LEFT_ONE 8u
 #define BUSTER_IR_OPTIMIZE_RIGHT_ONES 16u
 #define BUSTER_IR_OPTIMIZE_LEFT_ONES 32u
+// A conversion back to its operand's operand's type (#3311): a bitcast of a bitcast, and a truncation of an extension.
+// SROA's eightbytes (ir_sroa_widen) carry a double's bits as an i64 and a narrow field's as its extension.
+#define BUSTER_IR_OPTIMIZE_ROUND_TRIP 64u
+// An `and` whose operand is zero is that operand (#3311): SCCP folds a constant's, so this is an undef's, which these
+// identities take as zero (ir_optimize_known), as Tier 1 selects it (TIER1_RULE_CONSTANT's zero). SROA's eightbytes
+// (ir_sroa_widen) clear a field's bits in a word no store wrote before, an undef after promotion.
+#define BUSTER_IR_OPTIMIZE_ABSORB 128u
 static const uint8_t ir_optimize_identity_kinds[BUSTER_IR_OP_TABLE] = {
+    [IR_BITCAST] = BUSTER_IR_OPTIMIZE_ROUND_TRIP,
+    [IR_TRUNC] = BUSTER_IR_OPTIMIZE_ROUND_TRIP,
     [IR_ADD] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO | BUSTER_IR_OPTIMIZE_LEFT_ZERO,
     [IR_SUB] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO,
     [IR_OR] = BUSTER_IR_OPTIMIZE_RIGHT_ZERO | BUSTER_IR_OPTIMIZE_LEFT_ZERO,
@@ -1416,7 +1425,7 @@ static const uint8_t ir_optimize_identity_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_MUL] = BUSTER_IR_OPTIMIZE_RIGHT_ONE | BUSTER_IR_OPTIMIZE_LEFT_ONE,
     [IR_UDIV] = BUSTER_IR_OPTIMIZE_RIGHT_ONE,
     [IR_SDIV] = BUSTER_IR_OPTIMIZE_RIGHT_ONE,
-    [IR_AND] = BUSTER_IR_OPTIMIZE_RIGHT_ONES | BUSTER_IR_OPTIMIZE_LEFT_ONES,
+    [IR_AND] = BUSTER_IR_OPTIMIZE_RIGHT_ONES | BUSTER_IR_OPTIMIZE_LEFT_ONES | BUSTER_IR_OPTIMIZE_ABSORB,
 };
 
 // The identities' candidates among `count` (at most 64) operations, a bit each: their opcodes' kinds by a 128-byte
@@ -1442,35 +1451,62 @@ static uint64_t ir_optimize_identity_candidates(const uint8_t* operations, uint3
     return candidates;
 }
 
-// Whether SCCP knows `value`, of `type`'s bits (I1 to I64), is `expected` (zero, one or all ones) at those bits.
+// Whether SCCP knows `value`, of `type`'s bits (I1 to I64), is `expected` (zero, one or all ones) at those bits; or, for
+// zero, whether it is an undef (#3311), which may be any value, and which Tier 1 selects as zero.
 static bool ir_optimize_known(const IrOptimizeWork* work, uint32_t value, uint32_t type, uint64_t expected)
 {
     const uint32_t bits = ir_type_bits[type];
     const uint64_t mask = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
-    const bool result = work->states[value] == IROPT_CONSTANT && (work->values[value].low & mask) == (expected & mask);
+    const bool undefined = expected == 0 && work->function->op[value] == IR_UNDEF;
+    const bool result = (work->states[value] == IROPT_CONSTANT && (work->values[value].low & mask) == (expected & mask)) || undefined;
     return result;
 }
 
+// Whether `value` is a zero extension whose source's bits SCCP knows `mask` (of the same type) keeps all of (#3311): an
+// `and` of the two is the extension. SROA's eightbytes (ir_sroa_widen) clear a field's bits in a zeroed word and or the
+// field's extension in, which leaves this mask on a 32-bit value's extension.
+static bool ir_optimize_kept_extension(const IrOptimizeWork* work, uint32_t value, uint32_t mask)
+{
+    const IrFunction* f = work->function;
+    const bool extension = f->op[value] == IR_ZEXT && f->type[f->a[value]] >= IR_I1 && f->type[f->a[value]] <= IR_I64;
+    const uint32_t bits = extension ? ir_type_bits[f->type[f->a[value]]] : 64;
+    const uint64_t low = bits >= 64 ? UINT64_MAX : (UINT64_C(1) << bits) - 1;
+    return extension && work->states[mask] == IROPT_CONSTANT && (work->values[mask].low & low) == low;
+}
+
 // The operand instruction i returns unchanged by its kinds (ir_optimize_identity_kinds) and SCCP's facts, or
-// BUSTER_IR_NONE.
-static uint32_t ir_optimize_identity_source(const IrOptimizeWork* work, uint32_t i, uint32_t type)
+// BUSTER_IR_NONE: also an `and` of a zero extension and a mask that keeps its source's bits (#3311).
+static uint32_t ir_optimize_identity_source(const IrOptimizeWork* work, const uint32_t* forward, uint32_t i, uint32_t type)
 {
     const IrFunction* f = work->function;
     const uint32_t kind = ir_optimize_identity_kinds[f->op[i]];
-    const uint32_t a = f->a[i];
-    const uint32_t b = f->b[i];
+    // Its operands through the identities found before it (#3311), whose values they are: an `or` of an `and` that an
+    // undef absorbed is the `or`'s other operand.
+    uint32_t a = f->a[i];
+    uint32_t b = f->b[i];
+    for (uint32_t step = 0; forward != 0 && step < 4; step += 1)
+    {
+        a = a < f->instruction_count && forward[a] != BUSTER_IR_NONE ? forward[a] : a;
+        b = b < f->instruction_count && forward[b] != BUSTER_IR_NONE ? forward[b] : b;
+    }
+    const bool ones = (kind & BUSTER_IR_OPTIMIZE_RIGHT_ONES) != 0;
     const bool right = ((kind & BUSTER_IR_OPTIMIZE_RIGHT_ZERO) != 0 && ir_optimize_known(work, b, type, 0)) || ((kind & BUSTER_IR_OPTIMIZE_RIGHT_ONE) != 0 && ir_optimize_known(work, b, type, 1)) ||
-                       ((kind & BUSTER_IR_OPTIMIZE_RIGHT_ONES) != 0 && ir_optimize_known(work, b, type, UINT64_MAX));
+                       ((kind & BUSTER_IR_OPTIMIZE_RIGHT_ONES) != 0 && ir_optimize_known(work, b, type, UINT64_MAX)) || (ones && ir_optimize_kept_extension(work, a, b));
     const bool left = ((kind & BUSTER_IR_OPTIMIZE_LEFT_ZERO) != 0 && ir_optimize_known(work, a, type, 0)) || ((kind & BUSTER_IR_OPTIMIZE_LEFT_ONE) != 0 && ir_optimize_known(work, a, type, 1)) ||
-                      ((kind & BUSTER_IR_OPTIMIZE_LEFT_ONES) != 0 && ir_optimize_known(work, a, type, UINT64_MAX));
-    const uint32_t result = right ? a : left ? b : BUSTER_IR_NONE;
+                      ((kind & BUSTER_IR_OPTIMIZE_LEFT_ONES) != 0 && ir_optimize_known(work, a, type, UINT64_MAX)) || (ones && ir_optimize_kept_extension(work, b, a));
+    const uint32_t inner = (kind & BUSTER_IR_OPTIMIZE_ROUND_TRIP) != 0 && a < f->instruction_count ? f->a[a] : BUSTER_IR_NONE;
+    const bool round = inner < f->instruction_count && f->type[inner] == type &&
+                       ((f->op[i] == IR_BITCAST && f->op[a] == IR_BITCAST) || (f->op[i] == IR_TRUNC && (f->op[a] == IR_ZEXT || f->op[a] == IR_SEXT)));
+    const bool absorbed_right = (kind & BUSTER_IR_OPTIMIZE_ABSORB) != 0 && ir_optimize_known(work, b, type, 0);
+    const bool absorbed_left = (kind & BUSTER_IR_OPTIMIZE_ABSORB) != 0 && ir_optimize_known(work, a, type, 0);
+    const uint32_t result = right ? a : left ? b : round ? inner : absorbed_right ? b : absorbed_left ? a : BUSTER_IR_NONE;
     return result;
 }
 
 // Identities' forwarding (#2554), after SCCP and before DCE: an integer operation, I1 to I64, of a reachable block that
 // returns one of its operands unchanged by SCCP's facts (ir_optimize_identity_kinds: a shift by zero, Lua's instruction
 // decoding's `>> 0`, a multiplication by one, a C `n * sizeof (char)`, and the rest) forwards that operand, of its own
-// type. Its users read the operand in its place (ir_optimize_rewrite), DCE marks the operand rather than it (a shift's
+// type; and a conversion of an integer, f32 or f64 back to its operand's operand's type (#3311) forwards that value. Its users read the operand in its place (ir_optimize_rewrite), DCE marks the operand rather than it (a shift's
 // root with it, ir_optimize_dce) and it is gone. An operand defines a value that dominates the operation, which
 // dominates the operation's users, so every use stays dominated. A chain of them forwards its first operand that isn't
 // one, found with path compression. A result SCCP folded and a vector's stay as they are. False where the map (`count`
@@ -1491,9 +1527,10 @@ static bool ir_optimize_identities(IrOptimizeWork* work, Arena* scratch)
             candidates &= candidates - 1;
             const uint32_t type = f->type[i];
             uint32_t source = BUSTER_IR_NONE;
-            if (type >= IR_I1 && type <= IR_I64 && work->blocks[work->cfg.instruction_blocks[i]] != 0 && work->states[i] != IROPT_CONSTANT)
+            const bool scalar = (type >= IR_I1 && type <= IR_I64) || type == IR_F32 || type == IR_F64;
+            if (scalar && work->blocks[work->cfg.instruction_blocks[i]] != 0 && work->states[i] != IROPT_CONSTANT)
             {
-                source = ir_optimize_identity_source(work, i, type);
+                source = ir_optimize_identity_source(work, forward, i, type);
                 source = source != BUSTER_IR_NONE && f->type[source] == type ? source : BUSTER_IR_NONE;
             }
             if (source != BUSTER_IR_NONE && forward == 0)

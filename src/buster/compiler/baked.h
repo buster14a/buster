@@ -7,9 +7,12 @@
 // check_asm_index_initialize's, and the intrinsic catalogue's exact table, builtin_intrinsic_table_initialize's), which
 // build.sh has the
 // linked executable write into its own file (bake-tables, baked.c), so that a compile starts with it built rather than
-// building it. The section is writable data with file bytes: a process
+// building it. The section is data with file bytes: a process
 // reads its pages from the page cache, shared with every other process, as they are touched, and an executable that
-// isn't baked (a PIE, or one linked without build.sh) builds them as before. BUSTER_BAKED is for the state main.c's
+// isn't baked (a PIE, or one linked without build.sh) builds them as before. Where lld's start order script gives it a
+// segment of its own (cmake/BusterStartOrder.cmake), the bake makes that segment read-only (#2886, baked.c's
+// bake_seal), which the kernel can then map by huge pages: a compile only reads the tables, and every other command
+// makes their pages writable as it starts (main.c's main_baked_writable). BUSTER_BAKED is for the state main.c's
 // units share (x86_64_encoder.c's BUSTER_X86_SHARED), and BUSTER_BAKED_UNIT for a module's static state, which is
 // baked only in the checker's unit, the C driver's: another unit's copy (the backend's tests') would only add its bytes
 // to the file. BUSTER_BAKED_FRONTEND is for the static state of a module whose home is the frontend's unit (main.c),

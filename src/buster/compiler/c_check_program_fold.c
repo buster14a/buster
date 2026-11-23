@@ -7,6 +7,247 @@
 // It does not interpret mutable locals or iterate loops: reaching a loop's backedge refuses the fold. Expressions
 // still pass the existing outside-a-constant-context proof, including its __builtin_constant_p restrictions.
 
+// Read only completed, nonvolatile constant initializer receipts. Weak objects keep their runtime load even when
+// this translation unit provides an initializer, so require the source reader's nonnull (non-weak) address proof.
+static bool check_program_constant_load(const CheckProgram* program, uint32_t node, CheckValue* loaded)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckValue value = check_stream_value(program->stream, node);
+    const uint32_t restricted = BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED;
+    const uint32_t position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE;
+    // A bit-field can start between bytes. Its member action records the object and bit offset even there.
+    const bool located = value.constant_kind == CHECK_CONSTANT_ADDRESS || (graph->ops[node] == CHECK_OP_MEMBER && (value.flags & BUSTER_CHECK_BIT_FIELD) != 0);
+    const bool known = value.category == CHECK_LVALUE && value.fault == CHECK_FAULT_NONE && located &&
+                       (value.flags & restricted) == 0 && (value.flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 &&
+                       (type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) == 0 &&
+                       check_const_load(program->types, graph->const_values, value.object, value.offset, value.object_bit_offset,
+                                        value.bit_width, value.type, position, loaded) &&
+                       (loaded->constant_kind == CHECK_CONSTANT_FLOATING || loaded->constant_kind == CHECK_CONSTANT_INTEGER);
+    return known;
+}
+
+// Code emission may read a completed const integer initializer even in an ordinary C expression (#2987).
+// Keep this proof separate from the checked stream: the read does not make the source an integer constant expression.
+static bool check_program_const_designator(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    // A named object, its member, or an element at a constant index. The address alone cannot prove that computing
+    // it was free of effects (a statement expression can yield the same address after executing arbitrary code).
+    while (graph->ops[node] == CHECK_OP_MEMBER || graph->ops[node] == CHECK_OP_SUBSCRIPT)
+    {
+        uint32_t base = graph->operand0[node];
+        if (graph->ops[node] == CHECK_OP_MEMBER)
+        {
+            const CheckValue record = check_stream_value(program->stream, base);
+            uint64_t offset = 0;
+            uint32_t qualifiers = 0;
+            const CheckAction action = {
+                .member = graph->members[node],
+                .context = check_graph_context(graph, node, true),
+            };
+            const TypeId type = type_strip_aligned(program->types, record.type);
+            const uint32_t member = type_lookup_member(program->types, type, action.member, &offset, &qualifiers);
+            if (member == 0 || !check_action_const_member(program->types, &action, &record, type, member))
+            {
+                break;
+            }
+        }
+        else
+        {
+            uint32_t index = graph->operand1[node];
+            if (!type_kind_is_array(check_action_kind(program->types, check_stream_type(program->stream, base))))
+            {
+                base = index;
+                index = graph->operand0[node];
+            }
+            const TypeId array = type_strip_aligned(program->types, check_stream_type(program->stream, base));
+            const CheckValue offset = check_stream_value(program->stream, index);
+            if (check_action_kind(program->types, array) != BUSTER_TYPE_KIND_ARRAY || graph->ops[index] != CHECK_OP_VALUE ||
+                offset.constant_kind != CHECK_CONSTANT_INTEGER || offset.integer >= program->types->types.extent[type_index(array)])
+            {
+                break;
+            }
+        }
+        node = base;
+    }
+    return graph->ops[node] == CHECK_OP_VALUE;
+}
+
+// Fold using the operand types the checker already chose, including integer promotions and the usual arithmetic
+// conversions. All inputs are integers of at most 128 bits. Arithmetic faults keep ordinary code generation.
+static bool check_program_const_operation(const CheckProgram* program, uint32_t node, unsigned __int128 first, CheckValue* value)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOp op = graph->ops[node];
+    const TypeId type = check_stream_type(program->stream, node);
+    const bool binary = graph->operand1[node] != BUSTER_CHECK_NONE;
+    CheckValue left = {
+        .type = check_stream_type(program->stream, graph->operand0[node]),
+        .constant_kind = CHECK_CONSTANT_INTEGER,
+        .integer = binary ? first : value->integer,
+    };
+    const CheckConversion* conversions = program->stream->conversions[node].operands;
+    CheckIntegerFold fold = { .op = op, .node = node };
+    check_action_convert_value(program->types, &left, conversions[0].type, node);
+    bool known = check_action_integer_type(program->types, left.type, &fold.width, &fold.is_signed);
+    fold.left = left.integer;
+    fold.right_width = fold.width;
+    fold.right_signed = fold.is_signed;
+    if (binary)
+    {
+        check_action_convert_value(program->types, value, conversions[1].type, node);
+        known = known && check_action_integer_type(program->types, value->type, &fold.right_width, &fold.right_signed);
+        fold.right = value->integer;
+    }
+    *value = (CheckValue){ .type = type, .constant_kind = CHECK_CONSTANT_INTEGER };
+    if (known)
+    {
+        check_action_fold_integer(fold, value);
+        known = value->fault == CHECK_FAULT_NONE;
+    }
+    return known;
+}
+
+typedef struct CheckProgramConstFrame CheckProgramConstFrame;
+struct CheckProgramConstFrame
+{
+    unsigned __int128 left;
+    uint32_t node;
+    bool right;
+};
+
+static bool check_program_const_operator(CheckOp op)
+{
+    return (op >= CHECK_OP_POSITIVE && op <= CHECK_OP_CONDITIONAL) || op == CHECK_OP_CAST || op == CHECK_OP_CONVERT ||
+           op == CHECK_OP_CONDITION || op == CHECK_OP_SELECT;
+}
+
+// Walk only the evaluated operands, in order. In particular a deciding left operand skips the right operand's
+// calls, while an unknown left operand ends the proof. The bounded stack is only used for emission decisions.
+static __attribute__((noinline)) bool check_program_const_expression(const CheckProgram* program, uint32_t node, CheckValue* value)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    CheckProgramConstFrame frames[BUSTER_CHECK_BRANCH_TRUTH_DEPTH];
+    uint32_t depth = 0;
+    bool known = true;
+    bool loaded = false;
+    bool descend = true;
+    while (known && (descend || depth != 0))
+    {
+        if (descend)
+        {
+            const CheckOp op = graph->ops[node];
+            uint32_t width = 0;
+            bool sign = false;
+            known = check_action_integer_type(program->types, check_stream_type(stream, node), &width, &sign);
+            if (known && check_stream_category(stream, node) == CHECK_LVALUE)
+            {
+                known = (type_qualifiers(check_stream_type(stream, node)) & BUSTER_TYPE_CONST) != 0 &&
+                        check_program_constant_load(program, node, value) && value->constant_kind == CHECK_CONSTANT_INTEGER &&
+                        check_program_const_designator(program, node);
+                loaded |= known;
+                descend = false;
+            }
+            else if (known && (op == CHECK_OP_VALUE || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF))
+            {
+                *value = check_stream_value(stream, node);
+                known = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE &&
+                        (value->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+                descend = false;
+            }
+            else
+            {
+                known = known && depth < BUSTER_ARRAY_LENGTH(frames) && stream->conversions != NULL &&
+                        check_program_const_operator(op);
+                if (known)
+                {
+                    frames[depth++] = (CheckProgramConstFrame){ .node = node };
+                    node = graph->operand0[node];
+                }
+            }
+        }
+        else
+        {
+            CheckProgramConstFrame* frame = frames + depth - 1;
+            node = frame->node;
+            const CheckOp op = graph->ops[node];
+            const bool truth = value->integer != 0;
+            const bool logical = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
+            if (!frame->right && graph->operand1[node] != BUSTER_CHECK_NONE &&
+                !(logical && truth == (op == CHECK_OP_LOGICAL_OR)) &&
+                !(op == CHECK_OP_CONDITIONAL && truth && graph->operand1[node] == graph->operand0[node]))
+            {
+                frame->right = true;
+                frame->left = value->integer;
+                node = op == CHECK_OP_CONDITIONAL && !truth ? graph->operand2[node] : graph->operand1[node];
+                descend = true;
+            }
+            else
+            {
+                depth -= 1;
+                if (logical || op == CHECK_OP_NOT || op == CHECK_OP_CONDITION)
+                {
+                    *value = (CheckValue){ .type = BUSTER_TYPE_INT, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = truth != (op == CHECK_OP_NOT) };
+                }
+                else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_SELECT)
+                {
+                    check_action_convert_value(program->types, value, check_stream_type(stream, node), node);
+                    known = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE;
+                }
+                else
+                {
+                    known = check_program_const_operation(program, node, frame->left, value);
+                }
+            }
+        }
+    }
+    return known && loaded;
+}
+
+static bool check_program_const_integer(const CheckProgram* program, uint32_t node, CheckValue* value)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckConstValues* receipts = graph->const_values;
+    return node < graph->count && receipts != NULL && (receipts->count != 0 || receipts->prefix != NULL) &&
+           check_program_const_expression(program, node, value);
+}
+
+typedef enum CheckEmissionTruth
+{
+    CHECK_EMISSION_UNKNOWN,
+    CHECK_EMISSION_CHECKED,
+    CHECK_EMISSION_INITIALIZER,
+} CheckEmissionTruth;
+
+// A condition and the arm the initializer would skip must allow pruning even when a GNU statement expression
+// contains a label. The taken arm can keep its labels.
+static bool check_program_const_enterable(const CheckProgram* program, uint32_t node, uint32_t condition, bool truth)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOp op = graph->ops[node];
+    const uint32_t skipped = op == CHECK_OP_CONDITIONAL ? (truth ? graph->operand2[node] : graph->operand1[node]) :
+                             ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? graph->operand1[node] : BUSTER_CHECK_NONE;
+    uint32_t stack[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
+    return check_program_labeled(program, condition, 0, NULL, stack, BUSTER_ARRAY_LENGTH(stack)) ||
+           check_program_labeled(program, skipped, 0, NULL, stack, BUSTER_ARRAY_LENGTH(stack));
+}
+
+static CheckEmissionTruth check_program_emission_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
+{
+    CheckEmissionTruth result = check_program_runtime_truth(program, node, condition, truth) ? CHECK_EMISSION_CHECKED : CHECK_EMISSION_UNKNOWN;
+    CheckValue value;
+    if (result == CHECK_EMISSION_UNKNOWN && check_program_const_integer(program, condition, &value))
+    {
+        *truth = value.integer != 0;
+        if (program->input->region_count == 0 || !check_program_const_enterable(program, node, condition, *truth))
+        {
+            result = CHECK_EMISSION_INITIALIZER;
+        }
+    }
+    return result;
+}
+
 #define BUSTER_CHECK_CONTROL_FOLD_STEPS 128u
 
 typedef enum CheckControlFoldStepKind
@@ -401,6 +642,12 @@ static bool check_control_fold_truth(const CheckControlWriter* writer, uint32_t 
     const bool integer = expression < graph->count && check_action_integer_type(program->types, value.type, &width, &sign);
     bool folded = integer && (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 && check_action_truth(program->types, &value, truth) &&
                   check_control_foldable(writer, expression);
+    CheckValue initialized;
+    if (!folded && integer && check_program_const_integer(program, expression, &initialized))
+    {
+        *truth = initialized.integer != 0;
+        folded = true;
+    }
     if (!folded && integer && graph->ops[expression] == CHECK_OP_STATEMENT_VALUE)
     {
         folded = check_control_fold_region_truth(writer, expression, truth);

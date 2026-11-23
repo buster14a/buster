@@ -43,6 +43,10 @@ static const char node_census_test_warnings[] =
     "    e = eb; // refuse: enum-mix\n"
     "    x = (char)p; // refuse: pointer-cast-or-void-dereference\n"
     "    s = \"abc\" + i; // refuse: string-plus-int\n"
+    "    x = (i & 8) == 4; // refuse: cfg-tautology\n"
+    "    x = !(i | 1); // refuse: cfg-tautology\n"
+    "    x = i == 1 && i == 2; // refuse: cfg-tautology\n"
+    "    x = i && !i; // refuse: cfg-tautology\n"
     "    x = sizeof(x++); // refuse: unevaluated-operand\n"
     "    unsigned char c = 300; // refuse: constant\n"
     "    x = arr[5]; // refuse: constant\n"
@@ -197,8 +201,8 @@ static const char node_census_test_quiet[] =
 // beside a literal to a pointer's is quiet, and the other way round is not; past the parameters none is asked); an
 // initializer that starts with a parenthesis, whose warning's event is before its first node's token (#3017), beside
 // a for statement's clauses a line each, whose first one's event is no other's; an atomic pointer assigned, whose own
-// type is no pointer's where its conversion's is; and an integer constant folded from a floating one, whose record's
-// payload and exponent are the floating value's (#3014): it is no small divisor by that exponent.
+// type is no pointer's where its conversion's is; and an integer constant folded from a floating one: only the truncated
+// integer counts as the divisor (#3014, #3022).
 // Seventy of one name summed: 139 records, so that the other operand of what is above them is further back than the
 // block before.
 #define BUSTER_NODE_CENSUS_TEST_TEN(name) name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name
@@ -766,6 +770,47 @@ static const char node_census_test_atomic[] =
     "int indirect(void) { return p->x; } // refuse: complex-bitint-atomic-vector-half\n"
     "int ordinary(struct A* q) { return q->x + 1; } // take\n";
 
+// The logical family is default-on, and its graph-time events are not available to the reader-time tests. Literal
+// and const-receipt operands must be refused in both views, while ordinary Boolean and runtime idioms stay in the set.
+static const char node_census_test_logical[] =
+    "enum E { FOUR = 4 };\n"
+    "#define LOGIC(a, b) ((a) && (b))\n"
+    "int call(int);\n"
+    "int logical(int a, int b, _Bool bb)\n"
+    "{\n"
+    "    int x = 0; // take\n"
+    "    const int k = 4; // take\n"
+    "    const int one = 1; // take\n"
+    "    x = a && 4; // refuse: constant\n"
+    "    x = a || 8; // refuse: constant\n"
+    "    x = a && (FOUR); // refuse: constant\n"
+    "    x = (FOUR) && 4; // refuse: constant\n"
+    "    x = a && k; // refuse: constant\n"
+    "    x = a && (k + 1); // refuse: constant\n"
+    "    x = a && (int)k; // refuse: constant\n"
+    "    x = a && 0; // take\n"
+    "    x = a || 1; // take\n"
+    "    x = a && one; // take\n"
+    "    x = a && b; // take\n"
+    "    x = a && (b + 1); // take\n"
+    "    x = a && (b ? 4 : 8); // take\n"
+    "    x = a && call(b); // take\n"
+    "    x = a && b++; // take\n"
+    "    x = a && (b > 4); // take\n"
+    "    x = bb && 4; // take\n"
+    "    x = a && (_Bool)4; // take\n"
+    "    x = a && FOUR; // take\n"
+    "    x = FOUR && 4; // take\n"
+    "    x = LOGIC(a, 4); // take\n"
+    "    return x; // take\n"
+    "}\n";
+
+static const char node_census_test_logical_quiet[] =
+    "int logical_quiet(int x)\n"
+    "{\n"
+    "    return x && 4; // take\n"
+    "}\n";
+
 // What the compiler's own test tables had and no corpus (#3201, #3202), with the default warnings. An ordered comparison
 // of a pointer with an integer, by each operand that is a pointer once converted (a pointer, an array, a function), and
 // the comparisons its test has nothing for: a null constant, two pointers (which the loop on the window leaves out).
@@ -904,11 +949,13 @@ static const char node_census_test_silent[] =
 // Under the sign comparison's warning every comparison is sent to its tests whatever its operands, and two pointers'
 // ordered comparison is not one the loop leaves out.
 static const char node_census_test_signs[] =
-    "int order(long a, int* p, int* e)\n"
+    "int order(long a, int* p, int* e, unsigned u)\n"
     "{\n"
     "    int x = p < e; // take\n"
     "    while (p < e) p++; // take\n"
     "    x = a < p; // refuse: pointer-integer-order\n"
+    "    x = -2 < 3u; // take\n"
+    "    x = u < -2; // refuse: sign-compare\n"
     "    return x; // take\n"
     "}\n";
 
@@ -1828,43 +1875,45 @@ static bool node_bodies_test_controls(const char* directory, bool anywhere)
     return same;
 }
 
+// The bodies' fixture's unit: each body named for what it has.
+static const char node_bodies_test_text[] = "struct S { int a; unsigned b : 3; long c; };\nint g;\nint h(int);\n"
+    "static int plain(int x, int y) { int t = x * 2; if (y > 3) { t += y; } return t + g; }\n"
+    "static void nothing(int x) { g = x; }\n"
+    "static void early(int x) { if (x) return; g = 1; }\n"
+    "static int loops(struct S* s, int n) { long r = h(n) + h(n + 1); while (n > 0 && s->a != n) { r += s->c; n -= h(1); } return (int)r; }\n"
+    "static int both(int a, int b) { if (a && b) { return 1; } else { return 2; } }\n"
+    "static int either(int a, int b) { int r = 0; do { r += a; a -= 1; } while (a > 0 || b > r); return r; }\n"
+    "static int twice(int n) { int i = 0; do { i += 2; } while (i < n); return i; }\n"
+    "static int values(int a, int b) { int r = a && b; r += a || b; return r + (a ? b : 3); }\n"
+    "static int post(int* p) { int v = (*p)++; return v + p[1]++; }\n"
+    "static int counts(int n) { int s = 0; for (int i = 0; i < n; i++) { if (i == 3) continue; if (i == 7) break; s += h(i); } return s; }\n"
+    "static int falls(int x) { if (x) { return 1; } g = 2; }\n"
+    "static int jumps(int x) { if (x > 2) goto out; x += h(x); out: return x; }\n"
+    "long double wide(int x) { for (;;) { g = x; } }\n"
+    "static int chosen(int c) { switch (c) { case 1: return 2; default: return c + 3; } }\n"
+    "static int braces(int i) { int v[3] = { 1, i, 3 }; return v[0] + v[2]; }\n"
+    "static int field(struct S* s) { return s->b + 1; }\n"
+    "static int folded(int x) { if (0) { g = x; } return x + 1; }\n"
+    "static int counted(int x) { static int calls; calls += x; return calls; }\n"
+    "static int folds(int x) { return 0 && h(x); }\n"
+    "static void discards(int x) { (void)&g; g = h(x); }\n"
+    "static int keeps(int x) { volatile int v = x; int w = v + 1; return w; }\n"
+    "static int sized(int x) { return x + (int)sizeof(x); }\n"
+    "static int floated(int x) { if (1.5) { x += 1; } return x; }\n"
+    "static int after(int x) { if (x) { return 1; } return 2; g = 3; }\n"
+    "static int leaves(int x) { if (x > 2) goto out; return x; out: return x + 1; }\n"
+    "static int spun(int x) { while (1) { if (x) break; x += 1; } return x; }\n"
+    "static int ends(int x) { if (x) { return 1; } else { return 2; } g = 4; }\n"
+    "static int forever(int x) { for (;;) { if (x) break; x += 1; } return x; }\n"
+    "int main(void)\n{\n    struct S s;\n    int n = 4;\n    s.a = 1;\n    s.c = 3;\n    nothing(n);\n    early(n);\n"
+    "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s) + twice(n) +\n"
+    "        values(n, 2) + folded(n) + counted(n) + folds(n) + keeps(n) + sized(n) + floated(n) + after(n) + leaves(n) + spun(n) + ends(n) + forever(n);\n    discards(n);\n}\n";
+
 static bool node_bodies_test_fixture(const char* directory, char** options, uint32_t option_count, bool before, const NodeBodiesExpected* expected)
 {
-    static const char text[] = "struct S { int a; unsigned b : 3; long c; };\nint g;\nint h(int);\n"
-                               "static int plain(int x, int y) { int t = x * 2; if (y > 3) { t += y; } return t + g; }\n"
-                               "static void nothing(int x) { g = x; }\n"
-                               "static void early(int x) { if (x) return; g = 1; }\n"
-                               "static int loops(struct S* s, int n) { long r = h(n) + h(n + 1); while (n > 0 && s->a != n) { r += s->c; n -= h(1); } return (int)r; }\n"
-                               "static int both(int a, int b) { if (a && b) { return 1; } else { return 2; } }\n"
-                               "static int either(int a, int b) { int r = 0; do { r += a; a -= 1; } while (a > 0 || b > r); return r; }\n"
-                               "static int twice(int n) { int i = 0; do { i += 2; } while (i < n); return i; }\n"
-                               "static int values(int a, int b) { int r = a && b; r += a || b; return r + (a ? b : 3); }\n"
-                               "static int post(int* p) { int v = (*p)++; return v + p[1]++; }\n"
-                               "static int counts(int n) { int s = 0; for (int i = 0; i < n; i++) { if (i == 3) continue; if (i == 7) break; s += h(i); } return s; }\n"
-                               "static int falls(int x) { if (x) { return 1; } g = 2; }\n"
-                               "static int jumps(int x) { if (x > 2) goto out; x += h(x); out: return x; }\n"
-                               "long double wide(int x) { for (;;) { g = x; } }\n"
-                               "static int chosen(int c) { switch (c) { case 1: return 2; default: return c + 3; } }\n"
-                               "static int braces(int i) { int v[3] = { 1, i, 3 }; return v[0] + v[2]; }\n"
-                               "static int field(struct S* s) { return s->b + 1; }\n"
-                               "static int folded(int x) { if (0) { g = x; } return x + 1; }\n"
-                               "static int counted(int x) { static int calls; calls += x; return calls; }\n"
-                               "static int folds(int x) { return 0 && h(x); }\n"
-                               "static void discards(int x) { (void)&g; g = h(x); }\n"
-                               "static int keeps(int x) { volatile int v = x; int w = v + 1; return w; }\n"
-                               "static int sized(int x) { return x + (int)sizeof(x); }\n"
-                               "static int floated(int x) { if (1.5) { x += 1; } return x; }\n"
-                               "static int after(int x) { if (x) { return 1; } return 2; g = 3; }\n"
-                               "static int leaves(int x) { if (x > 2) goto out; return x; out: return x + 1; }\n"
-                               "static int spun(int x) { while (1) { if (x) break; x += 1; } return x; }\n"
-                               "static int ends(int x) { if (x) { return 1; } else { return 2; } g = 4; }\n"
-                               "static int forever(int x) { for (;;) { if (x) break; x += 1; } return x; }\n"
-                               "int main(void)\n{\n    struct S s;\n    int n = 4;\n    s.a = 1;\n    s.c = 3;\n    nothing(n);\n    early(n);\n"
-                               "    g = plain(n, 2) + loops(&s, n) + both(n, 1) + either(n, 2) + post(&n) + counts(n) + falls(n) + jumps(n) + chosen(n) + braces(n) + field(&s) + twice(n) +\n"
-                               "        values(n, 2) + folded(n) + counted(n) + folds(n) + keeps(n) + sized(n) + floated(n) + after(n) + leaves(n) + spun(n) + ends(n) + forever(n);\n    discards(n);\n}\n";
     char path[512];
     snprintf(path, sizeof(path), "%s/bodies.c", directory);
-    bool valid = parse_test_write(path, text, sizeof(text) - 1);
+    bool valid = parse_test_write(path, node_bodies_test_text, sizeof(node_bodies_test_text) - 1);
     NodeShadow shadow = {
         .front = before ? (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER) : 0,
         .reader = before ? (uint16_t)(BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE) : 0,
@@ -1954,6 +2003,144 @@ static bool node_bodies_test_fixture(const char* directory, char** options, uint
     }
     unlink(path);
     return same && counts;
+}
+
+// The producer's verdicts of the bodies' fixture, made before the walk (--produce; and as a compile would run it,
+// --produce-lean): every body it takes is in the set the bodies' comparisons give and has the program's controls, and
+// what it takes and what it leaves, by its reason, are the counts expected.
+typedef struct NodeProducerExpected NodeProducerExpected;
+struct NodeProducerExpected
+{
+    uint32_t reasons[NODE_PRODUCER_REASONS];
+    uint32_t unread;
+    // The bodies it takes that the program does not lower, whose verdicts `reasons` does not count.
+    uint32_t unlowered;
+    // The unit's own reason to take no body (BUSTER_NODE_PRODUCER_UNIT_*, 0 for none).
+    uint8_t unit;
+};
+
+// The refusals that stand for what the walk's actions and the passes after it would say (#2850's gate against the
+// diagnostics), each with a body beside it that is taken. Taken: `present` and `calls` (an internal function the unit
+// defines, named; and the unit declares a function with a result's attribute, which is no unit's reason), `same` (one
+// enumeration's values stored, passed and compared), `kept`, `exact` and `halves` (a
+// conditional whose arms its conversion keeps: small integers to a floating type, floats to a double), `narrow` (a
+// compound shift inside its operand's own width). A root that may be warned of: `mixed` (two enumerations' enumerators
+// compared), `stored` and `passed` (an enumeration's value to another's object and parameter), `armed` and `started` (a
+// conditional's floating arms converted to an integer, by a return and by an initialization), `inexact` (an integer arm
+// a float does not hold), `narrowed` (double arms to a float). A token's kind: `pragmatic` (a pragma in the body), `undefined` (an internal function the
+// unit does not define, named). The machine's: `shifted` (a compound shift by its operand's own width, the census's
+// constants'). Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility). An
+// initialization of another form: `aligned` and `typed` (an object aligned past 8 bytes, by its attribute and by its
+// type, whose local is a frame object). A gate of the controls': `bounded` (a parameter whose array's bound the
+// function's entry evaluates).
+static const char node_producer_test_text[] =
+    "enum A { A0, A1 };\nenum B { B0, B1 };\nstruct S { enum A a; enum B b; unsigned char c; int n; };\nvoid take(enum A);\n"
+    "__attribute__((warn_unused_result)) int must(int);\n"
+    "static int missing(void);\nstatic int present(void) { return 1; }\n"
+    "int calls(void) { return present(); }\n"
+    "int same(struct S *p) { take(p->a); p->a = A1; return p->a == A1; }\n"
+    "double kept(int c) { return c ? 1 : 2; }\n"
+    "float exact(int c) { return c ? 3 : 1; }\n"
+    "double halves(int c) { return c ? 1.5f : 2.5f; }\n"
+    "float inexact(int c) { return c ? 16777217 : 1; }\n"
+    "float narrowed(int c) { return c ? 1.5 : 2.5; }\n"
+    "int said(void) { int g(struct hidden *); return 1; }\n"
+    "int narrow(struct S *p) { p->c <<= 7; return p->c; }\n"
+    "int mixed(void) { return A1 == B1; }\n"
+    "void stored(struct S *p) { p->a = B1; }\n"
+    "void passed(struct S *p) { take(p->b); }\n"
+    "int armed(int c) { return c ? 5.5 : 6.5; }\n"
+    "int started(int c) { int x = c ? 5.5 : 6.5; return x; }\n"
+    "int pragmatic(int c) {\n#pragma omp parallel\n return c; }\n"
+    "int undefined(void) { return missing(); }\n"
+    "int shifted(struct S *p) { p->c <<= 8; return p->c; }\n"
+    "int aligned(int c) { int x __attribute__((aligned(16))) = c; return x; }\n"
+    "typedef int wide_t __attribute__((aligned(32)));\nint typed(int c) { wide_t y = c; return y; }\n"
+    "int bounded(int n, int a[n]) { return a[0]; }\n";
+// A unit with a member marked unavailable, one with a member of the counted_by family, one with a function declared with
+// internal linkage by its attribute, and one with a result's attribute on a type: none takes a body.
+static const char node_producer_test_members_text[] = "struct M { int n; int gone __attribute__((unavailable(\"gone\"))); };\nint member(struct M *p) { return p->n; }\n";
+static const char node_producer_test_counted_text[] = "struct C { int n; int *p __attribute__((counted_by(n))); };\nint counted(struct C *c) { return c->n; }\n";
+static const char node_producer_test_linkage_text[] = "__attribute__((internal_linkage)) int inner(void);\nint linked(void) { return 1; }\n";
+// A function's attribute of its code, one a unit: a target, its clones, an interrupt's, a processor's own version, a
+// dispatch among them. `bodies` is the unit's lowered bodies. The second's target fuses a product and a sum, which its
+// function and the one beside it have: the machine before the walk takes neither's sum (NodeMachine.fuses), where the
+// lowering fuses the first's alone.
+static const struct { const char* text; uint32_t bodies; } node_producer_test_code_units[] = {
+    { "__attribute__((target(\"avx2\"))) int t(void) { return 1; }\n", 1 },
+    { "__attribute__((target(\"fma\"))) double tf(double a, double b, double c) { return a * b + c; }\n"
+      "double plain(double a, double b, double c) { return a * b + c; }\n", 2 },
+    { "__attribute__((target_clones(\"avx2\",\"default\"))) int tc(void) { return 1; }\n", 2 },
+    { "struct interrupt_frame;\n__attribute__((interrupt)) void isr(struct interrupt_frame *frame) { (void)frame; }\nint plain(void) { return 1; }\n", 2 },
+    { "__attribute__((cpu_specific(generic))) int s1(void) { return 1; }\nint plain(void) { return 1; }\n", 2 },
+    { "__attribute__((cpu_dispatch(generic))) int d(void);\nint plain(void) { return 1; }\n", 1 },
+};
+// A floating sum, a compound one whose destination is an integer's, and a product beside them: taken where the target
+// fuses none, and the sums' bodies left where it does (-mfma: C has no template for a float's or a double's sum there,
+// NodeMachine.fuses), the product's taken all the same.
+static const char node_producer_test_fused_text[] = "double summed(double a, double b, double c) { return a * b + c; }\n"
+                                                    "int stepped(int i, double a, double b) { i -= a * b; return i; }\n"
+                                                    "double multiplied(double a, double b) { return a * b; }\n";
+// A function whose declaration gives it always_inline, an inline-only wrapper that the lowering expands at its direct
+// call (#2983): the body that calls it is left (the machine takes no such callee's call), the wrapper's own, which the
+// program does not lower and the expansion reads, is left by its function, and the one beside them is taken. A naked
+// function, whose statements a pass after the walk reports: left by its function, the one beside it taken. And a static
+// function nothing names, which the program does not lower: its body is taken all the same.
+static const char node_producer_test_inlined_text[] = "__attribute__((always_inline)) inline int wrap(int a) { return a + 1; }\n"
+                                                      "int caller(int a) { return wrap(a); }\n"
+                                                      "int beside(int a) { return a + 2; }\n";
+static const char node_producer_test_naked_text[] = "__attribute__((naked)) void bare(void) { }\nint beside(int a) { return a + 2; }\n";
+// Volatile lvalues, whose reads and stores the lowering's tasks mark (#3310): a global's read, its store, its updates and
+// a member's read through a pointer are no template's, and their bodies are left. A local's by name has no mark (the
+// tasks' entries are a local's as ever), and its body is taken, as is the one that reads the member beside the volatile
+// one.
+static const char node_producer_test_volatile_text[] = "volatile int v;\nstruct W { volatile int n; int m; };\n"
+                                                       "int reads(void) { return v; }\n"
+                                                       "void stores(int a) { v = a; }\n"
+                                                       "void updates(void) { v++; v += 2; }\n"
+                                                       "int through(struct W *w) { return w->n + w->m; }\n"
+                                                       "int local(int a) { volatile int x = a; x = x + 1; x++; return x; }\n"
+                                                       "int beside(struct W *w) { return w->m; }\n";
+static const char node_producer_test_unlowered_text[] = "static int unnamed(int a) { return a + 1; }\nint beside(int a) { return a + 2; }\n";
+static const char node_producer_test_results_text[] = "typedef int W __attribute__((warn_unused_result));\nW w(void);\nint result(void) { return 1; }\n";
+
+static bool node_producer_test_fixture(const char* directory, const char* text, uint64_t length, char** options, uint32_t option_count, bool lean,
+                                       const NodeProducerExpected* expected)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/bodies-produced.c", directory);
+    bool valid = parse_test_write(path, text, length);
+    NodeShadow shadow = {
+        .front = (uint8_t)(BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER),
+        .reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | BUSTER_NODE_READER_ALONE_FIRST | BUSTER_NODE_READER_PRODUCE | (lean ? BUSTER_NODE_READER_PRODUCE_LEAN : 0),
+        .bodies = true,
+        .passes = 0,
+        .repeat = 1,
+    };
+    NodeCensus census = { .shadow = &shadow };
+    fflush(stdout);
+    valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    const uint64_t taken = shadow.produced_reasons[NODE_PRODUCER_TAKEN];
+    bool same = valid && !node_shadow_differs(&shadow) && shadow.produced_bodies != 0 && shadow.produced_unsound == 0 && shadow.produced_controls_different == 0 &&
+                shadow.produced_sound == taken && shadow.produced_controls_same == taken && shadow.produced_unread == expected->unread &&
+                shadow.produced_taken_all == taken + expected->unlowered && expected->unit < BUSTER_NODE_PRODUCER_UNITS && shadow.produced_units[expected->unit] == 1;
+    for (uint32_t reason = 0; reason < NODE_PRODUCER_REASONS; reason += 1)
+    {
+        same = same && shadow.produced_reasons[reason] == expected->reasons[reason];
+    }
+    if (!same)
+    {
+        fprintf(stderr, "test-checker: node-producer: valid %d, %" PRIu64 " bodies, in the set %" PRIu64 ", outside it %" PRIu64 ", controls the program's %" PRIu64 ", different %" PRIu64
+                ", unread %" PRIu64 " (%u), taken of every body %" PRIu64 " (%u of them not lowered expected), units of the reason %u expected: %" PRIu64 ";",
+                valid, shadow.produced_bodies, shadow.produced_sound, shadow.produced_unsound, shadow.produced_controls_same, shadow.produced_controls_different, shadow.produced_unread,
+                expected->unread, shadow.produced_taken_all, expected->unlowered, expected->unit, expected->unit < BUSTER_NODE_PRODUCER_UNITS ? shadow.produced_units[expected->unit] : 0);
+        for (uint32_t reason = 0; reason < NODE_PRODUCER_REASONS; reason += 1)
+        {
+            fprintf(stderr, " %s %" PRIu64 " (%u)", node_producer_reason_names[reason], shadow.produced_reasons[reason], expected->reasons[reason]);
+        }
+        fprintf(stderr, "\n");
+    }
+    return same;
 }
 
 // The test whose name `name` (`length` bytes) is, or NODE_CENSUS_TESTS.
@@ -2933,10 +3120,8 @@ static const char node_contexts_test_source[] =
     // call is on the first pass's list and its other argument on the second's. The two lists are run in the window's
     // order, each argument's rule before the call's, which then makes the call from T's records of both.
     "    a = callee(callee(o->inner.bits, b), callee(1e100, b));\n"
-    // An integer constant folded from a floating one (#3014): its record's payload is the floating value's, its integer
-    // zero. As an argument its conversion is T's (the rule takes an integer's value from a payload that is the
-    // integer's), and so is a null pointer made of it, whose value keeps the floating storage: an assignment's, and
-    // what reads the assignment after.
+    // A zero folded from a floating constant as an argument, as a null pointer and as the value of an
+    // assignment. Each conversion reads the new kind's payload (#3014, #3022).
     "    fl((int)0.5);\n"
     "    fi((int)1e-4900L);\n"
     "    vf(a, (int)0.5);\n"
@@ -3278,6 +3463,19 @@ static const char node_contexts_test_source[] =
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    if (a && (b || (wide && local))) local++;\n")
     "    return local + (int)wide + narrow + flag + (int)real + (ptr != 0) + rooted + sunk_root + (int)wide_root + root_and + (int)root_or + root_flag + text[0];\n"
     "}\n";
+
+// Sums and updates for a target that fuses a product and a sum (-mfma): a double's sum of a product, an integer's
+// compound difference of a double's product, a float's compound sum of one and its difference of another, an integer's
+// compound sum, and a float's sum of a conversion. A product, a quotient, a shift and a negation alone are decided on
+// either target.
+static const char node_contexts_test_fused_source[] =
+    "double summed(double a, double b, double c) { return a * b + c; }\n"
+    "int stepped(int i, double a, double b) { i -= a * b; return i; }\n"
+    "double multiplied(double a, double b) { return a * b; }\n"
+    "float mixed(float x, float y, float z, int k) { float s = x; s += y * z; s = s - x * y; k += 2; return s + (float)k; }\n"
+    "double halved(double a) { return a / 2.0; }\n"
+    "int shifted(int a) { return a << 1; }\n"
+    "int negated(int a) { return -a; }\n";
 
 // C on the window's fixture for a unit with a type in a space of its own (TypeTable.extended: here `__seg_gs`'s and
 // `__seg_fs`'s): the loop asks the space of the destination of each update its masks take, a record at a time, and
@@ -6911,6 +7109,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census refuses every call of a unit with type tags");
     check_test_expect(test, ready && node_census_test_fixture(directory, "builtins.c", node_census_test_builtins, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census asks a library call's own semantics by the function that holds it, in a unit with no_builtin");
+    check_test_expect(test, ready && node_census_test_fixture(directory, "logical.c", node_census_test_logical, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
+                      "node-census refuses constant logical operands while taking their quiet source and runtime idioms");
+    char* logical_quiet[] = { "-nostdinc", "-Wno-constant-logical-operand" };
+    check_test_expect(test, ready && node_census_test_fixture(directory, "logical-quiet.c", node_census_test_logical_quiet, logical_quiet, BUSTER_ARRAY_LENGTH(logical_quiet), &system),
+                      "node-census takes constant logical operands when their warning is disabled");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
@@ -6923,22 +7126,22 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census takes a system header's macros in a user's expression and counts them apart");
     // What the tests on the window count on each of the eight fixtures, which no verdict shows.
     static const NodeTestsWindowed windowed_warnings = {
-        .expressions = 46,
+        .expressions = 50,
         .trees = 4,
-        .operators = 58,
-        .sent = 23,
+        .operators = 68,
+        .sent = 26,
         .walks = 4,
-        .quiet = 6,
+        .quiet = 7,
         .calls = 1,
         .calls_checked = 1,
         .casts = 1,
         .casts_left = 4,
         .asks = 1,
-        .values = 45,
-        .spared = 36,
+        .values = 50,
+        .spared = 45,
         .direct = 2,
         .apart = 3,
-        .decided = 42,
+        .decided = 47,
         .decided_refused = 1,
     };
     static const NodeTestsWindowed windowed_clean = {
@@ -6993,8 +7196,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .expressions = 475,
         .trees = 29,
         .operators = 130,
-        .sent = 55,
-        .walks = 12,
+        .sent = 51,
+        .walks = 11,
         .far = 37,
         .quiet = 77,
         .calls = 179,
@@ -7003,11 +7206,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .casts_left = 30,
         .asks = 9,
         .nulls = 8,
-        .values = 253,
+        .values = 254,
         .spared = 263,
         .direct = 211,
         .apart = 22,
-        .decided = 446,
+        .decided = 457,
         .decided_refused = 10,
     };
     // (The loop leaves three ordered comparisons of two pointers out: `p < e`, `ga < p` and the `while`'s.)
@@ -7108,10 +7311,30 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .direct = 2,
         .decided = 3,
     };
+    // T refuses the four expressions that read `k` or `one` under `&&` before any test runs (#2987's const conditions,
+    // node_machine_const_control): the window and the reader-time tests have the other 21.
+    static const NodeTestsWindowed windowed_logical = {
+        .expressions = 21,
+        .operators = 18,
+        .walks = 1,
+        .quiet = 4,
+        .calls = 1,
+        .calls_checked = 1,
+        .values = 24,
+        .spared = 18,
+        .direct = 1,
+        .decided = 19,
+    };
+    static const NodeTestsWindowed windowed_logical_quiet = {
+        .expressions = 1,
+        .operators = 1,
+        .values = 1,
+        .decided = 1,
+    };
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
     check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud),
-                                                             BUSTER_NODE_FRONT_AFTER, 41, 3, windowed_warnings),
+                                                             BUSTER_NODE_FRONT_AFTER, 45, 3, windowed_warnings),
                       "node-tests: at reader time the tests refuse each expression the compiler warns of, as the census does after the pipeline");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud),
                                                              BUSTER_NODE_FRONT_BEFORE, 0, 6, windowed_clean),
@@ -7135,17 +7358,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                                                              BUSTER_NODE_FRONT_AFTER, 7, 1, windowed_segments),
                       "node-tests: at reader time a value of a type in a segment's address space is refused by its type's byte");
     static const NodeTestsWindowed windowed_signs = {
-        .expressions = 5,
-        .operators = 3,
-        .sent = 3,
+        .expressions = 7,
+        .operators = 5,
+        .sent = 5,
+        .quiet = 3,
         .casts_left = 1,
-        .spared = 4,
+        .values = 7,
+        .spared = 8,
         .direct = 2,
         .apart = 1,
-        .decided = 5,
+        .decided = 7,
     };
     check_test_expect(test, ready && node_tests_test_fixture(directory, "signs.c", node_census_test_signs, signs, BUSTER_ARRAY_LENGTH(signs),
-                                                             BUSTER_NODE_FRONT_AFTER, 1, 1, windowed_signs),
+                                                             BUSTER_NODE_FRONT_AFTER, 2, 1, windowed_signs),
                       "node-tests: at reader time, under the sign comparison's warning, the loop leaves no pointers' comparison out");
     static const NodeTestsWindowed windowed_silent = {
         .expressions = 7,
@@ -7249,13 +7474,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_tests_test_fixture(directory, "builtins.c", node_census_test_builtins, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER,
                                                              0, 0, windowed_builtins),
                       "node-tests: at reader time a unit with no_builtin has its calls made, and each library call's semantics by its own function");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "logical.c", node_census_test_logical, quiet, BUSTER_ARRAY_LENGTH(quiet),
+                                                             BUSTER_NODE_FRONT_AFTER, 4, 3, windowed_logical),
+                      "node-tests: both reader-time forms refuse logical warnings before their graph events exist");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "logical-quiet.c", node_census_test_logical_quiet, logical_quiet,
+                                                             BUSTER_ARRAY_LENGTH(logical_quiet), BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_logical_quiet),
+                      "node-tests: both reader-time forms honor a disabled constant-logical-operand warning");
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
                                                                BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");
     // C on the window: its own fixture's counts, each rule on both sides.
     static const NodeContextsExpected contexts_expected = {
         .expressions = 2536,
-        .decided = 2270,
+        .decided = 2276,
         .refused = 61,
         .strides = 241,
         .asked = 7,
@@ -7269,24 +7500,24 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .sunk = 18,
         .commas = 224,
         .listed = {
-            [BUSTER_NODE_CONTEXTS_REASON_CALL] = 43,
+            [BUSTER_NODE_CONTEXTS_REASON_CALL] = 44,
             [BUSTER_NODE_CONTEXTS_REASON_LOGICAL] = 183,
             [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 15,
             [BUSTER_NODE_CONTEXTS_REASON_COMMA] = 5,
             [BUSTER_NODE_CONTEXTS_REASON_DIVISION] = 2,
-            [BUSTER_NODE_CONTEXTS_REASON_WIDE] = 16,
+            [BUSTER_NODE_CONTEXTS_REASON_WIDE] = 9,
             [BUSTER_NODE_CONTEXTS_REASON_OPERATOR] = 2,
         },
         .calls = 362,
-        .calls_made = 336,
-        .calls_converted = 312,
-        .calls_plain = 303,
+        .calls_made = 339,
+        .calls_converted = 315,
+        .calls_plain = 306,
         .calls_left = 21,
-        .calls_compared = 309,
+        .calls_compared = 312,
         // Callee and argument checks run consecutively for each call. A shared
         // slot therefore sees a different sequence of conversion keys.
-        .single_answers = 2487,
-        .single_timed = 355,
+        .single_answers = 2515,
+        .single_timed = 359,
     };
     check_test_expect(test, ready && node_contexts_test_fixture(directory, "contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &contexts_expected),
                       "node-contexts: C on the window decides each expression of its rules as C does on T's columns, and lists the kinds it has no case for");
@@ -7302,17 +7533,40 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     check_test_expect(test, ready && node_contexts_test_fixture(directory, "spaced.c", node_contexts_test_spaced_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &spaced_expected),
                       "node-contexts: in a unit with a type in a space of its own, C on the window lists an update whose destination is in a segment's and takes the others");
+    // Where the unit's target fuses a product and a sum (NodeMachine.fuses), C has no template for a float's or a
+    // double's sum or compound sum, and the window lists every sum and every update for it to ask: the fixture's three
+    // sums and three updates, a float's, a double's and an integer's among each, of which no other target lists any.
+    static const NodeContextsExpected unfused_expected = {
+        .expressions = 12,
+        .decided = 12,
+        .updates = 3,
+        .updates_taken = 3,
+    };
+    static const NodeContextsExpected fused_expected = {
+        .expressions = 12,
+        .decided = 6,
+        .updates = 3,
+        .listed = {
+            [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 3,
+            [BUSTER_NODE_CONTEXTS_REASON_OPERATOR] = 3,
+        },
+    };
+    char* fusing[] = { "-nostdinc", "-mfma" };
+    check_test_expect(test, ready && node_contexts_test_fixture(directory, "unfused.c", node_contexts_test_fused_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &unfused_expected),
+                      "node-contexts: C on the window decides a sum and an update of any class where the target fuses no product with a sum");
+    check_test_expect(test, ready && node_contexts_test_fixture(directory, "fused.c", node_contexts_test_fused_source, fusing, BUSTER_ARRAY_LENGTH(fusing), &fused_expected),
+                      "node-contexts: C on the window lists every sum and every update where the target fuses a product with a sum");
     // X's rows on the window: its tables; its own fixture's counts, a line a shape; and C's fixture's, each of C's
     // rules' records.
     check_test_expect(test, node_rows_test_tables(), "node-rows: each shape's row has its length's entries, and no class's source where the rows' write resolves none");
     static const NodeRowsExpected rows_expected = {
-        .expressions = 1379,
-        .taken = 1233,
-        .entries = 10123,
+        .expressions = 1390,
+        .taken = 1240,
+        .entries = 10144,
         .listed_update = 133,
         .listed_branches = 1,
         .listed_conversion = 10,
-        .listed_floating = 2,
+        .listed_floating = 6,
         .written = 11143,
         .words = 405,
         .lines = 625,
@@ -7329,21 +7583,21 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         },
         .numbered = 68,
         .steps = 473,
-        .control_valued = 308,
+        .control_valued = 310,
         .chunks = 9,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows.c", node_rows_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_expected),
                       "node-rows: X's rows on the window make each shape's entries' kinds and classes as X does on T's columns, and list what they don't make");
     static const NodeRowsExpected rows_contexts_expected = {
-        .expressions = 2209,
-        .taken = 2188,
-        .entries = 20946,
+        .expressions = 2215,
+        .taken = 2194,
+        .entries = 20965,
         .listed_update = 0,
         .listed_branches = 5,
         .listed_conversion = 10,
         .listed_floating = 6,
-        .written = 23351,
-        .words = 536,
+        .written = 23354,
+        .words = 537,
         .lines = 501,
         .updates = 854,
         .branched = 1667,
@@ -7358,7 +7612,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         },
         .numbered = 223,
         .steps = 1895,
-        .control_valued = 547,
+        .control_valued = 548,
         .chunks = 23,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_contexts_expected),
@@ -7422,9 +7676,9 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-branch.c", node_rows_test_branch_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_branch_expected),
                       "node-rows: in a chunk with one condition evaluated as branches and no update, X's rows on the window make its tested values' tests");
     static const NodeRowsExpected rows_values_expected = {
-        .expressions = 1064,
-        .taken = 1058,
-        .entries = 9877,
+        .expressions = 1066,
+        .taken = 1060,
+        .entries = 9883,
         .listed_update = 3,
         .listed_branches = 0,
         .listed_conversion = 0,
@@ -7445,7 +7699,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         },
         .numbered = 244,
         .steps = 724,
-        .control_valued = 264,
+        .control_valued = 265,
         .chunks = 10,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-values.c", node_rows_test_values_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_values_expected),
@@ -7459,8 +7713,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .references = 804,
         .program_references = 801,
         .listed = 808,
-        .suspects = 362,
-        .unknowns = 146,
+        .suspects = 222,
+        .unknowns = 5,
         .stops = 74,
         .reduced = 141,
         .decided = 9,
@@ -7494,7 +7748,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .program_references = 14,
         .listed = 15,
         .suspects = 15,
-        .unknowns = 6,
+        .unknowns = 5,
         .stops = 2,
         .reduced = 1,
         .decided = 0,
@@ -7668,6 +7922,89 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-bodies before the walk: the entries from the tapes kept there are the lowered function's, and the controls from the tokens the program's");
     check_test_expect(test, ready && node_bodies_test_fixture(directory, loud, BUSTER_ARRAY_LENGTH(loud), true, &bodies_loud),
                       "node-bodies before the walk: the same with more warnings");
+    // The producer's verdicts of the same unit, made before the walk: with the default warnings, every body read and as a
+    // compile would run it; and with a warning option, where the unit takes no body.
+    // (The scan's: `sized`. A token's kind: `chosen`, `braces`. A gate's: `counted`. Its function's: `wide`. The machine's:
+    // `field`. Controls the twin does not make, each for a statement no control reaches: `after`, `spun`, `ends`,
+    // `forever`. A constant condition: `folded`, `floated`. The return flow's: `falls`. As a compile would run it, the
+    // five that are refused before any reading are not read.)
+    NodeProducerExpected produced_quiet = {
+        .reasons = { [NODE_PRODUCER_TAKEN] = 16, [NODE_PRODUCER_SCAN] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_GATE] = 1, [NODE_PRODUCER_FUNCTION] = 1,
+                     [NODE_PRODUCER_MACHINE] = 1, [NODE_PRODUCER_CONTROLS] = 4, [NODE_PRODUCER_CONSTANT] = 2, [NODE_PRODUCER_FLOW] = 1 },
+    };
+    NodeProducerExpected produced_loud = { .reasons = { [NODE_PRODUCER_UNIT] = 29 }, .unit = BUSTER_NODE_PRODUCER_UNIT_WARNINGS };
+    const uint64_t bodies_length = sizeof(node_bodies_test_text) - 1;
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_bodies_test_text, bodies_length, quiet, BUSTER_ARRAY_LENGTH(quiet), false, &produced_quiet),
+                      "node-producer: the bodies it takes before the walk are in the comparisons' set, with the program's controls");
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_bodies_test_text, bodies_length, loud, BUSTER_ARRAY_LENGTH(loud), false, &produced_loud),
+                      "node-producer: a unit with a warning option takes no body");
+    produced_quiet.unread = 5;
+    produced_loud.unread = 29;
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_bodies_test_text, bodies_length, quiet, BUSTER_ARRAY_LENGTH(quiet), true, &produced_quiet),
+                      "node-producer: the same as a compile would run it, five bodies unread");
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_bodies_test_text, bodies_length, loud, BUSTER_ARRAY_LENGTH(loud), true, &produced_loud),
+                      "node-producer: and with a warning option it reads none");
+    // The refusals that stand for a diagnostic of the walk's or of a pass after it, each beside a body that is taken; and
+    // the two units that take no body for a member's mark and for a result's attribute on a type.
+    NodeProducerExpected produced_silent = {
+        .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_GATE] = 1, [NODE_PRODUCER_MACHINE] = 1,
+                     [NODE_PRODUCER_INITIALIZER] = 2,
+                     [NODE_PRODUCER_LOUD] = 7 },
+    };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), false,
+                                                                 &produced_silent),
+                      "node-producer: two enumerations meeting, a conditional's constant arm changed, a pragma, an undefined internal function and a narrow compound shift are left");
+    produced_silent.unread = 4;
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), true,
+                                                                 &produced_silent),
+                      "node-producer: the same as a compile would run it, four bodies unread");
+    const NodeProducerExpected produced_members = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_MEMBERS };
+    const NodeProducerExpected produced_results = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_RESULTS };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_members_text, sizeof(node_producer_test_members_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_members),
+                      "node-producer: a unit with a marked member takes no body");
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_results_text, sizeof(node_producer_test_results_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_results),
+                      "node-producer: a unit with a result's attribute on a type takes no body");
+    const NodeProducerExpected produced_inlined = { .reasons = { [NODE_PRODUCER_TAKEN] = 1, [NODE_PRODUCER_MACHINE] = 1 } };
+    const NodeProducerExpected produced_naked = { .reasons = { [NODE_PRODUCER_TAKEN] = 1, [NODE_PRODUCER_FUNCTION] = 1 } };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_inlined_text, sizeof(node_producer_test_inlined_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_inlined),
+                      "node-producer: a body that calls a function a declaration gives always_inline is left, and that function's own");
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_naked_text, sizeof(node_producer_test_naked_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_naked),
+                      "node-producer: a naked function's body is left");
+    const NodeProducerExpected produced_volatile = { .reasons = { [NODE_PRODUCER_TAKEN] = 2, [NODE_PRODUCER_MACHINE] = 4 } };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_volatile_text, sizeof(node_producer_test_volatile_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_volatile),
+                      "node-producer: a body that reads, stores or updates a volatile lvalue is left, but for a local by its name");
+    const NodeProducerExpected produced_unlowered = { .reasons = { [NODE_PRODUCER_TAKEN] = 1 }, .unlowered = 1 };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_unlowered_text, sizeof(node_producer_test_unlowered_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_unlowered),
+                      "node-producer: a body the program does not lower is taken as any other");
+    const NodeProducerExpected produced_linkage = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_counted_text, sizeof(node_producer_test_counted_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_members),
+                      "node-producer: a unit with a member of the counted_by family takes no body");
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_linkage_text, sizeof(node_producer_test_linkage_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_linkage),
+                      "node-producer: a unit with a function of internal linkage by its attribute takes no body");
+    const NodeProducerExpected produced_unfused = { .reasons = { [NODE_PRODUCER_TAKEN] = 3 } };
+    const NodeProducerExpected produced_fused = { .reasons = { [NODE_PRODUCER_TAKEN] = 1, [NODE_PRODUCER_MACHINE] = 2 } };
+    char* fused[] = { "-nostdinc", "-mfma" };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_fused_text, sizeof(node_producer_test_fused_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_unfused),
+                      "node-producer: a floating sum and a compound one are taken where the target fuses none with a product");
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_fused_text, sizeof(node_producer_test_fused_text) - 1, fused,
+                                                                 BUSTER_ARRAY_LENGTH(fused), false, &produced_fused),
+                      "node-producer: a floating sum and a compound one are left where the target fuses one with a product");
+    for (uint32_t unit = 0; unit < BUSTER_ARRAY_LENGTH(node_producer_test_code_units); unit += 1)
+    {
+        const NodeProducerExpected produced_code = { .reasons = { [NODE_PRODUCER_UNIT] = node_producer_test_code_units[unit].bodies }, .unit = BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES };
+        check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_code_units[unit].text, strlen(node_producer_test_code_units[unit].text), quiet,
+                                                                     BUSTER_ARRAY_LENGTH(quiet), false, &produced_code),
+                          "node-producer: a unit with a function's attribute of its code takes no body");
+    }
     check_test_expect(test, ready && node_bodies_test_controls(directory, true),
                       "node-bodies read as -c reads a unit: the statement controls' path is taken, and both comparisons are exact there");
     check_test_expect(test, ready && node_bodies_test_controls(directory, false),
