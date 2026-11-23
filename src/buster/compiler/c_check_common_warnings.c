@@ -4586,14 +4586,15 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     const bool discarded = check_common_discarded_place(parser, token);
     const CheckOp op = graph->ops[node];
-    // A value a macro's body writes is quiet (check_common_unused_quiet); a call's own warnings decide for themselves.
-    const bool quiet = discarded && op != CHECK_OP_CALL && check_common_unused_quiet(emission, node);
+    // A value a macro's body writes is quiet (check_common_unused_quiet); a call's own warnings decide for themselves. It
+    // is asked last, of a value that would warn otherwise: its answer records the unit's expansion history
+    // (pp_history_ensure), which preprocesses the unit again, and a unit that warns of nothing never needs it (#2850).
     if (discarded && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
     {
         // An indirect comparison takes the generic marker; a direct one already reported as a comparison, but a discarded
         // statement expression's value, whose warning is clang's DiagnoseUnusedExprResult's of the statement expression
         // (#1447).
-        if (!quiet && (parent_role != PARSE_ROLE_TERMINATOR || check_common_statement_value(parser, parent)))
+        if ((parent_role != PARSE_ROLE_TERMINATOR || check_common_statement_value(parser, parent)) && !check_common_unused_quiet(emission, node))
         {
             check_common_report_unused(parser, emission->pp, emission->input, token, emission->parents, node, CHECK_WARNING_ID_UNUSED_VALUE,
                                        "expression result unused", NULL, 0, emission->scratch);
@@ -4611,14 +4612,15 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     {
         check_common_selected_marker(emission, node);
     }
-    else if (discarded && !quiet && op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION &&
+    else if (discarded && op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION &&
              check_common_effect_role(role) && role != PARSE_ROLE_ASSIGN && role != PARSE_ROLE_EQUALITY &&
              role != PARSE_ROLE_RELATIONAL &&
              !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)) &&
              parser->tokens.kinds[token] != PARSE_KIND_L_PAREN &&
              parser->tokens.kinds[token] != PARSE_KIND_PLUSPLUS && parser->tokens.kinds[token] != PARSE_KIND_MINUSMINUS &&
              !check_common_node_effect(graph, node) && !check_common_volatile_read(emission->stream, emission->types, node) &&
-             !check_common_void_quiet(graph, emission->stream, emission->types, node))
+             !check_common_void_quiet(graph, emission->stream, emission->types, node) &&
+             (op == CHECK_OP_CALL || !check_common_unused_quiet(emission, node)))
     {
         // (A value of type void is no result clang warns of, but a dereference's or a subscript's is, #1447.)
         // A discarded member read points at the member's name, like the comma's left operand does.

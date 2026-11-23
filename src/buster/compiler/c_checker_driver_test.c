@@ -7224,6 +7224,40 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
                       "--time-stages -fsyntax-only reports the stages it ran, on one lane");
     free(text);
     text = NULL;
+    // A unit that says nothing is preprocessed once (#2850). Its expansion history is recorded by preprocessing the unit
+    // again (pp_history_ensure), and nothing asks for it: `history-replays` reads 0, here for statements a macro's body
+    // writes that could not warn (an assignment, an update, a call, a cast to void). A discarded value a macro's body
+    // writes is quiet by that history (check_common_unused_quiet), so its unit reads 1, and says nothing either.
+    static const char once_text[] = "#define STORE(p, v) (*(p) = (v))\n#define BUMP(p) ((*(p))++)\n#define CALL(f, p) f(p)\n#define DROP(v) ((void)(v))\n"
+                                    "int h(int* p);\nint f(int* p)\n{\n    STORE(p, 1);\n    BUMP(p);\n    CALL(h, p);\n    DROP(*p);\n    return *p;\n}\n";
+    static const char twice_text[] = "#define SUM(a, b) ((a) + (b))\nint g(int a, int b)\n{\n    SUM(a, b);\n    return a;\n}\n";
+    char once_source[256];
+    char twice_source[256];
+    snprintf(once_source, sizeof(once_source), "%s/time_stages_once.c", directory);
+    snprintf(twice_source, sizeof(twice_source), "%s/time_stages_twice.c", directory);
+    const bool replays_made = made && parse_test_write(once_source, once_text, sizeof(once_text) - 1) && parse_test_write(twice_source, twice_text, sizeof(twice_text) - 1);
+    char* const once[] = { compiler, "-fsyntax-only", "--time-stages", once_source, NULL };
+    char* const twice[] = { compiler, "-fsyntax-only", "--time-stages", twice_source, NULL };
+    const int once_status = replays_made ? check_test_driver_spawn(once, &text) : -1;
+    const bool once_read = once_status == 0 && text != NULL && strstr(text, "\ntime-process\thistory-replays\t0\n") != NULL && strstr(text, "warning") == NULL;
+    if (!once_read)
+    {
+        printf("  --time-stages, a unit that says nothing: status %d: %s\n", once_status, text != NULL ? text : "");
+    }
+    check_test_expect(test, once_read, "a unit that says nothing is preprocessed once: --time-stages reports no replay for its expansion history");
+    free(text);
+    text = NULL;
+    const int twice_status = replays_made ? check_test_driver_spawn(twice, &text) : -1;
+    const bool twice_read = twice_status == 0 && text != NULL && strstr(text, "\ntime-process\thistory-replays\t1\n") != NULL && strstr(text, "warning") == NULL;
+    if (!twice_read)
+    {
+        printf("  --time-stages, a discarded value a macro's body writes: status %d: %s\n", twice_status, text != NULL ? text : "");
+    }
+    check_test_expect(test, twice_read, "a discarded value a macro's body writes is quiet by the expansion history: --time-stages reports its one replay");
+    free(text);
+    text = NULL;
+    unlink(once_source);
+    unlink(twice_source);
     // BUSTER_HUGE_PAGES (#1109, arena_page_policy), each case with this process's own setting, which the child inherits,
     // as the system's or off, and with the busy test's answer forced (BUSTER_TEST_HOST_BUSY, #672): "0" turns transparent
     // huge pages off for the process; "1" leaves them as the system has them, even where the process that started it had
