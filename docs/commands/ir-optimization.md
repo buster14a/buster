@@ -244,13 +244,16 @@ and `{long, long}`.
 
 At call sites (`ir_sroa_scalarize_calls`, the function's own code too, before
 SROA): a non-variadic call's argument in one or two eightbyte registers is
-passed as its parts, each loaded from the argument's ptr before the call, with
-records of no size in the parts' registers, and a result of one part (1, 2, 4
+passed as its parts, each loaded from the argument's ptr before the call at its
+own width (an i32 or i64, an f32 or f64: nothing past the object's end; a part
+of another size keeps the argument as its ptr), with records of no size in the
+parts' registers, and a result of one part (1, 2, 4
 or 8 bytes in `rax`, 4 or 8 in `xmm0`) comes back as the call's value, which a
 store after it puts where `into` pointed. The objects the call passed and
 filled are then private, so the widening SROA and promotion keep them in
 registers. A result of two eightbytes still comes back through its `into`
-slot.
+slot. `tests/ir-source/register-aggregates-page-end.c` passes objects that end
+at an inaccessible page (native only).
 
 ## Verification work and retained analyses (#1379)
 

@@ -1775,12 +1775,28 @@ static __attribute__((unused)) IrError ir_sroa_scalarize(const IrFunction* funct
 // those registers, and which made the object escape, so that SROA left it in memory: a struct passed in a loop went
 // through memory twice an iteration. ir_sroa_scalarize_calls, for a function's own code alone (a candidate's inline
 // summary keeps its calls' aggregates, which an expansion maps to its callee's parameters), passes such an argument as
-// its parts instead: before the call, each part's eightbyte loaded from the ptr (an i64 for a general register, an f64
-// for an xmm one, the second through an IR_ADDRESS of offset 8), and the call takes those values, with records of no
+// its parts instead: before the call, each part loaded from the ptr at its own width (ir_sroa_call_part_type: an
+// integer for a general register, an f32 or f64 for an xmm one, the second through an IR_ADDRESS of offset 8), and the call takes those values, with records of no
 // size in the part's register. The object's only use is then those loads, which SROA's widening and promotion make
 // values. A variadic call, a row's or an asm body's, and an argument of any other shape stay as they are. The call's
 // argument list, its parameter types and its records are new slices; the inserted loads go before the call in its
 // block, with the unroller's remapping, as ir_sroa_widen's do.
+
+// The type part `k` of a call argument's record is loaded as (#3311): exactly the part's bytes, so that the load reads
+// nothing past the object (a 12-byte struct's second part is 4 bytes, and the object may end at a page's end): an
+// i32 or i64 of 4 or 8 bytes for a general register, an f32 or f64 of 4 or 8 for an xmm one; IR_VOID for any other
+// size (3, 5, 6 or 7 bytes, which no single load reads, and 1 or 2, an i8 or i16 argument, which Tier 1's call
+// selection refuses), whose argument then stays its object's ptr.
+static uint32_t ir_sroa_call_part_type(const IrPassed* record, uint32_t k)
+{
+    const uint8_t reg = ir_sroa_scalar_register(record, k);
+    const uint32_t size = record->size > 8 * k ? (record->size - 8 * k > 8 ? 8 : record->size - 8 * k) : 0;
+    const bool general = reg != BUSTER_ABI_REGISTER_NONE && reg < 16;
+    const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+    return general ? (size == 8 ? IR_I64 : size == 4 ? IR_I32 : IR_VOID) :
+           vector  ? (size == 8 ? IR_F64 : size == 4 ? IR_F32 : IR_VOID) :
+                     IR_VOID;
+}
 
 // The parts of call argument `argument`'s record that ir_sroa_scalarize_calls passes as scalars: 1 or 2, or 0.
 static uint32_t ir_sroa_call_parts(const IrFunction* f, const IrCall* call, uint32_t argument)
@@ -1788,9 +1804,9 @@ static uint32_t ir_sroa_call_parts(const IrFunction* f, const IrCall* call, uint
     const IrPassed* record = call->abi != 0 && !call->variadic && call->row == 0 && call->body == 0 && argument < call->parameter_count ?
                                  &f->passed[f->abi_calls[call->abi - 1].passed + argument] : NULL;
     const uint32_t value = record != NULL ? f->extra[call->argument_first + argument] : BUSTER_IR_NONE;
-    const bool first = record != NULL && value < f->instruction_count && f->type[value] == IR_PTR && ir_sroa_scalar_register(record, 0) != BUSTER_ABI_REGISTER_NONE;
+    const bool first = record != NULL && value < f->instruction_count && f->type[value] == IR_PTR && ir_sroa_call_part_type(record, 0) != IR_VOID;
     const bool second = first && record->size > 8;
-    return first && (!second || ir_sroa_scalar_register(record, 1) != BUSTER_ABI_REGISTER_NONE) ? (second ? 2u : 1u) : 0u;
+    return first && (!second || ir_sroa_call_part_type(record, 1) != IR_VOID) ? (second ? 2u : 1u) : 0u;
 }
 
 // The scalar type a call's aggregate result of one part comes back as (#3311): an integer of its 1, 2, 4 or 8 bytes in
@@ -1963,7 +1979,7 @@ static __attribute__((unused)) IrError ir_sroa_scalarize_calls(const IrFunction*
                             for (uint32_t j = 0; j < parts; j += 1)
                             {
                                 const uint8_t reg = ir_sroa_scalar_register(record, j);
-                                const uint32_t type = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR ? IR_F64 : IR_I64;
+                                const uint32_t type = ir_sroa_call_part_type(record, j);
                                 uint32_t pointer = value;
                                 if (j != 0)
                                 {
