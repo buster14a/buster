@@ -18,7 +18,8 @@
 // - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, the
 //   three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), value numbering with memory alone
 //   (#2718) and Tier 1's set with it, forced vector and forced scalar: the same function and the same forwarded loads.
-// - LICM on P, vector and scalar: the same function, or the same refusal.
+// - LICM on P, by its per-loop walk and by its whole-function oracle's scalar worklist: the same function, or the same
+//   refusal; and the walk's result, given to LICM again, moves nothing (#2979).
 // - #2755's unroller on P optimized with Tier 1's set and its truth values simplified: an unrolled function must verify
 //   with dominance (#2924: its twin is gone).
 // - The loop vectorizer (#2743) on P optimized with Tier 1's set: a changed function must go through the optimizer,
@@ -218,17 +219,21 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
     }
-    // LICM on the promoted function.
+    // LICM on the promoted function. Its result, given to LICM again, moves nothing: each loop's one walk reached the
+    // fixed point of its readiness (#2979).
     {
         IrLicmOptions options = ir_licm_options();
         IrLicmResult vector = { 0 };
         IrLicmResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize_licm(promoted, output, scratch, options, &vector);
+        IrLicmResult again = { 0 };
+        const bool settled = vector_check.error != IR_OK || (ir_optimize_licm(&vector.function, twin, scratch, options, &again).error == IR_OK && again.moved == 0);
+        arena_pop_to(twin, twin_mark);
         // The per-loop walk against its whole-function oracle, the worklist's fixed point (#2979).
         options.whole = true;
         options.scalar = true;
         const IrCheck scalar_check = ir_optimize_licm(promoted, twin, scratch, options, &scalar);
-        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function);
+        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function) && settled;
         ir_source_passes_record(totals, IR_SOURCE_PASS_LICM, file, name, vector_check, scalar_check, same, true, vector.moved != 0, vector.moved);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
