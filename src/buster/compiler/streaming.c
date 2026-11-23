@@ -134,11 +134,15 @@ struct StreamOptions
     uint64_t chunk_bytes;
     // The writer lane's CPUs (lane 0's, lane 1's), or 0 for the process's.
     const uint32_t* cpus;
+    // A test's (#3150): with a writer lane, lane 0 waits until lane 1 sleeps on the ready word before its terminal
+    // handoff, so that the handoff must wake it.
+    bool sleeping_writer;
 };
 
 // What a write did, and when (CLOCK_MONOTONIC nanoseconds): its start, the last function compiled, .text's last chunk
 // and the last pairs written (`flushed`, the writer lane's chunks aside), the tail built and written, the headers
-// written, and the file closed.
+// written, and the file closed. With a writer lane, the ready word's publications (#3150): every one, and those that
+// found lane 1 asleep on the word and woke it.
 typedef struct StreamResult StreamResult;
 struct StreamResult
 {
@@ -159,6 +163,8 @@ struct StreamResult
     uint64_t fixups;
     uint64_t forward_fixups;
     uint64_t records;
+    uint64_t publications;
+    uint64_t wakes;
     uint8_t build_id[BUSTER_EXECUTABLE_BUILD_ID_BYTES];
 };
 
@@ -996,7 +1002,8 @@ static bool stream_pwrite(int descriptor, const uint8_t* bytes, uint64_t length,
 
 // What a write's lanes share: the code, the layout, the file, the pieces' hashes (the headers', .data's, each chunk's
 // and the tail's), and with a writer lane the word through which lane 0 makes chunks ready and .text's final size,
-// which lane 1 reads once the word says done.
+// which lane 1 reads once the word says done. `published` is lane 0's copy of the word's last value; `write_failed` and
+// `write_errno` are the lane that writes the chunks' (lane 1's with a writer lane, read after the lanes' sync).
 typedef struct StreamWrite StreamWrite;
 struct StreamWrite
 {
@@ -1009,8 +1016,10 @@ struct StreamWrite
     uint8_t* hashes;
     uint64_t flushed;
     uint64_t final_text_size;
+    uint32_t published;
     _Alignas(64) uint32_t ready;
     bool write_failed;
+    int write_errno;
 };
 
 // Chunk `chunk` of .text, hashed and written: a whole chunk, or the last one up to `text_size`.
@@ -1019,11 +1028,46 @@ static bool stream_write_chunk(StreamWrite* write, uint64_t chunk, uint64_t text
     const uint64_t begin = chunk * write->layout.chunk_bytes;
     const uint64_t end = begin + write->layout.chunk_bytes < text_size ? begin + write->layout.chunk_bytes : text_size;
     stream_hash_piece(write->code.text + begin, end - begin, write->hashes + (2 + chunk) * BUSTER_EXECUTABLE_BUILD_ID_BYTES);
-    return stream_pwrite(write->descriptor, write->code.text + begin, end - begin, write->layout.text_offset + begin);
+    const bool written = stream_pwrite(write->descriptor, write->code.text + begin, end - begin, write->layout.text_offset + begin);
+    // The first failure's errno is the one the write reports.
+    write->write_errno = !written && !write->write_failed ? errno : write->write_errno;
+    write->write_failed = !written || write->write_failed;
+    return written;
+}
+
+// Lane 0's handoff to a writer lane (#3150): `ready` chunks, and with `done` the last of them. The word is published
+// only where it changes: a function that makes no more chunks ready (a forward field can hold the boundary for many) wakes
+// nothing, and the terminal handoff is published once, with no chunks (an empty .text, or a failure before any), the last
+// partial one, or the whole chunks made ready before a failure. A publication that finds bit 0 set (lane_wait's sleeper)
+// is a wake.
+static void stream_publish(StreamWrite* write, uint64_t ready, bool done)
+{
+    const uint32_t word = (uint32_t)(2 * ready) | (done ? BUSTER_STREAM_READY_DONE : 0);
+    const bool terminal = (write->published & BUSTER_STREAM_READY_DONE) != 0;
+    if (!terminal && word != write->published)
+    {
+        const bool asleep = (__atomic_load_n(&write->ready, __ATOMIC_RELAXED) & 1u) != 0;
+        lane_publish(&write->ready, word);
+        write->published = word;
+        write->result->publications += 1;
+        write->result->wakes += asleep;
+    }
+}
+
+// Lane 0, before its terminal handoff in a test that asks for it (StreamOptions.sleeping_writer): waits, for up to ten
+// seconds, until lane 1 has set the ready word's bit 0 to sleep on it.
+static void stream_await_sleeping_writer(StreamWrite* write)
+{
+    for (uint32_t tries = 0; write->options->sleeping_writer && (__atomic_load_n(&write->ready, __ATOMIC_ACQUIRE) & 1u) == 0 && tries < 10000; tries += 1)
+    {
+        const struct timespec pause = { .tv_sec = 0, .tv_nsec = 1000000 };
+        nanosleep(&pause, 0);
+    }
 }
 
 // The chunks that are whole and wait for no field, from `flushed` on, made ready: written now, or with a writer lane
-// published for it. With `last`, every chunk, the last one partial.
+// handed to it (stream_publish) where there are more than before. With `last`, every chunk, the last one partial, and
+// with a writer lane the terminal handoff.
 static void stream_flush(StreamWrite* write, bool last)
 {
     StreamCode* code = &write->code;
@@ -1044,15 +1088,23 @@ static void stream_flush(StreamWrite* write, bool last)
     }
     if (write->options->schedule == STREAM_SCHEDULE_WRITER)
     {
-        write->flushed = ready;
-        write->final_text_size = code->text_size;
-        lane_publish(&write->ready, (uint32_t)(2 * ready) | (last ? BUSTER_STREAM_READY_DONE : 0));
+        if (ready != write->flushed || last)
+        {
+            write->flushed = ready;
+            // Read by lane 1 only once the word says done, so set before the terminal handoff's release.
+            write->final_text_size = code->text_size;
+            if (last)
+            {
+                stream_await_sleeping_writer(write);
+            }
+            stream_publish(write, ready, last);
+        }
     }
     else
     {
         for (uint64_t chunk = write->flushed; chunk < ready; chunk += 1)
         {
-            write->write_failed = !stream_write_chunk(write, chunk, code->text_size) || write->write_failed;
+            stream_write_chunk(write, chunk, code->text_size);
         }
         write->flushed = ready;
     }
@@ -1073,7 +1125,7 @@ static void stream_writer_lane(StreamWrite* write)
         const uint64_t text_size = done ? write->final_text_size : UINT64_MAX;
         for (uint64_t chunk = written; chunk < ready; chunk += 1)
         {
-            write->write_failed = !stream_write_chunk(write, chunk, text_size) || write->write_failed;
+            stream_write_chunk(write, chunk, text_size);
         }
         written = ready;
     }
@@ -1105,6 +1157,7 @@ static void stream_compile_lane(StreamWrite* write)
         error = stream_pwrite(write->descriptor, program->data, program->data_size, write->layout.data_offset) &&
                 stream_pwrite(write->descriptor, stream_zeros, write->layout.text_offset - write->layout.data_offset - program->data_size,
                               write->layout.data_offset + program->data_size) ? STREAM_OK : STREAM_ERROR_FILE;
+        result->system_error = error == STREAM_ERROR_FILE ? errno : result->system_error;
     }
     for (uint32_t i = 0; error == STREAM_OK && i < program->function_count; i += 1)
     {
@@ -1130,6 +1183,7 @@ static void stream_compile_lane(StreamWrite* write)
         error = stream_pwrite(write->descriptor, program->data, program->data_size, write->layout.data_offset) &&
                 stream_pwrite(write->descriptor, stream_zeros, write->layout.text_offset - write->layout.data_offset - program->data_size,
                               write->layout.data_offset + program->data_size) ? STREAM_OK : STREAM_ERROR_FILE;
+        result->system_error = error == STREAM_ERROR_FILE ? errno : result->system_error;
         for (uint64_t fixup = 0; fixup < code->fixup_count; fixup += 1)
         {
             stream_patch(code, fixup);
@@ -1146,8 +1200,9 @@ static void stream_compile_lane(StreamWrite* write)
     result->flushed = stream_now();
     if (options->schedule == STREAM_SCHEDULE_WRITER && error != STREAM_OK)
     {
-        // After a failure the writer lane writes what was ready and stops.
-        lane_publish(&write->ready, (uint32_t)(2 * write->flushed) | BUSTER_STREAM_READY_DONE);
+        // After a failure the writer lane writes what was ready and stops: the terminal handoff, where the last flush
+        // didn't make it.
+        stream_publish(write, write->flushed, true);
     }
     uint8_t* tail = 0;
     uint64_t tail_size = 0;
@@ -1162,6 +1217,7 @@ static void stream_compile_lane(StreamWrite* write)
         const uint64_t text_end = write->layout.text_offset + write->layout.text_size;
         error = stream_pwrite(write->descriptor, stream_zeros, write->layout.eh_offset - text_end, text_end) &&
                 stream_pwrite(write->descriptor, tail, tail_size, write->layout.eh_offset) ? STREAM_OK : STREAM_ERROR_FILE;
+        result->system_error = error == STREAM_ERROR_FILE ? errno : result->system_error;
     }
     result->tail_written = stream_now();
     result->fixups = code->fixup_count;
@@ -1267,6 +1323,9 @@ static bool stream_write(const StreamProgram* program, const StreamOptions* opti
         const uint32_t lanes = options->schedule == STREAM_SCHEDULE_WRITER ? 2 : 1;
         valid = lane_run(lanes, stream_lane, &write, options->schedule == STREAM_SCHEDULE_WRITER ? options->cpus : 0);
         valid = valid && result->error == STREAM_OK && !write.write_failed;
+        // A chunk's failed write is the write's error, with its errno, whichever lane wrote it, where lane 0's own writes
+        // gave none.
+        result->system_error = result->system_error == 0 && write.write_failed ? write.write_errno : result->system_error;
         result->error = result->error == STREAM_OK && !valid ? STREAM_ERROR_FILE : result->error;
     }
     if (valid)

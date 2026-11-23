@@ -35,6 +35,21 @@ three schedules (at the end, streamed, streamed by a writer lane):
   sorted, each FDE at its function;
 - a streamed write with several chunks must have written some before the last
   function compiled, and forward fields come only in the callers' order.
+- the writer lane's ready word (#3150) is published only where more whole
+  chunks are ready, and once more for the terminal handoff, so a writer
+  schedule publishes at least once and at most once per chunk it streamed plus
+  one, and the other schedules not at all. A function that readies no chunk,
+  as a pending forward field holds the boundary, publishes nothing. A direct
+  check of `stream_flush` covers the whole-chunk steps, a pending field, an
+  empty `.text`'s terminal handoff, the partial last chunk with `.text`'s size,
+  and a failure's handoff, each published once;
+- a writer lane asleep on the word (`StreamOptions.sleeping_writer`: lane 0
+  waits for its futex bit before the terminal handoff) is woken by it, once,
+  and writes the reference's bytes, which run;
+- a failed write ends every schedule with the file's error and `EFBIG`: a file
+  size limit (`RLIMIT_FSIZE`, `SIGXFSZ` ignored) before `.data`'s end fails
+  lane 0's write before any handoff, and one past the first 4 KB chunk fails a
+  chunk's, the writer lane's with one.
 
 `--cross-check`, which needs readelf, llvm-dwarfdump, gdb and perf, reads a
 streamed file with `readelf -a` (no warnings) and `llvm-dwarfdump --verify`
