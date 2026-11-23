@@ -2829,8 +2829,9 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
         valid = valid && tier1_cert_emitted_define(build, node, build->result_parts + k, tier1_cert_emitted_stack(build, staged, tier1_cert_emitted_part_width(vector, parts[k].bytes, false)));
         at += valid ? 2 * pieces : 0;
     }
-    for (uint32_t k = 0; valid && k < part_count; k += 1)
+    for (uint32_t ordered = 0; valid && ordered < part_count; ordered += 1)
     {
+        const uint32_t k = tier1_select_result_order(parts, part_count, source, ordered);
         const bool vector = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const bool direct = tier1_select_part_direct(parts[k]);
         X86Instruction loads[3] = {
@@ -2851,8 +2852,9 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
         }
         if (valid && direct)
         {
-            // A split vector's part (#1847) or a payload (#2798): its loads read the result's bytes through the address and
-            // define the part's value in its register, which the ret reads (tier1_cert_emitted_return).
+            // A split vector's part (#1847), a payload (#2798) or a whole eightbyte (#3299): its loads read the result's
+            // bytes through the address and define the part's value in its register, which the ret reads
+            // (tier1_cert_emitted_return).
             Tier1CertEmittedKernel kernel = {
                 .referenced = UINT32_MAX,
                 .definition = BUSTER_TIER1_CFG_NONE,
@@ -2863,7 +2865,8 @@ static bool tier1_cert_emitted_result(Tier1CertEmittedBuild* build, uint32_t nod
                 valid = tier1_cert_emitted_take_reference(build, at + j, 0);
             }
             valid = valid && tier1_cert_emitted_add_use(&kernel, value, tier1_cert_emitted_gpr(source, 8)) && tier1_cert_emitted_originals(build, node, &kernel, records + at, load_count);
-            valid = valid && tier1_cert_emitted_define(build, node, build->result_parts + k, tier1_cert_emitted_vector(build, parts[k].reg & 0x1f, tier1_cert_emitted_part_width(true, parts[k].bytes, false)));
+            const uint32_t location = vector ? tier1_cert_emitted_vector(build, parts[k].reg & 0x1f, tier1_cert_emitted_part_width(true, parts[k].bytes, false)) : tier1_cert_emitted_gpr(parts[k].reg, 8);
+            valid = valid && tier1_cert_emitted_define(build, node, build->result_parts + k, location);
         }
         else if (valid)
         {

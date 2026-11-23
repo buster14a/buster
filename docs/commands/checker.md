@@ -387,6 +387,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
+  `-Wsign-compare` skips comparisons that are themselves integer constant expressions (#3300). A comparison
+  containing an evaluated assignment or comma operator still gets the usual signedness checks.
   `-Wsign-compare` retains both operands' source signs and reads the checked comparison conversion, including
   narrow integers, bit-fields and `_BitInt` promotions (#1391). `c_check_sign_range.c` computes diagnostic ranges
   as a width and a nonnegative flag: constants, implicit conversions, assignment/comma results, ordinary
@@ -760,6 +762,10 @@ Its real-header overflows (a local array, an element's offset, a static array, a
 structure, `bzero`, `read`) must abort at `--tier1` too, as clang's build does where
 glibc's version lets it, since the lowering expands the wrappers with their
 callers' bounds ([the wrappers' bounds](../c-builtins-fortify.md#the-wrappers-bounds-2983), #2983).
+So must the longer wrappers' (`fgets`, `fread`, `wcscpy`, `wcsncat`, `strlcpy`,
+`recv`, `realpath`, `mbstowcs`), as GCC's build does; clang isn't run for them, whose
+result depends on glibc's version. One program runs those wrappers within their
+objects, against clang too.
 
 ## Runtime fixtures
 

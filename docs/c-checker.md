@@ -770,7 +770,9 @@ of incompatible type '<overloaded function type>'" (or "assigning to") with a
 note at each candidate, and an operand is "reference to overloaded function
 could not be resolved; did you mean to call it?", " with no arguments" where
 one candidate takes none, with "possible target for call" at each
-(`check_driver_overload_unresolved`). Where clang then reads that operand as
+(`check_driver_overload_unresolved`). A `#pragma weak A = T` clone's lookup
+set is such a set as an operand too, its clone's note at the pragma's A (#2935).
+Where clang then reads that operand as
 the call, it goes on to the expression's next operand, a conditional's
 condition last, and so does the driver; it doesn't check what the call's type
 makes of the expression (`*f`). Initializers, casts, assignments,
@@ -12114,13 +12116,23 @@ type>'` (initializing, assigning or passing a function pointer), with the
 overload machinery's coverage and limits. A function clone's candidate note names the
 pragma, and two functions' notes are sorted by location as clang's overload
 candidates are, so a declaration written between the pragma and a later TARGET
-follows the pragma's note. An object's set lists every clone made before the
-reference, newest first (an object clone at TARGET's declaration, a function
-clone at the pragma), then the earlier declaration
-(`check_driver_weak_alias_candidates`). References before a later
+follows the pragma's note. An object's set is clang's identifier chain, newest
+first: every clone made before the reference (an object clone at TARGET's
+declaration, a function clone at the pragma), the earlier declaration, and
+every file-scope redeclaration of ALIAS that a redeclaration error made
+invalid. Clang's `LookupResult::resolveKind` then drops the invalid ones,
+marking each while more than one entry is unmarked and then filling the marked
+places from the list's end, the last marked first; so an invalid `extern int
+a;` after the clone puts the earlier declaration first, and two put the clone
+back first (#2934, `check_input_symbol_lookup_order`). The first of that list
+is also the "previous definition" a conflicting redeclaration's note names
+(`check_input_symbol_representative`), and all of it an ambiguous reference's
+candidates (`check_driver_weak_alias_candidates`). References before a later
 TARGET declaration keep their earlier lookup. Local parameters and block/loop
 declarations shadow the outer lookup set normally. Later declarations diagnose
-conflicting kind, type, definition or linkage against the clone and retain
+conflicting kind, type, definition or linkage against the clone, a declaration
+whose source writes an `alias` or `ifunc` attribute being a definition, as
+clang's clone is one (its "redefinition of 'A'", #2934), and retain
 later independent errors, including repeated invalid redeclarations. A
 `static` object redeclaring an object clone gives its error before the clone's
 "weak declaration cannot have internal linkage" at the pragma, as clang checks

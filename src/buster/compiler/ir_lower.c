@@ -81,8 +81,9 @@ static bool ir_typed_access_valid(uint8_t kind, uint8_t class, uint64_t value)
     const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
     const uint32_t orders = kind == BUSTER_TYPED_LOAD ? 0x27u : 0x29u;
     const uint64_t order = value & BUSTER_TYPED_FENCE_ORDER;
-    // A segment override (#1447) goes to the access's flags (ir_typed_access); the rest is the class's.
-    value &= ~BUSTER_TYPED_ACCESS_SEGMENT;
+    // A segment override (#1447) and a volatile access's mark (#3310) go to the access's flags (ir_typed_access); the rest
+    // is the class's.
+    value &= ~(BUSTER_TYPED_ACCESS_SEGMENT | (integer ? BUSTER_TYPED_ACCESS_VOLATILE : 0));
     return !integer || value == 0 || ((value & ~(uint64_t)(BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_ORDER)) == 0 && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0 && (orders >> order & 1) != 0);
 }
 
@@ -648,9 +649,11 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_emit(IrTypedSink*
 // BUSTER_IR_ATOMIC and its order, and its natural alignment, which the checker's direct access has proven and the
 // verifier requires of an atomic access. The flags column starts zeroed, which an ordinary access keeps.
 // A segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT) of any class it admits (ir_typed_segment_class) goes to
-// BUSTER_IR_SEGMENT, numbered as the typed stream numbers it.
+// BUSTER_IR_SEGMENT, numbered as the typed stream numbers it, and a volatile access's mark (#3310,
+// BUSTER_TYPED_ACCESS_VOLATILE, a scalar class's alone) to BUSTER_IR_VOLATILE.
 static __attribute__((always_inline)) inline void ir_typed_access(IrTypedSink* sink, uint32_t id, uint8_t class, uint64_t value)
 {
+    const bool scalar = class != BUSTER_TYPED_CLASS_VECTOR && class != BUSTER_TYPED_CLASS_MASK;
     const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
     const uint8_t segment = (uint8_t)((value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT) << BUSTER_IR_SEGMENT_SHIFT);
     if (sink->output != 0 && integer && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0)
@@ -661,6 +664,10 @@ static __attribute__((always_inline)) inline void ir_typed_access(IrTypedSink* s
     if (sink->output != 0 && __builtin_expect(segment != 0, 0))
     {
         sink->output->flags[id] |= segment;
+    }
+    if (sink->output != 0 && scalar && __builtin_expect((value & BUSTER_TYPED_ACCESS_VOLATILE) != 0, 0))
+    {
+        sink->output->flags[id] |= BUSTER_IR_VOLATILE;
     }
 }
 
@@ -2391,6 +2398,28 @@ static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t
     const uint32_t width = size == 16 ? 0 : size == 32 ? 1 : size == 64 ? 2 : 3;
     const IrType types[4] = { IR_V4I32, IR_V8I32, IR_V16I32, IR_VOID };
     return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
+}
+
+// COPY's move form (#1373, tier0_copy_moves): `bytes` (BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES)
+// whose ranges may overlap either way, as memmove's, by 16-byte pieces (IR_V4I32), the last ending at the end, every one
+// loaded before the first is stored, as Tier 0's tier0_copy_move holds them in its registers and clang's code moves
+// llvm.memmove's bytes. Their alignment is unknown, as LOAD's is.
+static void ir_typed_move(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint32_t bytes)
+{
+    const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    const uint32_t pieces = tier0_move_pieces(bytes);
+    uint32_t loaded[BUSTER_TIER0_MAX_MOVE_BYTES / 16] = { 0 };
+    for (uint32_t p = 0; p < pieces; p += 1)
+    {
+        const uint64_t at = p + 1 < pieces ? 16 * (uint64_t)p : bytes - 16;
+        loaded[p] = ir_typed_emit(sink, IR_LOAD, IR_V4I32, ir_typed_offset(sink, source, at), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    for (uint32_t p = 0; p < pieces; p += 1)
+    {
+        const uint64_t at = p + 1 < pieces ? 16 * (uint64_t)p : bytes - 16;
+        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, at), loaded[p], BUSTER_IR_NONE, 0);
+    }
 }
 
 static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes, bool wide)
