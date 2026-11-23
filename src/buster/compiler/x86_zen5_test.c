@@ -370,6 +370,11 @@ static int run_x86_zen5_benchmark(int argc, char** argv)
             printf("Zen 5 AVX-512 lookup: %.4f ns/ID [%.4f, %.4f], %.4f cycles/ID, %u passes, after-scalar %lu ms; excludes record-to-ID resolution\n",
                    median / denominator, times[0] / denominator, times[passes - 1] / denominator, cycles / denominator, passes, conditioning);
         }
+        // The timed runs' output, checked again.
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            valid &= vector[i] == x86_zen5_columns[X86_COST_THROUGHPUT][ids[i]];
+        }
     }
     x86_zen5_counters_close(&counters);
     if (!valid)
