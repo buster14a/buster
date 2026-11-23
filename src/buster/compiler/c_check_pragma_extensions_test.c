@@ -293,9 +293,14 @@ static void check_test_pragma_extension_sources(CheckTest* test)
         { .source = "#pragma weak\n#pragma weak alias=\n#pragma redefine_extname value\nint value;\n", .accepted = true },
         { .source = "#pragma weak alias=value\nint value=7;\n", .accepted = true },
         // An undefined target is code generation's error, not the reader's (#2449); a later alias attribute on the
-        // clone's ALIAS (clang's "redefinition of 'alias'") is still refused by name.
+        // clone's ALIAS redefines the clone (#2934: clang's "redefinition of 'alias'"); a later declaration after two
+        // clones merges with the newer one and carries the first one's alias (#2934), and a reference to function clones
+        // after an object declaration of their name, clang's '<overloaded function type>' operand, is still refused by name.
         { .source = "#pragma weak alias=value\nextern int value;\n", .accepted = true },
-        { .source = "int value(void){return 1;}\n#pragma weak alias=value\nint alias(void) __attribute__((alias(\"value\")));\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
+        { .source = "int value(void){return 1;}\n#pragma weak alias=value\nint alias(void) __attribute__((alias(\"value\")));\n", .message = CHECK_INPUT_REDECLARATION },
+        { .source = "int t1(void){return 1;}\nint t2(void){return 2;}\n#pragma weak a=t1\n#pragma weak a=t2\nint a(void);\n", .accepted = true },
+        { .source = "int t1(void){return 1;}\nint t2(void){return 2;}\n#pragma weak a=t1\n#pragma weak a=t2\nextern int a;\nint use(void){return a;}\n",
+          .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "extern int value; int f(void){return value;}\n#pragma redefine_extname value renamed\nint value=7;\n", .accepted = true },
         { .source = "#define SOURCE value\n#pragma weak SOURCE\nint value=7;\n", .message = CHECK_INPUT_PRAGMA_SEMANTICS },
         { .source = "#pragma ms_struct on\nint value;\n", .ms_records = 1, .accepted = true },

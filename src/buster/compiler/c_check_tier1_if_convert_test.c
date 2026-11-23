@@ -474,11 +474,12 @@ static void check_test_driver_tier1_float_select(CheckTest* test, const char* cl
                     const X86Instruction* instruction = &records[i].instruction;
                     const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
                     const bool masked_blend = form == X86_FORM_VPBLENDMQ_X_X_XM128 && instruction->decorations != 0;
-                    blends += form == X86_FORM_PAND_X_XM128 || masked_blend;
+                    // At a target with AVX, each legacy SSE record's VEX twin (#2830, tier1_emit_vex).
+                    blends += form == X86_FORM_PAND_X_XM128 || form == X86_FORM_VPAND_X_X_XM128 || masked_blend;
                     opmasks += masked_blend && instruction->decorations == 1;
-                    lanes += form == X86_FORM_CMPSD_X_XM64_IMM8 || form == X86_FORM_CMPSS_X_XM32_IMM8;
+                    lanes += form == X86_FORM_CMPSD_X_XM64_IMM8 || form == X86_FORM_CMPSS_X_XM32_IMM8 || form == X86_FORM_VCMPSD_X_X_XM64_IMM8 || form == X86_FORM_VCMPSS_X_X_XM32_IMM8;
                     branches += (x86_effects(form)->kinds >> 4) == BUSTER_X86_CONTROL_BRANCH;
-                    copies += form == X86_FORM_MOVAPS_X_XM && instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->reg != 15;
+                    copies += (form == X86_FORM_MOVAPS_X_XM || form == X86_FORM_VMOVAPS_X_XM128) && instruction->mode == BUSTER_X86_REGISTER_DIRECT && instruction->reg != 15;
                 }
                 const bool guarded = shape->branches == UINT32_MAX;
                 // At x86-64-v4 an integer condition's selects are under k1, but in a function with a mask value, and a

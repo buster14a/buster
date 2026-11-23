@@ -1167,6 +1167,7 @@ static void x86_zen5_x87_unit(const X86CostShape* shape, X86CostExperiment exper
             x86_zen5_helper(builder, pop);
             break;
         case X86_FORM_FLDZ:
+        case X86_FORM_FLD1:
         case X86_FORM_FLD_M32:
         case X86_FORM_FLD_M64:
         case X86_FORM_FLD_M80:

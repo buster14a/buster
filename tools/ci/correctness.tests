@@ -220,6 +220,20 @@ test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" test-ssa-source --typed tests/interpreter/source.c
 "$BUSTER_COMPILER" test-ssa-source --typed --tier1 -DBUSTER_INTERPRETER_LARGE_WORDS=64 tests/interpreter/source.c
 "$BUSTER_COMPILER" interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c > build/interpreter-units.out && printf 'typed units: 1\n' | cmp - build/interpreter-units.out
+# #3311: structs and unions passed and returned in registers, by the interpreter's forms and both strict Tier 1 paths
+# against clang's output; and their code: an {int, int}'s fields kept in registers with no frame, and a {long, long}'s
+# result loaded from its slot with no red-zone copy.
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/register-aggregates.c
+"$BUSTER_COMPILER" --tier1 --tier1-strict --verify -S -o build/register-aggregates.s tests/ir-source/register-aggregates.c
+if awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'rsp'; then exit 1; fi
+if awk '/^add_l2:/,/^\tret/' build/register-aggregates.s | grep -q -- '-8(%rsp)'; then exit 1; fi
+awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'ret'
+# Exact-width call-site parts: small_args's 4- and 12-byte objects stay in registers; its stack holds only n's spill.
+test "$(awk '/^small_args:/,/^\tret/' build/register-aggregates.s | grep -c '(%rsp)')" -le 2
+awk '/^small_args:/,/^\tret/' build/register-aggregates.s | grep -q 'call sum_args'
+# Call sites' argument parts loaded at their own widths: objects that end at an inaccessible page (native only).
+"$BUSTER_COMPILER" --tier1 --tier1-strict -o build/register-aggregates-page-end tests/ir-source/register-aggregates-page-end.c
+build/register-aggregates-page-end > build/register-aggregates-page-end.out && printf 'page end 3615 654\n' | cmp - build/register-aggregates-page-end.out
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 "$BUSTER_COMPILER" test-unwind --cross-check
 == Test the caret display against clang
@@ -972,6 +986,87 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 # 64-bit operations and 128-bit products; the program runs in the IR's forms, the typed stream's interpreter and Tier 1.
 "$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/overflow-builtins.c
 "$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/overflow-builtins.c
+== Test volatile accesses and compiler barriers through the IR and Tier 1's opt-in passes
+# #3310: each volatile lvalue's load and store is the typed stream's marked LOAD, STORE or SET and the IR's volatile
+# access (#3329: a volatile aggregate's copy, a marked COPY, its pieces), and an empty asm statement's "memory" clobber a
+# signal fence; the program runs in the IR's forms, the typed
+# stream's interpreter and Tier 1 against clang.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/volatiles.c
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/volatiles.c
+objects=$(mktemp -d)
+# Each function's accesses, lowered and promoted: every one is volatile, and each barrier is its fence.
+for counted in stored_twice:8 read_twice:4 discarded:4 bit_fields:12 updated:10 incremented:10 element:8 member:10 mapped:6 \
+    floating:18 wide:6 packed:16 pointer:6 counted:4 barrier:0 barrier_operand:0 copied:16 assigned:16 \
+    complex_update:18 quad_update:18 limb_update:18 parts:12 asm_operand:10; do
+    name=${counted%%:*}
+    "$BUSTER_COMPILER" test-ir-source --print "$name" tests/ir-source/volatiles.c > "$objects/$name.ir"
+    test "$(grep -cE 'align=[0-9]+ volatile' "$objects/$name.ir")" -eq "${counted#*:}"
+done
+for name in barrier barrier_operand; do
+    test "$("$BUSTER_COMPILER" test-ir-source --print "$name" tests/ir-source/volatiles.c | grep -c 'fence.void seq_cst signal')" -eq 2
+done
+# Value numbering with memory and the other opt-in passes keep every access outside the frame that the default passes
+# emit (they merged, forwarded and dropped them).
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c tests/ir-source/volatiles.c -o "$objects/default.o"
+"$BUSTER_COMPILER" --tier1 --tier1-strict --tier1-passes=+all -c tests/ir-source/volatiles.c -o "$objects/all.o"
+for name in stored_twice read_twice discarded bit_fields updated incremented element member mapped floating wide packed pointer counted \
+    barrier barrier_operand copied assigned complex_update quad_update limb_update parts asm_operand; do
+    for build in default all; do
+        objdump -d --no-show-raw-insn --disassemble="$name" "$objects/$build.o" | grep '(' | grep -vcE '%rsp|%rbp|lea ' > "$objects/$name.$build" || true
+    done
+    cat "$objects/$name.all"
+    cmp "$objects/$name.default" "$objects/$name.all"
+done
+test "$(cat "$objects/read_twice.all")" -eq 2
+test "$(cat "$objects/barrier.all")" -eq 2
+test "$(cat "$objects/copied.all")" -eq 4
+test "$(cat "$objects/asm_operand.all")" -eq 5
+# #3329: a volatile vector's accesses and a bool vector's copies, by the IR's forms and Tier 1 (the typed stream's
+# interpreter runs no vector), counted as above, at the default target and at x86-64-v4, whose 64-byte vector the IR
+# takes.
+"$BUSTER_COMPILER" test-ir-source --dominators tests/ir-source/volatile-vectors.c
+"$BUSTER_COMPILER" test-ssa-source --tier1 --clang clang tests/ir-source/volatile-vectors.c
+for counted in vector:4 vector_through:8 truth_vector:8; do
+    name=${counted%%:*}
+    "$BUSTER_COMPILER" test-ir-source --print "$name" tests/ir-source/volatile-vectors.c > "$objects/$name.ir"
+    test "$(grep -cE 'align=[0-9]+ volatile' "$objects/$name.ir")" -eq "${counted#*:}"
+done
+"$BUSTER_COMPILER" test-ir-source -march=x86-64-v4 --print vector_wide tests/ir-source/volatile-vectors.c > "$objects/vector_wide.ir"
+test "$(grep -cE 'align=[0-9]+ volatile' "$objects/vector_wide.ir")" -eq 4
+for march in x86-64 x86-64-v4; do
+    "$BUSTER_COMPILER" --tier1 --tier1-strict -march="$march" -c tests/ir-source/volatile-vectors.c -o "$objects/default.o"
+    "$BUSTER_COMPILER" --tier1 --tier1-strict -march="$march" --tier1-passes=+all -c tests/ir-source/volatile-vectors.c -o "$objects/all.o"
+    for name in vector vector_through vector_wide truth_vector; do
+        for build in default all; do
+            objdump -d --no-show-raw-insn --disassemble="$name" "$objects/$build.o" | grep '(' | grep -vcE '%rsp|%rbp|lea ' > "$objects/$name.$build" || true
+        done
+        cat "$objects/$name.all"
+        cmp "$objects/$name.default" "$objects/$name.all"
+    done
+    test "$(cat "$objects/vector.all")" -eq 2
+done
+test "$(cat "$objects/vector_wide.all")" -eq 2
+# A volatile object in %gs's space: a complex update's copies and a struct's assignment and read, each piece a volatile
+# access through %gs (check_lower_copy_segmented), in both printed forms; the passes keep every %gs access.
+for counted in complex_update:4 assigned:4 read:4; do
+    name=${counted%%:*}
+    "$BUSTER_COMPILER" test-ir-source --print "$name" tests/ir-source/volatile-segments.c > "$objects/$name.ir"
+    test "$(grep -cE 'align=[0-9]+ volatile gs' "$objects/$name.ir")" -eq "${counted#*:}"
+    test "$(grep -cE 'align=[0-9]+ gs' "$objects/$name.ir")" -eq 0
+done
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c tests/ir-source/volatile-segments.c -o "$objects/default.o"
+"$BUSTER_COMPILER" --tier1 --tier1-strict --tier1-passes=+all -c tests/ir-source/volatile-segments.c -o "$objects/all.o"
+for name in complex_update assigned read; do
+    for build in default all; do
+        objdump -d --no-show-raw-insn --disassemble="$name" "$objects/$build.o" | grep -c '%gs:' > "$objects/$name.$build" || true
+    done
+    cat "$objects/$name.all"
+    cmp "$objects/$name.default" "$objects/$name.all"
+done
+test "$(cat "$objects/complex_update.all")" -eq 2
+test "$(cat "$objects/assigned.all")" -eq 2
+test "$(cat "$objects/read.all")" -eq 2
+rm -r "$objects"
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
 == Test experimental Tier 1 scheduling, model coverage and native execution
@@ -982,6 +1077,8 @@ test "$("$BUSTER_COMPILER" test-ir-source --print fetched tests/ir-source/atomic
 "$BUSTER_COMPILER" test-ir-licm
 "$BUSTER_COMPILER" test-ir-unroll
 "$BUSTER_COMPILER" test-ir-sroa
+# #3309: loop store motion's fixtures against the interpreter as they are, promoted and optimized, and its faults.
+"$BUSTER_COMPILER" test-ir-store-motion
 # #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
 "$BUSTER_COMPILER" test-ir-vectorize
 # #2805: compare the C reductions built by the opt-in Tier 1 vectorizer and Clang.
@@ -1066,3 +1163,11 @@ clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags
 mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_symbols.c -o build/test-driver-tier1-symbols
 ./build/test-driver-tier1-symbols "$BUSTER_COMPILER" "$(command -v clang)"
+== Test Tier 1's loop store motion against Clang's output, its report and the unit's distinct objects
+# #3309: loops over globals in every shape the pass takes or refuses, strictly at Tier 1 with the pass and without it on
+# both host paths, each program's lines Clang -O0's; the report's counts; the issue's kernel with one load and one store
+# of each global; and which declarations' objects the emission lists (a definition of the unit's, not a weak, aliased,
+# preemptible, asm-labeled, section, common, volatile or thread-local one).
+mapfile -d '' -t sanitizer_flags < <(./build.sh print-sanitizer-flags)
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/tier1_store_motion.c -o build/test-driver-tier1-store-motion
+./build/test-driver-tier1-store-motion "$BUSTER_COMPILER" "$(command -v clang)"

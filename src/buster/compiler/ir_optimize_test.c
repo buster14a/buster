@@ -35,7 +35,7 @@ struct IrOptimizeTest
 
 #define BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
 #define BUSTER_IR_OPTIMIZE_TEST_IF_CONVERT_DIGEST UINT64_C(0x75253a506ea076dd)
-#define BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST UINT64_C(0xb3cb1a793dad0e42)
+#define BUSTER_IR_OPTIMIZE_TEST_THREAD_DIGEST UINT64_C(0x3eb6c488a41e3c42)
 #define BUSTER_IR_OPTIMIZE_TEST_SINK_DIGEST UINT64_C(0x9f4d956b5e0b38fc)
 #define BUSTER_IR_OPTIMIZE_TEST_UNROLL_DIGEST UINT64_C(0xc92a6941c51cf4e2)
 #define BUSTER_IR_OPTIMIZE_TEST_SEED UINT64_C(139)
@@ -424,9 +424,20 @@ struct IrOptimizeExecution
 #define BUSTER_IR_OPTIMIZE_TEST_LABEL 64
 #define BUSTER_IR_OPTIMIZE_TEST_SYMBOLS 16
 
+// A read-only table a fixture's symbol names (#3298's switches of constants): a load whose address is the symbol's
+// (IR_SYMBOL_ADDR's value, the symbol in the high 32 bits) plus an offset inside `size` reads `bytes`.
+typedef struct IrOptimizeTestTable IrOptimizeTestTable;
+struct IrOptimizeTestTable
+{
+    const uint8_t* bytes;
+    uint64_t size;
+    uint32_t symbol;
+};
+
 // Independent bounded interpreter used only by the original fixtures. It does not use optimizer opcode tables,
-// use enumeration, lattice, CFG, or fold code. Integer arithmetic goes through the independent wide-C oracle.
-static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* scratch, uint64_t parameter, uint64_t unspecified)
+// use enumeration, lattice, CFG, or fold code. Integer arithmetic goes through the independent wide-C oracle. `table`,
+// null for none, is a symbol's read-only bytes.
+static IrOptimizeExecution ir_optimize_test_execute_table(const IrFunction* f, Arena* scratch, uint64_t parameter, uint64_t unspecified, const IrOptimizeTestTable* table)
 {
     const uint64_t mark = scratch->length;
     uint64_t* values = arena_push_array(scratch, f->instruction_count, sizeof(uint64_t), _Alignof(uint64_t));
@@ -553,12 +564,18 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                 {
                     const uint64_t address = values[a];
                     const uint32_t bytes = (ir_type_bits[op == IR_LOAD ? f->type[i] : f->type[b]] + 7) / 8;
+                    const uint64_t offset = address - ((uint64_t)(table != NULL ? table->symbol : 0) << 32);
+                    const bool tabled = op == IR_LOAD && table != NULL && offset < table->size && bytes <= table->size - offset;
+                    for (uint32_t byte = 0; tabled && byte < bytes; byte += 1)
+                    {
+                        value |= (uint64_t)table->bytes[offset + byte] << (byte * 8);
+                    }
                     const uint64_t symbol = address >> 32;
                     const uint64_t within = address & UINT32_MAX;
-                    const bool symbolic = symbol != 0 && symbol < BUSTER_IR_OPTIMIZE_TEST_SYMBOLS && within + bytes <= 32;
-                    folded = symbolic || (address != 0 && address - 1 <= sizeof(memory) && bytes <= sizeof(memory) - (address - 1));
-                    uint8_t* bank = !folded ? NULL : symbolic ? symbol_memory + symbol * 32 + within : memory + address - 1;
-                    if (folded)
+                    const bool symbolic = !tabled && symbol != 0 && symbol < BUSTER_IR_OPTIMIZE_TEST_SYMBOLS && within + bytes <= 32;
+                    folded = tabled || symbolic || (address != 0 && address - 1 <= sizeof(memory) && bytes <= sizeof(memory) - (address - 1));
+                    uint8_t* bank = !folded || tabled ? NULL : symbolic ? symbol_memory + symbol * 32 + within : memory + address - 1;
+                    if (folded && !tabled)
                     {
                         if (op == IR_STORE)
                         {
@@ -671,6 +688,11 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
     }
     arena_pop_to(scratch, mark);
     return execution;
+}
+
+static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* scratch, uint64_t parameter, uint64_t unspecified)
+{
+    return ir_optimize_test_execute_table(f, scratch, parameter, unspecified, NULL);
 }
 
 static void ir_optimize_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector_arena, Arena* scalar_arena, Arena* scratch, uint32_t passes)
@@ -2007,6 +2029,7 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test);
 #endif
 #include "ir_if_convert_test.c"
 #include "ir_thread_test.c"
+#include "ir_switch_table_test.c"
 #include "tier1_sink_ir_test.c"
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
@@ -2057,6 +2080,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         ir_optimize_test_simd(&test);
         ir_if_convert_tests(&test);
         ir_thread_tests(&test);
+        ir_switch_table_tests(&test);
         tier1_schedule_ir_test_empty_segments(&test);
         tier1_schedule_ir_test_segment(&test);
         tier1_sink_ir_tests(&test);

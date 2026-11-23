@@ -167,6 +167,13 @@ struct CheckDebugValues
     uint32_t* inline_open;
     uint64_t* inline_order;
     CheckDebugInlineSpans* inline_spans;
+    // The tokens the sweeps stop at (check_debug_value_events), in token order: `events`, each that declares itself
+    // (CheckInput.declarations) or opens a lexical block, and `root_ends`, each file-scope declaration's last token.
+    // Every other token is neither a declaration nor a scope's opening, so the sweeps read past it.
+    uint32_t* events;
+    uint32_t event_count;
+    uint32_t* root_ends;
+    uint32_t root_count;
 };
 
 static String8 check_debug_name(const CheckDebugValues* values, uint32_t identifier)
@@ -1052,6 +1059,62 @@ static int check_debug_inline_compare(const void* x, const void* y)
 // At a block's opening token, where its scope declares something of its own (check_debug_value_own_blocks, #2543).
 #define CHECK_DEBUG_OWN 16u
 
+// The unit's tokens the sweeps stop at (CheckDebugValues.events and root_ends), 16 tokens at a time: a token that
+// declares itself or opens a block, a block, a for's clause or a condition's (the roles the body walk opens a scope at),
+// and a token whose parent is the tree's root. Each list has room for every token and 16 more: each block's whole
+// compressed register is stored and the next block's overwrites what lies past its count.
+static void check_debug_value_events(CheckDebugValues* values)
+{
+    const uint32_t tokens = values->program->input->token_count;
+    const uint32_t* declarations = values->program->input->declarations;
+    const uint8_t* roles = values->parser->tree.roles;
+    const uint32_t* parents = values->parser->tree.parents;
+    const __m128i open_block = _mm_set1_epi8((char)PARSE_ROLE_OPEN_BLOCK);
+    const __m128i open_for = _mm_set1_epi8((char)PARSE_ROLE_OPEN_FOR);
+    const __m128i open_condition = _mm_set1_epi8((char)PARSE_ROLE_OPEN_CONDITION);
+    const __m512i root = _mm512_set1_epi32((int)BUSTER_PARSE_ROOT);
+    __m512i index = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    uint32_t events = 0;
+    uint32_t roots = 0;
+    for (uint32_t t = 0; t < tokens; t += 16)
+    {
+        const uint32_t take = tokens - t < 16 ? tokens - t : 16;
+        const __mmask16 valid = (__mmask16)_bzhi_u32(0xffff, take);
+        const __m128i role = _mm_maskz_loadu_epi8(valid, roles + t);
+        const __mmask16 block = _mm_mask_cmpeq_epi8_mask(valid, role, open_block) | _mm_mask_cmpeq_epi8_mask(valid, role, open_for) |
+                                _mm_mask_cmpeq_epi8_mask(valid, role, open_condition);
+        const __mmask16 self = _mm512_mask_cmpeq_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, declarations + t), index);
+        const __mmask16 last = _mm512_mask_cmpeq_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, parents + t), root);
+        _mm512_storeu_si512(values->events + events, _mm512_maskz_compress_epi32(self | block, index));
+        _mm512_storeu_si512(values->root_ends + roots, _mm512_maskz_compress_epi32(last, index));
+        events += (uint32_t)__builtin_popcount(self | block);
+        roots += (uint32_t)__builtin_popcount(last);
+        index = _mm512_add_epi32(index, _mm512_set1_epi32(16));
+    }
+    values->event_count = events;
+    values->root_count = roots;
+}
+
+// The place of the first of `count` ascending tokens `list` at or past `token` (`count` where none is).
+static uint32_t check_debug_value_at_or_past(const uint32_t* list, uint32_t count, uint32_t token)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        if (list[middle] < token)
+        {
+            low = middle + 1;
+        }
+        else
+        {
+            high = middle;
+        }
+    }
+    return low;
+}
+
 // The unit's roots, as clang's DWARF has them (#2531): its file-scope declarations that define what the unit emits, a
 // function's body or an object's storage (any declaration of a defined object), with everything inside them; and the
 // file-scope typedefs whose names they bind (CheckInput.declarations), and those that such a typedef's declaration binds
@@ -1068,65 +1131,80 @@ static void check_debug_value_roots(CheckDebugValues* values, uint32_t* starts, 
     const uint32_t tokens = input->token_count;
     uint8_t* marks = values->marks;
     memset(marks, 0, (uint64_t)tokens + 1);
+    // A root's last token is marked first where one of its tokens declares a body or a defined object: the first root
+    // end at or past that token closes its declaration. (Only a declaration's own token, an event, defines an object.)
     for (uint32_t b = 0; b < program->body_count; b += 1)
     {
         const uint32_t declaration = program->bodies[b].declaration;
-        marks[declaration < tokens ? declaration : tokens] |= CHECK_DEBUG_BODY;
+        const uint32_t root = declaration < tokens ? check_debug_value_at_or_past(values->root_ends, values->root_count, declaration) : values->root_count;
+        if (root < values->root_count)
+        {
+            marks[values->root_ends[root]] |= CHECK_DEBUG_ROOT;
+        }
+    }
+    uint32_t root = 0;
+    for (uint32_t e = 0; e < values->event_count; e += 1)
+    {
+        const uint32_t t = values->events[e];
+        if (check_debug_value_declaration(input, t) && input->declaration_kinds[t] == C_BINDING_OBJECT && check_debug_value_defined(values, t))
+        {
+            while (root < values->root_count && values->root_ends[root] < t)
+            {
+                root += 1;
+            }
+            if (root < values->root_count)
+            {
+                marks[values->root_ends[root]] |= CHECK_DEBUG_ROOT;
+            }
+        }
     }
     // Each file-scope declaration, its last token the tree's root (a declaration of a valid parse is a tree of its own):
-    // a root where one of its tokens declares a body or a defined object.
+    // all its tokens a root's where its last is marked. The roots then queue to be scanned for the typedefs they bind.
     uint32_t first = 0;
-    bool defines = false;
-    for (uint32_t t = 0; t < tokens; t += 1)
-    {
-        const bool object = check_debug_value_declaration(input, t) && input->declaration_kinds[t] == C_BINDING_OBJECT && check_debug_value_defined(values, t);
-        defines |= object || (marks[t] & CHECK_DEBUG_BODY) != 0;
-        if (parser->tree.parents[t] == BUSTER_PARSE_ROOT)
-        {
-            starts[t] = first;
-            for (uint32_t u = first; defines && u <= t; u += 1)
-            {
-                marks[u] |= CHECK_DEBUG_ROOT;
-            }
-            first = t + 1;
-            defines = false;
-        }
-    }
-    // The typedefs the roots bind, then those their declarations bind: each declaration scanned once.
     uint32_t count = 0;
-    for (uint32_t t = 0; t < tokens; t += 1)
+    for (uint32_t r = 0; r < values->root_count; r += 1)
     {
-        if (parser->tree.parents[t] == BUSTER_PARSE_ROOT && (marks[t] & CHECK_DEBUG_ROOT) != 0)
+        const uint32_t last = values->root_ends[r];
+        starts[last] = first;
+        if ((marks[last] & CHECK_DEBUG_ROOT) != 0)
         {
-            marks[t] |= CHECK_DEBUG_SCANNED;
-            pending[count] = t;
+            memset(marks + first, CHECK_DEBUG_ROOT, (uint64_t)last - first + 1);
+            marks[last] |= CHECK_DEBUG_SCANNED;
+            pending[count] = last;
             count += 1;
         }
+        first = last + 1;
     }
+    // The typedefs the roots bind, then those their declarations bind: each declaration scanned once, its identifiers
+    // that name another token's declaration 16 at a time.
+    const __m128i identifier = _mm_set1_epi8((char)PARSE_KIND_IDENTIFIER);
     while (count != 0)
     {
         count -= 1;
         const uint32_t last = pending[count];
-        for (uint32_t t = starts[last]; t <= last; t += 1)
+        for (uint32_t at = starts[last]; at <= last; at += 16)
         {
-            const uint32_t declaration = parser->tokens.kinds[t] == PARSE_KIND_IDENTIFIER ? input->declarations[t] : BUSTER_CHECK_NONE;
-            const bool typedef_name = declaration < tokens && declaration != t && input->declaration_kinds[declaration] == C_BINDING_TYPEDEF &&
-                                      (marks[declaration] & (CHECK_DEBUG_USED | CHECK_DEBUG_ROOT)) == 0;
-            if (typedef_name)
+            const uint32_t take = last - at + 1 < 16 ? last - at + 1 : 16;
+            const __mmask16 valid = (__mmask16)_bzhi_u32(0xffff, take);
+            const __m512i index = _mm512_add_epi32(_mm512_set1_epi32((int)at), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
+            const __mmask16 named = _mm_mask_cmpeq_epi8_mask(valid, _mm_maskz_loadu_epi8(valid, parser->tokens.kinds + at), identifier);
+            const __m512i declared = _mm512_maskz_loadu_epi32(named, input->declarations + at);
+            const __mmask16 other = _mm512_mask_cmplt_epu32_mask(named, declared, _mm512_set1_epi32((int)tokens)) & _mm512_cmpneq_epi32_mask(declared, index);
+            for (uint32_t rest = other; rest != 0; rest &= rest - 1)
             {
-                marks[declaration] |= CHECK_DEBUG_USED;
-                // The typedef's declaration, scanned in turn: its own last token is the first at or after it whose parent is
-                // the root.
-                uint32_t end = declaration;
-                while (end < tokens && parser->tree.parents[end] != BUSTER_PARSE_ROOT)
+                const uint32_t declaration = input->declarations[at + (uint32_t)__builtin_ctz(rest)];
+                if (input->declaration_kinds[declaration] == C_BINDING_TYPEDEF && (marks[declaration] & (CHECK_DEBUG_USED | CHECK_DEBUG_ROOT)) == 0)
                 {
-                    end += 1;
-                }
-                if (end < tokens && (marks[end] & CHECK_DEBUG_SCANNED) == 0)
-                {
-                    marks[end] |= CHECK_DEBUG_SCANNED;
-                    pending[count] = end;
-                    count += 1;
+                    marks[declaration] |= CHECK_DEBUG_USED;
+                    // The typedef's declaration, scanned in turn: its own last token is the first root end at or past it.
+                    const uint32_t end_root = check_debug_value_at_or_past(values->root_ends, values->root_count, declaration);
+                    const uint32_t end = end_root < values->root_count ? values->root_ends[end_root] : tokens;
+                    if (end < tokens && (marks[end] & CHECK_DEBUG_SCANNED) == 0)
+                    {
+                        marks[end] |= CHECK_DEBUG_SCANNED;
+                        pending[count] = end;
+                        count += 1;
+                    }
                 }
             }
         }
@@ -1192,8 +1270,14 @@ static void check_debug_value_own_blocks(CheckDebugValues* values, uint32_t b, u
     const CheckInput* input = values->program->input;
     const Parser* parser = values->parser;
     uint32_t depth = 0;
-    for (uint32_t token = opening + 1; token <= closing; token += 1)
+    // The body's events alone: a scope that ended before one closes first, as it would have at its end's token.
+    for (uint32_t e = check_debug_value_at_or_past(values->events, values->event_count, opening + 1); e < values->event_count && values->events[e] <= closing; e += 1)
     {
+        const uint32_t token = values->events[e];
+        while (depth != 0 && values->scopes[depth - 1] < token)
+        {
+            depth -= 1;
+        }
         const uint32_t role = parser->tree.roles[token];
         const bool block = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION;
         if (block && values->ends == NULL)
@@ -1239,8 +1323,9 @@ static void check_debug_values_write(CheckDebugValues* values)
     {
         check_debug_value_type(values, values->types[t]);
     }
-    for (uint32_t token = 0; token < input->token_count; token += 1)
+    for (uint32_t e = 0; e < values->event_count; e += 1)
     {
+        const uint32_t token = values->events[e];
         const bool declaration = check_debug_value_declaration(input, token) && type_is_valid(program->types, input->declared_types[token]);
         const bool file = declaration && check_sparse_get(input->declaration_bodies, token) == BUSTER_CHECK_NONE;
         // (A file-scope typedef that a root names, and an object the unit defines: check_debug_value_roots.)
@@ -1281,8 +1366,9 @@ static void check_debug_values_write(CheckDebugValues* values)
             // Its automatic locals, without a location (each instance's has its own, #2541), so that a debugger in an
             // instance's frame names them; flat, as gdb takes a lexical block without addresses.
             const uint32_t end = parser->tree.parents[body.opening];
-            for (uint32_t token = body.opening + 1; token <= end; token += 1)
+            for (uint32_t e = check_debug_value_at_or_past(values->events, values->event_count, body.opening + 1); e < values->event_count && values->events[e] <= end; e += 1)
             {
+                const uint32_t token = values->events[e];
                 if (check_debug_abstract_local(values, token))
                 {
                     values->parameter_dies[token] = (uint32_t)values->info.size;
@@ -1334,8 +1420,24 @@ static void check_debug_values_write(CheckDebugValues* values)
                 check_debug_value_own_blocks(values, b, body.opening, closing);
             }
             uint32_t depth = 0;
-            for (uint32_t token = body.opening + 1; token <= closing; token += 1)
+            // The body's events and its instances' calls, in token order; nothing else in it opens, declares or calls.
+            // A scope that ended before the next of them closes first, as it would have at its end's token.
+            uint32_t e = check_debug_value_at_or_past(values->events, values->event_count, body.opening + 1);
+            while ((e < values->event_count && values->events[e] <= closing) ||
+                   (next_inline < ordered && (uint32_t)(values->inline_order[next_inline] >> 32) <= closing))
             {
+                const uint32_t event = e < values->event_count && values->events[e] <= closing ? values->events[e] : UINT32_MAX;
+                const uint32_t call = next_inline < ordered ? (uint32_t)(values->inline_order[next_inline] >> 32) : UINT32_MAX;
+                const uint32_t token = event < call ? event : call;
+                e += event == token ? 1 : 0;
+                while (depth != 0 && values->scopes[depth - 1] < token)
+                {
+                    if (values->scope_tokens[depth - 1] != BUSTER_CHECK_NONE)
+                    {
+                        debug_integer(&values->info, 0, 1);
+                    }
+                    depth -= 1;
+                }
                 const uint32_t role = parser->tree.roles[token];
                 const bool block = role == PARSE_ROLE_OPEN_BLOCK || role == PARSE_ROLE_OPEN_FOR || role == PARSE_ROLE_OPEN_CONDITION;
                 if (block && values->ends == NULL)
@@ -1386,6 +1488,15 @@ static void check_debug_values_write(CheckDebugValues* values)
                     depth -= 1;
                 }
             }
+            // The scopes that end at the closing brace, as its token closed them.
+            while (depth != 0 && values->scopes[depth - 1] <= closing)
+            {
+                if (values->scope_tokens[depth - 1] != BUSTER_CHECK_NONE)
+                {
+                    debug_integer(&values->info, 0, 1);
+                }
+                depth -= 1;
+            }
             // The instances whose call is outside the body's tokens (before its opening brace, or past its closing one).
             for (uint32_t k = 0; k < ordered; k += 1)
             {
@@ -1419,6 +1530,10 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     values.scopes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     values.scope_tokens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 1);
     values.marks = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)tokens + 1);
+    values.events = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 16);
+    values.root_ends = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)tokens + 16);
+    // Each enum definition's opening token and index, in token order (check_debug_values' sweep of the enumerators).
+    uint64_t* enum_opens = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)program->input->enum_definition_count + 1);
     // The spans' index (#1640), room for the largest function's; without it, each list scans its function's spans.
     uint32_t most_spans = 0;
     for (uint32_t b = 0; b < program->body_count; b += 1)
@@ -1452,7 +1567,8 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     const bool ends_valid = !derive || (values.derived_ends != NULL && values.ends_children != NULL && values.ends_queue != NULL && values.ends_ready != NULL);
     bool valid = values.type_offsets != NULL && values.types != NULL && values.enum_definitions != NULL && values.enum_owners != NULL && values.local_ids != NULL &&
                  values.scopes != NULL && values.scope_tokens != NULL && values.marks != NULL && ends_valid && values.function_offsets != NULL && values.expanded != NULL && values.address_indices != NULL &&
-                 values.parameter_dies != NULL && values.inline_open != NULL && values.inline_order != NULL;
+                 values.parameter_dies != NULL && values.inline_open != NULL && values.inline_order != NULL && values.events != NULL && values.root_ends != NULL &&
+                 enum_opens != NULL;
     if (valid)
     {
         // A lone instance visits the spans only once. Without room for the optional index, the same writer
@@ -1460,6 +1576,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
         values.inline_spans = most_inlines > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDebugInlineSpans, most_inlines) : NULL;
         memset(values.type_offsets, 0, room * sizeof(uint32_t));
         memset(values.enum_definitions, 0, (uint64_t)table->types.count * sizeof(uint32_t));
+        check_debug_value_events(&values);
         // (The roots' scan takes the local ids and the scopes for its starts and its worklist, before either is used.)
         check_debug_value_roots(&values, values.local_ids, values.scopes);
         memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
@@ -1484,38 +1601,59 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
                 values.expanded[instance.body < program->body_count ? instance.body : program->body_count] |= instance.described;
             }
         }
-        for (uint32_t t = 0; t < tokens; t += 1)
+        for (uint32_t event = 0; event < values.event_count; event += 1)
         {
+            const uint32_t t = values.events[event];
             if (check_debug_value_declaration(input, t) && (values.marks[t] & (CHECK_DEBUG_ROOT | CHECK_DEBUG_USED)) != 0)
             {
                 check_debug_type_add(&values, input->declared_types[t]);
             }
         }
-        for (uint32_t e = 0; e < program->input->enum_definition_count; e += 1)
+        const uint32_t definitions = program->input->enum_definition_count;
+        bool ordered = true;
+        for (uint32_t e = 0; e < definitions; e += 1)
         {
             const CheckInputEnumDefinition definition = program->input->enum_definitions[e];
             values.enum_definitions[type_index(definition.type)] = e + 1;
-            values.local_ids[definition.open] = e;
+            enum_opens[e] = (uint64_t)definition.open << 32 | e;
+            ordered = ordered && (e == 0 || enum_opens[e - 1] < enum_opens[e]);
         }
-        // Sweep opening braces in source order. The innermost open definition owns each enumerator.
+        if (!ordered)
+        {
+            qsort(enum_opens, definitions, sizeof(uint64_t), check_debug_inline_compare);
+        }
+        // Sweep the definitions' opening braces and the enumerators in source order: the innermost open definition owns
+        // each enumerator. As a sweep of every token, an enumerator whose token isn't past the one before it (or isn't
+        // a token) is never reached, and neither is any after it.
         uint32_t depth = 0;
         uint32_t e = 0;
-        for (uint32_t token = 0; token < tokens; token += 1)
+        uint32_t o = 0;
+        uint32_t assigned = 0;
+        bool enumerators = true;
+        bool more = true;
+        while (more)
         {
-            while (depth != 0 && program->input->enum_definitions[values.scopes[depth - 1]].close <= token)
+            const uint32_t value_token = e < program->input->enum_value_count ? program->input->enum_values[e].token : UINT32_MAX;
+            enumerators = enumerators && e < program->input->enum_value_count && (e == 0 || value_token > assigned) && value_token < tokens;
+            const uint32_t value = enumerators ? value_token : UINT32_MAX;
+            const uint32_t open = o < definitions ? (uint32_t)(enum_opens[o] >> 32) : UINT32_MAX;
+            const uint32_t token = open < value ? open : value;
+            more = token < tokens;
+            while (more && depth != 0 && program->input->enum_definitions[values.scopes[depth - 1]].close <= token)
             {
                 depth -= 1;
             }
-            if (values.local_ids[token] != BUSTER_CHECK_NONE)
+            if (more && open == token)
             {
-                values.scopes[depth++] = values.local_ids[token];
+                values.scopes[depth++] = (uint32_t)enum_opens[o];
+                o += 1;
             }
-            if (e < program->input->enum_value_count && program->input->enum_values[e].token == token)
+            if (more && value == token)
             {
                 values.enum_owners[e++] = depth != 0 ? values.scopes[depth - 1] + 1 : 0;
+                assigned = token;
             }
         }
-        memset(values.local_ids, 0xff, ((uint64_t)tokens + 1) * sizeof(uint32_t));
         // This bound grows: visiting a type can append its pointee, parameters, members and qualifier base.
         for (uint32_t t = 0; t < values.type_count; t += 1)
         {

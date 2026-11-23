@@ -13,12 +13,13 @@
 //     builtin types aside) by abi_classify_all at each target vector width (16, 32 and 64 bytes), per type and per
 //     record member; then, at 16 bytes, by abi_classify in the batches a front end hands it as it completes records:
 //     windows of the 1, 4 or 16 types it made since its last call, each in levels of types that depend only on earlier
-//     ones, a call per level.
+//     ones, a call per level; then by abi_classify_all with no scratch (no-scratch: its first scratch arena of no room),
+//     and a chain of 1,024 records against the table's order, with scratch and without (chain, chain-starved).
 //   - assignment: --count calls (32,768) over the table's types, at 16 bytes: most of 0 to 6 arguments, some of 4 to
 //     14 and a few of 15 to 22, one in four variadic, whose arguments are integers and pointers mostly, then
 //     floating types, records that pass in registers and in memory, and now and then long double, __int128, a complex
 //     type or a vector (abi_benchmark_named_type and abi_benchmark_unnamed_type have the mix); by abi_assign, per
-//     argument, with the share of arguments abi_assign left to its per-call fallback, abi_assign_call. Then the same
+//     argument, with the share of arguments abi_assign left to its per-call kernel, abi_assign_lanes. Then the same
 //     calls' shapes with integers, pointers and doubles alone (assign-simple), each of which needs one register of one
 //     class.
 // Every run takes the whole table or every call once, and the defaults are more types and arguments than Zen 5's
@@ -94,6 +95,8 @@ struct String8
 #define BUSTER_ABI_BENCHMARK_CLASSIFY_ALL 0
 #define BUSTER_ABI_BENCHMARK_BATCHES 1
 #define BUSTER_ABI_BENCHMARK_ASSIGN 2
+// Each call of `signatures` assigned alone, a call of abi_assign each.
+#define BUSTER_ABI_BENCHMARK_ASSIGN_ALONE 3
 
 static const uint32_t abi_benchmark_widths[] = {
     16,
@@ -505,6 +508,8 @@ struct AbiBenchmarkCase
     AbiSignatures signatures;
     AbiLocation* locations;
     AbiCall* calls;
+    // An arena of no room that classify-all runs with as the thread's first scratch arena, or 0.
+    Arena* starved;
 };
 
 typedef struct AbiBenchmarkOptions AbiBenchmarkOptions;
@@ -536,6 +541,17 @@ static __attribute__((noinline, aligned(64))) uint32_t abi_benchmark_classify_al
     return abi_classify_all(abi, table);
 }
 
+// classify-all with `starved`, an arena of no room, as the thread's first scratch arena, the one abi_classify_all's
+// scratch comes from.
+static __attribute__((noinline, aligned(64))) uint32_t abi_benchmark_classify_all_starved(AbiTable* abi, const TypeTable* table, Arena* starved)
+{
+    const Arena saved = thread_context.scratch[0];
+    thread_context.scratch[0] = *starved;
+    const uint32_t result = abi_classify_all(abi, table);
+    thread_context.scratch[0] = saved;
+    return result;
+}
+
 static __attribute__((noinline, aligned(64))) void abi_benchmark_batches_vector(AbiTable* abi, const TypeTable* table, const TypeId* types, const uint32_t* starts,
                                                                                uint32_t batch_count)
 {
@@ -548,6 +564,25 @@ static __attribute__((noinline, aligned(64))) void abi_benchmark_batches_vector(
 static __attribute__((noinline, aligned(64))) void abi_benchmark_assign_vector(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
     abi_assign(abi, signatures, locations, calls);
+}
+
+// Each call alone, as a code generator assigns a single signature (a function's entry, va_start's named parameters).
+static __attribute__((noinline, aligned(64))) void abi_benchmark_assign_alone(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
+{
+    uint64_t first = 0;
+    for (uint32_t c = 0; c < signatures.count; c += 1)
+    {
+        const AbiSignatures one = {
+            .results = signatures.results + c,
+            .counts = signatures.counts + c,
+            .named = signatures.named + c,
+            .variadic = signatures.variadic + c,
+            .count = 1,
+            .arguments = signatures.arguments + first,
+        };
+        abi_assign(abi, one, locations + first, calls + c);
+        first += signatures.counts[c];
+    }
 }
 
 // Readies a run, outside the time: classify-all starts its table again, with only the builtin types classified.
@@ -568,13 +603,21 @@ static bool abi_benchmark_execute(const AbiBenchmarkCase* benchmark)
 {
     AbiTable* abi = benchmark->abi;
     bool result = true;
-    if (benchmark->kind == BUSTER_ABI_BENCHMARK_CLASSIFY_ALL)
+    if (benchmark->kind == BUSTER_ABI_BENCHMARK_CLASSIFY_ALL && benchmark->starved != 0)
+    {
+        result = abi_benchmark_classify_all_starved(abi, benchmark->table, benchmark->starved) == benchmark->classified;
+    }
+    else if (benchmark->kind == BUSTER_ABI_BENCHMARK_CLASSIFY_ALL)
     {
         result = abi_benchmark_classify_all_vector(abi, benchmark->table) == benchmark->classified;
     }
     else if (benchmark->kind == BUSTER_ABI_BENCHMARK_BATCHES)
     {
         abi_benchmark_batches_vector(abi, benchmark->table, benchmark->types, benchmark->starts, benchmark->batch_count);
+    }
+    else if (benchmark->kind == BUSTER_ABI_BENCHMARK_ASSIGN_ALONE)
+    {
+        abi_benchmark_assign_alone(abi, benchmark->signatures, benchmark->locations, benchmark->calls);
     }
     else
     {
@@ -1012,6 +1055,137 @@ static bool abi_benchmark_batches(const AbiBenchmarkWorld* world, AbiBenchmarkTa
     return valid;
 }
 
+// An arena of no room, which a starved run puts in place of the thread's first scratch arena.
+static Arena abi_benchmark_starved_arena(void)
+{
+    Arena result = arena_reserve(4096);
+    result.capacity = result.length;
+    return result;
+}
+
+// classify-all with no scratch at all (abi_benchmark_classify_all_starved), at the base width: into the timed table,
+// which must match what classify-all with its scratch classified, then timed.
+static bool abi_benchmark_classify_starved(const AbiBenchmarkWorld* world, AbiBenchmarkTables* tables, uint32_t classified, AbiBenchmarkCounters counters)
+{
+    const TypeTable* table = &world->table;
+    AbiTable* abi = &tables->abi[BUSTER_ABI_BENCHMARK_TIMED];
+    static AbiBenchmarkSamples samples;
+    Arena starved = abi_benchmark_starved_arena();
+    bool valid = starved.base != 0 && abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_REFERENCE, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES) &&
+                 abi_classify_all(&tables->abi[BUSTER_ABI_BENCHMARK_REFERENCE], table) == classified;
+    valid = valid && abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_TIMED, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES) &&
+            abi_benchmark_classify_all_starved(abi, table, &starved) == classified;
+    valid = valid && abi_benchmark_same_tables(abi, &tables->abi[BUSTER_ABI_BENCHMARK_REFERENCE], table->types.count, "classify-all with no scratch");
+    const AbiBenchmarkCase benchmark = {
+        .kind = BUSTER_ABI_BENCHMARK_CLASSIFY_ALL,
+        .name = "no-scratch",
+        .table = table,
+        .abi = abi,
+        .arena = &tables->arena[BUSTER_ABI_BENCHMARK_TIMED],
+        .vector_bytes = BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES,
+        .items = classified,
+        .classified = classified,
+        .starved = &starved,
+    };
+    valid = valid && abi_benchmark_measure(&benchmark, counters, &samples);
+    if (valid)
+    {
+        printf("classify-all with no scratch, %u-byte vectors\n", BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES);
+        abi_benchmark_print(benchmark.name, &samples, "type", 0, 0);
+    }
+    else
+    {
+        fprintf(stderr, "benchmark-calling-convention: classify-all with no scratch failed or classified otherwise\n");
+    }
+    arena_release(&starved);
+    return valid;
+}
+
+// The links of the reversed chain.
+#define BUSTER_ABI_BENCHMARK_CHAIN_LINKS 1024
+
+// A chain of records against the table's order: tags R0 to R1023 made first, then completed from the last, R1023 {int}
+// and Ri {Ri+1}, so that each needs the one after it. classify-all takes it by its levels after its scans, and with no
+// scratch by its scans alone, a scan per link. Every link must be classified, and be what {int} is.
+static bool abi_benchmark_chain(Arena* arena, AbiBenchmarkCounters counters)
+{
+    static AbiBenchmarkSamples samples;
+    const uint32_t links = BUSTER_ABI_BENCHMARK_CHAIN_LINKS;
+    const TypeCapacity capacity = {
+        .types = links + BUSTER_ABI_BENCHMARK_SLACK_TYPES,
+        .parameters = 1,
+        .tags = links,
+        .members = links,
+    };
+    const uint64_t length = arena->length;
+    TypeTable table;
+    Arena type_arena = arena_reserve(type_capacity_bytes(capacity));
+    Arena index_arena = arena_reserve(type_index_capacity_bytes(capacity));
+    Arena starved = abi_benchmark_starved_arena();
+    TypeId* chain = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, links);
+    bool valid = chain != 0 && starved.base != 0 && type_initialize(&table, &type_arena, &index_arena, capacity);
+    Arena abi_arena = arena_reserve(valid ? abi_capacity_bytes(table.types.capacity) : 0);
+    for (uint32_t i = 0; valid && i < links; i += 1)
+    {
+        chain[i] = type_tag(&table, BUSTER_TYPE_KIND_STRUCT, i + 1);
+        valid = chain[i] != 0;
+    }
+    const TypeRecordAttributes attributes = {
+        .packed = false,
+        .pack_log2 = 0,
+        .alignment_log2 = 0,
+    };
+    for (uint32_t i = links; valid && i > 0; i -= 1)
+    {
+        const TypeMember member = {
+            .name = 1,
+            .type = i == links ? BUSTER_TYPE_INT : chain[i],
+            .bit_width = BUSTER_TYPE_NOT_BIT_FIELD,
+            .alignment_log2 = 0,
+            .packed = false,
+        };
+        valid = type_complete_record(&table, chain[i - 1], &member, 1, attributes);
+    }
+    AbiTable abi;
+    for (uint32_t route = 0; valid && route < 2; route += 1)
+    {
+        const AbiBenchmarkCase benchmark = {
+            .kind = BUSTER_ABI_BENCHMARK_CLASSIFY_ALL,
+            .name = route == 0 ? "chain" : "chain-starved",
+            .table = &table,
+            .abi = &abi,
+            .arena = &abi_arena,
+            .vector_bytes = BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES,
+            .items = links,
+            .classified = links,
+            .starved = route == 0 ? 0 : &starved,
+        };
+        valid = abi_benchmark_prepare(&benchmark) && abi_benchmark_execute(&benchmark);
+        for (uint32_t i = 0; valid && i < links; i += 1)
+        {
+            const uint32_t index = chain[i] >> BUSTER_TYPE_INDEX_SHIFT;
+            const uint32_t integer = BUSTER_TYPE_INT >> BUSTER_TYPE_INDEX_SHIFT;
+            valid = abi.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES] == abi.rows[(uint64_t)integer * BUSTER_ABI_ROW_BYTES] && abi.stack_bytes[index] == 8;
+        }
+        valid = valid && abi_benchmark_measure(&benchmark, counters, &samples);
+        if (valid)
+        {
+            printf("a chain of %u records against the table's order, %s\n", links, route == 0 ? "with scratch" : "with no scratch");
+            abi_benchmark_print(benchmark.name, &samples, "type", 0, 0);
+        }
+    }
+    if (!valid)
+    {
+        fprintf(stderr, "benchmark-calling-convention: the reversed chain failed or classified otherwise than {int}\n");
+    }
+    arena_release(&starved);
+    arena_release(&abi_arena);
+    arena_release(&index_arena);
+    arena_release(&type_arena);
+    arena_pop_to(arena, length);
+    return valid;
+}
+
 static bool abi_benchmark_classification(const AbiBenchmarkWorld* world, Arena* arena, AbiBenchmarkOptions options, AbiBenchmarkCounters counters)
 {
     const TypeTable* table = &world->table;
@@ -1029,6 +1203,8 @@ static bool abi_benchmark_classification(const AbiBenchmarkWorld* world, Arena* 
             valid = abi_benchmark_classify_all(world, &tables, w, classified, options, counters);
         }
         valid = valid && abi_benchmark_batches(world, &tables, types, classified, arena, counters);
+        valid = valid && abi_benchmark_classify_starved(world, &tables, classified, counters);
+        valid = valid && abi_benchmark_chain(arena, counters);
     }
     abi_benchmark_tables_close(&tables);
     arena_pop_to(arena, length);
@@ -1277,7 +1453,7 @@ static bool abi_benchmark_calls(AbiBenchmarkCalls* calls, const AbiBenchmarkPool
     return result;
 }
 
-// What abi_assign leaves to its per-call fallback, abi_assign_call, and why (a call may have several reasons).
+// What abi_assign leaves to its per-call kernel, abi_assign_lanes, and why (a call may have several reasons).
 typedef struct AbiBenchmarkDeferred AbiBenchmarkDeferred;
 struct AbiBenchmarkDeferred
 {
@@ -1293,9 +1469,9 @@ struct AbiBenchmarkDeferred
     uint32_t long_calls;
 };
 
-// abi_assign's rules for which calls go to abi_assign_call, mirrored here a call at a time (keep them in step with
-// abi_assign's deferred_lanes), since its results don't tell: the fallback's are the same. The prefix sums of a call's
-// registers and stack slots count every argument that needs a register as using it, so a call goes to the fallback when an
+// abi_assign's rules for which calls go to abi_assign_lanes, mirrored here a call at a time (keep them in step with
+// abi_assign's deferred_lanes), since its results don't tell: the kernel's are the same. The prefix sums of a call's
+// registers and stack slots count every argument that needs a register as using it, so a call goes to the kernel when an
 // argument is UNCOUNTED, doesn't fit (the sum of a class it needs past the registers) while a register it needs is
 // still free (inexact), goes to the stack at an offset its alignment doesn't divide or aligned to more than 32 bits hold
 // (padded), is a named WIDE vector of a variadic call, is on the stack with a slot that depends on clang's count (EMPTY,
@@ -1452,11 +1628,73 @@ static bool abi_benchmark_assign_mix(const AbiTable* abi, const TypeTable* table
                    benchmark.name, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES, calls.count, calls.variadic_count, calls.argument_count, arguments / calls.count,
                    100.0 * kinds[BUSTER_ABI_LOCATION_REGISTERS] / arguments, 100.0 * kinds[BUSTER_ABI_LOCATION_STACK] / arguments,
                    100.0 * kinds[BUSTER_ABI_LOCATION_SPLIT] / arguments, 100.0 * kinds[BUSTER_ABI_LOCATION_IGNORE] / arguments);
-            printf("%s: the vector path left %.2f%% of the arguments (%u calls, %.2f%%) to abi_assign_call: %u calls uncounted, %u inexact, %u padded, %u named wide, "
+            printf("%s: the vector path left %.2f%% of the arguments (%u calls, %.2f%%) to abi_assign_lanes: %u calls uncounted, %u inexact, %u padded, %u named wide, "
                    "%u empty, %u general low, %u demoted, %u long\n",
                    benchmark.name, 100.0 * (double)deferred.arguments / arguments, deferred.calls, 100.0 * deferred.calls / calls.count, deferred.uncounted, deferred.inexact,
                    deferred.padded, deferred.wide_named, deferred.empty, deferred.general_low, deferred.demoted, deferred.long_calls);
             abi_benchmark_print(benchmark.name, &samples, "argument", 0, 0);
+        }
+        // The same calls, each assigned alone; and for the mix, only the calls the prefix sums leave to the per-call
+        // kernel, each alone (single signatures whose kernel runs one lane of eight).
+        AbiBenchmarkCase alone_case = benchmark;
+        alone_case.kind = BUSTER_ABI_BENCHMARK_ASSIGN_ALONE;
+        alone_case.name = simple ? "simple-alone" : "assign-alone";
+        valid = valid && abi_benchmark_measure(&alone_case, counters, &samples);
+        if (valid)
+        {
+            abi_benchmark_print(alone_case.name, &samples, "argument", 0, 0);
+        }
+        if (valid && !simple && deferred.calls != 0)
+        {
+            // The deferred calls' columns, gathered: each call alone through abi_benchmark_deferred.
+            TypeId* kept_results = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, deferred.calls);
+            uint32_t* kept_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, deferred.calls);
+            uint32_t* kept_named = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, deferred.calls);
+            uint8_t* kept_variadic = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, deferred.calls);
+            TypeId* kept_arguments = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, deferred.arguments + 1);
+            valid = kept_results != 0 && kept_counts != 0 && kept_named != 0 && kept_variadic != 0 && kept_arguments != 0;
+            uint32_t kept = 0;
+            uint64_t kept_total = 0;
+            uint64_t first = 0;
+            for (uint32_t c = 0; valid && c < signatures.count; c += 1)
+            {
+                const AbiSignatures one = {
+                    .results = signatures.results + c,
+                    .counts = signatures.counts + c,
+                    .named = signatures.named + c,
+                    .variadic = signatures.variadic + c,
+                    .count = 1,
+                    .arguments = signatures.arguments + first,
+                };
+                if (abi_benchmark_deferred(abi, one).calls != 0)
+                {
+                    kept_results[kept] = signatures.results[c];
+                    kept_counts[kept] = signatures.counts[c];
+                    kept_named[kept] = signatures.named[c];
+                    kept_variadic[kept] = signatures.variadic[c];
+                    memcpy(kept_arguments + kept_total, signatures.arguments + first, signatures.counts[c] * sizeof(TypeId));
+                    kept_total += signatures.counts[c];
+                    kept += 1;
+                }
+                first += signatures.counts[c];
+            }
+            AbiBenchmarkCase deferred_case = alone_case;
+            deferred_case.name = "deferred-alone";
+            deferred_case.items = kept_total;
+            deferred_case.signatures = (AbiSignatures){
+                .results = kept_results,
+                .counts = kept_counts,
+                .named = kept_named,
+                .variadic = kept_variadic,
+                .count = kept,
+                .arguments = kept_arguments,
+            };
+            valid = valid && kept_total != 0 && abi_benchmark_measure(&deferred_case, counters, &samples);
+            if (valid)
+            {
+                printf("deferred-alone: the %u calls (%" PRIu64 " arguments) the prefix sums leave, each alone\n", kept, kept_total);
+                abi_benchmark_print(deferred_case.name, &samples, "argument", 0, 0);
+            }
         }
     }
     if (!valid)

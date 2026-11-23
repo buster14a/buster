@@ -520,6 +520,8 @@ actions. The option remains off by default; the post-merge measurements below de
   anything:
   - a unit whose bodies take fewer than `BUSTER_CHECK_DEFERRED_COMPILE_LANES` (4) lanes, or two
     with `--lanes N` (below);
+  - without `--lanes N`, a unit with a dominant body: its bodies' tokens beyond their critical path
+    are less than half the unit's (`check_deferred_dominant`, #1668, reported as "a dominant body");
   - a unit with a `#pragma clang section` line, which the merge doesn't take
     (`check_deferred_sections`);
   - a prefix, a repair and `-flazy-system-headers`' selection;

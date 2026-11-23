@@ -327,6 +327,11 @@ precision on registers, each 4 cycles' latency, 2 per cycle and one macro-op
 Its scatters then added 10 `MEMORY_INDEX` rows, `vpscatterdd` to `vpscatterqq` at every width x86 has: one every 3
 (`vpscatterqq` of 16 bytes) to 17 cycles (`vpscatterdd` of 64), 16 to 88 macro-ops, and no latency, as a scatter has
 no result (the harness's scatter takes no chain through its index) (the same record).
+[#1387](https://github.com/buster14a/buster/issues/1387)'s positive one (#3140) then added `FLD1` on registers,
+measured as `FLDZ` is (a push and the `fstp st0` that pops it) by one `--missing --table` process on the 9700X
+(CPU 2, under the lock, built `BUSTER_DEBUG_INFO=0` at `4704727a` with the change): its row is `FLDZ`'s, a push
+every 1.1 cycles, one macro-op on the FP pipes
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x87-fld1-row-1387-2026-11-23)).
 
 What the rows say, a few families (cycles; derived values in italics):
 
@@ -369,6 +374,19 @@ rows: the objects of `sqlite3.c`, speedtest1 and Lua's 34 files at Tier 0 and
 `--tier1`, at the default target and `-march=znver5`, are the same bytes from
 `main` and this change (Tier 0's `inc` and `dec` still cost no more than `add`
 and `sub`, and every rematerialized copy still costs no more than its reload).
+
+[#2830](https://github.com/buster14a/buster/issues/2830) added 63 rows: `vzeroupper`, and
+the VEX twins of the legacy SSE forms Tier 1 selects (`tier1_emit_vex`): `vmovss`, `vmovsd`
+and `vmovaps` stores, the scalar arithmetic, `vucomis*`, `vcmps*`, the conversions, `vmovd`
+and `vmovq` between register files, and `vpaddq`, each at its legacy form's operand kinds.
+They were measured by one `--missing --table` process on the 9700X (CPU 2, under the lock,
+built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0` at the change). Each twin has its legacy form's
+latency and throughput but `vmovd` and `vmovq` into an xmm register: 2.5 cycles and one
+macro-op, against the legacy forms' 4.5 cycles and two. The arithmetic's memory forms block
+fewer pipes, and the scalar loads' address path is 4.5 cycles rather than 4. `vzeroupper`
+has a throughput of one per cycle and one macro-op. The same process printed every other row as committed. The 2,084 rows share
+218 IDs. [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-upper-state-2830-2026-11-23)
+has the process's output.
 
 ## Consumers
 
