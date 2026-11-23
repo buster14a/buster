@@ -5557,6 +5557,70 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             parser->error_resume_end = end;
         }
     }
+    // A GNU attribute's expression argument a stray token follows (#2914, `aligned(8 8)`), clang's ParseGNUAttributeArgs then
+    // ParseGNUAttributes: "expected ')'" twice at the argument's end, a third at the end of the attribute's `)` where more of
+    // the list follows it, the list skipped through its `)`; the specifier's last `)` is left over, the declaration's error
+    // at it: after a declarator "extraneous ')' before ';'" where its `;` follows, else clang's ParseDeclGroup's (a
+    // function's body, the top level's `;`, a block's, a member's), or before one "expected identifier or '('". The view
+    // drops the attribute and the rest of its list, `__attribute__(())`, where the `)` was extraneous or the attribute is
+    // among the specifiers; else the declarator's tail to its `;`, which clang skips. (Not a counted_by family's or a type
+    // argument's group: their own recovery.)
+    const ParseFrame* list = call != NULL && call > parser->frames ? call - 1 : NULL;
+    const ParseFrame* specifier = list != NULL && list > parser->frames ? list - 1 : NULL;
+    const ParseFrame* outer = specifier != NULL && specifier > parser->frames ? specifier - 1 : NULL;
+    const bool stray = call != NULL && call->role == PARSE_ROLE_OPEN_CALL && parse_scalar_gnu_attribute_group(parser, call) &&
+                       (call->flags & BUSTER_PARSE_FRAME_DECLARATION) == 0 && parse_scalar_counted_attribute(parser, call) == 0 &&
+                       parser->error_message == PARSE_MESSAGE_EXPECTED_R_PAREN && at > call->opener + 1 && at < parser->count && !parser->error_resumed &&
+                       specifier != NULL && outer != NULL && specifier->opener > 0 &&
+                       (specifier->role == PARSE_ROLE_OPEN_ATTRIBUTE || specifier->role == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER) &&
+                       parser->kinds[specifier->opener - 1] == PARSE_KIND_ATTRIBUTE;
+    bool stray_balanced = stray;
+    const uint32_t stray_argument_end = stray ? parse_scalar_attribute_skip_group(parser, call->opener, &stray_balanced, false) : 0;
+    const uint32_t stray_list_end = stray_balanced ? parse_scalar_attribute_skip_group(parser, list->opener, &stray_balanced, false) : 0;
+    const uint32_t stray_end = stray_balanced ? parse_scalar_attribute_skip_group(parser, specifier->opener, &stray_balanced, false) : 0;
+    // (The specifier's last `)`, which clang leaves over; and the end of the declaration, its `;`.)
+    const uint32_t leftover = stray_balanced && stray_end > 0 ? stray_end - 1 : BUSTER_PARSE_NONE;
+    uint32_t semicolon = leftover;
+    bool stray_ended = leftover != BUSTER_PARSE_NONE;
+    while (stray_ended && semicolon < parser->count && parser->kinds[semicolon] != PARSE_KIND_SEMI)
+    {
+        const uint8_t kind = parser->kinds[semicolon];
+        if (semicolon != leftover && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE))
+        {
+            semicolon = parse_scalar_attribute_skip_group(parser, semicolon, &stray_ended, false);
+        }
+        else
+        {
+            stray_ended = semicolon == leftover || !parse_kind_is_closer(kind);
+            semicolon += 1;
+        }
+    }
+    stray_ended &= semicolon < parser->count && parser->kinds[semicolon] == PARSE_KIND_SEMI;
+    const bool after_declarator = specifier != NULL && specifier->role == PARSE_ROLE_OPEN_ATTRIBUTE;
+    const bool member = outer != NULL && outer->role == PARSE_ROLE_OPEN_STRUCT;
+    const bool block = outer != NULL && parse_frame_is_block(outer);
+    const uint32_t keyword = specifier != NULL && specifier->opener > 0 ? specifier->opener - 1 : BUSTER_PARSE_NONE;
+    const bool function = after_declarator && !member && !block && keyword != BUSTER_PARSE_NONE && keyword > 0 && parser->roles[keyword - 1] == PARSE_ROLE_CLOSE_FUNCTION;
+    const bool extraneous = after_declarator && !member && !function && leftover != BUSTER_PARSE_NONE && leftover + 1 < parser->count &&
+                            parser->kinds[leftover + 1] == PARSE_KIND_SEMI;
+    // (An attribute among the specifiers is dropped alone too: its declaration may begin the unit, where a deletion from
+    // its keyword, token 0, would be none. Its declarator then stays declared, where clang's skip leaves it unread.)
+    const bool drop_attribute = extraneous || !after_declarator;
+    const bool stray_resumed = stray_ended && (drop_attribute || keyword != BUSTER_PARSE_NONE);
+    if (stray_resumed)
+    {
+        parser->error_resumed = true;
+        parser->error_resume_delete = true;
+        parser->error_resume_begin = drop_attribute ? call->opener - 1 : keyword;
+        parser->error_resume_end = drop_attribute ? stray_list_end - 1 : semicolon;
+    }
+    const uint8_t stray_message = !after_declarator ? PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN : member ? PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST :
+                                  function ? PARSE_MESSAGE_EXPECTED_FUNCTION_BODY : extraneous ? PARSE_MESSAGE_EXTRANEOUS_BEFORE_SEMI :
+                                  block ? PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION : PARSE_MESSAGE_EXPECTED_SEMI_AFTER_TOP_LEVEL_DECLARATOR;
+    const uint8_t stray_place = stray_message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST || stray_message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION ||
+                                stray_message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_TOP_LEVEL_DECLARATOR ? BUSTER_PARSE_AFTER_PREVIOUS : BUSTER_PARSE_AT_TOKEN;
+    // (The attribute's `)`, after which more of its list follows: the third "expected ')'".)
+    const uint32_t stray_third = stray_resumed && stray_argument_end < stray_list_end - 1 ? stray_argument_end : BUSTER_PARSE_NONE;
     if (call != NULL && call->role == PARSE_ROLE_OPEN_TERNARY && parser->error_message == PARSE_MESSAGE_EXPECTED_COLON &&
         at < parser->count && parse_argument_delimiter(parser->kinds[at]) && (parser->flags[at] & BUSTER_PARSE_RECOVERY_ARGUMENT) != 0)
     {
@@ -5594,6 +5658,25 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
         parser->diagnostic_count += 1;
     }
     parser->errors += 1;
+    // A stray attribute argument's further errors (#2914): its second "expected ')'", the attribute's, and the declaration's.
+    const ParseDiagnostic stray_diagnostics[3] =
+    {
+        { .token = parser->error_token, .argument = BUSTER_PARSE_NONE, .message = PARSE_MESSAGE_EXPECTED_R_PAREN, .place = parser->error_place, .error = true,
+          .note = BUSTER_PARSE_NONE, .consequent = true },
+        { .token = stray_third, .argument = BUSTER_PARSE_NONE, .message = PARSE_MESSAGE_EXPECTED_R_PAREN, .place = BUSTER_PARSE_AFTER_PREVIOUS, .error = true,
+          .note = BUSTER_PARSE_NONE, .consequent = true },
+        { .token = leftover, .argument = extraneous ? leftover : BUSTER_PARSE_NONE, .message = stray_message, .place = stray_place, .error = true,
+          .note = BUSTER_PARSE_NONE, .consequent = true },
+    };
+    for (uint32_t d = 0; stray_resumed && d < 3; d += 1)
+    {
+        if (stray_diagnostics[d].token != BUSTER_PARSE_NONE && parser->diagnostic_count < parser->diagnostic_capacity)
+        {
+            parser->diagnostics[parser->diagnostic_count] = stray_diagnostics[d];
+            parser->diagnostic_count += 1;
+            parser->errors += 1;
+        }
+    }
     if (parser->error_follow_token != BUSTER_PARSE_NONE && parser->error_follow_paren != BUSTER_PARSE_NONE && parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){

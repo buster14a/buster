@@ -3155,6 +3155,41 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // A GNU attribute's argument a stray token follows (#2914, clang's ParseGNUAttributeArgs and ParseGNUAttributes): "expected ')'"
+        // twice, a third where more of the list follows, and the declaration's "extraneous ')' before ';'"; no undeclared name's error.
+        .name = "attributes' stray argument tokens after declarators",
+        .source =
+                  "int y __attribute__((aligned(8 8)));\n"
+                  "int n; int z __attribute__((aligned(n n)));\n"
+                  "int y2 __attribute__((aligned(8 8, 4)));\n"
+                  "int y3 __attribute__((aligned(8 8), unused));\n",
+        .errors = 13,
+        .c23 = true,
+    },
+    {
+        // The same with the declaration's other ends (#2914): "expected ';' after top level declarator" and a function's body.
+        .name = "attributes' stray argument tokens before declarators' ends",
+        .source =
+                  "int y4 __attribute__((unused, aligned((8) 8)));\n"
+                  "int y5 __attribute__((aligned(8 8))), z5;\n"
+                  "int y6 __attribute__((aligned(8 8))) = 3;\n"
+                  "void g(void) __attribute__((aligned(8 8)));\n",
+        .errors = 12,
+        .c23 = true,
+    },
+    {
+        // The same in members and a block (#2914), the unit's later warnings given as clang's recovery reads on.
+        .name = "attributes' stray argument tokens in members and blocks",
+        .source =
+                  "struct B { int x __attribute__((aligned(4 4))), y; int z; };\n"
+                  "struct A { int m; int *p __attribute__((aligned(m m))); };\n"
+                  "void f(void) { int w __attribute__((aligned(8 8))) = 1; (void)w; char c = 1000; (void)c; }\n"
+                  "int w = 1.5;\n",
+        .warnings = 2,
+        .errors = 9,
+        .c23 = true,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },

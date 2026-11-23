@@ -871,6 +871,9 @@ struct ParseDiagnostic
     // structurally complete; the checker drops that list's attributes after reading its argument diagnostics.
     // Also marks an unknown type after a block's attribute prefix, diagnosed before those attributes' type checks.
     bool attribute_prefix;
+    // An error that is part of a resumed error's recovery, given after it (#2914: a stray GNU attribute argument's second and
+    // third "expected ')'" and its declaration's error): it stops no recovery round of its own.
+    bool consequent;
     // A balanced malformed type-name tail is removed without inserting a declaration terminator.
     bool resume_delete;
     // A rejected call retains its callee, parentheses and arguments before/after the unread one in the diagnostic
