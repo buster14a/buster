@@ -4864,7 +4864,8 @@ static bool check_driver_jump_kept(const Parser* parser, const CheckInput* input
 // reference (an object clone at T's declaration, a function clone at the pragma's A), A's earlier declaration
 // `declaration` (a token) and every file-scope redeclaration of A that a redeclaration error made invalid before the
 // reference, which resolveKind drops by moving others into its place (#2934: `extern int a;` again after
-// `#pragma weak a = t` puts A's earlier declaration first). Their count, 0 where the notes have no room in `scratch`.
+// `#pragma weak a = t` puts A's earlier declaration first). `declaration` is BUSTER_CHECK_NONE where the clones were made
+// before any declaration of A. Their count, 0 where the notes have no room in `scratch`.
 static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t declaration, const char* message,
                                                    PPOutputDiagnosticNote** notes, Arena* scratch)
 {
@@ -4884,7 +4885,7 @@ static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const C
     {
         capacity += check_input_symbol_invalid_redeclaration(input, parser, input->reports + r, name, token, declaration);
     }
-    const bool room = clones != 0 && declaration < count && capacity + records < BUSTER_CHECK_SYMBOL_INVALID;
+    const bool room = clones != 0 && (declaration < count || declaration == BUSTER_CHECK_NONE) && capacity + records < BUSTER_CHECK_SYMBOL_INVALID;
     PPOutputDiagnosticNote* listed = room ? BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, capacity) : NULL;
     uint64_t* order = listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, capacity) : NULL;
     uint32_t listed_count = 0;
@@ -4898,7 +4899,7 @@ static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const C
             order[listed_count++] = (uint64_t)made << 32 | i;
         }
     }
-    if (order != NULL)
+    if (order != NULL && declaration < count)
     {
         order[listed_count++] = (uint64_t)declaration << 32 | records;
     }
@@ -6845,7 +6846,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             };
                             // An object's set lists each clone made before the reference, where several directives name A.
                             PPOutputDiagnosticNote* listed = NULL;
-                            const uint32_t listed_count = object && report->value < count ?
+                            const uint32_t listed_count = object && (report->value < count || report->value == BUSTER_CHECK_NONE) ?
                                                           check_driver_weak_alias_candidates(parser, input, token, (uint32_t)report->value, candidate, &listed, scratch) : 0;
                             const bool call = token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, listed_count != 0 ? listed : notes,
