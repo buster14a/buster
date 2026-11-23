@@ -572,6 +572,9 @@ static __attribute__((unused)) bool link_initialize(Link* link, Arena* arena, Ar
 static __attribute__((unused)) NameId link_add_name(Link* link, const uint8_t* bytes, uint32_t length);
 // The same with the name's hash given, which the caller computed with link_hash or link_hash_names.
 static __attribute__((unused)) NameId link_add_name_hashed(Link* link, const uint8_t* bytes, uint32_t length, uint64_t hash);
+// link_add_name_hashed for each of `count` names in order, the ones before the first it would fail at (which it fails as
+// it would), their bytes copied with one push: how many it added, the first's id the table's count before.
+static __attribute__((unused)) uint32_t link_add_names(Link* link, const uint8_t* const* names, const uint32_t* lengths, const uint64_t* hashes, uint32_t count);
 // An atom: its id, or 0. Its fixups are added after it, with link_add_fixup or link_add_code_fixups, and its address
 // starts at 0.
 static __attribute__((unused)) AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, uint64_t size, uint8_t* bytes, uint32_t unit);
@@ -794,6 +797,50 @@ static NameId link_add_name_hashed(Link* link, const uint8_t* bytes, uint32_t le
         }
     }
     return result;
+}
+
+// The names that fit, and the first that would fail: past the table's room, or empty. Their copies are contiguous, as
+// link_add_name_hashed's pushes of a byte's alignment make them; a name of fewer than 64 bytes is copied with its NUL by
+// a masked load and store, a longer one by memcpy.
+static uint32_t link_add_names(Link* link, const uint8_t* const* names, const uint32_t* lengths, const uint64_t* hashes, uint32_t count)
+{
+    LinkNames* names_table = &link->names;
+    const uint32_t room = names_table->capacity - names_table->count;
+    uint32_t fitting = count < room ? count : room;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < fitting; i += 1)
+    {
+        fitting = lengths[i] == 0 ? i : fitting;
+        total += lengths[i] == 0 ? 0 : (uint64_t)lengths[i] + 1;
+    }
+    uint8_t* copy = fitting != 0 ? arena_push(link->name_arena, total, 1) : 0;
+    const bool pushed = fitting == 0 || copy != 0;
+    const uint32_t added = pushed ? fitting : 0;
+    const uint32_t first = names_table->count;
+    for (uint32_t i = 0; i < added; i += 1)
+    {
+        const uint32_t length = lengths[i];
+        if (length < 64)
+        {
+            const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, length), names[i]);
+            _mm512_mask_storeu_epi8(copy, _bzhi_u64(~0ull, length + 1), bytes);
+        }
+        else
+        {
+            memcpy(copy, names[i], length);
+            copy[length] = 0;
+        }
+        names_table->bytes[first + i] = copy;
+        names_table->length[first + i] = length;
+        names_table->hash[first + i] = hashes[i];
+        copy += (uint64_t)length + 1;
+    }
+    names_table->count += added;
+    if (added < count)
+    {
+        link_fail(link, !pushed || added == room ? LINK_ERROR_FULL : LINK_ERROR_RECORD);
+    }
+    return added;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
