@@ -142,7 +142,9 @@ requirements. [Command index](README.md).
   runs' table, it prints every pair's medians and a table of the builds by
   compiler, with `--tier1` against clang -O2 and -O0. It isn't allowed with
   `--sizes-only`. The caller's pinning applies, so on one CPU this compiler
-  compiles with one lane, as clang and tcc do.
+  compiles with one lane, as clang and tcc do. The 9700X job passes
+  `--compiles 3` on its dispatched runs (the nightly's), not on a pull
+  request's, whose job it would lengthen by about 40 s.
 - The same command reports **function sizes** separately for SQLite's
   `sqlite3.c` and all **34 Lua sources**, including `luac.c` and its `PrintCode`.
   Each source is compiled to a relocatable object by Tier 1 and Clang `-O0`

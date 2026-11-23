@@ -228,7 +228,7 @@ static void tier1_programs_compiler(const Tier1Programs* p, uint32_t build, Tier
     }
 }
 
-// Build `b`'s files, its outputs in `directory`. Returns whether every path fits.
+// The files of build `b`'s commands, its outputs in `directory`, into `f`. Returns whether every path fits.
 static bool tier1_programs_files(const Tier1Programs* p, uint32_t b, const char* directory, Tier1ProgramsFiles* f)
 {
     const char* file = p->files[b];

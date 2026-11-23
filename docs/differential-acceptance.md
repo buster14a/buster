@@ -137,6 +137,22 @@ external runtime/header installation as well. Publish durable evidence through
 do not commit raw campaign captures to this source repository. This command is
 a rerun recipe, not a claim that requalification was executed in the audit.
 
+## Later campaigns
+
+The same harness has run again at later revisions, each campaign both tiers
+against clang -O0 and -O2:
+
+| Date | Buster revision | Programs | All four modes agree | Mismatches | Record |
+| --- | --- | ---: | ---: | ---: | --- |
+| 2026-11-14 | `6651dfb8` | 80 per campaign, 10 campaigns of #139's pass settings | 66 each | 0 | [#139's](https://github.com/buster14a/buster-performance/tree/c61db97a94c50c8f896ac5f4a58fb35bb44a23fe/docs/measurements/ssa-passes-139-2026-11-14) |
+| 2026-11-23 | `2e2d7674` | 300 (150 per generator) | 242 | 0 | [#138's](https://github.com/buster14a/buster-performance/tree/6a9b30d3a795be8e260c04f2557f31c2e3eb1201/docs/measurements/tier1-acceptance-138-2026-11-23) |
+
+#2541's step 2 also ran 1,400 programs by `--tier1`, `--tier1
+--tier1-no-inline` and clang ([the unit inlining design](tier1-unit-inlining.md)'s
+"Step 2, measured"). In every campaign, each failed case fails first in a step
+of clang's own. #138's record breaks its 58 down; the [Tier 1
+guide](tier1.md)'s "#138's acceptance" summarizes them.
+
 [record]: https://github.com/buster14a/buster-performance/blob/1d3f174114cb24d6e4d876e3c8361ee884990050/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5/README.md
 [command]: https://github.com/buster14a/buster-performance/blob/1d3f174114cb24d6e4d876e3c8361ee884990050/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5/9700x/queue-d.sh
 [ledger]: https://github.com/buster14a/buster-performance/blob/1d3f174114cb24d6e4d876e3c8361ee884990050/docs/measurements/tier1-cfg-allocation-140-2026-10-31/step5/9700x/head-2fa64125/campaign-cases.tsv
