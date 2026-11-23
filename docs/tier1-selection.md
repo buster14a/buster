@@ -512,8 +512,10 @@ patterns are:
   can feed `cvtsi2s*` directly. A float or double load can feed `cvtts*2si` directly
   for signed 32- or 64-bit results and unsigned 32-bit results. The latter uses
   the 64-bit destination. A conversion to a floating value
-  zeroes its destination first, but a resize: `cvtsi2s*` writes its low element
-  alone, which would otherwise wait for the register's last writer. An unsigned
+  zeroes its destination first, and so does a resize into another register
+  than its operand's (#3308; in place the zero would clobber the operand):
+  `cvtsi2s*`, `cvtss2sd` and `cvtsd2ss` write their low element alone, which
+  would otherwise wait for the register's last writer. An unsigned
   64-bit integer's conversions use the fixed-register path
   (`TIER1_RULE_FLOAT_CONVERT_WIDE`). For integer to floating, an output target
   admitting the unsigned qword register form uses `xorps` followed by
@@ -725,8 +727,10 @@ patterns are:
   put in rdi; `test-tier1-emit`'s code certificate fixtures run such a call
   natively and refuse its move into rdi left out. A
   return loads the parts staged below rsp (the frame stays out of the red zone),
-  or copies the bytes through the hidden pointer that the entry stored, which
-  rax returns.
+  but a whole register's part (a split vector's, and since #3299 a whole
+  eightbyte's) straight from the result's address, the address's own register
+  last (`tier1_select_result_order`), or copies the bytes through the hidden
+  pointer that the entry stored, which rax returns.
   `test-checker-driver`'s overflow-staging fixture cross-links four, five,
   eight and nine vector arguments, mixed integer aggregate parts, repeated
   values, and dynamic and indirect callers with clang. Both v3 and v4 policies,

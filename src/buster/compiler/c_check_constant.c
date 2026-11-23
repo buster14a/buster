@@ -2964,6 +2964,91 @@ static CheckConstantRange check_constant_action_source(const CheckConstantInput*
     return result;
 }
 
+// A real/imaginary component remains a designator for address and type queries. Its consuming action may read the
+// whole complex receipt and select the component without changing that stored designator. The parsed reader has
+// the checked base value; raw attribute slices can recover a direct complex object's base from its receipt.
+static bool check_constant_component_operand(CheckConstantInput* input, const CheckAction* action, uint32_t first,
+                                              const CheckConstantRange* ranges, uint32_t slot, CheckValue* value)
+{
+    CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const CheckValue* operand = action->operands + slot;
+    bool result = false;
+    if (operand->category == CHECK_LVALUE && operand->constant_kind == CHECK_CONSTANT_ADDRESS &&
+        operand->fault == CHECK_FAULT_NONE && (operand->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART)) == 0 &&
+        (type_qualifiers(operand->type) & BUSTER_TYPE_VOLATILE) == 0)
+    {
+        CheckConstantRange source = { .first = BUSTER_CHECK_NONE, .end = BUSTER_CHECK_NONE };
+        if (!input->raw)
+        {
+            for (uint32_t i = 0; i < slot && first >= input->first && first < input->end; i += 1)
+            {
+                first = input->next_value[first - input->first];
+            }
+            source.first = check_constant_enum_leaf(input, first);
+            source.end = source.first >= input->first && source.first < input->end ? reader->ends[source.first] + 1 : BUSTER_CHECK_NONE;
+        }
+        else
+        {
+            source = check_constant_action_source(input, first, ranges, slot);
+            while (source.first < source.end && source.end <= input->end && parser->tokens.kinds[source.first] == PARSE_KIND_L_PAREN &&
+                   parser->tree.parents[source.first] == source.end - 1)
+            {
+                source.first += 1;
+                source.end -= 1;
+            }
+        }
+        const bool component = source.first >= input->first && source.first < source.end && source.end <= input->end &&
+                               parser->tokens.kinds[source.first] == PARSE_KIND_REAL_IMAG;
+        CheckValue base = { 0 };
+        if (component && !input->raw)
+        {
+            for (uint32_t child = reader->first_child[source.first]; child != BUSTER_CHECK_NONE && base.type == 0; child = reader->next_child[child])
+            {
+                const uint32_t root = child >= input->first && child < input->end ? input->first_value[child - input->first] : BUSTER_CHECK_NONE;
+                if (root >= input->first && root < input->end)
+                {
+                    base = input->values[root - input->first];
+                }
+            }
+        }
+        else if (component)
+        {
+            const CheckConstObject* receipt = check_const_find(action->context.const_values, operand->object, action->context.source_position, NULL);
+            if (receipt != NULL && check_action_kind(reader->types, receipt->type) == BUSTER_TYPE_KIND_COMPLEX)
+            {
+                base = *operand;
+                base.type = receipt->type;
+                base.offset = 0;
+            }
+        }
+        if (base.type != 0 && check_action_kind(reader->types, base.type) == BUSTER_TYPE_KIND_COMPLEX)
+        {
+            const bool imaginary = parser->tokens.names[source.first] == C_NAME_GNU_IMAG || parser->tokens.names[source.first] == C_NAME_GNU_IMAG2;
+            const TypeId element = type_element(reader->types, type_strip_aligned(reader->types, base.type));
+            const uint64_t offset = (uint64_t)base.offset + (imaginary ? type_size(reader->types, element) : 0);
+            const bool matches = base.object == operand->object && offset == (uint64_t)operand->offset &&
+                                 type_unqualified(type_strip_aligned(reader->types, element)) == type_unqualified(type_strip_aligned(reader->types, operand->type));
+            if (matches)
+            {
+                CheckAction read = *action;
+                read.operands[0] = base;
+                read.context.constant_evaluated = true;
+                CheckActionResult converted = { 0 };
+                const CheckValue loaded = check_action_operand(reader->types, &read, &converted, 0);
+                reader->output->resource |= converted.diagnostic == CHECK_DIAG_RESOURCE;
+                result = converted.diagnostic == CHECK_DIAG_NONE && loaded.constant_kind == CHECK_CONSTANT_COMPLEX && check_value_evaluated_constant(&loaded);
+                if (result)
+                {
+                    *value = check_complex_component(reader->types, &loaded, imaginary);
+                    check_action_inherit(value, operand);
+                }
+            }
+        }
+    }
+    return result;
+}
+
 static void check_constant_action(CheckConstantInput* input, const CheckAction* action, uint32_t callee,
                                    const CheckConstantRange* ranges, CheckActionResult* checked)
 {
@@ -3120,6 +3205,28 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
         if (valid)
         {
             check_action_scalar(reader->types, &resolved, checked);
+            if (checked->diagnostic == CHECK_DIAG_NONE)
+            {
+                bool loaded = false;
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    if ((checked->conversions[i].flags & BUSTER_CHECK_CONVERT_LVALUE) != 0)
+                    {
+                        loaded |= check_constant_component_operand(input, action, callee, ranges, i, resolved.operands + i);
+                    }
+                }
+                if (loaded)
+                {
+                    CheckActionResult proof;
+                    check_action_scalar(reader->types, &resolved, &proof);
+                    check_action_diagnose(checked, proof.diagnostic, proof.diagnostic_operand);
+                    if (proof.diagnostic == CHECK_DIAG_NONE)
+                    {
+                        checked->value = proof.value;
+                        checked->warnings |= proof.warnings;
+                    }
+                }
+            }
             // A call of a plain library builtin's declaration that clang folds (#148) folds here as in the graph.
             if (action->op == CHECK_OP_CALL && callee < reader->parser->tokens.count)
             {
@@ -3202,6 +3309,16 @@ static void check_constant_action(CheckConstantInput* input, const CheckAction* 
             event.payload.data = check_input_operand_spelling(reader, reader->output->graph.operand1[node]);
         }
         check_input_warning_once(reader, &event);
+    }
+    if (action->op == CHECK_OP_LOGICAL_AND || action->op == CHECK_OP_LOGICAL_OR)
+    {
+        // Logical operands are checked as their expression is built, including type/query operands whose graph is erased.
+        CheckAction warning = *action;
+        if (checked->diagnostic == CHECK_DIAG_NONE)
+        {
+            check_constant_component_operand(input, action, callee, ranges, 1, warning.operands + 1);
+        }
+        check_input_constant_logical_warning(reader, &warning, checked, reader->ends[action->node] + 1);
     }
 }
 

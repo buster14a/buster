@@ -1956,6 +1956,9 @@ typedef enum PPSeverity
 typedef enum PPDiagnosticPhase
 {
     PP_DIAGNOSTIC_LEXICAL,
+    // A function's CFG observer's warnings (#2990, check_common_cfg_tautologies): clang builds the CFG at the body's end
+    // before it gives the body's queued runtime warnings.
+    PP_DIAGNOSTIC_CFG,
     PP_DIAGNOSTIC_DEFERRED,
     PP_DIAGNOSTIC_RETURN,
     // A declarator's completed type precedes declaration-attribute checks at the same parser boundary.

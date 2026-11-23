@@ -222,6 +222,8 @@ static uint32_t tier0_test_scan_values(uint32_t kind, uint32_t entry, uint32_t c
         values[n++] = 1;
         values[n++] = BUSTER_TIER0_MAX_COPY_BYTES;
         values[n++] = BUSTER_TIER0_MAX_COPY_BYTES + 1;
+        values[n++] = BUSTER_TIER0_MAX_COPY_VALUE;
+        values[n++] = BUSTER_TIER0_MAX_COPY_VALUE + 1;
         break;
     case BUSTER_TYPED_PTR_ADD:
         values[n++] = 0;

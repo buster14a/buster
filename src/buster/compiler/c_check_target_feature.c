@@ -875,7 +875,7 @@ static bool check_target_feature_join(CheckTargetFeatureEmission* emission, Chec
     const uint32_t region = op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < input->token_count ?
                             input->expression_regions[graph->tokens[node]] : 0;
     const bool statements = region != 0 && (region > program->region_count || program->regions[region - 1].count != 1);
-    return (decided && !select && (labeled || !check_program_runtime_truth(program, node, graph->operand0[node], &truth))) ||
+    return (decided && !select && (labeled || !check_program_emission_truth(program, node, graph->operand0[node], &truth))) ||
            op == CHECK_OP_VARARGS || statements;
 }
 
@@ -902,7 +902,7 @@ static uint32_t check_target_feature_operand(CheckTargetFeatureEmission* emissio
         const uint32_t region = graph->tokens[node] < input->token_count ? input->expression_regions[graph->tokens[node]] : 0;
         result = k == 0 && region != 0 && region <= program->region_count ? program->regions[region - 1].result : BUSTER_CHECK_NONE;
     }
-    else if (decided && !labeled && check_program_runtime_truth(program, node, operands[0], &truth))
+    else if (decided && !labeled && check_program_emission_truth(program, node, operands[0], &truth))
     {
         // `1 && x` and `0 || x` emit x alone, `0 && x` and `1 || x` nothing; `c ? a : b` the arm c selects — a label
         // inside the condition keeps the fold out, so every operand's code goes.
@@ -1827,7 +1827,7 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
         // whatever its value; a constant one has no branch where it can't go: back from `do ... while (0)`, out of
         // `while (1)`. A label inside the condition keeps clang's ConstantFoldsToSimpleInteger from folding it.
         bool truth = false;
-        const bool known = check_program_runtime_truth(program, entry->node, entry->node, &truth) &&
+        const bool known = check_program_emission_truth(program, entry->node, entry->node, &truth) &&
                            !(entry->node < program->input->graph.count && emission->node_labeled[entry->node] != 0);
         const bool branch = entry->kind == CHECK_CONTROL_BRANCH_TRUE ? !known || truth : loop == 2 || !known || !truth;
         check_x86_diagnostic_push(walk, entry->node, false);
@@ -1843,7 +1843,7 @@ static void check_target_feature_control(CheckX86DiagnosticWalk* walk, CheckTarg
         // holds a label, or a case of a switch outside it (ConstantFoldsToSimpleInteger and ContainsLabel, which also
         // keeps the condition itself from folding where it holds a label).
         bool truth = false;
-        const bool known = check_program_runtime_truth(program, entry->node, entry->node, &truth) &&
+        const bool known = check_program_emission_truth(program, entry->node, entry->node, &truth) &&
                            !(entry->node < program->input->graph.count && emission->node_labeled[entry->node] != 0);
         check_x86_diagnostic_push(walk, entry->node, false);
         uint32_t body = BUSTER_CHECK_NONE;
@@ -1899,26 +1899,25 @@ static void check_target_feature_expression(CheckX86DiagnosticWalk* walk, CheckT
         // A label inside the condition keeps clang's ConstantFoldsToSimpleInteger from folding it: every operand's
         // code emits, whichever the constant would have left out.
         const bool labeled_condition = check_target_feature_labeled(emission, program, operands[0]);
-        if (labeled_condition)
-        {
-            for (uint32_t k = 1; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
-            {
-                if (operands[k] < graph->count)
-                {
-                    check_x86_diagnostic_push(walk, operands[k], false);
-                }
-            }
-        }
         bool truth = false;
-        if (!labeled_condition && check_program_runtime_truth(program, node, operands[0], &truth))
+        const CheckEmissionTruth known = labeled_condition ? CHECK_EMISSION_UNKNOWN : check_program_emission_truth(program, node, operands[0], &truth);
+        if (known != CHECK_EMISSION_UNKNOWN && (op == CHECK_OP_CONDITIONAL || truth == (op == CHECK_OP_LOGICAL_OR)))
         {
-            const uint32_t skipped = op == CHECK_OP_CONDITIONAL ? operands[truth ? 2 : 1] :
-                                    truth == (op == CHECK_OP_LOGICAL_OR) ? operands[1] : BUSTER_CHECK_NONE;
-            if (skipped < graph->count && check_target_feature_labeled(emission, program, skipped))
+            const uint32_t skipped = op == CHECK_OP_CONDITIONAL && truth ? 2 : 1;
+            if (!check_target_feature_labeled(emission, program, operands[skipped]))
             {
-                check_x86_diagnostic_push(walk, skipped, false);
+                operands[skipped] = BUSTER_CHECK_NONE;
             }
         }
+        if (known == CHECK_EMISSION_INITIALIZER)
+        {
+            operands[0] = BUSTER_CHECK_NONE;
+        }
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
+        {
+            check_x86_diagnostic_push(walk, operands[k], false);
+        }
+        return;
     }
     else if (op == CHECK_OP_STATEMENT_VALUE && graph->tokens[node] < program->input->token_count)
     {

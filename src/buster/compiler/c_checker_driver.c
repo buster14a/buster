@@ -4592,9 +4592,12 @@ static const char* check_driver_overload_operand(const Parser* parser, Preproces
 // its `from`th (its check refused the first, check_graph_overload_operands), its index in `*index`, and whether clang reads
 // it as that call and goes on to the node's next operand, as BuildBinOp and CheckConditionalOperands do (`*recovers`); NULL
 // for any other report, an initialization's, an assignment's source, a return's and a call's among them
-// (check_driver_overload_address, check_driver_overload_operand).
-static const char* check_driver_overload_unresolved(const Parser* parser, const CheckStream* stream, const TypeTable* types, const CheckReport* report,
-                                                    uint32_t from, uint32_t* located, PPOutputDiagnosticNote* notes, uint32_t* index, bool* recovers)
+// (check_driver_overload_address, check_driver_overload_operand). A `#pragma weak A = T` clone's lookup set is such a set
+// whatever its signatures (#2449, #2935): its clone's note is at the pragma's A, as clang's cloned declaration is
+// (check_input_symbol_overload_source).
+static const char* check_driver_overload_unresolved(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                    const CheckReport* report, uint32_t from, uint32_t* located, PPOutputDiagnosticNote* notes, uint32_t* index,
+                                                    bool* recovers)
 {
     const CheckGraph* graph = stream->graph;
     const uint32_t node = report->node;
@@ -4620,7 +4623,8 @@ static const char* check_driver_overload_unresolved(const Parser* parser, const 
         const uint32_t at = operands[i];
         const uint32_t named = at < stream->count && graph->ops[at] == CHECK_OP_ADDRESS ? graph->operand0[at] : at;
         const uint32_t found = named < stream->count ? check_stream_overload_head(stream, named) : 0;
-        const bool overloadable = found != 0 && found - 1 < graph->overload_candidate_count && (graph->overload_candidates[found - 1].flags & BUSTER_CHECK_OVERLOADABLE) != 0;
+        const bool overloadable = found != 0 && found - 1 < graph->overload_candidate_count &&
+                                  (graph->overload_candidates[found - 1].flags & (BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA)) != 0;
         // (A set of one available candidate resolved, and isn't the refused operand.)
         uint32_t available = 0;
         uint32_t seen[BUSTER_CHECK_SEMANTIC_NOTES];
@@ -4670,7 +4674,15 @@ static const char* check_driver_overload_unresolved(const Parser* parser, const 
             const bool again = none && callable && !ambiguous;
             ambiguous |= again;
             callable = none ? !again : callable;
-            check_semantic_add_note(parser, notes, &note_count, candidate->declaration, "possible target for call");
+            const uint32_t pragma_source = check_input_symbol_overload_source(input, candidate);
+            if (pragma_source != BUSTER_CHECK_NONE && note_count < BUSTER_CHECK_SEMANTIC_NOTES)
+            {
+                notes[note_count++] = (PPOutputDiagnosticNote){ .token = pragma_source, .message = "possible target for call" };
+            }
+            else
+            {
+                check_semantic_add_note(parser, notes, &note_count, candidate->declaration, "possible target for call");
+            }
         }
     }
     const char* result = NULL;
@@ -4847,56 +4859,69 @@ static bool check_driver_jump_kept(const Parser* parser, const CheckInput* input
     return kept;
 }
 
-// An ambiguous reference's candidates where its lookup set holds an object (#2449, CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS):
-// every `#pragma weak A = T` clone of the name made before the reference, newest first as clang's lookup lists them
-// (an object clone at T's declaration, a function clone at the pragma's A), then A's earlier declaration at
-// `declaration`. Their count, 0 where the notes have no room in `scratch`.
+// An ambiguous reference's candidates where its lookup set holds an object (#2449, CHECK_INPUT_WEAK_ALIAS_OBJECT_AMBIGUOUS),
+// as clang lists them (check_input_symbol_lookup_order): every `#pragma weak A = T` clone of the name made before the
+// reference (an object clone at T's declaration, a function clone at the pragma's A), A's earlier declaration
+// `declaration` (a token) and every file-scope redeclaration of A that a redeclaration error made invalid before the
+// reference, which resolveKind drops by moving others into its place (#2934: `extern int a;` again after
+// `#pragma weak a = t` puts A's earlier declaration first). `declaration` is BUSTER_CHECK_NONE where the clones were made
+// before any declaration of A. Their count, 0 where the notes have no room in `scratch`.
 static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t declaration, const char* message,
                                                    PPOutputDiagnosticNote** notes, Arena* scratch)
 {
     const CheckInputSymbolPragmas* history = input->symbol_pragmas;
     const uint32_t count = parser->tokens.count;
     const uint32_t name = parser->tokens.names[token];
+    const uint32_t records = history != NULL ? history->count : 0;
     uint32_t clones = 0;
-    for (uint32_t i = 0; history != NULL && i < history->count; i += 1)
+    for (uint32_t i = 0; i < records; i += 1)
     {
         const CheckInputSymbolPragma* record = history->records + i;
         const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
         clones += record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token;
     }
-    PPOutputDiagnosticNote* listed = clones != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, (uint64_t)clones + 1) : NULL;
-    uint64_t* order = listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, clones) : NULL;
+    uint64_t capacity = (uint64_t)clones + 1;
+    for (uint32_t r = 0; clones != 0 && r < input->report_count; r += 1)
+    {
+        capacity += check_input_symbol_invalid_redeclaration(input, parser, input->reports + r, name, token, declaration);
+    }
+    const bool room = clones != 0 && (declaration < count || declaration == BUSTER_CHECK_NONE) && capacity + records < BUSTER_CHECK_SYMBOL_INVALID;
+    PPOutputDiagnosticNote* listed = room ? BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, capacity) : NULL;
+    uint64_t* order = listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, capacity) : NULL;
     uint32_t listed_count = 0;
-    for (uint32_t i = 0; order != NULL && i < history->count; i += 1)
+    // Each entry's index: a record's, `declaration`'s (records), or a report's past them.
+    for (uint32_t i = 0; order != NULL && i < records; i += 1)
     {
         const CheckInputSymbolPragma* record = history->records + i;
         const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
         if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token)
         {
-            // Newest first: by creation, then by directive, both descending (an insertion of a few records).
-            const uint64_t key = (uint64_t)made << 32 | i;
-            uint32_t at = listed_count;
-            while (at != 0 && order[at - 1] < key)
-            {
-                order[at] = order[at - 1];
-                at -= 1;
-            }
-            order[at] = key;
-            listed_count += 1;
+            order[listed_count++] = (uint64_t)made << 32 | i;
         }
     }
-    for (uint32_t c = 0; order != NULL && c < listed_count; c += 1)
+    if (order != NULL && declaration < count)
     {
-        const CheckInputSymbolPragma* record = history->records + (uint32_t)order[c];
-        const bool function = input->declaration_kinds[record->alias_declaration] == C_BINDING_FUNCTION;
-        listed[c] = (PPOutputDiagnosticNote){ .token = function ? record->source + 3 : parse_source_index(&parser->tokens, record->alias_declaration), .message = message };
+        order[listed_count++] = (uint64_t)declaration << 32 | records;
     }
-    if (order != NULL)
+    for (uint32_t r = 0; order != NULL && r < input->report_count; r += 1)
     {
-        listed[listed_count] = (PPOutputDiagnosticNote){ .token = declaration, .message = message };
+        if (check_input_symbol_invalid_redeclaration(input, parser, input->reports + r, name, token, declaration))
+        {
+            order[listed_count++] = (uint64_t)input->reports[r].token << 32 | BUSTER_CHECK_SYMBOL_INVALID | (records + 1 + r);
+        }
+    }
+    listed_count = order != NULL ? check_input_symbol_lookup_order(order, listed_count) : 0;
+    for (uint32_t c = 0; c < listed_count; c += 1)
+    {
+        const uint32_t e = (uint32_t)(order[c] & (BUSTER_CHECK_SYMBOL_INVALID - 1));
+        const CheckInputSymbolPragma* record = e < records ? history->records + e : NULL;
+        const bool function = record != NULL && input->declaration_kinds[record->alias_declaration] == C_BINDING_FUNCTION;
+        const uint32_t note = record == NULL ? (e == records ? declaration : input->reports[e - records - 1].token) :
+                              function ? BUSTER_CHECK_NONE : record->alias_declaration;
+        listed[c] = (PPOutputDiagnosticNote){ .token = function ? record->source + 3 : parse_source_index(&parser->tokens, note), .message = message };
     }
     *notes = listed;
-    return order != NULL ? listed_count + 1 : 0;
+    return listed_count;
 }
 
 // `from`: the first token whose reports, warnings, pragmas' diagnostics and packed members' warnings it publishes, 0 for
@@ -5527,7 +5552,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                     }
                     if (x86_message == NULL && phase == 1)
                     {
-                        x86_message = check_driver_overload_unresolved(parser, stream, types, stream->reports + index, 0, &x86_location, x86_note,
+                        x86_message = check_driver_overload_unresolved(parser, input, stream, types, stream->reports + index, 0, &x86_location, x86_note,
                                                                        &unresolved_index, &unresolved_recovers);
                     }
                     if (x86_message == NULL && phase == 1)
@@ -6821,7 +6846,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             };
                             // An object's set lists each clone made before the reference, where several directives name A.
                             PPOutputDiagnosticNote* listed = NULL;
-                            const uint32_t listed_count = object ? check_driver_weak_alias_candidates(parser, input, token, later, candidate, &listed, scratch) : 0;
+                            const uint32_t listed_count = object && (report->value < count || report->value == BUSTER_CHECK_NONE) ?
+                                                          check_driver_weak_alias_candidates(parser, input, token, (uint32_t)report->value, candidate, &listed, scratch) : 0;
                             const bool call = token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, listed_count != 0 ? listed : notes,
                                                         listed_count != 0 ? listed_count : kind != CHECK_INPUT_WEAK_ALIAS_REDEFINITION ? 2u : 1u,
@@ -6939,7 +6965,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             {
                                 PPOutputDiagnosticNote more[BUSTER_CHECK_SEMANTIC_NOTES] = { 0 };
                                 uint32_t at = BUSTER_CHECK_NONE;
-                                const char* again = check_driver_overload_unresolved(parser, stream, types, stream->reports + index, next, &at, more, &unresolved_index,
+                                const char* again = check_driver_overload_unresolved(parser, input, stream, types, stream->reports + index, next, &at, more, &unresolved_index,
                                                                                      &unresolved_recovers);
                                 if (again != NULL && at < count)
                                 {
@@ -11949,7 +11975,7 @@ struct CheckDriverDeferred
 };
 
 // --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
-// merge, licm, sroa, memory, vectorize, unroll, vectors, gvn or inline) or all, applied in turn to the passes the earlier
+// merge, licm, sroa, memory, vectorize, unroll, vectors, tables, gvn or inline) or all, applied in turn to the passes the earlier
 // options left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining and vectors), with
 // --tier1-gvn's and --tier1-no-inline's changes where they came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
 // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
@@ -11958,7 +11984,7 @@ struct CheckDriverDeferred
 #define BUSTER_CHECK_DRIVER_PASS_INLINE 1024u
 static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool* gvn, bool* no_inline)
 {
-    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "gvn", "inline", "all" };
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "tables", "gvn", "inline", "all" };
     static const uint32_t bits[] = {
         BUSTER_CHECK_TIER1_PASS_SCCP,
         BUSTER_CHECK_TIER1_PASS_DCE,
@@ -11970,6 +11996,7 @@ static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool*
         BUSTER_CHECK_TIER1_PASS_VECTORIZE,
         BUSTER_CHECK_TIER1_PASS_UNROLL,
         BUSTER_CHECK_TIER1_PASS_VECTORS,
+        BUSTER_CHECK_TIER1_PASS_TABLES,
         BUSTER_CHECK_DRIVER_PASS_GVN,
         BUSTER_CHECK_DRIVER_PASS_INLINE,
         BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,
@@ -13075,9 +13102,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 // Planning remains charged to check-input. These structural counters make an unsupported
                 // tree certificate's whole-unit grammar fallback visible in opt-in measurements (#1364).
-                fprintf(errors, "time-lazy planner=%s tokens=%u scalar-replay-tokens=%u bodies=%u selected=%u deferred=%u references=%u retained-bytes=%llu\n",
+                fprintf(errors, "time-lazy planner=%s tokens=%u scalar-replay-tokens=%u bodies=%u selected=%u deferred=%u skipped=%u references=%u retained-bytes=%llu\n",
                         eager ? "eager" : lazy.replay_tokens != 0 ? "bindings" : "tree", tokens, lazy.replay_tokens, lazy.body_count, lazy.selected_count,
-                        lazy.deferred_count, lazy.reference_count, (unsigned long long)lazy.retained_bytes);
+                        lazy.deferred_count, lazy.skipped_count, lazy.reference_count, (unsigned long long)lazy.retained_bytes);
             }
         }
         if (ready)
@@ -13941,8 +13968,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     if (program_checked)
                     {
-                        // A repaired view's warnings, at its complete original statements alone (CheckCommonView, #2406).
-                        check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
+                        // A repaired view keeps complete original statements alone; a prefix keeps its original
+                        // lookahead for warnings deferred to its final body's end (CheckCommonView, #2406).
+                        check_common_view = repairing ? check_driver_common_view(&repair, recovered) :
+                                            (CheckCommonView){ .original = recovered, .count = tokens };
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         check_driver_return_reports(checking, recovered, pp, &program, parse_error, baseline, quiet);
@@ -14044,8 +14073,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         if (error_tokens != NULL)
                         {
-                            // A repaired view's, at its complete original statements alone (CheckCommonView, #2431).
-                            check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
+                            // Retain a prefix's original lookahead through the rejected readings; a repair also
+                            // keeps its complete original statements alone (CheckCommonView, #2431).
+                            check_common_view = repairing ? check_driver_common_view(&repair, recovered) :
+                                                (CheckCommonView){ .original = recovered, .count = tokens };
                             check_driver_rejected_common(checking, recovered, pp, &input, &types, additional, additional_count,
                                                          error_tokens, error_count, sites, site_count, nonconstant, scalar,
                                                          return_warning, baseline, parse_error,

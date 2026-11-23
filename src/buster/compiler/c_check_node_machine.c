@@ -140,10 +140,8 @@ static uint8_t node_census_type_bits_make(const TypeTable* types, TypeId type);
 #define BUSTER_NODE_MACHINE_WIDE 0x80u
 
 // Whether the columns hold a value whole, of its three storages (its integer `low`, its offset, a floating value): at
-// most one is no zero, and an integer constant has none but its integer. The fold of a floating constant to an integer
-// leaves the floating storage (`(int)0.5`, whose integer is zero: #3014), so such a constant's payload would be a
-// value that is not its own, which a reader of the columns would take for it (the tests' sweep, as the constant's
-// value; the kernel's operand, as a value with no storage): `wides` has it, and no reader of the columns sees it.
+// most one is nonzero, and an integer constant has none but its integer. Both the tests' sweep and the kernel's
+// operand read an integer constant's payload as its value (#3014).
 static inline bool node_machine_whole(CheckConstantKind kind, uint64_t low, uint64_t offset, bool floating)
 {
     const uint32_t fields = (low != 0) + (offset != 0) + floating;
