@@ -1315,11 +1315,11 @@ static uint64_t check_lower_segment_override(const TypeTable* types, TypeId type
 }
 
 // Whether an access of a class's value at an object of `type` is a volatile one the typed stream marks (#3310,
-// BUSTER_TYPED_ACCESS_VOLATILE): a volatile-qualified lvalue's, of a scalar class (not a vector's or a mask's, whose
-// value is its bytes).
+// BUSTER_TYPED_ACCESS_VOLATILE): a volatile-qualified lvalue's, of any class (#3329: a vector's or a mask's too, whose
+// bytes in its value's low bits the mark leaves as they are).
 static bool check_lower_volatile(uint8_t class, TypeId type)
 {
-    return (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0 && class != BUSTER_TYPED_CLASS_VECTOR && class != BUSTER_TYPED_CLASS_MASK;
+    return (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0 && class != BUSTER_TYPED_CLASS_VOID;
 }
 
 // A volatile access's mark (check_lower_volatile), which marks the function (CheckLowerWriter.volatile_entries); 0 for any
@@ -2282,8 +2282,8 @@ static bool check_lower_transparent_late(CheckLowerWriter* writer, TypeId type)
 // passes as itself). A transparent union passes so where it has that member's size and alignment; one that an aligned
 // or packed attribute of its own sizes or aligns otherwise passes as clang's code passes it, its registers the member's
 // and its stack slot the union's (getIndirectResult, AbiTable.transparent, #1844), where the member is a scalar or an
-// aggregate of eightbytes or an aggregate in memory, of any size, and is refused for another member (a pair, a vector, a
-// scalar in memory: abi_finish_transparent). And where the union
+// aggregate of eightbytes, a pair, a vector of 16 bytes or an aggregate in memory, of any size, and is refused for
+// another member (a vector wider than 16 bytes, an _Atomic value in memory: abi_finish_transparent). And where the union
 // was made transparent after clang's code may have classified a function's type (check_lower_transparent_late) and its
 // first member passes otherwise than it (its registers, its stack or its extension), clang's code may pass it as either.
 // Out of line: only aggregates ask.
@@ -2299,7 +2299,7 @@ static __attribute__((noinline)) const char* check_lower_transparent_passed(Chec
     const char* feature = NULL;
     if (!own_slot && (table->stack_bytes[own] != table->stack_bytes[first] || table->alignment_log2[own] != table->alignment_log2[first]))
     {
-        feature = "transparent unions sized or aligned otherwise than their first member, a pair, a vector or a scalar in memory";
+        feature = "transparent unions sized or aligned otherwise than their first member, a vector wider than 16 bytes or an _Atomic value";
     }
     else if (own_slot && check_lower_transparent_late(writer, type))
     {
@@ -2376,7 +2376,7 @@ static uint8_t check_lower_track_bytes(const CheckLowerWriter* writer, uint8_t k
                 kind == BUSTER_TYPED_CONST ? (value < writer->vector_constant_count ? writer->vector_constant_bytes[value] : 0) :
                 kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_STORE_LOCAL ? (value < writer->local_count && writer->local_sizes != NULL ? writer->local_sizes[value] : 0) :
                 kind == BUSTER_TYPED_DUP   ? (top != 0 ? writer->stack_bytes[top] : 0) :
-                                             value;
+                                             value & ~(BUSTER_TYPED_ACCESS_SEGMENT | BUSTER_TYPED_ACCESS_VOLATILE);
     }
     return bytes <= UINT8_MAX ? (uint8_t)bytes : 0;
 }
@@ -3744,7 +3744,8 @@ static bool check_lower_copy_node_volatile(CheckLowerWriter* writer, uint32_t no
 // `keep` (an assignment's value). Small copies use Tier 0's bounded COPY; larger nonvolatile ones call memmove through the ordinary
 // runtime-symbol and ABI path, preserving live values and returning the destination without a temporary. memmove permits
 // the same source and destination, which C aggregate assignment does too. The nonvolatile stream never grows with size.
-// Volatile copies retain the previous inline pieces: a library may skip accesses when the ranges are the same.
+// Volatile copies retain the previous inline pieces: a library may skip accesses when the ranges are the same. Their COPY
+// entries carry a volatile access's mark (#3329, BUSTER_TYPED_ACCESS_VOLATILE), which the IR's pieces keep.
 // A kept small destination goes in a temporary: its consumer's class is read from the entry before it (tier0_validate),
 // which a COPY, of class VOID, can't give.
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
@@ -3766,7 +3767,8 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     }
     else if (!keep && size <= BUSTER_TIER0_MAX_COPY_BYTES)
     {
-        check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size);
+        writer->volatile_entries = writer->volatile_entries || volatile_copy;
+        check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, size | (volatile_copy ? BUSTER_TYPED_ACCESS_VOLATILE : 0));
     }
     else if (size > BUSTER_TIER0_MAX_COPY_BYTES && !volatile_copy)
     {
@@ -3785,6 +3787,7 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
     {
         const uint32_t source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         const uint32_t destination = keep ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) : BUSTER_CHECK_NONE;
+        writer->volatile_entries = writer->volatile_entries || volatile_copy;
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, source);
         if (keep)
         {
@@ -3800,7 +3803,7 @@ static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWri
             check_lower_offset(writer, offset);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
             check_lower_offset(writer, offset);
-            check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, piece);
+            check_lower_emit(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, piece | (volatile_copy ? BUSTER_TYPED_ACCESS_VOLATILE : 0));
         }
         if (keep)
         {
@@ -7785,75 +7788,288 @@ static bool check_lower_wrapper_query(const CheckLowerWriter* writer, uint32_t n
 
 static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart* write);
 
+// How many of a wrapper's nodes its guards' evaluation in the caller's context takes (#2983, check_lower_wrapper_guards):
+// glibc's longest wrappers have about a hundred.
+#define BUSTER_CHECK_LOWER_WRAPPER_NODES 512u
+
+// `value` as a value of integer type `type` of at most 64 bits (truncated, then extended by its sign; _Bool's 0 or 1), in
+// *result; false for another type.
+static bool check_lower_fold_integer(const TypeTable* types, TypeId type, int64_t value, int64_t* result)
+{
+    uint32_t width = 0;
+    bool sign = false;
+    const bool boolean = type != 0 && type_unqualified(type_strip_aligned(types, type)) == BUSTER_TYPE_BOOL;
+    const bool integer = type != 0 && !boolean && check_action_integer_type(types, type, &width, &sign) && width <= 64;
+    const uint64_t mask = width >= 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1;
+    const uint64_t bits = (uint64_t)value & mask;
+    const uint64_t high = width != 0 && width < 64 && sign && (bits >> (width - 1)) != 0 ? ~mask : 0;
+    *result = boolean ? value != 0 : (int64_t)(bits | high);
+    return boolean || integer;
+}
+
+// The decisions of wrapper `index`'s guards at call `node` (#2983), whose arguments' object sizes are `sizes`, as GCC's
+// and clang's code makes them once the wrapper is inlined: each guard's condition evaluated in the caller's context, where
+// a parameter's value is its argument's constant, a local's its initializer's, an object-size query of a parameter its
+// argument's bound, and __builtin_constant_p of an expression whether that is constant here (glibc's guards test
+// `__builtin_constant_p (sz)` and of their length). In `decisions`, a guard's is 1 where its condition is true, 2 where
+// it is false, and 0 where it depends on the run. The body's own checking answered each such __builtin_constant_p false,
+// so a run's condition lowers as the body's only where none of them answers true here: returns false otherwise, and the
+// call is then not expanded. The wrapper's nodes are evaluated in their order (postorder: each one's operands before it).
+static __attribute__((noinline)) bool check_lower_wrapper_guards(const CheckLowerWriter* writer, uint32_t node, uint32_t index, const uint64_t (*sizes)[4],
+                                                                 uint8_t* decisions)
+{
+    const CheckProgram* program = writer->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    const TypeTable* types = program->types;
+    const CheckProgramWrapper* wrapper = program->wrappers + index;
+    const uint32_t* objects = program->wrapper_parameters + wrapper->parameter_first;
+    const uint32_t arguments = graph->argument_offsets[node];
+    const uint32_t first = wrapper->first;
+    uint32_t last = wrapper->node;
+    for (uint32_t g = 0; g < wrapper->guard_count; g += 1)
+    {
+        last = wrapper->guards[g][0] > last ? wrapper->guards[g][0] : last;
+    }
+    const bool room = last >= first && last - first < BUSTER_CHECK_LOWER_WRAPPER_NODES && last < stream->count;
+    int64_t values[BUSTER_CHECK_LOWER_WRAPPER_NODES];
+    uint8_t known[BUSTER_CHECK_LOWER_WRAPPER_NODES];
+    bool differs = false;
+    for (uint32_t n = first; room && n <= last; n += 1)
+    {
+        const CheckOp op = graph->ops[n];
+        const TypeId type = check_stream_type(stream, n);
+        const CheckValue value = check_stream_value(stream, n);
+        const uint32_t a = graph->operand0[n] - first < n - first ? graph->operand0[n] - first : BUSTER_CHECK_LOWER_WRAPPER_NODES;
+        const uint32_t b = graph->operand1[n] - first < n - first ? graph->operand1[n] - first : BUSTER_CHECK_LOWER_WRAPPER_NODES;
+        const uint32_t c = graph->operand2[n] - first < n - first ? graph->operand2[n] - first : BUSTER_CHECK_LOWER_WRAPPER_NODES;
+        const bool has_a = a < BUSTER_CHECK_LOWER_WRAPPER_NODES && known[a] != 0;
+        const bool has_b = b < BUSTER_CHECK_LOWER_WRAPPER_NODES && known[b] != 0;
+        const TypeId type_a = stream->conversions[n].operands[0].type;
+        const TypeId type_b = stream->conversions[n].operands[1].type;
+        int64_t x = 0;
+        int64_t y = 0;
+        const bool left = has_a && check_lower_fold_integer(types, type_a != 0 ? type_a : check_stream_type(stream, graph->operand0[n]), values[a], &x);
+        const bool right = has_b && check_lower_fold_integer(types, type_b != 0 ? type_b : check_stream_type(stream, graph->operand1[n]), values[b], &y);
+        uint32_t width = 0;
+        bool sign = false;
+        const bool signed_operands = type_a != 0 && check_action_integer_type(types, type_a, &width, &sign) && sign;
+        const bool constant = value.category == CHECK_RVALUE && value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE &&
+                              (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+        bool result_known = false;
+        int64_t result = 0;
+        if (op == CHECK_OP_VALUE && value.category == CHECK_LVALUE && value.object != 0)
+        {
+            // A parameter's argument, a constant of the caller's, converted to the parameter's type; or a local's value.
+            for (uint32_t p = 0; p < wrapper->parameter_count + wrapper->local_count; p += 1)
+            {
+                const bool parameter = p < wrapper->parameter_count;
+                const uint32_t argument = parameter ? graph->argument_nodes[arguments + p] : BUSTER_CHECK_NONE;
+                const CheckValue given = parameter && argument < stream->count ? check_stream_value(stream, argument) : (CheckValue){ 0 };
+                const bool fixed = given.category == CHECK_RVALUE && given.constant_kind == CHECK_CONSTANT_INTEGER && given.fault == CHECK_FAULT_NONE &&
+                                   (given.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
+                const CheckInitPart* part = parameter ? NULL : program->initializers->plans[wrapper->plans[p - wrapper->parameter_count]].parts;
+                const uint32_t initial = part != NULL && part->node - first < n - first ? part->node - first : BUSTER_CHECK_LOWER_WRAPPER_NODES;
+                int64_t own = 0;
+                const bool read = objects[p] == value.object &&
+                                  (parameter ? fixed && check_lower_fold_integer(types, given.type, (int64_t)given.integer, &own) &&
+                                                   check_lower_fold_integer(types, stream->argument_conversions[arguments + p].type, own, &own) :
+                                               initial < BUSTER_CHECK_LOWER_WRAPPER_NODES && known[initial] != 0 &&
+                                                   check_lower_fold_integer(types, part->conversion.type, values[initial], &own));
+                result_known |= read;
+                result = read ? own : result;
+            }
+        }
+        else if (op == CHECK_OP_VALUE || op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
+        {
+            result_known = constant && check_lower_fold_integer(types, type, (int64_t)value.integer, &result);
+        }
+        else if (op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_CONDITION || op == CHECK_OP_POSITIVE)
+        {
+            result_known = left && check_lower_fold_integer(types, type, op == CHECK_OP_CONDITION ? x != 0 : x, &result);
+        }
+        else if (op == CHECK_OP_NEGATIVE || op == CHECK_OP_BIT_NOT || op == CHECK_OP_NOT)
+        {
+            result_known = left && check_lower_fold_integer(types, type, op == CHECK_OP_NEGATIVE ? (int64_t)(0 - (uint64_t)x) : op == CHECK_OP_BIT_NOT ? ~x : x == 0,
+                                                            &result);
+        }
+        else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+        {
+            // The first operand decides, or both do.
+            const bool decides = left && (op == CHECK_OP_LOGICAL_OR) == (x != 0);
+            result_known = decides || (left && right);
+            result = decides ? op == CHECK_OP_LOGICAL_OR : y != 0;
+        }
+        else if (op == CHECK_OP_CONDITIONAL)
+        {
+            const uint32_t arm = left ? (x != 0 ? b : c) : BUSTER_CHECK_LOWER_WRAPPER_NODES;
+            result_known = arm < BUSTER_CHECK_LOWER_WRAPPER_NODES && known[arm] != 0 && check_lower_fold_integer(types, type, values[arm], &result);
+        }
+        else if (op >= CHECK_OP_ADD && op <= CHECK_OP_BIT_XOR && left && right)
+        {
+            const uint64_t u = (uint64_t)x;
+            const uint64_t v = (uint64_t)y;
+            const bool divided = op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER;
+            const bool shifted = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
+            const bool defined = (!divided || (y != 0 && !(signed_operands && x == INT64_MIN && y == -1))) && (!shifted || v < 64);
+            int64_t computed = 0;
+            switch (op)
+            {
+                case CHECK_OP_ADD: computed = (int64_t)(u + v); break;
+                case CHECK_OP_SUBTRACT: computed = (int64_t)(u - v); break;
+                case CHECK_OP_MULTIPLY: computed = (int64_t)(u * v); break;
+                case CHECK_OP_DIVIDE: computed = !defined ? 0 : signed_operands ? x / y : (int64_t)(u / v); break;
+                case CHECK_OP_REMAINDER: computed = !defined ? 0 : signed_operands ? x % y : (int64_t)(u % v); break;
+                case CHECK_OP_SHIFT_LEFT: computed = !defined ? 0 : (int64_t)(u << v); break;
+                case CHECK_OP_SHIFT_RIGHT: computed = !defined ? 0 : signed_operands ? x >> v : (int64_t)(u >> v); break;
+                case CHECK_OP_LESS: computed = signed_operands ? x < y : u < v; break;
+                case CHECK_OP_LESS_EQUAL: computed = signed_operands ? x <= y : u <= v; break;
+                case CHECK_OP_GREATER: computed = signed_operands ? x > y : u > v; break;
+                case CHECK_OP_GREATER_EQUAL: computed = signed_operands ? x >= y : u >= v; break;
+                case CHECK_OP_EQUAL: computed = x == y; break;
+                case CHECK_OP_NOT_EQUAL: computed = x != y; break;
+                case CHECK_OP_BIT_AND: computed = x & y; break;
+                case CHECK_OP_BIT_OR: computed = x | y; break;
+                default: computed = x ^ y; break;
+            }
+            result_known = defined && check_lower_fold_integer(types, type, computed, &result);
+        }
+        else if (op == CHECK_OP_BUILTIN_QUERY)
+        {
+            const uint32_t selected = check_program_builtin_index(stream->queries, stream->query_count, sizeof(CheckBuiltinQueryEffect), n);
+            const CBuiltinId id = (CBuiltinId)graph->members[n];
+            const uint32_t operand = graph->argument_counts[n] != 0 ? graph->argument_nodes[graph->argument_offsets[n]] : BUSTER_CHECK_NONE;
+            const uint32_t at = operand - first < n - first ? operand - first : BUSTER_CHECK_LOWER_WRAPPER_NODES;
+            const uint32_t mode = selected != BUSTER_CHECK_NONE ? stream->queries[selected].mode : 4;
+            const CheckValue queried = operand < stream->count && graph->ops[operand] == CHECK_OP_VALUE ? check_stream_value(stream, operand) : (CheckValue){ 0 };
+            bool sized = false;
+            for (uint32_t p = 0; (id == CBUILTIN_OBJECT_SIZE || id == CBUILTIN_DYNAMIC_OBJECT_SIZE) && mode < 4 && queried.category == CHECK_LVALUE && p < wrapper->parameter_count;
+                 p += 1)
+            {
+                const bool found = !sized && queried.object != 0 && objects[p] == queried.object;
+                result = found ? (int64_t)sizes[p][mode] : result;
+                sized |= found;
+            }
+            if (id == CBUILTIN_CONSTANT_P && graph->argument_counts[n] == 1)
+            {
+                // Whether its operand is constant here; where it is, the body's checking answered differently.
+                result_known = true;
+                result = at < BUSTER_CHECK_LOWER_WRAPPER_NODES && known[at] != 0;
+                differs |= result != 0;
+            }
+            else
+            {
+                result_known = sized || (constant && check_lower_fold_integer(types, type, (int64_t)value.integer, &result));
+            }
+        }
+        known[n - first] = result_known;
+        values[n - first] = result;
+    }
+    bool runtime = false;
+    for (uint32_t g = 0; g < wrapper->guard_count; g += 1)
+    {
+        const uint32_t condition = wrapper->guards[g][0];
+        const bool decided = room && condition >= first && known[condition - first] != 0;
+        decisions[g] = !decided ? 0 : values[condition - first] != 0 ? 1 : 2;
+        runtime |= !decided;
+    }
+    return room && !(runtime && differs);
+}
+
+
 // Call `node` of wrapper `index` (#2983, check_lower_wrapper_of) expanded in place, as clang's AlwaysInliner expands it:
 // its arguments, each converted to its parameter's type, into temporaries in their order; then, with the parameters'
 // objects at those temporaries (the WRAPPER tasks' frame), its locals' values into theirs, and the wrapper's expression,
 // converted to the call's type, which a void wrapper's is; or its guards' conditionals and its last return's expression.
-// Each argument's object sizes are taken now, for the queries of its parameter. The tasks run in reverse.
-static void check_lower_wrapper_call(CheckLowerWriter* writer, uint32_t node, uint32_t index)
+// Each argument's object sizes are taken now, for the queries of its parameter. The tasks run in reverse. Returns false,
+// and writes nothing, where the guards can't be decided as the caller's code would (check_lower_wrapper_guards): the call
+// then stays a call.
+static bool check_lower_wrapper_call(CheckLowerWriter* writer, uint32_t node, uint32_t index)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const CheckProgramWrapper* wrapper = program->wrappers + index;
     const uint32_t first = graph->argument_offsets[node];
-    const uint32_t depth = writer->wrapper_depth;
-    CheckLowerWrapperFrame* frame = writer->wrapper_frames + depth;
-    writer->wrapper_depth += 1;
-    frame->wrapper = index;
-    frame->bound = false;
-    check_lower_source(writer, graph->tokens[graph->operand0[node]]);
+    uint64_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS][4];
     for (uint32_t p = 0; p < wrapper->parameter_count; p += 1)
     {
-        frame->temporaries[p] = check_lower_temporary(writer, check_lower_class(writer, stream->argument_conversions[first + p].type));
         for (uint32_t mode = 0; mode < 4; mode += 1)
         {
-            frame->sizes[p][mode] = check_lower_wrapper_size(writer, graph->argument_nodes[first + p], mode, wrapper->sizes[p]);
+            sizes[p][mode] = check_lower_wrapper_size(writer, graph->argument_nodes[first + p], mode, wrapper->sizes[p]);
         }
     }
-    for (uint32_t l = 0; l < wrapper->local_count; l += 1)
+    uint8_t decisions[BUSTER_CHECK_WRAPPER_GUARDS] = { 0 };
+    const bool expanded = wrapper->guard_count == 0 || check_lower_wrapper_guards(writer, node, index, (const uint64_t (*)[4])sizes, decisions);
+    // The guards the run tests, and the last one a constant condition takes, whose return is then the expansion's last.
+    uint32_t taken = wrapper->guard_count;
+    for (uint32_t g = wrapper->guard_count; g-- > 0;)
     {
-        const CheckInitPart* part = program->initializers->plans[wrapper->plans[l]].parts;
-        frame->temporaries[wrapper->parameter_count + l] = check_lower_temporary(writer, check_lower_class(writer, part->conversion.type));
+        taken = decisions[g] == 1 ? g : taken;
     }
-    const TypeId type = check_stream_type(stream, node);
-    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth, .address = true });
-    if (wrapper->guard_count == 0)
+    if (expanded)
     {
-        check_lower_expression(writer, wrapper->node, false, type);
-    }
-    else
-    {
-        // `if (C) return E;`s, then `return E;`: as many conditionals' arms, each guard's E's value joined at `end`
-        // (check_lower_logical's), C's branch past it to the next one's.
-        const uint8_t class = check_lower_class(writer, type);
-        const uint32_t end = check_lower_label(writer);
-        check_lower_mark(writer, end);
-        check_lower_expression(writer, wrapper->node, false, type);
-        for (uint32_t g = wrapper->guard_count; g-- > 0;)
+        const uint32_t depth = writer->wrapper_depth;
+        CheckLowerWrapperFrame* frame = writer->wrapper_frames + depth;
+        writer->wrapper_depth += 1;
+        frame->wrapper = index;
+        frame->bound = false;
+        check_lower_source(writer, graph->tokens[graph->operand0[node]]);
+        for (uint32_t p = 0; p < wrapper->parameter_count; p += 1)
         {
-            const uint32_t next = check_lower_label(writer);
-            check_lower_mark(writer, next);
-            check_lower_instruction(writer, BUSTER_TYPED_JUMP_VALUE, class, end);
-            check_lower_expression(writer, wrapper->guards[g][1], false, type);
-            check_lower_instruction(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, next);
-            check_lower_expression(writer, wrapper->guards[g][0], false, 0);
+            frame->temporaries[p] = check_lower_temporary(writer, check_lower_class(writer, stream->argument_conversions[first + p].type));
+            memcpy(frame->sizes[p], sizes[p], sizeof(sizes[p]));
+        }
+        for (uint32_t l = 0; l < wrapper->local_count; l += 1)
+        {
+            const CheckInitPart* part = program->initializers->plans[wrapper->plans[l]].parts;
+            frame->temporaries[wrapper->parameter_count + l] = check_lower_temporary(writer, check_lower_class(writer, part->conversion.type));
+        }
+        const TypeId type = check_stream_type(stream, node);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth, .address = true });
+        // `if (C) return E;`s, then `return E;`: as many conditionals' arms, each run guard's E's value joined at `end`
+        // (check_lower_logical's), C's branch past it to the next one's. A guard whose condition is constant here
+        // (check_lower_wrapper_guards) is no test: a false one's statement is left out, and a true one's E ends the chain.
+        uint32_t tested = 0;
+        for (uint32_t g = 0; g < taken; g += 1)
+        {
+            tested += decisions[g] == 0;
+        }
+        const uint8_t class = check_lower_class(writer, type);
+        const uint32_t end = tested != 0 ? check_lower_label(writer) : BUSTER_CHECK_NONE;
+        if (tested != 0)
+        {
+            check_lower_mark(writer, end);
+        }
+        check_lower_expression(writer, taken < wrapper->guard_count ? wrapper->guards[taken][1] : wrapper->node, false, type);
+        for (uint32_t g = taken; g-- > 0;)
+        {
+            if (decisions[g] == 0)
+            {
+                const uint32_t next = check_lower_label(writer);
+                check_lower_mark(writer, next);
+                check_lower_instruction(writer, BUSTER_TYPED_JUMP_VALUE, class, end);
+                check_lower_expression(writer, wrapper->guards[g][1], false, type);
+                check_lower_instruction(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, next);
+                check_lower_expression(writer, wrapper->guards[g][0], false, 0);
+            }
+        }
+        // Its locals' values, in their order, each in its temporary.
+        for (uint32_t l = wrapper->local_count; l-- > 0;)
+        {
+            const CheckInitPart* part = program->initializers->plans[wrapper->plans[l]].parts;
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, part->conversion.type), frame->temporaries[wrapper->parameter_count + l]);
+            check_lower_part_value(writer, part);
+        }
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth });
+        for (uint32_t p = wrapper->parameter_count; p-- > 0;)
+        {
+            const TypeId argument = stream->argument_conversions[first + p].type;
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, argument), frame->temporaries[p]);
+            check_lower_operand(writer, node, p + 3, false, argument);
         }
     }
-    // Its locals' values, in their order, each in its temporary.
-    for (uint32_t l = wrapper->local_count; l-- > 0;)
-    {
-        const CheckInitPart* part = program->initializers->plans[wrapper->plans[l]].parts;
-        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, part->conversion.type), frame->temporaries[wrapper->parameter_count + l]);
-        check_lower_part_value(writer, part);
-    }
-    check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth });
-    for (uint32_t p = wrapper->parameter_count; p-- > 0;)
-    {
-        const TypeId type = stream->argument_conversions[first + p].type;
-        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, type), frame->temporaries[p]);
-        check_lower_operand(writer, node, p + 3, false, type);
-    }
+    return expanded;
 }
 
 // A WRAPPER task (#2983): frame `depth`'s parameters' objects at its temporaries from here (`end` false: its arguments
@@ -7888,10 +8104,11 @@ static __attribute__((noinline)) void check_lower_wrapper_task(CheckLowerWriter*
 static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 {
     const uint32_t wrapper = writer->program->wrapper_count != 0 ? check_lower_wrapper_of(writer, node) : BUSTER_CHECK_NONE;
-    const uint32_t computed = wrapper == BUSTER_CHECK_NONE ? check_program_call_computed(writer->program, node) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
-    if (wrapper != BUSTER_CHECK_NONE)
+    const bool expanded = wrapper != BUSTER_CHECK_NONE && check_lower_wrapper_call(writer, node, wrapper);
+    const uint32_t computed = !expanded ? check_program_call_computed(writer->program, node) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    if (expanded)
     {
-        check_lower_wrapper_call(writer, node, wrapper);
+        // The wrapper's expansion (#2983).
     }
     else if (computed != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
     {
