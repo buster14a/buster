@@ -886,6 +886,9 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "rare_columns_shared", CHECK_ATTESTED_FIELD_AMBIENT },
     { "cpu_dispatch", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "no_builtin", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    // (The absolute value functions' identifiers where they are library builtins, #2914: options' and names', as
+    // the reader's library_names.)
+    { "absolute_names", CHECK_ATTESTED_FIELD_NAME },
     { "target_multiversion", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "target_candidates", CHECK_ATTESTED_FIELD_OWN },
     { "resource", CHECK_ATTESTED_FIELD_AMBIENT },

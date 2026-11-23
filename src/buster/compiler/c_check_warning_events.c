@@ -292,6 +292,15 @@ enum
     // (the usual arithmetic conversions' operands and the default argument promotions too), off by default, in no group but
     // -Weverything.
     CHECK_WARNING_ID_DOUBLE_PROMOTION = 175,
+    // A call of an absolute value function (abs to llabs, fabsf to fabsl, cabsf to cabsl, a library builtin's or its
+    // __builtin_ spelling) whose argument it doesn't suit (#2914, clang's CheckAbsoluteValueFunction): -Wabsolute-value,
+    // on by default.
+    CHECK_WARNING_ID_ABSOLUTE_VALUE = 176,
+    // A C-style cast to a pointer from an integer type narrower than it, that is no integer constant expression (#2914,
+    // clang's checkIntToPointerCast), on by default: -Wint-to-pointer-cast's, with -Wint-to-void-pointer-cast's to a
+    // pointer to void under it.
+    CHECK_WARNING_ID_INT_TO_POINTER_CAST = 177,
+    CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST = 178,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -665,6 +674,14 @@ typedef enum CheckWarningEventKind
     // payload.data the argument's alignment's log2 in its low byte and the parameter's above it; payload.name the cleanup
     // function's name.
     CHECK_WARNING_EVENT_ALIGN_MISMATCH,
+    // An absolute value function's call its argument doesn't suit (#2914, check_warning_graph_absolute), at the call's
+    // first token: payload.data its form and functions (BUSTER_CHECK_ABSOLUTE_*), first_type the argument's type before its
+    // conversion (payload.name its typedef's spelling) and second_type the parameter's.
+    CHECK_WARNING_EVENT_ABSOLUTE_VALUE,
+    // A cast to a pointer from a narrower integer (#2914, check_warning_graph_int_pointer_cast), at the cast's `(`: "cast to
+    // T from smaller integer type S", payload.second_type the cast's type (its value type, unqualified) and payload.data its
+    // typedef's spelling, payload.first_type the operand's type after its lvalue conversion and payload.name its spelling.
+    CHECK_WARNING_EVENT_INT_TO_POINTER_CAST,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -763,6 +780,14 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE,
     CHECK_WARNING_NOTE_LOGICAL_BITWISE,
     CHECK_WARNING_NOTE_LOGICAL_REMOVE_CONSTANT,
+    // -Wabsolute-value's notes (#2914, payload.data a BUSTER_CHECK_ABSOLUTE_* function and its builtin bit): "remove the
+    // call to 'F' since unsigned values cannot be negative"; "use function 'F' instead"; and "include the header <H> or
+    // explicitly provide a declaration for 'F'", which the renderer gives only where no declaration of F precedes the call
+    // (check_driver_absolute_declared, as clang's emitReplacement looks it up), and where one that isn't the library's
+    // function does, neither of the last two.
+    CHECK_WARNING_NOTE_ABSOLUTE_REMOVE,
+    CHECK_WARNING_NOTE_ABSOLUTE_REPLACE,
+    CHECK_WARNING_NOTE_ABSOLUTE_HEADER,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 

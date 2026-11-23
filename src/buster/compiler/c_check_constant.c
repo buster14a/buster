@@ -1815,12 +1815,14 @@ static void check_input_generic_duplicates(CheckInputReader* reader, CheckConsta
     uint32_t* starts = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
     uint32_t* names = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
     uint32_t* colons = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
+    uint32_t* ordinals = arena_push_array(reader->scratch, capacity, sizeof(uint32_t), 4);
     // (Whether an association's type has its error yet: a later one at its token is another, as clang's is.)
     bool* reported = arena_push_array(reader->scratch, capacity, sizeof(bool), 1);
-    const bool valid = keys != NULL && types != NULL && starts != NULL && names != NULL && colons != NULL && reported != NULL;
+    const bool valid = keys != NULL && types != NULL && starts != NULL && names != NULL && colons != NULL && ordinals != NULL && reported != NULL;
     reader->output->resource |= !valid;
     uint32_t count = 0;
     uint32_t defaults[2] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+    uint32_t ordinal = 0;
     uint32_t association = separator + 1;
     if (valid)
     {
@@ -1838,6 +1840,7 @@ static void check_input_generic_duplicates(CheckInputReader* reader, CheckConsta
         }
         else if (type != 0 && count < capacity)
         {
+            ordinals[count] = ordinal;
             // (The type name's TypeLoc begins past its qualifiers, as check_generic_unreachable's location does.)
             uint32_t at = association;
             while (at + 1 < colon && parser->tokens.kinds[at] == PARSE_KIND_QUALIFIER)
@@ -1852,6 +1855,7 @@ static void check_input_generic_duplicates(CheckInputReader* reader, CheckConsta
             reported[count] = false;
             count += 1;
         }
+        ordinal += parser->tokens.kinds[association] != PARSE_KIND_DEFAULT;
         association = after + 1;
     }
     if (defaults[1] != BUSTER_CHECK_NONE)
@@ -1866,7 +1870,7 @@ static void check_input_generic_duplicates(CheckInputReader* reader, CheckConsta
     }
     for (uint32_t i = 0; defaults[1] == BUSTER_CHECK_NONE && i < count; i += 1)
     {
-        check_generic_unreachable(reader, starts[i], colons[i], types[i]);
+        check_generic_unreachable(reader, starts[i], colons[i], types[i], close, ordinals[i]);
         const __m512i key = _mm512_set1_epi32((int)keys[i]);
         for (uint32_t block = (i + 1) & ~15u; block < count; block += 16)
         {
@@ -1891,6 +1895,9 @@ static void check_input_generic_duplicates(CheckInputReader* reader, CheckConsta
                     report->note_kind = CHECK_INPUT_NOTE_GENERIC_COMPATIBLE;
                     report->repeated = reported[j];
                     reported[j] = true;
+                    // (At the selection's `)`, in clang's order: check_generic_suborder.)
+                    report->completion = close + 1;
+                    report->suborder = check_generic_suborder(ordinals[i], ordinals[j] + 1);
                 }
             }
         }
@@ -2877,6 +2884,7 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
         uint32_t association = separator + 1;
         // A second default or a type compatible with an earlier association's stopped the walk (#2914).
         bool duplicate = false;
+        uint32_t ordinal = 0;
         while (valid && association < token)
         {
             const uint32_t colon = check_constant_punctuation(parser, association, token, PARSE_KIND_COLON);
@@ -2897,8 +2905,9 @@ static bool check_constant_selection(CheckConstantInput* input, uint32_t keyword
                 valid = type != 0 && kind != BUSTER_TYPE_KIND_FUNCTION && (type_inherited_flags(reader->types, type) & BUSTER_TYPE_FLAG_VARIABLY_MODIFIED) == 0;
                 if (valid)
                 {
-                    check_generic_unreachable(reader, association, colon, type);
+                    check_generic_unreachable(reader, association, colon, type, token, ordinal);
                 }
+                ordinal += 1;
                 bool matches = false;
                 const bool listed = valid && check_generic_association(reader, &seen, type, &matches);
                 duplicate = valid && !listed && !reader->output->resource;

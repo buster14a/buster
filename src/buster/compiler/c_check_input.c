@@ -1334,6 +1334,10 @@ struct CheckInput
     // body: only then does a marked library call look for its function's (check_input_no_builtin), which walks back to
     // the body's brace.
     bool no_builtin;
+    // The absolute value functions' identifiers (check_absolute_functions' order) where each is a library builtin of the
+    // unit (pp_library_builtin), else 0 (#2914): a call of a declaration of one with external linkage and its prototype is
+    // -Wabsolute-value's (check_warning_graph_absolute). Set with the library folds' names (check_input_library_names).
+    IdentId absolute_names[9];
     // Whether a function is multiversioned by target strings (#1838, c_check_target_versions.c): several target
     // attributes of other strings, target("default") or target_clones. A unit with one is read in source order
     // (check_deferred_bodies), whose binding events say what was used before a declaration.
@@ -14151,10 +14155,72 @@ static void check_input_bind(CheckInputReader* reader, uint32_t token, uint32_t 
 #include "c_check_typo.c"
 #include "c_check_implicit_input.c"
 
-// The plain library builtins' folds' identifiers in the unit, and their mask (CheckInputReader.library_names).
+// The absolute value functions (#2914, clang's CheckAbsoluteValueFunction), by family (integer, floating, complex) and then
+// by size, as BUSTER_CHECK_ABSOLUTE_FUNCTION numbers them: each one's name, its header, its parameter and its result.
+typedef struct CheckAbsoluteFunction CheckAbsoluteFunction;
+struct CheckAbsoluteFunction
+{
+    const char* name;
+    const char* builtin;
+    const char* header;
+    TypeId parameter;
+    TypeId result;
+};
+
+static const CheckAbsoluteFunction check_absolute_functions[9] =
+{
+    { "abs", "__builtin_abs", "stdlib.h", BUSTER_TYPE_INT, BUSTER_TYPE_INT },
+    { "labs", "__builtin_labs", "stdlib.h", BUSTER_TYPE_LONG, BUSTER_TYPE_LONG },
+    { "llabs", "__builtin_llabs", "stdlib.h", BUSTER_TYPE_LLONG, BUSTER_TYPE_LLONG },
+    { "fabsf", "__builtin_fabsf", "math.h", BUSTER_TYPE_FLOAT, BUSTER_TYPE_FLOAT },
+    { "fabs", "__builtin_fabs", "math.h", BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE },
+    { "fabsl", "__builtin_fabsl", "math.h", BUSTER_TYPE_LONG_DOUBLE, BUSTER_TYPE_LONG_DOUBLE },
+    { "cabsf", "__builtin_cabsf", "complex.h", BUSTER_TYPE_COMPLEX_FLOAT, BUSTER_TYPE_FLOAT },
+    { "cabs", "__builtin_cabs", "complex.h", BUSTER_TYPE_COMPLEX_DOUBLE, BUSTER_TYPE_DOUBLE },
+    { "cabsl", "__builtin_cabsl", "complex.h", BUSTER_TYPE_COMPLEX_LONG_DOUBLE, BUSTER_TYPE_LONG_DOUBLE },
+};
+
+// An absolute value function's number (check_absolute_functions' index) in a -Wabsolute-value event's or note's
+// payload.data, its builtin spelling's bit, and the event's form and the kinds of its parameter and argument (0 integer,
+// 1 floating, 2 complex).
+#define BUSTER_CHECK_ABSOLUTE_FUNCTION 0xfu
+#define BUSTER_CHECK_ABSOLUTE_BUILTIN 0x10u
+#define BUSTER_CHECK_ABSOLUTE_FORM_SHIFT 8u
+#define BUSTER_CHECK_ABSOLUTE_PARAMETER_SHIFT 12u
+#define BUSTER_CHECK_ABSOLUTE_ARGUMENT_SHIFT 14u
+#define BUSTER_CHECK_ABSOLUTE_UNSIGNED 0u
+#define BUSTER_CHECK_ABSOLUTE_POINTER 1u
+#define BUSTER_CHECK_ABSOLUTE_FUNCTION_TYPE 2u
+#define BUSTER_CHECK_ABSOLUTE_ARRAY 3u
+#define BUSTER_CHECK_ABSOLUTE_TOO_SMALL 4u
+#define BUSTER_CHECK_ABSOLUTE_WRONG_KIND 5u
+
+// Whether `declared` is absolute value function `index`'s prototype (check_absolute_functions), as clang requires for a
+// declaration to be the library's builtin: its result and its one parameter, unqualified, and no "...".
+static __attribute__((unused)) bool check_absolute_prototype(const TypeTable* types, TypeId declared, uint32_t index)
+{
+    const TypeId function = type_strip_aligned(types, declared);
+    bool result = index < BUSTER_ARRAY_LENGTH(check_absolute_functions) && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
+    const uint8_t flags = result ? types->types.flags[type_index(function)] : 0;
+    result = result && (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 && (flags & BUSTER_TYPE_FLAG_VARIADIC) == 0;
+    uint32_t count = 0;
+    const TypeId* parameters = result ? type_parameters(types, function, &count) : NULL;
+    return result && count == 1 && type_unqualified(type_strip_aligned(types, parameters[0])) == check_absolute_functions[index].parameter &&
+           type_unqualified(type_strip_aligned(types, type_return(types, function))) == check_absolute_functions[index].result;
+}
+
+// The plain library builtins' folds' identifiers in the unit, and their mask (CheckInputReader.library_names); and the
+// absolute value functions' (CheckInput.absolute_names).
 static __attribute__((noinline)) void check_input_library_names(CheckInputReader* reader)
 {
     const InternTable* table = reader->pp->table;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(check_absolute_functions); i += 1)
+    {
+        const uint8_t* name = (const uint8_t*)check_absolute_functions[i].name;
+        const uint32_t length = (uint32_t)strlen(check_absolute_functions[i].name);
+        const bool library = pp_library_builtin(&reader->pp->options, name, length);
+        reader->output->absolute_names[i] = library ? intern_find_hashed(table, name, length, intern_hash_bytes(name, length)) : 0;
+    }
     uint64_t mask[4] = { 0 };
     for (uint32_t i = 0; i < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS; i += 1)
     {
