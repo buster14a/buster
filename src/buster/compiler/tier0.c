@@ -1434,17 +1434,28 @@ static bool tier0_aggregate_whole(AbiLocation location)
     return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
 }
 
+// The bytes of an aggregate of `size` bytes that `location` carries: its size, or at a FIRST location its first 16 bytes
+// alone (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's registers or eightbytes'
+// slots, whose bytes past them are padding).
+static uint32_t tier0_location_size(AbiLocation location, uint32_t size)
+{
+    return (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : size;
+}
+
 // The bytes a copy of an aggregate of `size` bytes on the stack whole at `location` moves: its size, or at a PAYLOAD
-// location its vector payload alone (#2113, a record's <size / 8 x double> that LLVM put on the stack).
+// location its vector payload alone (#2113, a record's <size / 8 x double> that LLVM put on the stack), or at a FIRST one
+// its first 16 bytes (tier0_location_size).
 static uint32_t tier0_whole_bytes(AbiLocation location, uint32_t size)
 {
+    size = tier0_location_size(location, size);
     return (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0 ? abi_vector_payload_bytes(size) : size;
 }
 
 // The bytes of the stack an aggregate of `size` bytes on the stack whole at `location` takes: its size rounded up to 8,
-// or at a PAYLOAD location its vector register's width (#2113).
+// or at a PAYLOAD location its vector register's width (#2113), or at a FIRST one its first 16 bytes'.
 static uint64_t tier0_whole_slot(AbiLocation location, uint32_t size)
 {
+    size = tier0_location_size(location, size);
     const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
     return payload ? abi_vector_register_bytes(abi_vector_payload_bytes(size)) : ((uint64_t)size + 7) & ~UINT64_C(7);
 }
@@ -1452,6 +1463,7 @@ static uint64_t tier0_whole_slot(AbiLocation location, uint32_t size)
 // The parts of an aggregate argument or parameter of `size` bytes at `location` (none on the stack whole or ignored).
 static uint32_t tier0_location_parts(AbiLocation location, uint32_t size, Tier0Part* parts)
 {
+    size = tier0_location_size(location, size);
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT;
@@ -1471,7 +1483,8 @@ static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
     const uint32_t alignment_log2 = tier0_is_object(function, p) ? function->local_alignments[p] : 0;
     const bool aligned = alignment_log2 <= BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 && location.stack_offset % (1u << alignment_log2) == 0;
     // A PAYLOAD slot (#2113) holds the payload alone, which may end before the object's size: its bytes are copied.
-    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    // So does a FIRST one (#1844), of the object's first 16 bytes alone.
+    const bool payload = (location.flags & (BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) != 0;
     return tier0_is_object(function, p) ? tier0_aggregate_whole(location) && aligned && !payload : location.kind == BUSTER_ABI_LOCATION_STACK;
 }
 
@@ -1582,6 +1595,10 @@ static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, u
 // an 8-byte slot, as is the high or the low eightbyte alone on the stack, with no register.
 static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes)
 {
+    // FIRST, of a value past 16 bytes, isn't PAYLOAD's.
+    const bool first = (location.flags & BUSTER_ABI_FLAG_FIRST) != 0;
+    const bool first_valid = !first || (size > BUSTER_ABI_REGISTER_BYTES && (location.flags & BUSTER_ABI_FLAG_PAYLOAD) == 0 && location.kind != BUSTER_ABI_LOCATION_IGNORE);
+    size = tier0_location_size(location, size);
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool whole = tier0_aggregate_whole(location);
@@ -1602,7 +1619,7 @@ static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, 
     // LOW is a STACK location's alone, and PAYLOAD a whole one's, of a record past its payload (#2113).
     valid = valid && (!low || location.kind == BUSTER_ABI_LOCATION_STACK);
     valid = valid && (!payload || (whole && size > abi_vector_payload_bytes(size) && size <= 64));
-    return valid;
+    return valid && first_valid;
 }
 
 // How many x87 registers a result comes back in: st0, or st0 and st1 (a COMPLEX_X87 one), each part 16 bytes after the

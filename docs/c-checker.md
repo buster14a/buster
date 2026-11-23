@@ -2802,9 +2802,23 @@ What the lowering covers past scalars (#145's programs):
   slot of the union's size and alignment (`getIndirectResult`;
   `abi_finish_transparent` records the union in the ABI table's `transparent`
   column, which `abi_assign`'s vector path and `abi_assign_call` read), and `va_arg` reads
-  the member from a slot of the union's size and alignment. Such a union past
-  two eightbytes, or whose first member passes as an aggregate, a pair, a
-  vector or in memory, is refused by name. And a union made transparent, by a
+  the member from a slot of the union's size and alignment. Since #1844 the
+  member may be an aggregate, of eightbytes or in memory, and the union of any
+  size. An aggregate in memory passes as clang's `getIndirectResult` of the
+  member gives it: a byval slot of the union's bytes at the member's alignment,
+  or an integer of 8 bytes (a register LLVM has, else the low eightbyte alone
+  in an 8-byte slot, `LOW`) for a member of 8 bytes or less aligned to 8 or
+  less where clang has no general register left, and so does the union in the
+  same case. Past 16 bytes, the member's registers or eightbytes' slots carry
+  the union's first 16 bytes alone (`BUSTER_ABI_FLAG_FIRST`, which Tier 0's
+  location helpers, Tier 1's parts and `va_arg`'s register plan read; Tier 1
+  leaves a function with such a location on the stack whole to Tier 0). A
+  member's value converted to such a union, of a member passed by its bytes,
+  goes through a zeroed object of the union's size and alignment, as clang's
+  code's memset and memcpy make it (`check_lower_transparent_value`), so that
+  the union's slot is never copied from past the member. A first member that
+  passes as a pair, a vector or a scalar in memory is still refused by name,
+  and so is a printer's such union of `__builtin_dump_struct`. And a union made transparent, by a
   later declaration's attribute, after a function definition or a static
   object's initializer that names a function, whose first member passes
   otherwise than the union does (its registers, its stack or its extension):
@@ -2822,7 +2836,9 @@ What the lowering covers past scalars (#145's programs):
   another type, is refused so too, though clang's code would pass it as its
   member. `test-checker`'s programs
   (`c_check_program_transparent_test.c`) run each kind of member value, union
-  values, unnamed arguments and `va_arg`, in registers and on the stack,
+  values, unnamed arguments and `va_arg`, in registers and on the stack, and
+  unions of a slot of their own of each such member
+  (`BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS`),
   against clang -O0's build of the same source, calling the harness's clang
   functions and called by them through pointers, with the registers a
   `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and

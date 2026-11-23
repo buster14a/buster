@@ -79,6 +79,12 @@ a parameter and `va_arg`'s type that is one as the member
 struct that holds one. The table keeps the union's own row, which those take,
 and the code generator gives `abi_assign` and `abi_va_arg` the member's type
 (`check_lower_passed_as`; the checker guide's "Transparent unions (#147)").
+A union aligned or packed otherwise than its member has a slot of its own
+(`AbiTable.transparent`): `abi_assign_call` assigns the member's registers,
+and where clang has none for them the union's byval slot, or the member's
+alignment for a member in memory; past 16 bytes its locations in registers or
+eightbytes' slots carry the union's first 16 bytes (`BUSTER_ABI_FLAG_FIRST`,
+#1844).
 
 `vector_bytes`, which `abi_initialize` takes, is the widest vector register
 the generated code may use: 16, 32 or 64 (no AVX, AVX, AVX-512F), clang's

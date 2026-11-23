@@ -2281,8 +2281,9 @@ static bool check_lower_transparent_late(CheckLowerWriter* writer, TypeId type)
 // Why a struct or a union can't pass as a transparent union's first member (check_lower_passed_as), or NULL (another's
 // passes as itself). A transparent union passes so where it has that member's size and alignment; one that an aligned
 // or packed attribute of its own sizes or aligns otherwise passes as clang's code passes it, its registers the member's
-// and its stack slot the union's (getIndirectResult, AbiTable.transparent, #1844), where the member is a scalar of
-// eightbytes, and is refused for another member (an aggregate, a pair, a vector, a value in memory). And where the union
+// and its stack slot the union's (getIndirectResult, AbiTable.transparent, #1844), where the member is a scalar or an
+// aggregate of eightbytes or an aggregate in memory, of any size, and is refused for another member (a pair, a vector, a
+// scalar in memory: abi_finish_transparent). And where the union
 // was made transparent after clang's code may have classified a function's type (check_lower_transparent_late) and its
 // first member passes otherwise than it (its registers, its stack or its extension), clang's code may pass it as either.
 // Out of line: only aggregates ask.
@@ -2298,7 +2299,7 @@ static __attribute__((noinline)) const char* check_lower_transparent_passed(Chec
     const char* feature = NULL;
     if (!own_slot && (table->stack_bytes[own] != table->stack_bytes[first] || table->alignment_log2[own] != table->alignment_log2[first]))
     {
-        feature = "transparent unions sized or aligned otherwise than their first member, an aggregate, a pair, a vector or a value in memory";
+        feature = "transparent unions sized or aligned otherwise than their first member, a pair, a vector or a scalar in memory";
     }
     else if (own_slot && check_lower_transparent_late(writer, type))
     {
@@ -7081,13 +7082,29 @@ static TypeId check_lower_transparent_argument(const CheckLowerWriter* writer, c
 // argument's type: the union's, whose value is its object's address, or the member's that a conversion to the union
 // selects, whose value is the union's first bytes, as every member has the first's size. An integer's or a pointer's bits
 // are the first member's value; a struct's, a union's or a complex value's bytes are at its address; any other value's go
-// through a temporary, whose bytes are the union's.
-static void check_lower_transparent_value(CheckLowerWriter* writer, uint32_t node, uint32_t operand, TypeId member, TypeId first)
+// through a temporary, whose bytes are the union's. `own` is the union where its stack slot is its own (#1844,
+// AbiTable.transparent) and the member passes by its bytes: a member's value then goes through a zeroed object of the
+// union's size and alignment, which the call's slot copies whole, as clang's code makes it (a memset and a memcpy).
+static void check_lower_transparent_value(CheckLowerWriter* writer, uint32_t node, uint32_t operand, TypeId member, TypeId first, TypeId own)
 {
+    const TypeTable* types = writer->program->types;
     const uint8_t first_class = check_lower_transparent_class(writer, first);
     const uint8_t member_class = check_lower_class(writer, member);
     const bool address = check_lower_aggregate(writer, member);
-    // The tasks run last pushed first: the operand, then what passes it.
+    const bool widened = own != 0 && first_class == UINT8_MAX && type_index(type_strip_aligned(types, member)) != type_index(type_strip_aligned(types, own));
+    const uint64_t own_bytes = widened ? type_size(types, own) : 0;
+    const uint32_t widened_local = widened ? check_lower_object(writer, own_bytes, type_alignment_log2(types, own)) : 0;
+    const CheckGraph* graph = &writer->program->input->graph;
+    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + operand - 3];
+    const bool volatile_copy = widened && address && check_lower_copy_node_volatile(writer, argument, member);
+    // The tasks run last pushed first: the union's object cleared, its address, the operand's bytes' address, the copy,
+    // then the object's address the call passes.
+    if (widened)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, widened_local);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = type_size(types, member), .volatile_copy = volatile_copy });
+    }
+    // The operand, then what passes it.
     if (!address && first_class != UINT8_MAX && member_class >= BUSTER_TYPED_CLASS_I8 && member_class <= BUSTER_TYPED_CLASS_U64)
     {
         if (member_class != first_class)
@@ -7111,6 +7128,11 @@ static void check_lower_transparent_value(CheckLowerWriter* writer, uint32_t nod
         check_lower_instruction(writer, BUSTER_TYPED_LOAD, first_class, 0);
     }
     check_lower_operand(writer, node, operand, false, member);
+    if (widened)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, widened_local);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_CLEAR, .type = (TypeId)own_bytes, .value = widened_local });
+    }
 }
 
 static SymbolId check_lower_runtime(CheckLowerWriter* writer, CheckLowerRuntime runtime);
@@ -7497,7 +7519,11 @@ static inline __attribute__((always_inline)) bool check_lower_call_body(CheckLow
             const TypeId member = transparent ? check_lower_transparent_argument(writer, conversion, a < parameters ? parameter_types[a] : 0) : 0;
             if (member != 0)
             {
-                check_lower_transparent_value(writer, node, a + 3, argument, member);
+                // The union itself where its stack slot is its own (check_lower_passed_as).
+                const TypeId own = a < parameters && (conversion->flags & BUSTER_CHECK_CONVERT_TRANSPARENT_UNION) != 0 && check_lower_passed_as(writer, parameter_types[a]) == parameter_types[a]
+                                       ? parameter_types[a]
+                                       : 0;
+                check_lower_transparent_value(writer, node, a + 3, argument, member, own);
             }
             else if (atomic && check_lower_aggregate(writer, argument))
             {
@@ -10012,6 +10038,8 @@ static void check_lower_varargs_prepare(CheckLowerWriter* writer, uint32_t node)
                 const uint32_t own_log2 = type_alignment_log2(types, requested);
                 call->plan.overflow_alignment_log2 = (uint8_t)(own_log2 > BUSTER_ABI_SLOT_LOG2 ? own_log2 : BUSTER_ABI_SLOT_LOG2);
                 call->plan.stack_bytes = (uint32_t)((size + BUSTER_ABI_SLOT_BYTES - 1) & ~(uint64_t)(BUSTER_ABI_SLOT_BYTES - 1));
+                // Past 16 bytes, its member's registers are its first 16 bytes' (BUSTER_ABI_FLAG_FIRST).
+                call->plan.flags |= call->plan.kind == BUSTER_ABI_LOCATION_REGISTERS && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_FLAG_FIRST : 0;
             }
             call->result_class = bytes ? BUSTER_TYPED_CLASS_U64 : check_lower_storage_class(writer, requested);
             // (An empty one, which the call ignores, still names its object: 1 byte, as its frame object takes.)
@@ -10591,7 +10619,10 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
         members[r] = parameter != 0 && type_kind(types, type_strip_aligned(types, parameter)) == BUSTER_TYPE_KIND_UNION ? check_lower_transparent(writer, parameter) : 0;
         const bool atomic = parameter != 0 && check_action_kind(types, parameter) == BUSTER_TYPE_KIND_ATOMIC && check_lower_aggregate(writer, parameter);
         sources[r] = members[r] != 0 ? type : atomic ? type_conversion_operand(types, parameter) : 0;
-        refused = members[r] != 0 && addresses[r] ? "__builtin_dump_struct of an array or a function for a printer's transparent union" :
+        // A union of a stack slot of its own (#1844, AbiTable.transparent) would pass as the union, which the printer's
+        // calls don't make.
+        refused = members[r] != 0 && check_lower_passed_as(writer, parameter) == parameter ? "__builtin_dump_struct for a printer's transparent union of a stack slot of its own" :
+                  members[r] != 0 && addresses[r] ? "__builtin_dump_struct of an array or a function for a printer's transparent union" :
                   addresses[r] ? NULL : check_lower_dump_passed(writer, members[r] != 0 ? members[r] : targets[r]);
     }
     const TypeId format = rest < parameters ? parameter_types[rest] : BUSTER_TYPE_ULONG;
@@ -10734,7 +10765,7 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
             {
                 if (members[r] != 0)
                 {
-                    check_lower_transparent_value(writer, node, 3 + 2 + r, sources[r], members[r]);
+                    check_lower_transparent_value(writer, node, 3 + 2 + r, sources[r], members[r], 0);
                 }
                 else if (sources[r] != 0)
                 {
