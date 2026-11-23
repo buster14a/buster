@@ -9,9 +9,53 @@
 // symbols: for each declaration below, a unit whose one loop updates the object must move its key or leave it, as the
 // emission's list of the unit's distinct objects says (check_program_store_motion_symbols).
 
-#if defined(BUSTER_TIER1_STORE_MOTION_SUBJECT)
+#if defined(BUSTER_TIER1_STORE_MOTION_SETJMP)
 
+// #3346's setjmp program, built without --tier1-strict: Tier 1 doesn't admit a function that calls setjmp, which runs by
+// Tier 0, but the loop is its callee's, whose stores sink to the exit before the call that jumps back.
+#include <setjmp.h>
 #include <stdio.h>
+
+long jump_a;
+long jump_b;
+long jump_seen;
+static jmp_buf jump_buffer;
+
+__attribute__((noinline)) void jump_leave(void)
+{
+    jump_seen = jump_a * 3 + jump_b;
+    longjmp(jump_buffer, 1);
+}
+
+__attribute__((noinline)) void jump_loop(int n)
+{
+    for (int i = 0; i < n; i += 1)
+    {
+        jump_a += i;
+        jump_b ^= jump_a;
+    }
+    jump_leave();
+}
+
+int main(void)
+{
+    for (int n = 0; n < 40; n += 13)
+    {
+        if (setjmp(jump_buffer) == 0)
+        {
+            jump_loop(n);
+        }
+        printf("%d: %ld %ld %ld\n", n, jump_a, jump_b, jump_seen);
+    }
+    return 0;
+}
+
+#elif defined(BUSTER_TIER1_STORE_MOTION_SUBJECT)
+
+#define _POSIX_C_SOURCE 200809L
+#include <signal.h>
+#include <stdio.h>
+#include <sys/mman.h>
 
 long motion_a;
 long motion_b;
@@ -189,6 +233,88 @@ __attribute__((noinline)) void motion_overlap(int n)
     }
 }
 
+// #3346: the stores sink to every exit, a break, a return and a goto out of the loop among them.
+__attribute__((noinline)) long motion_exits(int n, int k)
+{
+    long result = 0;
+    for (int i = 0; i < n; i += 1)
+    {
+        motion_a += i;
+        if (motion_a > 4000)
+        {
+            return motion_a ^ motion_b;
+        }
+        motion_b ^= motion_a;
+        if (i == k)
+        {
+            break;
+        }
+        if (i == k + 3)
+        {
+            goto out;
+        }
+        motion_count -= 1;
+    }
+    result = motion_b;
+out:
+    return result + motion_a + motion_count;
+}
+
+// The issue's second kernel: two doubles and a long.
+__attribute__((noinline)) void motion_doubles(int n)
+{
+    for (int i = 0; i < n; i += 1)
+    {
+        motion_sum = motion_sum * 1.0000001 + 0.5;
+        motion_record.d += motion_sum;
+        motion_count += i & 3;
+    }
+}
+
+// A page of its own, read-only while these run (main): a loop that stores nothing, of no iteration or whose condition
+// never holds, must store nothing, not even the value the object holds.
+static long motion_page[512] __attribute__((aligned(4096)));
+
+__attribute__((noinline)) void motion_guarded(int n, int limit)
+{
+    for (int i = 0; i < n; i += 1)
+    {
+        if (i > limit)
+        {
+            motion_page[1] += i;
+        }
+    }
+}
+
+// The flag a signal handler sets is volatile: every access of the body stays where it is.
+static volatile sig_atomic_t motion_signalled;
+
+static void motion_handler(int signal)
+{
+    (void)signal;
+    motion_signalled = 1;
+}
+
+__attribute__((noinline)) void motion_poll(int n)
+{
+    for (int i = 0; i < n && !motion_signalled; i += 1)
+    {
+        motion_a += i;
+    }
+}
+
+// The global's address escapes to a pointer the loop reads through.
+long* motion_escaped;
+
+__attribute__((noinline)) void motion_escape(int n)
+{
+    for (int i = 0; i < n; i += 1)
+    {
+        motion_b += i;
+        motion_a += *motion_escaped;
+    }
+}
+
 // The global is the loop's own bound.
 __attribute__((noinline)) void motion_while(int n)
 {
@@ -298,6 +424,7 @@ static void motion_show(const char* name)
 int main(void)
 {
     long local = 5;
+    signal(SIGUSR1, motion_handler);
     static const long table[4] = { 3, 1, 4, 1 };
     for (int n = 0; n < 40; n += 13)
     {
@@ -348,6 +475,44 @@ int main(void)
         motion_show("goto");
         motion_self(n);
         motion_show("self");
+        printf("exits=%ld\n", motion_exits(n, 30));
+        motion_show("exits");
+        printf("exits=%ld\n", motion_exits(n, 5));
+        motion_show("exits by break");
+        printf("exits=%ld\n", motion_exits(n, 2));
+        motion_show("exits by goto");
+        motion_a = 3000;
+        printf("exits=%ld\n", motion_exits(n, 30));
+        motion_show("exits by return");
+        motion_doubles(n);
+        motion_show("doubles");
+        motion_page[1] = n;
+        motion_page[2] = n * 2;
+        if (mprotect(motion_page, sizeof(motion_page), PROT_READ) != 0)
+        {
+            return 1;
+        }
+        motion_guarded(0, 0);
+        motion_guarded(n, 1000);
+        if (mprotect(motion_page, sizeof(motion_page), PROT_READ | PROT_WRITE) != 0)
+        {
+            return 1;
+        }
+        motion_guarded(n, n / 2);
+        printf("page=%ld %ld\n", motion_page[1], motion_page[2]);
+        motion_signalled = 0;
+        if (n == 26)
+        {
+            raise(SIGUSR1);
+        }
+        motion_poll(n);
+        motion_show("poll");
+        motion_escaped = &motion_a;
+        motion_escape(n);
+        motion_show("escape");
+        motion_escaped = &motion_b;
+        motion_escape(n);
+        motion_show("escape to the other");
         motion_a &= 0xffff;
         motion_b &= 0xffff;
     }
@@ -586,8 +751,10 @@ int main(int argc, char** argv)
             valid = false;
         }
         // The subject's loops that store to one of its objects, by outcome, and what the pass moved.
-        static const char* const fields[] = { "loops", "moved", "barrier", "unknown-store", "no-key", "keys", "key.met", "key.limit", "loads", "stores" };
-        static const long expected[] = { 23, 17, 2, 2, 2, 34, 4, 1, 47, 34 };
+        // #3346's: the keys whose stores sink, those kept for a load the pass can't place or one that meets them, and
+        // the write-backs.
+        static const char* const fields[] = { "loops", "moved", "barrier", "unknown-store", "no-key", "keys", "key.met", "key.limit", "loads", "stores", "sunk", "sink.load", "sink.met", "sink.exit", "write-backs" };
+        static const long expected[] = { 26, 21, 1, 2, 2, 43, 4, 1, 59, 43, 36, 5, 2, 0, 47 };
         for (unsigned k = 0; valid && k < sizeof(fields) / sizeof(fields[0]); k += 1)
         {
             const long count = motion_count(report, fields[k]);
@@ -605,6 +772,31 @@ int main(int argc, char** argv)
             valid = false;
         }
         printf("Tier 1 store motion %s, %s: %s\n", moved ? "on" : "off", scalar ? "scalar" : "default", valid ? "pass" : "FAIL");
+    }
+    // #3346's setjmp program, by Clang -O0 and by --tier1 with the pass, which sinks its loop's two keys.
+    if (valid)
+    {
+        unlink(reference);
+        unlink(reference_output);
+        unlink(program);
+        unlink(program_output);
+        unlink(report);
+        char* reference_build[] = { argv[2], "-std=c17", "-O0", "-DBUSTER_TIER1_STORE_MOTION_SETJMP", source, "-o", reference, NULL };
+        char* reference_run[] = { reference, NULL };
+        char* build[] = { argv[1], "--tier1", "--verify", "--lanes", "1", "--tier1-report", "--tier1-passes=+storemotion", "-std=c17", "-DBUSTER_TIER1_STORE_MOTION_SETJMP", source, "-o", program, NULL };
+        char* execute[] = { program, NULL };
+        valid = motion_run(reference_build, NULL, NULL) && motion_run(reference_run, reference_output, NULL) && motion_run(build, NULL, report) && motion_run(execute, program_output, NULL);
+        if (valid && !motion_same(reference_output, program_output))
+        {
+            fprintf(stderr, "store motion: the setjmp program's lines differ from Clang -O0's\n");
+            valid = false;
+        }
+        if (valid && motion_count(report, "sunk") != 2)
+        {
+            fprintf(stderr, "store motion: the setjmp program sank %ld keys, 2 expected\n", motion_count(report, "sunk"));
+            valid = false;
+        }
+        printf("Tier 1 store motion across setjmp: %s\n", valid ? "pass" : "FAIL");
     }
     for (unsigned k = 0; valid && k < sizeof(motion_symbols) / sizeof(motion_symbols[0]); k += 1)
     {
