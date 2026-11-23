@@ -351,7 +351,7 @@ static __attribute__((noinline)) void check_test_action_fixtures(CheckTest* test
         .type = BUSTER_TYPE_INT
     };
     result = check_test_action(test, table, action);
-    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.integer == 3 && (result.value.flags & BUSTER_CHECK_ICE) != 0,
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.integer == 3 && result.value.floating == 0 && (result.value.flags & BUSTER_CHECK_ICE) != 0,
                       "immediate floating literal cast is an integer constant expression");
     action = (CheckAction){
         .op = CHECK_OP_ADD,
@@ -790,9 +790,14 @@ static __attribute__((noinline)) void check_test_action_constraints(CheckTest* t
         }
     };
     result = check_test_action(test, table, action);
-    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 0 && result.value.offset == -1,
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 0 && result.value.offset == -1 && result.value.integer == 0,
                       "integer-to-pointer cast sign extends to the target address width");
     const CheckValue absolute = result.value;
+    action.operands[0] = absolute;
+    action.type = BUSTER_TYPE_ULONG;
+    result = check_test_action(test, table, action);
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_INTEGER && result.value.integer == UINT64_MAX && result.value.offset == 0,
+                      "converting an absolute pointer back to integer moves its addend into the integer");
     action = (CheckAction){
         .op = CHECK_OP_NOT,
         .operands = {
@@ -859,7 +864,7 @@ static __attribute__((noinline)) void check_test_integer_float_rounding(CheckTes
                     equal = actual_bits == expected_bits;
                 }
                 check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.fault == CHECK_FAULT_NONE &&
-                                       result.value.constant_kind == CHECK_CONSTANT_FLOATING && equal,
+                                       result.value.constant_kind == CHECK_CONSTANT_FLOATING && result.value.integer == 0 && equal,
                                   "128-bit integer converts directly to float/double without double rounding");
             }
         }
@@ -886,7 +891,7 @@ static __attribute__((noinline)) void check_test_action_regressions(CheckTest* t
     action.op = CHECK_OP_INITIALIZE;
     action.type = type_pointer(table, BUSTER_TYPE_INT);
     result = check_test_action(test, table, action);
-    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 0 && result.value.offset == 0,
+    check_test_expect(test, result.diagnostic == CHECK_DIAG_NONE && result.value.constant_kind == CHECK_CONSTANT_ADDRESS && result.value.object == 0 && result.value.offset == 0 && result.value.integer == 0,
                       "null pointer conversion tests the target-width integer value");
     action = (CheckAction){
         .op = CHECK_OP_CONDITIONAL,

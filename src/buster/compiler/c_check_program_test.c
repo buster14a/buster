@@ -1029,6 +1029,22 @@ static bool check_test_program_daz(void)
     "typedef union __attribute__((transparent_union)){int a[2];struct external_ip q;}ExternalTA;"                                                                  \
     "typedef union __attribute__((transparent_union)){struct external_big s;struct external_big_bytes t;}ExternalTB;"
 
+// Transparent unions of a stack slot of their own (#1844), aligned otherwise than their first members, which clang's code
+// passes in the member's registers or, where it has none for them, as the union's bytes in a byval slot of the union's
+// alignment, or the member's where the member is in memory: an aggregate of 8 bytes in a union of 32, one of two floats
+// and two ints in a union of 32, 24 bytes in memory in a union of 32, a pointer beside a long and a struct of a double in
+// unions of 32, and a packed struct of 5 bytes, in memory, in unions of 16 and 32, which clang passes as an integer
+// where it has no general register left. After BUSTER_CHECK_TEST_TRANSPARENT_UNIONS, whose structs it takes.
+#define BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS                                                                                                                      \
+    "struct external_l{long a;};struct external_mix{int a,b;float c,d;};struct __attribute__((packed)) external_pk{char c;int i;};"                                \
+    "typedef union __attribute__((transparent_union,aligned(32))){struct external_l s;long l;}ExternalOL;"                                                          \
+    "typedef union __attribute__((transparent_union,aligned(32))){struct external_mix m;struct external_mix n;}ExternalOM;"                                        \
+    "typedef union __attribute__((transparent_union,aligned(32))){struct external_big s;struct external_big_bytes t;}ExternalOB;"                                  \
+    "typedef union __attribute__((transparent_union,aligned(32))){long*p;long l;}ExternalOP;"                                                                       \
+    "typedef union __attribute__((transparent_union,aligned(32))){struct external_dv s;long l;}ExternalOD;"                                                        \
+    "typedef union __attribute__((transparent_union,aligned(16))){struct external_pk p;struct external_pk q;}ExternalOK;"                                          \
+    "typedef union __attribute__((transparent_union,aligned(32))){struct external_pk p;struct external_pk q;}ExternalOQ;"
+
 // The program every checked object and its oracle are linked with: it runs both on the same inputs.
 static const char check_test_program_harness[] =
     "#include <stdio.h>\n"
@@ -1203,6 +1219,31 @@ static const char check_test_program_harness[] =
     "unsigned long external_transparent_variadic_apply(unsigned long(*f)(int,...),int n){ExternalTF tf={.q={n,-n}};ExternalTS ts={.s=(short)(n-7)};"
     "ExternalTD td={.l=(long)n*1000003};ExternalTW tw={.w=(__int128)n*3};ExternalTA ta={.q={n,5}};ExternalTB tb={.s={n,2,3}};"
     "return f(2,tf,ts,td,tw,ta,tb,tf,ts,td,tw,ta,tb);}\n"
+    // Unions of a stack slot of their own (#1844), in registers and after 6 longs and 8 doubles, where every one takes the
+    // stack, passed to the program's functions through pointers, and the register-classified ones read with va_arg (clang
+    // reads one whose member is in memory at the union's alignment, where its caller aligned it as the member).
+    BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS
+    "static unsigned long external_own_fold(unsigned long h,int k,ExternalOL l,ExternalOM m,ExternalOB b,ExternalOP p,ExternalOD d,ExternalOK s,ExternalOQ q){"
+    "h=external_fold(external_fold(h,(unsigned long)k),(unsigned long)l.s.a);h=external_fold(h,(unsigned long)(m.m.a+m.m.b*3+(long)(m.m.c*4)+(long)(m.m.d*8)));"
+    "h=external_fold(h,(unsigned long)(b.s.a+b.s.b*3+b.s.c*5));h=external_fold(h,(unsigned long)((k&1)?p.l:*p.p));h=external_fold(h,(unsigned long)(long)(d.s.v*4));"
+    "h=external_fold(h,(unsigned long)(s.p.c+s.p.i*3));return external_fold(h,(unsigned long)(q.p.c+q.p.i*5));}\n"
+    "unsigned long external_own(int k,ExternalOL l,ExternalOM m,ExternalOB b,ExternalOP p,ExternalOD d,ExternalOK s,ExternalOQ q){"
+    "return external_own_fold(0,k,l,m,b,p,d,s,q);}\n"
+    "unsigned long external_own_late(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,double d6,"
+    "double d7,int k,ExternalOL l,ExternalOM m,ExternalOB b,ExternalOP p,ExternalOD d,ExternalOK s,ExternalOQ q){"
+    "return external_own_fold((unsigned long)(l0+l1+l2+l3+l4+l5*3)+(unsigned long)(long)(d0+d1+d2+d3+d4+d5+d6+d7*3),k,l,m,b,p,d,s,q);}\n"
+    "unsigned long external_own_apply(unsigned long(*f)(int,ExternalOL,ExternalOM,ExternalOB,ExternalOP,ExternalOD,ExternalOK,ExternalOQ),"
+    "unsigned long(*g)(long,long,long,long,long,long,double,double,double,double,double,double,double,double,int,ExternalOL,ExternalOM,ExternalOB,"
+    "ExternalOP,ExternalOD,ExternalOK,ExternalOQ),int n){long x=n*3;struct external_mix m={n,2,1.5f,n*0.5f};struct external_pk k={(char)n,n*7};"
+    "struct external_big big={n,n+1,n+2};ExternalOL ol={.s={n*5}};"
+    "return f(0,(struct external_l){n},m,big,&x,(struct external_dv){n*0.25},k,k)^f(1,ol,m,(struct external_big_bytes){{1,2,n}},(long)n,(struct external_dv){2.5},k,k)"
+    "^g(1,2,3,4,5,n,0.5,1,2,3,4,5,6,n*0.5,0,ol,m,big,&x,(struct external_dv){n*0.75},k,k);}\n"
+    "unsigned long external_own_variadic(int count,...){va_list a;va_start(a,count);unsigned long h=(unsigned long)count;"
+    "for(int i=0;i<count;i++){ExternalOL l=va_arg(a,ExternalOL);ExternalOM m=va_arg(a,ExternalOM);ExternalOP p=va_arg(a,ExternalOP);"
+    "ExternalOD d=va_arg(a,ExternalOD);h=external_fold(h,(unsigned long)l.s.a);h=external_fold(h,(unsigned long)(m.m.a+m.m.b*3+(long)(m.m.c*4)+(long)(m.m.d*8)));"
+    "h=external_fold(h,(unsigned long)p.l);h=external_fold(h,(unsigned long)(long)(d.s.v*4));}va_end(a);return h;}\n"
+    "unsigned long external_own_variadic_apply(unsigned long(*f)(int,...),int n){ExternalOL l={.s={n}};ExternalOM m={.m={n,-n,0.5f,n*0.25f}};"
+    "ExternalOP p={.l=n*9L};ExternalOD d={.s={n*1.5}};return f(3,l,m,p,d,l,m,p,d,l,m,p,d);}\n"
     // After 6 longs and 8 doubles, every union on the stack.
     "unsigned long external_transparent_late(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,"
     "double d6,double d7,ExternalTF f,ExternalTS s,ExternalTP p,ExternalTD d,ExternalTW w,ExternalTA a,ExternalTB b){"
@@ -2003,6 +2044,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         uint64_t return_flow_work = 0;
         uint64_t region_target_work = 0;
         uint64_t statement_walk_work = 0;
+        uint64_t enterable_work = 0;
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -2014,6 +2056,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             .return_flow_work = &return_flow_work,
             .region_target_work = &region_target_work,
             .statement_walk_work = &statement_walk_work,
+            .enterable_work = &enterable_work,
             .target = pp_options.target,
             .predefines = &predefines,
         };
@@ -2039,6 +2082,14 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                               region_target_work <= input.token_count && statement_walk_work <= 2 * (uint64_t)input.token_count &&
                                   (!regions || region_target_work != 0) && (!statements || statement_walk_work != 0),
                               walks);
+            // check_control_enterable's subtree facts: statements nested 200 deep pass their tokens about once, where
+            // walking and scanning each arm again passed tens of times as many.
+            if (strcmp(name, "quadratic-switches") == 0)
+            {
+                snprintf(walks, sizeof(walks), "%s: %s enterable arms take %llu steps for %u tokens", name, path == 0 ? "scalar" : "vector",
+                         (unsigned long long)enterable_work, input.token_count);
+                check_test_expect(test, enterable_work != 0 && enterable_work <= 2 * (uint64_t)input.token_count, walks);
+            }
         }
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
@@ -5449,6 +5500,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         // a while condition, as above.
         check_test_program_checker_source(test, "quadratic-statement-expressions", "gcc");
         check_test_program_checker_source(test, "quadratic-vla-bounds", clang);
+        check_test_program_checker_source(test, "quadratic-switches", clang);
         check_test_program_source(test,
             "int tested(int n){int x=0;double z=0.5+({double y=n+0.25;x++;y;});return (int)(z*4)+x;}", "statement-region-floating-pending-value", clang);
         check_test_program_source(test,
