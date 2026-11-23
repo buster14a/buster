@@ -177,7 +177,14 @@ its label is the next record's), whose place in the function's code Tier 0
 writes as it emits the body's call (`Tier0Code.asm_label_records`), and whose
 symbol the emission defines at that record's offset, as a naked function's
 labels are (`EmittedCode.asm_label_records`). Such a function isn't inlined by
-Tier 0 (`tier0_inline_callee_valid`), so each label is defined once. The IR's
+Tier 0 (`tier0_inline_callee_valid`), so each label is defined once. A private
+label (#2351's gap 4: a `.L` name that no template refers to and no directive
+names, as `.Lx%=` usually is) is the body's alone: its template's branches reach
+it as the body's own, and the object's symbols leave `.L` names out, so the
+planning drops it from the body's labels (`check_program_asm_names`). A function
+whose bodies' labels are all private is inlined, each copy's branches its own,
+as clang's inlined copies each renumber `%=`. Another name keeps its function
+out of the splicing, as clang fails to assemble two copies of it. The IR's
 body call carries no labels, so under `--tier1` a template of instructions and
 labels keeps its helper, which Tier 1 calls, and a function with a label of a
 template of no instructions is Tier 0's (`ir_lower`'s `IR_ERROR_UNSUPPORTED`). A template that returns and has a label keeps the

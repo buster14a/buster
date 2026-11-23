@@ -16,7 +16,7 @@
 // (CHECK_PROGRAM_RESOURCE) with both arenas as they were, among them a run whose room ends before each statement's
 // places; then the plans must be the whole arena's: an asm body each for the first two (#1839), the third refused by name,
 // a helper for the fourth, whose form x86_semantics.c doesn't cover (rorx), and an asm body for the fifth, whose named label
-// the names step adds (#2090: its run without room must leave the helpers as they were).
+// the names step adds (#2090: its run without room must leave the helpers as they were), then drops as private (#2351).
 static void check_test_program_asm_room(CheckTest* test)
 {
     static const char source[] =
@@ -83,9 +83,9 @@ static void check_test_program_asm_room(CheckTest* test)
                                  planned.plans[1].helper == BUSTER_CHECK_NONE && planned.plans[2].reason != NULL &&
                                  strcmp(planned.plans[2].reason, "inline assembly operands of this type in their constraint's registers") == 0 && planned.plans[3].reason == NULL &&
                                  !planned.plans[3].inlined && planned.plans[3].helper != BUSTER_CHECK_NONE && planned.plans[4].reason == NULL &&
-                                 planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 1 && planned.plans[5].reason == NULL &&
+                                 planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 0 && planned.plans[5].reason == NULL &&
                                  planned.plans[5].inlined && planned.plans[5].helper == BUSTER_CHECK_NONE && planned.plans[5].inline_branch_count == 2 && helpers.count == 1;
-        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the named label and the asm goto are asm bodies",
+        snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the private label's and the asm goto's statements are asm bodies",
                  path == 0 ? "scalar" : "vector");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);
@@ -274,11 +274,10 @@ static void check_test_program_asm_placement(CheckTest* test)
             }
             if (right && s == NAMED)
             {
-                // The named label's body: testl, jle to the label and movl, the label at the template's end (record 3),
-                // its spelling the substituted `.Lnamed` and the statement's number.
-                right = plan->label_count == 1 && plan->labels[0].record == 3 && plan->inline_label_records != 0 && plan->inline_label_records[0] == 3 &&
-                        plan->labels[0].spelling.length > 7 && memcmp(plan->labels[0].spelling.pointer, ".Lnamed", 7) == 0 && plan->inline_branch_count == 1 &&
-                        plan->inline_targets[0] == 3;
+                // The named label's body: testl, jle to the label and movl, the jle a branch of the body to the template's
+                // end (record 3). Its label, `.Lnamed` and the statement's number, which no template refers to, is private
+                // and dropped (#2351's gap 4).
+                right = plan->label_count == 0 && plan->inline_branch_count == 1 && plan->inline_targets[0] == 3;
             }
             if (right && s == PLACED)
             {
@@ -465,8 +464,8 @@ static void check_test_program_asm_goto(CheckTest* test, const char* clang)
         "int tested(int n){unsigned s=0;for(int i=-3;i<8;i++)s=s*7+(unsigned)next(i+n)+(unsigned)ends(i)*5+(unsigned)twice(i)*11+(unsigned)under(i-n)*13+(unsigned)kept(i&3);return (int)s;}",
         "asm-goto-direct", clang);
     // Bodies with outputs that branch straight to their labels (#2351), each exit through its own copy of the stores: two
-    // labels and the fall-through, each reading the outputs; a + output and a flag output; a memory output's address and
-    // an x87 output; a template's own branch to its end; an always_inline function's statement called twice; and one
+    // labels and the fall-through, each reading the outputs; a + output and a flag output; a memory output's address (an
+    // x87 output is left out: clang 23's FP stackifier crashes on one in asm goto); a template's own branch to its end; an always_inline function's statement called twice; and one
     // in a loop of live values in callee-saved registers.
     check_test_program_source(test,
         "static int three(int x){int r;__asm__ goto(\"movl %1, %0\\n\\taddl $7, %0\\n\\tcmpl $2, %1\\n\\tje %l[two]\\n\\tcmpl $5, %1\\n\\tjg %l[big]\" : \"=&r\"(r) : \"r\"(x) : \"cc\" : two, big);"
@@ -474,7 +473,6 @@ static void check_test_program_asm_goto(CheckTest* test, const char* clang)
         "static int plus(int x){int y=x;int z;__asm__ goto(\"addl $3, %0\\n\\ttestl %0, %0\\n\\tjs %l[neg]\" : \"+r\"(y), \"=@ccz\"(z) : : : neg);return y*2+z;neg:return y-z*10;}"
         "static long mem(long* p, int x){long t;__asm__ goto(\"movq $9, %0\\n\\tmovl %2, %k1\\n\\tcmpl $0, %2\\n\\tjl %l[low]\" : \"=m\"(*p), \"=&r\"(t) : \"r\"(x) : \"cc\" : low);"
         "return *p+t;low:return *p*100+t;}"
-        "static double root(double d, int x){double r;__asm__ goto(\"fsqrt\\n\\ttestl %2, %2\\n\\tjnz %l[odd]\" : \"=t\"(r) : \"0\"(d), \"r\"(x&1) : \"cc\" : odd);return r;odd:return -r;}"
         "static int ends(int x){int r=0;__asm__ goto(\"movl %1, %0\\n\\tcmpl $3, %1\\n\\tje 1f\\n\\tcmpl $4, %1\\n\\tje %l[four]\\n1:\" : \"=&r\"(r) : \"r\"(x) : \"cc\" : four);return r;four:return r*40;}"
         "static inline __attribute__((always_inline)) int dec(int x){int r=x;__asm__ goto(\"decl %0\\n\\tjz %l[z]\" : \"+r\"(r) : : \"cc\" : z);return r;z:return 1000+r;}"
         "static int twice(int x){return dec(x)*3+dec(x-1);}"
@@ -482,7 +480,7 @@ static void check_test_program_asm_goto(CheckTest* test, const char* clang)
         "__asm__ goto(\"movl %1, %0\\n\\tandl $3, %0\\n\\ttestl $2, %1\\n\\tjnz %l[two]\" : \"=&r\"(o) : \"r\"(i) : \"cc\", \"rbx\", \"r12\" : two);"
         "t+=a+b+o;continue;two:t+=c*d-e+f+o*7;}return (int)(t+a+b+c+d+e+f);}"
         "int tested(int n){unsigned s=0;for(int i=-3;i<8;i++){long m=0;s=s*7+(unsigned)three(i+n)+(unsigned)plus(i-n)*3+(unsigned)mem(&m,i)*5+(unsigned)m"
-        "+(unsigned)(int)(root((double)(i*i+1),i)*1000.0)+(unsigned)ends(i)*11+(unsigned)twice(i)*13+(unsigned)kept(i&3)*17;}return (int)s;}",
+        "+(unsigned)ends(i)*11+(unsigned)twice(i)*13+(unsigned)kept(i&3)*17;}return (int)s;}",
         "asm-goto-direct-outputs", clang);
 }
 
@@ -642,6 +640,15 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "return r*10+(p!=q&&p!=0)+n;}",
         "asm-named-labels", clang);
     check_test_program_source(test, "int tested(int n){__asm__(\"lonely:\");return n;}", "asm-label-no-instructions", clang);
+    // Private labels (#2351's gap 4): always_inline functions whose templates' `.L%=` labels no other template refers
+    // to, each spliced twice into one caller by Tier 0, every copy's branches its own; and a loop back to one.
+    check_test_program_source(test,
+        "static inline __attribute__((always_inline)) int clamp(int x){int r=x;__asm__(\"cmpl $10, %0\\n\\tjle .Lok%=\\n\\tmovl $10, %0\\n.Lok%=:\" : \"+r\"(r) : : \"cc\");return r;}"
+        "static inline __attribute__((always_inline)) int doubled(int x){__asm__(\"testl %0, %0\\n\\tjns .Lpos%=\\n\\tnegl %0\\n.Lpos%=:\\n\\taddl %0, %0\" : \"+r\"(x) : : \"cc\");return x;}"
+        "static inline __attribute__((always_inline)) int spin(int k){int r=0;__asm__(\".Lspin%=:\\n\\taddl $3, %1\\n\\tdecl %0\\n\\tjnz .Lspin%=\" : \"+r\"(k), \"+r\"(r) : : \"cc\");return r;}"
+        "static int pair(int a,int b){return clamp(a)+clamp(b)*3+doubled(a-b)*5+doubled(b)*7+spin((a&3)+1)+spin((b&3)+1)*11;}"
+        "int tested(int n){unsigned s=0;for(int i=-20;i<20;i++)s=s*7+(unsigned)pair(i+n,i*2);return (int)s;}",
+        "asm-private-labels-inlined", clang);
     // Callee-saved clobbers inside a loop of live values, and a statement expression's asm under a live value.
     check_test_program_source(test,
         "int tested(int n){long a=n,b=n+1,c=n+2,d=n+3,e=n+4,f=n+5,g=n+6;long r;"

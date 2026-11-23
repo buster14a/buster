@@ -4126,6 +4126,33 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
             }
         }
     }
+    // An asm body's private labels (#2351's gap 4): a `.L` name, which the object's symbols leave out, that no template
+    // refers to and no directive names. The body's own branches reach their targets without it, so it defines nothing,
+    // and Tier 0 may splice its function into its callers (tier0_inline_callee_valid), as clang inlines a function whose
+    // template's `.Lx%=` labels each copy renumbers. Its name, a label of no other template (each defines its own once),
+    // is then no label, and so no symbol.
+    for (uint32_t s = 0; valid && s < statements; s += 1)
+    {
+        CheckProgramAsm* plan = result->plans + s;
+        uint32_t kept = 0;
+        for (uint32_t k = 0; plan->planned && plan->reason == NULL && plan->inlined && k < plan->label_count; k += 1)
+        {
+            CheckAsmName* name = names + plan->labels[k].name;
+            const String8 spelling = plan->labels[k].spelling;
+            const bool local = spelling.length >= 2 && spelling.pointer[0] == '.' && spelling.pointer[1] == 'L';
+            const bool kept_label = !local || name->referenced || name->directives != 0;
+            // A dropped one is no label: unreferenced, it then has no link symbol (check_program_emit_asm_symbols).
+            name->label = kept_label;
+            if (kept_label)
+            {
+                plan->labels[kept] = plan->labels[k];
+                plan->inline_label_records[kept] = plan->inline_label_records[k];
+                plan->inline_label_names[kept] = plan->inline_label_names[k];
+                kept += 1;
+            }
+        }
+        plan->label_count = plan->planned && plan->reason == NULL && plan->inlined ? kept : plan->label_count;
+    }
     result->names = names;
     result->name_count = count;
     arena_pop_to(scratch, scratch_mark);
