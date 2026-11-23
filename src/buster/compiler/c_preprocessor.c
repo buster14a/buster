@@ -7530,6 +7530,10 @@ static bool pp_parse_options_inputs(int count, char** arguments, PPOptions* opti
             fprintf(stderr, "error: malformed linker option '%s' (use '-Wl,OPTION')\n", argument);
             result = false;
         }
+        else if (inputs != NULL && match.exact == C_OPTION_S)
+        {
+            // The preprocessing driver stops before assembly, regardless of the order of the action options.
+        }
         else if (match.exact == C_OPTION_E || match.exact == C_OPTION_C || match.exact == C_OPTION_W || match.exact == C_OPTION_FHOSTED || match.exact == C_OPTION_PIPE)
         {
             preprocess_only |= match.exact == C_OPTION_E;

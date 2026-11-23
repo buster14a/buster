@@ -216,7 +216,11 @@ static const char asm_test_encoding_prefixes[] =
     "{vex} {evex} vaddps %ymm1, %ymm2, %ymm3{%k1}\n"
     "{vex} vpdpbusd %xmm1, %xmm2, %xmm3\n{evex} vpdpbusd %xmm1, %xmm2, %xmm3\n"
     "{disp32} jne 1f\njmp 1f\n1: {disp32} jmp 1b\n{disp32} jne outside\n"
-    ".intel_syntax noprefix\n{load} mov eax, ebx\n{store} {vex} vmovaps xmm13, xmm2\n"
+    "{disp32} movl (%rax), %ecx\n{disp32} movl -128(%rsp), %edx\n{disp32} jmp *4(%r13)\n"
+    "{disp32} movl $17, outside+3(%r12,%rcx,4)\n{disp32} cmpb $9, outside(%rip)\n{disp32} movl outside(,%eax,4), %ecx\n"
+    "{disp32} {evex} vaddps 64(%rax), %zmm2, %zmm1\n{disp32} vpgatherdd (%r12,%zmm7,4), %zmm1{%k2}\n"
+    ".intel_syntax noprefix\n{disp32} mov eax, DWORD PTR [ebp]\n{disp32} mov DWORD PTR [r8+r9*8-1], 1234\n"
+    "{load} mov eax, ebx\n{store} {vex} vmovaps xmm13, xmm2\n"
     ".section .eh_frame,\"a\",@unwind\n.p2align 3\n.long entry-.\n";
 
 // AVX2's and AVX-512's gathers and scatters, of vector-indexed (VSIB) memory (#1115: clang's `vpgatherqd
@@ -362,6 +366,12 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
     static const uint8_t forced[] = { 0x03, 0xc1, 0x01, 0xc8, 0x0f, 0x85, 0, 0, 0, 0, 0xe9, 0xfb, 0xff, 0xff, 0xff, 0xeb, 0xf9 };
     asm_test_bytes(test, "{load} addl %ecx,%eax\n{store} addl %ecx,%eax\n{disp32} jne 1f\n1: {disp32} jmp 1b\njmp 1b\n", 1, forced, sizeof(forced),
                    "explicit direction and near branches keep their encoding");
+    // Zero, the disp8 boundary, and an ordinary short displacement, all crossed by the same jump.
+    static const uint8_t memory[] = {
+        0xeb, 0x10, 0x8b, 0x80, 0, 0, 0, 0, 0x89, 0x84, 0x24, 0x80, 0xff, 0xff, 0xff, 0x8b, 0x40, 0x04,
+    };
+    asm_test_bytes(test, "jmp 1f\n{disp32} movl (%rax), %eax\n{disp32} movl %eax, -128(%rsp)\nmovl 4(%rax), %eax\n1:\n", 1, memory, sizeof(memory),
+                   "forced memory displacements size the jump across them");
     asm_test_pair(test, BUSTER_S8("{evex} vaddps %ymm1, %ymm2, %ymm3\n"), 0, X86_ARCH_V3);
     // What GNU as refuses too, or what the Link can't hold: @TPOFF in an unsigned field (`movl $x@tpoff, %eax`),
     // @GOTTPOFF without RIP, a 2-byte TLS offset as data, a TLS modifier on a symbol outside a TLS section; .comm's
@@ -386,7 +396,7 @@ static void asm_test_issue_fixtures(AsmTest* test, const char* directory, bool c
         "{load}\nmov %eax, %ebx\n",
         "{load} .byte 1\n",
         "{unknown} mov %eax, %ebx\n",
-        "{disp32} mov 4(%rax), %eax\n",
+        "{disp32} mov 0x100000000(%rax), %eax\n",
         ".section .eh_frame,\"a\",@unwind\n.section .eh_frame,\"a\",@progbits\n",
         ".text\nmovl $tl@tpoff, %eax\n.section .tbss,\"awT\",@nobits\ntl: .zero 4\n",
         ".text\nmovq ext@gottpoff, %rax\n",

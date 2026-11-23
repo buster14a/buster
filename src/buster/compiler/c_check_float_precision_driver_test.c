@@ -329,8 +329,36 @@ static const char check_driver_float_small_source[] =
     "    return f == 0.1;\n"
     "}\n";
 
+// Narrowing at builtin parameter edges, including nested calls and a group of controls.
+// Suppress fabsf's independent -Wabsolute-value diagnostic so these cases isolate the argument conversions.
+static const char check_driver_builtin_float_arguments_source[] =
+    "typedef double D;\n"
+    "float copy(D x, long double y) { return __builtin_copysignf(x, y); }\n"
+    "float absolute(double x) { return __builtin_fabsf(x); }\n"
+    "float fused(double x, long double y) { return __builtin_fmaf(x, 1.0f, y); }\n"
+    "float nested(long double x) { return __builtin_copysignf(__builtin_ceil(x), __builtin_floor(x)); }\n"
+    "float choose(int c, double x, double y) { return __builtin_sqrtf(c ? x : y); }\n"
+    "float dead(double x) { if (0) return __builtin_sqrtf(x); return __builtin_ceilf(0.1); }\n"
+    "float exchange(_Atomic float *p, double x) { return __c11_atomic_exchange(p, x, 5); }\n"
+    "float exact(double x) { return __builtin_copysignf((float)x, 1.0); }\n"
+    "int query(long double x) { return __builtin_isfinite(x) + (int)sizeof(__builtin_floorf(x)); }\n"
+    "float component(_Complex double x) { return __builtin_crealf(x); }\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_float_precision_fixtures[] =
 {
+    {
+        .name = "builtin floating parameter conversions",
+        .source = check_driver_builtin_float_arguments_source,
+        .options = { "-Wno-absolute-value", "-Wimplicit-float-conversion" },
+        .warnings = 15,
+        .compare_node_window = true,
+    },
+    {
+        .name = "builtin floating parameter conversions with the warning disabled",
+        .source = check_driver_builtin_float_arguments_source,
+        .options = { "-Wno-absolute-value", "-Wimplicit-float-conversion", "-Wno-implicit-float-conversion" },
+        .compare_node_window = true,
+    },
     {
         .name = "floating conversions to a lower rank, by default",
         .source = check_driver_float_conversions_source,

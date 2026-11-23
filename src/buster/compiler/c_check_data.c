@@ -61,6 +61,11 @@ struct CheckDataObject
     bool optional;
     // Declaration alignment is separate from the ordinary compatible type. Zero keeps its natural alignment.
     uint8_t alignment_log2;
+    // Its initializer's live parts (check_initializer_live's marks, a byte a part, null for none, and how many), which the
+    // preparation found (check_initializer_references_live) and the plan reads (#3393), where `live_kept`.
+    bool live_kept;
+    const uint8_t* live_parts;
+    uint32_t live_count;
 };
 
 typedef enum CheckDataStatus
@@ -127,66 +132,274 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
 
 #include "c_check_constant_bytes.c"
 
-static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const CheckStream* stream, const CheckDataObject* object,
-                                             const SymbolId* object_symbols, uint32_t object_count, const Link* link, CheckDataScalar* plan)
+// What a scalar's plan takes from its type alone (check_data_plan_scalar's): its kind, width and size, or the status
+// that refuses it. An initializer's parts of one type share it (#3393: a table's thousands of elements had it found
+// again each).
+typedef struct CheckDataScalarShape CheckDataScalarShape;
+struct CheckDataScalarShape
 {
-    *plan = (CheckDataScalar){ 0 };
+    CheckDataStatus status;
+    TypeId base;
+    uint32_t width;
+    bool is_signed;
+    bool integer;
+    bool floating;
+    bool complex;
+    bool pointer;
+    bool quad;
+    uint8_t size;
+    uint8_t alignment_log2;
+};
+
+static CheckDataScalarShape check_data_scalar_shape(const TypeTable* types, TypeId type, uint8_t alignment_log2)
+{
+    CheckDataScalarShape shape = { .status = CHECK_DATA_OK };
+    if (!type_is_valid(types, type) || !type_is_complete(types, type))
+    {
+        shape.status = CHECK_DATA_INVALID;
+    }
+    if (shape.status == CHECK_DATA_OK)
+    {
+        const TypeId stripped = type_strip_aligned(types, type);
+        shape.base = type_conversion_operand(types, stripped);
+        const uint8_t kind = type_kind(types, shape.base);
+        shape.integer = check_action_integer_type(types, shape.base, &shape.width, &shape.is_signed);
+        shape.floating = shape.base == BUSTER_TYPE_FLOAT || shape.base == BUSTER_TYPE_DOUBLE || shape.base == BUSTER_TYPE_LONG_DOUBLE ||
+                         check_action_half_format(shape.base) != CHECK_HALF_NONE;
+        shape.complex = kind == BUSTER_TYPE_KIND_COMPLEX;
+        shape.pointer = kind == BUSTER_TYPE_KIND_POINTER;
+        // A __float128 object's bytes are zeros without an initializer (#137), or its constant's bits (#1250).
+        shape.quad = shape.base == BUSTER_TYPE_FLOAT128;
+        const uint64_t size = type_size(types, type);
+        const uint32_t natural = type_alignment_log2(types, type);
+        const uint32_t alignment = alignment_log2 > natural ? alignment_log2 : natural;
+        const uint64_t scalar_size = type_size(types, shape.base);
+        const bool fits = size != 0 && size <= sizeof(((CheckDataScalar*)0)->bytes) && size >= scalar_size && alignment <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
+        if ((!shape.integer && !shape.floating && !shape.complex && !shape.pointer && !shape.quad) || !fits || (shape.pointer && size != 8) ||
+            (shape.integer && shape.width > size * 8))
+        {
+            shape.status = CHECK_DATA_UNSUPPORTED;
+        }
+        else
+        {
+            shape.size = (uint8_t)size;
+            shape.alignment_log2 = (uint8_t)alignment;
+        }
+    }
+    return shape;
+}
+
+// The symbol a scalar of `object` is planned for (check_data_plan_scalar's): the object's, without code or a definition
+// yet, in *symbol.
+static CheckDataStatus check_data_scalar_symbol(uint32_t object, const SymbolId* object_symbols, uint32_t object_count, const Link* link, SymbolId* symbol)
+{
     CheckDataStatus status = CHECK_DATA_OK;
-    if (!type_is_valid(types, object->type) || !type_is_complete(types, object->type))
+    *symbol = 0;
+    if (object == 0 || object >= object_count || object_symbols[object] == 0 || object_symbols[object] >= link->symbols.count)
+    {
+        status = CHECK_DATA_SYMBOL;
+    }
+    else
+    {
+        *symbol = object_symbols[object];
+        const uint8_t symbol_type = link->symbols.flags[*symbol] & BUSTER_LINK_SYMBOL_TYPE;
+        if ((symbol_type != BUSTER_LINK_SYMBOL_OBJECT && symbol_type != BUSTER_LINK_SYMBOL_TLS && symbol_type != BUSTER_LINK_SYMBOL_COMMON) ||
+            (link->symbols.source[*symbol] != BUSTER_LINK_SOURCE_PROGRAM && link->symbols.source[*symbol] != BUSTER_LINK_SOURCE_NONE) ||
+            link->symbols.atom[*symbol] != 0)
+        {
+            status = CHECK_DATA_SYMBOL;
+        }
+    }
+    return status;
+}
+
+// A scalar's bytes, or its object and addend, from its checked constant `value` (check_data_plan_scalar's), into `plan`
+// whose size and alignment `shape` gave it.
+static CheckDataStatus check_data_scalar_value(const TypeTable* types, const CheckDataScalarShape* shape, const CheckValue* value, const SymbolId* object_symbols,
+                                              uint32_t object_count, const Link* link, CheckDataScalar* plan)
+{
+    CheckDataStatus status = CHECK_DATA_OK;
+    const TypeId base = shape->base;
+    const uint32_t width = shape->width;
+    const bool is_signed = shape->is_signed;
+    const bool integer = shape->integer;
+    const bool floating = shape->floating;
+    const bool complex = shape->complex;
+    const bool pointer = shape->pointer;
+    const bool quad = shape->quad;
+    const bool valid_type = type_is_valid(types, value->type);
+    // An atomic cast's constant (#2230) is its value type's.
+    const TypeId value_type = valid_type ? type_conversion_operand(types, value->type) : 0;
+    TypeAnswer compatible = value_type == base ? TYPE_ANSWER_YES : TYPE_ANSWER_NO;
+    if (valid_type && pointer && value_type != base && type_kind(types, value_type) == BUSTER_TYPE_KIND_POINTER)
+    {
+        // A later compatible declaration can complete an array/function pointee after this initializer
+        // was checked. Its pointer representation is unchanged; scalar arithmetic conversions are exact.
+        compatible = type_compatible(types, base, value_type);
+    }
+    if (compatible == TYPE_ANSWER_FULL)
+    {
+        status = CHECK_DATA_RESOURCE;
+    }
+    else if (!valid_type || compatible != TYPE_ANSWER_YES || value->category != CHECK_RVALUE)
     {
         status = CHECK_DATA_INVALID;
     }
-    TypeId base = 0;
-    uint32_t width = 0;
-    bool is_signed = false;
-    bool integer = false;
-    bool floating = false;
-    bool complex = false;
-    bool pointer = false;
-    bool quad = false;
-    if (status == CHECK_DATA_OK)
+    else if (value->fault != CHECK_FAULT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
     {
-        const TypeId stripped = type_strip_aligned(types, object->type);
-        base = type_conversion_operand(types, stripped);
-        const uint8_t kind = type_kind(types, base);
-        integer = check_action_integer_type(types, base, &width, &is_signed);
-        floating = base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE || check_action_half_format(base) != CHECK_HALF_NONE;
-        complex = kind == BUSTER_TYPE_KIND_COMPLEX;
-        pointer = kind == BUSTER_TYPE_KIND_POINTER;
-        // A __float128 object's bytes are zeros without an initializer (#137), or its constant's bits (#1250).
-        quad = base == BUSTER_TYPE_FLOAT128;
-        const uint64_t size = type_size(types, object->type);
-        const uint32_t natural = type_alignment_log2(types, object->type);
-        const uint32_t alignment = object->alignment_log2 > natural ? object->alignment_log2 : natural;
-        const uint64_t scalar_size = type_size(types, base);
-        const bool shape = size != 0 && size <= sizeof(plan->bytes) && size >= scalar_size && alignment <= BUSTER_LINK_MAX_ALIGNMENT_LOG2;
-        if ((!integer && !floating && !complex && !pointer && !quad) || !shape || (pointer && size != 8) || (integer && width > size * 8))
+        status = CHECK_DATA_NON_CONSTANT;
+    }
+    else if (integer && value->constant_kind == CHECK_CONSTANT_INTEGER)
+    {
+        const unsigned __int128 mask = check_action_mask(width);
+        if ((value->integer & ~mask) != 0 || (base == BUSTER_TYPE_BOOL && value->integer > 1))
+        {
+            status = CHECK_DATA_INVALID;
+        }
+        else
+        {
+            // The x86-64 _BitInt object representation extends a signed value through its storage unit.
+            const bool extend = is_signed && width < plan->size * 8u && (value->integer >> (width - 1)) != 0;
+            const unsigned __int128 bits = value->integer | (extend ? ~mask : 0);
+            check_data_integer_bytes(plan->bytes, bits, plan->size);
+        }
+    }
+    else if (integer && width >= 32 && value->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE)
+    {
+        // GNU's difference of two labels' addresses (#1447): their distance in their function's code, which the
+        // emission placed before the static data is planned, as an assembler resolves clang's `.long .La-.Lb`.
+        const uint32_t minuend = value->object;
+        const uint32_t subtrahend = (uint32_t)value->integer;
+        const SymbolId a = minuend < object_count ? object_symbols[minuend] : 0;
+        const SymbolId b = subtrahend < object_count ? object_symbols[subtrahend] : 0;
+        const bool placed = a != 0 && b != 0 && a < link->symbols.count && b < link->symbols.count && link->symbols.atom[a] != 0 &&
+                            link->symbols.atom[a] == link->symbols.atom[b];
+        if (!placed)
         {
             status = CHECK_DATA_UNSUPPORTED;
         }
         else
         {
-            plan->size = (uint8_t)size;
-            plan->alignment_log2 = (uint8_t)alignment;
+            const uint64_t distance = link->symbols.value[a] - link->symbols.value[b];
+            const unsigned __int128 mask = check_action_mask(width);
+            const bool extend = is_signed && width < plan->size * 8u && ((distance & mask) >> (width - 1)) != 0;
+            const unsigned __int128 bits = ((unsigned __int128)(int64_t)distance & mask) | (extend ? ~mask : 0);
+            check_data_integer_bytes(plan->bytes, bits, plan->size);
         }
     }
-    if (status == CHECK_DATA_OK)
+    else if ((floating || quad) && value->constant_kind == CHECK_CONSTANT_FLOATING)
     {
-        if (object->object == 0 || object->object >= object_count || object_symbols[object->object] == 0 || object_symbols[object->object] >= link->symbols.count)
+        const long double rounded = check_action_round_float(base, value->floating);
+        if (!isnan(value->floating) && (rounded != value->floating || signbit(rounded) != signbit(value->floating)))
+        {
+            status = CHECK_DATA_INVALID;
+        }
+        else
+        {
+            check_data_scalar_float_bytes(plan->bytes, base, value);
+        }
+    }
+    else if (complex && value->constant_kind == CHECK_CONSTANT_COMPLEX)
+    {
+        const TypeId element = type_element(types, base);
+        const uint32_t component_size = (uint32_t)type_size(types, element);
+        uint32_t component_width = 0;
+        bool component_signed = false;
+        if (component_size == 0 || (uint64_t)component_size * 2 != plan->size)
+        {
+            status = CHECK_DATA_UNSUPPORTED;
+        }
+        else if (type_unqualified(element) == BUSTER_TYPE_FLOAT128)
+        {
+            // A _Complex __float128's parts are its bits (#1250, check_quad_complex_set).
+            check_data_integer_bytes(plan->bytes, value->integer, 16);
+            check_data_integer_bytes(plan->bytes + 16, check_quad_complex_imaginary(value), 16);
+        }
+        else if (check_action_float_supported(types, element) || check_action_half_format(element) != CHECK_HALF_NONE)
+        {
+            const long double real = check_action_round_float(element, value->floating);
+            const long double imaginary = check_action_round_float(element, value->imaginary);
+            const bool real_valid = isnan(value->floating) || (real == value->floating && signbit(real) == signbit(value->floating));
+            const bool imaginary_valid = isnan(value->imaginary) || (imaginary == value->imaginary && signbit(imaginary) == signbit(value->imaginary));
+            if (!real_valid || !imaginary_valid)
+            {
+                status = CHECK_DATA_INVALID;
+            }
+            else
+            {
+                check_data_float_bytes(plan->bytes, element, value->floating);
+                check_data_float_bytes(plan->bytes + component_size, element, value->imaginary);
+            }
+        }
+        else if (check_action_integer_type(types, element, &component_width, &component_signed) && component_width <= 64)
+        {
+            const unsigned __int128 mask = check_action_mask(component_width);
+            const unsigned __int128 parts[2] = { value->integer & UINT64_MAX, value->integer >> 64 };
+            if ((parts[0] & ~mask) != 0 || (parts[1] & ~mask) != 0)
+            {
+                status = CHECK_DATA_INVALID;
+            }
+            else
+            {
+                for (uint32_t part = 0; part < 2; part += 1)
+                {
+                    // A complex _BitInt's part extends a signed value through its storage unit, as a _BitInt does
+                    // (#2219); a GNU complex integer's fills its own.
+                    const bool extend = component_signed && component_width < component_size * 8u && (parts[part] >> (component_width - 1)) != 0;
+                    check_data_integer_bytes(plan->bytes + part * component_size, parts[part] | (extend ? ~mask : 0), component_size);
+                }
+            }
+        }
+        else if (check_complex_wide_element(types, element, &component_width, &component_signed))
+        {
+            // An integer element past 64 bits: each part's limbs (#2219).
+            const bool written = check_complex_wide_bytes(value, false, component_width, component_signed, plan->bytes, component_size) &&
+                                 check_complex_wide_bytes(value, true, component_width, component_signed, plan->bytes + component_size, component_size);
+            status = written ? status : CHECK_DATA_UNSUPPORTED;
+        }
+        else
+        {
+            status = CHECK_DATA_UNSUPPORTED;
+        }
+    }
+    else if ((pointer || (integer && width == 64 && plan->size == 8)) && value->constant_kind == CHECK_CONSTANT_ADDRESS)
+    {
+        if (value->object == 0)
+        {
+            check_data_integer_bytes(plan->bytes, (uint64_t)value->offset, 8);
+        }
+        else if ((value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0)
+        {
+            status = CHECK_DATA_NON_CONSTANT;
+        }
+        else if (value->object >= object_count)
         {
             status = CHECK_DATA_SYMBOL;
         }
         else
         {
-            plan->symbol = object_symbols[object->object];
-            const uint8_t symbol_type = link->symbols.flags[plan->symbol] & BUSTER_LINK_SYMBOL_TYPE;
-            if ((symbol_type != BUSTER_LINK_SYMBOL_OBJECT && symbol_type != BUSTER_LINK_SYMBOL_TLS && symbol_type != BUSTER_LINK_SYMBOL_COMMON) ||
-                     (link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_PROGRAM && link->symbols.source[plan->symbol] != BUSTER_LINK_SOURCE_NONE) ||
-                     link->symbols.atom[plan->symbol] != 0)
-            {
-                status = CHECK_DATA_SYMBOL;
-            }
+            plan->object = value->object;
+            plan->addend = value->offset;
         }
+    }
+    else
+    {
+        status = CHECK_DATA_NON_CONSTANT;
+    }
+    return status;
+}
+
+static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const CheckStream* stream, const CheckDataObject* object,
+                                             const SymbolId* object_symbols, uint32_t object_count, const Link* link, CheckDataScalar* plan)
+{
+    *plan = (CheckDataScalar){ 0 };
+    const CheckDataScalarShape shape = check_data_scalar_shape(types, object->type, object->alignment_log2);
+    CheckDataStatus status = shape.status;
+    plan->size = shape.size;
+    plan->alignment_log2 = shape.alignment_log2;
+    if (status == CHECK_DATA_OK)
+    {
+        status = check_data_scalar_symbol(object->object, object_symbols, object_count, link, &plan->symbol);
     }
     if (status == CHECK_DATA_OK && object->initializer != BUSTER_CHECK_NONE)
     {
@@ -201,166 +414,7 @@ static CheckDataStatus check_data_plan_scalar(const TypeTable* types, const Chec
         else
         {
             const CheckValue checked_value = check_stream_value(stream, object->initializer);
-            const CheckValue* value = &checked_value;
-            const bool valid_type = type_is_valid(types, value->type);
-            // An atomic cast's constant (#2230) is its value type's.
-            const TypeId value_type = valid_type ? type_conversion_operand(types, value->type) : 0;
-            TypeAnswer compatible = value_type == base ? TYPE_ANSWER_YES : TYPE_ANSWER_NO;
-            if (valid_type && pointer && value_type != base && type_kind(types, value_type) == BUSTER_TYPE_KIND_POINTER)
-            {
-                // A later compatible declaration can complete an array/function pointee after this initializer
-                // was checked. Its pointer representation is unchanged; scalar arithmetic conversions are exact.
-                compatible = type_compatible(types, base, value_type);
-            }
-            if (compatible == TYPE_ANSWER_FULL)
-            {
-                status = CHECK_DATA_RESOURCE;
-            }
-            else if (!valid_type || compatible != TYPE_ANSWER_YES || value->category != CHECK_RVALUE)
-            {
-                status = CHECK_DATA_INVALID;
-            }
-            else if (value->fault != CHECK_FAULT_NONE || (value->flags & BUSTER_CHECK_SIDE_EFFECT) != 0)
-            {
-                status = CHECK_DATA_NON_CONSTANT;
-            }
-            else if (integer && value->constant_kind == CHECK_CONSTANT_INTEGER)
-            {
-                const unsigned __int128 mask = check_action_mask(width);
-                if ((value->integer & ~mask) != 0 || (base == BUSTER_TYPE_BOOL && value->integer > 1))
-                {
-                    status = CHECK_DATA_INVALID;
-                }
-                else
-                {
-                    // The x86-64 _BitInt object representation extends a signed value through its storage unit.
-                    const bool extend = is_signed && width < plan->size * 8u && (value->integer >> (width - 1)) != 0;
-                    const unsigned __int128 bits = value->integer | (extend ? ~mask : 0);
-                    check_data_integer_bytes(plan->bytes, bits, plan->size);
-                }
-            }
-            else if (integer && width >= 32 && value->constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE)
-            {
-                // GNU's difference of two labels' addresses (#1447): their distance in their function's code, which the
-                // emission placed before the static data is planned, as an assembler resolves clang's `.long .La-.Lb`.
-                const uint32_t minuend = value->object;
-                const uint32_t subtrahend = (uint32_t)value->integer;
-                const SymbolId a = minuend < object_count ? object_symbols[minuend] : 0;
-                const SymbolId b = subtrahend < object_count ? object_symbols[subtrahend] : 0;
-                const bool placed = a != 0 && b != 0 && a < link->symbols.count && b < link->symbols.count && link->symbols.atom[a] != 0 &&
-                                    link->symbols.atom[a] == link->symbols.atom[b];
-                if (!placed)
-                {
-                    status = CHECK_DATA_UNSUPPORTED;
-                }
-                else
-                {
-                    const uint64_t distance = link->symbols.value[a] - link->symbols.value[b];
-                    const unsigned __int128 mask = check_action_mask(width);
-                    const bool extend = is_signed && width < plan->size * 8u && ((distance & mask) >> (width - 1)) != 0;
-                    const unsigned __int128 bits = ((unsigned __int128)(int64_t)distance & mask) | (extend ? ~mask : 0);
-                    check_data_integer_bytes(plan->bytes, bits, plan->size);
-                }
-            }
-            else if ((floating || quad) && value->constant_kind == CHECK_CONSTANT_FLOATING)
-            {
-                const long double rounded = check_action_round_float(base, value->floating);
-                if (!isnan(value->floating) && (rounded != value->floating || signbit(rounded) != signbit(value->floating)))
-                {
-                    status = CHECK_DATA_INVALID;
-                }
-                else
-                {
-                    check_data_scalar_float_bytes(plan->bytes, base, value);
-                }
-            }
-            else if (complex && value->constant_kind == CHECK_CONSTANT_COMPLEX)
-            {
-                const TypeId element = type_element(types, base);
-                const uint32_t component_size = (uint32_t)type_size(types, element);
-                uint32_t component_width = 0;
-                bool component_signed = false;
-                if (component_size == 0 || (uint64_t)component_size * 2 != plan->size)
-                {
-                    status = CHECK_DATA_UNSUPPORTED;
-                }
-                else if (type_unqualified(element) == BUSTER_TYPE_FLOAT128)
-                {
-                    // A _Complex __float128's parts are its bits (#1250, check_quad_complex_set).
-                    check_data_integer_bytes(plan->bytes, value->integer, 16);
-                    check_data_integer_bytes(plan->bytes + 16, check_quad_complex_imaginary(value), 16);
-                }
-                else if (check_action_float_supported(types, element) || check_action_half_format(element) != CHECK_HALF_NONE)
-                {
-                    const long double real = check_action_round_float(element, value->floating);
-                    const long double imaginary = check_action_round_float(element, value->imaginary);
-                    const bool real_valid = isnan(value->floating) || (real == value->floating && signbit(real) == signbit(value->floating));
-                    const bool imaginary_valid = isnan(value->imaginary) || (imaginary == value->imaginary && signbit(imaginary) == signbit(value->imaginary));
-                    if (!real_valid || !imaginary_valid)
-                    {
-                        status = CHECK_DATA_INVALID;
-                    }
-                    else
-                    {
-                        check_data_float_bytes(plan->bytes, element, value->floating);
-                        check_data_float_bytes(plan->bytes + component_size, element, value->imaginary);
-                    }
-                }
-                else if (check_action_integer_type(types, element, &component_width, &component_signed) && component_width <= 64)
-                {
-                    const unsigned __int128 mask = check_action_mask(component_width);
-                    const unsigned __int128 parts[2] = { value->integer & UINT64_MAX, value->integer >> 64 };
-                    if ((parts[0] & ~mask) != 0 || (parts[1] & ~mask) != 0)
-                    {
-                        status = CHECK_DATA_INVALID;
-                    }
-                    else
-                    {
-                        for (uint32_t part = 0; part < 2; part += 1)
-                        {
-                            // A complex _BitInt's part extends a signed value through its storage unit, as a _BitInt does
-                            // (#2219); a GNU complex integer's fills its own.
-                            const bool extend = component_signed && component_width < component_size * 8u && (parts[part] >> (component_width - 1)) != 0;
-                            check_data_integer_bytes(plan->bytes + part * component_size, parts[part] | (extend ? ~mask : 0), component_size);
-                        }
-                    }
-                }
-                else if (check_complex_wide_element(types, element, &component_width, &component_signed))
-                {
-                    // An integer element past 64 bits: each part's limbs (#2219).
-                    const bool written = check_complex_wide_bytes(value, false, component_width, component_signed, plan->bytes, component_size) &&
-                                         check_complex_wide_bytes(value, true, component_width, component_signed, plan->bytes + component_size, component_size);
-                    status = written ? status : CHECK_DATA_UNSUPPORTED;
-                }
-                else
-                {
-                    status = CHECK_DATA_UNSUPPORTED;
-                }
-            }
-            else if ((pointer || (integer && width == 64 && plan->size == 8)) && value->constant_kind == CHECK_CONSTANT_ADDRESS)
-            {
-                if (value->object == 0)
-                {
-                    check_data_integer_bytes(plan->bytes, (uint64_t)value->offset, 8);
-                }
-                else if ((value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0)
-                {
-                    status = CHECK_DATA_NON_CONSTANT;
-                }
-                else if (value->object >= object_count)
-                {
-                    status = CHECK_DATA_SYMBOL;
-                }
-                else
-                {
-                    plan->object = value->object;
-                    plan->addend = value->offset;
-                }
-            }
-            else
-            {
-                status = CHECK_DATA_NON_CONSTANT;
-            }
+            status = check_data_scalar_value(types, &shape, &checked_value, object_symbols, object_count, link, plan);
         }
     }
     return status;
@@ -824,7 +878,9 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         }
         else if (initializer->count != 0)
         {
-            const CheckInitStatus references = check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
+            const CheckInitStatus references = object->live_kept ? CHECK_INIT_OK : check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
+            live_parts = object->live_kept ? (uint8_t*)(uintptr_t)object->live_parts : live_parts;
+            live_count = object->live_kept ? object->live_count : live_count;
             status = references == CHECK_INIT_OK ? CHECK_DATA_OK : references == CHECK_INIT_RESOURCE ? CHECK_DATA_RESOURCE : CHECK_DATA_INVALID;
             plan->fixups = status == CHECK_DATA_OK && live_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, live_count) : 0;
             // arena_push is capacity-only and leaves the arena unchanged on failure. Admit direct construction
@@ -937,6 +993,12 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             }
         }
     }
+    CheckDataScalarShape part_shape = { 0 };
+    TypeId part_shape_type = 0;
+    bool part_shaped = false;
+    SymbolId part_symbol = 0;
+    CheckDataStatus part_symbol_status = CHECK_DATA_OK;
+    bool part_symbol_found = false;
     for (uint32_t i = 0; status == CHECK_DATA_OK && initializer != 0 && i < initializer->count; i += 1)
     {
         const CheckInitPart* part = &initializer->parts[i];
@@ -989,21 +1051,30 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         }
         else if (part->kind == CHECK_INIT_VALUE)
         {
-            CheckDiagnostic diagnostic = CHECK_DIAG_NONE;
-            CheckValue value = part->value;
-            const CheckStream scalar_stream = {
-                .dense_values = &value,
-                .diagnostics = &diagnostic,
-                .count = 1,
-            };
-            const CheckDataObject scalar_object = {
-                .type = part->type,
-                .object = object->object,
-                .initializer = 0,
-                .token = part->token,
-            };
-            CheckDataScalar scalar = { 0 };
-            status = check_data_plan_scalar(types, &scalar_stream, &scalar_object, object_symbols, object_count, link, &scalar);
+            // check_data_plan_scalar's plan of the part's constant as a scalar object's of its type, the object's own: its
+            // type's shape found once for a run of parts of one type, and its symbol once for the object.
+            if (!part_shaped || part->type != part_shape_type)
+            {
+                part_shape = check_data_scalar_shape(types, part->type, 0);
+                part_shape_type = part->type;
+                part_shaped = true;
+            }
+            if (!part_symbol_found)
+            {
+                part_symbol_status = check_data_scalar_symbol(object->object, object_symbols, object_count, link, &part_symbol);
+                part_symbol_found = true;
+            }
+            CheckDataScalar scalar = { .size = part_shape.size, .alignment_log2 = part_shape.alignment_log2 };
+            status = part_shape.status;
+            if (status == CHECK_DATA_OK)
+            {
+                scalar.symbol = part_symbol;
+                status = part_symbol_status;
+            }
+            if (status == CHECK_DATA_OK)
+            {
+                status = check_data_scalar_value(types, &part_shape, &part->value, object_symbols, object_count, link, &scalar);
+            }
             if (status == CHECK_DATA_OK && part->bit_width != 0)
             {
                 uint32_t width = 0;

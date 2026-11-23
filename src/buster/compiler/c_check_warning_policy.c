@@ -107,6 +107,12 @@ static bool check_warning_option(uint32_t id, String8 option)
     matches |= id == CHECK_WARNING_ID_VOID_POINTER_TO_ENUM_CAST &&
                (check_diagnostic_option(option, "-Wpointer-to-int-cast") || check_diagnostic_option(option, "-Wvoid-pointer-to-int-cast"));
     matches |= id == CHECK_WARNING_ID_POINTER_TO_ENUM_CAST && check_diagnostic_option(option, "-Wpointer-to-int-cast");
+    // -Wimplicit-float-conversion holds -Wimplicit-int-float-conversion, which holds -Wimplicit-const-int-float-conversion;
+    // -Wconversion holds all three, and -Wnon-gcc -Wconversion (#3339).
+    const bool int_float = id == CHECK_WARNING_ID_IMPLICIT_INT_FLOAT_CONVERSION || id == CHECK_WARNING_ID_IMPLICIT_CONST_INT_FLOAT_CONVERSION;
+    matches |= id == CHECK_WARNING_ID_IMPLICIT_CONST_INT_FLOAT_CONVERSION && check_diagnostic_option(option, "-Wimplicit-float-conversion");
+    matches |= int_float && check_diagnostic_option(option, "-Wconversion");
+    matches |= (int_float || id == CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION) && check_diagnostic_option(option, "-Wnon-gcc");
     return matches;
 }
 

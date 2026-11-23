@@ -980,7 +980,7 @@ struct CheckDriverDiagnostic
     TypeId default_target;
     // A predefined typedef's declaration has no source location (#2250).
     bool unlocated_note;
-    // A reread builtin typo precedes the corrected expression's own diagnostic, even at the same token.
+    // A reread name that now checks as its replacement. Its typo precedes any diagnostic on the replacement.
     bool corrected;
     // A duplicate case/default makes clang discard that switch before its jump-scope check (#2498).
     bool switch_conflict;
@@ -5017,8 +5017,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         const uint64_t* completions = completion_count != 0 ? c_bindings_sort(completion_keys, completion_sorting, completion_count, !scalar, varying) : NULL;
         uint32_t report_total = 0;
-        // A builtin typo is corrected before the reread expression is checked (#2250). Stable token sorting keeps
-        // this name error before an argument or direct-call error at the same token.
+        // A name is corrected before its replacement is checked. Stable sorting keeps the typo before any error
+        // the corrected expression or statement has at the same token.
         for (uint32_t i = 0; i < extra_count; i += 1)
         {
             if (extra[i].corrected)
@@ -8196,8 +8196,8 @@ static bool check_driver_rejected_top_known(const Parser* parser, const uint32_t
 // Whether the first reading's errors at `token` all leave their declaration valid (check_driver_report_keeps_valid,
 // #1835): no other error is there. A typo's correction (#1447, CHECK_INPUT_UNDECLARED_CORRECTED) does in a body too
 // (`bodied`): the reading corrects it again, its use bound as clang's, whose warnings (an array index's) stay. Only a
-// rejected unit's rounds call it. A builtin corrected by a driver name edit (#2250) has the same recovered status in
-// the extra diagnostics; an independent expression error at its token still rejects the expression.
+// rejected unit's rounds call it. A driver name edit can also leave the corrected expression or statement valid;
+// an independent error at its token still rejects it.
 static bool check_driver_rejected_recovered(const Parser* parser, const CheckInput* input, const CheckDriverDiagnostic* extra, uint32_t extra_count, uint32_t token, bool bodied)
 {
     bool recovered = false;
@@ -10840,7 +10840,6 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     bool valid = state->valid;
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
     CheckDebug dwarf = { 0 };
-    check_driver_lower_report(&code, stage_clock);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
@@ -10934,6 +10933,9 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
     check_driver_object_release(state, lanes, scratch);
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+    // The lowering's coverage line, a write to stderr of --time-stages' own, after the object's stages, which it would
+    // otherwise be charged to (#3393): of the emission's result as it came, before the object's own failures.
+    check_driver_lower_report(&state->code, stage_clock);
     return valid;
 }
 
@@ -11927,6 +11929,9 @@ struct CheckDriverCommand
 {
     // The preprocessor's, from -E's options on the command line, for every unit.
     PPOptions options;
+    // #2850's default path's rule against what it replaces, where a test asks (BUSTER_TEST_DEFAULT_PATH_LOG): the
+    // command's counts, which each unit's pass adds to (CheckInput.default_path_counts). Null in every other run.
+    uint64_t* default_path_counts;
     // --scalar, --verify, --dump-typed, --dump-static, -w, -flazy-system-headers and --lower-all.
     bool scalar;
     bool verify;
@@ -12899,7 +12904,9 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
                     .note_token = declared,
                     .note = note,
                     .unlocated_note = predefined,
-                    .corrected = builtin,
+                    // A reparsed statement keyword is usable in the warning pass, even when the original call
+                    // could not be parsed (#3369). A later repair may have removed the replacement.
+                    .corrected = builtin || (!edits->parameters[e] && keyword != 0 && checking->tokens.kinds[token] == edit->kind),
                     .parameter_correction = edits->parameters[e],
                 };
                 result += 1;
@@ -13436,7 +13443,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
                 if ((pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0)
                 {
-                    // --node-bodies: the bodies the producer decided, those the compile takes and their tokens.
+                    // --node-bodies: the bodies the producer decided, those the compile takes and their tokens; and the
+                    // positions of the bodies it read or began to, with the nodes its machine's columns were made for and the
+                    // bytes all the machine's state took of the reader's arenas.
                     uint32_t decided = 0;
                     uint32_t taken = 0;
                     uint64_t taken_tokens = 0;
@@ -13449,7 +13458,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         taken += masked;
                         taken_tokens += masked ? (uint64_t)checking->tree.parents[opening] - opening + 1 : 0;
                     }
-                    fprintf(errors, "node-bodies: bodies=%u taken=%u tokens=%" PRIu64 " graph-nodes=%u\n", decided, taken, taken_tokens, input.graph.count);
+                    fprintf(errors, "node-bodies: bodies=%u taken=%u tokens=%" PRIu64 " graph-nodes=%u swept=%" PRIu64 " room=%u made=%" PRIu64 "\n", decided, taken,
+                            taken_tokens, input.graph.count, supply != NULL ? supply->alone_swept : 0, supply != NULL ? supply->alone_room : 0,
+                            supply != NULL ? supply->alone_made : 0);
                 }
 #endif
                 for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
@@ -13491,6 +13502,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     stage_clock->transition_entries += stream.statistics.transition_entries;
                 }
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
+                input.default_path_counts = command->default_path_counts;
                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
                 if (ready && input.recovered_published != 0)
@@ -14524,6 +14536,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
 #endif
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
+    // Whether anything asked for the unit's expansion history, which preprocesses the unit again (pp_history_ensure).
+    check_clock_history(stage_clock, pp->history_replay != NULL);
     result = pp->errors != 0 || driver_fatal ? 1 : result;
     // A failure that memory may explain (#1521), which the stage that failed may have reported as its capacity: on a
     // thread switched to compact reservations, each arena it reserved since then holds at most
@@ -15667,8 +15681,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // (The option is the checker's unit's: elsewhere it is read and does nothing.)
     (void)node_bodies;
 #endif
+    // #2850's default path's rule against what it replaces, where a test asks: the command's counts, and a line of them
+    // in the test's file at the command's end (CheckDefaultPathCount's names say what each is).
+    uint64_t default_path_counts[CHECK_DEFAULT_PATH_COUNTS] = { 0 };
+    const char* default_path_log = getenv("BUSTER_TEST_DEFAULT_PATH_LOG");
+    const bool default_path_checked = default_path_log != NULL && default_path_log[0] != 0;
     const CheckDriverCommand command = {
         .options = options,
+        .default_path_counts = default_path_checked ? default_path_counts : NULL,
         .scalar = scalar,
         .verify = verify,
         .check_transitions = check_transitions,
@@ -15845,6 +15865,17 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         arena_release(&arena);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+    if (default_path_checked)
+    {
+        FILE* file = fopen(default_path_log, "a");
+        if (file != NULL)
+        {
+            fprintf(file, "default-path: logical-operands-not-replayed=%" PRIu64 " of-them-an-event=%" PRIu64 " of-them-a-type-made=%" PRIu64 "\n",
+                    default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_SKIPPED], default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_EVENTS],
+                    default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_TYPES]);
+            fclose(file);
+        }
+    }
     if (stage_clock != NULL)
     {
         check_clock_report(stage_clock, pp_ticks, PP_PHASE_COUNT, stderr);

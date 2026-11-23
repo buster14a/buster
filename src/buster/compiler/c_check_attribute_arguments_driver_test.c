@@ -1620,8 +1620,14 @@ static void check_test_driver_attribute_arguments(CheckTest* test, const char* c
     char* actual_lines = malloc(LINES);
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/attribute-arguments.c", directory);
-    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
+    for (uint32_t unit = 0; unit < BUSTER_ARRAY_LENGTH(units); unit += 1)
     {
+        // Each unit is a unit of test-checker-driver's deal (check_test_driver_takes), dealt whatever the buffers'
+        // allocation: whole, the sweep took 36 s on a 4-CPU Xeon VM (#3399).
+        if (!check_test_driver_takes() || expected_lines == NULL || actual_lines == NULL)
+        {
+            continue;
+        }
         const bool made = parse_test_write(source, units[unit], strlen(units[unit]));
         char* arguments[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL, NULL };
         char* expected = NULL;

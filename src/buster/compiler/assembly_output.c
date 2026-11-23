@@ -766,7 +766,7 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
         assembly_append(text, assembly_evex_needed(record, form) ? "{evex} " : "");
         assembly_append(text, form->family == BUSTER_X86_FAMILY_VEX && x86_match_yields((uint32_t)(form - x86_form_descriptions)) ? "{vex} " : "");
         const bool near = form->syntax == X86_SYNTAX_REL && form->relative_bytes >= 2 && assembly_opcode(form) != 0xe8 && target != UINT32_MAX;
-        assembly_append(text, near ? "{disp32} " : "");
+        assembly_append(text, near || (record->mode & BUSTER_X86_MODE_DISP32) ? "{disp32} " : "");
         bool suffixed = false;
         assembly_mnemonic(text, form, record, &suffixed);
         const char* suffix = suffixed ? assembly_suffix(record, form, widths) : 0;

@@ -240,7 +240,7 @@ static void assembly_fixture_program(AssemblyTest* test, AssemblyFixture* fixtur
                               "lea rdi, [rip + message]\ncall helper\ncall external\nmov rcx, qword ptr [rip + external_data@GOTPCREL]\n"
                               "mov dword ptr [rip + counter + 4], 1000\nmov ecx, offset table\nmov rdx, offset table + 4\nmovabs rsi, offset buffer + 16\n"
                               "mov eax, dword ptr [table + rcx*4]\nmovsd xmm0, qword ptr [rip + table]\naddsd xmm0, xmm1\nmovaps xmm2, xmm0\n"
-                              "imul eax, ecx, 100\nshl eax, 1\nsar ecx, 3\nmovzx eax, al\nmovsxd rax, ecx\ncdqe\ncqo\n"
+                              "{disp32} mov eax, dword ptr [rsp + 4]\nimul eax, ecx, 100\nshl eax, 1\nsar ecx, 3\nmovzx eax, al\nmovsxd rax, ecx\ncdqe\ncqo\n"
                               "test eax, eax\nje .Ldone\nmov eax, 1\njmp .Lend\n.Ldone:\nxor eax, eax\nmiddle:\nadd ecx, edx\n.Lend:\nleave\nret\n");
     assembly_fixture_function(test, fixture, "helper", local_function, 4, "mov eax, 42\ncmp eax, 7\njne .Lout\ninc eax\n.Lout:\nret\n");
     // A branch over more than 127 bytes: a rel32 jmp, which GNU as relaxes to the same only when told ({disp32}).
@@ -469,6 +469,7 @@ static void assembly_test_program(AssemblyTest* test)
         "\tmovabs $buffer+16, %rsi\n",
         "table(,%rcx,4), %eax\n",
         "{disp32} jmp " BUSTER_ASSEMBLY_PREFIX,
+        "\t{disp32} mov 4(%rsp), %eax\n",
         "\tcltq\n\tcqto\n",
         "middle:\n",
         "\t.quad main\n\t.quad helper+1\n\t.long helper+4-.\n\t.long counter\n\t.quad weak_undefined-8\n",

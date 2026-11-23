@@ -97,8 +97,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, including the real system-header lazy-policy
   fixtures and eager/lazy object comparisons, since the others run the same either way, and
-  `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
-  `CheckDriverPart`; #2071's run modes, for every run of buster and of the
+  `--part K/N` runs the K-th of N parts its checks are dealt to, each unit
+  to the part that weighs the least so far (`CheckDriverPart`, #3399): a unit
+  weighs what it takes in hundredths of a second of one CPU on a 4-CPU Xeon
+  VM, the usual `BUSTER_CHECK_DRIVER_UNIT_WEIGHT` or, for one that takes 2 s
+  or more, its own (`check_test_driver_takes_weighing`), and a sweep that
+  would take more than about 20 s deals each of its cases, since a long unit
+  late in the order makes its part the longest whatever the weights;
+  #2071's run modes, for every run of buster and of the
   oracle clang that goes through the shared helpers
   (`check_test_driver_spawn_stream`, `check_test_driver_run_with`):
   `--in-process` runs buster's source commands as this process's
@@ -309,7 +315,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   arguments and nested calls retain their original parse errors through successive
   rounds, without duplicating earlier arguments' diagnostics. Block expression
   calls also recover at their first outer semicolon, checking subsequent clauses
-  as statements and preserving Clang's C23 loop-typo correction. Builtin controls
+  as statements and preserving Clang's C23 loop-typo correction. The keyword-typo
+  cases check warnings before, inside and after a corrected loop, plus independent
+  errors in the same body and at the corrected keyword (#3369). Builtin controls
   keep lookup/header diagnostics and independent arguments without imposing
   intrinsic constraints on the synthetic call. Boundary controls exclude empty
   later arguments, mismatched delimiters, member callees and semicolon crossings
@@ -941,6 +949,10 @@ the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
 builder's observer's `-Wtautological-bitwise-compare`,
 `-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
 order (`c_check_common_cfg.c`).
+
+`tests/checker/int-float-conversions` (#3339) is one too: `-Wimplicit-const-int-float-conversion`
+at the default flags, and `-Wimplicit-int-float-conversion` and `-Wdouble-promotion` under pragmas, whole
+([the c-checker section](../c-checker.md#integer-to-floating-conversions-and-floating-promotions-3339)).
 
 `tests/checker/system-macros` (#3338) is one too: common warnings at a system
 header's macro expanded in user code, which the expansion location decides as

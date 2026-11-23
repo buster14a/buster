@@ -134,6 +134,9 @@ struct CheckInitializer
     // conditional or comma may carry one (#1447, check_init_changed_integer): the other plans the common warnings read, for
     // their constant conversions.
     bool changed_integers;
+    // A value part whose integer source converts to a floating target (#3339): the plans whose integer-to-floating and
+    // floating promotion warnings the common warnings read too (check_common_scan_conversion).
+    bool integer_floats;
     // A value part whose target is an enumeration (#1447): the plans the common warnings read for a conversion between
     // enumerations (check_common_enum_cast).
     bool enum_values;
@@ -840,6 +843,9 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
                                        check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) : BUSTER_TYPE_KIND_VOID;
             walker->result->floating_values |= value_kind == BUSTER_TYPE_KIND_FLOATING || value_kind == BUSTER_TYPE_KIND_COMPLEX;
             walker->result->changed_integers |= check_init_changed_integer(walker, part);
+            const uint8_t converted_kind = part->kind == CHECK_INIT_VALUE ? check_action_kind(walker->types, part->conversion.type) : BUSTER_TYPE_KIND_VOID;
+            walker->result->integer_floats |= value_kind == BUSTER_TYPE_KIND_INTEGER &&
+                                              (converted_kind == BUSTER_TYPE_KIND_FLOATING || converted_kind == BUSTER_TYPE_KIND_COMPLEX);
             const uint8_t target_kind = part->kind == CHECK_INIT_VALUE ? type_kind(walker->types, part->conversion.type) : BUSTER_TYPE_KIND_VOID;
             walker->result->enum_values |= target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED;
             walker->result->label_differences |= part->kind == CHECK_INIT_VALUE && part->value.constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE;
@@ -4215,8 +4221,11 @@ static CheckInitStatus check_initializer_live(const TypeTable* types, const Chec
 
 // Public object-ID slices retain source order and duplicate IDs from distinct surviving fields. The emitter
 // uses the same live-part classification, so discarded literals and foreign symbols need no shared symbol.
-static __attribute__((unused)) CheckInitStatus check_initializer_references(const TypeTable* types, const CheckInitializer* initializer,
-                                                                          Arena* output, Arena* scratch, uint32_t** objects, uint32_t* count)
+// With `live`, the live parts' marks too (check_initializer_live's, a byte a part, or null for none), in `output` after the
+// objects: what the static data's plan reads again (CheckDataObject.live_parts, #3393).
+static __attribute__((unused)) CheckInitStatus check_initializer_references_live(const TypeTable* types, const CheckInitializer* initializer,
+                                                                               Arena* output, Arena* scratch, uint32_t** objects, uint32_t* count,
+                                                                               const uint8_t** live)
 {
     *objects = 0;
     *count = 0;
@@ -4248,6 +4257,16 @@ static __attribute__((unused)) CheckInitStatus check_initializer_references(cons
             assert(at == used);
         }
     }
+    uint8_t* kept = status == CHECK_INIT_OK && live != NULL && selected != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, initializer->count) : 0;
+    status = status == CHECK_INIT_OK && live != NULL && selected != 0 && kept == 0 ? CHECK_INIT_RESOURCE : status;
+    if (kept != 0)
+    {
+        memcpy(kept, selected, initializer->count);
+    }
+    if (live != NULL)
+    {
+        *live = status == CHECK_INIT_OK ? kept : NULL;
+    }
     if (status == CHECK_INIT_OK)
     {
         *objects = result;
@@ -4262,6 +4281,12 @@ static __attribute__((unused)) CheckInitStatus check_initializer_references(cons
         arena_pop_to(scratch, scratch_mark);
     }
     return status;
+}
+
+static __attribute__((unused)) CheckInitStatus check_initializer_references(const TypeTable* types, const CheckInitializer* initializer,
+                                                                          Arena* output, Arena* scratch, uint32_t** objects, uint32_t* count)
+{
+    return check_initializer_references_live(types, initializer, output, scratch, objects, count, NULL);
 }
 #endif
 

@@ -1186,6 +1186,18 @@ static const LinkTestKnownFixup link_test_known_fixups[] = {
         5,
         { 0x64, 0x48, 0x01, 0x1c, 0x25 },
     },
+    // {disp32} mov dword ptr [rax + x], 17: a zero placeholder still reserves a field before the immediate.
+    {
+        { .form = X86_FORM_MOV_RM32_IMM32, .mode = BUSTER_X86_MEMORY_BASE | BUSTER_X86_MODE_DISP32, .immediate = 17 },
+        X86_FIXUP_DISPLACEMENT,
+        BUSTER_LINK_FIXUP_ABS32S,
+        false,
+        0,
+        0,
+        10,
+        2,
+        { 0xc7, 0x80, 0, 0, 0, 0, 17, 0, 0, 0 },
+    },
     // mov rax, qword ptr [rip + x@gottpoff]; add rax, qword ptr [rip + x@gottpoff] (R_X86_64_GOTTPOFF x - 4)
     {
         { .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_RAX, .mode = BUSTER_X86_MEMORY_RIP },

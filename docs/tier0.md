@@ -1324,6 +1324,12 @@ Tier 0 keeps the state clean as clang's code does, with Tier 1's pieces
   `movhps`). A function with an asm body keeps its legacy records. Each twin
   computes its legacy form's low 128 bits and zeroes the rest, which no later
   record of Tier 0's reads; `test-tier1-emit` runs each pair natively.
+  The scan reads 32 records a step with no gather (`x86_vex_find`, #2874):
+  their forms four records a load, and each form's entry from the table's
+  192 rows from `movss`'s, which hold every legacy form with a twin, in six
+  registers. Its first form gathered the forms and then their entries, two
+  gathers every 16 records: `tier0` 0.15 ms more on `-c sqlite3.c` (the
+  9700X), the same objects.
 
 The issue's kernel at `-march=znver5`:
 
@@ -1371,9 +1377,10 @@ code reaches it (`BUSTER_TIER0_ACCESS_*`):
 - **How:** fusion keys an entry of a symbol that isn't direct by one of Tier 0's own kinds, past the stream's
   (`BUSTER_TIER0_KIND_GOT`, `_LOCAL_EXEC` and `_INITIAL_EXEC`, four each, in the global kinds' order:
   `tier0_access_kind`). Their templates load the slot into R0, the register free above the operand (beside a floating
-  one too), then make the access through it. The vector path finds a block's global entries by compares, reads their
-  symbols' accesses from the column (they are few, as the calls are), and keys each access's lanes by a `vpermb` of its
-  table; without the column it does nothing. A template's reference kind and field are in its summary (`fixup_kind`,
+  one too), then make the access through it. The vector path lists the global entries of each 64 by compares, reads
+  their symbols' accesses from the column an entry at a time in a loop of their own before fusion's blocks
+  (`tier0_vector_global_accesses`, #2874), and keys each access's lanes in a block by a `vpermb` of its table; without
+  the column it does nothing. A template's reference kind and field are in its summary (`fixup_kind`,
   `fixup_field`), so a thread-local's address takes its `TPOFF32` in an immediate.
 - **No fusions:** these kinds take no fused local or constant, whose value would need a second free register. A constant
   stored through the GOT could be an immediate, but its properties would be a row past the vector fusion's sixteen,
@@ -1573,6 +1580,20 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
   same rule (#221). Every form the emitter writes has `x86_semantics.c`'s effects, which `test-tier0` checks on every
   record it compiles but the X86 entries'.
 
+**The calls' memo (#2874).** A call's records follow from its depths, its arguments' classes and locations, whether it
+is indirect or variadic (and al's count), whether a vzeroupper comes before it (#3335), its result's stack and the save
+area. Nothing else feeds them in a function
+without the memory classes' values, masks, aggregate arguments, deep entries or a setjmp's snapshots, for a call to no
+asm body with no result object and of six arguments or fewer. Measuring takes such a call's records from a table of the
+thread's (`tier0_call_memo_find`), keyed by one 512-bit vector of those inputs: the header, the arguments' locations as
+`AbiLocation` has them, and their classes, hashed by vector multiplies. A key's first call runs `tier0_emit_call` on a
+frame whose save area is at rsp + 0. Every call with the key then writes the kept records, four a masked store
+(`tier0_call_memo_write`), and puts in their saves and restores (its first and last ones) the frame's base and the
+area's offset and bias, and in its call record's reference its callee. The records are the emitter's either way. A call
+with no key, or a full table, takes `tier0_count_deferred` and `tier0_emit_deferred` as before. On `sqlite3.c` the
+table takes `tier0` from 5.032 to 4.774 ms on the 9700X, every object byte for byte the same ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-calls-memo-2874-2026-11-23)).
+
 ## The two paths
 
 **The vector path** finds the fusions, effects and depths 64 entries at a time:
@@ -1606,9 +1627,11 @@ homes, and whether its four cases' words differ in the template alone (uniform).
 
 1. **Selection** gathers each entry's word from its slot's (`vpgatherdq`, from the slot table's 32,768 words). The
    depth checks are masks, the depths each stack reaches lane maxima, the kept templates' words are ORed together
-   (their fixed rdx) and the unsupported lanes collected, so that a block takes no branch but on a deferred entry,
-   whose touches (a call's saves, division's fixed registers) are taken an entry at a time. The first unsupported
-   entry is looked for only when there is one, in a compile that fails.
+   (their fixed rdx) and the unsupported lanes collected, and the deferred entries are listed (`vpcompressd`), so
+   that a block takes no branch. The listed entries' touches (a call's saves, division's fixed registers) are then
+   taken an entry at a time, in a loop of their own: inside the blocks' loop, its end at each block's last deferred
+   lane mispredicted, and the blocks behind it waited (#2874). The first unsupported entry is looked for only when
+   there is one, in a compile that fails.
 2. **Homes:** the references' count takes the referring entries of 64 at a time as a mask (`vpshufbitqmb` of their
    kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The greedy loop gives the k-th local of
    a kind that takes a register (not in one yet, its address not taken, referenced) the k-th free register of its
@@ -1636,8 +1659,11 @@ homes, and whether its four cases' words differ in the template alone (uniform).
 3. **Measuring** resolves a home-dependent word to its homes' case. Which of up to 64 locals are in registers is one
    mask, of which a lane's case is a shift (`vpsrlvq`); past 64 locals, a local's home comes from four registers by
    `vpermt2q` for up to 32 locals, or by a gather past that. A uniform slot's case is added to the template; another's
-   word is gathered. The lengths come from the words, or a deferred entry's from its count, and the positions are
-   their prefix sum in registers.
+   word is gathered. A template's length comes from its word, and the deferred entries are listed, in a loop with no
+   branch on its words. Then each listed entry's length comes from the thread's table of calls or its count, in a loop
+   of its own, and the positions are the lengths' prefix sum in registers, in a third (#2874). Splitting measuring and
+   selection so, with the calls' effects on the stacks counted 64 argument classes at a time in fusion, took `tier0`
+   0.33 ms less on `sqlite3.c` (the 9700X, the same objects).
 4. **Emission** computes the hole blocks of 8 entries in vectors. K, the scale and the locals of A and B come from a
    `vpermt2q` over this block's values and the last block's; A and B from the homes' registers; the registers around
    each depth from two 32-entry windows by `vpermt2d`. Four `vpermt2q` interleave them into four registers of two
@@ -1645,8 +1671,11 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    to its hole indices for the second block of a register, one `vpermb`, one blend and one 64-byte store. A lane of an
    absorbed or deferred entry, or past the last, stores too; the later lanes, the deferred entries and the epilogue
    write over it. The choice requests are compressed into their columns (`vpcompress`), their contexts read from the
-   expanded records. The branches, then the references and the deferred entries, follow in entry order by their masks'
-   bits.
+   expanded records. The branches, then the templates' references, follow in entry order by their masks' bits. The
+   deferred entries are written after the blocks, in order, from measuring's list, each over what the lanes stored at
+   its place; their references go to a column of their own and then into the templates' by instruction, from the end,
+   so that the references stay in the entries' order (#2874). A function with deep entries writes its deferred
+   entries in the blocks' loop, as before, since their branches and choice requests go with the templates'.
 
 The immediates' choice is one `x86_choose_forms` over every request, and each chosen form is applied from a byte per
 form (its immediate's size, and whether it takes no operands or its destination twice) to the record's two 8-byte
@@ -2390,8 +2419,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   - inline assembly, `setjmp` and atomics;
   - `switch` needs no entry of its own: the checker's lowering dispatches it by compares or, where clang -O0 would,
     through a jump table and `JUMP_INDIRECT` to its cases' labels (`docs/c-checker.md`, "Switches").
-- **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
-  padded for it would take a block's at once, if real code shows them to cost.
+- **The access column's lookups** are an entry at a time for the listed global entries, in a loop of their own (#2874).
+  A gather from a column padded for it would take a block's at once, if real code shows them to cost.
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
   per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.
 - **The immediates' choice** costs about 7 cycles per entry: the application about 5 (its loads of the records more

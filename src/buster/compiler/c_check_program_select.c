@@ -273,9 +273,10 @@ static bool check_program_attribute_gnu_inline(const CheckInputAttributes* attri
 // an extern-inline call to libc, whose ordinary declaration is a different overload.
 static bool check_program_object_size_inline(const CheckInput* input, uint32_t declaration)
 {
-    const CheckInputAttributes* attributes = check_input_attributes_at(input, declaration);
-    return attributes != NULL && attributes->object_sizes != NULL && input->function_flags != NULL &&
-           (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+    // (The inline flag first: most declarations aren't inline functions', and their attributes would be two loads more.)
+    const bool inline_function = input->function_flags != NULL && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
+    const CheckInputAttributes* attributes = inline_function ? check_input_attributes_at(input, declaration) : NULL;
+    return attributes != NULL && attributes->object_sizes != NULL;
 }
 
 // Whether another module may preempt `object`'s symbol (#2101): a declaration of external linkage and default

@@ -215,6 +215,9 @@ struct CheckClock
     // command that never reached its flow).
     uint32_t lanes_asked;
     uint32_t lanes;
+    // The units whose expansion history a second preprocessing of the unit recorded (Preprocessor.history_replay,
+    // pp_history_ensure), which a unit that says nothing never needs (#2850): the report's `history-replays` line.
+    uint32_t history_replays;
     // Whether the process's arenas took base pages because the host was busy when it started (#672: lane.c's
     // arena_pages_busy), which the driver copies in; the report says `busy` for them.
     bool pages_busy;
@@ -275,6 +278,15 @@ static __attribute__((unused)) void check_clock_tokens(CheckClock* stage_clock, 
     if (stage_clock != NULL)
     {
         stage_clock->tokens += tokens;
+    }
+}
+
+// Counts a unit whose expansion history a second preprocessing recorded (CheckClock.history_replays), with a clock.
+static __attribute__((unused)) void check_clock_history(CheckClock* stage_clock, bool replayed)
+{
+    if (stage_clock != NULL)
+    {
+        stage_clock->history_replays += replayed ? 1u : 0u;
     }
 }
 
@@ -453,6 +465,7 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     }
     fprintf(stream, "time-process\ttsc-mhz\t%.1f\n", ticks_per_millisecond / 1e3);
     fprintf(stream, "time-process\ttokens\t%" PRIu64 "\n", stage_clock->tokens);
+    fprintf(stream, "time-process\thistory-replays\t%u\n", stage_clock->history_replays);
     if (stage_clock->lanes_asked != 0)
     {
         fprintf(stream, "time-process\tlanes-asked\t%u\n", stage_clock->lanes_asked);

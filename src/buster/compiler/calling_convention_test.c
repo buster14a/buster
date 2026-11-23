@@ -207,7 +207,7 @@ static uint32_t abi_test_classify_all_fallback(AbiTable* abi, const TypeTable* t
     return classified;
 }
 
-// Every call by the per-call kernel alone (abi_assign_lanes, eight at a time), which abi_assign takes only for the calls
+// Every call by the per-call kernel alone (abi_assign_lanes, a call at a time), which abi_assign takes only for the calls
 // its prefix sums can't place: each call's result and starting totals as abi_assign's setup writes them, then the
 // kernel over all of them, with every scratch arena of the thread exhausted, as neither route needs scratch.
 static void abi_test_assign_starved(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
@@ -2567,8 +2567,31 @@ static void abi_test_ordering(AbiTestTally* tally)
 // in rdi; variadic f(int, ...) with an unnamed _Atomic float vector(32) puts the vector on the stack at 0, no
 // vector register used; and f(_Atomic long, long x4, a transparent union of two __int128s aligned to 32, long double),
 // whose uncounted _Atomic long leaves clang two registers for the union's member and LLVM one, puts the member's i128 on
-// the stack at 0, the union's first 16 bytes alone (FIRST, #1844), and the long double at 16. By abi_assign and by the
-// kernel over every call (abi_test_assign_starved).
+// the stack at 0, the union's first 16 bytes alone (FIRST, #1844), and the long double at 16. And seven more for the
+// rules #3375's mutation round found no call reaching (clang 23.1.4 at -O1, x86-64-v3 for the vector):
+//   - f(double x5, _Atomic double x2, struct {double, double}, long): the uncounted _Atomic doubles take xmm5 and xmm6
+//     while clang still counts three vector registers, so the struct splits between xmm7 and the stack at 0, the long
+//     in rdi;
+//   - variadic f(int, ...) given an unnamed float vector(32) first, six doubles and struct {double, double}: the vector
+//     goes on the stack at 0, which clang doesn't count, and the struct in xmm6 and xmm7;
+//   - after f(long x4, nullptr_t, __int128, ...)'s __int128, which clang counts two general registers for and LLVM puts
+//     on the stack at 0 (it has r9 alone), so that clang has none left and LLVM one: a struct of a flexible array member
+//     alone is clang's i0 and the long after it its i64, which LLVM 23.1.4 can't select a call with (GCC refuses the
+//     struct), so this pins the module's rule that an i0 takes no register, leaving r9 to the long; and a packed
+//     transparent union of struct {long} is an i64 in r9 (its member is an aggregate, which no late register takes),
+//     the long on the stack at 16;
+//   - transparent unions of a slot of their own: after five longs, a union of two __int128s aligned to 32 takes its own
+//     byval slot at 0, without FIRST, and the long r9; after six longs, packed {long *} is an i64 on the stack at 0,
+//     without LOW, the long at 8; and after the __int128 above, a union aligned to 16 of packed
+//     {long, _Atomic {long[0]}} (9 bytes, in memory for its _Atomic member) takes the union's 16 bytes at 16, aligned
+//     to the member's 8 (getIndirectResult of the member), and the long r9.
+// And five for a transparent union of a LARGER member in memory (#3400), whose table entry is the member's
+// (AbiTable.transparent): packed {_Atomic {long[0]}} is GROWN (1 byte in C, its copy 9 to LLVM). After the __int128
+// above, a union of it aligned to 16 is the member's i8 in r9, the long on the stack at 16, and so is the union of it
+// without attributes; after five longs and struct {long, long, long} at 0 the union aligned to 16 takes its own 16
+// bytes at 24, aligned to the member's 8, the long r9, and so does the union aligned to 16 of the 9-byte member above;
+// and after seven longs, the union aligned to 16 is the i8 in an 8-byte slot at 8 (LOW), the long at 16.
+// By abi_assign and by the kernel over every call (abi_test_assign_starved).
 static void abi_test_kernel_rules(AbiTestTally* tally)
 {
     AbiTestTables tables;
@@ -2601,28 +2624,90 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
         const TypeId wide_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 6);
         const bool wide_marked = wide_union != 0 && type_mark_transparent_union(table, wide_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
         const TypeId atomic_long = type_atomic(table, BUSTER_TYPE_LONG);
-        const bool made = started && marked && wide_marked && packed != 0 && three != 0 && atomic_int != 0 && vector != 0 && atomic_vector != 0 && atomic_long != 0;
+        const TypeId atomic_double = type_atomic(table, BUSTER_TYPE_DOUBLE);
+        m[0] = abi_test_member(&builder, BUSTER_TYPE_DOUBLE);
+        m[1] = abi_test_member(&builder, BUSTER_TYPE_DOUBLE);
+        const TypeId doubles = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, false, 0);
+        m[0] = abi_test_member(&builder, type_incomplete_array(table, BUSTER_TYPE_LONG));
+        const TypeId flexible = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+        m[0] = abi_test_member(&builder, type_pointer(table, BUSTER_TYPE_LONG));
+        const TypeId packed_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, true, 0);
+        const bool packed_marked = packed_union != 0 && type_mark_transparent_union(table, packed_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        m[0] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+        const TypeId one_long = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+        m[0] = abi_test_member(&builder, one_long);
+        const TypeId record_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, true, 0);
+        const bool record_marked = record_union != 0 && type_mark_transparent_union(table, record_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+        m[1] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+        const TypeId own_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 6);
+        const bool own_marked = own_union != 0 && type_mark_transparent_union(table, own_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        m[0] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_LONG, 0));
+        const TypeId no_size = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, false, 0);
+        m[0] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+        m[1] = abi_test_member(&builder, type_atomic(table, no_size));
+        const TypeId atomic_ending = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 2, true, 0);
+        m[0] = abi_test_member(&builder, atomic_ending);
+        const TypeId memory_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 5);
+        const bool memory_marked = memory_union != 0 && type_mark_transparent_union(table, memory_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        m[0] = abi_test_member(&builder, type_atomic(table, no_size));
+        const TypeId grown = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+        m[0] = abi_test_member(&builder, grown);
+        const TypeId grown_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 5);
+        const bool grown_marked = grown_union != 0 && type_mark_transparent_union(table, grown_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        m[0] = abi_test_member(&builder, grown);
+        const TypeId grown_plain = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 0);
+        const bool plain_marked = grown_plain != 0 && type_mark_transparent_union(table, grown_plain).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        const bool made = started && marked && wide_marked && packed_marked && record_marked && own_marked && memory_marked && grown_marked && plain_marked && packed != 0 &&
+                          three != 0 && atomic_int != 0 && vector != 0 && atomic_vector != 0 && atomic_long != 0 && atomic_double != 0 && doubles != 0 && flexible != 0;
         abi_test_expect(tally, made, "fixtures", "the kernel's fixtures can't be made");
         if (made)
         {
             abi_classify_all(&tables.abi, table);
+            // The unions of a LARGER member in memory pass as it (#3400): their entries name it, GROWN or not.
+            const uint32_t grown_index = grown >> BUSTER_TYPE_INDEX_SHIFT;
+            const uint32_t grown_pass = tables.abi.pass[grown_index];
+            const uint32_t grown_entry = tables.abi.transparent[grown_union >> BUSTER_TYPE_INDEX_SHIFT];
+            const uint32_t plain_entry = tables.abi.transparent[grown_plain >> BUSTER_TYPE_INDEX_SHIFT];
+            const uint32_t memory_entry = tables.abi.transparent[memory_union >> BUSTER_TYPE_INDEX_SHIFT];
+            char entries_detail[192];
+            snprintf(entries_detail, sizeof(entries_detail), "the kernel's rules: the GROWN member's pass %08x, the unions' entries %u, %u and %u, not %u, %u and %u", grown_pass,
+                     grown_entry, plain_entry, memory_entry, grown_index, grown_index, atomic_ending >> BUSTER_TYPE_INDEX_SHIFT);
+            abi_test_expect(tally,
+                            (grown_pass & (BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_MEMORY)) == (BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_MEMORY) && grown_entry == grown_index &&
+                                plain_entry == grown_index && memory_entry == atomic_ending >> BUSTER_TYPE_INDEX_SHIFT,
+                            "fixtures", entries_detail);
             const TypeId arguments[] = {
                 atomic_int, three, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, packed, BUSTER_TYPE_LONG,
                 BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, transparent, BUSTER_TYPE_LONG,
                 vector, vector, vector, vector, vector, vector, vector, vector, vector, BUSTER_TYPE_LONG,
                 BUSTER_TYPE_INT, atomic_vector,
                 atomic_long, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, wide_union, BUSTER_TYPE_LONG_DOUBLE,
+                BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, atomic_double, atomic_double, doubles, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_INT, vector, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, BUSTER_TYPE_DOUBLE, doubles,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_NULLPTR, BUSTER_TYPE_INT128, flexible, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_NULLPTR, BUSTER_TYPE_INT128, record_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, own_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, packed_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_NULLPTR, BUSTER_TYPE_INT128, memory_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_NULLPTR, BUSTER_TYPE_INT128, grown_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, three, grown_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, grown_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_NULLPTR, BUSTER_TYPE_INT128, grown_plain, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, three, memory_union, BUSTER_TYPE_LONG,
             };
-            const TypeId results[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID };
-            const uint32_t counts[] = { 8, 8, 10, 2, 7 };
-            const uint32_t named[] = { 8, 8, 10, 1, 7 };
-            const uint8_t variadic[] = { 0, 0, 1, 1, 0 };
+            const TypeId results[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID,
+                                       BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID,
+                                       BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID };
+            const uint32_t counts[] = { 8, 8, 10, 2, 7, 9, 9, 8, 8, 7, 8, 8, 8, 8, 9, 8, 8 };
+            const uint32_t named[] = { 8, 8, 10, 1, 7, 9, 1, 8, 8, 7, 8, 8, 8, 8, 9, 8, 8 };
+            const uint8_t variadic[] = { 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
             const AbiSignatures signatures = {
                 .results = results,
                 .counts = counts,
                 .named = named,
                 .variadic = variadic,
-                .count = 5,
+                .count = BUSTER_ARRAY_LENGTH(counts),
                 .arguments = arguments,
             };
             // Each checked argument: its index, kind, first register and stack offset.
@@ -2640,11 +2725,52 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
                 { 32, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, 0 },
                 { 33, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
                 { 34, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 42, BUSTER_ABI_LOCATION_SPLIT, BUSTER_ABI_REGISTER_VECTOR | 7, 0 },
+                { 43, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, 0 },
+                { 45, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 52, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_REGISTER_VECTOR | 6, 0 },
+                { 58, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 59, BUSTER_ABI_LOCATION_IGNORE, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 60, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 66, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 67, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 68, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 74, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 75, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 82, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 83, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 8 },
+                { 89, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 90, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 91, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 97, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 98, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 99, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 105, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 106, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 24 },
+                { 107, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 114, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 115, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 8 },
+                { 116, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 123, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 124, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 131, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 24 },
+                { 132, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+            };
+            // And the flags of those whose flags a rule decides: neither FIRST in a union's own slot nor LOW for 8 bytes;
+            // a GROWN member's i8 in r9 none, and LOW in its slot of the union's 16 bytes.
+            const uint32_t flagged[][2] = {
+                { 74, 0 },
+                { 82, 0 },
+                { 98, 0 },
+                { 106, 0 },
+                { 115, BUSTER_ABI_FLAG_LOW },
+                { 123, 0 },
+                { 131, 0 },
             };
             for (uint32_t route = 0; route < 2; route += 1)
             {
                 AbiLocation locations[BUSTER_ARRAY_LENGTH(arguments)];
-                AbiCall calls[5];
+                AbiCall calls[BUSTER_ARRAY_LENGTH(counts)];
                 memset(locations, 0x5a, sizeof(locations));
                 if (route == 0)
                 {
@@ -2663,11 +2789,45 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
                              checked[k][3]);
                     abi_test_expect(tally, got.kind == checked[k][1] && got.registers[0] == checked[k][2] && got.stack_offset == checked[k][3], "fixtures", detail);
                 }
+                for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(flagged); k += 1)
+                {
+                    const AbiLocation got = locations[flagged[k][0]];
+                    char detail[160];
+                    snprintf(detail, sizeof(detail), "the kernel's rules (%s): argument %u has flags %02x, not %02x", route == 0 ? "abi_assign" : "the kernel alone", flagged[k][0],
+                             got.flags, flagged[k][1]);
+                    abi_test_expect(tally, got.flags == flagged[k][1], "fixtures", detail);
+                }
                 const uint32_t wide_index = wide_union >> BUSTER_TYPE_INDEX_SHIFT;
                 char first_detail[192];
                 snprintf(first_detail, sizeof(first_detail), "the kernel's rules (%s): the transparent union's i128 slot has flags %02x, without FIRST (member %u, %u bytes)",
                          route == 0 ? "abi_assign" : "the kernel alone", locations[33].flags, tables.abi.transparent[wide_index], tables.abi.stack_bytes[wide_index]);
                 abi_test_expect(tally, (locations[33].flags & BUSTER_ABI_FLAG_FIRST) != 0, "fixtures", first_detail);
+                // The later calls' totals: the general and vector registers LLVM uses, the stack bytes and their alignment.
+                const uint32_t totals[][5] = {
+                    { 5, 1, 8, 8, 4 },
+                    { 6, 1, 8, 32, 5 },
+                    { 7, 6, 0, 16, 4 },
+                    { 8, 6, 0, 24, 4 },
+                    { 9, 6, 0, 32, 5 },
+                    { 10, 6, 0, 16, 4 },
+                    { 11, 6, 0, 32, 4 },
+                    { 12, 6, 0, 24, 4 },
+                    { 13, 6, 0, 40, 4 },
+                    { 14, 6, 0, 24, 4 },
+                    { 15, 6, 0, 24, 4 },
+                    { 16, 6, 0, 40, 4 },
+                };
+                for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(totals); k += 1)
+                {
+                    const AbiCall got = calls[totals[k][0]];
+                    char detail[192];
+                    snprintf(detail, sizeof(detail), "the kernel's rules (%s): call %u's totals are %u, %u, %u bytes, 2^%u, not %u, %u, %u, 2^%u",
+                             route == 0 ? "abi_assign" : "the kernel alone", totals[k][0], got.integer_registers, got.vector_registers, got.stack_bytes, got.stack_alignment_log2,
+                             totals[k][1], totals[k][2], totals[k][3], totals[k][4]);
+                    abi_test_expect(tally, got.integer_registers == totals[k][1] && got.vector_registers == totals[k][2] && got.stack_bytes == totals[k][3] &&
+                                               got.stack_alignment_log2 == totals[k][4],
+                                    "fixtures", detail);
+                }
                 abi_test_expect(tally, calls[2].vector_registers == 0 && calls[3].vector_registers == 0 && calls[1].stack_bytes == 24 && calls[2].stack_bytes == 288 &&
                                        calls[4].stack_bytes == 32,
                                 "fixtures", route == 0 ? "the kernel's rules (abi_assign): the calls' totals" : "the kernel's rules (the kernel alone): the calls' totals");

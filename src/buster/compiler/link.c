@@ -572,6 +572,9 @@ static __attribute__((unused)) bool link_initialize(Link* link, Arena* arena, Ar
 static __attribute__((unused)) NameId link_add_name(Link* link, const uint8_t* bytes, uint32_t length);
 // The same with the name's hash given, which the caller computed with link_hash or link_hash_names.
 static __attribute__((unused)) NameId link_add_name_hashed(Link* link, const uint8_t* bytes, uint32_t length, uint64_t hash);
+// link_add_name_hashed for each of `count` names in order, the ones before the first it would fail at (which it fails as
+// it would), their bytes copied with one push: how many it added, the first's id the table's count before.
+static __attribute__((unused)) uint32_t link_add_names(Link* link, const uint8_t* const* names, const uint32_t* lengths, const uint64_t* hashes, uint32_t count);
 // An atom: its id, or 0. Its fixups are added after it, with link_add_fixup or link_add_code_fixups, and its address
 // starts at 0.
 static __attribute__((unused)) AtomId link_add_atom(Link* link, uint8_t class, uint8_t alignment_log2, uint64_t size, uint8_t* bytes, uint32_t unit);
@@ -794,6 +797,50 @@ static NameId link_add_name_hashed(Link* link, const uint8_t* bytes, uint32_t le
         }
     }
     return result;
+}
+
+// The names that fit, and the first that would fail: past the table's room, or empty. Their copies are contiguous, as
+// link_add_name_hashed's pushes of a byte's alignment make them; a name of fewer than 64 bytes is copied with its NUL by
+// a masked load and store, a longer one by memcpy.
+static uint32_t link_add_names(Link* link, const uint8_t* const* names, const uint32_t* lengths, const uint64_t* hashes, uint32_t count)
+{
+    LinkNames* names_table = &link->names;
+    const uint32_t room = names_table->capacity - names_table->count;
+    uint32_t fitting = count < room ? count : room;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < fitting; i += 1)
+    {
+        fitting = lengths[i] == 0 ? i : fitting;
+        total += lengths[i] == 0 ? 0 : (uint64_t)lengths[i] + 1;
+    }
+    uint8_t* copy = fitting != 0 ? arena_push(link->name_arena, total, 1) : 0;
+    const bool pushed = fitting == 0 || copy != 0;
+    const uint32_t added = pushed ? fitting : 0;
+    const uint32_t first = names_table->count;
+    for (uint32_t i = 0; i < added; i += 1)
+    {
+        const uint32_t length = lengths[i];
+        if (length < 64)
+        {
+            const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, length), names[i]);
+            _mm512_mask_storeu_epi8(copy, _bzhi_u64(~0ull, length + 1), bytes);
+        }
+        else
+        {
+            memcpy(copy, names[i], length);
+            copy[length] = 0;
+        }
+        names_table->bytes[first + i] = copy;
+        names_table->length[first + i] = length;
+        names_table->hash[first + i] = hashes[i];
+        copy += (uint64_t)length + 1;
+    }
+    names_table->count += added;
+    if (added < count)
+    {
+        link_fail(link, !pushed || added == room ? LINK_ERROR_FULL : LINK_ERROR_RECORD);
+    }
+    return added;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1220,18 +1267,18 @@ static bool link_add_priority(Link* link, AtomId atom, uint32_t priority)
 // Code
 
 // What field `field` of an instruction is (LinkField), from its form and operands. A memory operand's displacement is
-// 32-bit when it is RIP-relative, absolute or index-only; after a base, only when it doesn't fit in 8 bits in units of
-// an EVEX form's N, since the encoder makes small ones 8-bit or leaves them out, as GNU as does with numbers. So a
-// symbolic one there needs a placeholder that doesn't fit, such as INT32_MIN (x86_fixup_distance says the same).
-static LinkField link_instruction_field(const X86Instruction* instruction, X86FixupField field)
+// 32-bit when it is RIP-relative, absolute or index-only. After a base it is 32-bit when explicitly requested or
+// when it doesn't fit in a scaled byte (symbolic operands normally use INT32_MIN as their placeholder).
+static LinkField link_instruction_field(const X86Instruction* instruction, const X86FormDescription* form, X86FixupField field)
 {
-    const X86FormDescription* form = x86_form_description(instruction->form);
     const uint8_t mode = instruction->mode;
     const bool has_modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT) != 0;
     const bool memory = has_modrm && (form->rm & BUSTER_X86_OPERAND_MEMORY) != 0 && (mode & BUSTER_X86_MODE_MEMORY) != 0;
-    const int32_t scale = form->disp8_scale;
-    const int32_t scaled = instruction->displacement / scale;
-    const bool short_displacement = instruction->displacement % scale == 0 && scaled >= -128 && scaled <= 127;
+    // (The division only where a displacement after a base reads it: most references are branches and RIP-relative ones.)
+    const bool based = field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 0 && memory && (mode & BUSTER_X86_MODE_RIP) == 0 && (mode & BUSTER_X86_MODE_BASE) != 0;
+    const int32_t scale = based ? form->disp8_scale : 1;
+    const int32_t scaled = based ? instruction->displacement / scale : 0;
+    const bool short_displacement = based && !(mode & BUSTER_X86_MODE_DISP32) && instruction->displacement % scale == 0 && scaled >= -128 && scaled <= 127;
     LinkField result = LINK_FIELD_NONE;
     if (field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 4)
     {
@@ -1259,10 +1306,10 @@ static LinkField link_instruction_field(const X86Instruction* instruction, X86Fi
 // Whether `kind` can patch the instruction's field: one of the kind's fields and, for the kinds whose instructions
 // linkers rewrite (call and jmp through the GOT into direct ones, mov from the GOT into lea, initial-exec into
 // local-exec), one of those instructions.
-static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, X86FixupField field)
+static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, const X86FormDescription* description, X86FixupField field)
 {
     const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
-    bool result = kind < BUSTER_LINK_FIXUP_KINDS && (link_fixup_kinds[kind].fields & BUSTER_LINK_FIELD_BIT(link_instruction_field(instruction, field))) != 0;
+    bool result = kind < BUSTER_LINK_FIXUP_KINDS && (link_fixup_kinds[kind].fields & BUSTER_LINK_FIELD_BIT(link_instruction_field(instruction, description, field))) != 0;
     if (kind == BUSTER_LINK_FIXUP_CALL_GOT)
     {
         result = result && (form == X86_FORM_CALL_RM64 || form == X86_FORM_JMP_RM64);
@@ -1284,6 +1331,9 @@ static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, X86F
     return result;
 }
 
+// Scalar, a reference at a time: a version of eight references a batch (their instructions, forms' descriptions, kinds
+// and ends gathered, ten gathers a batch) took 69 microseconds more on the 9700X over sqlite3.c's 22,406 references in
+// 2,602 bodies (#3393): Zen 5 issues gathers slowly, and a body's 8.6 references on average make short batches.
 static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* instructions, uint64_t instruction_count, const uint32_t* fixup_ends,
                                  uint64_t marked, const LinkReference* references, uint64_t reference_count)
 {
@@ -1304,14 +1354,17 @@ static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* 
         const bool next_instruction = previous == UINT64_MAX || index > previous;
         const bool next_field = index == previous && previous_field == X86_FIXUP_DISPLACEMENT && reference->field == X86_FIXUP_IMMEDIATE;
         ordinal += next_instruction ? 1 : 0;
+        // The instruction's form's description, which its field's class and its distance from the end read (#3393: once).
+        const X86FormDescription* description = index < instruction_count ? x86_form_description(instructions[index].form) : NULL;
         result = index < instruction_count && (next_instruction || next_field) && reference->field <= X86_FIXUP_IMMEDIATE && ordinal < marked &&
-                 (instructions[index].form & BUSTER_X86_FORM_FIXUP) != 0 && link_kind_fits(reference->kind, &instructions[index], reference->field);
+                 (instructions[index].form & BUSTER_X86_FORM_FIXUP) != 0 && link_kind_fits(reference->kind, &instructions[index], description, reference->field);
         uint32_t offset = 0;
         int64_t addend = reference->addend;
         if (result)
         {
             const uint32_t end = fixup_ends[ordinal];
-            const uint32_t distance = x86_fixup_distance(instructions[index].form, reference->field);
+            const uint32_t distance = description->immediate_bytes +
+                                      (reference->field == X86_FIXUP_DISPLACEMENT ? (description->relative_bytes != 0 ? description->relative_bytes : 4u) : 0u);
             offset = end - distance;
             result = distance <= end && !(link_fixup_kinds[reference->kind].pc_relative && __builtin_sub_overflow(reference->addend, (int64_t)distance, &addend));
         }
@@ -1325,7 +1378,8 @@ static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* 
         }
         if (result)
         {
-            memset(link->atoms.bytes[atom] + offset, 0, link_fixup_kinds[reference->kind].width);
+            // The placeholder's bytes cleared: a field of 8 bytes at most, by one masked store.
+            _mm_mask_storeu_epi8(link->atoms.bytes[atom] + offset, (__mmask16)_bzhi_u32(0xffff, link_fixup_kinds[reference->kind].width), _mm_setzero_si128());
         }
         previous = index;
         previous_field = reference->field;
@@ -1703,11 +1757,19 @@ static LinkError link_check(Link* link)
     {
         memset(owned, 0, (link->fixups.count / 64 + 1) * sizeof(*owned));
     }
+    // The atoms with fixups, 16 at a time (#3393): an atom without one passes link_check_atom_fixups as it is, and the
+    // unit's data's atoms, its literals', mostly have none.
     uint64_t fixups = 0;
-    for (AtomId atom = 1; result == LINK_ERROR_NONE && atom < atoms->count; atom += 1)
+    for (AtomId first = 1; result == LINK_ERROR_NONE && first < atoms->count; first += 16)
     {
-        result = link_check_atom_fixups(link, atom, owned);
-        fixups += atoms->fixup_count[atom];
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, atoms->count - first < 16 ? atoms->count - first : 16);
+        const __m512i counts = _mm512_maskz_loadu_epi32(lanes, atoms->fixup_count + first);
+        fixups += (uint64_t)_mm512_reduce_add_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(counts))) +
+                  (uint64_t)_mm512_reduce_add_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(counts, 1)));
+        for (uint32_t fixed = _mm512_test_epi32_mask(counts, counts); result == LINK_ERROR_NONE && fixed != 0; fixed &= fixed - 1)
+        {
+            result = link_check_atom_fixups(link, first + (AtomId)__builtin_ctz(fixed), owned);
+        }
     }
     // Fixups in no atom's range.
     if (result == LINK_ERROR_NONE && fixups + 1 != link->fixups.count)

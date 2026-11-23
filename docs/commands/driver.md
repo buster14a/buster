@@ -519,8 +519,9 @@ AT&T syntax, which assembles into the object `-c` writes (the assembly sink's
 form contract, below), compiled by Tier 0 or with `--tier1` as `-c` compiles it.
 Its output is `-o FILE`, standard output with `-o -`, and otherwise each
 source's base name with `.s` in the current directory, as clang names it (`-o`
-with several sources is refused, as with `-c`). `-fsyntax-only` takes precedence
-over `-S`, and `-S` over `-c`, whichever comes first, as clang's phases do. It
+with several sources is refused, as with `-c`). `-E` with `-S` selects
+preprocessing in either order. `-fsyntax-only` takes precedence over `-S`,
+and `-S` over `-c`, whichever comes first, as clang's phases do. It
 runs the compile `-c` runs, its diagnostics and their promotions alike, and
 writes its file only after the unit's code and data are made: a unit with an
 error, or one the sink refuses, writes nothing and leaves an existing file as it
@@ -588,8 +589,8 @@ The form contract, which its tests hold GNU as to:
   `{load}` on the integer instructions' load direction between registers (03,
   0B ... 3B, 8A and 8B) and `{load}` or `{store}` on the vector moves', `{evex}`
   where a VEX encoding would do, `{vex}` where an EVEX one would be GNU as's
-  choice, and `{disp32}` on a rel32 jmp or jcc to a label. A size suffix only
-  where the operands leave the width open (another form of the mnemonic reads
+  choice, and `{disp32}` on a rel32 jmp or jcc to a label or on a memory operand
+  that requests a four-byte displacement. A size suffix only where the operands leave the width open (another form of the mnemonic reads
   the same registers but memory or an immediate of another width: `movl $1,
   8(%rsp)`, `fldt`, `cvtsi2sdl`, `vfpclasspdz`), as objdump prints them. A
   record GNU as encodes otherwise whatever it is written as

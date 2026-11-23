@@ -813,6 +813,10 @@ struct ObjectBuilder
     uint64_t local_count;
     // Original local place -> compact local place, UINT32_MAX for an elided temporary; absent on default writes.
     uint32_t* local_places;
+    // Each fixup's target's code (ObjectSymbols.entries' low half) as object_count_symbols found it, with
+    // BUSTER_OBJECT_FIXUP_SECTION where the relocation refers to the target's section symbol, by FixupId: what
+    // object_fill_relocations reads rather than find again (#3393).
+    uint64_t* fixup_codes;
     uint64_t global_count;
     uint64_t local_base;
     uint64_t global_base;
@@ -847,6 +851,7 @@ struct ObjectBuilder
 // Whether a fixup of `kind` with `addend` refers to its local target (whose code is `code`) through the target's section
 // symbol rather than itself (see the orientation comment): GNU as and LLVM keep the symbol for the GOT, TLS and size
 // kinds and for an IFUNC, and in a string pool for a PC-relative kind or any addend.
+#define BUSTER_OBJECT_FIXUP_SECTION (UINT64_C(1) << 32)
 static bool object_uses_section_symbol(uint8_t kind, uint32_t code, int64_t addend)
 {
     const bool kept = kind == BUSTER_LINK_FIXUP_CALL_GOT || kind == BUSTER_LINK_FIXUP_LOAD_GOT || kind == BUSTER_LINK_FIXUP_GOTPCREL || kind == BUSTER_LINK_FIXUP_TPOFF32 ||
@@ -1172,7 +1177,8 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
     const uint64_t declared_count = builder->options.declared_symbol_count;
     const uint64_t undefined_capacity = builder->fixup_count + declared_count + builder->group_count;
     builder->undefined = BUSTER_ARENA_PUSH_ARRAY(scratch, SymbolId, undefined_capacity);
-    bool result = (builder->undefined != 0 || undefined_capacity == 0) && builder->symbols->count == symbols->count &&
+    builder->fixup_codes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)fixups->count + 1);
+    bool result = (builder->undefined != 0 || undefined_capacity == 0) && builder->fixup_codes != 0 && builder->symbols->count == symbols->count &&
                   (builder->options.temporary_symbols == 0 || builder->local_count == 0 || builder->local_places != 0);
     builder->error = result ? OBJECT_ERROR_NONE : OBJECT_ERROR_FULL;
     builder->symbols->stamp += 1;
@@ -1199,6 +1205,7 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
     const uint64_t* symbol_info = units->symbol_info;
     const uint32_t* symbol_name_bytes = units->symbol_name_bytes;
     uint64_t* entries = builder->symbols->entries;
+    uint64_t* fixup_codes = builder->fixup_codes;
     SymbolId* undefined = builder->undefined;
     ObjectSection* sections = builder->sections;
     const uint64_t stamp = builder->stamp;
@@ -1248,6 +1255,7 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                 // ObjectOptions.local_unwind.
                 const uint32_t code = (uint32_t)entry;
                 const bool local = (code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL;
+                fixup_codes[fixup] = code;
                 if (local || unwind)
                 {
                     const uint8_t kind = kinds[fixup];
@@ -1255,6 +1263,7 @@ static bool object_count_symbols(ObjectBuilder* builder, Arena* scratch)
                     if ((local && object_uses_section_symbol(kind & BUSTER_LINK_FIXUP_KIND, code, addend)) ||
                         object_unwind_section_symbol(unwind, kind & BUSTER_LINK_FIXUP_KIND, code))
                     {
+                        fixup_codes[fixup] = code | BUSTER_OBJECT_FIXUP_SECTION;
                         const AtomId target_atom = symbols->atom[target];
                         const uint64_t place = units->atom_offset[target_atom] + symbols->value[target];
                         int64_t adjusted = 0;
@@ -1921,7 +1930,7 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
     const int64_t* wide_addends = link->fixups.wide_addends;
     const AtomId* symbol_atoms = link->symbols.atom;
     const uint64_t* symbol_values = link->symbols.value;
-    const uint64_t* entries = builder->symbols->entries;
+    const uint64_t* fixup_codes = builder->fixup_codes;
     const ObjectSection* sections = builder->sections;
     // Each kind of symbol's first index, by its code's top bits.
     const uint64_t bases[4] = {
@@ -1942,13 +1951,13 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
                 const uint64_t base = atom_offset[atom];
                 const FixupId first = fixup_begin[atom];
                 const FixupId end = first + fixup_count[atom];
-                const bool unwind = builder->options.local_unwind && link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME;
                 for (FixupId fixup = first; fixup < end; fixup += 1)
                 {
                     // What object_count_symbols found the target to be: its index is its kind's first plus its place,
                     // unless the relocation refers to a local target's section symbol.
                     const SymbolId target = targets[fixup];
-                    const uint32_t code = (uint32_t)entries[target];
+                    const uint64_t found = fixup_codes[fixup];
+                    const uint32_t code = (uint32_t)found;
                     const uint8_t kind_bits = kinds[fixup];
                     const uint8_t kind = kind_bits & BUSTER_LINK_FIXUP_KIND;
                     int64_t addend = (kind_bits & BUSTER_LINK_FIXUP_WIDE) != 0 ? wide_addends[(uint32_t)addends[fixup]] : addends[fixup];
@@ -1957,8 +1966,7 @@ static void object_fill_relocations(const ObjectBuilder* builder, uint8_t* bytes
                     {
                         index = builder->local_base + builder->local_places[code & BUSTER_OBJECT_SYMBOL_PLACE];
                     }
-                    if (((code & BUSTER_OBJECT_SYMBOL_KIND) == BUSTER_OBJECT_SYMBOL_LOCAL && object_uses_section_symbol(kind, code, addend)) ||
-                        object_unwind_section_symbol(unwind, kind, code))
+                    if ((found & BUSTER_OBJECT_FIXUP_SECTION) != 0)
                     {
                         const AtomId target_atom = symbol_atoms[target];
                         index = sections[atom_section[target_atom]].symbol;
