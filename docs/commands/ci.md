@@ -198,8 +198,8 @@ build configuration such as libFuzzer needs its own analysis invocation.
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
 Clang/LLVM 23.1.4 release, in native host builds (the baseline `x86-64` rows
-are gone, #2924). Native builds on CPUs without the complete vector feature set
-use the scalar fallback.
+are gone, #2924). A native build needs a CPU with `host_isa.h`'s complete
+vector feature set, so the native row is drawn on qualifying runners too.
 On a pull request the native row is the vector row instead (#2033): the
 explicit vector target (`BUSTER_HOST_ARCH=vector`, `host_isa.h`'s predicate),
 whose plain configuration's 4 shards are items that each draw's collector
@@ -298,19 +298,21 @@ there at a time, so everything takes one lock:
   and the PR's.
 - Hold the lock per run, never around a series of runs: a CI job waits for it
   and times out after 10 minutes.
-- Every pull request's job queues behind every other's, so keep the job short.
-  A pull request runs a benchmark's plain run, which checks its paths against
-  their scalar twins, where it changes what the benchmark measures (the
-  `changes` job's `measure`): a file that the benchmark's translation unit
-  includes, for one built as a unit of its own (the build's `*_benchmark.c`),
-  or one that its entry in `changes_benchmarks` names, for one in `main.c`'s
-  units (the files that define the functions it calls); or the benchmark's own
-  step. A change to the build's description (`build.sh`, `CMakeLists.txt`,
-  `cmake/`) runs every one, and so does a push to main before the nightly mode
-  (below), so that main has each benchmark's numbers at every commit; with it,
-  a push measures what its first-parent change selects, as its pull request
-  did (the selector's targeted push), and the nightly backlog measures the
-  states no push measured. A new benchmark's
+- No pull request runs a 9700X job (#2055, the owner's decision on
+  2026-11-10): its merged first-parent state is measured in the nightly window,
+  where each job queues behind the others, so keep the job short. A state's
+  backlog run decides as a pull request's run did, on the state's change against
+  its first parent. It runs a benchmark's plain run, which checks its paths
+  against their scalar twins, where that change touches what the benchmark
+  measures (the `changes` job's `measure`): a file that the benchmark's
+  translation unit includes, for one built as a unit of its own (the build's
+  `*_benchmark.c`), or one that its entry in `changes_benchmarks` names, for one
+  in `main.c`'s units (the files that define the functions it calls); or the
+  benchmark's own step. A change to the build's description (`build.sh`,
+  `CMakeLists.txt`, `cmake/`) runs every one. Pushes to main ran every one
+  before the nightly mode (below), then what their first-parent change
+  selected; since the merge queue (#1430) they run nothing, and the nightly
+  backlog measures every state. A new benchmark's
   step gets an entry in `changes_benchmarks` and an `if:` on `MEASURE`, as the
   others have. Its isolated and after-scalar samples (`--only`, `--after-scalar`,
   repeated processes), which cost about 200 ms before each of 21 samples per
