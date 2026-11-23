@@ -191,6 +191,18 @@ Below AVX-512 the counts and permutes are EVEX's alone, so x86-64 to x86-64-v3
 keep these loops scalar; x86-64-v4 takes all but `rgb_to_gray`, whose byte
 permute is VBMI's.
 
+On the 9700X at znver5
+([the record](https://github.com/buster14a/buster-performance/tree/49570f32f/docs/measurements/tier1-vectorizer-strided-2808-2026-11-23),
+main `1b9821af` against #3321's merged head), the three rules take the
+vectorized kernels from 16 to 19 and the 19 loops' geometric mean from 2.05 to
+1.30 times clang -O2's time as linked (1.96 to 1.28 at the best placement);
+the controls stay at 1.09. `count_eq_u8` runs at 0.19 times clang's time
+(clang widens the bytes into vector accumulators), `aos_sum` at 1.57 and
+`rgb_to_gray` at 1.41, from 12.9, 6.5 and 16.2 without the rules; most of the
+last two's remainder is that each member loads its own vectors. Compiling sqlite3.c
+with the option costs 0.06% more user cycles and 0.11% more instructions than
+main's pass.
+
 **Widths.** The lanes per iteration are the widest whose vectors are all 16 to
 64 bytes and at which every row's operation is the target's.
 `ir_vectorize_target.c` derives that from Tier 1's own forms and the target's
