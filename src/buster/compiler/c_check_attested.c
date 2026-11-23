@@ -964,14 +964,24 @@ static void check_attested_list_run(CheckAttestedListing* listing, uint32_t d, u
         __mmask64 lanes = end - t < 64 ? _bzhi_u64(UINT64_MAX, end - t) : UINT64_MAX;
         const __m512i kind = _mm512_maskz_loadu_epi8(lanes, kinds + t);
         const __m512i role = _mm512_maskz_loadu_epi8(lanes, roles + t);
-        // The levels, from the block's lowest (consecutive tokens' depths differ by one at most: 64 bytes hold them).
         __m512i depth[4];
+        uint64_t file_level = 0;
+        for (uint32_t g = 0; g < 4; g += 1)
+        {
+            const __mmask16 group = (__mmask16)(lanes >> (16 * g));
+            depth[g] = _mm512_maskz_loadu_epi32(group, depths + t + 16 * g);
+            file_level |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(group, depth[g], _mm512_setzero_si512()) << (16 * g);
+        }
+        // A function definition's body ends the block at its opening.
+        const uint64_t bodies = file_level & check_attested_lanes_equal(lanes, role, PARSE_ROLE_OPEN_BODY);
+        const uint32_t length = bodies != 0 ? (uint32_t)_tzcnt_u64(bodies) + 1 : (uint32_t)_mm_popcnt_u64(lanes);
+        lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
+        // The levels, from the block's lowest (consecutive tokens' depths differ by one at most: 64 bytes hold them).
         uint32_t low = UINT32_MAX;
         uint32_t high = 0;
         for (uint32_t g = 0; g < 4; g += 1)
         {
             const __mmask16 group = (__mmask16)(lanes >> (16 * g));
-            depth[g] = _mm512_maskz_loadu_epi32(group, depths + t + 16 * g);
             const uint32_t least = _mm512_mask_reduce_min_epu32(group, depth[g]);
             const uint32_t most = _mm512_mask_reduce_max_epu32(group, depth[g]);
             low = least < low ? least : low;
@@ -983,15 +993,10 @@ static void check_attested_list_run(CheckAttestedListing* listing, uint32_t d, u
             quarters[g] = _mm512_cvtepi32_epi8(_mm512_maskz_sub_epi32((__mmask16)(lanes >> (16 * g)), depth[g], _mm512_set1_epi32((int32_t)low)));
         }
         const __m512i level = _mm512_inserti64x4(_mm512_castsi256_si512(_mm256_set_m128i(quarters[1], quarters[0])), _mm256_set_m128i(quarters[3], quarters[2]), 1);
-        const uint64_t file_level = low == 0 ? check_attested_lanes_equal(lanes, level, 0) : 0;
-        // A function definition's body ends the block at its opening.
-        const uint64_t bodies = file_level & check_attested_lanes_equal(lanes, role, PARSE_ROLE_OPEN_BODY);
-        const uint32_t length = bodies != 0 ? (uint32_t)_tzcnt_u64(bodies) + 1 : (uint32_t)_mm_popcnt_u64(lanes);
-        lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
         const uint32_t top = high - low;
         const uint64_t identifiers = check_attested_lanes_equal(lanes, kind, PARSE_KIND_IDENTIFIER);
         const uint64_t texts = check_attested_lanes_equal(lanes, kind, PARSE_KIND_STRING);
-        const uint64_t asms = check_attested_lanes_equal(lanes, kind, PARSE_KIND_ASM) & file_level;
+        const uint64_t asms = check_attested_lanes_equal(lanes, kind, PARSE_KIND_ASM) & file_level & lanes;
         const uint64_t commas = check_attested_lanes_equal(lanes, kind, PARSE_KIND_COMMA);
         const uint64_t semis = check_attested_lanes_equal(lanes, kind, PARSE_KIND_SEMI);
         const uint64_t extensions = check_attested_lanes_equal(lanes, kind, PARSE_KIND_EXTENSION);
