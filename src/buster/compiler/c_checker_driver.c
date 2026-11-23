@@ -4882,7 +4882,7 @@ static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const C
     {
         const CheckInputSymbolPragma* record = history->records + i;
         const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
-        clones += record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token;
+        clones += record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made <= token && !check_input_symbol_pending_duplicate(history, i);
     }
     uint64_t capacity = (uint64_t)clones + 1;
     for (uint32_t r = 0; clones != 0 && r < input->report_count; r += 1)
@@ -4898,7 +4898,7 @@ static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const C
     {
         const CheckInputSymbolPragma* record = history->records + i;
         const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
-        if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token)
+        if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made <= token && !check_input_symbol_pending_duplicate(history, i))
         {
             order[listed_count++] = (uint64_t)made << 32 | i;
         }
@@ -6955,7 +6955,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (x86_message != NULL && x86_location < count && conversion_note != NULL && conversion_note_token < count)
                         {
-                            const PPOutputDiagnosticNote note = { .token = parse_source_index(&parser->tokens, conversion_note_token), .message = conversion_note };
+                            const CheckInputSymbolPragma* clone = check_input_symbol_first_use(input->symbol_pragmas, conversion_note_token);
+                            const uint32_t source = clone != NULL ? clone->source + 3 : parse_source_index(&parser->tokens, conversion_note_token);
+                            const PPOutputDiagnosticNote note = { .token = source, .message = conversion_note };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, x86_location), publication, &note, 1, "%s", x86_message);
                         }
                         else if (x86_message != NULL && x86_location < count)
