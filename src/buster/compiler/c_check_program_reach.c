@@ -215,7 +215,8 @@ static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t 
         {
             const uint32_t expression = check_control_reach_condition(writer, token);
             const bool always = check_control_reach_always(writer, expression, false);
-            const bool breaks = check_control_reach_breaks(writer, token, body);
+            // The body is scanned for a break only where the answer needs one: a condition that is constantly true.
+            const bool breaks = always && check_control_reach_breaks(writer, token, body);
             result = !always || breaks;
         }
         else
@@ -241,7 +242,7 @@ static bool check_control_reach_leaf(const CheckControlWriter* writer, uint32_t 
         // `for (;;)` leaves that block unused, so only then is there no insertion point after the loop.
         const bool absent = condition != BUSTER_CHECK_NONE && check_control_statement_head(writer, condition) == BUSTER_CHECK_NONE &&
                             (condition >= writer->program->input->token_count || writer->program->input->token_nodes[condition] == BUSTER_CHECK_NONE);
-        const bool breaks = check_control_reach_breaks(writer, token, body);
+        const bool breaks = absent && check_control_reach_breaks(writer, token, body);
         result = !absent || breaks;
     }
     *completes = result;
@@ -533,6 +534,9 @@ static void check_control_emit_sequence(CheckControlWriter* writer, uint32_t par
     uint8_t* at = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, room);
     uint32_t* dropped = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room);
     bool ip = entered;
+    // The statement kept last, whose answer is asked when the next kept statement needs it: the block's last one's is
+    // never read.
+    uint32_t pending = BUSTER_CHECK_NONE;
     uint32_t count = 0;
     uint32_t drop_count = 0;
     if (list == NULL || at == NULL || dropped == NULL)
@@ -544,6 +548,11 @@ static void check_control_emit_sequence(CheckControlWriter* writer, uint32_t par
         const bool kept = check_control_sequence_child(writer, child) && child > after && !(skip_final && child == writer->region_final);
         if (kept)
         {
+            if (pending != BUSTER_CHECK_NONE)
+            {
+                ip = check_control_completes(writer, pending, ip, stop, repeat);
+                pending = BUSTER_CHECK_NONE;
+            }
             if (!ip && !check_control_enterable(writer, child))
             {
                 if (drop_count < room)
@@ -557,7 +566,7 @@ static void check_control_emit_sequence(CheckControlWriter* writer, uint32_t par
                 list[count] = child;
                 at[count] = ip ? 1 : 0;
                 count += 1;
-                ip = check_control_completes(writer, child, ip, stop, repeat);
+                pending = child;
             }
         }
     }

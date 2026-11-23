@@ -81,6 +81,9 @@ struct IrOptimizeWork
     IrCfg cfg;
     IrUses uses;
     Dominators dominators;
+    // What ir_optimize_prepare's dominator analysis gives past the tree (DominatorOptions.outputs): 0, or LICM's natural
+    // loops (#2719), which would otherwise take the analysis a second time.
+    uint32_t dominator_outputs;
     uint8_t* states;
     IrConstant* values;
     // Allocated lazily by the first SIMD transfer; scalar functions keep their two-word lattice and no wide map.
@@ -1776,9 +1779,13 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
             .predecessors = work->cfg.predecessors,
         };
         DominatorOptions options = dominators_options();
-        options.outputs = 0;
+        options.outputs = work->dominator_outputs;
         const DominatorStatus status = dominators_analyze(scratch, output, &cfg, options, &work->dominators);
-        check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
+        // A loop analysis past its matrices' limit is a function the pass that asked for it leaves as it was.
+        check.error = status == DOMINATOR_OK            ? IR_OK :
+                      status == DOMINATOR_NO_MEMORY     ? IR_ERROR_MEMORY :
+                      status == DOMINATOR_MATRIX_LIMIT  ? IR_ERROR_UNSUPPORTED :
+                                                          IR_ERROR_DOMINANCE;
     }
     if (check.error == IR_OK)
     {

@@ -519,10 +519,11 @@ static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diag
                                          (diagnostic->resume_call_semi ? diagnostic->resume_end < view->tokens.count &&
                                                                          view->tokens.kinds[diagnostic->resume_end] == PARSE_KIND_SEMI :
                                                                          view->tokens.kinds[diagnostic->resume_end - 1] == PARSE_KIND_R_PAREN)));
-    const uint32_t arguments = diagnostic->resume_call_arguments;
-    valid &= !diagnostic->resume_call_semi || (diagnostic->resume_call && diagnostic->resume_call_value && arguments == 0);
-    valid = valid && (arguments == 0 || (diagnostic->resume_call && diagnostic->resume_call_value && arguments > diagnostic->token &&
-                                        arguments < diagnostic->resume_end - 1 && view->tokens.kinds[arguments - 1] == PARSE_KIND_COMMA));
+    const uint32_t tail = diagnostic->resume_call_tail;
+    const uint32_t closer = diagnostic->resume_end - !diagnostic->resume_call_semi;
+    valid &= !diagnostic->resume_call_semi || (diagnostic->resume_call && diagnostic->resume_call_value);
+    valid = valid && (!diagnostic->resume_call || (tail > diagnostic->token && tail <= closer &&
+                      (tail == closer || (diagnostic->resume_call_value && view->tokens.kinds[tail] == PARSE_KIND_COMMA))));
     valid = valid && (!diagnostic->resume_call || !diagnostic->resume_call_value ||
                       (diagnostic->token >= callee + 2 && (diagnostic->token == callee + 2 || view->tokens.kinds[diagnostic->token - 1] == PARSE_KIND_COMMA)));
     valid = valid && (!diagnostic->resume_call || diagnostic->resume_call_value ||
@@ -540,12 +541,20 @@ static uint32_t check_prefix_call_attributes(const ParseDiagnostic* diagnostic)
     return retained ? diagnostic->resume_callee - diagnostic->resume_begin : 0;
 }
 
-// The callee, opening parenthesis and any earlier complete arguments. With a later suffix, its first argument
-// consumes the comma before the rejected argument; without one, remove that comma as well as the rejected argument.
+// Keep the call through the first token of its rejected argument, which becomes a missing operand.
+// A lookup-only call keeps just the name and opening parenthesis.
 static uint32_t check_prefix_call_prefix(const ParseDiagnostic* diagnostic)
 {
-    return diagnostic->resume_call_value && diagnostic->token > diagnostic->resume_callee + 2 ?
-           diagnostic->token - diagnostic->resume_callee - (diagnostic->resume_call_arguments == 0) : 2;
+    return diagnostic->resume_call_value ? diagnostic->token - diagnostic->resume_callee + 1 : 2;
+}
+
+// The checker cuts this leaf and its parents as an invalid use. An operand uses the parser's numeric
+// token for false, which needs no source spelling. A member uses an identifier without a name.
+static void check_prefix_missing_operand(ParseTokens* tokens, uint32_t at, bool member)
+{
+    tokens->kinds[at] = member ? PARSE_KIND_IDENTIFIER : PARSE_KIND_NUMBER;
+    tokens->names[at] = member ? 0 : C_NAME_FALSE;
+    tokens->flags[at] = BUSTER_PARSE_RECOVERY_ARGUMENT;
 }
 
 // `diagnostic` at the original's tokens, from a view's whose tokens' originals `origin` has (a synthetic `;`'s, the
@@ -570,7 +579,8 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
     result.resume_at = 0;
     result.resume_closers = 0;
     result.resume_follow = 0;
-    result.resume_call_arguments = 0;
+    result.resume_call_tail = 0;
+    result.resume_operand = false;
     result.resume_colon = false;
     return result;
 }
@@ -776,7 +786,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                 diagnostic.resumed = diagnostic.resumed || end != 0;
                 diagnostic.resume_delete = diagnostic.resume_delete || end != 0;
                 diagnostic.resume_end = end != 0 ? end : diagnostic.resume_end;
-                diagnostic.tail = end != 0;
+                diagnostic.tail |= end != 0;
                 round_diagnostics[d] = diagnostic;
             }
             diagnostics = round_diagnostics;
@@ -820,11 +830,10 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : at) : last;
             insert += taken && !diagnostic->resume_delete ? (diagnostic->resume_closers != 0 ? diagnostic->resume_closers : 1u) + (diagnostic->resume_follow != 0) : 0u;
             following += taken && diagnostic->resume_follow;
-            const uint32_t arguments = diagnostic->resume_call_arguments;
             const uint32_t attributes = taken ? check_prefix_call_attributes(diagnostic) : 0;
-            insert += attributes != 0;
+            insert += (attributes != 0) + (taken && diagnostic->resume_call_semi);
             retained += taken && diagnostic->resume_call ? attributes + check_prefix_call_prefix(diagnostic) +
-                                                          (arguments != 0 ? diagnostic->resume_end - arguments : 1u) : 0u;
+                                                          (diagnostic->resume_end - diagnostic->resume_call_tail) : 0u;
             repairs += taken;
             discard += taken && diagnostic->resume_end != 0 ? diagnostic->resume_end - begin : 0;
             // At most one tail is taken in a round (limit above). A tail starting before its error also removes
@@ -950,19 +959,28 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                 next_origin[written] = origin != NULL ? origin[callee] : callee;
                                 written += 1;
                             }
-                            const uint32_t arguments = diagnostic->resume_call_arguments != 0 ? diagnostic->resume_call_arguments : diagnostic->resume_end - 1;
+                            const uint32_t closer = diagnostic->resume_end - !diagnostic->resume_call_semi;
                             const uint32_t prefix = check_prefix_call_prefix(diagnostic);
-                            const uint32_t retained_call = prefix + diagnostic->resume_end - arguments;
+                            const uint32_t retained_call = prefix + (closer - diagnostic->resume_call_tail) + 1;
                             for (uint32_t c = 0; c < retained_call; c += 1)
                             {
                                 // StopAtSemi abandons this call before its original closer. The replacement ')'
                                 // borrows the semicolon's source just as a synthetic ';' borrows its next token's.
-                                const bool close = diagnostic->resume_call_semi && c == prefix;
-                                const uint32_t token = c < prefix ? diagnostic->resume_callee + c : close ? diagnostic->resume_end : arguments + c - prefix;
-                                view->tokens.kinds[written] = close ? PARSE_KIND_R_PAREN : current->tokens.kinds[token];
+                                const uint32_t token = c < prefix ? diagnostic->resume_callee + c : diagnostic->resume_call_tail + (c - prefix);
+                                const bool close = diagnostic->resume_call_semi && token == closer;
+                                const uint8_t kind = current->tokens.kinds[token];
+                                view->tokens.kinds[written] = close ? PARSE_KIND_R_PAREN : kind;
                                 view->tokens.names[written] = close ? 0 : current->tokens.names[token];
                                 view->tokens.sources[written] = parse_source_index(&current->tokens, token);
                                 view->tokens.flags[written] = close ? 0 : current->tokens.flags[token];
+                                if (diagnostic->resume_call_value && c == prefix - 1)
+                                {
+                                    check_prefix_missing_operand(&view->tokens, written, false);
+                                }
+                                else if (diagnostic->resume_call_semi && (c == 1 || close || (c >= prefix && parse_argument_delimiter(kind))))
+                                {
+                                    view->tokens.flags[written] |= BUSTER_PARSE_RECOVERY_ARGUMENT;
+                                }
                                 next_origin[written] = origin != NULL ? origin[token] : token;
                                 written += 1;
                             }
@@ -981,6 +999,10 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                 view->tokens.sources[written] = parse_source_index(&current->tokens, source);
                                 view->tokens.flags[written] = c < closers && kind == PARSE_KIND_R_PAREN && diagnostic->resume_at != 0 ?
                                                                  BUSTER_PARSE_DROPPED_ATTRIBUTE : 0;
+                                if (diagnostic->resume_operand)
+                                {
+                                    check_prefix_missing_operand(&view->tokens, written, diagnostic->message == PARSE_MESSAGE_EXPECTED_IDENTIFIER);
+                                }
                                 next_origin[written] = origin != 0 ? origin[source] : source;
                                 written += 1;
                             }

@@ -649,9 +649,25 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                 {
                     // Use the opposite arena roles for this temporary result. The helper restores its scratch
                     // suffix in output, and we copy the surviving references before releasing its result suffix.
-                    const CheckInitStatus status = check_initializer_references(types, plan, scratch, output, &references, &reference_count);
+                    const uint8_t* live = NULL;
+                    const CheckInitStatus status = check_initializer_references_live(types, plan, scratch, output, &references, &reference_count, &live);
                     valid = status == CHECK_INIT_OK;
-                    if (!valid)
+                    // The live parts' marks, which the plan reads (CheckDataObject.live_parts), kept with the objects.
+                    uint8_t* kept = valid && live != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, plan->count) : 0;
+                    valid = valid && (live == NULL || kept != 0);
+                    if (kept != 0)
+                    {
+                        memcpy(kept, live, plan->count);
+                    }
+                    result->objects[written].live_parts = kept;
+                    result->objects[written].live_count = reference_count;
+                    result->objects[written].live_kept = valid;
+                    if (!valid && status == CHECK_INIT_OK)
+                    {
+                        result->status = CHECK_DATA_INPUT_RESOURCE;
+                        result->token = selected;
+                    }
+                    else if (!valid)
                     {
                         result->status = status == CHECK_INIT_RESOURCE ? CHECK_DATA_INPUT_RESOURCE : CHECK_DATA_INPUT_INVALID;
                         result->token = selected;

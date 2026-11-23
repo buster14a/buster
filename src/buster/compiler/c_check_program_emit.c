@@ -309,23 +309,72 @@ static bool check_program_emit_makes_name(const CheckInput* input, uint32_t decl
            (renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 0);
 }
 
-// Adds `spelling`, the name the source gives a symbol, to the link's names, and to the names a made one must not be if
-// it could be one: its NameId, or 0 when the link has no room. Every made name has a '.', which no identifier has, so
-// only an asm label with one can be a made name, and only it goes in the table (#442: most units' given names are
-// identifiers, whose probes the table then doesn't pay for).
-static NameId check_program_emit_given_name(Link* link, CheckProgramNames* names, const uint8_t* spelling, uint32_t length, bool label)
+// The symbols' passes over their declarations (check_program_emit_timed's names and symbols) read columns at each
+// symbol's declaration, a token anywhere in the unit's, and through them the declaration's body's sparse block and its
+// identifier's spelling: each pass prefetches a symbol's declaration 16 symbols ahead, its columns 8 ahead, and the
+// loads they lead to 4 ahead, so that several symbols' misses are in flight at once (#3393).
+#define BUSTER_CHECK_EMIT_SYMBOL_AHEAD 4u
+static void check_program_emit_prefetch_symbol(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, uint32_t s)
 {
-    const uint64_t hash = link_hash(spelling, length);
-    uint32_t slot = 0;
-    const bool dotted = label && memchr(spelling, '.', length) != 0;
-    const bool taken = dotted && check_program_emit_taken(link, names, spelling, length, hash, &slot);
-    const NameId result = link_add_name_hashed(link, spelling, length, hash);
-    if (dotted && !taken && result != 0)
+    const CheckInput* input = program->input;
+    const uint32_t far = s + 4 * BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
+    const uint32_t middle = s + 2 * BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
+    const uint32_t near = s + BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
+    if (far < program->symbol_count)
     {
-        names->taken[slot] = result;
+        __builtin_prefetch(program->object_declarations + program->symbol_objects[far]);
     }
-    return result;
+    const uint32_t declaration = middle < program->symbol_count ? program->object_declarations[program->symbol_objects[middle]] : BUSTER_CHECK_NONE;
+    if (declaration != BUSTER_CHECK_NONE)
+    {
+        __builtin_prefetch(input->declaration_bits + declaration);
+        __builtin_prefetch(input->declaration_kinds + declaration);
+        __builtin_prefetch(parser != NULL ? (const void*)(parser->tokens.names + declaration) : (const void*)(input->declaration_bits + declaration));
+        __builtin_prefetch(input->declaration_bodies.directory + (declaration >> BUSTER_CHECK_SPARSE_SHIFT));
+        if (input->function_flags != NULL)
+        {
+            __builtin_prefetch(input->function_flags + declaration);
+        }
+    }
+    const uint32_t close = near < program->symbol_count ? program->object_declarations[program->symbol_objects[near]] : BUSTER_CHECK_NONE;
+    if (close != BUSTER_CHECK_NONE)
+    {
+        const uint32_t block = input->declaration_bodies.directory[close >> BUSTER_CHECK_SPARSE_SHIFT] & ~BUSTER_CHECK_SPARSE_CLAIMED;
+        __builtin_prefetch(input->declaration_bodies.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT) + (close & (BUSTER_CHECK_SPARSE_TOKENS - 1)));
+        if (parser != NULL)
+        {
+            __builtin_prefetch(identifiers->spans + parser->tokens.names[close]);
+        }
+    }
 }
+
+// The decimal digits of `number` at `at`, as "%u" writes them: how many (#3393: the symbols' names of the literals,
+// tables and cases, thousands in a unit, took snprintf's hundred cycles each).
+static uint32_t check_program_emit_decimal(char* at, uint32_t number)
+{
+    char reversed[10];
+    uint32_t count = 0;
+    uint32_t rest = number;
+    do
+    {
+        reversed[count] = (char)('0' + rest % 10);
+        rest /= 10;
+        count += 1;
+    } while (rest != 0);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        at[i] = reversed[count - 1 - i];
+    }
+    return count;
+}
+
+// `prefix` (a literal's `length` bytes) and `number`'s digits in `spelling`: its length.
+static uint32_t check_program_emit_numbered(char* spelling, const char* prefix, uint32_t length, uint32_t number)
+{
+    memcpy(spelling, prefix, length);
+    return length + check_program_emit_decimal(spelling + length, number);
+}
+#define BUSTER_CHECK_EMIT_NUMBERED(spelling, prefix, number) check_program_emit_numbered((spelling), (prefix), (uint32_t)sizeof(prefix) - 1, (number))
 
 // Adds `base`, or the first of its ".N" spellings no name of `names` has, to the link's names: its NameId, or 0 when the
 // link or scratch has no room.
@@ -512,8 +561,10 @@ struct CheckEmitGrowth
 // only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
 // and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
 // the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither;
-// and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol.
-#define BUSTER_CHECK_TIER1_STEPS 13
+// and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol. LICM's
+// pressure policy (--tier1-passes=+hoist, #2719) takes step 9 too, reserved at the lane's first function that has a loop,
+// and step 13 is the value numbering's on promoted SSA under the same policy (--tier1-passes=+numbering).
+#define BUSTER_CHECK_TIER1_STEPS 14
 #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
 // block's IR instructions before selection and allocation (tier1_schedule_ir.c).
@@ -528,7 +579,7 @@ struct CheckEmitGrowth
 // value numbering with memory's maps to its BUSTER_IR_OPTIMIZE_MEMORY. #866's solver and the inlining keep their own
 // options (--tier1-gvn, --tier1-no-inline), which the option's list sets too. VECTORS (#2781, on by default) is the
 // solver and LICM on vector and mask values alone, in the functions that have such values and where the option doesn't
-// run the pass on every value.
+// run the pass on every value; HOIST (#2719, off by default) is LICM under its pressure policy in the other functions.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
 #define BUSTER_CHECK_TIER1_PASS_CFG 4u
@@ -546,6 +597,15 @@ struct CheckEmitGrowth
 // #3298's switches whose arms only give constants, as loads of their jump tables' values (ir_switch_table.c), on by
 // default.
 #define BUSTER_CHECK_TIER1_PASS_TABLES 4096u
+// LICM under #2719's pressure policy (ir_optimize_licm.c's IrLicmOptions.pressure), off by default: in a function without
+// vector or mask values (VECTORS' policy takes those) that has a loop, where LICM doesn't run on every value. On the 9700X
+// it takes 6.2% of the loop kernels' cycles, and none of speedtest1's or Lua's beyond code placement's, for 3.4% of
+// sqlite3.c's --tier1 compile (docs/ir-loop-motion.md's "The pressure policy").
+#define BUSTER_CHECK_TIER1_PASS_HOIST 16384u
+// #866's solver under #2719's pressure policy (ir_optimize_gvn.c's IrGvnOptions.pressure), on promoted SSA after
+// if-conversion and before LICM, off by default: on the 9700X it takes none of speedtest1's or Lua's cycles beyond code
+// placement's, for 16.2% of sqlite3.c's --tier1 compile.
+#define BUSTER_CHECK_TIER1_PASS_NUMBERING 32768u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT                                                                                                                              \
     (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \
      BUSTER_CHECK_TIER1_PASS_TABLES)
@@ -555,7 +615,7 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_STORE_MOTION 8192u
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
-     BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION)
+     BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION | BUSTER_CHECK_TIER1_PASS_HOIST | BUSTER_CHECK_TIER1_PASS_NUMBERING)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
 // IrVectorizeRefusal.
@@ -1084,9 +1144,117 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
                                              CheckTier1Counts* counts, const CheckTier1Fault* fault);
 // Releases a lane's arenas for the pipeline.
 static void check_tier1_lane_release(CheckTier1Lane* lane);
-// Defined in c_check_tier1_inline.c (#1282): the unit's inline callees by symbol, in `arena`, or false for none.
+// The unit's attributed declarations (#3393): each token that has attributes and whose declaration is itself, in token
+// order, found 16 tokens at a time (check_input_attributed_next), with what one pass over its records gives the
+// emission's two readers of them, a byte each: check_tier1_inline_marks' marks (BUSTER_CHECK_ATTRIBUTED_INTERPOSABLE and
+// _ROOTED, its BUSTER_CHECK_TIER1_INLINE_*), and BUSTER_CHECK_ATTRIBUTED_SYMBOL where the symbols' attribute pass
+// (check_program_emit_timed's) reads the declaration: an alignment, or a record of a kind it reads, not ignored. The two
+// passes walked the attributes each, a third of a millisecond together on sqlite3.c; now one does. A record's bits are a
+// table's by its kind.
+typedef struct CheckProgramAttributed CheckProgramAttributed;
+struct CheckProgramAttributed
+{
+    uint32_t* tokens;
+    uint8_t* bits;
+    uint32_t count;
+};
+#define BUSTER_CHECK_ATTRIBUTED_INTERPOSABLE 1u
+#define BUSTER_CHECK_ATTRIBUTED_ROOTED 2u
+#define BUSTER_CHECK_ATTRIBUTED_SYMBOL 4u
+#define BUSTER_CHECK_ATTRIBUTED_MARKS (BUSTER_CHECK_ATTRIBUTED_INTERPOSABLE | BUSTER_CHECK_ATTRIBUTED_ROOTED)
+static const uint8_t check_program_attributed_kinds[CHECK_ATTRIBUTE_ADDRESS_SPACE + 1] = {
+    [CHECK_ATTRIBUTE_WEAK] = BUSTER_CHECK_ATTRIBUTED_INTERPOSABLE | BUSTER_CHECK_ATTRIBUTED_ROOTED | BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_SELECTANY] = BUSTER_CHECK_ATTRIBUTED_INTERPOSABLE | BUSTER_CHECK_ATTRIBUTED_ROOTED | BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_USED] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_CONSTRUCTOR] = BUSTER_CHECK_ATTRIBUTED_ROOTED | BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_DESTRUCTOR] = BUSTER_CHECK_ATTRIBUTED_ROOTED | BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_INTERRUPT] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_TARGET_CLONES] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_CPU_SPECIFIC] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_CPU_DISPATCH] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_ALIAS] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_IFUNC] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_WEAKREF] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_RETAIN] = BUSTER_CHECK_ATTRIBUTED_ROOTED | BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_NAKED] = BUSTER_CHECK_ATTRIBUTED_ROOTED,
+    [CHECK_ATTRIBUTE_ASM_LABEL] = BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_WEAK_IMPORT] = BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_COMMON] = BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_SECTION] = BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_NOCOMMON] = BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+    [CHECK_ATTRIBUTE_LOADER_UNINITIALIZED] = BUSTER_CHECK_ATTRIBUTED_SYMBOL,
+};
+
+// The attributed declarations of `input` (CheckProgramAttributed), in `arena`: false without room. Three passes, as the
+// records are a chain of loads each that misses (the column's value, the attributes, their records: 2,577 declarations
+// took 215 cycles each on sqlite3.c as one loop): the declaring tokens of each 16 with attributes, compressed from a
+// compare of their declarations with themselves; then each one's attributes, prefetched as they are found; then their
+// records' bits, each declaration's records prefetched 8 ahead.
+#define BUSTER_CHECK_ATTRIBUTED_AHEAD 8u
+static bool check_program_attributed(const CheckInput* input, Arena* arena, CheckProgramAttributed* result)
+{
+    const uint32_t tokens = input->token_count;
+    *result = (CheckProgramAttributed){
+        .tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)tokens + 16),
+    };
+    const uint32_t* declarations = input->declarations;
+    const CheckSparseWide attributes = input->attributes;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    // The slots with attributes (one for each 16 tokens at most), the values of each prefetched, and its declarations.
+    uint32_t* listed = result->tokens != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)tokens / BUSTER_CHECK_SPARSE_TOKENS + 2) : 0;
+    const uint32_t slots = listed != 0 ? check_sparse_wide_slots(attributes, tokens, listed) : 0;
+    for (uint32_t k = 0; k < slots; k += 1)
+    {
+        __builtin_prefetch(declarations + ((uint64_t)listed[k] << BUSTER_CHECK_SPARSE_SHIFT));
+    }
+    uint32_t count = 0;
+    for (uint32_t k = 0; k < slots; k += 1)
+    {
+        const uint32_t first = listed[k] << BUSTER_CHECK_SPARSE_SHIFT;
+        const __mmask16 attributed = (__mmask16)check_input_attributed_group(attributes, first, tokens);
+        const __m512i group = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
+        const __mmask16 declaring = _mm512_mask_cmpeq_epi32_mask(attributed, _mm512_maskz_loadu_epi32(attributed, declarations + first), group);
+        _mm512_mask_compressstoreu_epi32(result->tokens + count, declaring, group);
+        count += (uint32_t)__builtin_popcount(declaring);
+    }
+    result->bits = listed != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 16) : 0;
+    const CheckInputAttributes** records = result->bits != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, const CheckInputAttributes*, (uint64_t)count + BUSTER_CHECK_ATTRIBUTED_AHEAD) : 0;
+    const bool valid = records != 0;
+    for (uint32_t d = 0; valid && d < count; d += 1)
+    {
+        records[d] = check_input_attributes_at(input, result->tokens[d]);
+        __builtin_prefetch(records[d]);
+    }
+    for (uint32_t d = count; valid && d < count + BUSTER_CHECK_ATTRIBUTED_AHEAD; d += 1)
+    {
+        records[d] = NULL;
+    }
+    for (uint32_t d = 0; valid && d < count; d += 1)
+    {
+        const CheckInputAttributes* ahead = records[d + BUSTER_CHECK_ATTRIBUTED_AHEAD];
+        if (ahead != NULL)
+        {
+            __builtin_prefetch(ahead->records);
+        }
+        const CheckInputAttributes* listed = records[d];
+        uint32_t bits = listed != 0 && listed->alignment_log2 != 0 ? BUSTER_CHECK_ATTRIBUTED_SYMBOL : 0;
+        for (uint32_t i = 0; listed != 0 && i < listed->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = &listed->records[i];
+            const uint32_t kind = (uint32_t)attribute->kind;
+            bits |= attribute->ignored || kind > CHECK_ATTRIBUTE_ADDRESS_SPACE ? 0 : check_program_attributed_kinds[kind];
+        }
+        result->bits[d] = (uint8_t)bits;
+    }
+    result->count = valid ? count : 0;
+    return valid;
+}
+
+// Defined in c_check_tier1_inline.c (#1282): the unit's inline callees by symbol, in `arena`, or false for none. Its marks
+// are `attributed`'s, or with none its own pass's (check_program_attributed).
 static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, bool scalar, Arena* arena,
-                                     CheckTier1Inline* table);
+                                     const CheckProgramAttributed* attributed, CheckTier1Inline* table);
 static void check_tier1_inline_release(CheckTier1Inline* table);
 // Defined in c_check_tier1_inline.c (#2541 step 2): one body's entries that take a candidate's address, marked in `addressed`
 // (test-tier0-inline checks it against its definition).
@@ -3248,7 +3416,7 @@ static bool check_program_emit_asm_symbols(const CheckProgram* program, const Pa
     {
         const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
         const String8 renamed = symbol_names[s + 1];
-        // The names the source gives (check_program_emit_given_name's): not a literal's, a compound literal's or a
+        // The names the source gives (check_program_emit_timed's given names): not a literal's, a compound literal's or a
         // block-scope static's, which the emission makes.
         const bool given = declaration != BUSTER_CHECK_NONE && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) &&
                            !(renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 0);
@@ -3722,18 +3890,29 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
     {
         defined[program->bodies[b].object] = 1;
     }
+    // The static objects' defining declarations: of each 64 tokens, those with the static bit and a definition's or a
+    // tentative one's, an object's, by two masked byte loads and compares; then of the few found, by 16, those that declare
+    // themselves (#3393).
+    const __m512i lanes16 = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     for (uint32_t first = 0; first < input->token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
-                                        check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
-        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+        const __mmask64 present = _bzhi_u64(~0ull, input->token_count - first < 64 ? input->token_count - first : 64);
+        const __m512i bits = _mm512_maskz_loadu_epi8(present, input->declaration_bits + first);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(present, input->declaration_kinds + first);
+        const __mmask64 statics = _mm512_mask_test_epi8_mask(present, bits, _mm512_set1_epi8((char)BUSTER_CHECK_BITS_STATIC));
+        const __mmask64 defining = _mm512_mask_test_epi8_mask(statics, bits, _mm512_set1_epi8((char)(BUSTER_CHECK_BITS_DEFINED | BUSTER_CHECK_BITS_TENTATIVE)));
+        const uint64_t candidates = _mm512_mask_cmpeq_epi8_mask(defining, kinds, _mm512_set1_epi8((char)C_BINDING_OBJECT));
+        for (uint32_t part = 0; candidates != 0 && part < 64; part += 16)
         {
-            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
-            const uint32_t object = input->objects[token];
-            if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE)))
+            const __mmask16 lanes = (__mmask16)(candidates >> part);
+            const uint32_t base = first + part;
+            const __m512i tokens = _mm512_add_epi32(lanes16, _mm512_set1_epi32((int)base));
+            const __mmask16 own = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, input->declarations + base), tokens);
+            const __m512i objects = _mm512_maskz_loadu_epi32(own, input->objects + base);
+            const __mmask16 found = _mm512_mask_cmplt_epu32_mask(own, objects, _mm512_set1_epi32((int)program->object_count));
+            for (uint32_t selected = found; selected != 0; selected &= selected - 1)
             {
-                defined[object] = 1;
+                defined[input->objects[base + (uint32_t)__builtin_ctz(selected)]] = 1;
             }
         }
     }
@@ -3759,6 +3938,7 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
     }
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
     {
+        check_program_emit_prefetch_symbol(program, NULL, NULL, s);
         const uint32_t object = program->symbol_objects[s];
         const uint32_t declaration = program->object_declarations[object];
         const bool literal = declaration == BUSTER_CHECK_NONE || check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
@@ -3813,7 +3993,7 @@ static bool check_program_emit_tls_symbols(Link* link, const CheckProgram* progr
         if (made[v] != 0)
         {
             char spelling[48];
-            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_tls_%u", index);
+            const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_tls_", index);
             const NameId name = link_add_name(link, (const uint8_t*)spelling, (uint32_t)length);
             const SymbolId symbol = name != 0 ? link_add_symbol(link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
                                                                  binding ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) : 0;
@@ -4256,9 +4436,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // The unit's inline callees (#1282, #1398), unless --tier1-no-inline and --tier0-no-inline keep every call: Tier 1's
     // with --tier1, and Tier 0's for the bodies it compiles. A unit without them runs one epoch.
     CheckTier1Inline tier1_inline = { 0 };
+    // The attributed declarations (check_program_attributed), which the table's marks and the symbols' attributes read:
+    // listed here once the input's columns are complete, as they are unless a deferred lowering's parts run the
+    // caller's loop (CheckProgramLanes.loop), after which the symbols' pass lists them itself.
+    CheckProgramAttributed attributed = { 0 };
+    const bool attributes_listed = valid && loop == NULL && check_program_attributed(program->input, scratch, &attributed);
     const bool tier1_inlines = tier1 && run.tier1_outcomes != 0 && !lanes->tier1_no_inline;
     const bool tier0_inlines = valid && (lanes == NULL || !lanes->tier0_no_inline);
-    if ((tier1_inlines || tier0_inlines) && check_tier1_inline_table(program, &result->lowered, access_count, tier1_inlines, run.scalar, scratch, &tier1_inline))
+    if ((tier1_inlines || tier0_inlines) && check_tier1_inline_table(program, &result->lowered, access_count, tier1_inlines, run.scalar, scratch, attributes_listed ? &attributed : NULL, &tier1_inline))
     {
         run.inline_table = &tier1_inline;
         run.tier1_inline = tier1_inlines ? &tier1_inline : NULL;
@@ -4559,8 +4744,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // The declaring tokens, for the attributes' passes (one vector pass: cheaper than holding them through the
     // bodies' compiles), pushed last and given back after them.
     const uint64_t attributes_mark = scratch->length;
-    uint32_t* declared = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->input->token_count + 16) : 0;
-    valid = valid && alignments != 0 && symbol_names != 0 && declared != 0 && (count == 0 || result->function_atoms != 0);
+    CheckProgramAttributed late = { 0 };
+    const CheckProgramAttributed* listed = attributes_listed ? &attributed : valid && check_program_attributed(program->input, scratch, &late) ? &late : NULL;
+    valid = valid && alignments != 0 && symbol_names != 0 && listed != NULL && (count == 0 || result->function_atoms != 0);
     if (valid)
     {
         memset(alignments, 0, (uint64_t)program->symbol_count + 1);
@@ -4569,25 +4755,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         memset(retained, 0, (uint64_t)program->symbol_count + 1);
         memset(commons, 0, (uint64_t)program->symbol_count + 1);
         memset(structors, 0, 2 * ((uint64_t)program->symbol_count + 1) * sizeof(uint32_t));
-        // Find the tokens with attributes first, 16 at a time, then keep the declaring tokens. This avoids reading every
-        // declaration's attributes and keeps parameters' retain obligations as well as static declarations'. The input's
-        // columns are complete here, after the bodies' lanes, and the scan writes `declared` alone.
-        uint32_t attributed = 0;
+        // The attributed declarations (check_program_attributed), which keeps parameters' retain obligations as well as
+        // static declarations'; the ones whose records or alignment the pass reads.
         const CheckInput* input = program->input;
-        const uint32_t tokens = input->token_count;
-        const uint32_t* declarations = input->declarations;
-        const CheckSparseWide attributes = input->attributes;
-        for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
-        {
-            for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
-            {
-                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-                if (declarations[token] == token)
-                {
-                    declared[attributed++] = token;
-                }
-            }
-        }
         // The first emitted variable under active #pragma clang section object settings, or BUSTER_CHECK_NONE (#619).
         // Static objects are conservative candidates under any active object setting; section-kind selection belongs
         // with actual section emission, so the refusal must not claim that this object would use the named section. A
@@ -4600,12 +4770,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const uint32_t object = token < program->input->token_count ? program->input->objects[token] : 0;
             placed = object != 0 && object < program->object_count && program->object_symbols[object] != 0 ? token : placed;
         }
-        for (uint32_t d = 0; valid && d < attributed && declared[d] <= placed; d += 1)
+        for (uint32_t d = 0; valid && d < listed->count && listed->tokens[d] <= placed; d += 1)
         {
-            const uint32_t token = declared[d];
+            const uint32_t token = listed->tokens[d];
             const CheckInputAttributes* attributes = check_input_attributes_at(program->input, token);
             const uint32_t object = program->input->objects[token];
-            if (object != 0 && object < program->object_count)
+            if (object != 0 && object < program->object_count && (listed->bits[d] & BUSTER_CHECK_ATTRIBUTED_SYMBOL) != 0)
             {
                 // The object's own symbol: a referenced weakref's is its target's (#147), which its attributes don't touch.
                 const SymbolId taken = program->object_symbols[object];
@@ -5229,45 +5399,78 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // A block-scope static's declaration is in a body (declaration_bodies) and has no linkage; a block-scope extern or
     // function declaration has linkage, and its symbol is the file-scope entity's.
     const CheckInput* input = program->input;
-    // Only a unit that makes a name, which most don't, needs the table of the names a made one must not be, and the
-    // source's names in it first; the others add their names as they come.
+    // The names the source gives, one pass over the symbols (#3393): each symbol of a
+    // declaration whose name the compiler doesn't make, its asm label or else its identifier, listed in symbol order and
+    // hashed eight at a time (link_hash_names). Only a unit that makes a name, which most don't, needs the table of the
+    // names a made one must not be, and the source's names in it first, all added at once (link_add_names); the others
+    // add their names as they come, each with its hash.
+    const uint32_t named_symbols = program->symbol_count;
+    const uint8_t** spellings = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, const uint8_t*, (uint64_t)named_symbols + 1) : 0;
+    uint32_t* spelling_lengths = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)named_symbols + 1) : 0;
+    uint64_t* spelling_hashes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)named_symbols + 1) : 0;
+    // Each symbol's given name's place in the list, or UINT32_MAX for none.
+    uint32_t* given_places = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)named_symbols + 1) : 0;
+    valid = valid && spellings != 0 && spelling_lengths != 0 && spelling_hashes != 0 && given_places != 0;
     bool makes = false;
-    for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
+    uint32_t given_count = 0;
+    for (uint32_t s = 0; valid && s < named_symbols; s += 1)
     {
+        check_program_emit_prefetch_symbol(program, parser, identifiers, s);
         const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
-        makes |= declaration != BUSTER_CHECK_NONE && check_program_emit_makes_name(input, declaration, symbol_names[s + 1]);
+        const String8 renamed = symbol_names[s + 1];
+        const bool named = declaration != BUSTER_CHECK_NONE;
+        const bool made = named && check_program_emit_makes_name(input, declaration, renamed);
+        const bool listed_name = named && !made;
+        const uint32_t identifier = named ? parser->tokens.names[declaration] : 0;
+        makes |= made;
+        given_places[s] = listed_name ? given_count : UINT32_MAX;
+        if (listed_name)
+        {
+            spellings[given_count] = renamed.length != 0 ? (const uint8_t*)renamed.pointer : intern_bytes(identifiers, identifier);
+            __builtin_prefetch(spellings[given_count]);
+            spelling_lengths[given_count] = renamed.length != 0 ? (uint32_t)renamed.length : intern_length(identifiers, identifier);
+            given_count += 1;
+        }
+    }
+    if (valid)
+    {
+        link_hash_names(spellings, spelling_lengths, given_count, spelling_hashes);
     }
     uint32_t slots = 2;
-    while (makes && slots <= (uint64_t)program->symbol_count * 2 && slots < (UINT32_C(1) << 31))
+    while (makes && slots <= (uint64_t)named_symbols * 2 && slots < (UINT32_C(1) << 31))
     {
         slots *= 2;
     }
     CheckProgramNames names = { .mask = slots - 1 };
     names.taken = valid && makes ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, slots) : 0;
-    NameId* given = valid && makes ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, program->symbol_count) : 0;
+    NameId* given = valid && makes ? BUSTER_ARENA_PUSH_ARRAY(scratch, NameId, named_symbols) : 0;
     valid = valid && (!makes || (names.taken != 0 && given != 0));
     if (names.taken != 0)
     {
         memset(names.taken, 0, (uint64_t)slots * sizeof(NameId));
     }
-    // The names the source gives come first, so that no made name is one of them.
-    for (uint32_t s = 0; valid && makes && s < program->symbol_count; s += 1)
+    // The names the source gives come first, so that no made name is one of them. Every made name has a '.', which no
+    // identifier has, so only an asm label with one can be a made name, and only it goes in the table, in symbol order
+    // (#442: most units' given names are identifiers, whose probes the table then doesn't pay for).
+    const NameId given_first = result->link.names.count;
+    const uint32_t given_added = valid && makes ? link_add_names(&result->link, spellings, spelling_lengths, spelling_hashes, given_count) : 0;
+    valid = valid && (!makes || given_added == given_count);
+    for (uint32_t s = 0; valid && makes && s < named_symbols; s += 1)
     {
-        const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
-        const String8 renamed = symbol_names[s + 1];
-        const bool made = declaration != BUSTER_CHECK_NONE && check_program_emit_makes_name(input, declaration, renamed);
-        given[s] = 0;
-        if (declaration != BUSTER_CHECK_NONE && !made)
+        const uint32_t place = given_places[s];
+        const NameId name = place != UINT32_MAX ? given_first + place : 0;
+        given[s] = name;
+        uint32_t slot = 0;
+        const uint32_t length = name != 0 ? spelling_lengths[place] : 0;
+        const bool dotted = name != 0 && symbol_names[s + 1].length != 0 && memchr(spellings[place], '.', length) != 0;
+        if (dotted && !check_program_emit_taken(&result->link, &names, spellings[place], length, spelling_hashes[place], &slot))
         {
-            const uint32_t identifier = parser->tokens.names[declaration];
-            given[s] = renamed.length != 0 ? check_program_emit_given_name(&result->link, &names, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length, true) :
-                                             check_program_emit_given_name(&result->link, &names, intern_bytes(identifiers, identifier),
-                                                                           intern_length(identifiers, identifier), false);
-            valid = given[s] != 0;
+            names.taken[slot] = name;
         }
     }
     for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
     {
+        check_program_emit_prefetch_symbol(program, parser, identifiers, s);
         const uint32_t object = program->symbol_objects[s];
         const uint32_t declaration = program->object_declarations[object];
         NameId name = 0;
@@ -5330,8 +5533,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             else
             {
-                name = renamed.length != 0 ? link_add_name(&result->link, (const uint8_t*)renamed.pointer, (uint32_t)renamed.length) :
-                                             link_add_name(&result->link, intern_bytes(identifiers, identifier), intern_length(identifiers, identifier));
+                const uint32_t place = given_places[s];
+                name = link_add_name_hashed(&result->link, spellings[place], spelling_lengths[place], spelling_hashes[place]);
             }
             const uint8_t kind = program->input->declaration_kinds[declaration] == C_BINDING_FUNCTION ? BUSTER_LINK_SYMBOL_FUNCTION :
                                  check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL) ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
@@ -5379,7 +5582,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // builtin of a name points to (__builtin_FILE's and its kin's, #148), which clang makes a private constant as
             // it makes a literal's.
             char spelling[48];
-            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
+            const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_string_", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (program->cfstring_class_own && object == program->cfstring_class)
@@ -5396,7 +5599,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // clang's .L_unnamed_cfstring_ and its characters' constant are.
             char spelling[48];
             const bool record = parser->tree.roles[object - 1] == PARSE_ROLE_CLOSE_CALL;
-            const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
+            const uint32_t length = record ? BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_cfstring_", parse_origin(parser, object - 1) + 1) :
+                                            BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_string_", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (object == 0)
@@ -5440,7 +5644,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t p = 0; valid && p < pools->count; p += 1)
     {
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_initializer_%u", p);
+        const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_initializer_", p);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_OBJECT,
                                             BUSTER_LINK_SOURCE_NONE) == pools->symbol_base + p;
@@ -5466,7 +5670,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         const bool table = k < result->lowered.table_count;
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), table ? ".Lbuster_switch_%u" : ".Lbuster_case_%u", table ? k : k - result->lowered.table_count);
+        const uint32_t length = table ? BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_switch_", k) : BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_case_", k - result->lowered.table_count);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         const uint8_t flags = BUSTER_LINK_SYMBOL_LOCAL | (table ? BUSTER_LINK_SYMBOL_OBJECT : BUSTER_LINK_SYMBOL_NOTYPE);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) == result->lowered.case_symbol_base + k;
@@ -5533,7 +5737,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t k = 0; valid && k < patched; k += 1)
     {
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_patchable_%u", k);
+        const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_patchable_", k);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE,
                                             binding != NULL ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == result->patchable_symbol_base + k;
@@ -5571,7 +5775,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t u = 0; valid && u < literals.count; u += 1)
     {
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_literal_%u", u);
+        const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_literal_", u);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE,
                                             binding != NULL ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == literals.symbol_base + u;

@@ -3279,6 +3279,15 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
                     }
                 }
             }
+            // A valid graph can still have an error under the active diagnostic policy, including an implicit
+            // builtin declaration in GNU17. Apply the same severity lookup as the compiler and corpus runner.
+            uint32_t diagnostic = BUSTER_CHECK_NONE;
+            if (check_diagnostic_first_error(&input[p], checked[p] ? &streams[p] : NULL, &diagnostic))
+            {
+                const uint32_t source = diagnostic < parsers[p].tokens.count ? parse_source_index(&parsers[p].tokens, diagnostic) : BUSTER_CHECK_NONE;
+                first = source < first ? source : first;
+                rejected[p] = true;
+            }
             const char* name = NULL;
             uint32_t length = 0;
             // Compare the primary diagnostic, not a macro-definition spelling. The driver's output diagnostics

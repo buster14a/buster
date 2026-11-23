@@ -1,9 +1,10 @@
 # Tier 1 backend
 
 Tier 1 is tracked by [#138](https://github.com/buster14a/buster/issues/138).
-Its acceptance includes generated-program correctness, compilation cost and
-run time on the approved Ryzen 7 9700X. A standalone analysis or allocator test
-does not establish that the C compiler can compile and run a program at Tier 1.
+Its acceptance covers generated-program correctness, compilation cost and run
+time on the approved Ryzen 7 9700X; ["#138's acceptance"](#138s-acceptance)
+below has the measurements. A standalone analysis or allocator test does not
+establish that the C compiler can compile and run a program at Tier 1.
 
 ## Integration order
 
@@ -181,16 +182,20 @@ LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
 unrolling](tier1-loop-unrolling.md)), `tables` (#3298's switches of
 constants as loads of their jump tables' values, [the optimization
 guide](ir-optimization.md#switches-of-constants-3298)), `storemotion` (#3309's
-[loop store motion](tier1-store-motion.md), before promotion), `gvn` (as
-`--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or `all`. The
-default is SCCP, dead-code removal, CFG cleanup, its merges, the inlining,
-`vectors` and `tables`. The restricted
-value numbering runs before promotion; LICM runs after if-conversion, before
-the optimizer, which cleans up after it, then the loop vectorizer, then the
-unroller. Explicit `+gvn` or `+licm` runs that pass on every value instead of
-its restricted counterpart. A function that value numbering, LICM, SROA or the
-loop vectorizer refuses goes on as it was, and so does one past the unroller's
-loop analysis.
+[loop store motion](tier1-store-motion.md), before promotion), `hoist`
+(#2719's LICM under its pressure policy, in a function that has a loop and no
+vector or mask value: [the loop motion guide](ir-loop-motion.md#the-pressure-policy-2719)),
+`numbering` (#2719's value numbering on the promoted function under the same
+policy: [the value numbering guide](ir-value-numbering.md#the-pressure-policy-2719)),
+`gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
+`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges, the
+inlining, `vectors` and `tables`. The restricted
+value numbering runs before promotion, `numbering` after the switches of
+constants; LICM runs after it, before the optimizer, which cleans up after it,
+then the loop vectorizer, then the unroller. Explicit `+gvn` or `+licm` runs
+that pass on every value instead of its restricted counterparts. A function
+that value numbering, LICM, SROA or the loop vectorizer refuses goes on as it
+was, and so does one past the unroller's loop analysis.
 The summaries the unit's inlining builds run the same passes but the
 unroller, which their callers run on what they expand (a summary's size is
 the loop's own, and an expanded loop is unrolled once); a candidate whose
@@ -1051,8 +1056,10 @@ to 356 M on Lua, and user cycles on the 9700X by 0.73 and 1.02
 (100 ln(head / base)), head slower at 1 of 8 shifts and 7 of 33 link orders
 ([the record](https://github.com/buster14a/buster-performance/tree/ddb5213da1fce7ac9325afbf6364a797bbc63b5b/docs/measurements/tier1-dominator-places-2553-2026-11-12)).
 
-At main `c5f0efb2` (2026-11-12) the same measurement gives 1.42 and 1.39 times
-clang -O2's time, and gaps of 1,160 M and 1,780 M instructions; a ladder of
+`measure-tier1-programs` at `2e2d7674` (2026-11-23) gives 1.13 and 1.07 times
+clang -O2's time ("#138's acceptance" below). At main `c5f0efb2` (2026-11-12)
+the same measurement gave 1.42 and 1.39 times clang -O2's time, and gaps of 1,160 M and
+1,780 M instructions; a ladder of
 LLVM's own pieces ranks what is left by time, and the compiler itself is
 measured as a third program. [The unit inlining design](tier1-unit-inlining.md)
 (#2541) has those tables, the ranking with each cause's issue, the design of
@@ -1069,70 +1076,140 @@ back-end gap at znver5. It designs a data-parallel loop vectorizer over the exis
 IR, with exact scalar twins, run-time overlap guards and strict floating-point
 reductions left scalar. This is design only; no such pass runs in the pipeline.
 
-## Current integration boundary
+## #138's acceptance
 
-The implementation now consumes the shared IR and the upstream local-SSA
-adapter. The optimization slices cover SCCP/dead-code/CFG cleanup, value
-numbering, conservative loop motion, private aggregate-field splitting and
-bounded translation-unit inlining.
-Their [optimization guide](ir-optimization.md) records unsupported forms and
-the remaining transformation and measurement scope.
+[#138](https://github.com/buster14a/buster/issues/138) tracked Tier 1 against
+clang -O2 (roadmap item 6) through its parts. Each part had its own issue, and
+all are closed: the passes (#139), the allocator (#140), selection (#141), the
+differential campaigns (#142), scheduling (#172), dominators and loops (#174),
+frames (#177), rematerialization (#178), the Zen 5 model (#181), and the
+pieces of the gap after #1189. Its Done-when items were measured on
+2026-11-23 at `2e2d7674`, main `8d3002eb` with `measure-tier1-programs
+--compiles`. [The record](https://github.com/buster14a/buster-performance/tree/6a9b30d3a795be8e260c04f2557f31c2e3eb1201/docs/measurements/tier1-acceptance-138-2026-11-23) has the scripts, the raw output, the
+inputs' and tools' hashes and the campaigns' ledgers.
 
-The [selection](tier1-selection.md), [selected-use liveness](tier1-liveness.md),
-[allocation](tier1-allocation.md) and [frame](tier1-frame.md) modules are
-connected by a native function consumer. Its fragment path supports 32/64-bit
-scalar values in straight-line block chains, plus byte/word memory and integer
-conversions with canonical 32-bit storage. It emits actual spill stores,
-reloads, constant rematerialization and stack probes. A chain may end in a
-return, explicit unreachable, or an empty self-loop sink retaining its actual
-branch. Every other CFG, with loops and phis, goes through its CFG path
-(`tier1_emit_cfg.c`, #140): [`tier1_cfg.c`](tier1-allocation.md) allocates the
-selected uses over the CFG, and the records carry each edge's moves, critical
-edges' in stubs. Indirect/variadic/wide-ABI calls and floating-point emission
-remain outside this bounded consumer. The selector's uniform-register API has
-its own broader branch subset and explicitly refuses unsupported allocations
-and phis.
+### The pipeline, the passes and the allocator
 
-Ordinary direct calls accept up to six register-passed `I32`, `I64` or pointer
-arguments (64 through the CFG consumer, #1847, those past the sixth on the stack:
-#141) and a void or matching scalar result. The native consumer preserves
-live caller registers, resolves argument cycles, aligns the stack and publishes
-ordinary symbolic CALL references. Independent hostile helpers test clobbers,
-return widths, memory effects and frame safety. Full builtin/source acceptance
-requires integrating the source owner's exact helper and checked-call path.
+| Piece | Where it is described |
+| --- | --- |
+| The order of the pipeline | "Integration order" above, and [the optimization guide](ir-optimization.md)'s "The pipeline and the order" |
+| Lowering to the shared IR, and SSA promotion | [the IR guide](ir.md), [the SSA guide](ssa.md) |
+| The optimization passes (#139) | [the optimization guide](ir-optimization.md)'s "#139's acceptance", with each pass's own guide |
+| Inlining (#2541) | [the inlining guide](ir-inlining.md), [the unit inlining design](tier1-unit-inlining.md) |
+| Selection (#141) | [the selection guide](tier1-selection.md) |
+| Liveness | [the liveness guide](tier1-liveness.md) |
+| Register allocation and rematerialization (#140, #178) | [the allocation guide](tier1-allocation.md) |
+| Frames, slot sharing and callee-saved registers (#177) | [the frame guide](tier1-frame.md) |
+| Scheduling (#172), off by default | [the scheduling guide](tier1-scheduling.md) |
+| Refusals and fallbacks | [the outcomes guide](tier1-outcomes.md) |
+| `--verify`'s certificates | [the certificate guide](tier1-certificate.md) |
 
-`test-tier1-pipeline --cross-check` starts with eight original typed-stream
-fixtures and runs ABI assignment, lowering, SSA promotion, optimization,
-selection, liveness, allocation, frame emission, branch sizing and encoding.
-It freezes interpreter expectations before compilation and also compares
-Clang-built C formulas. A complete cross-check expects 1,920 native results,
-960 Clang results, twelve emitted direct calls, 28 functions through the CFG
-path and two explicit unsupported refusals. These are bounded integration fixtures, described in
-the [pipeline guide](tier1-pipeline.md), not a source-corpus campaign.
-Source byte loops now have a CFG/phi consumer, but no source corpus is compiled
-through it yet. Source floating-point helper
-adapters additionally need addressable frame locals, stack addresses, FP value
-transport/conversions and their ABI. Raw integer-bit helper-call acceptance
-does not establish those producer paths.
-The frozen source overflow fixture also retains an address-taken byte local;
-narrow memory/conversion support alone does not provide its `IR_STACK_ADDR`
-frame object.
+On the programs below, Tier 1 compiles all 1,420 functions of speedtest1's
+unit that are still emitted after inlining, which expanded 7,299 calls. It
+compiles all 2,668 functions of `sqlite3.c` without inlining (the size
+gate's objects), and 1,087 of the Lua interpreter's 1,088. The one left,
+`luaD_rawrunprotected`, calls `setjmp` and is compiled by Tier 0
+([the outcomes guide](tier1-outcomes.md)).
 
-The [emitted-case harness](tier1-model-measurements.md) accepts only complete
-selector manifests, retains exact operand distinctions and refuses experiments
-it cannot represent faithfully. Its current inventory has 566 eligible cases;
-verification is construction/execution evidence, not a processor measurement.
-This frozen inventory does not include the new native-call consumer records.
-No unknown model column is filled by this integration.
+### Run time
 
-At the start of the October 23, 2026 takeover, main
-`a41ae0432ad30fbd1466ea41c1f595e385b5945a` contained the Tier 0 typed-stream
-backend, calling-convention module, dataflow solvers and partial measured Zen 5
-model. The general IR and SSA were being implemented by their own active
-owners. The source-to-typed-function path was incomplete. The ordinary C driver
-did not yet compile C to machine code at either tier.
+`measure-tier1-programs` ran on the 9700X, pinned to CPU 2 under the lock, in
+11 rounds of a Williams design's order after a warm-up. It used the 9700X
+job's clang 23.1.4 and tcc 0.9.28rc, and the job's inputs by their hashes.
+Every build agreed on speedtest1's verification hash and on each Lua script's
+output. Medians are below; Lua's are the sum of its five scripts' medians:
 
-Consequently no full Tier 1 corpus, SQLite run-time, real-generator differential
-campaign or Tier 1 ABI acceptance is established by this document. Component
-tests and subsequent integration evidence must identify their actual producer,
-consumer and revision before this boundary can be advanced.
+| Program | Tier 0 | `--tier1` | clang -O0 | clang -O2 | tcc | `--tier1` / -O2 | `--tier1` / -O0 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| speedtest1, ms | 218.9 | 146.2 | 269.5 | 129.4 | 269.6 | 1.13 | 0.54 |
+| speedtest1, user cycles, M | 1,120.5 | 719.2 | 1,391.6 | 627.2 | 1,397.3 | 1.15 | 0.52 |
+| speedtest1, instructions, M | 4,628.8 | 2,378.3 | 3,855.7 | 1,979.0 | 4,832.2 | 1.20 | 0.62 |
+| Lua's five scripts, ms | 291.1 | 177.3 | 359.7 | 166.2 | 392.2 | 1.07 | 0.49 |
+| Lua's five scripts, user cycles, M | 1,592.6 | 965.3 | 1,964.6 | 904.3 | 2,152.2 | 1.07 | 0.49 |
+| Lua's five scripts, instructions, M | 9,335.6 | 4,524.8 | 8,290.5 | 4,250.0 | 9,393.0 | 1.06 | 0.55 |
+
+By script, `--tier1` against clang -O2 is 1.12 (calls), 1.09 (tables), 1.14
+(strings), 0.85 (arithmetic) and 1.12 (closures). The gap, as `--tier1` / -O2,
+has narrowed from 1.60 and 1.56 on 2026-11-03 (#1189) to 1.42 and 1.39 on
+2026-11-12 (#2541's design), and to 1.13 and 1.07 now. Both size gates pass:
+`sqlite3.c`'s Tier 1 functions take 872,558 bytes against clang -O0's 913,339,
+and Lua's 34 units' take 195,286 against 248,990.
+
+### Compile time
+
+The same builds were timed by `--compiles 5`, as whole processes on the same
+CPU, in 5 rounds after a warm-up. A build is speedtest1's two files (clang's
+two objects and their link, or the others' one command) or Lua's 33 sources,
+compiled and linked:
+
+| Build | Tier 0 | `--tier1` | clang -O0 | clang -O2 | tcc | `--tier1` / -O2 | `--tier1` / -O0 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| speedtest1, ms | 118.2 | 705.3 | 416.9 | 6,502.8 | 44.5 | 0.11 | 1.69 |
+| speedtest1, user cycles, M | 573.2 | 3,803.3 | 2,188.5 | 35,851.6 | 232.0 | 0.11 | 1.74 |
+| Lua, ms | 64.8 | 189.8 | 321.7 | 1,329.4 | 48.1 | 0.14 | 0.59 |
+| Lua, user cycles, M | 298.1 | 965.8 | 1,460.9 | 6,938.4 | 236.3 | 0.14 | 0.66 |
+
+`measure-compile --variant --tier1` on `-c sqlite3.c` alone (#136's flags, 7
+runs) gives 114.9 ms by default against 632.6 ms by `--tier1`, with wait4
+peaks of 240 MiB and 332 MiB. Without inlining (`--tier1-no-inline`) it takes
+397.4 ms. #2541's inlining is thus 235 ms of the compile, as its step 2 record
+measured
+("the compile's growth is the code's"). On 2026-11-12 the same compile took
+424.7 ms, for code at 1.42 and 1.39 times clang -O2's time.
+[#2538](https://github.com/buster14a/buster/issues/2538)'s
+record has where the pipeline's own time goes.
+
+### Tests
+
+- **Csmith and YARPGen (#142):** a campaign of 300 programs at `2e2d7674`
+  (seeds 7000 to 7049, 7100 to 7149 and 7200 to 7249 of each generator), both
+  tiers against clang -O0 and -O2. 242 agree in all four modes, 58 fail first
+  in clang -O0's own steps, and none mismatches. Of the 58:
+  - 22 run past the 30 s timeout;
+  - 2 pass the output limit at clang's compile (in one, Buster's two tiers
+    build, run and agree);
+  - 23 have YARPGen arrays past the small code model, which Buster's link
+    refuses too;
+  - 5 call with more than 239 arguments, past Tier 0's documented bound
+    ([the Tier 0 guide](tier0.md));
+  - 6 Buster builds alone. In 5 of them its two tiers agree; the sixth's 37 GB
+    `.bss` doesn't map on the campaign's host.
+
+  Tier 1 compiled all 6,777 Csmith functions and 694 of 730 YARPGen ones. The
+  others are `test` functions with more than 64 parameters, which Tier 0
+  compiles. [The #142 acceptance record](differential-acceptance.md) has the
+  earlier campaigns.
+- **ABI cross-linking at Tier 1 (#137):** `test-calling-convention
+  --cross-check` links our side by Tier 1 too (`--tier1 --verify`, with and
+  without frame pointers), against clang 23.1.4 and GCC 16.2.1, at 16- and
+  64-byte vectors. On the 9700X its eight Tier 1 runs compiled 681 to 793 of
+  800 functions by Tier 1 and passed 7,035 to 7,618 checks each with no
+  failure. `correctness.tests` runs it on every merge-queue candidate.
+- **In CI:** `correctness.tests` also runs c-testsuite by `--tier1` with its
+  size bound (#2646), SQLite's shell and testfixture suites (#146), and
+  `test-ssa-source`'s generated programs. The 9700X job runs
+  `measure-tier1-programs` on pull requests that change Tier 1 and on the
+  nightly, which also times the compiles (`--compiles 3`).
+
+### What #138 leaves to other issues
+
+Tier 0 is still the default for every `-O` ("Optimization flags and backend
+selection" above). [The unit inlining design](tier1-unit-inlining.md)'s
+"What stands between Tier 1 and `-O1` and above" lists the evidence for
+that decision: pathological functions' memory (#1353, #1384), no standing
+Csmith and YARPGen campaign in CI, and the compile cost above. The rest of the
+gap to clang -O2, and loops that clang vectorizes
+([the loop vectorization design](tier1-loop-vectorization.md)), are their
+own issues.
+
+### Integration fixtures
+
+`test-tier1-pipeline --cross-check` runs original typed-stream fixtures through
+ABI assignment, lowering, SSA promotion, optimization, selection, liveness,
+allocation, frame emission, branch sizing and encoding, against the typed
+interpreter and Clang-built C formulas; [the pipeline guide](tier1-pipeline.md)
+has its fixtures and counts. The [emitted-case harness](tier1-model-measurements.md)
+accepts only complete selector manifests, retains exact operand distinctions
+and refuses experiments it cannot represent faithfully. Its verification is
+construction and execution evidence, not a processor measurement, and no
+unknown model column is filled by it.

@@ -147,9 +147,6 @@ typedef enum CheckInputMessage
     // constant other than 1 (check_input_longjmp_argument).
     CHECK_INPUT_LONGJMP_INTEGER,
     CHECK_INPUT_LONGJMP_ONE,
-    // A FILE builtin's call (__builtin_fprintf and its kin, #148) in a unit without a file-scope FILE, which its prototype
-    // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
-    CHECK_INPUT_UNKNOWN_BUILTIN,
     CHECK_INPUT_INVOKE_ARGUMENTS,
     // A unary, overflow or complex part builtin's call with another count of arguments (#1860), which the graph doesn't
     // take: clang's "too few/too many arguments to function call", the count it takes and the call's in the detail's low
@@ -421,6 +418,13 @@ typedef enum CheckInputMessage
     // A _Generic selection whose controlling type (its lvalue conversion's) matches no association and which has no
     // default (#2914): clang's err_generic_sel_no_match at the controlling expression's first token, with that type.
     CHECK_INPUT_GENERIC_NO_MATCH,
+    // A _Generic association's type compatible with an earlier association's (#2914, clang's err_assoc_compatible_types):
+    // at the later type name's first token that isn't a qualifier, type and type_spelling its type, value the earlier
+    // one's type and detail its typedef spelling, with CHECK_INPUT_NOTE_GENERIC_COMPATIBLE at the earlier type name.
+    CHECK_INPUT_GENERIC_COMPATIBLE,
+    // A _Generic selection's second default association (#2914, clang's err_duplicate_default_assoc): at its `default`,
+    // with CHECK_INPUT_NOTE_GENERIC_DEFAULT at the first.
+    CHECK_INPUT_GENERIC_DEFAULT,
     // A nullability specifier at the deduced base's level with a non-pointer deduction (#1844).
     CHECK_INPUT_AUTO_TYPE_NULLABILITY,
 } CheckInputMessage;
@@ -526,7 +530,6 @@ static const char* const check_input_messages[] =
     "argument to __builtin_verbose_trap must not contain $",
     "argument to '__builtin_longjmp' must be a constant integer",
     "argument to __builtin_longjmp must be a constant 1",
-    "use of unknown builtin",
     "attribute multiversioning cannot be combined with another attribute",
     "multiversioning attributes are not compatible",
     "attribute cannot appear more than once on a declaration",
@@ -601,6 +604,8 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENUM_VALUE_TYPE] = "integer constant expression must have integer type",
     [CHECK_INPUT_AUTO_ATOMIC_POINTER] = "variable with atomic deduced pointee has incompatible initializer",
     [CHECK_INPUT_GENERIC_NO_MATCH] = "controlling expression type not compatible with any generic association type",
+    [CHECK_INPUT_GENERIC_COMPATIBLE] = "type in generic association compatible with previously specified type",
+    [CHECK_INPUT_GENERIC_DEFAULT] = "duplicate default generic association",
     [CHECK_INPUT_AUTO_TYPE_NULLABILITY] = "nullability specifier cannot be applied to non-pointer type",
 };
 
@@ -660,6 +665,11 @@ typedef enum CheckInputNoteKind
     // constant expression".
     CHECK_INPUT_NOTE_CONSTANT_VOID,
     CHECK_INPUT_NOTE_CONSTANT_CONVERSION,
+    // A _Generic association's earlier compatible type (#2914): "compatible type 'T' specified here", T the report's value
+    // and detail (CHECK_INPUT_GENERIC_COMPATIBLE's).
+    CHECK_INPUT_NOTE_GENERIC_COMPATIBLE,
+    // A _Generic selection's first default association (#2914): "previous default generic association is here".
+    CHECK_INPUT_NOTE_GENERIC_DEFAULT,
 } CheckInputNoteKind;
 
 // A version as clang's VersionTuple holds it (#1447: an availability attribute's): its components (major, minor,
@@ -3719,6 +3729,14 @@ static uint32_t check_input_invalid_call_index(const Parser* parser, uint32_t to
     return low < parser->invalid_call_count && parser->invalid_call_sources[low] == source ? low : BUSTER_CHECK_NONE;
 }
 
+// A recovered argument's placeholder fits the grammar without supplying a value or a member name.
+static bool check_input_missing_operand(const Parser* parser, uint32_t token)
+{
+    const bool number = parser->tokens.kinds[token] == PARSE_KIND_NUMBER;
+    const bool member = parser->tree.roles[token] == PARSE_ROLE_MEMBER && parser->tokens.names[token] == 0;
+    return (number || member) && (parser->tokens.flags[token] & BUSTER_PARSE_RECOVERY_ARGUMENT) != 0;
+}
+
 // A failed parse's call-shaped lookup is never an expression to check (#2406). The private view has already erased
 // its unread argument (all arguments for an attribute-led call); earlier/later arguments and the ordinary binding and
 // implicit declaration must survive for independent checks and later statements. Append the
@@ -3729,7 +3747,11 @@ static void check_input_invalid_calls(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count;
     for (uint32_t token = 0; token < count; token += 1)
     {
-        if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND)
+        if (check_input_missing_operand(parser, token))
+        {
+            check_input_report(reader, token, CHECK_INPUT_INVALID_USE);
+        }
+        else if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND)
         {
             // Search the sorted original callee sources, not a view's token sources: a repair's synthetic closers
             // have no source, and another diagnostic view may repeat a source for inserted punctuation or casts.
@@ -3797,7 +3819,8 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
         recoverable = (item->message == CHECK_INPUT_UNDECLARED || item->message == CHECK_INPUT_INVALID_USE || item->message == CHECK_INPUT_AMBIGUOUS ||
                        item->message == CHECK_INPUT_BUILTIN_NOT_CALLED) &&
                       item->pragma == 0 && item->token < count &&
-                      parser->tokens.kinds[item->token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[item->token] == PARSE_ROLE_OPERAND;
+                      ((parser->tree.roles[item->token] == PARSE_ROLE_OPERAND && parser->tokens.kinds[item->token] == PARSE_KIND_IDENTIFIER) ||
+                       (item->message == CHECK_INPUT_INVALID_USE && check_input_missing_operand(parser, item->token)));
     }
     if (recoverable)
     {

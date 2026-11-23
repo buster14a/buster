@@ -22514,14 +22514,28 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     part->stage = part->stage == CHECK_LOWER_STAGE_NONE && (locations == 0 || calls == 0) ? CHECK_LOWER_STAGE_ROOM : part->stage;
     if (part->stage == CHECK_LOWER_STAGE_NONE)
     {
-        for (uint32_t i = 0; i < abi->argument_count + abi->count; i += 1)
+        // Each argument's and each result's type in a call's convention, 16 at a time: classified, supported and of a
+        // size on the stack.
+        __mmask16 unsupported = 0;
+        for (uint32_t k = 0; k < 2; k += 1)
         {
-            const TypeId type = i < abi->argument_count ? abi->arguments[i] : abi->results[i - abi->argument_count];
-            const uint32_t index = type_index(type);
-            if ((table->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 || (table->pass[index] & BUSTER_ABI_PASS_UNSUPPORTED) != 0 || table->stack_bytes[index] == UINT32_MAX)
+            const TypeId* types = k == 0 ? abi->arguments : abi->results;
+            const uint32_t count = k == 0 ? abi->argument_count : abi->count;
+            for (uint32_t i = 0; i < count; i += 16)
             {
-                check_lower_unsupported(writer, "this type in a call (its calling convention)");
+                // A remaining count past 255 keeps every lane (_bzhi_u32 reads its index's low byte alone).
+                const __mmask16 lanes = count - i >= 16 ? (__mmask16)0xffff : (__mmask16)_bzhi_u32(0xffff, count - i);
+                _Static_assert(sizeof(TypeId) == 4, "a type is a dword");
+                const __m512i indices = _mm512_srli_epi32(_mm512_maskz_loadu_epi32(lanes, (const void*)(types + i)), BUSTER_TYPE_INDEX_SHIFT);
+                const __m512i pass = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, indices, (const void*)table->pass, 4);
+                const __m512i bytes = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, indices, (const void*)table->stack_bytes, 4);
+                unsupported |= lanes & (_mm512_testn_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_CLASSIFIED)) | _mm512_test_epi32_mask(pass, _mm512_set1_epi32(BUSTER_ABI_PASS_UNSUPPORTED)) |
+                                        _mm512_cmpeq_epi32_mask(bytes, _mm512_set1_epi32(-1)));
             }
+        }
+        if (unsupported != 0)
+        {
+            check_lower_unsupported(writer, "this type in a call (its calling convention)");
         }
         part->stage = status->status != CHECK_PROGRAM_OK ? CHECK_LOWER_STAGE_CONVENTION : CHECK_LOWER_STAGE_NONE;
     }

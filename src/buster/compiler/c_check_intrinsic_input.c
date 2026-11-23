@@ -528,7 +528,8 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
             }
             if (!output->resource)
             {
-                if (fresh && !(file && malformed))
+                // A later file-scope typedef can supply FILE. Leave this row undecoded until then.
+                if (fresh && !file)
                 {
                     output->intrinsic_declarations[index] = declaration;
                     output->intrinsic_declaration_count += 1;
@@ -558,35 +559,13 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
                     }
                     status = CHECK_INPUT_INTRINSIC_PREPARED;
                 }
+                else if (file)
+                {
+                    status = CHECK_INPUT_INTRINSIC_NOT_FOUND;
+                }
                 else
                 {
-                    // A FILE builtin without the unit's FILE (check_input_file_type) is clang's error, with its warning
-                    // that the builtin needs its header; any other prototype that doesn't decode is refused by name.
-                    if (file && malformed)
-                    {
-                        // Without FILE, Clang handles this spelling as an unknown builtin's implicit declaration.
-                        // The original malformed call still needs that binding and its lookup diagnostic before its
-                        // parser error, then later uses must see the implicit declaration (#2406).
-                        status = CHECK_INPUT_INTRINSIC_NOT_FOUND;
-                    }
-                    else if (file)
-                    {
-                        const CheckWarningEvent event =
-                        {
-                            .id = CHECK_WARNING_ID_BUILTIN_HEADER,
-                            .kind = CHECK_WARNING_EVENT_BUILTIN_HEADER,
-                            .token = keyword,
-                            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
-                            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-                            .completion = keyword + 1,
-                            .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
-                        };
-                        check_input_warning_event(reader, &event, NULL, 0);
-                    }
-                    if (!file || !malformed)
-                    {
-                        check_input_report(reader, keyword, file ? CHECK_INPUT_UNKNOWN_BUILTIN : CHECK_INPUT_UNSUPPORTED);
-                    }
+                    check_input_report(reader, keyword, CHECK_INPUT_UNSUPPORTED);
                 }
             }
             else

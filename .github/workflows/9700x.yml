@@ -1755,7 +1755,9 @@ jobs:
         # as whole processes on one CPU with their user cycles and instructions (docs/tier1.md has the results). Where
         # `changes` doesn't rule it out (Tier 1's pipeline and the measurement: `tier1_programs`), and on the daily and
         # dispatched runs. #1116 also gates all 34 Lua sources' Tier 1 function bytes against matching clang -O0 bytes,
-        # with luac.c included, and #2646 sqlite3.c's, using paired objects rather than linked-executable sizes.
+        # with luac.c included, and #2646 sqlite3.c's, using paired objects rather than linked-executable sizes. The
+        # dispatched runs (the nightly's) also time the same builds' compiles in 3 rounds (#138's compile time, about 40 s
+        # more); a pull request's run leaves them out, to keep its job short.
         if: needs.changes.outputs.tier1_programs != 'false'
         timeout-minutes: 5
         run: |
@@ -1776,8 +1778,12 @@ jobs:
           printf '%s  %s\n' 49e2d1afd09cdab6593ca127b056ccc35fc5f3a2d0e08dae67f604db2751c082 "$tcc" | sha256sum --check
           scripts="$PWD/build/tier1-programs-evidence/docs/measurements/tier1-reciprocal-141-2026-11-01/9700x/lua"
           clang --version | head -1
+          compiles=()
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+              compiles=(--compiles 3)
+          fi
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler measure-tier1-programs --check-code-size --runs 11 --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
+          taskset -c "$cpu" ./build/compiler measure-tier1-programs --check-code-size --runs 11 "${compiles[@]}" --clang clang --tcc "$tcc" --sqlite "$sqlite" --speedtest "$inputs" --lua "$inputs/lua-5.4.8/src" --scripts "$scripts" --directory /tmp
 
       - name: Time vector code by both tiers and the base's Tier 1, with the moves around Tier 1's machine rows
         # #1283: test-checker-driver's machine rows' unit, a lexer's byte scan and the compiler's own lexer (on

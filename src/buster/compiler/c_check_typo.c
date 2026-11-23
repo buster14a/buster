@@ -72,6 +72,7 @@ struct CheckTypoScope
     uint32_t count;
     uint32_t cursor;
     uint32_t token_cursor;
+    bool has_file_typedef;
     // A tentative parser probe's invalid statement tail, before its original semicolon (check_typo_probe_end).
     uint32_t token_skip;
     uint32_t capacity;
@@ -206,7 +207,7 @@ static bool check_typo_reserve(Arena* arena, uint32_t** column, uint32_t* capaci
 
 // Whether a spelling names one of the checker-supported builtin functions in the unit's language, without constructing
 // its type or a declaration. Parser-only forms such as __builtin_va_arg never reach this lookup as operand identifiers.
-static bool check_typo_builtin_name(CheckInputReader* reader, uint32_t name)
+static bool check_typo_builtin_name(CheckInputReader* reader, const CheckTypoScope* scope, uint32_t name)
 {
     const InternSpan span = reader->pp->table->spans[name];
     const uint8_t* spelling = reader->pp->table->records + span.offset;
@@ -219,7 +220,8 @@ static bool check_typo_builtin_name(CheckInputReader* reader, uint32_t name)
         const bool library = info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL;
         const bool language = info == NULL || check_input_builtin_language(info, &reader->pp->options);
         const bool catalog = builtin != CBUILTIN_NONE && !cbuiltin_stdc_library(builtin);
-        result = !library && language && (catalog || cbuiltin_library_source(spelling, span.length) ||
+        const bool available = scope->has_file_typedef || info == NULL || memchr(info->encoding, 'P', info->encoding_length) == NULL;
+        result = !library && language && available && (catalog || cbuiltin_library_source(spelling, span.length) ||
                                          (info != NULL && cbuiltin_source_intrinsic(spelling, span.length)));
     }
     return result;
@@ -403,7 +405,7 @@ static bool check_typo_builtin_operand(CheckInputReader* reader, CheckTypoScope*
                        (parent_role == PARSE_ROLE_PREFIX && parent_kind == PARSE_KIND_AMPAMP) ||
                        (token + 1 < count && parser->tree.roles[token + 1] == PARSE_ROLE_LABEL);
     const bool declaration = (reader->output->declarations != NULL && reader->output->declarations[token] == token) || label;
-    const bool named = !declaration && check_typo_builtin_name(reader, name) && !check_typo_declarator_name(reader, token) &&
+    const bool named = !declaration && check_typo_builtin_name(reader, scope, name) && !check_typo_declarator_name(reader, token) &&
                        check_typo_attribute_operand(reader, token);
     uint32_t bound = BUSTER_CHECK_NONE;
     for (uint32_t at = scope->count; named && bound == BUSTER_CHECK_NONE && at != 0; at -= 1)
@@ -442,7 +444,7 @@ static uint32_t check_typo_probe_end(CheckInputReader* reader, const CheckTypoSc
     {
         declared = scope->keys[at - 1] == name;
     }
-    const bool unknown = statement && !declared && !check_typo_builtin_name(reader, name);
+    const bool unknown = statement && !declared && !check_typo_builtin_name(reader, scope, name);
     uint32_t result = BUSTER_CHECK_NONE;
     for (uint32_t at = token + 1; unknown && result == BUSTER_CHECK_NONE && at < count;)
     {
@@ -551,6 +553,9 @@ static bool check_typo_scope_advance(CheckInputReader* reader, CheckTypoScope* s
         {
             const uint32_t key = bindings->key[e];
             const uint32_t name = key % bindings->name_capacity;
+            // A FILE builtin becomes a candidate only after its prototype is available at this source position.
+            scope->has_file_typedef |= bindings->kind[e] == C_BINDING_TYPEDEF && bindings->depth[e] == 0 &&
+                                       intern_length(reader->pp->table, name) == 4 && memcmp(intern_bytes(reader->pp->table, name), "FILE", 4) == 0;
             const uint32_t declared = bindings->declaration[e];
             const bool library = declared < reader->parser->tokens.count && reader->output->function_flags != NULL &&
                                  (reader->output->function_flags[declared] & CHECK_INPUT_FUNCTION_IMPLICIT_LIBRARY) != 0;
@@ -565,7 +570,7 @@ static bool check_typo_scope_advance(CheckInputReader* reader, CheckTypoScope* s
                 scope->sources[scope->count] = CHECK_TYPO_BINDING;
                 scope->count += 1;
                 valid = !library || check_typo_permanent(reader, scope, name, e, CHECK_TYPO_BINDING);
-                valid = valid && (!external || !check_typo_builtin_name(reader, name) || check_typo_builtin_add(reader, scope, name, declared));
+                valid = valid && (!external || !check_typo_builtin_name(reader, scope, name) || check_typo_builtin_add(reader, scope, name, declared));
             }
         }
     }
@@ -882,7 +887,7 @@ static uint32_t check_typo_search(CheckInputReader* reader, CheckTypoScope* scop
                               reader->declaration_bits != NULL && check_input_linkage(reader->declaration_bits, declaration) == 2;
         const bool predefined = unique && !keyword && source == CHECK_TYPO_PREDECLARED;
         const bool builtin = unique && !keyword && (source == CHECK_TYPO_BUILTIN_USE ||
-                             (mode != CHECK_TYPO_FUNCTION && external && check_typo_builtin_name(reader, scope->keys[best_at])));
+                             (mode != CHECK_TYPO_FUNCTION && external && check_typo_builtin_name(reader, scope, scope->keys[best_at])));
         const bool type = unique && !keyword && (predefined || (source == CHECK_TYPO_BINDING && bindings->kind[scope->events[best_at]] == C_BINDING_TYPEDEF));
         result = unique && !keyword && !type && !builtin ? scope->events[best_at] : BUSTER_CHECK_NONE;
         typo->suggested_keyword = keyword ? best_keyword : 0;

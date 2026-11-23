@@ -639,10 +639,10 @@ static void check_data_test_limits(CheckTest* test, TypeTable* types)
                     expected = CHECK_DATA_INVALID;
                     break;
                 case 17:
-                    // A scalar type the data path doesn't take, nullptr_t (a __float128 is 16 zero bytes without an
-                    // initializer, #137, and the half-precision types are their bits, #136).
+                    // A nullptr_t object is a null pointer's 8 bytes (#2914), but its initializer's value here is the
+                    // other object's type, which isn't its own.
                     objects[1].type = BUSTER_TYPE_NULLPTR;
-                    expected = CHECK_DATA_UNSUPPORTED;
+                    expected = CHECK_DATA_INVALID;
                     break;
                 case 18:
                     objects[1].alignment_log2 = BUSTER_LINK_MAX_ALIGNMENT_LOG2 + 1;
