@@ -1500,12 +1500,22 @@ static void check_test_program_build_release(void)
 static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* oracle_source, bool mismatch, const char* clang,
                                                        bool char_unsigned, bool alignment_oracle, bool run_native, const char* standard, Arena* scratch)
 {
-    char directory[] = "/tmp/buster-check-program-XXXXXX";
-    const bool created = mkdtemp(directory) != 0;
-    char object[160];
-    char executable[160];
-    char out[160];
-    char err[160];
+    const char* profile_directory = getenv("BUSTER_CHECKER_PROFILE_DIR");
+    const bool profiling = profile_directory != 0 && *profile_directory != 0;
+    char directory[PATH_MAX - sizeof("/checked.o") + 1];
+    const int directory_length = snprintf(directory, sizeof(directory), "%s/buster-check-program-XXXXXX",
+                                          profiling ? profile_directory : "/tmp");
+    const bool fits = directory_length >= 0 && (size_t)directory_length < sizeof(directory);
+    const bool created = fits && directory[0] == '/' && mkdtemp(directory) != 0;
+    if (profiling && !created)
+    {
+        fprintf(stderr, "test-checker: BUSTER_CHECKER_PROFILE_DIR must be an existing writable absolute directory: %s (%s)\n",
+                profile_directory, !fits ? "path too long" : directory[0] != '/' ? "relative path" : strerror(errno));
+    }
+    char object[PATH_MAX];
+    char executable[PATH_MAX];
+    char out[PATH_MAX];
+    char err[PATH_MAX];
     char harness[96];
     char oracle[96];
     snprintf(object, sizeof(object), "%s/checked.o", directory);
@@ -1574,7 +1584,7 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
     if (!valid && created)
     {
         // The sources go beside the object, as the one-step build had them.
-        char path[160];
+        char path[PATH_MAX];
         snprintf(path, sizeof(path), "%s/driver.c", directory);
         parse_test_write(path, check_test_program_harness, sizeof(check_test_program_harness) - 1);
         snprintf(path, sizeof(path), "%s/oracle.c", directory);
@@ -1599,10 +1609,14 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
     if (valid && created)
     {
         unlink(object);
-        unlink(executable);
         unlink(out);
         unlink(err);
-        rmdir(directory);
+        // Keep the actual path the profiler saw. A cache hit and a link-only fixture have no new executed image.
+        if (!profiling || same || !run_native)
+        {
+            unlink(executable);
+            rmdir(directory);
+        }
     }
     return valid;
 }
