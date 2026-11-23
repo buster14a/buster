@@ -11588,8 +11588,10 @@ static __attribute__((noinline, cold)) Tier0Error tier0_asm_direct(const Tier0Fu
 }
 
 // The references of the direct asm goto bodies' absorbed dispatches (tier0_asm_direct) taken from their exits'
-// temporaries, each the SET_LOCAL's and a LOCAL per label, weighted as the call's entry (tier0_loop_weights): one no
-// other entry reads then takes no home, nor a callee-saved register's save.
+// temporaries, each the SET_LOCAL's (entry i + 1) and a LOCAL per label (entry i + 2 + 4 l, tier0_asm_dispatch), each
+// with the weight its entry added (tier0_loop_weights): a dispatch's branch back to an earlier label ends a loop inside
+// it, so its entries' weights differ. One no other entry reads then takes no home, nor a callee-saved register's save;
+// one another dispatch or entry reads keeps those references.
 static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0Function* function, const Tier0Entries* entries, const uint32_t* weights, uint32_t* references)
 {
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -11598,7 +11600,12 @@ static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0F
         {
             const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
             const uint64_t temporary = function->values[i + 1];
-            const uint64_t weighted = (uint64_t)(1 + (body->count - body->exits - 2) / 2) * (weights != 0 ? weights[i] : 1);
+            const uint32_t labels = (body->count - body->exits - 2) / 2;
+            uint64_t weighted = weights != 0 ? weights[i + 1] : 1;
+            for (uint32_t l = 0; l < labels; l += 1)
+            {
+                weighted += weights != 0 ? weights[i + 2 + 4 * l] : 1;
+            }
             const uint32_t taken = weighted < UINT32_MAX ? (uint32_t)weighted : UINT32_MAX;
             references[temporary] -= references[temporary] >= taken ? taken : references[temporary];
         }

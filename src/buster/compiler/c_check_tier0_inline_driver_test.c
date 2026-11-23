@@ -9,7 +9,9 @@
 // argument), a callee with a loop, one with two returns and one whose result returns in memory, with two returns too
 // (calls by default; with --tier0-inline-shapes, step 5, each return a jump to the copy's end, the hidden pointer the
 // call's object), one with a variable-length array (refused, a call), a cycle of two (its closing call a call), a callee
-// through a pointer, a pointer parameter, long double, a struct argument and result in registers, a chain of wrappers
+// through a pointer, a pointer parameter, an asm goto back to a label before it, spliced in a loop and beside a value
+// below its call (#2841's review: its dispatch's back edge, a direct site and one that isn't share its locals), long
+// double, a struct argument and result in registers, a chain of wrappers
 // (_mm256_mask_add_epi32's), intrinsics of 16, 32 and 64 bytes, and a callee that calls a runtime function (an __int128
 // division's __divti3), which a caller in another part, with no runtime call of its own, takes by its final symbol (the
 // default windows lower each callee as a part of its own: its provisional symbol named no symbol, #1398). Built at
@@ -50,6 +52,20 @@ static const char check_test_tier0_inline_source[] =
     "AI int vla(int n) { int a[(n & 7) + 1]; for (int i = 0; i <= (n & 7); i += 1) a[i] = i * i; return a[n & 7]; }\n"
     "AI __m256i plus_iota(__m256i a) { return _mm256_add_epi32(a, (__m256i)(__v8si){ 8, 7, 6, 5, 4, 3, 2, 1 }); }\n"
     "static __attribute__((noinline)) int kept(int x) { return x * 7; }\n"
+    "AI int poll1(int* p)\n"
+    "{\n"
+    "    int r = 0;\n"
+    "again:\n"
+    "    __asm__ goto(\"testl %0, %0\\n\\tjs %l1\\n\\tjz %l2\" : : \"r\"(*p) : \"cc\" : again, done);\n"
+    "    r = 1;\n"
+    "done:\n"
+    "    return r;\n"
+    "}\n"
+    "__attribute__((noinline)) int polled(int* p, int a)\n"
+    "{\n"
+    "    for (int i = 0; i < 4; i += 1) poll1(p);\n"
+    "    return a + poll1(p);\n"
+    "}\n"
     "__attribute__((noinline)) __m512i mix(__m512i a, __m512i b, __m512i c)\n"
     "{\n"
     "    __m512i x = _mm512_add_epi32(a, b);\n"
@@ -121,6 +137,9 @@ static const char check_test_tier0_inline_source[] =
     "    _mm512_storeu_si512(out, mix(a, b, c));\n"
     "    printf(\"%llx %llx %llu %lld\\n\", out[0], out[7], (unsigned long long)count(buffer, 640), structs(9));\n"
     "    printf(\"%d %d %lld %lld %d\\n\", narrow(5, 3), narrow(-77, 9), scalars(9, 4), scalars(2, 11), iota(4));\n"
+    "    int one = 1;\n"
+    "    int zero = 0;\n"
+    "    printf(\"%d %d\\n\", polled(&one, 10), polled(&zero, 20));\n"
     "    return 0;\n"
     "}\n";
 

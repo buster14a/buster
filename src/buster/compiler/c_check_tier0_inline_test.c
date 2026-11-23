@@ -33,8 +33,8 @@ struct Tier0InlineTestTally
 // The driver fixture's spliced streams' digests at x86-64-v4, without and with --tier0-inline-shapes. Frozen on the tree
 // where the splice's vector path and its scalar twin still gave the same bytes in every column (#2924); a change to the
 // splice, to the lowering that feeds it or to the fixture moves them, and a run reports its own.
-#define BUSTER_TIER0_INLINE_TEST_DIGEST UINT64_C(0xb4a261ea907626a8)
-#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0xdff8badce317e533)
+#define BUSTER_TIER0_INLINE_TEST_DIGEST UINT64_C(0x0fa513406c408f6e)
+#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0xb259a1817ff59603)
 
 static void tier0_inline_test_expect(Tier0InlineTestTally* tally, bool condition, const char* file, uint32_t body, const char* message)
 {
