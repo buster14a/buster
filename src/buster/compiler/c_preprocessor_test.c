@@ -4,9 +4,10 @@
 //
 // The preprocessor tests (c_preprocessor.c), for the test-preprocessor command:
 //
-//   build/compiler test-preprocessor [--clang] [--keep] [--fuzz N] [--seed N] [--std c17|c23] [--jobs N] [clang-style options] [file...]
+//   build/compiler test-preprocessor [--clang] [--keep] [--fuzz N] [--seed N] [--std c17|c23] [--jobs N] [--fixtures DIR] [clang-style options] [file...]
 //
-// Without files, it runs the built-in cases (pp_test_cases): small sources on the topics of the C standard's examples
+// Without files, it runs the built-in cases (pp_test_cases, runtime data under tests/preprocessor since #2053; the
+// comment above pp_test_fixture_root): small sources on the topics of the C standard's examples
 // (6.10.4.5), the cases where GCC's and clang's behavior was probed (docs/c-preprocessor.md), and inputs past the
 // vectorized kernels' limits, each written to a new directory under $TMPDIR (or /tmp) and preprocessed by the vectorized and the
 // scalar kernels, whose output streams must be the same token for token (kind, flags, value and location), whose
@@ -1713,62 +1714,19 @@ struct PPTestCase
     uint32_t errors;
 };
 
-static const PPTestFile pp_test_files_include_next[] = {
-    { "first/wrapper.h", "LAYER_ONE\n#include_next <wrapper.h>\n" },
-    { "second/wrapper.h", "LAYER_TWO\n" },
-    { 0, 0 },
-};
+#include <dirent.h>
+#include <fcntl.h>
+#include <limits.h>
 
-// -dI's includes (#1380): an #include_next from the first -I directory's header to the second's.
-static const PPTestFile pp_test_files_dumped_includes[] = {
-    { "first/wrapper.h", "LAYER_ONE\n#include_next <wrapper.h>\n" },
-    { "second/wrapper.h", "LAYER_TWO\n" },
-    { 0, 0 },
-};
-
-static const PPTestFile pp_test_files_renamed[] = {
-    { "inc.h", "int in_header;\n#line 50 \"renamed.h\"\nint after;\n" },
-    { 0, 0 },
-};
-
-static const PPTestFile pp_test_files_collecting_exit[] = {
-    { "outer.h", "#include \"other.h\"\n" },
-    { 0, 0 },
-};
-
-static const PPTestFile pp_test_files_collecting_return[] = {
-    { "outer.h", "#include \"other.h\"\nb)\nouter_after\n" },
-    { 0, 0 },
-};
-
-static const PPTestFile pp_test_files_stack[] = {
-    { "a.h", "a_token\n#include \"b.h\"\na_after\n" },
-    { "b.h", "b_token\n" },
-    { "sys/s.h", "sys_first\n\n\n\n\n\n\n\n\n\n\nsys_far\n" },
-    { "p.h", "user_before\n#pragma GCC system_header\nuser_after\n" },
-    { 0, 0 },
-};
-
-static const PPTestFile pp_test_files_conversion_system[] = {
-    { "sys/conversion.h", "#if -1 > 0u\ninside\n#endif\n" },
-    { 0, 0 },
-};
-
-// A file whose name is what a header name taken from the raw string literal R"(other.h)" would be.
-static const PPTestFile pp_test_files_raw_header[] = {
-    { "\"(other.h)", "found_by_a_raw_string\n" },
-    { 0, 0 },
-};
-
-// Angle header bytes that resemble an unterminated raw literal must not consume following source.
-static const PPTestFile pp_test_files_opaque_raw[] = {
-    { "R\"(x", "header\n" },
-    { "a\\>R\"(x", "escaped_header\n" },
-    { 0, 0 },
-};
+// 4,096 'A's: an identifier, and a header name too long for any path (#254's review), which the history's cases use.
+#define BUSTER_PP_TEST_A64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+#define BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64
+#define BUSTER_PP_TEST_A4096 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512
+_Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
 
 // Runtime header queries may get their identity through a macro. Raw-looking header bytes remain header bytes;
-// earlier and later macro definitions keep the prepared view that supplied their token indexes.
+// earlier and later macro definitions keep the prepared view that supplied their token indexes. Its own check
+// (pp_test_raw_query_views) keeps it in C; the cases' copy is tests/preprocessor/trees' raw-query.
 static const PPTestFile pp_test_files_raw_query[] = {
     { "R\"(x", "header\n" },
     { "raw-plain.h", "ordinary\n" },
@@ -1779,1520 +1737,486 @@ static const PPTestFile pp_test_files_raw_query[] = {
     { 0, 0 },
 };
 
-// #embed's resources: text, bytes of every kind (a zero, 255, the edges of one, two and three digits), every value in
-// turn, nothing, and headers that end with an #embed, with and without a newline after it.
-// #252's review's #embed files: a resource in a directory of its own, for a name with "//" (and one whose name starts
-// with '*', for "/*"), and a header that becomes a system header before it embeds one.
-static const PPTestFile pp_test_files_embed_review[] = {
-    { "dir/bytes.bin", "A\n" },
-    { "dir/*x.bin", "B\n" },
-    { "hi.txt", "Hi!\n" },
-    { "sys.h", "unsigned char a[] = {\n#pragma GCC system_header\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
-    { "sys_indent.h", "unsigned char b[] = {\n#pragma GCC system_header\n  #embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
-    { "sys_blank.h", "unsigned char c[] = {\n#pragma GCC system_header\n\n#embed \"hi.txt\" limit(1) suffix(, 300)\n};\n" },
-    { 0, 0 },
+// The built-in cases (pp_test_cases) and the files they write beside case.c are runtime data (#2053), under the fixture
+// root (tests/ under the working directory, or test-preprocessor's --fixtures DIR), read before the checks are dealt,
+// so that editing or adding a case compiles, links and bakes nothing:
+//
+// - preprocessor/cases/catalog.tsv, first line `buster-fixtures v1 preprocessor-cases`, then a case a line not starting
+//   with '#': ID (letters, digits, '.', '_' and '-'), STANDARD (-std='s, or -), FLAGS (comma-separated, or -: fails,
+//   warnings=N, errors=N, other, markers, files=TREE), OPTIONS (both sides' options as one field, %d the case's
+//   directory, or -) and NAME, tab-separated. Its files beside the catalog: ID.c, the source, and ID.expected, the
+//   expected output; with `other`, ID.other.h (written as other.h); with `markers`, ID.markers (-E's text with line
+//   markers).
+// - preprocessor/trees/catalog.tsv, first line `buster-fixtures v1 preprocessor-trees`, then a file of a tree a line:
+//   TREE, KIND, SOURCE and PATH, tab-separated, each tree's lines together and in order. PATH is the file's place in the
+//   case's directory (relative, no "." or ".." part). KIND `text` writes SOURCE's bytes, a file beside the catalog, as
+//   they are (zero bytes among them); `symlink` makes a symbolic link to SOURCE as it is written; `hard` a hard link to
+//   SOURCE, an earlier PATH of the tree.
+//
+// A text field's file holds no zero byte. A missing, unreadable or malformed catalog, a missing file, a repeated ID, tree
+// or path, an unknown flag or tree, a file in either directory that no line names, or no case fails the run: no case is
+// skipped.
+static const char* pp_test_fixture_root = "tests";
+static const PPTestCase* pp_test_cases;
+static uint32_t pp_test_case_count;
+
+enum
+{
+    // The cases, the trees' files, and a file's bytes, at most.
+    BUSTER_PP_TEST_FIXTURE_CASES = 8192,
+    BUSTER_PP_TEST_FIXTURE_FILES = 4096,
+    BUSTER_PP_TEST_FIXTURE_BYTES = 1 << 20,
 };
 
-static const PPTestFile pp_test_files_embed[] = {
-    { "hi.txt", "Hi!\n" },
-    { "bin.dat", "\x00\xff\x7f\x80\x09\x0a\x63\x64", 8 },
-    {
-        "bytes.dat",
-        "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f"
-        "\x20\x21\x22\x23\x24\x25\x26\x27\x28\x29\x2a\x2b\x2c\x2d\x2e\x2f\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x3a\x3b\x3c\x3d\x3e\x3f"
-        "\x40\x41\x42\x43\x44\x45\x46\x47\x48\x49\x4a\x4b\x4c\x4d\x4e\x4f\x50\x51\x52\x53\x54\x55\x56\x57\x58\x59\x5a\x5b\x5c\x5d\x5e\x5f"
-        "\x60\x61\x62\x63\x64\x65\x66\x67\x68\x69\x6a\x6b\x6c\x6d\x6e\x6f\x70\x71\x72\x73\x74\x75\x76\x77\x78\x79\x7a\x7b\x7c\x7d\x7e\x7f"
-        "\x80\x81\x82\x83\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x8e\x8f\x90\x91\x92\x93\x94\x95\x96\x97\x98\x99\x9a\x9b\x9c\x9d\x9e\x9f"
-        "\xa0\xa1\xa2\xa3\xa4\xa5\xa6\xa7\xa8\xa9\xaa\xab\xac\xad\xae\xaf\xb0\xb1\xb2\xb3\xb4\xb5\xb6\xb7\xb8\xb9\xba\xbb\xbc\xbd\xbe\xbf"
-        "\xc0\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf\xd0\xd1\xd2\xd3\xd4\xd5\xd6\xd7\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf"
-        "\xe0\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8\xe9\xea\xeb\xec\xed\xee\xef\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7\xf8\xf9\xfa\xfb\xfc\xfd\xfe\xff",
-        256,
-    },
-    { "empty.txt", "" },
-    { "embedlast.h", "a\n#embed \"hi.txt\" limit(1)\n" },
-    { "embedlast_nonl.h", "a\n#embed \"hi.txt\" limit(1)" },
-    { "tail.h", "x\n" },
-    { 0, 0 },
+// What the catalogs load into, kept for the run: the cases and their trees refer to its bytes.
+typedef struct PPTestFixtures PPTestFixtures;
+struct PPTestFixtures
+{
+    Arena storage;
+    PPTestCase* cases;
+    const char** identifiers;
+    uint32_t count;
+    PPTestFile* files;
+    uint32_t file_count;
+    // The trees: each's name and first file, its files ending with one without a path.
+    const char** tree_names;
+    uint32_t* tree_firsts;
+    uint32_t tree_count;
+    // The file names beside each catalog that its lines name.
+    const char** named;
+    uint32_t named_count;
+    char problem[4400];
 };
 
-// --embed-dir's resource, and headers in a directory of their own that embed one beside them, first thing and after
-// blank lines and a comment.
-static const PPTestFile pp_test_files_embed_directories[] = {
-    { "dir/x.bin", "ED" },
-    { "sub/inc.h", "#embed \"y.bin\"\n" },
-    { "sub/late.h", "\n// first\n#embed \"y.bin\"\n" },
-    { "sub/y.bin", "Y" },
-    { 0, 0 },
-};
+static PPTestFixtures pp_test_fixtures;
 
-// #119's header names and search: names with "//", "/*...*/" and a backslash written out, the file a comment that runs
-// on to the next line makes a name of ("a b.h"), a computed name's file, #include_next through three directories, a
-// header that includes itself, and one file reached through a symbolic link and a hard link, with #pragma once and
-// with a guard. Then #254's review's: the file a header name too long for a path would name if its identifier were
-// expanded, headers named " x.h" and "  x.h", each alone in a directory, and a header that includes itself to the depth
-// limit and there includes another three times.
-static const PPTestFile pp_test_files_includes[] = {
-    { "a/b.h", "ab\n" },
-    { "dir/*x.h", "opaque_header\n" },
-    { "dir/*x.bin", "B\n" },
-    { "a/*x*/b.h", "axb\n" },
-    { "a\\b.h", "backslash\n" },
-    { "a b.h", "joined\n" },
-    { "c.h", "computed\n" },
-    { "d1/n.h", "one\n#include_next <n.h>\n" },
-    { "d2/n.h", "two\n#include_next <n.h>\n" },
-    { "d3/n.h", "three\n" },
-    { "self.h", "#include \"self.h\"\nx\n" },
-    { "real.h", "#pragma once\nonce\n" },
-    { .path = "sym.h", .link = "real.h" },
-    { .path = "hard.h", .link = "real.h", .hard = true },
-    { "guarded.h", "#ifndef G\n#define G\nguarded\n#endif\n" },
-    { .path = "gsym.h", .link = "guarded.h" },
-    { "local.h", "local\n" },
-    { "short.h", "short\n" },
-    { "one/ x.h", "one_space\n" },
-    { "two/  x.h", "two_spaces\n" },
-    { "loop.h", "#if __INCLUDE_LEVEL__ < 199\n#include \"loop.h\"\n#else\n#include \"leaf.h\"\n#include \"leaf.h\"\n#include \"leaf.h\"\n#endif\n" },
-    { "leaf.h", "LEAF\n" },
-    { 0, 0 },
-};
+// The bytes of the file at `path`, with a zero byte after them, in the fixtures' storage, and their count; null, with the
+// reason in the problem, when it can't be read, is larger than BUSTER_PP_TEST_FIXTURE_BYTES, or (unless `binary`) holds a
+// zero byte.
+static char* pp_test_fixture_read(PPTestFixtures* fixtures, const char* path, bool binary, uint64_t* length)
+{
+    char* bytes = 0;
+    const int file = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat status;
+    const bool regular = file >= 0 && fstat(file, &status) == 0 && S_ISREG(status.st_mode);
+    if (!regular)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "can't read %s", path);
+    }
+    else if (status.st_size > BUSTER_PP_TEST_FIXTURE_BYTES)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "%s is larger than %u bytes", path, (unsigned)BUSTER_PP_TEST_FIXTURE_BYTES);
+    }
+    else
+    {
+        const uint64_t size = (uint64_t)status.st_size;
+        char* buffer = arena_push(&fixtures->storage, size + 1, 1);
+        uint64_t done = 0;
+        ssize_t got = 1;
+        while (buffer != 0 && done < size && got > 0)
+        {
+            got = read(file, buffer + done, size - done);
+            done += got > 0 ? (uint64_t)got : 0;
+        }
+        if (buffer == 0 || done != size)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "can't read %s whole", path);
+        }
+        else if (!binary && memchr(buffer, 0, size) != 0)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "%s holds a zero byte", path);
+        }
+        else
+        {
+            buffer[size] = 0;
+            *length = size;
+            bytes = buffer;
+        }
+    }
+    if (file >= 0)
+    {
+        close(file);
+    }
+    return bytes;
+}
 
-// #254's second review's headers: a name with a backslash before a '>', and one reached through "//".
-static const PPTestFile pp_test_files_header_tails[] = {
-    { "a\\>b.h", "int escaped;\n" },
-    { " x.h", "int one_space;\n" },
-    { "x.h", "int x_h;\n" },
-    { "dir/x.h", "int dir_x;\n" },
-    { 0, 0 },
-};
+// Whether `text` is 1 to 64 letters, digits, '.', '_' and '-'.
+static bool pp_test_fixture_word(const char* text)
+{
+    const size_t length = strlen(text);
+    bool word = length != 0 && length <= 64;
+    for (size_t i = 0; word && i < length; i += 1)
+    {
+        const char c = text[i];
+        word = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '_' || c == '-';
+    }
+    return word;
+}
 
-// 4,096 'A's: an identifier, and a header name too long for any path (#254's review).
-#define BUSTER_PP_TEST_A64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-#define BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64
-#define BUSTER_PP_TEST_A4096 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512
-_Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
+// Whether `path` is a relative path of the case's directory: not empty, no leading '/', no empty, "." or ".." part.
+static bool pp_test_fixture_path(const char* path)
+{
+    bool valid = path[0] != 0 && path[0] != '/';
+    const char* part = path;
+    while (valid && part != 0)
+    {
+        const char* slash = strchr(part, '/');
+        const size_t length = slash != 0 ? (size_t)(slash - part) : strlen(part);
+        valid = length != 0 && !(length == 1 && part[0] == '.') && !(length == 2 && part[0] == '.' && part[1] == '.');
+        part = slash != 0 ? slash + 1 : 0;
+    }
+    return valid;
+}
 
-static const PPTestCase pp_test_cases[] = {
-    // Negative-to-unsigned conversions (#1291): all converting operators on both sides, live contexts, and
-    // controls. Both kernels check the warning counts; --clang checks the values and warning-policy outcomes.
-    { "#if negative conversions for each arithmetic, comparison and bitwise operator",
-      "#if -3 * 2u\ncase_0\n#endif\n#if 2u * -3\ncase_1\n#endif\n#if -3 / 2u\ncase_2\n#endif\n#if 2u / -3\ncase_3\n#endif\n"
-      "#if -3 % 2u\ncase_4\n#endif\n#if 2u % -3\ncase_5\n#endif\n#if -3 + 2u\ncase_6\n#endif\n#if 2u + -3\ncase_7\n#endif\n"
-      "#if -3 - 2u\ncase_8\n#endif\n#if 2u - -3\ncase_9\n#endif\n#if -3 < 2u\ncase_10\n#endif\n#if 2u < -3\ncase_11\n#endif\n"
-      "#if -3 <= 2u\ncase_12\n#endif\n#if 2u <= -3\ncase_13\n#endif\n#if -3 > 2u\ncase_14\n#endif\n#if 2u > -3\ncase_15\n#endif\n"
-      "#if -3 >= 2u\ncase_16\n#endif\n#if 2u >= -3\ncase_17\n#endif\n#if -3 == 2u\ncase_18\n#endif\n#if 2u == -3\ncase_19\n"
-      "#endif\n#if -3 != 2u\ncase_20\n#endif\n#if 2u != -3\ncase_21\n#endif\n#if -3 & 2u\ncase_22\n#endif\n#if 2u & -3\ncase_23\n"
-      "#endif\n#if -3 ^ 2u\ncase_24\n#endif\n#if 2u ^ -3\ncase_25\n#endif\n#if -3 | 2u\ncase_26\n#endif\n#if 2u | -3\ncase_27\n"
-      "#endif\n",
-      0, "c17", "case_0\ncase_1\ncase_2\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\ncase_11\ncase_13\ncase_14\ncase_16\ncase_20\ncase_21\ncase_24\ncase_25\ncase_26\ncase_27\n", false, 28 },
-    { "#if signed, nonnegative and already unsigned controls",
-      "#if -3 < 0\ncase_0\n#endif\n#if 3 < 4u\ncase_1\n#endif\n#if 0u < 18446744073709551615u\ncase_2\n#endif\n#if -1u > 0\ncase_3\n"
-      "#endif\n#if -1 + -2 == -3\ncase_4\n#endif\n#if ~0u > 0\ncase_5\n#endif\n#if (-8 >> 1u) == -4\ncase_6\n#endif\n#if (-1 && 1u)\n"
-      "case_7\n#endif\n#if (0u || -1)\ncase_8\n#endif\n#if (-1, 1u)\ncase_9\n#endif\n#if (1u, -1)\ncase_10\n#endif\n",
-      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\ncase_10\n", false, 0 },
-    { "#if conditional common type without a conversion warning",
-      "#if (1 ? -1 : 0u) > 0\ncase_0\n#endif\n#if (0 ? 0u : -2) > 0\ncase_1\n#endif\n#if (0 ? -1 : 0u) == 0\ncase_2\n#endif\n"
-      "#if (1 ? 0u : -2) == 0\ncase_3\n#endif\n#if (0 ? 0u : (1 ? -1 : -2)) > 0\ncase_4\n#endif\n",
-      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\n", false, 0 },
-    { "#if conversions in unevaluated operands stay silent",
-      "#if 0 && (-1 > 0u)\ncase_0\n#endif\n#if 1 || (0u < -2)\ncase_1\n#endif\n#if 0 ? (-1 + 1u) : 1\ncase_2\n#endif\n"
-      "#if 1 ? 1 : (1u + -1)\ncase_3\n#endif\n#if 0 && (1 ? (-1 > 0u) : (0u < -2))\ncase_4\n#endif\n#if 1 || (0 ? (0u < -1) : (-2 > 0u))\n"
-      "case_5\n#endif\n#if 0 && (1 / 0 + (-1 > 0u))\ncase_6\n#endif\n#if 1 || (1 / 0 + (0u < -2))\ncase_7\n#endif\n",
-      0, "c17", "case_1\ncase_2\ncase_3\ncase_5\ncase_7\n", false, 0 },
-    { "#if conversion liveness restored across precedence and conditional nesting",
-      "#if 0 && (-1 > 0u) || (-2 > 0u)\ncase_0\n#endif\n#if (0 && (-1 > 0u)) + (-3 > 0u)\ncase_1\n#endif\n#if 1 ? (-1 > 0u) : (-2 > 0u)\n"
-      "case_2\n#endif\n#if 0 ? (-1 > 0u) : (-2 > 0u)\ncase_3\n#endif\n#if 0 ? (-1 > 0u) : 1 ? (0u < -2) : (-3 > 0u)\ncase_4\n#endif\n"
-      "#if 1 ? (0 ? (-1 > 0u) : (-2 > 0u)) : (-3 > 0u)\ncase_5\n#endif\n#if (1 || (-1 > 0u)) && (0u < -2)\ncase_6\n#endif\n"
-      "#if ((0u < -1) ? -2 : 3) > 0u\ncase_7\n#endif\n#if (-1 > 0u) && (-2 > 0u)\ncase_8\n#endif\n#if -'A' > 0u\ncase_9\n#endif\n",
-      0, "c17", "case_0\ncase_1\ncase_2\ncase_3\ncase_4\ncase_5\ncase_6\ncase_7\ncase_8\ncase_9\n", false, 12 },
-    { "#if negative conversions become errors", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "", true, 0, "-Werror", .errors = 2 },
-    { "#if negative conversion warnings are suppressed by -w", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 0, "-w -Werror", .errors = 0 },
-    { "#if negative conversion warnings can be demoted", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Werror -Wno-error", .errors = 0 },
-    { "#if promoted conversion in a system header is suppressed", "#include <conversion.h>\n", 0, "c17", "inside\n", false, 0, "-Werror -isystem %d/sys", pp_test_files_conversion_system },
-    { "#if promoted conversion with system warnings enabled", "#include <conversion.h>\n", 0, "c17", "", true, 0, "-Werror -Wsystem-headers -isystem %d/sys", pp_test_files_conversion_system, .errors = 1 },
-    { "#if negative conversions are not sign-compare warnings", "#if -1 > 0u\nint a;\n#endif\n#if 1u < -2\nint b;\n#endif\nint x;\n", 0, "c17", "int a;\nint b;\nint x;\n", false, 2, "-Wno-sign-compare -Wno-sign-conversion", .errors = 0 },
-    { "#if conversion macros and evaluated #elif", "#define NEG (-1)\n#define GT >\n#define COMPARE(a,b) ((a) > (b))\n#if NEG GT 0u\nmacro_left\n#endif\n#if COMPARE(0u, -2)\nmacro_right\n#endif\n#if 0\n#if -3 > 0u\nskipped\n#endif\n#elif 0u < -4\nelif_taken\n#elif -5 > 0u\nskipped_elif\n#endif\n", 0, "c17", "macro_left\nelif_taken\n", false, 3 },
-    { "#if dead conversion operand still checks syntax", "#if 0 && (-1 > 0u + )\nwrong\n#endif\n", 0, "c17", "", true, 0 },
-    // The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
-    // placemarkers, and variadic macros (the expected text is clang's output).
-    { "rescanning, redefinitions and painting", "#define n 4\n#define twice(v) twice(n + (v))\n#undef n\n#define n 5\n#define alias twice\n#define box box{1}\n#define open alias(-\n#define call(f) f(k)\n#define k 7,8\n#define id(v) v\n#define kw() long\n#define one(v) v\n#define join(p,q) p ## q\n#define quote(v) # v\ntwice(a-1) * twice(twice(box)) + id(id(alias)(2) - id)(3);\nalias(n*(9,10)-k) & open 6) | call\n(twice)^call(call);\nkw() arr[one()] = { one(4), join(5,6), join(7,), join(,8), join(,) };\nchar s[2][4] = { quote(abc), quote() };\n",
-      0, "c17", "twice(5 + (a-1)) * twice(5 + (twice(5 + (box{1})))) + twice(5 + (2)) - id(3);\ntwice(5 + (5*(9,10)-7,8)) & twice(5 + (- 6)) | twice(5 + (7,8))^call(7,8);\nlong arr[] = { 4, 56, 7, 8, };\nchar s[2][4] = { \"abc\", \"\" };\n", false },
-    { "# and ## with indirection", "#define quote(v) # v\n#define xquote(v) quote(v)\n#define trace(a, b) log(\"v\" # a \" is %d, v\" # b \" is %s\", \\\n v ## a, v ## b)\n#define PART_OF(n) part ## n\n#define cat(a, b) a ## b\n#define xcat(a, b) cat(a, b)\n#define UPDOWN \"top\"\n#define DOWN DOWN \" bottom\"\ntrace(3, 4);\nputs(quote(strcmp(\"a\\0b\", \"a\", '\\5') // dropped\n != 0) quote(! #\\n), out);\nxquote(PART_OF(7).inc)\ncat(UP, DOWN);\nxcat(UP, DOWN)\n",
-      0, "c17", "log(\"v\" \"3\" \" is %d, v\" \"4\" \" is %s\", v3, v4);\nputs(\"strcmp(\\\"a\\\\0b\\\", \\\"a\\\", '\\\\5') != 0\" \"! #\\n\", out);\n\"part7.inc\"\n\"top\";\n\"top\" \" bottom\"\n", false },
-    { "placemarkers", "#define tri(a,b,c) a ## b ## c\nint v[] = { tri(9,8,7), tri(,6,5), tri(4,,3), tri(2,1,),\n tri(10,,), tri(,20,), tri(,,30), tri(,,) };\n",
-      0, "c17", "\nint v[] = { 987, 65, 43, 21,\n 10, 20, 30, };\n", false },
-    { "variadic macros", "#define log_all(...) logf(level, __VA_ARGS__)\n#define names(...) show(#__VA_ARGS__)\n#define check(c, ...) ((c) ? show(#c) : \\\n emit(__VA_ARGS__))\nlog_all(\"start\");\nlog_all(\"n = %d\\n\", n);\nnames(red, green and blue);\ncheck(a < b, \"a is %d, b is %d\", a, b);\n",
-      0, "c17", "logf(level, \"start\");\nlogf(level, \"n = %d\\n\", n);\nshow(\"red, green and blue\");\n((a < b) ? show(\"a < b\") : emit(\"a is %d, b is %d\", a, b));\n", false },
-    // The cases the notes probed with GCC and clang (preprocessor-logical-spacing, preprocessor-expansion-boundaries).
-    { "splice makes a function-like macro", "#define F\\\n(x) x + 10\nF(2)\n", 0, "c17", "2 + 10\n", false },
-    { "comment makes an object-like macro", "#define F/**/(x) x + 10\nF(2)\n", 0, "c17", "(x) x + 10(2)\n", false },
-    { "stringize across a splice and a comment", "#define S(x) #x\nS(a\\\n+b)\nS(a/**/+b)\n", 0, "c17", "\"a+b\"\n\"a +b\"\n", false },
-    { "redefinition with other spacing", "#define X(x) x+1\n#define X(x) x + 1\nX(2)\n", 0, "c17", "2 + 1\n", false, 1 },
-    { "a disabled macro's last token", "#define foo(x) bar x\nfoo(foo) (2)\n", 0, "c17", "bar foo (2)\n", false },
-    // M's template finds N painted while N's expansion is under way, which it mustn't keep (pp_template_names) for the
-    // M(2) after it, whose N expands.
-    { "a name painted while its macro is disabled, then expanded", "#define N M(1)\n#define M(a) N a\nN\nM(2)\nint x = M(3);\n", 0, "c17",
-      "N 1\nM(1) 2\nint x = M(1) 3;\n", false },
-    // Templates of a few tokens whose names' bodies make their expansions longer than a template writes: past 16 tokens,
-    // exactly 16 and 17 (pp_template_size).
-    { "expansions past a template's tokens",
-      "#define LONG a b c d e f g h i j\n#define M(x) LONG x LONG\n#define SEVEN 1 2 3 4 5 6 7\n#define B16(x) SEVEN x SEVEN x\n#define B17(x) SEVEN x SEVEN x x\nM(1)\nB16(.)\nB17(.)\n",
-      0, "c17", "a b c d e f g h i j 1 a b c d e f g h i j\n1 2 3 4 5 6 7 . 1 2 3 4 5 6 7 .\n1 2 3 4 5 6 7 . 1 2 3 4 5 6 7 . .\n", false },
-    // An empty expansion of a template with a space between its tokens leaves that space before the next token.
-    { "an empty expansion's spaces", "#define E(a,b) a b\n#define F(a) a\n[E(,)] [E(,)x] (F()y)\n", 0, "c17", "[ ] [ x] (y)\n", false },
-    // One template's names found again after each change of the macros' table (Preprocessor.macro_epoch): its direct
-    // object redefined longer, pushed, redefined, popped and undefined, invoked in a file's text and collected.
-    { "a template's names across #define, #undef, push_macro and pop_macro",
-      "#define D 1\n#define F(x) D x\n#define G F(g)\nF(a) G\n#undef D\n#define D 2 3\nF(b) G\n#pragma push_macro(\"D\")\n#undef D\n#define D 4 5 6\nF(c) G\n"
-      "#pragma pop_macro(\"D\")\nF(d) G\n#undef D\nF(e) G\n",
-      0, "c17", "1 a 1 g\n2 3 b 2 3 g\n4 5 6 c 4 5 6 g\n2 3 d 2 3 g\nD e D g\n", false },
-    // Chains of one to three operands with every operand empty or not, in a file's text (pp_invoke_file) and collected from
-    // an expansion (pp_finish_simple), where the arguments are the same: the same tokens and spaces either way.
-    { "pastes from a template in a file's text and collected",
-      "#define C2(a, b) a ## b\n#define C3(a, b, c) a ## b ## c\n#define ID(x) x\n#define W2(a, b) [C2(a, b)]\n#define W3(a, b, c) [C3(a, b, c)]\n[C2(x, y)] [C2(, y)] [C2(x, )] [C2(,)] [C3(p, q, r)] [C3(, q, r)] [C3(p, , r)] [C3(p, q, )] [C3(, , r)] [C3(,,)]\nW2(x, y) W2(, y) W2(x, ) W2(,) W3(p, q, r) W3(, q, r) W3(p, , r) W3(p, q, ) W3(, , r) W3(,,)\na C2(b, c)d e C2( , f) g C2(h ,)i\n",
-      0, "c17", "[xy] [y] [x] [] [pqr] [qr] [pr] [pq] [r] []\n[xy] [y] [x] [] [pqr] [qr] [pr] [pq] [r] []\na bc d e f g h i\n", false },
-    // A template's chains between body tokens, parameters and #, each chain's first operand a body token or a parameter,
-    // and a chain's body token that names a macro whose body would go straight in (it doesn't: its paste is the token).
-    { "pastes with body tokens and other items",
-      "#define M(x, y) < x ## _end y pre_ ## x ## _post #x y >\n#define N(x) x ## 1 x 1 ## x\n#define W(x, y) M(x, y) N(x)\nM(a, b) M(, b) M(a, ) N(z) N()\nW(a, b) W(, ) W(q r, s)\n#define ONE 1\n#define K(x) ONE ## x ONE\n#define WK(x) [K(x)]\nK(2) K() WK(3) WK()\n",
-      0, "c17", "< a_end b pre_a_post \"a\" b > < _end b pre__post \"\" b > < a_end pre_a_post \"a\" > z1 z 1z 1 1\n< a_end b pre_a_post \"a\" b > a1 a 1a < _end pre__post \"\" > 1 1 < q r_end s pre_q r_post \"q r\" s > q r1 q r 1q r\nONE2 1 1 1 [ONE3 1] [1 1]\n", false },
-    // Numbers pasted onto names and names onto numbers, numbers first, and __LINE__'s integer (expanded by the wrapper's
-    // arguments first).
-    { "pastes of numbers",
-      "#define C(a, b) a ## b\n#define X(a, b) C(a, b)\n#define W(a, b) [C(a, b)]\nC(1, 2) C(x, 1) C(1, x) C(0x, 1fu) C(1e, 5) C(__LINE__, u)\nW(1, 2) W(x, 1) W(1, x)\nX(__LINE__, u) X(u, __LINE__) X(__LINE__, __LINE__)\n",
-      0, "c17", "12 x1 1x 0x1fu 1e5 __LINE__u\n[12] [x1] [1x]\n6u u6 66\n", false },
-    // Operands the templates don't paste: of two tokens or more, punctuators, literals, '$', and a GNU comma and __VA_OPT__,
-    // which have no template.
-    { "pastes the templates leave to pp_substitute",
-      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define V(a, ...) a , ## __VA_ARGS__\n#define O(a, ...) a ## __VA_OPT__(x)\nC(a b, c) C(a, b c) C(<, <) C(L, 'x') C(u8, \"s\") C(a$, b) C(., 5)\nW(a b, c) W(<, <) W(L, 'x')\nV(1) V(1, 2) O(a) O(a, b)\n",
-      0, "c17", "a bc ab c << L'x' u8\"s\" a$b .5\n[a bc] [<<] [L'x']\n1 1 , 2 a ax\n", false },
-    // Names a paste makes: a macro's that expands (rescanned, from the expansions), the invoked macro's and a disabled
-    // macro's (painted where the expansion goes out).
-    { "pasted names that expand, painted and rescanned",
-      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define foobar 42\n#define fn(x) <x>\n#define G(x) G ## x\n#define A B(A, )\n#define B(x, y) x ## y\nC(foo, bar) W(foo, bar) C(f, n)(1) W(f, n)(2) G() G(1) A W(A, ) C(fo, obar)\n",
-      0, "c17", "42 [42] <1> [fn](2) G G1 A [A] 42\n", false },
-    // The variadic parameter on the left of ##, given and omitted, and a function-like macro without parameters.
-    { "pastes of a variadic argument and without parameters",
-      "#define V(...) __VA_ARGS__ ## _x\n#define F() a ## b\n#define W(x) V(x) F()\nV(a) V() F() W(b) W()\n",
-      0, "c17", "a_x _x ab b_x ab _x ab\n", false },
-    // # in a template, in a collected invocation, and in a file's text (which the templates leave to pp_invoke).
-    { "stringizing from a template",
-      "#define S(x, y) #x y #y\n#define T(x) x ## _ #x\n#define W(x, y) S(x, y) T(x)\nS(a, b) S(, ) S(a  +  b, \"q\\\\\") T(p) W(a, b) W(, ) W(q, \"y\")\n",
-      0, "c17", "\"a\" b \"b\" \"\" \"\" \"a + b\" \"q\\\\\" \"\\\"q\\\\\\\\\\\"\" p_ \"p\" \"a\" b \"b\" a_ \"a\" \"\" \"\" _ \"\" \"q\" \"y\" \"\\\"y\\\"\" q_ \"q\"\n", false },
-    // Arguments that start a line, placed first, moved past an empty operand and pasted, from a file's text and from an
-    // expansion, where a token that started a line inside an argument has BUSTER_PP_LINE_SPACE.
-    { "pastes on new lines",
-      "#define C(a, b) a ## b\n#define W(a, b) [C(a, b)]\n#define D(a, b) < a ## b >\n#define WD(a, b) D(a, b)\nC(\nx, y) C(,\ny) W(\nx, y) W(,\ny) C(\nx,\ny) W(\n,\n)\nD(,\ny) D(\nx, ) D(\nx, y) W(\nx, ) WD(,\ny) WD(\nx, ) WD(\nx, y)\n#define WP(a) [C a] <D a>\nWP((\nx, )) WP((,\ny)) WP((\nx,\ny))\n#define C3(a, b, c) a ## b ## c\n#define D3(a, b, c) < a ## b ## c >\n#define WQ(a) [C3 a] [D3 a]\nWQ((,\nq, r)) WQ((\np,\nq, r)) WQ((, ,\nr))\n",
-      0, "c17", "xy y [xy] [y] xy []\n< y > < x > < xy > [x] < y > < x > < xy >\n[x] < < x > > [y] < < y > > [xy] < < xy > >\n[qr] [< qr >] [pqr] [< pqr >] [r] [< r >]\n", false },
-    // A chain that makes no token leaves the space pending before it to the next token, which starts a run, and at the
-    // end to the token after the expansion.
-    { "pastes that make nothing among other tokens",
-      "#define P(a, b) [ a ## b]\n#define Q(a, b) x a ## b\n#define R(a, b) a ## b c\n#define WP(a, b) P(a, b) Q(a, b)y R(a, b)\nP(,) P(u,) Q(,)y Q(,v)y R(,) R(, d)\nWP(,) WP(u, v)\n",
-      0, "c17", "[ ] [ u] x y x v y c d c\n[ ] x y c [ uv] x uv y uv c\n", false },
-    // A template's expansion longer than it writes, left to pp_substitute: 16 tokens and 17.
-    { "an expansion of a template with ## past 16 tokens",
-      "#define L(x, y) x y ## z\n#define W(x, y) L(x, y)\n#define LONG a b c d e f g h i j\n#define ONE 1\n#define M(x, y) LONG x ## y LONG\n#define N(x, y) ONE x ## y ONE\n#define WM(x, y) M(x, y) N(x, y)\nL(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) L(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nW(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15, a) W(1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16, a)\nM(p, q) N(p, q) N(, ) WM(p, q)\n",
-      0, "c17", "1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\n1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 az 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 az\na b c d e f g h i j pq a b c d e f g h i j 1 pq 1 1 1 a b c d e f g h i j pq a b c d e f g h i j 1 pq 1\n", false },
-    // Arguments whose names of macros are all direct objects (pp_argument_in_place), expanded in place before the template
-    // or pp_substitute_simple takes them: alone, beside other tokens, twice in one argument, in two arguments; and the
-    // ones left to the main loop, an empty object, an object whose body invokes a macro, and an invocation with one of each.
-    { "arguments of direct objects, expanded in place",
-      "#define F(a) (a + 1)\n#define G(a, b) [a | b | a]\n#define X 2\n#define T unsigned long\n#define E\n#define N F(1)\nF(X) F(T X) G(X, T) G(T, 3) F(X X) F(E) F(N) G(X, N) G(N, X)\n",
-      0, "c17", "(2 + 1) (unsigned long 2 + 1) [2 | unsigned long | 2] [unsigned long | 3 | unsigned long] (2 2 + 1) ( + 1) ((1 + 1) + 1) [2 | (1 + 1) | 2] [(1 + 1) | 2 | (1 + 1)]\n", false },
-    // A direct object that starts a line in an argument (BUSTER_PP_START_OF_LINE in a file's text, BUSTER_PP_LINE_SPACE
-    // in an expansion's), and that ends one, from a file's text and from an expansion, with clang's line markers.
-    { "arguments of direct objects on new lines",
-      "#define F(a) <a>\n#define X x\n#define W(a) F(a) [F(a)]\nF(\nX) F(X\n) W(\nX) F(\n  X X)\nW(\n  X)\n",
-      0, "c17", "<x> <x> <x> [<x>] <x x>\n<x> [<x>]\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n<x> <x> <x> [<x>] <x x>\n\n\n\n\n<x> [<x>]\n" },
-    // A disabled macro's name beside a direct object in an argument: painted as the main loop paints it, so that it doesn't
-    // expand when the expansion is rescanned before '('.
-    { "arguments of direct objects beside a disabled macro's name",
-      "#define F(x) x\n#define Y y\n#define G(x) F(G Y)(x)\n#define H(x) F(x H Y)\nG(1) H(2) F(Y G) F(Y)(3)\n",
-      0, "c17", "G y(1) 2 H y y G y(3)\n", false },
-    // An argument expanded in place used twice, beside one used as it is, from a file's text and from an expansion.
-    { "arguments of direct objects used twice",
-      "#define D(a, b) a b a b\n#define X x\n#define P(a) [a]\n#define W(a, b) D(a, b) P(a)\nD(X, z) D(z, X) W(X, X) W( X ,z)\n",
-      0, "c17", "x z x z z x z x x x x x [x] x z x z [x]\n", false },
-    // Invocations in arguments expanded in place (pp_nested_invocation): pastes, a simple template, #, no parameters, a
-    // variadic argument left out and given, beside other invocations and direct objects; and the ones left to the main
-    // loop, a paste that makes a macro's name and an invocation whose argument names a direct object.
-    { "invocations in arguments, expanded in place",
-      "#define F(a) (a + 1)\n#define C(x, y) x ## y\n#define G(x) [x]\n#define S(x) #x\n#define Z() zz\n#define V(x, ...) x __VA_ARGS__\n#define X 2\n#define foo 7\nF(C(a, b)) F(G(1)) F(S(a  b)) F(Z()) F(V(1)) F(V(1, 2, 3)) F(C(a, b) G(c) X) F(X C(p, q)) F(C(fo, o)) F(G(X))\n",
-      0, "c17", "(ab + 1) ([1] + 1) (\"a b\" + 1) (zz + 1) (1 + 1) (1 2, 3 + 1) (ab [c] 2 + 1) (2 pq + 1) (7 + 1) ([2] + 1)\n", false },
-    // An invocation that makes nothing, between other tokens, alone, first and last (the space it leaves pending), and
-    // invocations next to each other and to a token.
-    { "empty and adjacent invocations in arguments",
-      "#define F(a) <a>\n#define P(x, y) x ## y\n#define G(x) [x]\nF(x P(, ) y) F(P(, )) F(P(, ) y) F(x P(, )) F(G(1)G(2)) F( G(1) G(2) ) F(G(1)z)\n",
-      0, "c17", "<x y> <> <y> <x> <[1][2]> <[1] [2]> <[1]z>\n", false },
-    // The invoked macro's name in its own expansion, and a disabled macro's in an invocation's argument: painted, so
-    // that neither expands before the '(' after it once the outer expansion is rescanned.
-    { "invocations in arguments beside painted names",
-      "#define F(a) a (2)\n#define S(x) x S\n#define G(x) [x]\n#define H(x) F(G(H x))\n#define K(x) F(G(x) K)\nF(S(1)) H(3) K(4)\n",
-      0, "c17", "1 S (2) [H 3] (2) [4] K (2)\n", false },
-    // Invocations in arguments that start and end lines, from a file's text and from an expansion, with clang's line
-    // markers.
-    { "invocations in arguments on new lines",
-      "#define F(a) <a>\n#define C(x, y) x ## y\n#define W(a) F(a) [F(a)]\nF(\nC(a, b)) F(C(a,\nb)\n) W(\nC(c, d)) F(\n  C(e, f) g)\nW(x\n  C(g, h)\n  z)\n",
-      0, "c17", "<ab> <ab> <cd> [<cd>] <ef g>\n<x gh z> [<x gh z>]\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n<ab> <ab> <cd> [<cd>] <ef g>\n\n\n\n\n\n<x gh z> [<x gh z>]\n" },
-    // Eight invocations in one invocation's arguments, the most pp_finish_simple plans (BUSTER_PP_NESTED_PLANS), and nine.
-    { "invocations in arguments past the plans kept",
-      "#define F(a, b) {a | b}\n#define G(x) [x]\nF(G(1) G(2) G(3) G(4), G(5) G(6) G(7) G(8)) F(G(1) G(2) G(3) G(4), G(5) G(6) G(7) G(8) G(9))\n",
-      0, "c17", "{[1] [2] [3] [4] | [5] [6] [7] [8]} {[1] [2] [3] [4] | [5] [6] [7] [8] [9]}\n", false },
-    // The outer body requires rescan rather than painting its arguments on direct output. An inner self name must
-    // already be painted when the later invocation supplies its parentheses.
-    { "invocations in arguments retain paint through outer rescan",
-      "#define F(x) T(x)\n#define T(x) x (2)\n#define S(x) x S\nF(S(1))\n",
-      0, "c17", "1 S (2)\n", false },
-    // An empty invocation leaves name-space pending. A plain run consumes it before another invocation, then a later
-    // stringification observes the space between 'a' and 'b', even though no source space follows the empty call.
-    { "invocations in arguments pass pending space to an intervening run",
-      "#define F(x) S(x)\n#define S(x) #x\n#define E(x,y) x ## y\n#define G(x) [x]\nF(a E(,)b G(1))\n",
-      0, "c17", "\"a b [1]\"\n", false },
-    // A plain argument does not authorize in-place expansion when the nested body's name itself still expands.
-    { "invocations in arguments leave expanding body names to rescan",
-      "#define F(x) [x]\n#define G(x) X x\n#define X 9\nF(G(2))\n",
-      0, "c17", "[9 2]\n", false },
-    // A poisoned name a paste makes, at the end of a chain and in its middle, collected (a file's text with a poisoned
-    // name takes the main loop's path).
-    { "poisoned names a template pastes",
-      "#define C(a, b) a ## b\n#define C3(a, b, c) a ## b ## c\n#define W(a, b) [C(a, b)]\n#define W3(a, b, c) [C3(a, b, c)]\n#pragma GCC poison foobar\nW(foo, bar) W3(foo, bar, baz) W(foo, ba)\n",
-      0, "c17", "[foobar] [foobarbaz] [fooba]\n", true, 0, 0, 0, 0, 0 },
-    { "an alias's invocation", "#define F(x) x\n#define ALIAS F\nALIAS (7)\n", 0, "c17", "7\n", false },
-    { "adjacent tokens don't paste", "#define PLUS +\n+PLUS\n", 0, "c17", "+ +\n", false },
-    { "an unused argument isn't expanded", "#define BAD(x,y) x\n#define DROP(x) 0\nDROP(BAD(1))\n", 0, "c17", "0\n", false },
-    { "a stringized argument isn't expanded", "#define BAD(x,y) x\n#define S(x) #x\nS(BAD(1))\n", 0, "c17", "\"BAD(1)\"\n", false },
-    { "defined function-like and bare names in conditions", "#define VALUE 1\n#define F(x) x\n#define EMPTY\n#if VALUE && F(1) && EMPTY(1) && !MISSING && !F\nkept\n#endif\n",
-      0, "c17", "kept\n", false },
-    { "undefined calls in skipped conditional groups remain skipped", "#if 0\n#if MISSING(1)\n#endif\n#elif 1\nkept\n#elif UNKNOWN(2)\nbad\n#endif\n",
-      0, "c23", "kept\n", false },
-    { .name = "C23 keyword spellings before parentheses are undefined macro calls", .source = "#if true(1)\n#endif\n#if false(1)\n#endif\n#if nullptr(1)\n#endif\nafter\n",
-      .standard = "c23", .expected = "after\n", .fails = true, .errors = 3 },
-    { .name = "embed limit diagnoses an undefined function-like name", .source = "#embed \"other.h\" limit(MISSING(1))\nafter\n", .other = "",
-      .standard = "c23", .expected = "after\n", .fails = true, .errors = 1 },
-    { "a dead arm's macros still expand", "#define BAD(x,y) x\n#if 0 && BAD(1)\n#endif\n", 0, "c17", "", true },
-    { "a dead arm's division isn't evaluated", "#if 0 && (1/0)\nx\n#else\ny\n#endif\n", 0, "c17", "y\n", false },
-    { "a dead arm's division skips an #error", "#if 0 && (1/0)\n#error unexpected\n#endif\nint x;\n", 0, "c17", "int x;\n", false },
-    { "a pp-number without exponent digits in a skipped group", "#if 0\nint discarded=1e+;\n#endif\nint retained;\n", 0, "c17", "int retained;\n", false },
-    // 1e+ stays one pp-number: the error ("exponent has no digits") is the parser's.
-    { "a pp-number without exponent digits", "int x=1e+;\n", 0, "c17", "int x=1e+;\n", false },
-    // Redefinitions are compared by spelling (1 and 01, [ and <:, parameter names) and whitespace, after splices: GCC
-    // and clang warn about A, B and C only.
-    { "redefinitions with other spellings", "#define A 1\n#define A 01\n#define B [\n#define B <:\n#define C(x) x\n#define C(y) y\n#define D (1 + 2)\n"
-                                            "#define D (1 + 2)\n#define E(x) x\n#define E(x)  x\n#define F(x) x  +  1\n#define F(x) x + 1\n#define G 1\\\n0\n"
-                                            "#define G 10\n#define H \"a\\\nb\"\n#define H \"ab\"\nA B C(3) D E(4) F(5) G H\n",
-      0, "c17", "01 <: 3 (1 + 2) 4 5 + 1 10 \"ab\"\n", false, 3 },
-    { "true in C17", "#if true\nyes\n#else\nno\n#endif\n", 0, "c17", "no\n", false },
-    { "true in C23", "#if true\nyes\n#else\nno\n#endif\n", 0, "c23", "yes\n", false },
-    { "__VA_OPT__ of an argument that expands to nothing", "#define EMPTY\n#define V(...) 1 __VA_OPT__(+ 2)\nV()\nV(EMPTY)\nV(x)\n", 0, "c23", "1\n1\n1 + 2\n", false },
-    // Probes of clang (docs/c-preprocessor.md).
-    { "GNU comma and __VA_OPT__", "#define F(x, ...) f(x __VA_OPT__(,) __VA_ARGS__)\nF(1) F(1,2) F(1,)\n#define C(a,...) g(a, ## __VA_ARGS__)\nC(1) C(1,) C(1,2)\n",
-      0, "c23", "f(1) f(1, 2) f(1)\ng(1) g(1,) g(1,2)\n", false },
-    { "pastes", "#define CAT(a,b) a##b\nCAT(x,y) CAT(,y) CAT(x,) CAT(,) CAT(1,e) CAT(<,<=) CAT(+,) CAT(L, \"x\") CAT(1,.e+)\n", 0, "c17",
-      "xy y x 1e <<= + L\"x\" 1. e+\n", false },
-    { "stringize spacing and escapes", "#define H(x) # x\nH(  a   \"\\n\"  ) H() H( + ) H('\\'' @ L\"x\")\n", 0, "c17",
-      "\"a \\\"\\\\n\\\"\" \"\" \"+\" \"'\\\\'' @ L\\\"x\\\"\"\n", false },
-    { "a function-like name without arguments", "#define EMPTY\n#define LPAREN (\n#define f(x) [x]\nf EMPTY (1)\nf LPAREN 2)\n#define g f\ng(3)\n", 0, "c17",
-      "f (1)\nf ( 2)\n[3]\n", false },
-    { "builtins", "a __COUNTER__ __COUNTER__ __INCLUDE_LEVEL__ __has_attribute(noreturn) __has_builtin(__builtin_expect) __has_feature(c_static_assert)\n"
-                  "#define X noreturn\n#if __has_attribute(X) && __has_include(\"other.h\") && !__has_include(\"missing.h\") && defined X && !defined(Y)\nb\n#endif\n"
-                  "#define G(x) __LINE__ x\nint a = G(\n1\n);\n",
-      "", "c17", "a 0 1 0 1 1 1\nb\nint a = 9 1;\n", false },
-    { "include guard and #pragma once", "#include \"other.h\"\n#include \"other.h\"\nother_t x;\n",
-      "#ifndef OTHER_H\n#define OTHER_H\ntypedef int other_t;\n#endif\n", "c17", "typedef int other_t;\nother_t x;\n", false },
-    { "pragmas", "#pragma once\n#pragma GCC system_header\n#pragma STDC FP_CONTRACT ON\n#define P(x) _Pragma(#x) after\nP(omp parallel for)\n#pragma push_macro(\"X\")\n"
-                 "#define X 1\n#pragma pop_macro(\"X\")\nX\n",
-      0, "c17", "#pragma STDC FP_CONTRACT ON\n#pragma omp parallel for\nafter\nX\n", false, 2 },
-    { "#if arithmetic", "#if -1 < 0u\nunsigned\n#endif\n#if (2 || 1/0) && (0 ? 1/0 : 3) == 3 && 0x10 == 16 && 010 == 8 && 0b101 == 5 && 1'000 == 1000 && 'A' == 65 && '\\377' < 0\nok\n#endif\n"
-                     "#if (-9223372036854775807 - 1) / -1 == (-9223372036854775807 - 1) && 18446744073709551615u == -1\nwraps\n#endif\n#if 1 ? 2 : 3 ? 4 : 5\nternary\n#endif\n",
-      0, "c23", "ok\nwraps\nternary\n", false, 2 },
-    { "#elif chains and nesting", "#define A 2\n#if A == 1\none\n#elif A == 2\n#ifdef A\ntwo\n#else\nnot\n#endif\n#elif 1/0\nthree\n#else\nfour\n#endif\n#ifndef B\nb\n#elifdef A\nno\n#endif\n",
-      0, "c23", "two\nb\n", false },
-    // Argument scanning past its fast path's limits: an argument across two 64-token blocks, parentheses nested 70 deep,
-    // 70 arguments, and a variadic argument of 69 commas.
-    { "an argument across blocks", "#define F(a, b) [a | b]\nF(( 1 , 2 , 3 , 4 , 5 , 6 , 7 , 8 , 9 , 10 , 11 , 12 , 13 , 14 , 15 , 16 , 17 , 18 , 19 , 20 , 21 , 22 , 23 , 24 , 25 , 26 , 27 , 28 , 29 , 30 , 31 , 32 , 33 , 34 , 35 ), x)\nF(x, ( 1 , 2 , 3 , 4 , 5 , 6 , 7 , 8 , 9 , 10 , 11 , 12 , 13 , 14 , 15 , 16 , 17 , 18 , 19 , 20 , 21 , 22 , 23 , 24 , 25 , 26 , 27 , 28 , 29 , 30 , 31 , 32 , 33 , 34 , 35 ))\n", 0, "c17",
-      "[( 1 , 2 , 3 , 4 , 5 , 6 , 7 , 8 , 9 , 10 , 11 , 12 , 13 , 14 , 15 , 16 , 17 , 18 , 19 , 20 , 21 , 22 , 23 , 24 , 25 , 26 , 27 , 28 , 29 , 30 , 31 , 32 , 33 , 34 , 35 ) | x]\n[x | ( 1 , 2 , 3 , 4 , 5 , 6 , 7 , 8 , 9 , 10 , 11 , 12 , 13 , 14 , 15 , 16 , 17 , 18 , 19 , 20 , 21 , 22 , 23 , 24 , 25 , 26 , 27 , 28 , 29 , 30 , 31 , 32 , 33 , 34 , 35 )]\n", false },
-    { "parentheses nested 70 deep", "#define F(a, b) [a | b]\nF(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))), y)\n", 0, "c17", "[((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((x)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) | y]\n", false },
-    { "70 arguments", "#define M(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35, a36, a37, a38, a39, a40, a41, a42, a43, a44, a45, a46, a47, a48, a49, a50, a51, a52, a53, a54, a55, a56, a57, a58, a59, a60, a61, a62, a63, a64, a65, a66, a67, a68, a69) a0 a69\nM(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69)\n#define V(first, ...) <first> __VA_ARGS__\nV(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69)\n", 0, "c17",
-      "0 69\n<0> 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69\n", false },
-    // Conditional pairing across 32-directive blocks: 40 nested groups, and a group with 100 directives inside.
-    { "conditionals nested 40 deep", "#if 1\na0\n#if 1\na1\n#if 1\na2\n#if 1\na3\n#if 1\na4\n#if 1\na5\n#if 1\na6\n#if 1\na7\n#if 1\na8\n#if 1\na9\n#if 1\na10\n#if 1\na11\n#if 1\na12\n#if 1\na13\n#if 1\na14\n#if 1\na15\n#if 1\na16\n#if 1\na17\n#if 1\na18\n#if 1\na19\n#if 1\na20\n#if 1\na21\n#if 1\na22\n#if 1\na23\n#if 1\na24\n#if 1\na25\n#if 1\na26\n#if 1\na27\n#if 1\na28\n#if 1\na29\n#if 1\na30\n#if 1\na31\n#if 1\na32\n#if 1\na33\n#if 1\na34\n#if 1\na35\n#if 1\na36\n#if 1\na37\n#if 1\na38\n#if 1\na39\ncore\n#else\nb39\n#endif\n#else\nb38\n#endif\n#else\nb37\n#endif\n#else\nb36\n#endif\n#else\nb35\n#endif\n#else\nb34\n#endif\n#else\nb33\n#endif\n#else\nb32\n#endif\n#else\nb31\n#endif\n#else\nb30\n#endif\n#else\nb29\n#endif\n#else\nb28\n#endif\n#else\nb27\n#endif\n#else\nb26\n#endif\n#else\nb25\n#endif\n#else\nb24\n#endif\n#else\nb23\n#endif\n#else\nb22\n#endif\n#else\nb21\n#endif\n#else\nb20\n#endif\n#else\nb19\n#endif\n#else\nb18\n#endif\n#else\nb17\n#endif\n#else\nb16\n#endif\n#else\nb15\n#endif\n#else\nb14\n#endif\n#else\nb13\n#endif\n#else\nb12\n#endif\n#else\nb11\n#endif\n#else\nb10\n#endif\n#else\nb9\n#endif\n#else\nb8\n#endif\n#else\nb7\n#endif\n#else\nb6\n#endif\n#else\nb5\n#endif\n#else\nb4\n#endif\n#else\nb3\n#endif\n#else\nb2\n#endif\n#else\nb1\n#endif\n#else\nb0\n#endif\n", 0, "c17", "a0\na1\na2\na3\na4\na5\na6\na7\na8\na9\na10\na11\na12\na13\na14\na15\na16\na17\na18\na19\na20\na21\na22\na23\na24\na25\na26\na27\na28\na29\na30\na31\na32\na33\na34\na35\na36\na37\na38\na39\ncore\n", false },
-    { "a group around 50 others", "#if 0\n#ifdef X0\nx0\n#endif\n#ifdef X1\nx1\n#endif\n#ifdef X2\nx2\n#endif\n#ifdef X3\nx3\n#endif\n#ifdef X4\nx4\n#endif\n#ifdef X5\nx5\n#endif\n#ifdef X6\nx6\n#endif\n#ifdef X7\nx7\n#endif\n#ifdef X8\nx8\n#endif\n#ifdef X9\nx9\n#endif\n#ifdef X10\nx10\n#endif\n#ifdef X11\nx11\n#endif\n#ifdef X12\nx12\n#endif\n#ifdef X13\nx13\n#endif\n#ifdef X14\nx14\n#endif\n#ifdef X15\nx15\n#endif\n#ifdef X16\nx16\n#endif\n#ifdef X17\nx17\n#endif\n#ifdef X18\nx18\n#endif\n#ifdef X19\nx19\n#endif\n#ifdef X20\nx20\n#endif\n#ifdef X21\nx21\n#endif\n#ifdef X22\nx22\n#endif\n#ifdef X23\nx23\n#endif\n#ifdef X24\nx24\n#endif\n#ifdef X25\nx25\n#endif\n#ifdef X26\nx26\n#endif\n#ifdef X27\nx27\n#endif\n#ifdef X28\nx28\n#endif\n#ifdef X29\nx29\n#endif\n#ifdef X30\nx30\n#endif\n#ifdef X31\nx31\n#endif\n#ifdef X32\nx32\n#endif\n#ifdef X33\nx33\n#endif\n#ifdef X34\nx34\n#endif\n#ifdef X35\nx35\n#endif\n#ifdef X36\nx36\n#endif\n#ifdef X37\nx37\n#endif\n#ifdef X38\nx38\n#endif\n#ifdef X39\nx39\n#endif\n#ifdef X40\nx40\n#endif\n#ifdef X41\nx41\n#endif\n#ifdef X42\nx42\n#endif\n#ifdef X43\nx43\n#endif\n#ifdef X44\nx44\n#endif\n#ifdef X45\nx45\n#endif\n#ifdef X46\nx46\n#endif\n#ifdef X47\nx47\n#endif\n#ifdef X48\nx48\n#endif\n#ifdef X49\nx49\n#endif\n#else\nok\n#endif\n", 0, "c17", "ok\n", false },
-    // Unbalanced groups, which the vectorized pairing leaves to the stack.
-    { "an #endif too many", "#if 1\na\n#endif\n#endif\nb\n", 0, "c17", "", true },
-    { "an #elif after #else", "#if 0\na\n#else\nb\n#elif 1\nc\n#endif\n", 0, "c17", "", true },
-    { "an unterminated group", "#if 1\na\n#if 0\nb\n#endif\n", 0, "c17", "", true },
-    // The main loop's frames: directives among a macro's arguments (a #if line expanded there, a #define), which the main
-    // loop collects a token at a time; builtins' operands from other contexts, and a #define in one; _Pragma from a
-    // macro; a computed #include; #line with a macro, and a line marker.
-    { "directives among a macro's arguments", "#define F(a, b) [a | b]\n#define ONE 1\nF(x,\n#if ONE + 1 == 2\nyes\n#else\nno\n#endif\n)\nF(\n#ifdef ONE\np\n#endif\n, q)\nF(r,\n#define LATE 7\nLATE)\nLATE\n#define G F\nG(\n#if defined(ONE) && __has_include(\"other.h\")\ns\n#endif\n, t)\n", "", "c17", "[x | yes]\n[p | q]\n[r | 7]\n7\n[s | t]\n", false },
-    { "builtins' operands, a computed #include and #line", "#define H __has_attribute\nint a = H(noreturn) + H(\nnot_an_attribute\n);\nint b = __has_attribute(\n#define Z 1\nnoreturn) + Z;\n#define PR _Pragma\nPR(\"message(\\\"hi\\\")\") after\n#define HDR \"other.h\"\n#include HDR\n#define N 100\n#line N\nint line = __LINE__;\n# 50 \"renamed.c\"\nint again = __LINE__;\n#if __has_include(HDR) && !__has_include(\"missing.h\")\nboth\n#endif\n", "typedef int other_t;\n", "c17",
-      "int a = 1 + 0;\nint b = 1 + 1;\n#pragma message(\"hi\")\nafter\ntypedef int other_t;\nint line = 100;\nint again = 50;\nboth\n", false, 1 },
-    { "unterminated invocation", "#define f(x) x\nf(1\n", 0, "c17", "", true },
-    // An identifier is printed as it is interned (a UCN as UTF-8), but stringized as written, without its splices.
-    { "identifiers written with UCNs and splices", "#define S(x) #x\ncaf\\u00e9 S(caf\\u00e9) S(caf\xC3\xA9) S(fo\\\no) S(\\U000000E9t\\\n\\u00e9)\n", 0,
-      "c17", "caf\xC3\xA9 \"caf\\u00e9\" \"caf\xC3\xA9\" \"foo\" \"\\U000000E9t\\u00e9\"\n", false },    // Review fixes (#193): a missing header by absolute path, as __has_include asks and as #include and -include name it
-    // (an error, not a crash).
-    { "a missing absolute header", "#if __has_include(\"/buster-missing-directory/absent.h\") || __has_include(</buster-missing-directory/absent.h>)\nfound\n#else\nmissing\n#endif\n",
-      0, "c17", "missing\n", false, 0, 0, 0 },
-    // __VA_OPT__ on either side of ## (C 6.10.5.2): a placemarker when it gives no tokens, else its first or last token
-    // pasted; an empty argument at an end of its content is a placemarker there (P1, P2), and content of placemarkers
-    // alone gives none (P4(, , 1): clang's ab, where GCC gives a b).
-    { "__VA_OPT__ next to ##", "#define E1 z\n#define EMPTY\n#define F(...) __VA_OPT__(x) ## y\nF() F(1)\n#define G(...) prefix __VA_OPT__(x) ## y\nG() G(1)\n#define H(...) __VA_OPT__() ## y\nH() H(1)\n#define R(...) a ## __VA_OPT__(b c)\nR() R(1)\n#define S(...) a ## __VA_OPT__(__VA_ARGS__ q)\nS() S(E1) S(1 2)\n#define T(x, ...) __VA_OPT__(x) ## x\nT(1) T(1, 2)\n#define U(...) __VA_OPT__(a ## b) ## c\nU() U(1)\n#define W(...) __VA_OPT__(x)##__VA_OPT__(y)\nW() W(1)\n#define X(a, ...) a ## __VA_OPT__(a) ## a\nX(1) X(1, 2)\n#define Y(...) __VA_OPT__(__VA_ARGS__) ## y\nY() Y(E1) Y(1 2) Y(E1 E1)\n#define Z(p, ...) p ## __VA_OPT__() ## p\nZ(1) Z(1, 2)\n#define P(...) __VA_OPT__(x y) ## __VA_OPT__(z w)\nP() P(1)\n#define P1(x, ...) __VA_OPT__(a x) ## y\nP1(E1, 1) P1(EMPTY, 1) P1(, 1)\n#define P2(x, ...) a ## __VA_OPT__(x b)\nP2(, 1) P2(E1, 1) P2(c, 1)\n#define P4(x, y, ...) a ## __VA_OPT__(x y) ## b\nP4(, , 1) P4(c, , 1) P4(, d, 1) P4(c, d, 1)\n#define S2(...) L ## #__VA_OPT__(a b)\nS2() S2(1)\n#define V2(...) w __VA_OPT__( __VA_ARGS__ ) ## v\nV2() V2( 1 ) V2(1 2)\n",
-      0, "c23", "y xy\nprefix y prefix xy\ny y\na ab c\na az q a1 2 q\n1 11\nc abc\nxy\n11 111\ny zy 1 2y z zy\n11 11\nx yz w\na zy a y a y\na b az b ac b\nab ac b a db ac db\nL\"\" L\"a b\"\nw v w 1v w 1 2v\n", false, 0, 0, 0 },
-    // An empty expansion's or empty argument's leading space goes to the next token, as clang does.
-    { "spaces through empty expansions", "#define EMPTY\n#define S(x) #x\n#define EXPAND(x) S(x)\nEXPAND(a EMPTY+b)\n#define F(x) a x+b\nEXPAND(F())\n#define G()\nEXPAND(a G()+b)\n#define H(x) a x\nEXPAND(H()+b)\n#define E2 EMPTY\nEXPAND(a E2+b)\n#define J(x, y) [x y]\nEXPAND(J(, +))\n#define K(x) x\nEXPAND(a K()+b)\n#define V(...) a __VA_OPT__(b)c\nEXPAND(V() V(1))\n",
-      0, "c23", "\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"a +b\"\n\"[ +]\"\n\"a +b\"\n\"a c a bc\"\n", false, 0, 0, 0 },
-    // #if and #elif lines that pp_condition_direct evaluates without a capture: names through chains of object-like
-    // macros to numbers and to names of no macro, defined X and defined(X), C23's true through a macro, and a
-    // self-referential name, which it leaves to the capture.
-    { "#if lines without a capture", "#define ONE 1\n#define TWO 2\n#define CHAIN ONE\n#define CHAIN2 CHAIN\n#define NAME undefined_name\n#define TRUE_NAME true\n#define SELF SELF\n#if CHAIN2 + TWO == 3 && defined(ONE) && defined TWO && !defined(THREE)\na\n#elif CHAIN\nb\n#endif\n#if NAME || SELF\nc\n#elif defined CHAIN2 && CHAIN2 > 0\nd\n#endif\n#if TRUE_NAME\ne\n#endif\n#if 0\n#elif TWO*TWO == 4\nf\n#endif\n#ifdef ONE\n#if ONE ? CHAIN : TWO\ng\n#endif\n#endif\n",
-      0, "c23", "a\nd\ne\nf\ng\n", false },
-    // Names on such lines that pp_condition_direct leaves to the capture without reading their bodies (#410's review): an
-    // empty object-like macro, one defined at the end of an included file (its body begins at the file's last token), a
-    // builtin, a function-like macro and one that pastes; and an empty one alone, an error.
-    { "#if lines of macros without a body of one token", "#include \"other.h\"\n#define EMPTY\n#define ZERO 0\n#define F() 1\n#define P 1 ## 0\n#if EMPTY 1\na\n#endif\n#if EMPTY_LAST 2 == 2 && ZERO == 0\nb\n#endif\n#if __LINE__ > 0\nc\n#endif\n#if F() == 1\nd\n#endif\n#if P == 10\ne\n#endif\n",
-      "#define EMPTY_LAST\n", "c17", "a\nb\nc\nd\ne\n", false },
-    { "#if of an empty macro", "#define EMPTY\n#if EMPTY\nx\n#endif\ny\n", 0, "c17", "y\n", true, 0, 0, 0, 0, 1 },
-    // Invocations read from a file's text whose names have no space before them: an empty expansion's trailing space, and
-    // a nonempty one's, go to the next token (pp_invoke_file's, as pp_finish_simple's).
-    { "spaces after invocations in a file's text", "#define E(a, b) a b\n#define F(a, b, c) [a b c]\n#define G(a)\n#define H(a, b) a b\nx=E(,)+1;\ny=E( , )-2;\nz=F(,,)*3;\nw=G(1)+4;\nv=H(,)H(,)5;\nu=H(1,)+6;\n",
-      0, "c17", "x= +1;\ny= -2;\nz=[ ]*3;\nw=+4;\nv= 5;\nu=1 +6;\n", false },
-    { "__has_include in a macro's argument in #if", "#define ID(x) x\n#if ID(__has_include(\"other.h\")) && ID(!__has_include(\"missing.h\"))\npresent\n#else\nabsent\n#endif\n",
-      "x\n", "c17", "present\n", false, 0, 0, 0 },
-    { "header names with line splices", "#include \"oth\\\ner.h\"\n#include <oth\\\ner.h>\n",
-      "spliced\n", "c17", "spliced\nspliced\n", false, 0, "-I %d", 0 },
-    { "a repeated -I and #include_next", "#include <wrapper.h>\n",
-      0, "c17", "LAYER_ONE\nLAYER_TWO\n", false, 0, "-I %d/first -I %d/first -I %d/second -I %d/first", pp_test_files_include_next },
-    { "_Pragma of a macro", "#define P \"omp parallel for\"\n_Pragma(P)\n#define Q(x) _Pragma(x)\nQ(\"STDC FP_CONTRACT ON\")\n#define R _Pragma(P)\nR after\n",
-      0, "c17", "#pragma omp parallel for\n#pragma STDC FP_CONTRACT ON\n#pragma omp parallel for\nafter\n", false, 0, 0, 0 },
-    { "#line without a file name", "#line 100 \"virtual.h\"\n#line 200\n__FILE__ __LINE__\n# 300\n__FILE__ __LINE__\n",
-      0, "c17", "\"virtual.h\" 200\n\"virtual.h\" 300\n", false, 0, 0, 0 },
-    { "__is_identifier", "#define M int\n__is_identifier(x) __is_identifier(int) __is_identifier(M) __is_identifier(1) __is_identifier(+) __is_identifier(bool) __is_identifier(__attribute__) __is_identifier(defined) __is_identifier(typeof) __is_identifier(asm)\n",
-      0, "gnu17", "1 0 1 0 0 1 0 1 0 0\n", false, 0, 0, 0 },
-    { "__is_identifier in C23", "__is_identifier(bool) __is_identifier(typeof) __is_identifier(asm) __is_identifier(restrict) __is_identifier(inline)\n",
-      0, "c23", "0 0 1 0 0\n", false, 0, 0, 0 },
-    // GNU's keywords follow the last -f[no-]gnu-keywords, or else the last of GCC's -f[no-]asm, or else the mode (#281).
-    { "-fno-gnu-keywords", "__is_identifier(asm) __is_identifier(typeof) __is_identifier(inline)\n", 0, "gnu89", "1 1 1\n", false, 0, "-fno-gnu-keywords", 0 },
-    { "-fasm in c89", "__is_identifier(asm) __is_identifier(typeof) __is_identifier(inline)\n", 0, "c89", "0 0 0\n", false, 0, "-fasm", 0 },
-    { "-fgnu-keywords before -fno-asm", "__is_identifier(asm) __is_identifier(typeof)\n", 0, "c17", "0 0\n", false, 0, "-fgnu-keywords -fno-asm", 0 },
-    { "-fno-gnu-keywords in C23", "__is_identifier(asm) __is_identifier(typeof)\n", 0, "c23", "1 0\n", false, 0, "-fasm -fno-gnu-keywords", 0 },
-    // '$' is punctuation in C with -fno-dollars-in-identifiers, as in assembly, which -fdollars-in-identifiers gives
-    // identifiers with '$' (#281).
-    { "-fno-dollars-in-identifiers", "#define bb BB\n#define S(x) #x\naa$bb 1$bb $bb S(aa$bb) S($ bb$) S(caf\\u00e9$bb)\n", 0, "c17",
-      "aa $ BB 1 $ BB $ BB \"aa$bb\" \"$ bb$\" \"caf\\u00e9$bb\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
-    { "pasting '$' as punctuation", "#define cat(a, b) a ## b\ncat(x, $)\n", 0, "c17", "x $\n", true, 0, "-fdollars-in-identifiers -fno-dollars-in-identifiers", 0 },
-    { "-fdollars-in-identifiers in assembly", "#define bb BB\naa$bb $bb\n", 0, "gnu17", "aa$bb $bb\n", false, 0, "-x assembler-with-cpp -fdollars-in-identifiers", 0 },
-    // What follows a '$' joins the tokens after it as clang lexes them (#283's review): a literal's prefix (u8'x' only
-    // from C23), and a pp-number's continuation; and a quote C23's digit separators free, which takes the rest of the line.
-    { "'$' before prefixed literals and pp-numbers", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "c17",
-      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$changed'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
-    { "'$' before prefixed literals in C23", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "c23",
-      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$u8'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
-    { "'$' before prefixed literals in assembly", "#define L changed\n#define u changed\n#define U changed\n#define u8 changed\n#define e changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\"x\") S($u\"x\") S($U'x') S($u8\"x\") S(a$L\"x\") S($u8'x') S($1.e) S(x$1.5) S(1$e+5)\n", 0, "gnu17",
-      "\"$L\\\"x\\\"\" \"$u\\\"x\\\"\" \"$U'x'\" \"$u8\\\"x\\\"\" \"a$L\\\"x\\\"\" \"$changed'x'\" \"$1.e\" \"x$1.5\" \"1$changed+5\"\n", false, 0, "-x assembler-with-cpp", 0 },
-    { "'$' before a prefixed literal across a line splice", "#define L changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\\\n\"y\") $L\\\n\"z\"\n", 0, "c17", "\"$L\\\"y\\\"\" $ L\"z\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
-    { "'$' before a prefixed literal across a line splice in assembly", "#define L changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\nS($L\\\n\"y\") $L\\\n\"z\"\n", 0, "gnu17", "\"$L\\\"y\\\"\" $ L\"z\"\n", false, 0, "-x assembler-with-cpp", 0 },
-    { "a quote after '$' that a digit separator frees", "#define x X\n$1'2' + x\nnext x\n", 0, "c23", "$ 1'2 ' + x\nnext X\n", false, 0, "-fno-dollars-in-identifiers", 0 },
-    // Character constants in #if are unsigned with -funsigned-char (or -fno-signed-char), and a multi-character one's
-    // first byte isn't sign-extended (#281).
-    { "-funsigned-char in #if", "#if '\\xff' == 255 && 'a' - 'b' > 0 && -'\\x01' > 0 && '\\377\\377' == 65535 && '\\377abc' > 0\nyes\n#endif\n",
-      0, "c17", "yes\n", false, 1, "-fsigned-char -fno-signed-char", 0 },
-    { "signed char in #if", "#if '\\xff' == -1 && 'a' - 'b' < 0 && '\\377\\377' == 65535 && '\\377abc' < 0 && 'abcde' == 0x62636465\nyes\n#endif\n",
-      0, "c17", "yes\n", false, 3, "-funsigned-char -fno-unsigned-char", 0 },
-    // Raw string literals (#285): R and LR ones in GNU modes from C99 on, u8R, uR and UR ones from C11 (whose prefixes
-    // they need), in any mode with -fraw-string-literals and in none with -fno-raw-string-literals, in skipped groups
-    // too; their spellings as written after the opening quote (line splices and trigraphs kept), pasted, stringized
-    // (line breaks as \n), as _Pragma's operand (the body) and #line's and a line marker's file name (the body);
-    // neither a header name nor (from a string) __has_warning's name, but its body; after '$' where '$' is punctuation;
-    // and -E's lines, which count the line breaks in an unknown token (including an invalid raw delimiter) and in no other.
-    { "raw string literals in a GNU mode", "#define R RR\n#define LR LRR\n#define u8R u8RR\n#define uR uRR\n#define UR URR\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" R(h) xR\"(i)\" 1R\"(j)\"\nafter\n", 0, "gnu17", "R\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR\"(i)\" 1R\"(j)\"\nafter\n", false, 0, 0, 0, "# 1 \"%d/case.c\"\n\n\n\n\n\nR\"x(a \"b\n c)x\" LR\"(\\\"\\\\)\" u8R\"(d)\" uR\"(e)\" UR\"y(f)y\" R\"0123456789abcdef(g)0123456789abcdef\" RR(h) xR \"(i)\" 1R\"(j)\"\n\nafter\n" },
-    { "raw string literals in gnu99", "#define uR uRR\n#define UR URR\n#define u8R u8RR\nR\"(a)\" LR\"(b)\" uR\"(c)\" UR\"(d)\" u8R\"(e)\"\n", 0, "gnu99", "R\"(a)\" LR\"(b)\" uRR \"(c)\" URR \"(d)\" u8RR \"(e)\"\n", false, 0, 0, 0 },
-    { "no raw string literals in an ISO mode", "#define R RR\n#define LR LRR\nR\"(a)\" LR\"(b)\"\n", 0, "c17", "RR \"(a)\" LRR \"(b)\"\n", false, 0, 0, 0 },
-    { "-fraw-string-literals in an ISO mode", "#define R RR\nR\"(a)\" u8R\"(b)\" R\"(?\?=)\" ?\?=\n", 0, "c17", "R\"(a)\" u8R\"(b)\" R\"(?\?=)\" #\n", false, 0, "-fraw-string-literals", 0 },
-    { "-fno-raw-string-literals in a GNU mode", "#define R RR\nR\"(a)\"\n", 0, "gnu17", "RR \"(a)\"\n", false, 0, "-fno-raw-string-literals", 0 },
-    { "raw string literals over lines and directives", "#if 0\nR\"(\n#endif\n)\"\n#endif\nR\"(\n#define X 1\n)\" X\nafter\n", 0, "gnu17", "R\"(\n#define X 1\n)\" X\nafter\n", false, 0, 0, 0 },
-    { "raw string literals keep their splices and trigraphs", "a R\"(x\\\ny?\?=)\" b ?\?=\nL\\\nR\"(z\\\nw)\" c\n", 0, "c17", "a R\"(x\\\ny?\?=)\" b #\nLR\"(z\\\nw)\" c\n", false, 0, "-fraw-string-literals", 0 },
-    { "raw string literals pasted and stringized", "#define CAT(a,b) a##b\n#define S(x) #x\nCAT(R,\"(x)\") CAT(L,R\"(y)\") CAT(u8,R\"(z)\") S(R\"(a\nb)\") S(R\"x(e\"f\\)x\") S(LR\"(\\\n)\")\n", 0, "gnu17", "R\"(x)\" LR\"(y)\" u8R\"(z)\" \"R\\\"(a\\nb)\\\"\" \"R\\\"x(e\\\"f\\\\)x\\\"\" \"LR\\\"(\\\\\\n)\\\"\"\n", false, 0, 0, 0 },
-    { "raw string literals in _Pragma, #line and a line marker", "_Pragma(R\"(omp parallel for)\")\n_Pragma(LR\"x(message(\"ab\"))x\")\n#line 7 R\"(f\\g.c)\"\n__FILE__ __LINE__\n# 9 R\"(h\"i.c)\"\n__FILE__\n", 0, "gnu17", "#pragma omp parallel for\n#pragma message(\"ab\")\n\"f\\\\g.c\" 7\n\"h\\\"i.c\"\n", false, 1, 0, 0 },
-    { "raw string literals in __has_warning", "#if __has_warning(R\"(-Wmisleading-indentation)\") && __has_warning(\"-Wmisleading\" R\"(-indentation)\")\nyes\n#endif\n", 0, "gnu17", "yes\n", false, 0, 0, 0 },
-    { "a raw string literal isn't a header name", "#if __has_include(R\"(other.h)\")\nfound\n#else\nnot\n#endif\n", 0, "gnu17", "not\n", true, 0, 0, pp_test_files_raw_header },
-    { "a raw string literal isn't an #include's header name", "#include R\"(other.h)\"\n", "x\n", "gnu17", "", true, 0, 0, 0 },
-    { "raw string literals after '$' as punctuation", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" 1$e+R\"(e)\" $u8R\"(f)\" $xR\"(g)\"\n", false, 0, "-fno-dollars-in-identifiers", 0 },
-    { "raw string literals after '$' in assembly", "#define R RR\n$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", 0, "gnu17", "$R\"(a\"b)\" 1$R\"(c)\" a$LR\"(d)\" $xR\"(g)\"\n", false, 0, "-x assembler-with-cpp", 0 },
-    { "line breaks in an unknown token and in a raw string literal", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", 0, "gnu17", "R\"x\ny\" z\nw\nR\"(a\nb)\" c\nd\n", true, 0, 0, 0, "# 1 \"%d/case.c\"\nR\"x\ny\" z\nw\nR\"(a\nb)\" c\n\nd\n" },
-    { "invalid raw delimiter keeps its line splice", "R\"a\\\nb\" c\n", 0, "gnu17", "R\"a\\\nb\" c\n", true, 0, 0, 0,
-      "# 1 \"%d/case.c\"\nR\"a\\\nb\" c\n" },
-    { .name = "invalid raw delimiters at active file scope", .source = "R\"bad space\" LR\"bad)\" uR\"bad\\\" UR\"abcdefghijklmnopq\" u8R\"bad\n\"\n",
-      .standard = "gnu17", .expected = "R\"bad space\" LR\"bad)\" uR\"bad\\\" UR\"abcdefghijklmnopq\" u8R\"bad\n\"\n", .fails = true, .errors = 5 },
-    { .name = "unterminated raw literal", .source = "before R\"tag(body\n", .standard = "gnu17", .expected = "before R\"tag(body\n", .fails = true, .errors = 1 },
-    { .name = "invalid raw prefix with phase two splice", .source = "L\\\nR\"bad space\"\n", .standard = "gnu17", .expected = "LR\"bad space\"\n", .fails = true, .errors = 1 },
-    { .name = "unused invalid raw macro diagnoses once", .source = "#define BAD R\"bad space\"\nBAD BAD\n", .standard = "gnu17", .expected = "R\"bad space\" R\"bad space\"\n", .fails = true, .errors = 1 },
-    { .name = "unused invalid raw macro argument diagnoses", .source = "#define DROP(x) kept\nDROP(R\"bad space\")\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
-    { .name = "invalid raw in a condition diagnoses after expansion", .source = "#define DROP(x) 1\n#if DROP(R\"bad space\")\nkept\n#endif\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
-    { .name = "skipped invalid raw literals suppress diagnostics", .source = "#if 0\nR\"bad space\"\n#define BAD LR\"bad)\"\n#endif\nkept\n", .standard = "gnu17", .expected = "kept\n" },
-    { .name = "an untaken elif still diagnoses invalid raw literals", .source = "#if 1\nkept\n#elif R\"bad space\"\n#endif\n", .standard = "gnu17", .expected = "kept\n", .fails = true, .errors = 1 },
-    { .name = "invalid raw syntax is ordinary text with raw disabled", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-fno-raw-string-literals", .expected = "R \"bad space\"\n" },
-    { .name = "invalid raw syntax with forced C89 raw literals", .source = "R\"bad space\"\n", .standard = "c89", .options = "-fraw-string-literals", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
-    { .name = "invalid raw syntax in assembly", .source = "R\"bad space\"\n", .standard = "gnu17", .options = "-x assembler-with-cpp", .expected = "R\"bad space\"\n", .fails = true, .errors = 1 },
-    // Named UCNs (#1447) are their characters where the lexer reads one in a token (pp_test_named_ucns has their errors),
-    // and never read in a skipped group (but a basic or control character's name, which clang diagnoses there), a literal
-    // or a comment, whose text clang's -E keeps as written.
-    { .name = "named UCNs in skipped groups, literals and comments",
-      .source = "#if 0\nint \\N{LATIN SMALL LETTER E WITH ACUTE};\n#define BAD \\N{NOT A NAME}\n#endif\n/* \\N{LATIN SMALL LETTER E WITH ACUTE} */ // \\N{DIGIT ZERO}\n"
-                "\"\\N{LATIN SMALL LETTER E WITH ACUTE}\" '\\N{DIGIT ZERO}' kept\n",
-      .standard = "gnu17", .expected = "\"\\N{LATIN SMALL LETTER E WITH ACUTE}\" '\\N{DIGIT ZERO}' kept\n" },
-    { .name = "a named UCN in an identifier", .source = "int \\N{LATIN SMALL LETTER E WITH ACUTE} = 1;\nint f(void) { return \\u00e9 + \xC3\xA9; }\n", .standard = "gnu17",
-      .expected = "int \xC3\xA9 = 1;\nint f(void) { return \xC3\xA9 + \xC3\xA9; }\n" },
-    { .name = "named UCNs of aliases and names made by rule", .source = "x\\N{LATIN CAPITAL LETTER GHA} \\N{CJK UNIFIED IDEOGRAPH-4E00}\\N{HANGUL SYLLABLE GAG}\n",
-      .standard = "gnu17", .expected = "x\xC6\xA2 \xE4\xB8\x80\xEA\xB0\x81\n" },
-    { .name = "a named UCN in a macro", .source = "#define E \\N{LATIN SMALL LETTER E WITH ACUTE}\nE E\n", .standard = "gnu17", .expected = "\xC3\xA9 \xC3\xA9\n" },
-    { .name = "a named UCN names a macro", .source = "#define \\N{GREEK SMALL LETTER BETA} 3\n\\N{GREEK SMALL LETTER BETA} \\u03b2 \xCE\xB2\n", .standard = "gnu17",
-      .expected = "3 3 3\n" },
-    { .name = "a named UCN in an unused macro argument", .source = "#define DROP(x) kept\nDROP(a\\N{GREEK SMALL LETTER ALPHA})\n", .standard = "gnu17",
-      .expected = "kept\n" },
-    { .name = "a named UCN in #if", .source = "#if \\N{GREEK SMALL LETTER ALPHA} || 1\nkept\n#endif\n", .standard = "gnu17", .expected = "kept\n" },
-    { .name = "a named UCN in #if's character constant", .source = "#if U'\\N{GREEK SMALL LETTER ALPHA}' == 0x3B1 && L'\\N{SNOWMAN}' == 0x2603\nkept\n#endif\n",
-      .standard = "gnu17", .expected = "kept\n" },
-    { .name = "a misspelled named UCN in #if's character constant", .source = "#if L'\\N{LATIN SMALL LETTER E WITH ACUTX}' == 0\n#endif\nkept\n", .standard = "gnu17",
-      .expected = "kept\n", .fails = true, .errors = 1 },
-    { .name = "a basic character's named UCN in #if's character constant", .source = "#if '\\N{DIGIT ZERO}' == 48\nkept\n#endif\n", .standard = "gnu17",
-      .expected = "", .fails = true, .errors = 1 },
-    { .name = "a basic character's named UCN in C23's #if", .source = "#if '\\N{DIGIT ZERO}' == 48\nkept\n#endif\n", .standard = "c23", .expected = "kept\n" },
-    { .name = "named UCNs a line splice splits", .source = "a\\\\\nN{GREEK SMALL LETTER ALPHA} b\\N{GREEK\\\n SMALL LETTER ALPHA} 1\\N{DIGIT ONE}\n",
-      .standard = "gnu17", .expected = "", .fails = true, .errors = 1 },
-    { .name = "names no character has", .source = "a\\N{greek small letter alpha} \\N{NOT A NAME}\n", .standard = "gnu17", .expected = "", .fails = true,
-      .errors = 2 },
-    { .name = "opaque raw-looking query with no lexical overlap", .source = "#define HI __has_include\n#if HI(<R\"bad\"x>)\nbad\n#endif\nafter\n", .standard = "gnu17", .expected = "after\n" },
-    { "raw-looking direct angle header preserves following source", "#include <R\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
-    { "raw strings resume after an opaque direct header", "#include <R\"(x> R\"(a\nb)\"\nafter\n", 0, "gnu17", "header\nafter\n", false, 1, "-I%d", pp_test_files_opaque_raw },
-    { "escaped greater in a raw-looking direct header", "#include <a\\>R\"(x>\nafter\n", 0, "gnu17", "escaped_header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
-    { "spliced raw-looking direct angle header", "#include <R\\\n\"(x>\nafter\n", 0, "gnu17", "header\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
-    { "raw-looking warning text preserves following source", "#warning R\"(\nafter\n", 0, "gnu17", "after\n", false, 1, 0, 0 },
-    { "raw-looking error text preserves following source", "#error R\"(\nafter\n", 0, "gnu17", "after\n", true, 0, 0, 0 },
-    { "repeated raw-looking direct headers use one recovery", "#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\n#include <R\"(x>\nafter\n", 0, "gnu17", "header\nheader\nheader\nheader\nheader\nheader\nheader\nheader\nheader\nafter\n", false, 0, "-I%d", pp_test_files_opaque_raw },
-    { "a macro-named raw header query restores later source", "#define RAW_QUERY __has_include\n#define RAW_BEFORE 11\n#if RAW_QUERY(<R\"(x>)\nhit\n#endif\n#define RAW_AFTER 22\nRAW_BEFORE RAW_AFTER\n",
-      0, "gnu17", "hit 11 22", false, 0, "-I%d", pp_test_files_raw_query },
-    { "successive raw header queries in one condition", "#define RAW_QUERY __has_include\n#if RAW_QUERY(<R\"(x>) && RAW_QUERY(<R\"(x>)\ntwo\n#endif\nafter\n",
-      0, "gnu17", "two after", false, 0, "-I%d", pp_test_files_raw_query },
-    { "a raw header query with a splice", "#define RAW_QUERY __has_include\n#if RAW_QUERY(<R\\\n\"(x>)\nspliced\n#endif\nafter\n",
-      0, "gnu17", "spliced after", false, 0, "-I%d", pp_test_files_raw_query },
-    { "a macro-named raw embed query restores later source", "#define RAW_QUERY __has_embed\n#if RAW_QUERY(<R\"(x>) == 1\nresource\n#endif\nafter\n",
-      0, "gnu23", "resource after", false, 0, "--embed-dir=%d", pp_test_files_raw_query },
-    { "a multiline raw macro argument remains opaque", "#define DROP(x) 1\n#if DROP(R\"(a\nb)\")\nkept\n#endif\nafter\n",
-      0, "gnu17", "kept after", false, 0, 0, 0 },
-    { "raw query private views preserve recursive macro snapshots", "#define RAW_QUERY __has_include\n#include \"raw-view.h\"\nRAW_BEFORE RAW_AFTER\n",
-      0, "gnu17", "outer inner 11 22 11 22", false, 0, "-I%d", pp_test_files_raw_query },
-    { "raw query private views retain once, import and guard identity", "#define RAW_QUERY __has_include\n#include \"raw-once.h\"\n#include \"raw-once.h\"\n#import \"raw-import.h\"\n#import \"raw-import.h\"\n#include \"raw-guard.h\"\n#include \"raw-guard.h\"\nafter\n",
-      0, "gnu17", "once imported guarded after", false, 0, "-I%d", pp_test_files_raw_query },
-    { "an excluded raw-looking direct header stays ordinary text", "#if 0\n#include <R\"(x>\n#endif\nafter\n",
-      0, "gnu17", "", true, 0, "-I%d", pp_test_files_raw_query },
-    { "an excluded raw-looking diagnostic stays ordinary text", "#if 0\n#warning R\"(\n#endif\nafter\n",
-      0, "gnu17", "", true, 0, 0, 0 },
-    { "a malformed raw-looking active diagnostic is opaque", "#warning R\"bad\nafter\n",
-      0, "gnu17", "after", false, 1, 0, 0 },
-    { "a malformed raw-looking excluded diagnostic stays ordinary text", "#if 0\n#warning R\"bad\n#endif\nafter\n",
-      0, "gnu17", "", true, 0, 0, 0 },
-    // c89 lexes neither digraphs nor "//" comments, as clang's -E has it: "%:define" is no directive, a digraph is two
-    // punctuators ("<%=" is '<' and "%=", and "<::>" '<', "::" and '>'), and "//" two slashes, of which the second starts
-    // a block comment before a '*'. Pasting a digraph's characters or "//" forms no token (#288).
-    { "c89 without digraphs or // comments", "%:define D 1\nD <: :> <% %> %: %:%: <%= <::>\na //* c */ b\nx // y\n#define S(x) #x\nS(<:) S(a //* c */ b) S(%:%:)\n#define F(x) %:x\n#define C(a, b) a %:%: b\nF(y) C(p, q)\n#define X a // b\nX\n",
-      0, "c89", "% : define D 1\nD < : : > < % % > % : % : % : < %= < :: >\na / b\nx / / y\n\"<:\" \"a / b\" \"%:%:\"\n% : y p % : % : q\na / / b\n", false, 0, 0, 0 },
-    { "pasting a digraph's characters in c89", "#define P(a, b) a ## b\nP(<, :)\n", 0, "c89", "< :\n", true, 0, 0, 0 },
-    { "pasting // in c89", "#define P(a, b) a ## b\nP(/, /)\n", 0, "c89", "/ /\n", true, 0, 0, 0 },
-    { "pasting %: and %: in c89", "#define P(a, b) a ## b\nP(%:, %:)\n", 0, "c89", "% : % :\n", true, 0, 0, 0 },
-    // C94 (iso9899:199409) is c89 with digraphs, and __STDC_VERSION__ 199409L (#288).
-    { "C94's digraphs without // comments", "%:define D 1\nD __STDC_VERSION__ <%= <::>\nx // y\n#define C(a, b) a %:%: b\n#define F(x) %:x\n#define P(a, b) a ## b\nC(p, q) F(y) P(%:, %:) P(<, :)\n",
-      0, "iso9899:199409", "1 199409L <% = <: :>\nx / / y\npq \"y\" %:%: <:\n", false, 0, 0, 0 },
-    // The last -f[no-]digraphs wins over the mode: c89 with -fdigraphs is C94, C94 with -fno-digraphs is c89 (no
-    // __STDC_VERSION__), and any other mode has no digraphs with -fno-digraphs, but its "//" comments (#288).
-    { "-fdigraphs in c89", "%:define D 1\nD __STDC_VERSION__ x // y\n", 0, "c89", "1 199409L x / / y\n", false, 0, "-fno-digraphs -fdigraphs", 0 },
-    { "-fno-digraphs in C94", "%:define D 1\nD __STDC_VERSION__\n", 0, "iso9899:199409", "% : define D 1\nD __STDC_VERSION__\n", false, 0, "-fdigraphs -fno-digraphs", 0 },
-    { "-fno-digraphs", "%:define D 1\nD <%= <::> a // b\n", 0, "gnu17", "% : define D 1\nD < %= < :: > a\n", false, 0, "-fno-digraphs", 0 },
-    { "-fno-digraphs in gnu89", "%:define D 1\nD __STDC_VERSION__ a // b\n", 0, "gnu89", "% : define D 1\nD __STDC_VERSION__ a\n", false, 0, "-fno-digraphs", 0 },
-    { "short wchar in #if", "#if (L'\\0' - 1) > 0 && L'\\xffff' - 65536 > 0\nyes\n#endif\n",
-      0, "c17", "yes\n", false, 0, "-fno-short-wchar -fshort-wchar", 0 },
-    { "default wchar after short wchar in #if", "#if (L'\\0' - 1) < 0 && L'\\xffff' - 65536 < 0\nyes\n#endif\n",
-      0, "c17", "yes\n", false, 0, "-fshort-wchar -fno-short-wchar", 0 },
-    { "true in C99", "#if true\nyes\n#else\nno\n#endif\n",
-      0, "c99", "no\n", false, 0, 0, 0 },
-    // Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
-    // gives 100), and __BASE_FILE__ in a forced include is <built-in> (GCC gives the main file).
-    { "#line continued on the next line", "#line \\\n100\n__LINE__\n",
-      0, "c17", "101\n", false, 0, 0, 0 },
-    { "__BASE_FILE__ in a forced include", "main\n",
-      "__BASE_FILE__\n", "c17", "\"<built-in>\"\nmain\n", false, 0, "-include %d/other.h", 0 },
-    // #193's re-review: a directory under both -iquote and -I (#include_next goes on from the directory this inclusion
-    // was found in, not the file's first), spliced string literals from macros, pending spaces in #__VA_OPT__,
-    // __BASE_FILE__ after #line (the presumed root, as clang walks to it), and #line continued with its number indented
-    // (clang counts from the line it lexes the number on).
-    { "#include_next through -iquote and -I", "#include \"wrapper.h\"\n",
-      0, "c17", "LAYER_ONE\nLAYER_ONE\nLAYER_TWO\n", false, 0, "-iquote %d/first -I %d/first -I %d/second", pp_test_files_include_next },
-    { "computed header names with line splices", "#define H \"oth\\\ner.h\"\n#include H\n#if __has_include(H) && __has_include(\"oth\\\ner.h\")\nfound\n#endif\n",
-      "spliced\n", "c17", "spliced\nfound\n", false, 0, 0, 0 },
-    { "#__VA_OPT__ after empty arguments", "#define F(x, ...) #__VA_OPT__(a x+b)\nF(, 1)\n#define G(x, ...) #__VA_OPT__(a x+b x-c)\nG(, 1)\n#define K(x, ...) #__VA_OPT__(a x) y\nK(, 1)\n",
-      0, "c23", "\"a +b\"\n\"a +b -c\"\n\"a\" y\n", false, 0, 0, 0 },
-    { "__BASE_FILE__ after #line", "#line 1 \"logical.c\"\n__BASE_FILE__\n#include \"other.h\"\n",
-      "__BASE_FILE__\n", "c17", "\"logical.c\"\n\"logical.c\"\n", false, 0, 0, 0 },
-    { "#line continued, its number indented", "#line \\\n 100\n__LINE__\n#line \\\n200\n__LINE__\n# \\\n 400\n__LINE__\n#line \\\r\n 500\n__LINE__\n",
-      0, "c17", "100\n201\n400\n500\n", false, 0, 0, 0 },
-    // #193's third review: -E's line markers give the presumed positions, as clang's do: #line's numbers and names in
-    // the main file and in an included one, a line that starts with a macro on the line of its name (also when the
-    // invocation spans lines), the line after a _Pragma's pragma, flag 1 and 2 for each file the stack goes into and
-    // back to, 3 for system headers (from -isystem, and after #pragma GCC system_header) on every marker, and names
-    // escaped as clang writes them.
-    { "line markers: #line in the main file and in an included one", "#line 100 \"logical.c\"\nint x;\nint y;\n#line 7\nint z;\n#include \"inc.h\"\nint w;\n",
-      0, "c17", "int x; int y; int z; int in_header; int after; int w;", false, 0, 0, pp_test_files_renamed,
-      "# 1 \"%d/case.c\"\n# 100 \"logical.c\"\nint x;\nint y;\n# 7 \"logical.c\"\nint z;\n# 1 \"%d/inc.h\" 1\nint in_header;\n# 50 \"renamed.h\"\nint after;\n# 9 \"logical.c\" 2\nint w;\n" },
-    { "line markers: lines that start with macros, and the line after _Pragma", "#define E int a;\n#define F(x) x\nE\nE\n\nE\nF(int\nb;)\nc;\n\n\n\n\n\n\n\n\n\n\n\nE\nd;\n_Pragma(\"bar\") t\nu\n",
-      0, "c17", "int a; int a; int a; int b; c; int a; d; #pragma bar\nt u", false, 0, 0, 0,
-      "# 1 \"%d/case.c\"\n\n\nint a;\nint a;\n\nint a;\nint b;\n\nc;\n# 21 \"%d/case.c\"\nint a;\nd;\n#pragma bar\n# 23 \"%d/case.c\"\nt\nu\n" },
-    { "line markers: the include stack, system headers and escaped names", "#include \"a.h\"\nmain_token\n#include <s.h>\n#include \"p.h\"\n#line 5 \"a\\\\b\\\"c.c\"\nescaped\n#line 7 \"\xc3\xb1.c\"\nutf8\n",
-      0, "c17", "a_token b_token a_after main_token sys_first sys_far user_before user_after escaped utf8", false, 0, "-isystem %d/sys", pp_test_files_stack,
-      "# 1 \"%d/case.c\"\n# 1 \"%d/a.h\" 1\na_token\n# 1 \"%d/b.h\" 1\nb_token\n# 3 \"%d/a.h\" 2\na_after\n# 2 \"%d/case.c\" 2\nmain_token\n# 1 \"%d/sys/s.h\" 1 3\nsys_first\n# 12 \"%d/sys/s.h\" 3\nsys_far\n# 4 \"%d/case.c\" 2\n# 1 \"%d/p.h\" 1\nuser_before\n# 3 \"%d/p.h\" 3\nuser_after\n# 5 \"a\\\\b\\\"c.c\" 2\nescaped\n# 7 \"\\303\\261.c\"\nutf8\n" },
-    // #193's third review: GNU comma elision when a variadic macro's only argument is omitted (C17 keeps the comma),
-    // the space before a stringized __VA_OPT__ (outside the string), a definition checked where it is made, the
-    // signedness of UTF-16, UTF-32 and (C23) UTF-8 character constants in #if, the standard features each mode has,
-    // and #line's number and file name read without their line splices, with the file name's escapes decoded (clang
-    // rejects numeric ones).
-    { "comma elision with an omitted sole variadic argument (GNU)", "#define F(...) call(0, ##__VA_ARGS__)\nF()\nF(1)\n#define G(x, ...) call(x, ##__VA_ARGS__)\nG(0)\nG(0,)\nG(0, 1)\n",
-      0, "gnu17", "call(0)\ncall(0,1)\ncall(0)\ncall(0,)\ncall(0, 1)\n", false, 0, 0, 0 },
-    { "comma elision with an omitted sole variadic argument (C17)", "#define F(...) call(0, ##__VA_ARGS__)\nF()\nF(1)\n#define G(x, ...) call(x, ##__VA_ARGS__)\nG(0)\nG(0,)\nG(0, 1)\n",
-      0, "c17", "call(0,)\ncall(0,1)\ncall(0)\ncall(0,)\ncall(0, 1)\n", false, 0, 0, 0 },
-    { "the space before a stringized __VA_OPT__", "#define S(x) #x\n#define E(x) S(x)\n#define F(x, ...) a x#__VA_OPT__(b)\nE(F(, 1))\n#define G(x, ...) a x#__VA_OPT__()\nE(G(, 1))\n#define H(x, ...) a x#__VA_OPT__(b c)\nE(H(, 1))\n#define K(x, ...) a x #__VA_OPT__(b)\nE(K(, 1))\nE(F(, ))\n",
-      0, "c23", "\"a \\\"b\\\"\"\n\"a \\\"\\\"\"\n\"a \\\"b c\\\"\"\n\"a \\\"b\\\"\"\n\"a \\\"\\\"\"\n", false, 0, 0, 0 },
-    { "an unused definition whose # names no parameter", "#define F(x) # y\nOK\n",
-      0, "c17", "", true, 0, 0, 0 },
-    { "UTF-16, UTF-32 and wide character constants' signedness in #if", "#if u'a' < -1\nunsigned_char16\n#else\nwrong_signed_char16\n#endif\n#if U'a' < -1\nunsigned_char32\n#endif\n#if 'a' < -1\nwrong\n#else\nsigned_char\n#endif\n#if L'a' < -1\nwrong\n#else\nsigned_wchar\n#endif\n",
-      0, "gnu17", "unsigned_char16\nunsigned_char32\nsigned_char\nsigned_wchar\n", false, 2, 0, 0 },
-    { "UTF-8 character constants' signedness in #if (C23)", "#if u8'a' < -1\nunsigned_char8\n#else\nwrong_signed_char8\n#endif\n",
-      0, "c23", "unsigned_char8\n", false, 1, 0, 0 },
-    { "standard features in C99", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
-      0, "c99", "0 0 0 0 0 0 0\n1 1 1 1\n", false, 0, 0, 0 },
-    { "standard features in GNU17", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
-      0, "gnu17", "1 1 1 1 1 1 0\n1 1 1 1\n", false, 0, 0, 0 },
-    { "standard features in C23", "__has_feature(c_alignas) __has_feature(c_alignof) __has_feature(c_atomic) __has_feature(c_generic_selections) __has_feature(c_static_assert) __has_feature(c_thread_local) __has_feature(c_fixed_enum)\n__has_extension(c_alignas) __has_extension(c_atomic) __has_extension(c_generic_selections) __has_extension(c_fixed_enum)\n",
-      0, "c23", "1 1 1 1 1 1 1\n1 1 1 1\n", false, 0, 0, 0 },
-    { "#line's operands as phase 2 leaves them", "#line 1\\\n00\n__LINE__\n#line 100 \"virtual\\\n.c\"\n__FILE__\n#line 300 \"a\\\\b.c\"\n__FILE__\n#line 400 \"\\u00f1.c\"\n__FILE__\n#line 500 \"\\n.c\"\n__FILE__\n",
-      0, "c17", "101\n\"virtual.c\"\n\"a\\\\b.c\"\n\"\xc3\xb1.c\"\n\"\\n.c\"\n", false, 0, 0, 0 },
-    { "#line with a numeric escape in its file name", "#line 200 \"\\x76irtual.c\"\n__FILE__\n",
-      0, "c17", "", true, 0, 0, 0 },
-    // Lexing by the language mode, as clang lexes: the u, U and u8 prefixes are C11's (u8 on a character constant C23's),
-    // so before them each is an identifier and the literal after it, a paste that would form one isn't a token, and
-    // trigraphs are replaced in the ISO modes before C23. And the directives clang rejects among a macro's arguments.
-    { "literal prefixes before C11", "#define u [u]\n#define U [U]\n#define u8 [u8]\n#define L [L]\nu'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n",
-      0, "c99", "[u]'a' [U]'a' [u]\"s\" [U]\"s\" [u8]\"s\" [u8]'a' L'a' L\"s\"\n", false, 0, 0, 0 },
-    { "u8 character constants before C23", "#define u [u]\n#define U [U]\n#define u8 [u8]\n#define L [L]\nu'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n",
-      0, "gnu17", "u'a' U'a' u\"s\" U\"s\" u8\"s\" [u8]'a' L'a' L\"s\"\n", false, 0, 0, 0 },
-    { "literal prefixes in C23", "#define u [u]\n#define U [U]\n#define u8 [u8]\n#define L [L]\nu'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n",
-      0, "c23", "u'a' U'a' u\"s\" U\"s\" u8\"s\" u8'a' L'a' L\"s\"\n", false, 0, 0, 0 },
-    { "a paste that forms u8'a' before C23", "#define P(a, b) a ## b\nP(u8, 'a')\n",
-      0, "gnu17", "u8 'a'\n", true, 0, 0, 0 },
-    { "#pragma among a macro's arguments", "#define F(x) [x]\nF(a\n#pragma omp parallel\nb)\nafter\n",
-      0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
-    { "#include among a macro's arguments", "#define F(x) [x]\nF(a\n#include \"other.h\"\nb)\nafter\n",
-      "inside\n", "c17", "[a b]\nafter\n", true, 0, 0, 0 },
-    // Clang's flag for a macro's arguments is one flag, not a depth: an invocation with arguments in a directive among
-    // them clears it, and #pragma and #include are taken after it, the arguments going on past the included file's end
-    // (#109's seed 2106).
-    // #370: FileChanged leaves a header while arguments are collected, before the expansion reaches the printer.
-    // Keep the expansion's presumed line, in the file the callback selected, without changing the actual origins.
-    { "line markers: an invocation crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
-      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, 0, 0,
-      "# 1 \"%d/case.c\"\n# 1 \"%d/other.h\" 1\n# 2 \"%d/case.c\" 2\n[a b]\nafter\n" },
-    { "line markers: an invocation after output crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
-      "#define F(x) [x]\nbefore F(a", "c17", "before [a b] after", false, 0, 0, 0 },
-    { "line markers: argument collection exits two included files", "#include \"outer.h\"\nb)\nafter\n",
-      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, 0, pp_test_files_collecting_exit },
-    { "line markers: argument collection returns to an included file", "#include \"outer.h\"\nafter\n",
-      "#define F(x) [x]\nF(a\n", "c17", "[a b] outer_after after", false, 0, 0, pp_test_files_collecting_return },
-    { "line markers: crossed files keep builtin and presumed locations", "#line 100 \"logical.c\"\n#include \"other.h\"\n__LINE__ __FILE__)\nafter\n",
-      "#define F(x) [x]\n#line 80 \"logical.h\"\nF(__LINE__ __FILE__\n", "c17", "[80 \"logical.h\" 101 \"logical.c\"] after", false, 0, 0, 0 },
-    { "line markers: an empty expansion crosses an included file's end", "#include \"other.h\"\nb)\nafter\n",
-      "#define F(x)\nF(a\n", "c17", "after", false, 0, 0, 0 },
-    { "line markers: an empty expansion crossing an include leaves no output", "#include \"other.h\"\nb)\n",
-      "#define F(x)\nF(a\n", "c17", "", false, 0, 0, 0,
-      "# 1 \"%d/case.c\"\n# 1 \"%d/other.h\" 1\n# 2 \"%d/case.c\" 2\n" },
-    { "line markers: a system include ends while collecting arguments", "#include <other.h>\nb)\nafter\n",
-      "#define F(x) [x]\nF(a\n", "c17", "[a b] after", false, 0, "-isystem %d", 0 },
-    { "line markers: a crossed invocation spans printer batches", "#include \"other.h\"\nb)\nafter\n",
-      "#define F(x) x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x\nF(a\n",
-      "c17", "a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b a b after", false, 0, 0, 0 },
-    { "an invocation in a #if among a macro's arguments clears clang's flag", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#pragma omp parallel\n#include \"other.h\"\nb)\nafter\n",
-      "inside\n", "c17", "#pragma omp parallel\n[a inside b]\nafter\n", false, 0, 0, 0 },
-    { "an object-like macro in a #if among a macro's arguments keeps clang's flag", "#define F(x) [x]\n#define G 1\nF(a\n#if G\n#endif\n#pragma omp parallel\nb)\nafter\n",
-      0, "c17", "[a b]\nafter\n", true, 0, 0, 0 },
-    { "#pragma lines among a macro's arguments after an invocation in a #if", "#define f(x) x\n#define g() 1\n#define h(y) y\nf(a\n#if g()\n#endif\nh(\n#pragma foo\n)\n#pragma bar\nb)\n",
-      0, "c17", "#pragma foo\n#pragma bar\na b\n", false, 0, 0, 0 },
-    { "a file twice by #include among a macro's arguments", "#define F(x) [x]\n#define G() 1\nF(a\n#if G()\n#endif\n#include \"other.h\"\n#include \"other.h\"\nb)\nafter\n",
-      "inside\n", "c17", "[a inside inside b]\nafter\n", false, 0, 0, 0 },
-    { "fuzzing, seed 2106 case 190642: #pragma among arguments after an invocation in a #elif", "#\tdefine ppf_190642_b(\\\n ) \n#define ppf_190642_h( )   \n ppf_190642_h       \f (   \\\n     \n#if   \\\n   ( ppf_190642_f ) \\\n!=  \\\nppf_g1\n#endif\n/**/#ifdef\\\n     \t    \t  /**/  /* c */   ppf_190642_bppf_190642_h\n#elif   \\\n  _Pragma(\"ppf_if\") ppf_190642_e\\\n\?       \f /* c */ppf_190642_b(/*\n*/ ) \\\n ppf_190642_d: ( /**/  (ppf_190642_h ) )>/* c */__has_c_attribute(gnu::unused)\\\n \?/**/ppf_190642_a/* c */:__STDC__\n#pragma          \n#if (\f 1u/**/)\n#endif\n#endif /* c */  \n     ) /**/ \n",
-      0, "c23", "#pragma ppf_if\n#pragma\n", false, 0, 0, 0 },
-    { "trigraphs in the ISO modes before C23", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
-      0, "c17", "1 [ ]\n\"#\" \"[\"\n", false, 0, 0, 0 },
-    { "trigraphs ignored in the GNU modes", "\?\?=define X 1\nX \?\?( \?\?)\n#define S(x) #x\nS(\?\?=) \"\?\?(\"\n",
-      0, "gnu17", "\? \? =define X 1\nX \? \?( \? \?)\n\"\?\?=\" \"\?\?(\"\n", false, 0, 0, 0 },
-    // #202's review: the split prefix's identifier ends before a line splice that comes before the quote, and a stringized
-    // string is final (with trigraphs on, its "??=" stays), while a paste is lexed again, as clang lexes it.
-    { "a line splice before the quote of a split literal", "#define u X\nu\\\n'a'\n#define U Z\nU\?\?/\n'b'\n",
-      0, "c99", "X 'a' Z 'b'\n", false, 0, 0, 0 },
-    { "a line splice before the quote of u8'a' before C23", "#define u8 Y\nu8\\\n'a'\nu\\\n8'c'\n",
-      0, "c17", "Y 'a' Y 'c'\n", false, 0, 0, 0 },
-    { "a trigraph that a stringized argument spells, and one a paste forms", "#define S(x) #x\n#define P(a, b) a ## b\n#define XP(a, b) P(a, b)\nS(\?\?\\\n=)\nXP(L, S(\?\?\\\n=))\n",
-      0, "c17", "\"\?\?=\"\nL\"#\"\n", false, 0, 0, 0 },
-    { "#include of a missing absolute path", "#include \"/buster-missing-directory/absent.h\"\nafter\n", 0, "c17", "", true },
-    { "-include of a missing absolute path", "x\n", 0, "c17", "", true, 0, "-include /buster-missing-directory/absent.h", 0 },
-    // #109's differential fuzzing against clang: a case for each difference it found (minimized) and for each that
-    // probing around one found, with clang's -P text, which test-preprocessor --clang checks again.
-    { "-undef", "__STDC__ __STDC_VERSION__ __STDC_HOSTED__ __STDC_UTF_16__ __STDC_UTF_32__\n__STDC_EMBED_NOT_FOUND__ __STDC_EMBED_FOUND__ __STDC_EMBED_EMPTY__\n__x86_64__ __clang__ __BUSTER__ __GNUC__ __CHAR_BIT__\n", 0, "c23", "1 202311L 1 1 1\n0 1 2\n__x86_64__ __clang__ __BUSTER__ __GNUC__ __CHAR_BIT__\n", false, 0, "-undef" },
-    // Assembly's language macro stays with -undef, as the standard ones do: a header shared with C keeps its C apart.
-    { "-undef in assembly", "#ifdef __ASSEMBLER__\nassembly\n#else\nc\n#endif\n__STDC_VERSION__ __STDC_HOSTED__ __x86_64__\n", 0, "c17", "assembly\n201710L 1 __x86_64__\n", false, 0,
-      "-undef -x assembler-with-cpp" },
-    { "feature answers' spelling", "__has_c_attribute(nodiscard) __has_c_attribute(deprecated) __has_c_attribute(fallthrough) __has_c_attribute(maybe_unused)\n__has_c_attribute(gnu::packed) __has_attribute(cold) __has_attribute(__nonnull__) __has_builtin(__builtin_expect) __has_feature(c_atomic) __has_extension(c_atomic)\n__has_cpp_attribute(nodiscard) __has_declspec_attribute(dllexport)\n#if __has_embed(\"/dev/null\") == 2\nempty\n#endif\n", 0, "c23", "202003L 201904L 201910L 202106L\n1 1 1 1 1 1\n__has_cpp_attribute(nodiscard) 0\nempty\n", false, 0 },
-    { "__has_warning", "__has_warning(\"-Wall\") __has_warning(\"-Wunused-macros\") __has_warning(\"-Wppf-none\") __has_warning(\"-W\" \"shadow\") __has_warning(\"-Rpass\")\n", 0, "c17", "1 1 0 1 0\n", false, 0 },
-    { "__VA_OPT__ without variadic parameters", "#define F(a) [__VA_OPT__(x a) a]\nF(1)\n", 0, "c23", "\n[ 1]\n", false, 1 },
-    { "a stringized trailing backslash", "#define S(x) #x\nS(\\) S(a \\) S(\\\\)\n", 0, "c17", "\n\"\" \"a \" \"\\\\\"\n", false, 2 },
-    { "an unterminated comment", "a\n/* b\nc\n", 0, "c17", "a\n", true, 0 },
-    { "a warning's comment text preserves following source", "#warning /* never closed\ntail\n", 0, "c17", "tail\n", false, 1 },
-    { "an error's comment text preserves following source", "#error /* never closed\ntail\n", 0, "c17", "tail\n", true, 0 },
-    { "a warning's quote is text", "#warning '\ntail\n", 0, "c17", "tail\n", false, 1 },
-    { "a warning's comment ends at its logical newline", "#warning /*\ninside\n*/\ntail\n", 0, "c17", "inside\n*/\ntail\n", false, 1 },
-    { "a warning's spliced name and text", "#war\\\nning /* op\\\nen\ntail\n", 0, "c17", "tail\n", false, 1 },
-    { "a warning in a repeated include", "#include \"other.h\"\n#include \"other.h\"\n", "#warning /* never closed\ntail\n", "c17", "tail\ntail\n", false, 2 },
-    { "a warning preserves macro snapshots", "#define BEFORE(x) [x]\n#warning /* never closed\n#define AFTER(y) {y}\nBEFORE(AFTER(7))\n", 0, "c17", "[{7}]\n", false, 1 },
-    { "a skipped warning is still lexed raw", "#if 0\n#warning /* never closed\n#endif\ntail\n", 0, "c17", "", true, 0 },
-    { "a skipped error is still lexed raw", "#if 0\n#error /* never closed\n#endif\ntail\n", 0, "c17", "", true, 0 },
-    { "a comma in #if", "#if 1, 2\nyes\n#endif\n#if (1, 2)\nparenthesized\n#endif\n#if 0 ? 1, 2 : 3\nconditional\n#endif\n", 0, "c17", "", true, 0 },
-    { "digit separators before C23", "#define N 1'000\nx N\n", 0, "c17", "\nx 1'000\n", false, 0 },
-    { "digit separators in C23", "#define N 1'000\nx N y\n#if 1'0 == 10\nten\n#endif\n", 0, "c23", "\nx 1'000 y\nten\n", false, 0 },
-    { "target queries", "__is_target_arch(x86_64) __is_target_arch(amd64) __is_target_arch(i386) __is_target_vendor(pc) __is_target_vendor(apple)\n__is_target_os(linux) __is_target_os(windows) __is_target_environment(gnu) __is_target_environment(msvc)\n__is_target_variant_os(linux) __is_target_variant_environment(gnu)\n", 0, "c17", "1 1 0 1 0\n1 0 1 0\n0 0\n", false, 0, "--target=x86_64-pc-linux-gnu" },
-    { "unknown target vendor", "__is_target_vendor(unknown) __is_target_vendor(pc)\n", 0, "c17", "1 0\n", false, 0, "--target=x86_64-unknown-linux-gnu" },
-    { "UCNs pasted and stringized", "#define P(a, b) a ## b\n#define S(x) #x\n#define T(x) S(x)\nT(P(caf\\u00e9, x) P(y, z))\nT(P(caf\\u00e9, x)P(y, z))\nP(caf\\u00e9, x)\n", 0, "c17", "\"caf\\u00e9x yz\"\n\"caf\\u00e9xyz\"\ncaf\xC3""\xA9""x\n", false, 0 },
-    { "UCNs in pragma lines", "#pragma ppf caf\\u00e9 x\\u0301 caf\xC3""\xA9""\n_Pragma(\"ppf caf\\\\u00e9\")\n#define M caf\\u00e9\n#pragma omp M\n#pragma STDC FP_CONTRACT x\\u0301\n", 0, "c17", "#pragma ppf caf\\u00e9 x\\u0301 caf\xC3""\xA9""\n#pragma ppf caf\\u00e9\n#pragma omp caf\\u00e9\n#pragma STDC FP_CONTRACT x\\u0301\n", false, 0 },
-    { "_Pragma in an expanded argument", "#define S(x) #x\n#define T(x) S(x) [x]\nT(_Pragma(\"ppf one\") a)\n#define P(a, b) a ## b\n#define Q(x, y) P(x, y) [x]\nQ(_Pragma(\"ppf two\") l, r)\n#define PR _Pragma(\"ppf three\")\nT(PR b)\n#define D(x) x x\nD(_Pragma(\"ppf four\"))\n", 0, "c17", "\"_Pragma(\\\"ppf one\\\") a\" [\n#pragma ppf one\n a]\n#pragma ppf two\n lr [\n#pragma ppf two\n l]\n\"_Pragma(\\\"ppf three\\\") b\" [\n#pragma ppf three\n b]\n#pragma ppf four\n#pragma ppf four\n", false, 0 },
-    { "a _Pragma's unterminated comment", "_Pragma(\"ppf /* x\")\ny\n", 0, "c17", "#pragma ppf\ny\n", true, 0 },
-    { "pasting a comment's start", "#define P(a, b) a ## b\nP(/, *) x\n", 0, "c17", "\n/ * x\n", true, 0 },
-    { "arguments expanded in order of use", "#define F(a, b) b a\nF(__COUNTER__, __COUNTER__)\n#define G(a, ...) __VA_OPT__(x) a\nG(__COUNTER__, __COUNTER__)\n#define H(a, b) #a b a\nH(__COUNTER__, __COUNTER__)\n#define K(a, ...) [__VA_OPT__(a)]\nK(__has_include)\nK(_Pragma(\"ppf\"))\n", 0, "c23", "\n0 1\nx 3\n\"__COUNTER__\" 4 5\n[]\n[]\n", false, 0 },
-    { "#pragma message's forms", "#pragma message(\"a\\x41\\n\")\n#pragma message \"b\"\n#pragma message(\"c\" \"d\")\n#pragma GCC warning \"e\"\n#pragma GCC warning (\"f\")\n#define MSG \"g\"\n#pragma message(MSG)\n_Pragma(\"message(\\\"h\\\")\")\n", 0, "c17", "#pragma message(\"aA\\012\")\n#pragma message(\"b\")\n#pragma message(\"cd\")\n#pragma GCC warning \"e\"\n#pragma GCC warning \"f\"\n#pragma message(\"g\")\n#pragma message(\"h\")\n", false, 7 },
-    { "#pragma GCC error", "#pragma GCC error \"stop\"\nx\n", 0, "c17", "#pragma GCC error \"stop\"\nx\n", true, 0 },
-    { "diagnostic pragmas", "#pragma clang diagnostic push\n#pragma GCC diagnostic push\n#pragma clang diagnostic ignored \"-Wunused-macros\"\n#pragma GCC diagnostic warning \"-W\" \"shadow\"\n#pragma clang diagnostic ignored \"-Wppf-none\"\n#pragma clang diagnostic remark \"-Wall\"\n#pragma clang diagnostic ignored \"-Rpass\"\n#pragma clang diagnostic ignored \"-Weverything\"\n#pragma clang diagnostic pop\n#pragma clang diagnostic pop\n#pragma clang diagnostic pop\n#pragma clang diagnostic\n#pragma GCC diagnostic ignored\n", 0, "c17", "#pragma clang diagnostic push\n#pragma GCC diagnostic push\n#pragma clang diagnostic ignored \"-Wunused-macros\"\n#pragma GCC diagnostic warning \"-Wshadow\"\n#pragma clang diagnostic ignored \"-Rpass\"\n#pragma clang diagnostic ignored \"-Weverything\"\n#pragma clang diagnostic pop\n#pragma clang diagnostic pop\n", true, 4 },
-    { "omp pragmas expand", "#define N 4\n#define PAR parallel\n#pragma omp PAR num_threads(N)\n_Pragma(\"omp for N\")\n#pragma ppf N\n#pragma STDC FP_CONTRACT N\n", 0, "c17", "#pragma omp parallel num_threads(4)\n#pragma omp for 4\n#pragma ppf N\n#pragma STDC FP_CONTRACT N\n", false, 0 },
-    { "silent pragmas", "#pragma mark - x\n#pragma region a\n#pragma endregion a\n#pragma clang max_tokens_here 1\n#pragma once\n#pragma GCC system_header\nafter\n", 0, "c17", "#pragma clang max_tokens_here 1\nafter\n", false, 2 },
-    { "push_macro and pop_macro", "#define X 1\n#pragma push_macro(\"X\")\n#undef X\n#define X 2\nX\n#pragma pop_macro(\"X\")\nX\n#pragma pop_macro(\"X\")\nX\n#pragma push_macro(\"Y\") tail\n", 0, "c17", "2\n1\n1\n", false, 0 },
-    { "push_macro malformed", "#pragma push_macro(X)\n", 0, "c17", "\n", true, 0 },
-    { "GCC poison", "#pragma GCC poison p q\nx\n#ifdef p\n#endif\n", 0, "c17", "\nx\n", true, 0 },
-    { "GCC poison used", "#pragma GCC poison p\np\n", 0, "c17", "\np\n", true, 0 },
-    { "GCC dependency", "#pragma GCC dependency \"other.h\"\nx\n", "int other;\n", "c17", "\nx\n", false, 0 },
-    { "GCC dependency missing", "#pragma GCC dependency \"ppf_missing.h\"\nx\n", 0, "c17", "", true, 0 },
-    { "assume_nonnull regions", "#pragma clang assume_nonnull begin\nx\n#pragma clang assume_nonnull end\n#pragma clang arc_cf_code_audited begin\n#pragma clang arc_cf_code_audited end\n#pragma clang unsafe_buffer_usage begin\n#pragma clang unsafe_buffer_usage end\n", 0, "c17", "#pragma clang assume_nonnull begin\nx\n#pragma clang assume_nonnull end\n", false, 0 },
-    { "an assume_nonnull region left open", "#pragma clang assume_nonnull begin\nx\n", 0, "c17", "#pragma clang assume_nonnull begin\nx\n", true, 0 },
-    { "macro notes", "#define M 1\n#pragma clang deprecated(M)\n#pragma clang deprecated(M, \"use N\")\n#pragma clang final(M)\n#pragma clang restrict_expansion(M)\nM\n", 0, "c17", "1\n", false, 0 },
-    { "macro notes malformed", "#pragma clang deprecated(ppf_undefined)\n", 0, "c17", "\n", true, 0 },
-    { "#ident and #sccs", "#ident \"one\"\n#sccs \"two\"\n#define ID \"three\"\n#ident ID\n#ident L\"four\" tail\n", 0, "c17", "#ident \"one\"\n#ident \"two\"\n#ident \"three\"\n#ident L\"four\"\n", false, 1 },
-    { "#ident malformed", "#ident x\n", 0, "c17", "\n", true, 0 },
-    { "__has_embed", "#if __has_embed(\"/dev/null\") == 2 && __has_embed(\"ppf_missing\") == 0 && __has_embed(<ppf_missing>) == 0\nok\n#endif\n#if __has_embed(\"/dev/null\" limit(0)) == 2 && __has_embed(\"/dev/null\" prefix(x) suffix(y) if_empty(z)) == 2 && __has_embed(\"/dev/null\" ppf::unknown) == 0\nparameters\n#endif\n#if __has_embed(\"other.h\" clang::offset(1) limit(2)) == 1\nfound\n#endif\n", "int other;\n", "c23", "\nok\nparameters\nfound\n", false, 0 },
-    { "__has_embed outside #if", "__has_embed(\"/dev/null\")\n", 0, "c23", "", true, 0 },
-    { "UCN identifiers stringized", "#define S(x) #x\n#define T(x) S(x)\n#define P(a, b) a ## b\nT(P(\\u00e9, \\u00e9) P(\\U000000E9x, y))\n", 0, "c17", "\"\\u00e9\\u00e9 \\U000000E9xy\"\n", false, 0 },
-    { "#pragma GCC poison's uses", "#define BEFORE p\n#pragma GCC poison p\nBEFORE\n#if 0\np\n#ifdef p\n#endif\n#endif\n#define P(a, b) a ## b\n#pragma GCC poison p\n", 0, "c17", "p\n", false, 0 },
-    { "a poisoned name read from the file", "#pragma GCC poison p\np\n", 0, "c17", "\np\n", true, 0 },
-    { "a poisoned name in #ifdef", "#pragma GCC poison p\n#ifdef p\n#endif\n", 0, "c17", "\n", true, 0 },
-    { "a poisoned name among arguments", "#define F(x) 1\n#pragma GCC poison p\nF(p)\n", 0, "c17", "1\n", true, 0 },
-    { "a poisoned name from a paste", "#define P(a, b) a ## b\n#pragma GCC poison pq\nP(p, q)\n", 0, "c17", "pq\n", true, 0 },
-    { "a poisoned name in _Pragma's text", "#pragma GCC poison p\n_Pragma(\"ppf p\")\n", 0, "c17", "\n#pragma ppf p\n", true, 0 },
-    { "poisoning a macro", "#define p 1\n#pragma GCC poison p\n#if 0\np\n#endif\n#define Q p\n", 0, "c17", "\n", true, 1 },
-    { "poisoning defined", "#pragma GCC poison defined\n", 0, "c17", "\n", false, 0 },
-    { "two ## in a row", "#define A x ## ## y\nA\n", 0, "c17", "\nx ## y\n", true, 0 },
-    { "two ## and an empty argument", "#define F(y) x ## ## y z\nF()\n#define G(y, w) x ## ## y w\nG(,q)\n#define H(x, y) x ## ## y\nH(,1)\n", 0, "c17", "\nxz\nxq\n##1\n", false, 0 },
-    { "GNU's comma paste after an argument", "#define G(...) __VA_ARGS__ ## __VA_ARGS__\nG(,)\n#define D(c, e...) e ## e\nD( , , )\n", 0, "c17", "\n,,\n, ,\n", false, 0 },
-    { "#line with digit separators", "#line 1'000\n__LINE__\n", 0, "c23", "1000\n", false, 0 },
-    { "line marker flags", "# 3 \"h\" 3 4\n__LINE__\n# 7 \"g\" 3\n__LINE__\n# 9 \"f\"\n__LINE__\n", 0, "c17", "3\n7\n9\n", false, 0 },
-    { "a line marker's flag 2 without 1", "# 5 \"f\" 2\n", 0, "c17", "\n", true, 0 },
-    { "a line marker's invalid flags", "# 5 \"f\" 1 2\n", 0, "c17", "\n", true, 0 },
-    { "#include with extra tokens", "#include \"other.h\" y\n#define H \"other.h\"\n#include H z\nx\n", "int other;\n", "c17", "int other;\n\nint other;\nx\n", false, 2 },
-    { "extra tokens after directives", "#define X\n#undef X y\n#if 0\n#elifdef X y\n#else x\n#endif x\n#if 1\n#else x\n#endif\n", 0, "c23", "\n", false, 5 },
-    { "#elifdef without a name", "#if 0\n#elifdef\n#endif\n", 0, "c23", "\n", true, 0 },
-    { "#ifdef defined", "#ifdef defined\nyes\n#else\nno\n#endif\n", 0, "c17", "no\n", false, 0 },
-    { "defined from macros in #if", "#define ID(x) x\n#if ID(defined Y)\nyes\n#else\nno\n#endif\n#define D defined\n#define X\n#if D X\nyes\n#endif\n#define DX defined(X)\n#if DX\nyes\n#endif\n", 0, "c17", "no\nyes\nyes\n", false, 0 },
-    { "defined from an argument that expands", "#define ID(x) x\n#define X\n#if ID(defined X)\n#endif\n", 0, "c17", "\n", true, 0 },
-    { "an inactive __VA_OPT__'s spacing", "#define S(x) #x\n#define T(x) S(x)\n#define D(c, ...) #__VA_OPT__( c)\nT((D(x)))\n#define E(c, ...) [__VA_OPT__( c)]\nT(E(q))\n", 0, "c23", "\"(\\\"\\\" )\"\n\"[ ]\"\n", false, 0 },
-    { "an empty __VA_OPT__ expands nothing", "#define H(d, a, ...) __VA_OPT__()\nH(,,H())\n", 0, "c23", "\n", false, 0 },
-    { "__VA_ARGS__ as a parameter", "#define F(__VA_ARGS__) [__VA_ARGS__]\nF(1)\n#define G(__VA_ARGS__, ...) [__VA_ARGS__]\nG(1, 2)\n", 0, "c23", "\n[1]\n[1]\n", false, 0 },
-    { "#__VA_ARGS__ in a named variadic macro", "#define F(x...) #__VA_ARGS__\n", 0, "c17", "\n", true, 0 },
-    { "right shifts in #if", "#if (~0u >> 97) == 1 && (8 >> 4294967297) == 4 && (-8 >> 64) == -1 && (4 >> 0x100000000) == 4 && (1 << 64) == 0\nok\n#endif\n", 0, "c23", "\nok\n", false, 0 },
-    { "push_macro allows a redefinition", "#define X 1\n#pragma push_macro(\"X\")\n#define X 2\nX\n#pragma pop_macro(\"X\")\nX\n", 0, "c17", "2\n1\n", false, 0 },
-    { "#pragma once with extra tokens", "#pragma once x\n", 0, "c17", "\n", false, 2 },
-    // An attribute query reads its operand expanded, a token at a time, to the ')' that closes it, wherever that comes
-    // from; and its scope (for __has_c_attribute) after a name it reads as it is.
-    { "an attribute query's operand read expanded", "#define R ) + 1\n#define D noreturn )\n__has_attribute(x R\n__has_attribute(D\n#define G gnu::\n__has_c_attribute(G noreturn)\n#define E\n__has_attribute(x E)\n#if __has_attribute(D\nyes\n#endif\n#define F(a) a\nF(__has_attribute(x R))\n",
-      0, "c23", "\n0 + 1\n1\n1\n0\nyes\n0 + 1 )\n", false, 0 },
-    { "an attribute query's operand across a directive", "__has_attribute(x\n#define Y 1\n) Y\n#define Z(a) a\n__has_attribute(\n#if 1\nnoreturn\n#endif\n) Z(1)\n", 0, "c17", "0 1\n1 1\n", false, 0 },
-    { "an attribute query's operand nested", "#define RR ) )\n__has_attribute(__has_attribute(x RR\n", 0, "c17", "", true, 0 },
-    { "a scope only in __has_c_attribute", "__has_attribute(gnu::noreturn)\n", 0, "c23", "", true, 0 },
-    { "a macro after __has_c_attribute's name", "#define E\n__has_c_attribute(x E)\n", 0, "c23", "", true, 0 },
-    { "an attribute query's operand unterminated", "__has_attribute(x\n", 0, "c17", "", true, 0 },
-    { "a scoped attribute query's operand at the end of the file", "__has_c_attribute(x", 0, "c23", "", true, 0 },
-    // A _Pragma in a directive's line runs, as clang reads the line: its pragma line comes first.
-    { "_Pragma in directives' lines", "#if _Pragma(\"ppf a\") 1\nyes\n#endif\n#line _Pragma(\"ppf b\") 5\n__LINE__\n#pragma message(_Pragma(\"ppf c\") \"s\")\n__has_attribute(_Pragma(\"ppf d\") x) after\n",
-      0, "c17", "#pragma ppf a\nyes\n#pragma ppf b\n5\n#pragma ppf c\n#pragma message(\"s\")\n#pragma ppf d\n0 after\n", false, 1 },
-    // Spaces in a substitution are clang's NextTokGetsSpace: none after ##, and __VA_OPT__'s tokens and ')' give the next
-    // token one even when the __VA_OPT__ gives nothing.
-    { "spaces around __VA_OPT__", "#define S(x) #x\n#define T(x) S(x)\n#define B(...) >= ## __VA_OPT__( )( )\nT(B())\n#define C(...) >= ## __VA_OPT__(x)( )\nT(C())\n#define D(...) x __VA_OPT__(a )y\nT(D(1))\n#define E(...) x #__VA_OPT__()y\nT(E())\n#define F(...) x ## __VA_OPT__()y\nT(F())\n",
-      0, "c23", "\n\">= ( )\"\n\">=( )\"\n\"x a y\"\n\"x \\\"\\\" y\"\n\"xy\"\n", false, 0 },
-    { "GNU's comma paste's spaces and placemarkers", "#define S(...) #__VA_ARGS__\n#define T(...) S(__VA_ARGS__)\n#define f(x, ...) [x , ## __VA_ARGS__]\nT(f(a,b))\nT(f(a, b))\n#define g(p, q, ...) [p ,q ## __VA_ARGS__]\nT(g(a,))\n#define h(p, ...) [, __VA_OPT__(__VA_ARGS__ ## a) ## __VA_ARGS__ ## b]\nT(h(u))\n#define X(p, ...) [p ## , ## __VA_ARGS__]\nT(X(a))\n",
-      0, "c17", "\n\"[a ,b]\"\n\"[a , b]\"\n\"[a]\"\n\"[, b]\"\n\"[a]\"\n", false, 0 },
-    { "GNU's comma paste with ## after __VA_ARGS__", "#define e(d, ...) , ## __VA_ARGS__ ## )\ne( )\n", 0, "c23", "", true, 0 },
-    // GNU's comma before __VA_OPT__ whose variadic argument follows empty arguments pasted onto it: clang drops their
-    // placemarkers with their ##, and the comma stays apart (seed 54's case 566182, C23).
-    { "GNU's comma before __VA_OPT__ past empty arguments", "#define c(d, e...) e ## __VA_OPT__( d ## e)\nc(,,)\n#define h(d, g, ...) , ## __VA_OPT__(d ## g ## __VA_ARGS__)\nh(,,y)\n",
-      0, "c23", "\n,,\n,y\n", false, 0 },
-    // There the variadic argument keeps its first token's own space, which a string shows (seed 70's case 208758, C17).
-    { "GNU's comma before __VA_OPT__ past empty arguments, stringized", "#define vs(...) #__VA_ARGS__\n#define vt(...) vs(__VA_ARGS__)\n#define vm(p, q, ...) __VA_OPT__(,) ## __VA_OPT__( q ## __VA_ARGS__ )\nvt(vm( ,,u ))\nvt(vm( ,, u ))\n",
-      0, "c17", "\n\",u\"\n\", u\"\n", false, 0 },
-    // The campaigns' differences (docs/preprocessor-fuzz.md): a function-like macro without parameters substitutes
-    // nothing, so its __VA_OPT__ and a # before it stay tokens (TokenLexer::Init).
-    { "__VA_OPT__ in a macro without parameters", "#define Z() a ## __VA_OPT__(b) # __VA_OPT__(c)\nZ()\n#define Y() __VA_OPT__ ( )\nY()\n", 0, "c23", "\na__VA_OPT__(b) # __VA_OPT__(c)\n__VA_OPT__ ( )\n", false, 3 },
-    // A token right after a line splice starts at the splice for clang's lexer: an expansion's ')' or name there gives
-    // __LINE__ the splice's line, and so does a #line's number.
-    { "__LINE__ at a ')' that starts at a line splice", "#define L() __LINE__\nL(\n\\\n)\n#define M __LINE__\nx\n\\\nM\n", 0, "c17", "\n3\nx\n7\n", false, 0 },
-    { "#line's number after a _Pragma and an empty macro", "#lin\\\ne _Pragma(\"ppf_lin\\\ne\") 010\n__LINE__\n#define E\n#line E \\\n 30\n__LINE__\n#line E \\\n40\n__LINE__\n",
-      0, "c17", "\n#pragma ppf_line\n10\n30\n41\n", false, 1 },
-    { "__LINE__ at a ')' that starts at a trigraph's line splice", "#define L() __LINE__\nL(\n?\?/\n)\n", 0, "c17", "\n3\n", false, 0 },
-    // A line marker's tokens after its digits are read expanded (Preprocessor::HandleDigitDirective's Lex).
-    { "a line marker's name and flags from macros", "#define F \"named.c\"\n# 20 F\n__FILE__ __LINE__\n#define E\n# 30 E\n__LINE__\n", 0, "c17", "\n\"named.c\" 20\n30\n", false, 0 },
-    // A _Pragma's text gets a newline after it (prepare_PragmaString), which splices away a `\` that ends it.
-    { "a _Pragma's text that ends in a backslash", "#define P(x) _Pragma(x)\nP(\"\\\\\")\nx\n", 0, "c17", "\n#pragma\nx\n", false, 0 },
-    // Character constants in #if as clang's CharLiteralParser reads them.
-    { "character constants' values", "#if 'ab' == 24930 && '\\xff\\x01' == 65281 && '\\377' == -1 && L'\\xffffffff' == -1 && u'\\xffff' == 65535 && U'\\U0010FFFF' == 0x10FFFF && '\\e' == 27 && '\\q' == 'q'\nok\n#endif\n",
-      0, "c17", "\nok\n", false, 3 },
-    { "a character constant's UCN past ASCII", "#if '\\u00e9'\n#endif\n", 0, "c17", "", true, 0 },
-    { "UCNs of basic characters in C23 character constants", "#if '\\u0041' == 65 && u8'\\u0024' == 36\nyes\n#endif\n", 0, "c23", "\nyes\n", false, 0 },
-    { "a UCN of a basic character before C23", "#if '\\u0041' == 65\n#endif\n", 0, "c17", "", true, 0 },
-    { "several characters in a wide character constant", "#if L'ab'\n#endif\n", 0, "c17", "", true, 0 },
-    { "an octal escape out of range", "#if '\\400' == 0\nzero\n#endif\n", 0, "c17", "\nzero\n", true, 0 },
-    // _Pragma reads its '(', string literal and ')' expanded, a token at a time (Preprocessor::Handle_Pragma).
-    { "_Pragma's operand read expanded", "#define A(c) ( #c\n_Pragma A(ppf a) )\n#define P (\"ppf p\")\n_Pragma P after\n#define S \"ppf s\"\n_Pragma(S)\n",
-      0, "c17", "\n#pragma ppf a\n#pragma ppf p\nafter\n#pragma ppf s\n", false, 0 },
-    { "_Pragma without its operand", "_Pragma x y\n", 0, "c17", "", true, 0 },
-    // A __VA_OPT__'s content pastes left to right with a ## before it, as clang's TokenLexer does: (.5 e) .5, and GNU's
-    // comma before `__VA_ARGS__ ##` in it (VaArgsPseudoPaste).
-    { "__VA_OPT__'s content pasted left to right", "#define C(...) .5 ## __VA_OPT__(e ## .5)\nC(1)\n#define V(...) __VA_OPT__(, ) ## __VA_OPT__(__VA_ARGS__ ## __VA_ARGS__)\nV(u)\n",
-      0, "c23", "\n.5e.5\n,uu\n", false, 0 },
-    // A prefix the mode doesn't have before an empty character constant is an identifier before C23 (`u8` and `''`), so
-    // pasting them forms two tokens there, and one in C23.
-    { "a prefix pasted onto an empty character constant before C23", "#define P(a, b) a ## b\nP(u8,'')\n", 0, "c17", "", true, 0 },
-    { "a prefix pasted onto an empty character constant in C23", "#define P(a, b) a ## b\nP(u8,'')\n", 0, "c23", "\nu8''\n", false, 0 },
-    // An unknown token that such a prefix starts (an empty character constant, or an unterminated literal) is the prefix
-    // and an unknown token from the quote too, as clang lexes it (pp_splits_unknown), alone in a file or after a literal
-    // the mode splits.
-    { "unknown tokens that a prefix C99 doesn't have starts", "#define u [u]\n#define U [U]\n#define u8 [u8]\nu\"abc\nU'x\nu8'' tail\nu8\"s\nu'a' u\"b\n", 0, "c99",
-      "[u]\"abc\n[U]'x\n[u8]'' tail\n[u8]\"s\n[u]'a' [u]\"b\n", false, 0 },
-    { "unknown tokens that u8 starts before C23", "#define u8 [u8]\nu8'' u8'x\nu8\"s\" u8'a'\n", 0, "c17", "[u8]'' [u8]'x\nu8\"s\" [u8]'a'\n", false, 0 },
-    // -E's space between a pp-number and a + or - after it (pp_separation_table): without it, an exponent's sign joins
-    // the number (1e+1 is one pp-number), where the two tokens came from different places.
-    { "a pp-number before a + or - that an exponent would take", "#define E 1e\n#define P 0x1p\n#define N 1\nE+1 P-2 N+3 E-x\n1+2 3-4\n", 0, "c17",
-      "1e + 1 0x1p - 2 1 + 3 1e - x\n1 + 2 3 - 4\n", false, 0 },
-    // Among a macro's arguments clang's macro expansion is off, and only #if and #elif turn it back on: #line's and
-    // #ident's operands stay as written.
-    { "#line among a macro's arguments, unexpanded", "#define F(x) [x]\n#define N 10\nF(\n#line N\n)\n", 0, "c17", "", true, 0 },
-    { "#line among a macro's arguments", "#define F(x) [x]\nF(a\n#line 20\n__LINE__)\n__LINE__\n", 0, "c17", "\n[a 20]\n21\n", false, 0 },
-    { "#ident among a macro's arguments, unexpanded", "#define F(x) [x]\n#define ID \"s\"\nF(\n#ident ID\n)\n#ident ID\n", 0, "c17", "\n[]\n#ident \"s\"\n", true, 0 },
-    // After a _Pragma that prints nothing, clang's lexer starts a line, which its printer moves to when the next token
-    // is on another one.
-    { "the token after a _Pragma that prints nothing", "#define h(x) _Pragma(x)\na h(\"once\") \\\n    b\n#define g(x) _Pragma(x) y\nc g(\"once\") \\\nd\n",
-      0, "c17", "\na\nb\nc y d\n", false, 2 },
-    // A name of a macro whose expansion an argument is read from is painted there: the expansion ends at the ')' after
-    // it, before the argument expands (Preprocessor::ReadMacroCallArgumentList).
-    { "a disabled macro's name among its arguments", "#define e a ( e\n#define a(...) __VA_ARGS__\ne )\n#define f g ( f\n#define g(x) [x]\nf )\n", 0, "c17", "\ne\n[f]\n", false, 0 },
-    // A token that started a line among a macro's arguments (but the first) starts one in clang's printer too, which
-    // moves to the expansion's line when that is another one: the name's, after a line splice.
-    { "line markers: a line among a macro's arguments", "#define h(...) __VA_ARGS__\nL\\\n h(\nU\n\"#\")\nx\\\n  h(7\n  y\nz)\n", 0, "c17", "L U \"#\" x 7 y z", false, 0, 0, 0,
-      "# 1 \"%d/case.c\"\n\nL U\n\"#\"\n\n\nx 7\ny z\n" },
-    // A paste's result takes its left operand's line start among the arguments, as clang's TokenLexer::pasteTokens
-    // gives it the left one's flags, so the printer moves to the expansion's line at the result, not at the token
-    // after it (seed 14's case 452, C23).
-    { "line markers: a paste of a line among a macro's arguments", "#define E(a) X a ## a .\nx \\\ny \\\nE(f\nz)\n", 0, "c17", "x y X f zf z .", false, 0, 0, 0,
-      "# 1 \"%d/case.c\"\n\nx y X f\nzf z .\n" },
-    // A token moved past an empty ## operand loses its line start, including one that an outer expansion retained
-    // as LINE_SPACE (#476). The first call leaves the output on a line before the second call's name: a retained line
-    // start would move the token to that name's line. Check both positions in a chain, pastes and a first output token.
+// `name`, a file beside the catalog being read, among those its lines name; false if a line named it already.
+static bool pp_test_fixture_name(PPTestFixtures* fixtures, const char* name)
+{
+    bool fresh = fixtures->named_count < BUSTER_PP_TEST_FIXTURE_CASES * 4;
+    for (uint32_t i = 0; fresh && i < fixtures->named_count; i += 1)
     {
-        .name = "line markers: moved argument tokens after empty paste operands",
-        .source = "#define C(a, b) a ## b\n#define D(a, b) < a ## b >\n#define D3(a, b, c) < a ## b ## c >\n"
-                  "#define WP(a) <D a>\n#define WQ(a) <D3 a>\n#define WC(a) C a\n"
-                  "WP(\n1) WP((,\ny))\nWQ(\n1) WQ((, ,\nr))\n"
-                  "WP(\n1) WP((\nx, ))\nWP(\n1) WP((\nx,\ny))\nWQ(\n1) WQ((,\nq, r))\n"
-                  "WC(\n1) WC((,\ny))\nWP(1) WP((,\ny))\nWP((,\ny))\nD(,\ny)\n",
-        .standard = "c17",
-        .expected = "<D 1> < < y > > <D3 1> < < r > > <D 1> < < x > > <D 1> < < xy > > <D3 1> < < qr > > "
-                    "C 1 y <D 1> < < y > > < < y > > < y >",
-        .markers = "# 1 \"%d/case.c\"\n\n\n\n\n\n\n<D 1> < < y > >\n\n\n<D3 1> < < r > >\n\n\n<D 1> < < x > >\n"
-                   "\n\n<D 1> < < xy > >\n\n\n\n<D3 1> < < qr > >\n\n\nC 1 y\n\n\n<D 1> < < y > >\n\n< < y > >\n\n< y >\n",
-    },
-    // Directives that read only part of their line expanded, and the rest as it is (Preprocessor::CheckEndOfDirective):
-    // #ident its string, #line its number, its name and one token more, a computed #include its header name and one token
-    // more, and push_macro and pop_macro their '(', string and ')'. What comes after never expands.
-    { "#ident's string read expanded, and the rest as it is", "#define c(x) x\n#define d(e) e\n#define h d(\"s\") c(\n#ident h\n#ident \"t\" _Pragma(\"message(\\\"m\\\")\")\n#ident \"u\" __COUNTER__\n__COUNTER__\n",
-      0, "c17", "\n#ident \"s\"\n#ident \"t\"\n#ident \"u\"\n0\n", false, 3 },
-    { "#line's operands read expanded, and the rest as it is", "#define c(x) x\n#line 10 \"f.c\" x c(\n__LINE__\n#line 20 \"g.c\" x __COUNTER__\n__COUNTER__ __LINE__\n", 0, "c17", "\n10\n0 20\n", false, 2 },
-    { "a computed #include's name read expanded, and the rest as it is", "#define c(x) x\n#define H \"other.h\"\n#include H x c(\nafter\n", "in_other\n", "c17", "\nin_other\nafter\n", false, 1 },
-    { "push_macro's and pop_macro's operands read expanded, and the rest as it is", "#define c(x) x\n#define m 1\n#pragma push_macro(\"m\") x c(\n#undef m\n#define m 2\n#pragma pop_macro(\"m\") y c(\nm\n",
-      0, "c17", "\n1\n", false, 0 },
-    // A pragma line that a directive among a macro's arguments gives while a _Pragma waits for its '(' stays before the
-    // expansion, where the _Pragma has read it (seed 45's case 610823 crashed reading past it).
-    { "a pragma line among a macro's arguments while a _Pragma waits", "_Pragma\n#define f(a, b)\nf(a\n#if _Pragma(\"ppf_if\") 1\n#endif\n,b)\nafter\n", 0, "c17",
-      "\n#pragma ppf_if\nafter\n", true, 0 },
+        fresh = strcmp(fixtures->named[i], name) != 0;
+    }
+    if (fresh)
     {
-        .name = "builtin and feature names are raw, attribute names may expand",
-        .source = "#define BUILTIN_NAME __builtin_expect\n#define FEATURE_NAME c_atomic\n#define ATTRIBUTE_NAME __const__\n"
-                  "#if __has_builtin(__is_target_arch) && __has_builtin(__is_target_os)\nbuiltin_names\n#endif\n"
-                  "#if __has_builtin(BUILTIN_NAME) || __has_feature(FEATURE_NAME) || __has_extension(FEATURE_NAME)\nwrong_expansion\n#else\nraw_names\n#endif\n"
-                  "#if __has_attribute(ATTRIBUTE_NAME) && __is_target_arch(x86_64) && __is_target_os(linux)\nattribute_and_target\n#endif\n",
-        .standard = "gnu17",
-        .expected = "builtin_names raw_names attribute_and_target",
-    },
+        fixtures->named[fixtures->named_count] = name;
+        fixtures->named_count += 1;
+    }
+    return fresh;
+}
+
+// Whether every file in `directory` but catalog.tsv is one the catalog's lines name, and nothing else is there.
+static bool pp_test_fixture_orphans(PPTestFixtures* fixtures, const char* directory)
+{
+    DIR* listing = opendir(directory);
+    bool clean = listing != 0;
+    if (!clean)
     {
-        .name = "__has_constexpr_builtin's name is raw, a macro's too",
-        .source = "#define CLZ __builtin_clz\n__has_constexpr_builtin(CLZ)\n__has_constexpr_builtin(__builtin_clz)\n#define __builtin_clz 0\n"
-                  "__has_constexpr_builtin(__builtin_clz)\n",
-        .standard = "gnu17",
-        .expected = "0 1 1",
-    },
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "can't list %s", directory);
+    }
+    for (struct dirent* entry = clean ? readdir(listing) : 0; clean && entry != 0; entry = readdir(listing))
     {
-        .name = "the oracle recognizes ext_vector_type with either attribute spelling",
-        .source = "#if __has_attribute(ext_vector_type) && __has_attribute(__ext_vector_type__)\nvector_attribute\n#endif\n",
-        .standard = "gnu17",
-        .expected = "vector_attribute",
-    },
+        const char* name = entry->d_name;
+        bool named = strcmp(name, ".") == 0 || strcmp(name, "..") == 0 || strcmp(name, "catalog.tsv") == 0;
+        for (uint32_t i = 0; !named && i < fixtures->named_count; i += 1)
+        {
+            named = strcmp(fixtures->named[i], name) == 0;
+        }
+        if (!named)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "%s/%s is in no catalog line", directory, name);
+            clean = false;
+        }
+    }
+    if (listing != 0)
     {
-        .name = "assume_nonnull end uses the printer's current line",
-        .source = "_Pragma(\"clang assume_nonnull begin\")\n#define SILENT 1\n_Pragma(\"clang assume_nonnull end\")\nint first = __LINE__;\n"
-                  "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint last = __LINE__;\n",
-        .standard = "gnu17",
-        .expected = "#pragma clang assume_nonnull begin\n#pragma clang assume_nonnull end\nint first = 4;\n"
-                    "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint last = 8;\n",
-    },
+        closedir(listing);
+    }
+    return clean;
+}
+
+// The catalog at `directory`/catalog.tsv, whose first line must be `header`: its lines not starting with '#' after the
+// first, each cut into `count` tab-separated fields, given to `line` with its number; false, with the reason in the
+// problem, for a catalog that can't be read, doesn't end with a newline, has another first line or a line of another
+// count of fields, or for a line `line` refuses.
+static bool pp_test_fixture_lines(PPTestFixtures* fixtures, const char* directory, const char* header, uint32_t count,
+                                  bool (*line)(PPTestFixtures* fixtures, const char* directory, char** fields, uint32_t number))
+{
+    char path[PATH_MAX + 64];
+    snprintf(path, sizeof(path), "%s/catalog.tsv", directory);
+    uint64_t length = 0;
+    char* catalog = pp_test_fixture_read(fixtures, path, false, &length);
+    bool valid = catalog != 0;
+    if (valid && (length == 0 || catalog[length - 1] != '\n'))
     {
-        .name = "assume_nonnull end after a presumed-file change",
-        .source = "#pragma clang assume_nonnull begin\n#line 500 \"logical-nullability.h\"\nint *pointer;\n#define SILENT 1\n"
-                  "_Pragma(\"clang assume_nonnull end\")\nint after = __LINE__;\n",
-        .standard = "gnu17",
-        .expected = "#pragma clang assume_nonnull begin\nint *pointer;\n#pragma clang assume_nonnull end\nint after = 503;\n",
-    },
-    // #embed (C23 6.10.3), as clang 23 has it: the data, one token that -E prints as its values; the parameters, read
-    // expanded, with clang's errors; the files found as clang finds them; and where -E prints it all: no token of an
-    // #embed starts a line, a line starts at a file change before them, and the next token of the file joins their line
-    // when no newline outside comments is between them.
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "%s doesn't end with a newline", path);
+        valid = false;
+    }
+    uint32_t number = 0;
+    char* cursor = catalog;
+    while (valid && cursor < catalog + length)
     {
-        .name = "#embed: data, limit, clang::offset, prefix, suffix and if_empty",
-        .source = "int a[] = {\n#embed \"hi.txt\"\n};\nint b[] = {\n#embed \"bin.dat\"\n};\nint c[] = { 1,\n"
-                  "#embed \"hi.txt\" limit(2) prefix(0,) suffix(,9)\n};\nint d[] = {\n"
-                  "#embed \"empty.txt\" if_empty(42) prefix(7,)\n};\n#define LIM 1\nint e[] = {\n"
-                  "#embed \"bin.dat\" limit(LIM+1) clang::offset(1)\n};\nint f[] = {\n"
-                  "#embed \"hi.txt\" __limit__(3) __suffix__(;)\n};\nint g[] = {\n"
-                  "#embed \"hi.txt\" limit(0) if_empty(0) clang::offset(9)\n#embed \"hi.txt\" clang::offset(4)\n"
-                  "#embed \"hi.txt\" clang::offset(18446744073709551615u) limit(-1u)\n};\nx\n",
-        .standard = "c23",
-        .expected = "int a[] = {72, 105, 33, 10 }; int b[] = {0, 255, 127, 128, 9, 10, 99, 100 }; int c[] = { 1,0,72, "
-                    "105 ,9}; int d[] = {42}; int e[] = {255, 127 }; int f[] = {72, 105, 33 ;}; int g[] = {0 }; x",
-        .files = pp_test_files_embed,
-    },
+        char* end = strchr(cursor, '\n');
+        *end = 0;
+        number += 1;
+        if (number == 1)
+        {
+            valid = strcmp(cursor, header) == 0;
+            if (!valid)
+            {
+                snprintf(fixtures->problem, sizeof(fixtures->problem), "%s's first line isn't '%s'", path, header);
+            }
+        }
+        else if (cursor[0] != '#')
+        {
+            char* fields[5] = { cursor, 0, 0, 0, 0 };
+            uint32_t found = 1;
+            for (char* tab = strchr(cursor, '\t'); tab != 0 && found <= count; tab = strchr(tab + 1, '\t'))
+            {
+                *tab = 0;
+                if (found < count)
+                {
+                    fields[found] = tab + 1;
+                }
+                found += 1;
+            }
+            valid = found == count;
+            for (uint32_t f = 0; valid && f < count; f += 1)
+            {
+                valid = fields[f][0] != 0;
+            }
+            if (!valid)
+            {
+                snprintf(fixtures->problem, sizeof(fixtures->problem), "%s line %u hasn't %u nonempty tab-separated fields", path, number, count);
+            }
+            if (valid && !line(fixtures, directory, fields, number))
+            {
+                char reason[sizeof(fixtures->problem)];
+                snprintf(reason, sizeof(reason), "%s", fixtures->problem);
+                snprintf(fixtures->problem, sizeof(fixtures->problem), "%s line %u: %s", path, number, reason);
+                valid = false;
+            }
+        }
+        cursor = end + 1;
+    }
+    return valid;
+}
+
+// A trees' catalog line: TREE, KIND, SOURCE and PATH.
+static bool pp_test_fixture_tree_line(PPTestFixtures* fixtures, const char* directory, char** fields, uint32_t number)
+{
+    (void)number;
+    const char* tree = fields[0];
+    const char* kind = fields[1];
+    const char* source = fields[2];
+    const char* path = fields[3];
+    const bool same = fixtures->tree_count != 0 && strcmp(fixtures->tree_names[fixtures->tree_count - 1], tree) == 0;
+    bool valid = pp_test_fixture_word(tree) && pp_test_fixture_path(path) && fixtures->file_count + 2 < BUSTER_PP_TEST_FIXTURE_FILES;
+    for (uint32_t t = 0; valid && !same && t < fixtures->tree_count; t += 1)
     {
-        .name = "#embed: every byte's value, in pieces of every length",
-        .source = "#embed \"bytes.dat\"\nx\n#embed \"bytes.dat\" clang::offset(250)\ny\n"
-                  "#embed \"bytes.dat\" limit(17) clang::offset(7)\nz\n",
-        .standard = "c23",
-        .expected = "0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, "
-                    "27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, "
-                    "51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, "
-                    "75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, "
-                    "99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, "
-                    "118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, "
-                    "137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, "
-                    "156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, "
-                    "175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, "
-                    "194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 211, 212, "
-                    "213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, "
-                    "232, 233, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, "
-                    "251, 252, 253, 254, 255 x 250, 251, 252, 253, 254, 255 y 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, "
-                    "18, 19, 20, 21, 22, 23 z",
-        .files = pp_test_files_embed,
-    },
+        valid = strcmp(fixtures->tree_names[t], tree) != 0;
+    }
+    if (!valid)
     {
-        .name = "#embed: the next token joins the data's line",
-        .source = "#define E\na1\n#embed \"hi.txt\" limit(1)\nb1 b2\na2\n#embed \"hi.txt\" limit(1)\n   b3\na3\n"
-                  "#embed \"hi.txt\" limit(1)\n\nb4\na5\n#embed \"hi.txt\" limit(1)\n/* c\n*/ b5\na6\n"
-                  "#embed \"hi.txt\" limit(1) // c\nb6\na7\n#embed \"hi.txt\" limit(1)\n#define Q\nb7\na8\n"
-                  "#embed \"hi.txt\" limit(1)\nE b8\na9\n#embed \"empty.txt\"\nb9\na10\n"
-                  "#embed \"empty.txt\" if_empty(z)\nb10\na11\n#include \"embedlast.h\"\nb11\na12\n"
-                  "#include \"embedlast_nonl.h\"\nb12\na13\n#embed \"hi.txt\" limit(1)\nE\nb13\n",
-        .standard = "c23",
-        .expected = "a1 72 b1 b2\na2 72 b3\na3 72\nb4\na5 72 b5\na6 72 b6\na7 72\nb7\na8 72 b8\na9\nb9\na10 z b10\n"
-                    "a11\na 72\nb11\na12\na 72\nb12\na13 72\nb13\n",
-        .files = pp_test_files_embed,
-    },
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "a bad tree or path, or a tree whose lines aren't together");
+    }
+    if (valid && !same)
     {
-        .name = "#embed: a file change before it starts a line",
-        .source = "first\n#include \"tail.h\"\n\n#embed \"hi.txt\" limit(1)\nz\n#line 50\n\n"
-                  "#embed \"hi.txt\" limit(2)\nw\n",
-        .standard = "c23",
-        .expected = "first x 72 z 72, 105 w",
-        .files = pp_test_files_embed,
-    },
+        // The previous tree's end, then this one's start.
+        if (fixtures->tree_count != 0)
+        {
+            fixtures->files[fixtures->file_count] = (PPTestFile){ 0 };
+            fixtures->file_count += 1;
+        }
+        fixtures->tree_names[fixtures->tree_count] = tree;
+        fixtures->tree_firsts[fixtures->tree_count] = fixtures->file_count;
+        fixtures->tree_count += 1;
+    }
+    const uint32_t first = valid ? fixtures->tree_firsts[fixtures->tree_count - 1] : 0;
+    bool earlier = false;
+    for (uint32_t i = first; valid && i < fixtures->file_count; i += 1)
     {
-        .name = "#embed: computed names and macros among the parameters",
-        .source = "#define F \"hi.txt\"\n#define P prefix(1,) limit(2)\n#define N 3\n#define L limit\n#define E\n"
-                  "#embed F limit(N - 2)\n#embed \"hi.txt\" P\n#embed \"hi.txt\" L(1) suffix(N)\n"
-                  "#embed E \"hi.txt\" E limit(1)\nx\n",
-        .standard = "c23",
-        .expected = "72 1,72, 105 72 3 72 x",
-        .files = pp_test_files_embed,
-    },
+        valid = strcmp(fixtures->files[i].path, path) != 0;
+        earlier = earlier || strcmp(fixtures->files[i].path, source) == 0;
+    }
+    if (!valid)
     {
-        .name = "#embed: --embed-dir, angled names and the including file's directory",
-        .source = "#embed <x.bin>\n#embed \"x.bin\"\na\n#include \"sub/inc.h\"\nb\n#include \"sub/late.h\"\nc\n"
-                  "#if __has_embed(<x.bin>) == 1 && __has_embed(\"x.bin\") == 1 && __has_embed(\"y.bin\") == 0\nfound\n"
-                  "#endif\n",
-        .standard = "c23",
-        .expected = "69, 68 69, 68 a\n89\nb\n89\nc\nfound\n",
-        .options = "--embed-dir=%d/dir",
-        .files = pp_test_files_embed_directories,
-    },
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "the tree has %s already", path);
+    }
+    PPTestFile file = { .path = path };
+    if (valid && strcmp(kind, "text") == 0)
     {
-        .name = "#embed before C23, an extension",
-        .source = "#embed \"hi.txt\" clang::offset(2)\nx\n",
-        .standard = "c17",
-        .expected = "33, 10 x",
-        .warnings = 1,
-        .files = pp_test_files_embed,
-    },
+        char file_path[PATH_MAX + 256];
+        snprintf(file_path, sizeof(file_path), "%s/%s", directory, source);
+        uint64_t length = 0;
+        valid = pp_test_fixture_word(source) && pp_test_fixture_name(fixtures, source);
+        if (!valid)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "a bad or repeated file name %s", source);
+        }
+        file.text = valid ? pp_test_fixture_read(fixtures, file_path, true, &length) : 0;
+        valid = file.text != 0 && length <= UINT32_MAX;
+        file.length = (uint32_t)length;
+    }
+    else if (valid && strcmp(kind, "symlink") == 0)
     {
-        .name = "#embed: the parameters' errors drop the directive",
-        .source = "a\n#embed \"hi.txt\" limit(defined(X))\nb\n#embed \"hi.txt\" prefix(a] suffix(b)\nc\n"
-                  "#embed \"hi.txt\" prefix((a)\nd\n#embed \"hi.txt\" 1\ne\n#embed \"hi.txt\" clang::\nf\n"
-                  "#embed \"hi.txt\" limit(1)x\ng\n#embed \"hi.txt\" limit(1 2)\nh\n#embed \"hi.txt\" limit()\ni\n"
-                  "#embed \"hi.txt\" prefix(a{b)c})\nj\n#embed \"hi.txt\" limit(-1)\nk\n#embed \"hi.txt\" int\nl\n"
-                  "#embed\nm\n#embed \"/dev/null\"\nn\n#embed \"hi.txt\" clang::offset(1) clang::offset(2)\no\n"
-                  "#embed \"hi.txt\" prefix(((a)b)c)\np\n#embed \"\"\nq\n#embed \"hi.txt\" limit(1 +)\nr\n"
-                  "#embed \"hi.txt\" limit((1)\ns\n#embed \"hi.txt\" prefix({) limit(1)\nt\n",
-        .standard = "c23",
-        .expected = "a b c d e f g h i j k l m n 33, 10 o p q r s{72 t",
-        .fails = true,
-        .files = pp_test_files_embed,
-    },
+        file.link = source;
+    }
+    else if (valid && strcmp(kind, "hard") == 0 && earlier)
     {
-        .name = "#embed: a file that isn't there",
-        .source = "#embed \"missing.txt\"\nx\n",
-        .standard = "c23",
+        file.link = source;
+        file.hard = true;
+    }
+    else if (valid)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "an unknown kind %s, or a hard link to no earlier path", kind);
+        valid = false;
+    }
+    if (valid)
+    {
+        fixtures->files[fixtures->file_count] = file;
+        fixtures->file_count += 1;
+    }
+    return valid;
+}
+
+// A case's text file ID.suffix, NUL-terminated, in `*text`; false, with the reason in the problem, when it can't be read.
+static bool pp_test_fixture_text(PPTestFixtures* fixtures, const char* directory, const char* identifier, const char* suffix, const char** text)
+{
+    char name[128];
+    snprintf(name, sizeof(name), "%s%s", identifier, suffix);
+    char* stored = arena_push(&fixtures->storage, strlen(name) + 1, 1);
+    bool valid = stored != 0;
+    if (valid)
+    {
+        memcpy(stored, name, strlen(name) + 1);
+        valid = pp_test_fixture_name(fixtures, stored);
+    }
+    char path[PATH_MAX + 256];
+    snprintf(path, sizeof(path), "%s/%s", directory, name);
+    uint64_t length = 0;
+    *text = valid ? pp_test_fixture_read(fixtures, path, false, &length) : 0;
+    return *text != 0;
+}
+
+// A count flag's decimal value, 1 to UINT32_MAX, in `*value`; false for another value or a repeated flag.
+static bool pp_test_fixture_count(const char* digits, uint32_t* value)
+{
+    char* end = 0;
+    const unsigned long long number = digits[0] >= '1' && digits[0] <= '9' ? strtoull(digits, &end, 10) : 0;
+    const bool valid = *value == 0 && end != 0 && *end == 0 && number <= UINT32_MAX;
+    *value = valid ? (uint32_t)number : *value;
+    return valid;
+}
+
+// A cases' catalog line: ID, STANDARD, FLAGS, OPTIONS and NAME.
+static bool pp_test_fixture_case_line(PPTestFixtures* fixtures, const char* directory, char** fields, uint32_t number)
+{
+    (void)number;
+    const char* identifier = fields[0];
+    bool valid = pp_test_fixture_word(identifier) && fixtures->count < BUSTER_PP_TEST_FIXTURE_CASES;
+    for (uint32_t i = 0; valid && i < fixtures->count; i += 1)
+    {
+        valid = strcmp(fixtures->identifiers[i], identifier) != 0;
+    }
+    if (!valid)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "a bad or repeated ID %s", identifier);
+    }
+    PPTestCase test = {
+        .name = fields[4],
+        .standard = strcmp(fields[1], "-") != 0 ? fields[1] : 0,
+        .options = strcmp(fields[3], "-") != 0 ? fields[3] : 0,
         .expected = "",
-        .fails = true,
-        .files = pp_test_files_embed,
-    },
+    };
+    bool other = false;
+    bool markers = false;
+    char* flag = strcmp(fields[2], "-") != 0 ? fields[2] : 0;
+    while (valid && flag != 0)
     {
-        .name = "#embed: an angled name without --embed-dir",
-        .source = "#embed <hi.txt>\nx\n",
-        .standard = "c23",
-        .expected = "",
-        .fails = true,
-        .files = pp_test_files_embed,
-    },
+        char* comma = strchr(flag, ',');
+        if (comma != 0)
+        {
+            *comma = 0;
+        }
+        if (strcmp(flag, "fails") == 0 && !test.fails)
+        {
+            test.fails = true;
+        }
+        else if (strncmp(flag, "warnings=", 9) == 0)
+        {
+            valid = pp_test_fixture_count(flag + 9, &test.warnings);
+        }
+        else if (strncmp(flag, "errors=", 7) == 0)
+        {
+            valid = pp_test_fixture_count(flag + 7, &test.errors);
+        }
+        else if (strcmp(flag, "other") == 0 && !other)
+        {
+            other = true;
+        }
+        else if (strcmp(flag, "markers") == 0 && !markers)
+        {
+            markers = true;
+        }
+        else if (strncmp(flag, "files=", 6) == 0 && test.files == 0)
+        {
+            for (uint32_t t = 0; t < fixtures->tree_count; t += 1)
+            {
+                test.files = strcmp(fixtures->tree_names[t], flag + 6) == 0 ? fixtures->files + fixtures->tree_firsts[t] : test.files;
+            }
+            valid = test.files != 0;
+        }
+        else
+        {
+            valid = false;
+        }
+        if (!valid)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "an unknown, repeated or bad flag %s", flag);
+        }
+        flag = comma != 0 ? comma + 1 : 0;
+    }
+    valid = valid && pp_test_fixture_text(fixtures, directory, identifier, ".c", &test.source) &&
+            pp_test_fixture_text(fixtures, directory, identifier, ".expected", &test.expected) &&
+            (!other || pp_test_fixture_text(fixtures, directory, identifier, ".other.h", &test.other)) &&
+            (!markers || pp_test_fixture_text(fixtures, directory, identifier, ".markers", &test.markers));
+    if (valid)
     {
-        .name = "#embed in a skipped group",
-        .source = "#if 0\n#embed \"missing.txt\"\n#embed\n#endif\nok\n",
-        .standard = "c23",
-        .expected = "ok",
-    },
-    // #252's review, against clang 23: an #embed's parameters past an angled name in which "//" began a comment for the
-    // file's tokens, so that the line is lexed again from the '>', and the errors of a token the name's
-    // '>' starts; an #embed after #pragma GCC system_header, which starts its line where the system header's line marker
-    // puts it; and comment delimiters that a line splice splits, after an #embed and in a #line's comment.
+        fixtures->identifiers[fixtures->count] = identifier;
+        fixtures->cases[fixtures->count] = test;
+        fixtures->count += 1;
+    }
+    return valid;
+}
+
+// The catalogs' cases into pp_test_cases, once; false, with the reason printed, when either catalog or a file of theirs
+// is wrong (the comment above pp_test_fixture_root).
+static bool pp_test_cases_load(void)
+{
+    PPTestFixtures* fixtures = &pp_test_fixtures;
+    bool valid = pp_test_cases != 0;
+    if (!valid)
     {
-        .name = "#252's review: an #embed's parameters past an angled name with \"//\"",
-        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(0) if_empty(42)\n};\nint b[] = {\n#embed <dir//bytes.bin> limit(1)\n};\n"
-                  "int c[] = {\n#embed <dir//bytes.bin> clang::offset(1)\n};\nint d[] = {\n#embed <dir//bytes.bin> /* c */ limit(1) /* d */\n};\n"
-                  "int e[] = {\n#embed <dir/\\\n/bytes.bin> limit(1)\n};\nx\n",
-        .standard = "c23",
-        .expected = "int a[] = {42}; int b[] = {65 }; int c[] = {10 }; int d[] = {65 }; int e[] = {65 }; x",
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's review: a token an #embed name's '>' starts",
-        .source = "int a[] = {\n#embed <dir/bytes.bin>> limit(1)\n};\nint b[] = {\n#embed <dir/bytes.bin>= limit(1)\n};\nx\n",
-        .standard = "c23",
-        .expected = "int a[] = { }; int b[] = { }; x",
-        .fails = true,
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's review: an #embed after #pragma GCC system_header",
-        .source = "#include \"sys.h\"\nint after;\n",
-        .standard = "c23",
-        .expected = "unsigned char a[] = { 72, 300 }; int after;",
-        .files = pp_test_files_embed_review,
-        .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys.h\" 1\nunsigned char a[] = {\n# 3 \"%d/sys.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\nint after;\n",
-    },
-    // #252's second review, against clang 23: the line lexed again past a "//" name runs on through a block comment's
-    // newlines, as clang's does, and the file goes on after it (a #define in that comment is none, and the next token
-    // joins the data's line); a gap of line splices alone in it isn't a space (STR(a\ +b) is "a+b"); and the system
-    // header's note starts where the printer resumes after #pragma GCC system_header, before an #embed indented or after
-    // a blank line.
-    {
-        .name = "#252's second review: an #embed's line past a \"//\" name, through a block comment's newlines",
-        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* comment\n*/ suffix(,42)\n};\nint b[] = {\n#embed <dir//bytes.bin> prefix(1 /* c\n */ ,) limit(1)\n};\n"
-                  "int c[] = {\n#embed <dir//bytes.bin> limit(1) /* c\n#define X 1\n*/\n};\nX\n#define STR(x) #x\nint d[] = {\n"
-                  "#embed <dir//bytes.bin> prefix(STR(a\\\n+b),) limit(1)\n};\nend\n",
-        .standard = "c23",
-        .expected = "int a[] = {65 ,42}; int b[] = {1 ,65 }; int c[] = {65 }; X int d[] = {\"a+b\",65 }; end",
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's second review: an #embed after #pragma GCC system_header, indented or after a blank line",
-        .source = "#include \"sys_indent.h\"\n#include \"sys_blank.h\"\nint after;\n",
-        .standard = "c23",
-        .expected = "unsigned char b[] = { 72, 300 }; unsigned char c[] = { 72, 300 }; int after;",
-        .files = pp_test_files_embed_review,
-        .markers = "# 1 \"%d/case.c\"\n# 1 \"%d/sys_indent.h\" 1\nunsigned char b[] = {\n# 3 \"%d/sys_indent.h\" 3\n72, 300 };\n# 2 \"%d/case.c\" 2\n"
-                   "# 1 \"%d/sys_blank.h\" 1\nunsigned char c[] = {\n# 3 \"%d/sys_blank.h\" 3\n72, 300 };\n# 3 \"%d/case.c\" 2\nint after;\n",
-    },
-    {
-        .name = "#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment",
-        .source = "int a[] = {\n#embed \"hi.txt\" limit(1)\n/* comment *\\\n/\n\n};\nint b[] = {\n#embed \"hi.txt\" limit(1)\n/\\\n* comment */\n\n};\n"
-                  "int c[] = {\n#embed \"hi.txt\" limit(1)\n/\\\n* comment\n*/ };\n#line 100 /* x *\\\n/\n#embed \"hi.txt\" limit(1)\nint z;\n",
-        .standard = "c23",
-        .expected = "int a[] = {72 }; int b[] = {72 }; int c[] = {72 }; 72 int z;",
-        .files = pp_test_files_embed_review,
-    },
-    // #252's third review, against clang 23, on lines lexed again past a name with "//" (or "/*"): a block comment right
-    // after the name carries the line on (the file's tokens had nothing past the name to differ); directives that a
-    // comment in such a line hides, which the file's conditional pairing counted (an #endif there leaves the #else, #elif
-    // and #elifdef after it to a count of the nesting, through #if, #ifdef, #ifndef and #elifndef); poisoned names in it,
-    // each an error once, and none in its comments, where the file's tokens may have them; an unterminated block comment
-    // at its end (clang's error); comments that end and begin again on its lines, each piece lexed once; and the file's
-    // next token, which joins the data's line from where the line lexed again ends (`// */` is in its comment).
-    {
-        .name = "#252's third review: a block comment right after an #embed's \"//\" name",
-        .source = "int a[] = {\n#embed <dir//bytes.bin> /* comment\n*/\n};\nint b[] = {\n#embed <dir//bytes.bin> /* c\n*/ limit(1)\n};\n"
-                  "int c[] = {\n#embed <dir//bytes.bin> /* c */ /* d\n*/ limit(1) /* e\n*/\n};\nafter\n",
-        .standard = "c23",
-        .expected = "int a[] = {65, 10 }; int b[] = {65 }; int c[] = {65 }; after",
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's third review: directives hidden in an #embed's line lexed again",
-        .source = "#if 1\n#embed <dir//bytes.bin> limit(1) /* comment\n#endif\n*/\n#else\nbad\n#endif\ngood\n"
-                  "#ifdef __STDC__\n#embed <dir//bytes.bin> limit(1) /* comment\n#endif\n*/\n#elifdef __STDC__\nbad\n#else\n#ifndef X\nbad\n"
-                  "#elifndef Y\nbad\n#else\nbad\n#endif\n#if 1\n#endif\nbad\n#endif\ngood2\n",
-        .standard = "c23",
-        .expected = "65 good 65 good2",
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's third review: poisoned names in an #embed's line lexed again",
-        .source = "#pragma GCC poison bad\nint a[] = {\n#embed <dir//bytes.bin> limit(1) prefix(bad,)\n};\nint b[] = {\n"
-                  "#embed <dir/bytes.bin>> limit(1) > bad\n};\nint c[] = {\n#embed <dir/bytes.bin> limit(1) prefix(bad,)\n};\nx\n",
-        .standard = "c23",
-        .expected = "int a[] = {bad,65 }; int b[] = { }; int c[] = {bad,65 }; x",
-        .fails = true,
-        .errors = 4,
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's third review: poisoned names in comments of an #embed's line lexed again",
-        .source = "#pragma GCC poison bad\nint a[] = {\n#embed <dir/*x.bin> limit(1) /*/ > bad */\n};\nint b[] = {\n"
-                  "#embed <dir//bytes.bin> limit(1) /* bad\n*/\n};\nx\n",
-        .standard = "c23",
-        .expected = "int a[] = {66 }; int b[] = {65 }; x",
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's third review: an unterminated block comment in an #embed's line lexed again",
-        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* unclosed\n};\n",
-        .standard = "c23",
-        .expected = "int a[] = {65",
-        .fails = true,
-        .errors = 1,
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's third review: comments that end and begin again in an #embed's line lexed again",
-        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) prefix(/*\n*/1,/*\n*/2, /* x */ /*\n\n*/3,) /* y */ /*\n*/ suffix(,/*\n\n*/4)\n};\nend\n",
-        .standard = "c23",
-        .expected = "int a[] = {1,2,3,65,4}; end",
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "#252's third review: the token after an #embed's line lexed again",
-        .source = "int a[] = {\n#embed <dir//bytes.bin> limit(1) /* comment\n// */\n, __builtin_LINE()\n};\nint b[] = {\n"
-                  "#embed <dir//bytes.bin> limit(1) /* comment\n// */\n\n, 3\n};\n",
-        .standard = "c23",
-        .expected = "int a[] = {65 , __builtin_LINE() }; int b[] = {65 , 3 };",
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-        .markers = "# 1 \"%d/case.c\"\nint a[] = {65 , __builtin_LINE()\n\n\n\n};\nint b[] = {65\n\n\n\n, 3\n};\n",
-    },
-    {
-        .name = "__has_embed: clang's limit and clang::offset",
-        .source = "#if __has_embed(\"hi.txt\") == 1 && __has_embed(\"hi.txt\" limit(4)) == 1 && __has_embed(\"hi.txt\" "
-                  "limit(5)) == 2 && __has_embed(\"hi.txt\" limit(100)) == 2\nlimits\n#endif\n"
-                  "#if __has_embed(\"hi.txt\" clang::offset(3)) == 1 && __has_embed(\"hi.txt\" clang::offset(4)) == 2 &"
-                  "& __has_embed(\"hi.txt\" clang::offset(9)) == 2 && __has_embed(\"empty.txt\") == 2\noffsets\n"
-                  "#endif\n"
-                  "#if __has_embed(<hi.txt>) == 0 && __has_embed(\"hi.txt\" foo) == 0 && __has_embed(\"hi.txt\" foo(1))"
-                  " == 0 && __has_embed(\"hi.txt\" __if_empty__(x)) == 1 && __has_embed(\"hi.txt\" clang::offset(1) lim"
-                  "it(3)) == 1 && __has_embed(\"hi.txt\" clang::offset(1) limit(4)) == 2\nothers\n#endif\n",
-        .standard = "c23",
-        .expected = "limits offsets others",
-        .files = pp_test_files_embed,
-    },
-    // #119's done-when checks, against clang 23: header names written out ("//" and "/*...*/" are part of the name,
-    // and a comment that runs on to the next line makes clang join the line's tokens), computed ones, #include_next
-    // through three directories, an inactive group's includes, a cycle stopped at clang's depth limit (an error, after
-    // which the file isn't entered again), one record through links, clang's recoveries (an angled name found as a
-    // quoted one, a name found without what it starts and ends with besides letters and digits), and the diagnostics'
-    // places.
-    {
-        .name = "#119: header names written out, a comment that runs on to the next line among them",
-        .source = "#include <a//b.h>\n#include <a/*x*/b.h>\n#include \"a\\b.h\"\n#include <a/*x\n*/b.h>\n",
-        .standard = "c17",
-        .expected = "ab axb backslash joined",
-        .options = "-I%d",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#119: computed names, joined as clang joins them",
-        .source = "#define H <c.h>\n#include H\n#define Q \"c.h\"\n#include Q\n#define L <\n#define R >\n#include L "
-                  "c.h R\n",
-        .standard = "c17",
-        .expected = "computed computed computed",
-        .fails = true,
-        .warnings = 1,
-        .options = "-I%d",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#119: #include_next through three directories",
-        .source = "#include <n.h>\n",
-        .standard = "c17",
-        .expected = "one two three",
-        .options = "-I%d/d1 -I%d/d2 -I%d/d3",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#119: an inactive group's includes aren't looked for",
-        .source = "#if 0\n#include \"missing.h\"\n#include <missing.h>\n#elif 0\n#include \"missing2.h\"\n#else\n"
-                  "#endif\nok\n",
-        .standard = "c17",
-        .expected = "ok",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#119: an include cycle stops at clang's depth limit",
-        .source = "#include \"self.h\"\nend\n",
-        .standard = "c17",
-        .expected = "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
-                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
-                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
-                    "x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x "
-                    "x x x end",
-        .fails = true,
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#119: one file through a symbolic link and a hard link",
-        .source = "#include \"real.h\"\n#include \"sym.h\"\n#include \"hard.h\"\n#include \"guarded.h\"\n#include "
-                  "\"gsym.h\"\nend\n",
-        .standard = "c17",
-        .expected = "once guarded end",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#119: clang's recoveries from a name not found",
-        .source = "#include <local.h>\na\n#include \"local.h \"\nb\n#include \" local.h\"\nc\n#include \"local.h.\"\n"
-                  "d\n",
-        .standard = "c17",
-        .expected = "local a local b local c local d",
-        .fails = true,
-        .warnings = 2,
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#119: an include's diagnostics, at clang's places",
-        .source = "#include\n#include 1\n#include \"local.h\" x\n#include <local.h\n#include \"\"\n#include <>\nz\n",
-        .standard = "c17",
-        .expected = "local z",
-        .fails = true,
-        .warnings = 1,
-        .options = "-I%d",
-        .files = pp_test_files_includes,
-    },
-    // #254's review, against clang 23: a header name written out that is too long for any path is one still, refused
-    // (clang's fatal error about the path, which the history cases compare), and never a computed one whose identifier
-    // expands to another header's name, nor is an #embed's longer than the buffer it reads into; __has_include's and
-    // __has_embed's operands written in their #if line are read as the line writes them, and the same operands from a
-    // macro or an argument joined from their tokens; and a header that the depth limit refused is included as clang
-    // marks it: three #includes of it give one error, and an #include after the cycle unwinds doesn't enter it.
-    {
-        .name = "#254's review: a header name written out, too long for a path",
-        .source = "#define " BUSTER_PP_TEST_A4096 " short.h\n#include <" BUSTER_PP_TEST_A4096 ">\nEND\n",
-        .standard = "c17",
-        .expected = "",
-        .fails = true,
-        .options = "-I%d",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#254's review: an #embed name written out, longer than its buffer",
-        .source = "#define " BUSTER_PP_TEST_A4096 "A short.h\n#embed <" BUSTER_PP_TEST_A4096 "A>\nEND\n",
-        .standard = "c23",
-        .expected = "",
-        .fails = true,
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#254's review: __has_include's and __has_embed's operands as their line writes them, \" x.h\" alone",
-        .source = "#define ID(x) x\n#define HI __has_include\n#define ARG <  x.h>\n#if __has_include(<  x.h>)\nraw\n#endif\n#if HI(<  x.h>)\nhi\n#endif\n"
-                  "#if ID(__has_include(<  x.h>))\nargument\n#endif\n#if __has_include(ARG)\nmacro\n#endif\n#if __has_embed(<  x.h>) == 0 && "
-                  "ID(__has_embed(<  x.h>)) == 1\nembed\n#endif\n#if __has_include(<  x.h>)\n#include <  x.h>\n#endif\nvalid_translation_unit\n",
-        .standard = "c23",
-        .expected = "argument macro embed valid_translation_unit",
-        .options = "-I%d/one --embed-dir=%d/one",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#254's review: __has_include's and __has_embed's operands as their line writes them, \"  x.h\" alone",
-        .source = "#define ID(x) x\n#define HI __has_include\n#define ARG <  x.h>\n#if __has_include(<  x.h>)\nraw\n#endif\n#if HI(<  x.h>)\nhi\n#endif\n"
-                  "#if ID(__has_include(<  x.h>))\nargument\n#endif\n#if __has_include(ARG)\nmacro\n#endif\n#if __has_embed(<  x.h>) == 1 && "
-                  "__has_embed(<  x.h> limit(0)) == 2 && ID(__has_embed(<  x.h>)) == 0\nembed\n#endif\n#include <  x.h>\n",
-        .standard = "c23",
-        .expected = "raw hi embed two_spaces",
-        .options = "-I%d/two --embed-dir=%d/two",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "header-query continuation retains dollar punctuation and wide literal prefixes",
-        .source = "#define L changed\n#define S_(...) #__VA_ARGS__\n#define S(...) S_(__VA_ARGS__)\n"
-                  "#if __has_include(<dir//x.h>) && _Pragma(S(ppf $L\"x\")) 1\nyes\n#endif\n",
-        .standard = "c17",
-        .expected = "#pragma ppf $L\"x\"\nyes\n",
-        .options = "-fno-dollars-in-identifiers -I%d",
-        .files = pp_test_files_header_tails,
-    },
-    // #254's second review, against clang 23: a backslash in a header name written out takes the character after it into
-    // the name, a '>' too, as clang's LexAngledStringLiteral reads it; and the rest of the line past such a name is what
-    // clang lexes on from its '>', where the file's tokens ran past it: a "//" in the name began a comment there (the
-    // #if line's `&& 0` and `|| defined(NOPE)` count, an #include's `junk` is a warning and __has_embed's parameters are
-    // read, also on past a block comment's newlines, and the file goes on after that line), or a token the '>' starts
-    // ("x.h>>", "x.h>=", "x.h>>=") stays in the operand, an error.
-    {
-        .name = "#254's second review: a backslash in a header name written out escapes its '>'",
-        .source = "#if __has_include(<a\\>b.h>) && __has_include(\"a\\>b.h\")\nyes\n#endif\n#include <a\\>b.h>\nend\n",
-        .standard = "c17",
-        .expected = "yes int escaped; end",
-        .options = "-I%d",
-        .files = pp_test_files_header_tails,
-    },
-    {
-        .name = "#254's second review: the rest of a line past a header name with \"//\"",
-        .source = "#if __has_include(<dir//x.h>) && 1\nyes2\n#endif\n#if __has_include(<dir//x.h>) && 0\nno3\n#endif\n"
-                  "#if __has_include(<dir//x.h>) || defined(NOPE)\nyes4\n#endif\n#if __has_embed(<dir//x.h> limit(1)) == 1\nyes5\n#endif\n"
-                  "#if __has_embed(<dir//x.h> limit(0)) == 2\nyes6\n#endif\n#include <dir//x.h> junk\nend\n",
-        .standard = "c23",
-        .expected = "yes2 yes4 yes5 yes6 int dir_x; end",
-        .warnings = 1,
-        .options = "-I%d --embed-dir=%d",
-        .files = pp_test_files_header_tails,
-    },
-    {
-        .name = "#254's second review: a \"//\" name's line, through a block comment's newlines",
-        .source = "#include <dir//x.h> /* c\n*/ junk\nmid\n#if __has_include(<dir//x.h>) /* c\n#define Y 1\n*/ && 0\nno\n#endif\n#ifdef Y\nY_defined\n#endif\n"
-                  "#if __has_include(<dir//x.h>) /* c\n*/ || 0\nyes\n#endif\nend\n",
-        .standard = "c17",
-        .expected = "int dir_x; mid yes end",
-        .warnings = 1,
-        .options = "-I%d",
-        .files = pp_test_files_header_tails,
-    },
-    {
-        .name = "#254's second review: a token a header query's '>' starts stays in its operand",
-        .source = "#if __has_include(<x.h>>)\nwrong1\n#endif\n#if __has_include(<x.h>=)\nwrong2\n#endif\n#if __has_include(<x.h>>=)\nwrong3\n#endif\n"
-                  "#if __has_include(<a\\\\>b.h>)\nwrong4\n#endif\nend\n",
-        .standard = "c17",
-        .expected = "end",
-        .fails = true,
-        .options = "-I%d",
-        .files = pp_test_files_header_tails,
-    },
-    {
-        .name = "#254's review: a header refused at the depth limit is included",
-        .source = "#include \"loop.h\"\n#include \"leaf.h\"\nEND\n",
-        .standard = "c17",
-        .expected = "END",
-        .fails = true,
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "-municode's UNICODE is <command line>'s first macro, before -D and -U",
-        .source = "UNICODE\n",
-        .standard = "gnu17",
-        .expected = "2",
-        .warnings = 1,
-        .options = "-DUNICODE=2 -municode",
-    },
-    {
-        .name = "-municode is a joined option, and a -U before it undefines its UNICODE",
-        .source = "#ifdef UNICODE\ndefined\n#else\nundefined\n#endif\n",
-        .standard = "gnu17",
-        .expected = "undefined",
-        .options = "-UUNICODE -municodeX",
-    },
-    {
-        .name = "#254's third review: condition links ignore directives hidden by a raw query's comment",
-        .source = "#if __has_include(<dir//x.h>) /* comment\n#else\n#define IGNORED */ && 0\nint wrong_branch;\n#endif\n"
-                  "#ifdef IGNORED\nint wrong_define;\n#endif\n#if __has_include(<dir//x.h>) /* comment\n#elifdef IGNORED\n*/ && 0\nwrong\n"
-                  "#else\nint real_else;\n#endif\nint end;\n",
-        .standard = "c17",
-        .expected = "int real_else; int end;",
-        .options = "-I%d",
-        .files = pp_test_files_header_tails,
-    },
-    // An ordinary comment delimiter belongs to an opaque header name too. Its original file token must not hide the
-    // source after the name or report a comment error; a real comment after the name must still be diagnosed.
-    {
-        .name = "opaque header: an unclosed comment delimiter in an include name",
-        .source = "#include <dir/*x.h>\nafter\n",
-        .standard = "c17",
-        .expected = "opaque_header after",
-        .options = "-I%d",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "opaque header: an unclosed comment delimiter in an embed name",
-        .source = "int a[] = {\n#embed <dir/*x.bin> limit(1)\n};\nafter\n",
-        .standard = "c23",
-        .expected = "int a[] = {66}; after",
-        .options = "--embed-dir=%d",
-        .files = pp_test_files_embed_review,
-    },
-    {
-        .name = "opaque header: an unclosed comment delimiter in a query name",
-        .source = "#if __has_include(<dir/*x.h>) && __has_embed(<dir/*x.bin> limit(1)) == 1\nfound\n#else\nwrong\n#endif\n"
-                  "#if __has_include(<dir/*x.h>) && 0\nwrong\n#else\nfalse_branch\n#endif\n"
-                  "#if 0\nwrong\n#elif __has_include(<dir/*x.h>)\nelif_branch\n#endif\nafter\n",
-        .standard = "c23",
-        .expected = "found false_branch elif_branch after",
-        .options = "-I%d --embed-dir=%d",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "opaque header: a real unclosed comment after an opaque name",
-        .source = "#include <dir/*x.h> /* unclosed\nafter\n",
-        .standard = "c17",
-        .expected = "opaque_header",
-        .fails = true,
-        .errors = 1,
-        .options = "-I%d",
-        .files = pp_test_files_includes,
-    },
-    {
-        .name = "#254's third review: later queries retain raw names in a re-lexed suffix",
-        .source = "#if __has_include(<dir//x.h>) && __has_include(<  x.h>)\nint wrong_branch;\n#else\nint expected_branch;\n#endif\n"
-                  "#if __has_include(<dir//x.h>) && __has_include(<dir//x.h>) && __has_embed(<dir//x.h> limit(1)) == 1\nint repeated;\n#endif\n"
-                  "#if __has_include(<dir//x.h>) && (1 + (2 * 3) == 7) && __has_include(<dir//x.h>)\nint parentheses;\n#endif\n",
-        .standard = "c23",
-        .expected = "int expected_branch; int repeated; int parentheses;",
-        .options = "-I%d --embed-dir=%d",
-        .files = pp_test_files_header_tails,
-    },
-    {
-        .name = "-C (#1380): comments are tokens outside directives, not in a macro's arguments, and a comment before '#' makes text",
-        .source = "/* lead */ int a; // tail\n#define F(x) [x]\n#define O /* in body */ 1\nF /* not invoked */ (1)\nF(2 /* dropped */) O\n"
-                  "/* c */ #define NOT 9\nNOT\n#if 0\n/* skipped */ #endif\n/* still skipped */\n#endif /* after endif */\n"
-                  "#include \"other.h\"\n#include \"other.h\"\n/* multi\n   line */ int m; // splice \\\ncontinued\nint last; /* end */\n",
-        .other = "/* header lead */\n#ifndef OTHER\n#define OTHER\nint other; /* in header */\n#endif\n// header trail\n",
-        .expected = "/* lead */ int a; // tail\nF /* not invoked */ (1)\n[2] 1\n/* c */ #define NOT 9\nNOT\n/* header lead */\n"
-                    "int other; /* in header */\n// header trail\n/* multi\n   line */ int m; // splice continued\nint last; /* end */\n",
-        .standard = "gnu17",
-        .options = "-E -C",
-        .markers = "# 1 \"%d/case.c\"\n/* lead */ int a; // tail\n\n\nF /* not invoked */ (1)\n[2] 1\n/* c */ #define NOT 9\nNOT\n"
-                   "# 1 \"%d/other.h\" 1\n/* header lead */\n\n\nint other; /* in header */\n\n// header trail\n# 14 \"%d/case.c\" 2\n"
-                   "/* multi\n   line */ int m; // splice continued\n\nint last; /* end */\n",
-    },
-    {
-        .name = "-C (#1380): a comment before #endif in a skipped group leaves the group open",
-        .source = "#if 0\n/* c */ #endif\nhidden\n#endif\nshown /* c */\n",
-        .expected = "shown /* c */\n",
-        .standard = "gnu17",
-        .options = "-E -C",
-        .markers = "# 1 \"%d/case.c\"\n\n\n\n\nshown /* c */\n",
-    },
-    {
-        .name = "-CC (#1380): replacement lists' and arguments' comments, a // one a block comment there, stringized and pasted",
-        .source = "#define F(x, ...) ((x) /* fc */ + __VA_ARGS__) // trailing\n#define S(x) #x\n#define P a /* in */ ## b\n"
-                  "#define O /* only */\nint y = F(1, 2 /* arg */);\nS(5 /* str */ 6) O P;\nF(3, // line\n  4) end\nO\n",
-        .expected = "int y = ((1) /* fc */ + 2 /* arg */) /* trailing*/;\n\"5 /* str */ 6\" /* only */ a b;\n((3) /* fc */ + // line\n"
-                    "4) /* trailing*/ end\n/* only */\n",
-        .standard = "gnu17",
-        .options = "-E -CC",
-        .markers = "# 1 \"%d/case.c\"\n\n\n\n\nint y = ((1) /* fc */ + 2 /* arg */) /* trailing*/;\n\"5 /* str */ 6\" /* only */ a b;\n"
-                   "((3) /* fc */ + // line\n# 7 \"%d/case.c\"\n4) /* trailing*/ end\n\n/* only */\n",
-    },
-    {
-        .name = "-dD (#1380): each #define and #undef on its line, defined or not, a redefinition too",
-        .source = "#define A 1\n#define F(a, ...) a + __VA_ARGS__\n#undef A\n#undef NEVER\n#define A 2 /* c */\nint x = A;\n"
-                  "#include \"other.h\"\n#include \"other.h\"\nint y = F(1, 2);\n#define  G( x )  x\n#undef G\n",
-        .other = "#ifndef OTHER\n#define OTHER\nint other;\n#endif\n",
-        .expected = "int x = 2;\nint other;\nint y = 1 + 2;\n",
-        .standard = "gnu17",
-        .options = "-dD -undef",
-        .markers = "# 1 \"%d/case.c\"\n# 1 \"<built-in>\" 1 3\n#define __STDC_EMBED_EMPTY__ 2\n#define __STDC_EMBED_FOUND__ 1\n"
-                   "#define __STDC_EMBED_NOT_FOUND__ 0\n#define __STDC_UTF_16__ 1\n#define __STDC_UTF_32__ 1\n#define __STDC__ 1\n"
-                   "#define __STDC_VERSION__ 201710L\n#define __STDC_HOSTED__ 1\n# 1 \"%d/case.c\" 2\n#define A 1\n"
-                   "#define F(a,...) a + __VA_ARGS__\n#undef A\n#undef NEVER\n#define A 2\nint x = 2;\n# 2 \"%d/other.h\" 1\n"
-                   "#define OTHER \nint other;\n# 9 \"%d/case.c\" 2\nint y = 1 + 2;\n#define G(x) x\n#undef G\n",
-    },
-    {
-        .name = "-dI (#1380): each include before what it enters, a guarded one, a computed one and #include_next",
-        .source = "#include \"other.h\"\n#include \"other.h\"\n#define H <wrapper.h>\n#include H\nint y;\n",
-        .other = "#ifndef OTHER\n#define OTHER\nint other;\n#endif\n",
-        .expected = "int other;\nLAYER_ONE\nLAYER_TWO\nint y;\n",
-        .standard = "gnu17",
-        .options = "-dI -I%d/first -I%d/second",
-        .files = pp_test_files_dumped_includes,
-        .markers = "# 1 \"%d/case.c\"\n#include \"other.h\" /* clang -E -dI */\n# 3 \"%d/other.h\" 1\nint other;\n# 2 \"%d/case.c\" 2\n"
-                   "#include \"other.h\" /* clang -E -dI */\n\n#include <wrapper.h> /* clang -E -dI */\n# 1 \"%d/first/wrapper.h\" 1\n"
-                   "LAYER_ONE\n#include_next <wrapper.h> /* clang -E -dI */\n# 1 \"%d/second/wrapper.h\" 1\nLAYER_TWO\n"
-                   "# 3 \"%d/first/wrapper.h\" 2\n# 5 \"%d/case.c\" 2\nint y;\n",
-    },
-    {
-        .name = "-dD -dI -CC (#1380): directives, comments and the replacement lists' comments together",
-        .source = "/* a */\n#define M(x) x // m\n#include \"other.h\" /* i */\nint v = M(1); /* v */\n#undef M\n",
-        .other = "#define O /* o */ 2\n",
-        .expected = "/* a */\nint v = 1 /* m*/; /* v */\n",
-        .standard = "gnu17",
-        .options = "-E -dD -dI -CC -undef",
-        .markers = "# 1 \"%d/case.c\"\n# 1 \"<built-in>\" 1 3\n#define __STDC_EMBED_EMPTY__ 2\n#define __STDC_EMBED_FOUND__ 1\n"
-                   "#define __STDC_EMBED_NOT_FOUND__ 0\n#define __STDC_UTF_16__ 1\n#define __STDC_UTF_32__ 1\n#define __STDC__ 1\n"
-                   "#define __STDC_VERSION__ 201710L\n#define __STDC_HOSTED__ 1\n# 1 \"%d/case.c\" 2\n/* a */\n#define M(x) x /* m*/\n"
-                   "#include \"other.h\" /* clang -E -dI */\n# 1 \"%d/other.h\" 1\n#define O /* o */ 2\n# 4 \"%d/case.c\" 2\n"
-                   "int v = 1 /* m*/; /* v */\n#undef M\n",
-    },
-    {
-        .name = "-dN (#1380): taken, and reported unused, as clang's driver does",
-        .source = "x\n",
-        .expected = "x\n",
-        .standard = "gnu17",
-        .warnings = 1,
-        .options = "-dN",
-    },
-};
+        *fixtures = (PPTestFixtures){ .storage = arena_reserve(UINT64_C(1) << 28) };
+        fixtures->cases = arena_push(&fixtures->storage, sizeof(PPTestCase) * BUSTER_PP_TEST_FIXTURE_CASES, 8);
+        fixtures->identifiers = arena_push(&fixtures->storage, sizeof(const char*) * BUSTER_PP_TEST_FIXTURE_CASES, 8);
+        fixtures->files = arena_push(&fixtures->storage, sizeof(PPTestFile) * BUSTER_PP_TEST_FIXTURE_FILES, 8);
+        fixtures->tree_names = arena_push(&fixtures->storage, sizeof(const char*) * BUSTER_PP_TEST_FIXTURE_FILES, 8);
+        fixtures->tree_firsts = arena_push(&fixtures->storage, sizeof(uint32_t) * BUSTER_PP_TEST_FIXTURE_FILES, 8);
+        fixtures->named = arena_push(&fixtures->storage, sizeof(const char*) * BUSTER_PP_TEST_FIXTURE_CASES * 4, 8);
+        valid = fixtures->cases != 0 && fixtures->identifiers != 0 && fixtures->files != 0 && fixtures->tree_names != 0 && fixtures->tree_firsts != 0 &&
+                fixtures->named != 0;
+        char directory[PATH_MAX];
+        snprintf(directory, sizeof(directory), "%s/preprocessor/trees", pp_test_fixture_root);
+        valid = valid && pp_test_fixture_lines(fixtures, directory, "buster-fixtures v1 preprocessor-trees", 4, pp_test_fixture_tree_line) &&
+                pp_test_fixture_orphans(fixtures, directory);
+        // The last tree's end.
+        if (valid)
+        {
+            fixtures->files[fixtures->file_count] = (PPTestFile){ 0 };
+            fixtures->file_count += 1;
+            fixtures->named_count = 0;
+        }
+        snprintf(directory, sizeof(directory), "%s/preprocessor/cases", pp_test_fixture_root);
+        valid = valid && pp_test_fixture_lines(fixtures, directory, "buster-fixtures v1 preprocessor-cases", 5, pp_test_fixture_case_line) &&
+                pp_test_fixture_orphans(fixtures, directory);
+        if (valid && fixtures->count == 0)
+        {
+            snprintf(fixtures->problem, sizeof(fixtures->problem), "%s/catalog.tsv names no case", directory);
+            valid = false;
+        }
+        if (valid)
+        {
+            pp_test_cases = fixtures->cases;
+            pp_test_case_count = fixtures->count;
+        }
+        else
+        {
+            printf("test-preprocessor: the cases (#2053): %s\n", fixtures->problem);
+        }
+    }
+    return valid;
+}
 
 // Writes `length` bytes of `text` to a file, or all of it up to its zero byte when `length` is 0; returns whether it could.
 static bool pp_test_write_bytes(const char* path, const char* text, uint32_t length)
@@ -8474,7 +7398,7 @@ static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint
 {
     PPTestChildCounts counts = { 0 };
     // The cases' parts take the first `count` cases, or every one.
-    const uint32_t cases = children->count != 0 ? children->count : BUSTER_ARRAY_LENGTH(pp_test_cases);
+    const uint32_t cases = children->count != 0 ? children->count : pp_test_case_count;
     switch (children->work)
     {
         case PP_TEST_CHILD_HEADERS:
@@ -9854,7 +8778,7 @@ static bool pp_test_cases_section(const char* directory, bool with_clang, bool k
     pp_test_system_made += cases.system_made;
     snprintf(pp_test_system_inexact_first, sizeof(pp_test_system_inexact_first), "%s", cases.system_inexact_first);
     const uint32_t failures = cases.failures + !cases.result;
-    printf("cases: %u of %lu fail\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_cases));
+    printf("cases: %u of %lu fail (#2053: %s/preprocessor/cases)\n", failures, (unsigned long)pp_test_case_count, pp_test_fixture_root);
     printf("system levels: %llu units by their runs and their history alike, %llu whose runs can't say%s%s%s; %llu tokens at a system level, %llu made "
            "by macros\n",
            (unsigned long long)pp_test_system_units, (unsigned long long)pp_test_system_inexact, pp_test_system_inexact != 0 ? " (the first: " : "",
@@ -10079,6 +9003,12 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
             i += 1;
             count = strtoull(arguments[i], 0, 10);
         }
+        else if (strcmp(argument, "--fixtures") == 0)
+        {
+            valid = valid && next != 0 && next[0] != 0;
+            pp_test_fixture_root = next != 0 ? next : pp_test_fixture_root;
+            i += 1;
+        }
         else if (strcmp(argument, "--part") == 0)
         {
             // K/N: decimal K from 1 to N, a '/', and decimal N up to the deal's checks, digits alone on either side.
@@ -10126,7 +9056,7 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     valid = valid && (!parted || (file_count == 0 && !tables && !generate_targets && !print_case));
     if (!valid || fuzz.jobs == 0 || fuzz.jobs > BUSTER_PP_FUZZ_MAX_JOBS)
     {
-        fprintf(stderr, "usage: test-preprocessor [--clang] [--clang-server PATH [--differential]] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--part K/N] [--print-case N] [options] [file...]\n");
+        fprintf(stderr, "usage: test-preprocessor [--clang] [--clang-server PATH [--differential]] [--keep] [--id-order N] [--fuzz N] [--first N] [--seed N] [--std c17|c23] [--jobs N] [--part K/N] [--print-case N] [--fixtures DIRECTORY] [options] [file...]\n");
     }
     if (valid && clang_server != 0)
     {
@@ -10145,6 +9075,11 @@ static int run_preprocessor_fixture_tests(int argument_count, char** arguments)
     {
         // c_predefines.c's generated tables, from clang (c_predefines_test.c).
         passed_all = predefines_test_print_tables(directory);
+    }
+    else if (passed_all && file_count == 0 && !pp_test_cases_load())
+    {
+        // The built-in cases are runtime data (#2053): without them, no check runs.
+        passed_all = false;
     }
     else if (passed_all && file_count == 0)
     {

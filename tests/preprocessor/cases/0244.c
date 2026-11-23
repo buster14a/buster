@@ -1,0 +1,2 @@
+#error /* never closed
+tail

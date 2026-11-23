@@ -1,0 +1,3 @@
+#pragma clang assume_nonnull begin
+x
+#pragma clang assume_nonnull end

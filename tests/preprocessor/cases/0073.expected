@@ -1,0 +1,4 @@
+#pragma STDC FP_CONTRACT ON
+#pragma omp parallel for
+after
+X
