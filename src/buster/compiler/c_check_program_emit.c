@@ -586,7 +586,7 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_LICM 8u
 #define BUSTER_CHECK_TIER1_PASS_SROA 16u
 #define BUSTER_CHECK_TIER1_PASS_MERGE 32u
-// The loop vectorizer (#2743, ir_vectorize_loops.c), a measurement option.
+// The loop vectorizer (#2743, ir_vectorize_loops.c), on by default (docs/tier1-loop-vectorization.md's "By default").
 #define BUSTER_CHECK_TIER1_PASS_VECTORIZE 64u
 // #2755's loop unroller (ir_optimize_unroll.c), off by default.
 #define BUSTER_CHECK_TIER1_PASS_UNROLL 128u
@@ -608,13 +608,13 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_NUMBERING 32768u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT                                                                                                                              \
     (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \
-     BUSTER_CHECK_TIER1_PASS_TABLES)
+     BUSTER_CHECK_TIER1_PASS_TABLES | BUSTER_CHECK_TIER1_PASS_VECTORIZE)
 // Loop store motion (#3309, ir_store_motion.c): a loop's globals read from registers, before promotion; off by default
 // (docs/tier1-store-motion.md's MEASUREMENTS: of speedtest1's and Lua's code it changes one start-up loop, sqlite3.c's
 // memsys5Init, and it costs a --tier1 compile of sqlite3.c 0.27% more instructions).
 #define BUSTER_CHECK_TIER1_PASS_STORE_MOTION 8192u
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
-    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
+    (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_UNROLL | \
      BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION | BUSTER_CHECK_TIER1_PASS_HOIST | BUSTER_CHECK_TIER1_PASS_NUMBERING)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
