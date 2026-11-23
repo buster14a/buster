@@ -4864,7 +4864,8 @@ static bool check_driver_jump_kept(const Parser* parser, const CheckInput* input
 // reference (an object clone at T's declaration, a function clone at the pragma's A), A's earlier declaration
 // `declaration` (a token) and every file-scope redeclaration of A that a redeclaration error made invalid before the
 // reference, which resolveKind drops by moving others into its place (#2934: `extern int a;` again after
-// `#pragma weak a = t` puts A's earlier declaration first). Their count, 0 where the notes have no room in `scratch`.
+// `#pragma weak a = t` puts A's earlier declaration first). `declaration` is BUSTER_CHECK_NONE where the clones were made
+// before any declaration of A. Their count, 0 where the notes have no room in `scratch`.
 static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const CheckInput* input, uint32_t token, uint32_t declaration, const char* message,
                                                    PPOutputDiagnosticNote** notes, Arena* scratch)
 {
@@ -4884,7 +4885,7 @@ static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const C
     {
         capacity += check_input_symbol_invalid_redeclaration(input, parser, input->reports + r, name, token, declaration);
     }
-    const bool room = clones != 0 && declaration < count && capacity + records < BUSTER_CHECK_SYMBOL_INVALID;
+    const bool room = clones != 0 && (declaration < count || declaration == BUSTER_CHECK_NONE) && capacity + records < BUSTER_CHECK_SYMBOL_INVALID;
     PPOutputDiagnosticNote* listed = room ? BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, capacity) : NULL;
     uint64_t* order = listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, capacity) : NULL;
     uint32_t listed_count = 0;
@@ -4898,7 +4899,7 @@ static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const C
             order[listed_count++] = (uint64_t)made << 32 | i;
         }
     }
-    if (order != NULL)
+    if (order != NULL && declaration < count)
     {
         order[listed_count++] = (uint64_t)declaration << 32 | records;
     }
@@ -6845,7 +6846,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             };
                             // An object's set lists each clone made before the reference, where several directives name A.
                             PPOutputDiagnosticNote* listed = NULL;
-                            const uint32_t listed_count = object && report->value < count ?
+                            const uint32_t listed_count = object && (report->value < count || report->value == BUSTER_CHECK_NONE) ?
                                                           check_driver_weak_alias_candidates(parser, input, token, (uint32_t)report->value, candidate, &listed, scratch) : 0;
                             const bool call = token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_L_PAREN;
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, listed_count != 0 ? listed : notes,
@@ -11974,7 +11975,7 @@ struct CheckDriverDeferred
 };
 
 // --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
-// merge, licm, sroa, memory, vectorize, unroll, vectors, gvn or inline) or all, applied in turn to the passes the earlier
+// merge, licm, sroa, memory, vectorize, unroll, vectors, tables, gvn or inline) or all, applied in turn to the passes the earlier
 // options left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining and vectors), with
 // --tier1-gvn's and --tier1-no-inline's changes where they came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
 // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
@@ -11983,7 +11984,7 @@ struct CheckDriverDeferred
 #define BUSTER_CHECK_DRIVER_PASS_INLINE 1024u
 static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool* gvn, bool* no_inline)
 {
-    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "gvn", "inline", "all" };
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "tables", "gvn", "inline", "all" };
     static const uint32_t bits[] = {
         BUSTER_CHECK_TIER1_PASS_SCCP,
         BUSTER_CHECK_TIER1_PASS_DCE,
@@ -11995,6 +11996,7 @@ static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool*
         BUSTER_CHECK_TIER1_PASS_VECTORIZE,
         BUSTER_CHECK_TIER1_PASS_UNROLL,
         BUSTER_CHECK_TIER1_PASS_VECTORS,
+        BUSTER_CHECK_TIER1_PASS_TABLES,
         BUSTER_CHECK_DRIVER_PASS_GVN,
         BUSTER_CHECK_DRIVER_PASS_INLINE,
         BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,
@@ -13151,9 +13153,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 // Planning remains charged to check-input. These structural counters make an unsupported
                 // tree certificate's whole-unit grammar fallback visible in opt-in measurements (#1364).
-                fprintf(errors, "time-lazy planner=%s tokens=%u scalar-replay-tokens=%u bodies=%u selected=%u deferred=%u references=%u retained-bytes=%llu\n",
+                fprintf(errors, "time-lazy planner=%s tokens=%u scalar-replay-tokens=%u bodies=%u selected=%u deferred=%u skipped=%u references=%u retained-bytes=%llu\n",
                         eager ? "eager" : lazy.replay_tokens != 0 ? "bindings" : "tree", tokens, lazy.replay_tokens, lazy.body_count, lazy.selected_count,
-                        lazy.deferred_count, lazy.reference_count, (unsigned long long)lazy.retained_bytes);
+                        lazy.deferred_count, lazy.skipped_count, lazy.reference_count, (unsigned long long)lazy.retained_bytes);
             }
         }
         if (ready)
@@ -13981,8 +13983,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     check_driver_x86_reports(checking, recovered, pp, &input, &stream, &types, quiet);
                     if (program_checked)
                     {
-                        // A repaired view's warnings, at its complete original statements alone (CheckCommonView, #2406).
-                        check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
+                        // A repaired view keeps complete original statements alone; a prefix keeps its original
+                        // lookahead for warnings deferred to its final body's end (CheckCommonView, #2406).
+                        check_common_view = repairing ? check_driver_common_view(&repair, recovered) :
+                                            (CheckCommonView){ .original = recovered, .count = tokens };
                         const CheckWarningSeverity baseline = !return_warning ? CHECK_WARNING_IGNORE :
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         check_driver_return_reports(checking, recovered, pp, &program, parse_error, baseline, quiet);
@@ -14084,8 +14088,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             return_error > 0 || (return_error == 0 && warning_errors) ? CHECK_WARNING_ERROR : CHECK_WARNING_WARNING;
                         if (error_tokens != NULL)
                         {
-                            // A repaired view's, at its complete original statements alone (CheckCommonView, #2431).
-                            check_common_view = repairing ? check_driver_common_view(&repair, recovered) : (CheckCommonView){ 0 };
+                            // Retain a prefix's original lookahead through the rejected readings; a repair also
+                            // keeps its complete original statements alone (CheckCommonView, #2431).
+                            check_common_view = repairing ? check_driver_common_view(&repair, recovered) :
+                                                (CheckCommonView){ .original = recovered, .count = tokens };
                             check_driver_rejected_common(checking, recovered, pp, &input, &types, additional, additional_count,
                                                          error_tokens, error_count, sites, site_count, nonconstant, scalar,
                                                          return_warning, baseline, parse_error,

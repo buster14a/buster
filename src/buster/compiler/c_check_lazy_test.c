@@ -43,9 +43,17 @@ static void check_test_lazy_same(CheckTest* test, const CheckLazy* planned, cons
 {
     const bool comparable = planned->status == CHECK_LAZY_OK && expected->status == CHECK_LAZY_OK &&
                             planned->body_count == expected->body_count && planned->token_count == expected->token_count;
-    bool same = comparable && planned->selected_count == expected->selected_count && planned->deferred_count == expected->deferred_count &&
-                memcmp(planned->deferred_tokens, expected->deferred_tokens, (uint64_t)planned->token_count + 1) == 0;
-    const uint32_t flags = planned->tree_all_selected || expected->tree_all_selected ? ~BUSTER_CHECK_LAZY_RETAIN : UINT32_MAX;
+    bool same = comparable && planned->selected_count == expected->selected_count && planned->deferred_count == expected->deferred_count;
+    // Only the tree planner skips headers (#3307): the bodies' bytes agree, and a header byte stands where the other has
+    // none or the same.
+    for (uint32_t token = 0; same && token <= planned->token_count; token += 1)
+    {
+        const uint8_t a = planned->deferred_tokens[token];
+        const uint8_t b = expected->deferred_tokens[token];
+        same = a == b || (a == BUSTER_CHECK_LAZY_MASK_HEADER && b == 0) || (b == BUSTER_CHECK_LAZY_MASK_HEADER && a == 0);
+    }
+    uint32_t flags = planned->tree_all_selected || expected->tree_all_selected ? ~BUSTER_CHECK_LAZY_RETAIN : UINT32_MAX;
+    flags &= ~BUSTER_CHECK_LAZY_NAMED;
     const uint32_t body_count = comparable ? planned->body_count : 0;
     for (uint32_t body = 0; body < body_count; body += 1)
     {
@@ -486,6 +494,17 @@ static __attribute__((noinline)) void check_test_lazy(CheckTest* test)
         { "used local data demands its body", "# 1 \"header.h\" 1 3\nstatic int kept(void){static int data __attribute__((used))=3;return data;} static int dead(void){return 4;}\n", 2, 2, true, true },
         { "GNU inline attribute retains body", "# 1 \"header.h\" 1 3\nstatic inline int hidden(void) __attribute__((gnu_inline));static inline int hidden(void){return missing;}\n", 0, 1, false, false },
         { "constructor attribute retains body", "# 1 \"header.h\" 1 3\n__attribute__((constructor)) static void hidden(void){missing=1;}\n", 0, 1, false, false },
+        // A call inside a keyword's operand is a use the tree certifies, as <immintrin.h>'s `__builtin_bit_cast(T, f())` (#3307).
+        { "keyword operand call in a dead body", "# 1 \"header.h\" 1 3\nstatic int leaf(void){return missing;}static unsigned wrap(void){return __builtin_bit_cast(unsigned, leaf());}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 3, 3, false, true, CHECK_LAZY_TEST_TREE },
+        { "keyword operand call demands its body", "# 1 \"header.h\" 1 3\nstatic int leaf(void){return missing;}static unsigned wrap(void){return __builtin_bit_cast(unsigned, leaf());}\n# 1 \"user.c\" 2\nint entry(void){return (int)wrap();}\n", 0, 3, false, false, CHECK_LAZY_TEST_TREE },
+        { "file-scope keyword operand call demands its body", "# 1 \"header.h\" 1 3\nstatic int leaf(void){return missing;}static int dead(void){return missing;}\n# 1 \"user.c\" 2\nint entry(void){return (int)__builtin_bit_cast(unsigned, leaf());}\n", 2, 3, false, false, CHECK_LAZY_TEST_TREE },
+        // An unread definition's whole header goes unread with its body, with its errors (#3307); one named elsewhere or
+        // declaring a tag is read.
+        { "unnamed deferred header is skipped", "# 1 \"header.h\" 1 3\nstatic int __attribute__((aligned(missing))) dead(void){return 0;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, true, CHECK_LAZY_TEST_TREE },
+        { "redeclared deferred header is read", "# 1 \"header.h\" 1 3\nstatic int __attribute__((aligned(missing))) dead(void){return 0;}\n# 1 \"user.c\" 2\nstatic int dead(void);int entry(void){return 0;}\n", 1, 2, false, false, CHECK_LAZY_TEST_TREE },
+        { "deferred header declaring a tag is read", "# 1 \"header.h\" 1 3\nstatic struct T* __attribute__((aligned(missing))) dead(void){return 0;}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 1, 2, false, false, CHECK_LAZY_TEST_TREE },
+        { "deferred header named by a deferred body is skipped", "# 1 \"header.h\" 1 3\nstatic int __attribute__((aligned(missing))) leaf(void){return 0;}static int dead(void){return leaf();}\n# 1 \"user.c\" 2\nint entry(void){return 0;}\n", 3, 3, false, true, CHECK_LAZY_TEST_TREE },
+        { "deferred header named by a read body is read", "# 1 \"header.h\" 1 3\nstatic int __attribute__((aligned(missing))) dead(void){return 0;}\n# 1 \"user.c\" 2\nstruct S{int dead;};int entry(struct S s){return s.dead;}\n", 1, 2, false, false, CHECK_LAZY_TEST_TREE },
         { "attribute expression demands function body", "# 1 \"header.h\" 1 3\nstatic int hidden(void){return missing;}\n# 1 \"user.c\" 2\nint entry(void){int x __attribute__((aligned(sizeof &hidden)));return sizeof x;}\n", 0, 2, false, false, CHECK_LAZY_TEST_REPLAY },
         { "opaque assembly retains every body", "# 1 \"header.h\" 1 3\nstatic int hidden(void){return missing;}static int untouched(void){return 1;}\n# 1 \"user.c\" 2\n__asm__(\"\");int entry(void){return 0;}\n", 0, 3, false, false, CHECK_LAZY_TEST_TREE },
         { "opaque assembly bypasses grouped K&R certification", "# 1 \"header.h\" 1 3\nstatic int (hidden(a))int a;{return missing;}\n# 1 \"user.c\" 2\n__asm__(\"\");int entry(void){return 0;}\n", 0, 2, false, false, CHECK_LAZY_TEST_REPLAY },

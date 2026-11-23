@@ -4587,10 +4587,11 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
 
 // Whether an aggregate argument's or parameter's `location` has it on the stack whole, its bytes in its slots from its
 // first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot, and a record's vector
-// payload alone (PAYLOAD, #2798), whose slot is a part's (tier1_select_location_parts).
+// payload alone (PAYLOAD, #2798), whose slot is a part's (tier1_select_location_parts), and a FIRST location's (#1844), whose
+// slots are its first 16 bytes' alone.
 static bool tier1_select_location_whole(AbiLocation location)
 {
-    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0;
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0;
 }
 
 // The bytes of the vector register a part of `bytes` takes whole (#141, #2798): its own 16, 32 or 64, or a payload's
@@ -4616,6 +4617,9 @@ static bool tier1_select_part_payload(uint32_t bytes)
 // register; none on the stack whole or ignored.
 static uint32_t tier1_select_location_parts(AbiLocation location, uint32_t size, Tier1SelectPart* parts)
 {
+    // A FIRST location's (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's registers),
+    // of the value's first 16 bytes alone.
+    size = (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : size;
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
@@ -4797,7 +4801,9 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
             placed &= parts[k].reg != BUSTER_ABI_REGISTER_NONE || slotted;
         }
         // A PAYLOAD slot (#2798) is a part's, its payload alone (tier1_select_location_parts).
-        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0 &&
+        // So is a FIRST location's (#1844), whose parts are its first 16 bytes' alone; a FIRST location on the stack whole
+        // isn't taken (tier1_select_location_whole).
+        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0 &&
                     (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
     }
     return supported;

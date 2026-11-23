@@ -132,6 +132,7 @@ static const uint32_t node_machine_row_candidates[] = {
     BUSTER_CHECK_INACTIVE_UNION_ADDRESS,
     BUSTER_CHECK_GNU_DIVISION,
     BUSTER_CHECK_GNU_FLOAT_RANGE,
+    BUSTER_CHECK_INVALID_CONSTANT,
 };
 
 // T's table, made by node_machine_tables_initialize from the actions and baked (baked.c): by row operator, then the

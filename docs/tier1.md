@@ -178,9 +178,12 @@ applied in turn, each `+` or `-` and then a pass's name: `sccp`, `dce`, `cfg`
 guide](ir-memory-value-numbering.md)), `vectors` (#2781's value numbering and
 LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
 [its guide](tier1-loop-vectorization.md)), `unroll` (#2755's [loop
-unrolling](tier1-loop-unrolling.md)), `gvn` (as `--tier1-gvn`), `inline`
-(`-inline` as `--tier1-no-inline`), or `all`. The default is SCCP, dead-code
-removal, CFG cleanup, its merges, the inlining and `vectors`. The restricted
+unrolling](tier1-loop-unrolling.md)), `tables` (#3298's switches of
+constants as loads of their jump tables' values, [the optimization
+guide](ir-optimization.md#switches-of-constants-3298)), `gvn` (as
+`--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or `all`. The
+default is SCCP, dead-code removal, CFG cleanup, its merges, the inlining,
+`vectors` and `tables`. The restricted
 value numbering runs before promotion; LICM runs after if-conversion, before
 the optimizer, which cleans up after it, then the loop vectorizer, then the
 unroller. Explicit `+gvn` or `+licm` runs that pass on every value instead of
@@ -196,7 +199,8 @@ SROA, as with the solver, a candidate compiles from its own pipeline.
 `--tier1-report` gives each pass's counts: `folded` constants,
 `removed_instructions` and `removed_blocks` (the optimizer's output against
 its input, merges included), `merged_blocks`, `licm_moved`, `sroa_split`
-(slots), `gvn_removed` and `loads_forwarded` (value numbering with memory's);
+(slots), `gvn_removed`, `loads_forwarded` (value numbering with memory's) and
+`value_tables` (the switches whose jump tables hold their constants);
 with `vectorize`, a `tier1-vectorize` line gives the loops examined (each back
 edge's header once, outer loops included), those vectorized by their widest
 vector (`bytes16`, `bytes32`, `bytes64`), their reductions and run-time overlap

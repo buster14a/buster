@@ -43,6 +43,10 @@ static const char node_census_test_warnings[] =
     "    e = eb; // refuse: enum-mix\n"
     "    x = (char)p; // refuse: pointer-cast-or-void-dereference\n"
     "    s = \"abc\" + i; // refuse: string-plus-int\n"
+    "    x = (i & 8) == 4; // refuse: cfg-tautology\n"
+    "    x = !(i | 1); // refuse: cfg-tautology\n"
+    "    x = i == 1 && i == 2; // refuse: cfg-tautology\n"
+    "    x = i && !i; // refuse: cfg-tautology\n"
     "    x = sizeof(x++); // refuse: unevaluated-operand\n"
     "    unsigned char c = 300; // refuse: constant\n"
     "    x = arr[5]; // refuse: constant\n"
@@ -764,6 +768,47 @@ static const char node_census_test_atomic[] =
     "int direct(void) { return a.x; } // refuse: complex-bitint-atomic-vector-half\n"
     "int indirect(void) { return p->x; } // refuse: complex-bitint-atomic-vector-half\n"
     "int ordinary(struct A* q) { return q->x + 1; } // take\n";
+
+// The logical family is default-on, and its graph-time events are not available to the reader-time tests. Literal
+// and const-receipt operands must be refused in both views, while ordinary Boolean and runtime idioms stay in the set.
+static const char node_census_test_logical[] =
+    "enum E { FOUR = 4 };\n"
+    "#define LOGIC(a, b) ((a) && (b))\n"
+    "int call(int);\n"
+    "int logical(int a, int b, _Bool bb)\n"
+    "{\n"
+    "    int x = 0; // take\n"
+    "    const int k = 4; // take\n"
+    "    const int one = 1; // take\n"
+    "    x = a && 4; // refuse: constant\n"
+    "    x = a || 8; // refuse: constant\n"
+    "    x = a && (FOUR); // refuse: constant\n"
+    "    x = (FOUR) && 4; // refuse: constant\n"
+    "    x = a && k; // refuse: constant\n"
+    "    x = a && (k + 1); // refuse: constant\n"
+    "    x = a && (int)k; // refuse: constant\n"
+    "    x = a && 0; // take\n"
+    "    x = a || 1; // take\n"
+    "    x = a && one; // take\n"
+    "    x = a && b; // take\n"
+    "    x = a && (b + 1); // take\n"
+    "    x = a && (b ? 4 : 8); // take\n"
+    "    x = a && call(b); // take\n"
+    "    x = a && b++; // take\n"
+    "    x = a && (b > 4); // take\n"
+    "    x = bb && 4; // take\n"
+    "    x = a && (_Bool)4; // take\n"
+    "    x = a && FOUR; // take\n"
+    "    x = FOUR && 4; // take\n"
+    "    x = LOGIC(a, 4); // take\n"
+    "    return x; // take\n"
+    "}\n";
+
+static const char node_census_test_logical_quiet[] =
+    "int logical_quiet(int x)\n"
+    "{\n"
+    "    return x && 4; // take\n"
+    "}\n";
 
 // What the compiler's own test tables had and no corpus (#3201, #3202), with the default warnings. An ordered comparison
 // of a pointer with an integer, by each operand that is a pointer once converted (a pointer, an array, a function), and
@@ -6934,6 +6979,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census refuses every call of a unit with type tags");
     check_test_expect(test, ready && node_census_test_fixture(directory, "builtins.c", node_census_test_builtins, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census asks a library call's own semantics by the function that holds it, in a unit with no_builtin");
+    check_test_expect(test, ready && node_census_test_fixture(directory, "logical.c", node_census_test_logical, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
+                      "node-census refuses constant logical operands while taking their quiet source and runtime idioms");
+    char* logical_quiet[] = { "-nostdinc", "-Wno-constant-logical-operand" };
+    check_test_expect(test, ready && node_census_test_fixture(directory, "logical-quiet.c", node_census_test_logical_quiet, logical_quiet, BUSTER_ARRAY_LENGTH(logical_quiet), &system),
+                      "node-census takes constant logical operands when their warning is disabled");
     char headers[512];
     char header[640];
     snprintf(headers, sizeof(headers), "%s/system", directory);
@@ -6946,22 +6996,22 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census takes a system header's macros in a user's expression and counts them apart");
     // What the tests on the window count on each of the eight fixtures, which no verdict shows.
     static const NodeTestsWindowed windowed_warnings = {
-        .expressions = 45,
+        .expressions = 49,
         .trees = 4,
-        .operators = 56,
-        .sent = 22,
+        .operators = 66,
+        .sent = 25,
         .walks = 4,
-        .quiet = 6,
+        .quiet = 7,
         .calls = 1,
         .calls_checked = 1,
         .casts = 1,
         .casts_left = 4,
         .asks = 1,
-        .values = 45,
-        .spared = 34,
+        .values = 50,
+        .spared = 43,
         .direct = 2,
         .apart = 3,
-        .decided = 42,
+        .decided = 46,
         .decided_refused = 1,
     };
     static const NodeTestsWindowed windowed_clean = {
@@ -7133,10 +7183,30 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .direct = 2,
         .decided = 3,
     };
+    // T refuses the four expressions that read `k` or `one` under `&&` before any test runs (#2987's const conditions,
+    // node_machine_const_control): the window and the reader-time tests have the other 21.
+    static const NodeTestsWindowed windowed_logical = {
+        .expressions = 21,
+        .operators = 18,
+        .walks = 1,
+        .quiet = 4,
+        .calls = 1,
+        .calls_checked = 1,
+        .values = 24,
+        .spared = 18,
+        .direct = 1,
+        .decided = 19,
+    };
+    static const NodeTestsWindowed windowed_logical_quiet = {
+        .expressions = 1,
+        .operators = 1,
+        .values = 1,
+        .decided = 1,
+    };
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
     check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud),
-                                                             BUSTER_NODE_FRONT_AFTER, 40, 3, windowed_warnings),
+                                                             BUSTER_NODE_FRONT_AFTER, 44, 3, windowed_warnings),
                       "node-tests: at reader time the tests refuse each expression the compiler warns of, as the census does after the pipeline");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud),
                                                              BUSTER_NODE_FRONT_BEFORE, 0, 6, windowed_clean),
@@ -7276,6 +7346,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_tests_test_fixture(directory, "builtins.c", node_census_test_builtins, quiet, BUSTER_ARRAY_LENGTH(quiet), BUSTER_NODE_FRONT_AFTER,
                                                              0, 0, windowed_builtins),
                       "node-tests: at reader time a unit with no_builtin has its calls made, and each library call's semantics by its own function");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "logical.c", node_census_test_logical, quiet, BUSTER_ARRAY_LENGTH(quiet),
+                                                             BUSTER_NODE_FRONT_AFTER, 4, 3, windowed_logical),
+                      "node-tests: both reader-time forms refuse logical warnings before their graph events exist");
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "logical-quiet.c", node_census_test_logical_quiet, logical_quiet,
+                                                             BUSTER_ARRAY_LENGTH(logical_quiet), BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_logical_quiet),
+                      "node-tests: both reader-time forms honor a disabled constant-logical-operand warning");
     check_test_expect(test, written && node_tests_test_fixture(directory, "system.c", node_census_test_system, isystem, BUSTER_ARRAY_LENGTH(isystem),
                                                                BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_system),
                       "node-tests: at reader time a system header's macros in a user's expression refuse nothing");

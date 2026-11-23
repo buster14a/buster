@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --unused-comparison-only |
+  --attribute-recovery-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
@@ -173,6 +173,34 @@ unused-warning fixtures also check exact scope-completion tokens.
   shared warning-policy, reader and requested-lane matrix. A separate safety
   fixture checks assertion errors, diagnostic counts and preserved output for
   complex attributed forms that deliberately retain their source spelling.
+  `--constant-logical-only` runs the original `constant_logical_*.c` sources for
+  `-Wconstant-logical-operand` (#2900). The standalone group is on by default.
+  Integer logical operators warn for independently constant right operands other
+  than zero or one; boolean/atomic/noninteger left operands, bare enumerators on
+  either side and operators originating in macros stay quiet. Parentheses around
+  an enumerator remove that bare-reference exemption. `&&` has the bitwise and
+  remove-constant notes; `||` has only the bitwise note.
+  Both the constant/type-query reader and the checked graph retain sparse events,
+  deduplicated by operator token, before pruning or failed-assertion recovery.
+  Their construction boundaries retain diagnostic order in unevaluated operands,
+  unselected arms, failed assertions and malformed-unit recovery. Runtime const
+  expressions use the existing checked actions with a private, lazy dependency
+  cache; the original graph and stream remain unchanged. Reached statement-prefix
+  effects and undefined arithmetic prevent a warning proof, even when GNU
+  required-constant folding supplies a payload. A completed const-object read
+  starts a new evaluation; C23 additionally withholds a static object's receipt
+  if any live initializer required undefined folding. The source reader retains
+  integer bit-cast and complex-component proofs in erased query operands too.
+  A completed top-level brace clears stale inner-statement repair cuts, so later
+  completed assertions and initializers stay in the checked prefix.
+  The suite compares full
+  Clang diagnostics and status, source/command-line policy, GNU17/C23, both readers,
+  lane requests and syntax/object modes, including rejected-output preservation.
+  The C23 invalid-static-receipt row is syntax-only because pinned Clang's backend
+  rejects that initializer; its GNU17 row retains object coverage. Existing
+  arithmetic diagnostics on newly folded const reads are isolated in that row;
+  direct invalid arithmetic and its diagnostic order have a separate full-output
+  fixture.
   `--query-bool-only` runs the original `tests/driver/query_bool_*.c` sources for
   boolean conversions in erased query/type expressions and successful selections
   (#2899). Complete Clang diagnostics cover integer and floating conditions,
@@ -860,6 +888,15 @@ for a condition on an lvalue at an absolute address (#3028).
 `initializer-comma` is: `buster-fixtures v1 checker-warnings`, then FILE,
 WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
 compared with clang's in every policy, mode, lane request and reader.
+
+`tests/checker/cfg-pruning` (#2990) is one too: conditions clang's CFG builder
+decides by its heuristics (`x * 0`, `x | 1`, `(x & 8) == 4`, `x == 1 && x == 2`,
+`x && !x`, `c_check_program_cfg.c`), whose pruned branches give no runtime
+warning and no `-Wreturn-type` fall-off, with the shapes the heuristics leave to
+the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
+builder's observer's `-Wtautological-bitwise-compare`,
+`-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
+order (`c_check_common_cfg.c`).
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they

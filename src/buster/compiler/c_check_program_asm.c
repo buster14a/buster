@@ -267,9 +267,10 @@ struct CheckProgramAsm
     uint32_t* inline_branches;
     uint32_t* inline_targets;
     uint32_t inline_branch_count;
-    // An asm goto's body without stores after its exits (Tier0AsmBody.exits, #2351): its exits' first record, past the
-    // template's; 0 for any other body.
+    // An asm goto's body (Tier0AsmBody.exits and goto_labels, #2351): its exits' first record, past the template's, and
+    // its labels' count; 0 for any other body.
     uint32_t inline_exits;
+    uint32_t inline_goto_labels;
     // Whether its template returns (Tier0AsmBody.leaves).
     bool inline_leaves;
     // Whether it moves rsp's variable's input into rsp (#1846, Tier0AsmBody.stack).
@@ -3443,9 +3444,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->label_count = valid ? code.label_count : 0;
         plan->inline_records = records;
         plan->inline_count = records_count;
-        // An asm goto's whose exits fall straight into the exit's move into eax, with no store or pop between (#2351):
-        // Tier 0 may branch from its jumps to their labels and drop the exits.
-        plan->inline_exits = valid && labels != 0 && records_count == tail + 1 ? exits : 0;
+        // An asm goto's (#2351): Tier 0 may branch from its jumps to their labels and drop the exits, each label's
+        // through a copy of the stores (and pops) between the exits and the move into eax.
+        plan->inline_exits = valid && labels != 0 && records_count > tail ? exits : 0;
+        plan->inline_goto_labels = plan->inline_exits != 0 ? labels : 0;
         // An asm goto's exit number in eax, its call row's result.
         plan->inline_touched = inline_touched | (labels != 0 ? 1u << X86_REGISTER_RAX : 0);
         plan->inline_masks = inline_masks;
@@ -3536,6 +3538,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_records = 0;
         plan->inline_count = 0;
         plan->inline_exits = 0;
+        plan->inline_goto_labels = 0;
         plan->inline_label_records = 0;
         plan->inline_label_names = 0;
         plan->inlined = false;
@@ -4122,6 +4125,33 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
                 }
             }
         }
+    }
+    // An asm body's private labels (#2351's gap 4): a `.L` name, which the object's symbols leave out, that no template
+    // refers to and no directive names. The body's own branches reach their targets without it, so it defines nothing,
+    // and Tier 0 may splice its function into its callers (tier0_inline_callee_valid), as clang inlines a function whose
+    // template's `.Lx%=` labels each copy renumbers. Its name, a label of no other template (each defines its own once),
+    // is then no label, and so no symbol.
+    for (uint32_t s = 0; valid && s < statements; s += 1)
+    {
+        CheckProgramAsm* plan = result->plans + s;
+        uint32_t kept = 0;
+        for (uint32_t k = 0; plan->planned && plan->reason == NULL && plan->inlined && k < plan->label_count; k += 1)
+        {
+            CheckAsmName* name = names + plan->labels[k].name;
+            const String8 spelling = plan->labels[k].spelling;
+            const bool local = spelling.length >= 2 && spelling.pointer[0] == '.' && spelling.pointer[1] == 'L';
+            const bool kept_label = !local || name->referenced || name->directives != 0;
+            // A dropped one is no label: unreferenced, it then has no link symbol (check_program_emit_asm_symbols).
+            name->label = kept_label;
+            if (kept_label)
+            {
+                plan->labels[kept] = plan->labels[k];
+                plan->inline_label_records[kept] = plan->inline_label_records[k];
+                plan->inline_label_names[kept] = plan->inline_label_names[k];
+                kept += 1;
+            }
+        }
+        plan->label_count = plan->planned && plan->reason == NULL && plan->inlined ? kept : plan->label_count;
     }
     result->names = names;
     result->name_count = count;
