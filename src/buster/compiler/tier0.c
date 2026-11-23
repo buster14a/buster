@@ -322,11 +322,11 @@
 // takes it (another kind's value is its own whole: a constant's top bits are its own).
 #define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
 #define BUSTER_TYPED_ACCESS_SEGMENT (UINT64_C(3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT)
-// A LOAD's, STORE's or SET's volatile access (#3310): one of a volatile-qualified lvalue, below the segment's bits, on a
-// scalar class's (an integer's, a floating value's or a 128-bit integer's, whose `value` holds nothing else but an atomic
-// marker and the segment). A function with one says so (Tier0Function.volatiles). Tier 0 emits every access anyway and
-// strips the bit out of line (tier0_segments_strip); the IR keeps it as BUSTER_IR_VOLATILE, which no pass removes,
-// merges or forwards (BUSTER_IR_OBSERVABLE).
+// A LOAD's, STORE's or SET's volatile access (#3310): one of a volatile-qualified lvalue, below the segment's bits, past
+// what any class's value holds (an atomic marker and its order, a vector's or a mask's bytes, #3329); and a COPY's of a
+// volatile aggregate, past its bytes. A function with one says so (Tier0Function.volatiles). Tier 0 emits every access
+// anyway and strips the bit out of line (tier0_segments_strip); the IR keeps it as BUSTER_IR_VOLATILE, on a copy's every
+// piece, which no pass removes, merges or forwards (BUSTER_IR_OBSERVABLE).
 #define BUSTER_TYPED_ACCESS_VOLATILE (UINT64_C(1) << 61)
 #define BUSTER_TYPED_SEGMENT_FS 1
 #define BUSTER_TYPED_SEGMENT_GS 2
@@ -14877,8 +14877,8 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
 
 // A function with segment overrides (#1447, Tier0Function.segments) or volatile accesses (#3310, Tier0Function.volatiles),
 // out of line: its values without them, in a copy of its values column (`values`), and each entry's override
-// (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's value. Another kind's value is its own whole
-// (a constant's top bits are its own).
+// (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's value; a COPY's volatile mark goes too.
+// Another kind's value is its own whole (a constant's top bits are its own).
 static void tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
 {
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -14888,8 +14888,8 @@ static void tier0_segments_strip(const Tier0Function* function, uint64_t* values
         const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
         const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_ATOMIC_RMW ||
                             kind == BUSTER_TYPED_ATOMIC_CAS;
-        const bool marked = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
-        values[i] = access ? value & ~(BUSTER_TYPED_ACCESS_SEGMENT | (marked ? BUSTER_TYPED_ACCESS_VOLATILE : 0)) : value;
+        const bool marked = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_COPY;
+        values[i] = access ? value & ~(BUSTER_TYPED_ACCESS_SEGMENT | BUSTER_TYPED_ACCESS_VOLATILE) : marked ? value & ~BUSTER_TYPED_ACCESS_VOLATILE : value;
         segments[i] = access ? (uint8_t)segment : 0;
     }
 }

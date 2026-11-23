@@ -6944,9 +6944,10 @@ condition after its body's, and not in the window's.
 
 **The return fact.** The flow gives a call its own fact
 (`check_program_return_call`): none where its callee, through `*` and `&`,
-is the name of a function, a stop where that function is declared noreturn,
-and an unknown for a call through a value or of a library's name the flow
-leaves unknown. Facts go up the tree; an `&&`, an `||` or a `?:` keeps its
+is the name of a function, a stop where that function is declared noreturn;
+for a call through a pointer object's name, a stop where its function type is
+noreturn and none otherwise (#1393); and an unknown for a call through any
+other value or of a library's name the flow leaves unknown. Facts go up the tree; an `&&`, an `||` or a `?:` keeps its
 condition's, an unknown of either arm, and a stop where both arms of a `?:`
 stop. On the window:
 

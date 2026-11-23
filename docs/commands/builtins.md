@@ -100,7 +100,7 @@ requirements. [Command index](README.md).
   `-ffreestanding` say, declared implicitly with their prototypes as clang
   declares them; a plain call of `memcpy` or `memset` of a constant size of at
   most 32 bytes, of `memmove` of at most 128 (from 33 bytes by `COPY`'s move
-  form), of `abs`, `labs` or `llabs`, or of `fabs`, `copysign` or their kin is
+  form; 64 for core2's tuning or with `minsize`, 32 for both, as clang's), of `abs`, `labs` or `llabs`, or of `fabs`, `copysign` or their kin is
   computed in its place, as clang -O0's code computes its intrinsic, and so are
   `__builtin_copysign` and `__builtin_copysignf` (#1373); `test-checker --program-library` and
   `test-checker-driver` check them against clang (the guide's "Library

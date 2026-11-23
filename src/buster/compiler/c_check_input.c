@@ -10130,7 +10130,7 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
     }
 }
 
-static bool check_input_fallthrough_noreturn_object(const CheckInputReader* reader, uint32_t declaration);
+static bool check_input_fallthrough_noreturn_object(const CheckInput* input, const Parser* parser, uint32_t declaration);
 
 // A completed record's member `index` (#1844), declared at `token` of type `type`: recorded in CheckInput.noreturn_members
 // where its type is a function pointer's (or an array's of them) that GNU's noreturn marks: on the member's own declaration
@@ -10146,7 +10146,7 @@ static void check_input_noreturn_member_add(CheckInputReader* reader, uint32_t i
     const bool pointer = type_kind(types, level) == BUSTER_TYPE_KIND_POINTER &&
                          type_kind(types, type_strip_aligned(types, type_element(types, level))) == BUSTER_TYPE_KIND_FUNCTION;
     CheckInput* input = reader->output;
-    if (pointer && (marked || (token < reader->parser->tokens.count && check_input_fallthrough_noreturn_object(reader, token))) && !input->resource)
+    if (pointer && (marked || (token < reader->parser->tokens.count && check_input_fallthrough_noreturn_object(reader->output, reader->parser, token))) && !input->resource)
     {
         if (input->noreturn_member_count == input->noreturn_member_capacity)
         {
