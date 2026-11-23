@@ -1821,6 +1821,11 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "code",
     },
     {
+        .name = "the checker suites' runtime fixtures and catalogs are code",
+        .files = "tests/checker/source-extensions/catalog.tsv tests/checker/attributes/0001.c tests/checker/overload/catalog.tsv",
+        .outputs_true = "code",
+    },
+    {
         .name = "a Markdown file under tests/ is documentation, so no fixture or catalog is one",
         .files = "tests/checker/sources/README.md",
         .outputs_false = "code",

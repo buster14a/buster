@@ -1,0 +1,1 @@
+int f(a,b,c,p)_Atomic(short) a;_Atomic(unsigned char) b;_Atomic(float) c;_Atomic(int*) p;{return a+b+(int)c+*p;}int g(int *p){return f(65539,259,1.25,p);}

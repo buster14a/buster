@@ -1,0 +1,1 @@
+int f(a)int a;{return a;}int g(void){int (*p)(int)=f;return p(1,2);}

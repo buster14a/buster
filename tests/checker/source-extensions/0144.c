@@ -1,0 +1,1 @@
+int f(x,a)enum E{A=3}x;int a[A];{return x+a[0];}

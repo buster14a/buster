@@ -1,0 +1,1 @@
+_Static_assert(__builtin_object_size("abc",1)==4,"max"); _Static_assert(__builtin_object_size("abc",3)==4,"min"); _Static_assert(!__builtin_constant_p(__builtin_object_size("abc",0)),"deferred"); _Static_assert(__builtin_constant_p(1.0+2.0i),"complex");
