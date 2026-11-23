@@ -18774,7 +18774,16 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         {
             check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_I32, exit);
         }
-        const TypeId result = jumps ? BUSTER_TYPE_INT : BUSTER_TYPE_VOID;
+        // An asm body's register output that its call row returns in its register (#2144, CheckProgramAsm.inline_result),
+        // stored into its object's local after the row: pushed first, it runs after the call.
+        const CheckAsmPlace* returned = plan->inlined && plan->inline_result != 0 ? plan->places + plan->inline_result - 1 : 0;
+        const uint32_t returned_object = returned != 0 ? check_stream_value(program->stream, statement->operands[plan->inline_result - 1].node).object : 0;
+        const uint32_t returned_local = returned != 0 && returned_object < program->object_count ? check_lower_local_of(writer, returned_object) : BUSTER_CHECK_NONE;
+        if (returned != 0 && returned_local == BUSTER_CHECK_NONE)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+        const TypeId result = returned != 0 ? returned->type : jumps ? BUSTER_TYPE_INT : BUSTER_TYPE_VOID;
         uint32_t call = 0;
         if (writer->output->status == CHECK_PROGRAM_OK && plan->inlined)
         {
@@ -18815,6 +18824,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .label_count = plan->label_count,
                     .exits = plan->inline_exits,
                     .goto_labels = plan->inline_goto_labels,
+                    .result = returned != 0 ? (uint8_t)(returned->reg + 1) : 0,
                     .leaves = plan->inline_leaves,
                     .stack = plan->inline_stack,
                 };
@@ -18826,7 +18836,12 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         {
             call = check_lower_native_call(writer, helper->symbol, result, &argument, plan->block != 0 ? 1 : 0);
         }
-        check_lower_instruction(writer, BUSTER_TYPED_CALL, jumps ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID, call);
+        if (returned != 0)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, returned->type), returned_local);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_CALL,
+                                returned != 0 ? check_lower_class(writer, returned->type) : jumps ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID, call);
         if (plan->block != 0 && !plan->inlined)
         {
             check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
@@ -18847,7 +18862,12 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_CONVERT, argument, 0);
             }
-            if (passed && place->written && place->kind != BUSTER_CHECK_ASM_MEMORY)
+            if (passed && place->returned)
+            {
+                // A `+` output its call row returns (#2144): its object's value, with no address in the block.
+                check_lower_expression(writer, node, false, place->type);
+            }
+            else if (passed && place->written && place->kind != BUSTER_CHECK_ASM_MEMORY)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
@@ -18880,13 +18900,13 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 check_lower_asm_slot(writer, object, place->slot);
                 check_lower_asm_slot(writer, object, place->value);
             }
-            if (place->written)
+            if (place->written && !place->returned)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_expression(writer, node, true, 0);
                 check_lower_asm_slot(writer, object, place->slot);
             }
-            else if (!passed && place->kind != BUSTER_CHECK_ASM_CONSTANT && !place->global)
+            else if (!passed && !place->written && place->kind != BUSTER_CHECK_ASM_CONSTANT && !place->global)
             {
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
                 check_lower_asm_value(writer, place, node);

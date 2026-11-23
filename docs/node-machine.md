@@ -8018,6 +8018,202 @@ two switches) each fail them. The first run of them found the fixture
 without a body that only the kept tapes' comparison leaves out, which it has
 since.
 
+### The producer, deciding before the walk
+
+Everything above decides a body after the fact: the bodies' comparisons read
+the program's controls and the lowered function, and the twin's gates read
+the reader's columns as they stand after the walk. A compile that takes a body
+has to decide before the walk reads it. The producer (`c_check_node_bodies.c`;
+`measure-node-machine --shadow --produce`) does: it runs at reader time, after
+the names' resolution and the reader's controls' pass have read the unit and
+before the walk's first chunk, for every body of the unit, and reads the
+tokens, the parser's tree, the reader's columns as those two passes leave
+them, and what the machine with no node of the walk's makes. For each body it
+keeps a verdict, and for a body it takes, its controls. No compile changes.
+
+**What it asks, in its order,** each a reason it keeps for a body it leaves:
+
+1. **The unit's own:** a `-W` option or a diagnostic pragma (the passes after
+   the walk say more of a body under other warnings than is proved absent
+   here); a symbol's pragma; a function's attribute of its code anywhere in
+   the unit (a target, its clones, an interrupt's, a processor's version or a
+   dispatch among them, internal linkage); an error before the walk; a member
+   marked deprecated or unavailable, or one of the `counted_by` family; a
+   `const`, `pure`, `warn_unused_result` or `nodiscard` attribute on what is no
+   function's declaration (a type's, an object's).
+2. **Something said of it already:** a report, a warning's event or a
+   published diagnostic of the passes before the walk at one of its tokens.
+3. **The scan** of its tokens for one the front would lose a root at.
+4. **A token's kind or role:** a `switch`, a `case` or a `default`, an `asm`,
+   a `_Static_assert`, a `typeof`, a braced initializer; a null statement that
+   is an `if`'s or a loop's whole body, and an `else` whose `if` is another
+   condition's whole statement (the common warnings' pass reads both forms
+   after the reader); a pragma in the body; and the name of a function with
+   internal linkage that the unit does not define (the unit's end warns of the
+   function, with a note at its first use).
+5. **The twin's gates:** a block's static or extern declaration, a
+   variable-length array, a cleanup, a statement expression.
+6. **Its function:** parameters without a prototype; a result that is neither
+   void nor a scalar of a class I8 to F64; a naked function (a pass after the
+   walk reports each of its statements that is no `asm`, in the body); a
+   function a declaration gives `always_inline` (the lowering expands a direct
+   call of its inline-only definition from that body's own nodes, #2983).
+7. **The machine,** after it has read the body: every root taken. Two of its
+   refusals are this piece's (below): a direct call of a function a
+   declaration gives `always_inline`, and on a target that fuses a product
+   and a sum, a float's or a double's sum.
+8. **Its controls,** which the twin makes from the tokens there (a statement
+   no control reaches refuses them), each control with an expression having
+   its root kept with its tape; an initialization a scalar's of one value that
+   converts to its object's type as an assignment's does without a diagnostic,
+   its object a plain local (none aligned past 8 bytes by its attribute or its
+   type, whose local is a frame object); a return with a value where the
+   function has a result and without where it has none.
+9. **No `if` whose condition's root is a constant.**
+10. **The return flow's silence,** proved from those controls.
+11. **No root that may be warned of for what neither T's rules nor the
+    census's tests stand for before the walk** (`node_machine_root_loud`, a
+    pass over a kept root's records): two enumerations meeting, an enumerator
+    being of its own enumeration though its type is `int` (an operator's two
+    operands; a value converted to another enumeration by an assignment, an
+    argument, a return or an initialization); and a conditional whose
+    conversion to another type changes a constant arm (a floating arm to an
+    integer, an integer arm a floating type does not hold exactly). It refuses
+    more than is warned of.
+
+**As a compile would run it** (`--produce-lean`): a body the first six refuse
+is not read; a body is left at the chunk in which a root of it is first lost
+or refused; and the machine's chunk has one run, which keeps what it makes of
+a root (its records' place, its verdicts, its tape and what is beside it) with
+no digest and no count. Nothing of a root is then compared with the walk's:
+what is compared is what the producer decided.
+
+**Against the set the comparisons give.** After the pipeline each lowered
+body's verdict is read beside the set of the section above (the scan and the
+gates pass, both comparisons the same, the return flow proved silent): a body
+the producer takes outside that set fails the command, as does one whose kept
+controls are not the program's, and what it leaves of the set is counted by
+its reason.
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| lowered bodies | 2,668 | 1,096 | 1,516 | 2,756 |
+| the set the comparisons give: bodies; of the body tokens | 1,760; 30.89% | 547; 21.48% | 179; 2.32% | 1,176; 17.67% |
+| **the producer takes, before the walk:** bodies; of the body tokens | 1,747; 30.65% | 545; 21.42% | 0 | 1,096; 16.09% |
+| … of them in the set; outside it | 1,747; 0 | 545; 0 | 0; 0 | 1,096; 0 |
+| … whose kept controls are the program's; that differ | 1,747; 0 | 545; 0 | 0; 0 | 1,096; 0 |
+| what it leaves of the set, by its reason | a token's kind, 9; a root that may be warned of, 4 | an initialization of another form, 2 | its unit's (a diagnostic pragma), 179 | something said of it before the walk, 44; a token's kind, 34; a root that may be warned of, 2 |
+| bodies it does not read, as a compile would run it, of every body of the units; their tokens | 610 of 2,674; 310,211 | 354 of 1,096; 124,669 | all 8,739 | 13,693 of 18,584; 1,185,799 |
+
+- **Sound, against the set: met.** Read as `-c` reads a unit the same, and
+  as a compile would run it the same; with `-Wall -Wextra` it takes none
+  (the unit's own reason). Twenty runs, each status 0, at the head with main
+  merged in.
+- **What it leaves of the set is the rule's doing:** a unit with a
+  diagnostic pragma (the compiler's own source); a body the passes before
+  the walk have already warned of (44 of musl's); and what stands for a
+  diagnostic of a pass after the walk, which refuses more than is warned of:
+  13 of `sqlite3.c`'s 1,760 bodies (1,332 tokens), 2 of Lua's, 36 of musl's.
+- **What it reads and leaves** on `sqlite3.c`, of the 2,668: the scan refuses
+  513 bodies (278,079 tokens), a token's kind 91 (31,056), the gates 5 (551)
+  and its function 1 (525) before any reading; the machine refuses 280
+  (77,372) after reading them; and 31 more (6,607) fall to the controls, a
+  root not kept, a constant condition, the return flow and a root that may be
+  warned of.
+
+**Against the diagnostics.** The corpora compile, so they say nothing of a
+unit that does not, and a taken body may have no diagnostic of any stage:
+every phase after the mask would skip it. With
+`BUSTER_TEST_NODE_BODIES_LOG` set to a path, a compile to an object runs the
+producer beside each unit's ordinary read, as a compile would run it and with
+nothing masked, and each diagnostic at a token of a body the producer takes is
+a line of that file (`node_bodies_check_place`): the reader's reports and its
+warnings' events, each with whether it was made before the producer decided,
+by the walk or after it; a warning's event's token and its notes' as they are
+rendered; a common warning's and its notes'; and each published diagnostic,
+by its token's place in the preprocessor's output. A line a unit says what was
+looked at. The unit's object and diagnostics are the same with the variable
+and without.
+
+On the units of the checker's and the driver's tests (34 blocks of the
+correctness inventory: those that compile a unit and read its diagnostics or
+its object): 111,723 units, the producer ran in 74,314 of them (the
+others are read with a view, a prefix or a repaired parse, on several lanes
+or with `-g`), 1,954,846 bodies, 36,386 taken; 1,184,166 diagnostics
+looked at, **none at a token of a taken body**. On the corpora, each unit
+compiled with `-c`: `sqlite3.c` 1,753 of 2,674 bodies taken, Lua
+545 of 1,096, musl 4,442 of 18,584 over 1,336 units, the compiler's own
+source none of 8,739; 1,007 diagnostics looked at, none in a taken
+body.
+
+- **What the log found on the way,** each a refusal of the list above with a
+  body in the fixture: two enumerations meeting and a value converted to
+  another enumeration, an enumerator being of its own; a conditional's
+  constant arm that its conversion changes; a compound shift whose count is
+  its narrow operand's width or more (the census's test took the promoted
+  width); the name of a function with internal linkage that the unit does not
+  define; a pragma in a body; a unit with a member that is deprecated,
+  unavailable or counted, with a result's attribute on a type, or with a
+  function's attribute of its code; an initialization of an object aligned
+  past 8 bytes; a parameter whose bound its function's entry evaluates.
+- **What no log of this kind can find** is a diagnostic that a body causes
+  and that is reported outside it, a difference of the object, and a body that
+  another function's lowering reads. The compile built on this piece looks for
+  those by compiling with the bodies taken and without; small units of one
+  loud or one unusual body each, between two bodies that say nothing, found
+  three, and main's merge a fourth, which the rules above have since:
+  - **A target that fuses a product and a sum.** The lowering contracts a
+    floating sum with its product operand where the target has FMA or
+    AVX-512F (`check_lower_contract_plan`), by an option or by a function's
+    own `target` attribute. No rule of C's or X's did, so the machine's
+    entries for such a sum were the unfused ones: `--shadow` counted them as
+    differences under `-mfma`, on main too, and no corpus has one that is
+    fused (three are compiled for the baseline target; the compiler's own
+    source, compiled for this machine's, has one body of the set with a
+    floating sum and no product, which the rule now leaves). C now has no
+    template for a float's or a double's sum or compound sum there, whatever
+    its operands are (`NodeMachine.fuses`: the unit's target and its
+    functions' own after the pipeline; before the walk the options' target,
+    or true in a unit with a function of a target of its own, whose string no
+    machine reads there), and C on the window lists every sum and makes no
+    update there for the reference to ask.
+  - **A naked function.** A pass after the walk reports each of its
+    statements that is no `asm`, and each use of a parameter, at its token
+    (`check_input_naked_finish`): the producer took such a body, and a taken
+    body had a diagnostic. No unit of the tests' in which the producer runs
+    has one.
+  - **An `always_inline` wrapper.** The lowering expands a direct call of an
+    `always_inline` function's inline-only definition in its caller, from the
+    wrapper's own nodes (#2983). The machine had a call's row for it, which the
+    comparisons count as a difference where a unit has one, and no corpus has;
+    and the wrapper's own body, which the program does not lower, had no
+    comparison at all. T now refuses a callee a declaration gives `always_inline`, from the
+    program's column after the pipeline and from the reader's facts before the
+    walk; the producer leaves the wrapper's own body by its function; and the
+    shadow counts the bodies the producer takes of every body of the unit,
+    lowered or not (`of-every-body-of-the-units-it-takes`).
+  - **A volatile access.** Main's #3310 marks each LOAD, STORE and SET of a
+    volatile lvalue, and the lowering's templates leave a volatile lvalue's
+    read and a store to one to its tasks, which write the marks. C is those
+    templates' mirror and had no such rule: with main merged in, `--shadow`
+    counted 32 entries' differences on `sqlite3.c`, the producer took bodies
+    outside the comparisons' set on three corpora, and the compile built on it
+    made six of musl's objects differ. C now has no template for a volatile
+    lvalue's read, a store to one or an update of one, but for a local's by
+    its name, whose entries the tasks write with no mark (`NodeMachine.marks`).
+    The flag is not set where the window's forms run: their records have no
+    bit for a volatile access, so C on the window and its reference there
+    still take one, as before #3310, and differ from the lowering's entries
+    for it. No compile and no producer runs those forms; the bit is owed
+    before one does.
+- **Single faults.** Of 56 single changes to the producer's refusals, to the
+  rules they stand on and to the three above, each built and run against the
+  fixtures, 55 fail one. The one that does not is the compound shift's width
+  in the tests' form on the window (`node_tests_constants`), which no path of
+  this piece runs: the machine with no node of the walk's asks the census's
+  code, and that form's fixture has no compound shift of a narrow operand.
+  The first 48 were run before main was merged in, on the same rules.
+
 ### What it says of step 2
 
 "Expected gains" took the machine at 55 cycles a body token for a taken
