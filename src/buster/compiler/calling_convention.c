@@ -3750,7 +3750,7 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, cons
 }
 
 // The arguments abi_assign marks at a time, on its stack, and the calls it leaves to abi_assign_lanes at a time.
-#define BUSTER_ABI_ASSIGN_WINDOW 4096
+#define BUSTER_ABI_ASSIGN_WINDOW 1024
 #define BUSTER_ABI_ASSIGN_DEFERRED 64
 
 // The deferred calls, eight at a time.
@@ -3789,15 +3789,15 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
     {
         total += signatures.counts[c];
     }
-    // A window's marks (and past its last argument a START where a call starts there); the calls left to
-    // abi_assign_lanes; and the totals of the calls that end in a vector of arguments.
+    // A window's marks (and past its last argument a START where a call starts there), and at each call's last argument
+    // in it the call's register counts, stack bytes and ORed alignments; and the calls left to abi_assign_lanes.
     _Alignas(64) uint8_t marks[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES + 1];
+    _Alignas(64) uint32_t end_registers[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
+    _Alignas(64) uint32_t end_stack[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
+    _Alignas(64) uint32_t end_alignment[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
     uint32_t deferred[BUSTER_ABI_ASSIGN_DEFERRED];
     uint64_t deferred_firsts[BUSTER_ABI_ASSIGN_DEFERRED];
     uint32_t deferred_count = 0;
-    _Alignas(64) uint32_t end_registers[BUSTER_ABI_LANES];
-    _Alignas(64) uint32_t end_stack[BUSTER_ABI_LANES];
-    _Alignas(64) uint32_t end_alignment[BUSTER_ABI_LANES];
     // The next call to set up and its first argument, the unnamed mark of one that started in an earlier window, and the
     // next call whose totals come and its first argument.
     uint32_t setup = 0;
@@ -3823,7 +3823,8 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
         const uint64_t window_end = total - window > BUSTER_ABI_ASSIGN_WINDOW ? window + BUSTER_ABI_ASSIGN_WINDOW : total;
         // The setup of the calls that start in the window: each call's result and starting totals and its marks. A call
         // without arguments marks nothing (its first argument is the next call's, or past the last).
-        memset(marks, 0, sizeof(marks));
+        // Only the window's marks and the START past them: a single call clears a few bytes, not the whole window.
+        memset(marks, 0, window_end - window + BUSTER_ABI_LANES + 1);
         if (pending_unnamed < window_end)
         {
             marks[pending_unnamed - window] |= BUSTER_ABI_LANE_UNNAMED;
@@ -3959,41 +3960,40 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __m512i offset = _mm512_maskz_mov_epi32(on_stack, stack_exclusive);
             _mm512_mask_storeu_epi64(locations + base, (__mmask8)valid, _mm512_permutex2var_epi32(offset, interleave_low, word));
             _mm512_mask_storeu_epi64(locations + base + 8, (__mmask8)(valid >> 8), _mm512_permutex2var_epi32(offset, interleave_high, word));
-            // The totals of the calls that end here, in the order of the calls with arguments: each call's from its
-            // last argument (a call without arguments keeps its starting ones), and the calls with a deferred argument
-            // to abi_assign_lanes.
-            // Compressed in registers and stored whole: the loads below forward from a full store, not from a compressing
-            // store's microcoded one, which they wait on to retire (+25% per argument on the 9700X).
-            _mm512_store_si512((void*)end_registers, _mm512_maskz_compress_epi32(ends, inclusive));
-            _mm512_store_si512((void*)end_stack, _mm512_maskz_compress_epi32(ends, stack_inclusive));
-            _mm512_store_si512((void*)end_alignment, _mm512_maskz_compress_epi32(ends, alignment_inclusive));
-            const uint32_t ended = (uint32_t)__builtin_popcount(ends);
-            for (uint32_t e = 0; e < ended; e += 1)
+            // The totals of the calls that end here, at their last arguments, which the pass over the window's calls
+            // reads (stored in place, not compressed: a compressing store's loads right after it wait on it, and a loop
+            // over a vector's calls mispredicts its count, together 25% per argument on the 9700X).
+            _mm512_mask_storeu_epi32(end_registers + (base - window), ends, inclusive);
+            _mm512_mask_storeu_epi32(end_stack + (base - window), ends, stack_inclusive);
+            _mm512_mask_storeu_epi32(end_alignment + (base - window), ends, alignment_inclusive);
+        }
+        // Each call that ends in the window, its totals from its last argument (a call without arguments keeps its
+        // starting ones), and the calls with a deferred argument to abi_assign_lanes. A call without arguments at the
+        // window's end waits for the setup of the next window, or for the last pass.
+        while (ending < setup && ending_first + signatures.counts[ending] <= window_end)
+        {
+            const uint32_t count = signatures.counts[ending];
+            const bool has = count != 0;
+            const uint64_t last = has ? ending_first + count - 1 - window : 0;
+            const uint32_t registers = end_registers[last];
+            const uint32_t alignment = end_alignment[last];
+            const uint32_t integers = registers & 0xffff;
+            const uint32_t vectors = registers >> 16;
+            const uint32_t largest = 31 - (uint32_t)__builtin_clz(alignment | 1);
+            AbiCall* call = calls + ending;
+            call->stack_bytes = has ? end_stack[last] : 0;
+            call->stack_alignment_log2 = (uint8_t)(has && largest > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? largest : BUSTER_ABI_STACK_ALIGNMENT_LOG2);
+            call->integer_registers = has ? (uint8_t)(integers < BUSTER_ABI_INTEGER_ARGUMENTS ? integers : BUSTER_ABI_INTEGER_ARGUMENTS) : call->integer_registers;
+            call->vector_registers = has ? (uint8_t)(vectors < BUSTER_ABI_VECTOR_ARGUMENTS ? vectors : BUSTER_ABI_VECTOR_ARGUMENTS) : 0;
+            deferred[deferred_count] = ending;
+            deferred_firsts[deferred_count] = ending_first;
+            deferred_count += has && (alignment & BUSTER_ABI_LANE_DEFERRED) != 0 ? 1 : 0;
+            ending_first += count;
+            ending += 1;
+            if (deferred_count == BUSTER_ABI_ASSIGN_DEFERRED)
             {
-                while (signatures.counts[ending] == 0)
-                {
-                    ending += 1;
-                }
-                const uint32_t registers = end_registers[e];
-                const uint32_t alignment = end_alignment[e];
-                const uint32_t integers = registers & 0xffff;
-                const uint32_t vectors = registers >> 16;
-                const uint32_t largest = 31 - (uint32_t)__builtin_clz(alignment | 1);
-                AbiCall* call = calls + ending;
-                call->stack_bytes = end_stack[e];
-                call->stack_alignment_log2 = (uint8_t)(largest > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? largest : BUSTER_ABI_STACK_ALIGNMENT_LOG2);
-                call->integer_registers = (uint8_t)(integers < BUSTER_ABI_INTEGER_ARGUMENTS ? integers : BUSTER_ABI_INTEGER_ARGUMENTS);
-                call->vector_registers = (uint8_t)(vectors < BUSTER_ABI_VECTOR_ARGUMENTS ? vectors : BUSTER_ABI_VECTOR_ARGUMENTS);
-                deferred[deferred_count] = ending;
-                deferred_firsts[deferred_count] = ending_first;
-                deferred_count += (alignment & BUSTER_ABI_LANE_DEFERRED) != 0 ? 1 : 0;
-                ending_first += signatures.counts[ending];
-                ending += 1;
-                if (deferred_count == BUSTER_ABI_ASSIGN_DEFERRED)
-                {
-                    abi_assign_deferred(abi, signatures, deferred, deferred_firsts, deferred_count, locations, calls);
-                    deferred_count = 0;
-                }
+                abi_assign_deferred(abi, signatures, deferred, deferred_firsts, deferred_count, locations, calls);
+                deferred_count = 0;
             }
         }
     }
