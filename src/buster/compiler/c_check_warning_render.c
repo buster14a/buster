@@ -2082,9 +2082,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
             result = check_warning_text(scratch, "incompatible redeclaration of library function '%.*s'", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_EVENT_BUILTIN_HEADER:
-            // Clang names the row's header: a FILE builtin's <stdio.h>, a jmp_buf or ucontext_t one's <setjmp.h> (#2406).
-            result = check_warning_text(scratch, "declaration of built-in function '%.*s' requires inclusion of the header <%s>", (int)name.length, name.pointer,
-                                        payload->data == BUSTER_CHECK_WARNING_HEADER_SETJMP ? "setjmp.h" : "stdio.h");
+            // Clang names the row's header. Only FILE rows reach here: every jmp_buf or ucontext_t library row has attribute T,
+            // which clang's allowTypeMismatch declares without this warning (check_input_implicit_function), so <stdio.h>.
+            result = check_warning_text(scratch, "declaration of built-in function '%.*s' requires inclusion of the header <stdio.h>", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE:
         {

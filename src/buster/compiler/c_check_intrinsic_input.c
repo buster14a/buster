@@ -579,7 +579,7 @@ static CheckInputIntrinsicStatus check_input_intrinsic_prepare(CheckInputReader*
                             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                             .completion = keyword + 1,
-                            .payload = { .name = name, .data = BUSTER_CHECK_WARNING_HEADER_STDIO, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                            .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
                         };
                         check_input_warning_event(reader, &event, NULL, 0);
                     }

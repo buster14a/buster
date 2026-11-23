@@ -84,8 +84,6 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                                  (info->encoding[decoded.types.error_offset] == 'P' || info->encoding[decoded.types.error_offset] == 'J' ||
                                   info->encoding[decoded.types.error_offset] == 'K')) ||
                                 (missing_header && ordinary && reader->linked_declarations[name] == 0);
-            const uint8_t context = header && !missing_header && decoded.types.error_offset < info->encoding_length ? (uint8_t)info->encoding[decoded.types.error_offset] : 'P';
-            const uint32_t header_code = context == 'J' || context == 'K' ? BUSTER_CHECK_WARNING_HEADER_SETJMP : BUSTER_CHECK_WARNING_HEADER_STDIO;
             if (header && !reader->output->resource)
             {
                 const CheckWarningEvent event =
@@ -96,8 +94,7 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
                     .source = BUSTER_CHECK_WARNING_NO_SOURCE,
                     .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
                     .completion = token + 1,
-                    // The header clang names: jmp_buf and ucontext_t rows are <setjmp.h>'s, FILE's (and a missing FILE's) <stdio.h>.
-                    .payload = { .name = name, .data = header_code, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+                    .payload = { .name = name, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
                 };
                 check_input_warning_event(reader, &event, NULL, 0);
             }

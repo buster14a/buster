@@ -123,8 +123,8 @@ prototype warns under `-Wincompatible-library-redeclaration`. Static linkage
 conflicts and malformed calls remain errors. Header-dependent descriptors such
 as `FILE *` do not become invented types: a direct pre-C23 call falls back to
 the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`,
-naming the row's header as clang does: `<stdio.h>` for a `FILE` row, `<setjmp.h>`
-for a `jmp_buf` or `ucontext_t` one.
+naming `<stdio.h>` as clang does. Only `FILE` rows reach it: every `jmp_buf` or
+`ucontext_t` library row has attribute `T`, which clang declares without it.
 
 An implicit library declaration warns by default even in C89. The ordinary
 implicit-declaration warning switches, promotion/demotion and source pragmas
