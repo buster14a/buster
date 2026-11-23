@@ -212,30 +212,46 @@ one before.
 
 The benchmark times a phase as the difference between a run through it and a
 run that stops before it. A phase then pays for every store before it that
-hasn't reached the cache, so the last one, the write, measured 2.5 to 3 times
-the removed scalar path's cycles on functions of 40 records with the same code.
-Most of those functions settle in the first round (#2946).
+hasn't reached the cache, so on functions of 40 records the last phase, the
+write, measured 2.5 to 3 times the removed scalar path's cycles with the same
+code, and the ranks phase 1.9 times its own work. Most of those functions
+settle in the first round (#2946).
 
-- **Setup:** it stores what a function whose branches all fit needs, D0, and
-  a 16-bit mask of the jmps per 16 branches. Before #2946 it stored six
-  columns per 16 branches, two of them across a cache line.
-- **Once a branch grows:** `branch_sizing_first_vector` makes the
-  growth-if-long column from the mask, and the first round's growths and
-  their prefix sums.
+- **Setup** stored six 512-bit columns per 16 branches, two of them across a
+  cache line. Two are gone: D0 is no longer copied into the displacement
+  column, which the rounds write and which the write reads only after a round,
+  and the round before's prefix sums are no longer zeroed, since only
+  `branch_sizing_worklist` reads them, which `branch_sizing_run` zeroes for it
+  when it goes there from the first round.
 - **With no round:** the offsets are `x86_measure`'s and the forms the
-  records'. `branch_sizing_write_short` stores the displacements alone.
-- **The write:** it takes 8 branches a pass. Their records' addresses come
-  from a vector of their indices. The lanes past the last branch aim at 8
-  sink records in the columns, one each, so no lane's form waits for another
-  lane's store.
-- **The loop it replaced:** a store per branch ended at a branch the
-  predictor missed 0.64 times per function of 40 records, since their branch
-  counts vary.
-- **What is left:** on 40-record functions the write still costs 3.5 to 3.6
-  cycles per branch, against the removed scalar path's 2.0 to 3.0. With an
-  `mfence` closing every run, so that each phase pays only for its own stores,
-  it costs 3.6 to 3.9: the gap is the write's own passes of 8 stores, not the
-  stores before it. #2946 keeps it open.
+  records'. `branch_sizing_write_short` stores the displacements alone, from
+  D0.
+- **The write** takes 8 branches a pass. Their records' addresses come from a
+  vector of their indices. The lanes past the last branch aim at 8 sink
+  records in the columns, one each, so no lane's form waits for another lane's
+  store.
+- **The loop it replaced:** a store per branch ended at a branch the predictor
+  missed 0.64 times per function of 40 records, since their branch counts
+  vary.
+
+### What the phase figures mean
+
+The ranks phase reads 3.8 to 4.1 cycles per branch on the 40-record rows,
+above the removed scalar path's 2.7 and 3.4, and the write 3.7 to 3.8 against
+2.0 to 3.0, although the whole path is 8% faster there than before #2946. Two
+measurements separate the phases' own work from what they inherit:
+
+- A variant that moved the growth columns and the first prefix sums out of
+  setup into a pass of their own, after it, left the same ranks code reading
+  1.2 to 1.5 cycles per branch. The 2.6 cycles that moved with those stores
+  were setup's, paid in the ranks interval.
+- A variant that ends every run with an `mfence`, so each phase pays only for
+  its own stores, left the write at 3.6 to 3.9: the write's own passes of 8
+  stores, not stores inherited from earlier phases.
+
+That deferring pass cost the functions of 250 records 2% of the whole path, so
+it isn't in the module; the figures above are what the benchmark's method
+gives. #2946 stays open for the write's own cost.
 
 ### Lengths and memory
 

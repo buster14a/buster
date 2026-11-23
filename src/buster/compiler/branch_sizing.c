@@ -50,8 +50,8 @@
 //   - Columns: BranchSizingColumns and branch_sizing_allocate.
 //   - Validation: branch_sizing_validate_branches and branch_sizing_validate.
 //   - The phases: lengths (x86_measure's offsets: the first round), setup (D0 and the jmps), and only when a branch
-//     grew, the first round's growths (branch_sizing_first_vector), ranks (in registers below 512 records, or from the
-//     byte map), round, prefix, the worklist's marks (branch_sizing_mark_vector) and offsets; then
+//     grew, ranks (in registers below 512 records, or from the byte map), round, prefix, the worklist's marks
+//     (branch_sizing_mark_vector) and offsets; then
 //     branch_sizing_worklist (the rare cases) and the records (branch_sizing_write, and branch_sizing_write_short when
 //     no branch grew).
 //   - The driver: branch_sizing_run.
@@ -333,9 +333,6 @@ struct BranchSizingColumns
     uint32_t* prefix[2];
     // branch_sizing_worklist's dirty bits, one per branch, and a word more (branch_sizing_mark_vector's spill).
     uint64_t* dirty;
-    // Setup's mask of the jmps among each 16 branches, from which branch_sizing_first_vector makes `grow` once a branch
-    // grows: a 2-byte store per 16 branches in place of a 64-byte one (#2946).
-    uint16_t* jumps;
     // BUSTER_BRANCH_SIZING_WRITE_BRANCHES records the write's lanes past the last branch write to, a record each.
     X86Instruction* sink;
     bool valid;
@@ -360,9 +357,8 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
     const uint64_t column_bytes = branch_sizing_lines(padded, sizeof(uint32_t));
     const uint64_t prefix_bytes = branch_sizing_lines(padded + BUSTER_BRANCH_SIZING_LANES, sizeof(uint32_t));
     const uint64_t dirty_bytes = branch_sizing_lines(branch_count / 64 + 2, sizeof(uint64_t));
-    const uint64_t jumps_bytes = branch_sizing_lines(padded / BUSTER_BRANCH_SIZING_LANES, sizeof(uint16_t));
     const uint64_t sink_bytes = branch_sizing_lines(BUSTER_BRANCH_SIZING_WRITE_BRANCHES, sizeof(X86Instruction));
-    uint8_t* base = arena_push(arena, map_bytes + ranks_bytes + 5 * column_bytes + 2 * prefix_bytes + dirty_bytes + jumps_bytes + sink_bytes, 64);
+    uint8_t* base = arena_push(arena, map_bytes + ranks_bytes + 5 * column_bytes + 2 * prefix_bytes + dirty_bytes + sink_bytes, 64);
     BranchSizingColumns result = {
         .valid = base != 0,
     };
@@ -381,8 +377,7 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
         result.prefix[0] = (uint32_t*)columns;
         result.prefix[1] = (uint32_t*)(columns + prefix_bytes);
         result.dirty = (uint64_t*)(columns + 2 * prefix_bytes);
-        result.jumps = (uint16_t*)(columns + 2 * prefix_bytes + dirty_bytes);
-        result.sink = (X86Instruction*)(columns + 2 * prefix_bytes + dirty_bytes + jumps_bytes);
+        result.sink = (X86Instruction*)(columns + 2 * prefix_bytes + dirty_bytes);
     }
     return result;
 }
@@ -479,12 +474,10 @@ static bool branch_sizing_too_large(uint64_t length, uint64_t branch_count)
 // Setup: each branch's growth if it's long, from its record's form, and its displacement with every branch short,
 // D0 = offset(t) - offset(r) - 2 (the function's length for a target at its end), which is the first round's: the
 // branches out of range grow. Returns whether any branch grew. 16 branches at a time, with the records' and the targets'
-// offsets gathered, and the records' forms (as their fourth dwords). It stores what a function whose branches all fit
-// needs, D0 (the write's displacements, when no round follows), and what the rounds need beside it, which branches are
-// jmps (a mask per 16): each branch's growth if it's long, the first round's growths and their prefix sums wait for a
-// branch to grow (branch_sizing_first_vector).
-// The write after it pays for every store before it that hasn't reached the cache yet, and a store per column per 16
-// branches, two of them across a cache line, cost the 40-record functions most of the write's time (#2946).
+// offsets gathered, and the records' forms (as their fourth dwords). It no longer copies D0 into the displacement
+// column, which the rounds write and which the write reads only after a round, or zeroes the round before's prefix
+// sums, which only branch_sizing_worklist reads: the write after setup pays for every store of setup's that hasn't
+// reached the cache, and those two cost the 40-record functions, most of which settle in this round (#2946).
 static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count,
                                        const uint32_t* offsets, uint32_t length, BranchSizingColumns* columns)
 {
@@ -498,7 +491,10 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
     const __m512i condition_growth = _mm512_set1_epi32(BUSTER_BRANCH_SIZING_JCC_GROWTH);
     // An emission without instructions has no records (null); the gathers then take no lanes.
     const uint8_t* forms = records != 0 ? (const uint8_t*)records + __builtin_offsetof(X86Instruction, form) : 0;
+    uint32_t* prefix = columns->prefix[0];
+    __m512i carry = _mm512_setzero_si512();
     __mmask16 grown = 0;
+    prefix[0] = 0;
     for (uint64_t k = 0; k < branch_count; k += BUSTER_BRANCH_SIZING_LANES)
     {
         const __mmask16 lanes = branch_sizing_lanes(k, branch_count);
@@ -512,36 +508,10 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
         const __m512i grow = _mm512_maskz_mov_epi32(lanes, _mm512_mask_blend_epi32(jump, condition_growth, jump_growth));
         const __m512i displacement = _mm512_maskz_sub_epi32(lanes, end, _mm512_add_epi32(start, short_bytes));
         // Lanes past the branches have no growth to take (their grow is 0).
-        columns->jumps[k / BUSTER_BRANCH_SIZING_LANES] = jump;
         _mm512_store_si512(columns->displacement0 + k, displacement);
-        grown |= _mm512_mask_test_epi32_mask(branch_sizing_out_of_range_vector(displacement), grow, grow);
+        grown |= _mm512_test_epi32_mask(growth, growth);
     }
     return grown != 0;
-}
-
-// Once a branch has grown: each branch's growth if it's long, from setup's jmps, the first round's growths, setup's
-// (the branches out of range with every branch short), and their prefix sums into buffer 0, from D0.
-static void branch_sizing_first_vector(uint64_t branch_count, BranchSizingColumns* columns)
-{
-    const __m512i jump_growth = _mm512_set1_epi32(BUSTER_BRANCH_SIZING_JMP_GROWTH);
-    const __m512i condition_growth = _mm512_set1_epi32(BUSTER_BRANCH_SIZING_JCC_GROWTH);
-    uint32_t* prefix = columns->prefix[0];
-    __m512i carry = _mm512_setzero_si512();
-    prefix[0] = 0;
-    for (uint64_t k = 0; k < branch_count; k += BUSTER_BRANCH_SIZING_LANES)
-    {
-        const __mmask16 lanes = branch_sizing_lanes(k, branch_count);
-        const __mmask16 jump = (__mmask16)columns->jumps[k / BUSTER_BRANCH_SIZING_LANES];
-        // Lanes past the branches have no growth to take (their grow is 0).
-        const __m512i grow = _mm512_maskz_mov_epi32(lanes, _mm512_mask_blend_epi32(jump, condition_growth, jump_growth));
-        const __m512i displacement = _mm512_load_si512(columns->displacement0 + k);
-        const __m512i growth = _mm512_maskz_mov_epi32(branch_sizing_out_of_range_vector(displacement), grow);
-        const __m512i sums = _mm512_add_epi32(branch_sizing_scan(growth), carry);
-        _mm512_store_si512(columns->grow + k, grow);
-        _mm512_store_si512(columns->growth + k, growth);
-        _mm512_storeu_si512(prefix + k + 1, sums);
-        carry = branch_sizing_last(sums);
-    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -993,7 +963,6 @@ static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, c
             result.rounds = 1;
             if (changed)
             {
-                branch_sizing_first_vector(branch_count, &columns);
                 branch_sizing_ranks_vector(count, branches, targets, branch_count, &columns);
             }
             while (changed)

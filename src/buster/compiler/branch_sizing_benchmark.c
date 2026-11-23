@@ -411,7 +411,6 @@ static bool branch_sizing_benchmark_setup_compress(const X86Instruction* records
         const __m512i growth = _mm512_maskz_mov_epi32(branch_sizing_out_of_range_vector(displacement), grow);
         const __m512i sums = _mm512_add_epi32(branch_sizing_scan(growth), carry);
         _mm512_store_si512(columns->grow + k, grow);
-        columns->jumps[k / BUSTER_BRANCH_SIZING_LANES] = jump;
         _mm512_store_si512(columns->displacement0 + k, displacement);
         _mm512_store_si512(columns->displacement + k, displacement);
         _mm512_store_si512(columns->growth + k, growth);
@@ -557,10 +556,6 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
         else
         {
             changed = branch_sizing_setup_vector(records, count, branches, targets, branch_count, offsets, (uint32_t)length, &columns);
-        }
-        if (changed)
-        {
-            branch_sizing_first_vector(branch_count, &columns);
         }
         result.rounds = 1;
     }
