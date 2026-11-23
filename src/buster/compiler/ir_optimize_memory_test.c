@@ -387,23 +387,16 @@ static IrMemoryTestRun ir_memory_test_run(const IrFunction* f, uint64_t first, u
     return run;
 }
 
-// One generated program through both of the optimizer's paths with `passes`: the same function, which verifies, and the
-// same runs.
-static void ir_memory_test_check(IrOptimizeTest* test, const IrFunction* f, uint32_t passes, Arena* vector, Arena* scalar, Arena* scratch, uint64_t* values, uint64_t* forwarded)
+// One generated program through the optimizer with `passes`: a function that verifies, and the same runs.
+static void ir_memory_test_check(IrOptimizeTest* test, const IrFunction* f, uint32_t passes, Arena* vector, Arena* scratch, uint64_t* values, uint64_t* forwarded)
 {
     IrOptimizeOptions options = ir_optimize_options();
     options.passes = passes;
-    options.path = BUSTER_IR_OPTIMIZE_VECTOR;
     IrOptimizeResult vector_result = { 0 };
-    IrOptimizeResult scalar_result = { 0 };
     const IrCheck vector_check = ir_optimize(f, vector, scratch, options, &vector_result);
-    options.path = BUSTER_IR_OPTIMIZE_SCALAR;
-    const IrCheck scalar_check = ir_optimize(f, scalar, scratch, options, &scalar_result);
-    ir_optimize_test_expect(test, vector_check.error == IR_OK && scalar_check.error == IR_OK, "memory: both of the optimizer's paths take a generated program");
-    if (vector_check.error == IR_OK && scalar_check.error == IR_OK)
+    ir_optimize_test_expect(test, vector_check.error == IR_OK, "memory: the optimizer takes a generated program");
+    if (vector_check.error == IR_OK)
     {
-        ir_optimize_test_expect(test, ir_optimize_test_equal(&vector_result.function, &scalar_result.function) && vector_result.forwarded_loads == scalar_result.forwarded_loads,
-                                "memory: the optimizer's paths give the same function");
         *forwarded += vector_result.forwarded_loads;
         ir_optimize_test_fold_function(&test->memory_digest, &vector_result.function);
         ir_optimize_test_fold(&test->memory_digest, vector_result.forwarded_loads);
@@ -461,7 +454,6 @@ static void ir_memory_test_overflows(IrOptimizeTest* test, Arena* input, Arena* 
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = BUSTER_IR_OPTIMIZE_MEMORY;
-        options.path = BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult result = { 0 };
         const uint64_t output_mark = vector->length;
         const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
@@ -610,7 +602,6 @@ static void ir_memory_test_shapes(IrOptimizeTest* test, Arena* input, Arena* out
         {
             IrOptimizeOptions options = ir_optimize_options();
             options.passes = BUSTER_IR_OPTIMIZE_MEMORY;
-            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
             bool same = check.error == IR_OK && result.forwarded_loads == expected[k];
@@ -636,11 +627,10 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(1ull << 24);
     Arena vector = arena_reserve(1ull << 24);
-    Arena scalar = arena_reserve(1ull << 24);
     Arena scratch = arena_reserve(1ull << 26);
     char* text = malloc(1u << 16);
     uint64_t* values = malloc((1u << 16) * sizeof(uint64_t));
-    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && scratch.base != 0 && text != 0 && values != 0;
+    const bool ready = input.base != 0 && vector.base != 0 && scratch.base != 0 && text != 0 && values != 0;
     ir_optimize_test_expect(test, ready, "memory: test arenas");
     uint64_t forwarded = 0;
     uint32_t programs = 0;
@@ -658,13 +648,12 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test)
         }
         if (parsed.error == IR_PARSE_OK && f.instruction_count < (1u << 16))
         {
-            ir_memory_test_check(test, &f, BUSTER_IR_OPTIMIZE_MEMORY | BUSTER_IR_OPTIMIZE_DCE, &vector, &scalar, &scratch, values, &forwarded);
-            ir_memory_test_check(test, &f, BUSTER_IR_OPTIMIZE_PASSES, &vector, &scalar, &scratch, values, &forwarded);
+            ir_memory_test_check(test, &f, BUSTER_IR_OPTIMIZE_MEMORY | BUSTER_IR_OPTIMIZE_DCE, &vector, &scratch, values, &forwarded);
+            ir_memory_test_check(test, &f, BUSTER_IR_OPTIMIZE_PASSES, &vector, &scratch, values, &forwarded);
             programs += 1;
         }
         arena_pop_to(&input, 0);
         arena_pop_to(&vector, 0);
-        arena_pop_to(&scalar, 0);
         ir_optimize_test_expect(test, scratch.length == 0, "memory: the pass restores scratch");
     }
     // The generator exercises the pass: most programs forward something.
@@ -677,7 +666,6 @@ static void ir_optimize_memory_tests(IrOptimizeTest* test)
     free(values);
     free(text);
     arena_release(&scratch);
-    arena_release(&scalar);
     arena_release(&vector);
     arena_release(&input);
 }

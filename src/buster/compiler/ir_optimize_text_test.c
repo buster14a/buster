@@ -206,7 +206,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
                          fixture->pass == IR_OPTIMIZE_TEXT_MEMORY ? BUSTER_IR_OPTIMIZE_MEMORY | BUSTER_IR_OPTIMIZE_DCE :
                          fixture->pass == IR_OPTIMIZE_TEXT_IDENTITIES ? BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_DCE :
                                                                  BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
-        options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult pass = { 0 };
         check = ir_optimize(input, output, scratch, options, &pass);
         result = pass.function;

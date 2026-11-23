@@ -148,7 +148,6 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                                "SSA promotion takes a function of masks alone");
                 IrOptimizeResult optimized = { 0 };
                 IrOptimizeOptions options = ir_optimize_options();
-                options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                 checked = ir_optimize(&function, output, scratch, options, &optimized);
                 ir_test_expect(tally, checked.error == IR_OK && ir_verify(&optimized.function, scratch, NULL).error == IR_OK && scratch->length == 0,
                                "SCCP, dead code and CFG cleanup take a function of masks alone, into a function that verifies");
@@ -245,7 +244,6 @@ static void ir_simd_vector_consumer_test(IrTestTally* tally, Arena* input, Arena
                                "SSA promotion takes a vector's slot, its constants' payloads kept");
                 IrOptimizeResult optimized = { 0 };
                 IrOptimizeOptions options = ir_optimize_options();
-                options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                 checked = checked.error == IR_OK ? ir_optimize(&promoted, output, scratch, options, &optimized) : checked;
                 uint32_t vector_values = 0;
                 for (uint32_t i = 0; checked.error == IR_OK && i < optimized.function.instruction_count; i += 1)
@@ -371,7 +369,6 @@ static int run_ir_simd_tests(int argc, char** argv)
             arena_pop_to(&output, 0);
             IrOptimizeResult optimized = { .function.instruction_count = 123 };
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             checked = ir_optimize(&function, &output, &scratch, options, &optimized);
             ir_test_expect(&tally, checked.error == IR_OK && optimized.function.instruction_count == 2 && optimized.function.op[0] == IR_VCONST &&
                                        memcmp(optimized.function.vector_constants, function.vector_constants, sizeof(IrSimdValue)) == 0 && scratch.length == 0,

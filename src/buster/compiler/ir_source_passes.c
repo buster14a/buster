@@ -17,7 +17,7 @@
 //   guide has it. The numbering's result must promote.
 // - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, the
 //   three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), value numbering with memory alone
-//   (#2718) and Tier 1's set with it, forced vector and forced scalar: the same function and the same forwarded loads.
+//   (#2718) and Tier 1's set with it (one path since #2924): the optimizer verifies its result.
 // - LICM on P (#2924: its twin is gone): its result, given to LICM again, moves nothing, since each loop's one walk
 //   reaches the fixed point of its readiness (#2979).
 // - #2755's unroller on P optimized with Tier 1's set and its truth values simplified: an unrolled function must verify
@@ -209,24 +209,15 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = ir_source_pass_optimizer[row];
-        options.path = BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult vector = { 0 };
-        IrOptimizeResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize(promoted, output, scratch, options, &vector);
-        options.path = BUSTER_IR_OPTIMIZE_SCALAR;
-        const IrCheck scalar_check = ir_optimize(promoted, twin, scratch, options, &scalar);
-        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.folded == scalar.folded &&
-                          vector.removed_instructions == scalar.removed_instructions && vector.removed_blocks == scalar.removed_blocks &&
-                          vector.merged_blocks == scalar.merged_blocks && vector.forwarded_loads == scalar.forwarded_loads &&
-                          ir_source_passes_equal(&vector.function, &scalar.function);
         const bool changed = vector.folded != 0 || vector.removed_instructions != 0 || vector.removed_blocks != 0 || vector.forwarded_loads != 0;
         // The merges' row counts its merged blocks, value numbering with memory's its forwarded loads; the others their
         // removed instructions.
         const IrSourcePass pass = (IrSourcePass)(IR_SOURCE_PASS_SCCP + row);
         const uint64_t effect = pass == IR_SOURCE_PASS_MERGE ? vector.merged_blocks : pass >= IR_SOURCE_PASS_MEMORY ? vector.forwarded_loads : vector.removed_instructions;
-        ir_source_passes_record(totals, (IrSourcePass)(IR_SOURCE_PASS_SCCP + row), file, name, vector_check, scalar_check, same, true, changed, effect);
+        ir_source_passes_record(totals, (IrSourcePass)(IR_SOURCE_PASS_SCCP + row), file, name, vector_check, vector_check, true, true, changed, effect);
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin, twin_mark);
     }
     // LICM on the promoted function. Its result, given to LICM again, moves nothing: each loop's one walk reached the
     // fixed point of its readiness (#2979).
@@ -732,7 +723,6 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
         {
             IrOptimizeOptions options = ir_optimize_options();
             options.passes = ir_source_pass_optimizer[pass - IR_SOURCE_PASS_SCCP];
-            options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             IrOptimizeResult result = { 0 };
             check = ir_optimize(&corpus->promoted[f], output, scratch, options, &result);
         }

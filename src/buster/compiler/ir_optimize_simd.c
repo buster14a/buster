@@ -10,12 +10,12 @@
 // carries no FENV_ACCESS state, so a lane folds when its result is exact (every rounding agrees), no operand is
 // subnormal and the result isn't. A NaN operand decides its lane whatever the controls: x86's rule, the first
 // operand's quieted where both are NaNs; an invalid operation gives the default NaN. A comparison folds unless a
-// lane without a NaN has a subnormal operand. The rewrite keeps the original row for its flags and traps. Neither path
-// reads or writes the compiler's own MXCSR: the scalar twin is integer arithmetic, and the vector path rounds down and
-// up by embedded rounding with exceptions suppressed, refusing a zero that only the host's FTZ could have made.
+// lane without a NaN has a subnormal operand. The rewrite keeps the original row for its flags and traps. The folds never
+// read or write the compiler's own MXCSR: they are integer arithmetic, a lane at a time (#2924 removed their embedded-
+// rounding vector form with the optimizer's vector passes).
 // Layout: ir_optimize_simd_effect, ir_optimize_simd_storage, ir_optimize_simd_value, ir_optimize_simd_meet,
 // ir_optimize_simd_float_encode, ir_optimize_simd_float_lane, ir_optimize_simd_float_compare,
-// ir_optimize_simd_float_vector, ir_optimize_simd_float, ir_optimize_simd_fold, ir_optimize_simd_transfer,
+// ir_optimize_simd_float, ir_optimize_simd_fold, ir_optimize_simd_transfer,
 // ir_optimize_simd_visit.
 
 static bool ir_optimize_simd_effect(const IrFunction* f, uint32_t i)
@@ -115,7 +115,7 @@ static bool ir_optimize_simd_float_encode(uint64_t sign, unsigned __int128 m, in
     return result;
 }
 
-// One floating lane by integer arithmetic alone (the scalar twin and the vector path's oracle): whether every floating
+// One floating lane by integer arithmetic alone: whether every floating
 // environment gives it the same bits, and those bits. A normal operand is M·2^e with M of the format's precision.
 static bool ir_optimize_simd_float_lane(uint32_t op, uint64_t a, uint64_t b, uint32_t width, uint64_t* value)
 {
@@ -260,218 +260,40 @@ static bool ir_optimize_simd_float_compare(uint64_t a, uint64_t b, uint32_t widt
     return result;
 }
 
-// Every lane at once (`bits` / `width` of them; the rest of the 512 bits stay zero). The arithmetic rounds down and up
-// by embedded rounding, which ignores MXCSR's rounding control and, with exceptions suppressed, sets no flag and
-// traps on none; a lane is exact where the two agree. Comparisons are integer operations on the bits. The host's own FTZ and DAZ still apply: a subnormal operand's
-// lane is refused whatever DAZ made of it, and a zero is refused unless an operand makes it exact, since FTZ flushes
-// a tiny result in both directions alike. NaNs are rebuilt by x86's rule from the operands afterwards, so that the
-// host compiler's commuting an addition's or a multiplication's operands can't choose the other payload.
-static bool ir_optimize_simd_float_vector(uint32_t op, uint32_t width, uint32_t bits, uint32_t predicate, const IrSimdValue* left, const IrSimdValue* right, IrSimdValue* output)
-{
-    const __m512i a = _mm512_loadu_si512(left);
-    const __m512i b = _mm512_loadu_si512(right);
-    const __m512i sign = width == 32 ? _mm512_set1_epi32((int32_t)UINT32_C(0x80000000)) : _mm512_set1_epi64((int64_t)UINT64_C(0x8000000000000000));
-    // A magnitude above the exponent field's is a NaN.
-    const __m512i exponent = width == 32 ? _mm512_set1_epi32(0x7f800000) : _mm512_set1_epi64(INT64_C(0x7ff0000000000000));
-    const __m512i quiet = width == 32 ? _mm512_set1_epi32(0x00400000) : _mm512_set1_epi64(INT64_C(0x0008000000000000));
-    const __m512i a_magnitude = _mm512_andnot_si512(sign, a);
-    const __m512i b_magnitude = _mm512_andnot_si512(sign, b);
-    const __m512i a_exponent = _mm512_and_si512(a, exponent);
-    const __m512i b_exponent = _mm512_and_si512(b, exponent);
-    const __mmask16 valid = (__mmask16)((UINT32_C(1) << (bits / width)) - 1);
-    __mmask16 a_nan;
-    __mmask16 b_nan;
-    __mmask16 a_zero;
-    __mmask16 b_zero;
-    __mmask16 b_infinite;
-    __mmask16 subnormal;
-    if (width == 32)
-    {
-        a_nan = _mm512_cmpgt_epu32_mask(a_magnitude, exponent);
-        b_nan = _mm512_cmpgt_epu32_mask(b_magnitude, exponent);
-        a_zero = _mm512_testn_epi32_mask(a_magnitude, a_magnitude);
-        b_zero = _mm512_testn_epi32_mask(b_magnitude, b_magnitude);
-        b_infinite = _mm512_cmpeq_epi32_mask(b_magnitude, exponent);
-        subnormal = (_mm512_testn_epi32_mask(a_exponent, a_exponent) & (__mmask16)~a_zero) | (_mm512_testn_epi32_mask(b_exponent, b_exponent) & (__mmask16)~b_zero);
-    }
-    else
-    {
-        a_nan = _mm512_cmpgt_epu64_mask(a_magnitude, exponent);
-        b_nan = _mm512_cmpgt_epu64_mask(b_magnitude, exponent);
-        a_zero = _mm512_testn_epi64_mask(a_magnitude, a_magnitude);
-        b_zero = _mm512_testn_epi64_mask(b_magnitude, b_magnitude);
-        b_infinite = _mm512_cmpeq_epi64_mask(b_magnitude, exponent);
-        subnormal = (_mm512_testn_epi64_mask(a_exponent, a_exponent) & (__mmask8)~a_zero) | (_mm512_testn_epi64_mask(b_exponent, b_exponent) & (__mmask8)~b_zero);
-    }
-    const __mmask16 nan = a_nan | b_nan;
-    __mmask16 refused = subnormal & (__mmask16)~nan;
-    __m512i staged;
-    if (op == IR_VCMP)
-    {
-        // C's predicates from the bits, as ir_optimize_simd_float_compare orders them: Clang drops a comparison's
-        // suppressed exceptions, which would set the compiler's own invalid flag, and DAZ would read a subnormal as zero.
-        __mmask16 equal;
-        __mmask16 less;
-        __mmask16 greater;
-        if (width == 32)
-        {
-            const __m512i a_key = _mm512_xor_si512(a, _mm512_or_si512(_mm512_srai_epi32(a, 31), sign));
-            const __m512i b_key = _mm512_xor_si512(b, _mm512_or_si512(_mm512_srai_epi32(b, 31), sign));
-            const __m512i either = _mm512_andnot_si512(sign, _mm512_or_si512(a, b));
-            equal = _mm512_cmpeq_epi32_mask(a, b) | _mm512_testn_epi32_mask(either, either);
-            less = _mm512_cmplt_epu32_mask(a_key, b_key);
-            greater = _mm512_cmpgt_epu32_mask(a_key, b_key);
-        }
-        else
-        {
-            const __m512i a_key = _mm512_xor_si512(a, _mm512_or_si512(_mm512_srai_epi64(a, 63), sign));
-            const __m512i b_key = _mm512_xor_si512(b, _mm512_or_si512(_mm512_srai_epi64(b, 63), sign));
-            const __m512i either = _mm512_andnot_si512(sign, _mm512_or_si512(a, b));
-            equal = _mm512_cmpeq_epi64_mask(a, b) | _mm512_testn_epi64_mask(either, either);
-            less = _mm512_cmplt_epu64_mask(a_key, b_key);
-            greater = _mm512_cmpgt_epu64_mask(a_key, b_key);
-        }
-        const __mmask16 ordered = (__mmask16)~nan;
-        __mmask16 compared = 0;
-        switch (predicate)
-        {
-            case IR_EQ: compared = ordered & equal; break;
-            case IR_NE: compared = nan | (__mmask16)~equal; break;
-            case IR_LT: compared = ordered & (__mmask16)~equal & less; break;
-            case IR_LE: compared = ordered & (equal | less); break;
-            case IR_GT: compared = ordered & (__mmask16)~equal & greater; break;
-            case IR_GE: compared = ordered & (equal | greater); break;
-            default: refused = valid; break;
-        }
-        staged = _mm512_zextsi128_si512(_mm_cvtsi32_si128((int32_t)(compared & valid)));
-    }
-    else
-    {
-        __m512i down;
-        __m512i up;
-        if (width == 32)
-        {
-            const __m512 x = _mm512_castsi512_ps(a);
-            const __m512 y = _mm512_castsi512_ps(b);
-            if (op == IR_FADD)
-            {
-                down = _mm512_castps_si512(_mm512_maskz_add_round_ps(valid, x, y, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-                up = _mm512_castps_si512(_mm512_maskz_add_round_ps(valid, x, y, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC));
-            }
-            else if (op == IR_FSUB)
-            {
-                down = _mm512_castps_si512(_mm512_maskz_sub_round_ps(valid, x, y, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-                up = _mm512_castps_si512(_mm512_maskz_sub_round_ps(valid, x, y, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC));
-            }
-            else if (op == IR_FMUL)
-            {
-                down = _mm512_castps_si512(_mm512_maskz_mul_round_ps(valid, x, y, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-                up = _mm512_castps_si512(_mm512_maskz_mul_round_ps(valid, x, y, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC));
-            }
-            else
-            {
-                down = _mm512_castps_si512(_mm512_maskz_div_round_ps(valid, x, y, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-                up = _mm512_castps_si512(_mm512_maskz_div_round_ps(valid, x, y, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC));
-            }
-        }
-        else
-        {
-            const __m512d x = _mm512_castsi512_pd(a);
-            const __m512d y = _mm512_castsi512_pd(b);
-            const __mmask8 lanes = (__mmask8)valid;
-            if (op == IR_FADD)
-            {
-                down = _mm512_castpd_si512(_mm512_maskz_add_round_pd(lanes, x, y, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-                up = _mm512_castpd_si512(_mm512_maskz_add_round_pd(lanes, x, y, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC));
-            }
-            else if (op == IR_FSUB)
-            {
-                down = _mm512_castpd_si512(_mm512_maskz_sub_round_pd(lanes, x, y, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-                up = _mm512_castpd_si512(_mm512_maskz_sub_round_pd(lanes, x, y, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC));
-            }
-            else if (op == IR_FMUL)
-            {
-                down = _mm512_castpd_si512(_mm512_maskz_mul_round_pd(lanes, x, y, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-                up = _mm512_castpd_si512(_mm512_maskz_mul_round_pd(lanes, x, y, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC));
-            }
-            else
-            {
-                down = _mm512_castpd_si512(_mm512_maskz_div_round_pd(lanes, x, y, _MM_FROUND_TO_NEG_INF | _MM_FROUND_NO_EXC));
-                up = _mm512_castpd_si512(_mm512_maskz_div_round_pd(lanes, x, y, _MM_FROUND_TO_POS_INF | _MM_FROUND_NO_EXC));
-            }
-        }
-        const __m512i magnitude = _mm512_andnot_si512(sign, down);
-        const __m512i down_exponent = _mm512_and_si512(down, exponent);
-        // A zero is exact by an operand alone: a sum of two zeros, a product with one, 0/b or a/inf.
-        const __mmask16 exact_zero = a_zero | b_zero | (op == IR_FDIV ? b_infinite : 0);
-        __mmask16 inexact;
-        __mmask16 tiny;
-        if (width == 32)
-        {
-            inexact = _mm512_cmpneq_epi32_mask(down, up);
-            const __mmask16 zero = _mm512_testn_epi32_mask(magnitude, magnitude);
-            tiny = (_mm512_testn_epi32_mask(down_exponent, down_exponent) & (__mmask16)~zero) | (zero & (__mmask16)~exact_zero);
-        }
-        else
-        {
-            inexact = _mm512_cmpneq_epi64_mask(down, up);
-            const __mmask8 zero = _mm512_testn_epi64_mask(magnitude, magnitude);
-            tiny = (_mm512_testn_epi64_mask(down_exponent, down_exponent) & (__mmask8)~zero) | (zero & (__mmask8)~exact_zero);
-        }
-        refused |= (inexact | tiny) & (__mmask16)~nan;
-        const __m512i first = width == 32 ? _mm512_mask_blend_epi32(a_nan, b, a) : _mm512_mask_blend_epi64((__mmask8)a_nan, b, a);
-        const __m512i propagated = _mm512_or_si512(first, quiet);
-        staged = width == 32 ? _mm512_mask_mov_epi32(down, nan & valid, propagated) : _mm512_mask_mov_epi64(down, (__mmask8)(nan & valid), propagated);
-    }
-    const bool result = (refused & valid) == 0;
-    if (result)
-    {
-        _mm512_storeu_si512(output, staged);
-    }
-    return result;
-}
-
 // A floating operation's or comparison's lanes, or false where one of them depends on the floating environment.
-static bool ir_optimize_simd_float(uint32_t op, uint32_t width, uint32_t bits, uint32_t predicate, const IrSimdValue* left, const IrSimdValue* right, bool scalar, IrSimdValue* output)
+static bool ir_optimize_simd_float(uint32_t op, uint32_t width, uint32_t bits, uint32_t predicate, const IrSimdValue* left, const IrSimdValue* right, IrSimdValue* output)
 {
     bool result = true;
-    if (!scalar)
+    const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
+    const uint64_t fraction = width == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
+    IrSimdValue staged = { 0 };
+    for (uint32_t lane = 0; result && lane < bits / width; lane += 1)
     {
-        result = ir_optimize_simd_float_vector(op, width, bits, predicate, left, right, output);
+        const uint64_t a = ir_simd_lane_read(left, width, lane);
+        const uint64_t b = ir_simd_lane_read(right, width, lane);
+        if (op == IR_VCMP)
+        {
+            const bool a_nan = (a & exponent) == exponent && (a & fraction) != 0;
+            const bool b_nan = (b & exponent) == exponent && (b & fraction) != 0;
+            const bool subnormal = ((a & exponent) == 0 && (a & fraction) != 0) || ((b & exponent) == 0 && (b & fraction) != 0);
+            result = (a_nan || b_nan || !subnormal) && predicate <= IR_GE;
+            staged.words[0] |= (uint64_t)ir_optimize_simd_float_compare(a, b, width, predicate) << lane;
+        }
+        else
+        {
+            uint64_t value = 0;
+            result = ir_optimize_simd_float_lane(op, a, b, width, &value);
+            ir_simd_lane_write(&staged, width, lane, value);
+        }
     }
-    else
+    if (result)
     {
-        const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
-        const uint64_t fraction = width == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
-        IrSimdValue staged = { 0 };
-        for (uint32_t lane = 0; result && lane < bits / width; lane += 1)
-        {
-            const uint64_t a = ir_simd_lane_read(left, width, lane);
-            const uint64_t b = ir_simd_lane_read(right, width, lane);
-            if (op == IR_VCMP)
-            {
-                const bool a_nan = (a & exponent) == exponent && (a & fraction) != 0;
-                const bool b_nan = (b & exponent) == exponent && (b & fraction) != 0;
-                const bool subnormal = ((a & exponent) == 0 && (a & fraction) != 0) || ((b & exponent) == 0 && (b & fraction) != 0);
-                result = (a_nan || b_nan || !subnormal) && predicate <= IR_GE;
-                staged.words[0] |= (uint64_t)ir_optimize_simd_float_compare(a, b, width, predicate) << lane;
-            }
-            else
-            {
-                uint64_t value = 0;
-                result = ir_optimize_simd_float_lane(op, a, b, width, &value);
-                ir_simd_lane_write(&staged, width, lane, value);
-            }
-        }
-        if (result)
-        {
-            *output = staged;
-        }
+        *output = staged;
     }
     return result;
 }
 
-static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdValue operands[3], bool scalar, IrSimdValue* output)
+static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdValue operands[3], IrSimdValue* output)
 {
     const uint32_t op = f->op[i];
     const uint32_t bits = ir_type_bits[f->type[op == IR_VCMP ? f->a[i] : i]];
@@ -480,7 +302,7 @@ static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdV
     bool folded = true;
     if (f->flags[i] >= IR_SIMD_LANE_F32 && (op == IR_VCMP || op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV))
     {
-        folded = ir_optimize_simd_float(op, width, bits, op == IR_VCMP ? f->c[i] : IR_EQ, operands, operands + 1, scalar, &staged);
+        folded = ir_optimize_simd_float(op, width, bits, op == IR_VCMP ? f->c[i] : IR_EQ, operands, operands + 1, &staged);
     }
     else if (op == IR_AND || op == IR_OR || op == IR_XOR || op == IR_NOT)
     {
@@ -556,7 +378,7 @@ static bool ir_optimize_simd_fold(const IrFunction* f, uint32_t i, const IrSimdV
                 .right = right,
                 .result = values,
             };
-            const uint16_t done = scalar ? ir_optimize_fold_scalar(batch, active) : ir_optimize_fold_vector(batch, active);
+            const uint16_t done = ir_optimize_fold_batch(batch, active);
             folded = done == active;
             for (uint32_t lane = 0; lane < count; lane += 1)
             {
@@ -799,7 +621,7 @@ static uint8_t ir_optimize_simd_transfer(const IrOptimizeWork* work, uint32_t i,
         }
         if (!overdefined)
         {
-            result = unknown ? IROPT_UNKNOWN : ir_optimize_simd_fold(f, i, operands, work->scalar, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
+            result = unknown ? IROPT_UNKNOWN : ir_optimize_simd_fold(f, i, operands, value) ? IROPT_CONSTANT : IROPT_OVERDEFINED;
         }
     }
     return result;

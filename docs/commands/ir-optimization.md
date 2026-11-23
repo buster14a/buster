@@ -484,16 +484,15 @@ nested clamp's outer test and those of an unproven load and a division.
 
 ## Dominator analysis (#1352, #2924)
 
-The AUTO transformation heuristic still chooses scalar SCCP/DCE/CFG kernels
-for small or branchy functions. The dominator analysis they prepare and verify
-with has one path, SEMI-NCA and the scalar loop bodies, whatever the heuristic
-or the scalar control ([why it is scalar](../dominators.md#why-it-is-scalar)).
-Other internal preparation callers retain their scalar argument's meaning.
+The SCCP/DCE/CFG passes are scalar worklists since #2924 (#860's AUTO bound
+and the vector passes went with it). The dominator analysis they prepare and
+verify with has one path, SEMI-NCA and the scalar loop bodies
+([why it is scalar](../dominators.md#why-it-is-scalar)).
 
 The 64 MiB matrix budget bounds the frontier rows and the loop bodies; it is a
 memory limit, not a measured crossover.
 
-The verified-handoff fixtures check preparation under AUTO and the explicit
-scalar control, empty graphs and the independently known diamond relation.
+The verified-handoff fixtures check preparation, empty graphs and the
+independently known diamond relation.
 Every existing fixture still compares ordinary/verified optimized IR and all
 dominance relations against a fresh rebuild.

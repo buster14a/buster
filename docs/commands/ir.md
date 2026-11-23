@@ -113,7 +113,7 @@ and as promoted. The correctness list runs it on c-testsuite's subset, the froze
 `sqlite3.c` and the frozen musl's units.
 
 `./build/compiler benchmark-ir-source [--only promote|gvn|
-gvn-scalar|optimize|optimize-scalar|optimize-vector|lower|verify]
+gvn-scalar|optimize|lower|verify]
 [--after-scalar MS] [preprocessor options]
 file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
 does, lowers and promotes each once outside the time, and reports the IR's bytes
@@ -146,7 +146,7 @@ passes by its vector and its scalar version:
   alone, CFG cleanup alone and with its merges, the three together, Tier 1's
   set (the three with the merges, layout and identities), value numbering
   with memory alone (`memory`, #2718) and Tier 1's set with it
-  (`tier1-memory`), which must also forward the same loads;
+  (`tier1-memory`), one path since #2924, whose final verification must pass;
 - LICM on the promoted form, by its one path (#2924): its result, given to
   LICM again, must move nothing, since each loop's one walk reaches its fixed
   point (#2979);

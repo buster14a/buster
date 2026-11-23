@@ -82,7 +82,6 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             case 1:
             {
                 IrOptimizeOptions options = ir_optimize_options();
-                options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                 IrOptimizeResult result = { 0 };
                 check = ir_optimize(function, output, scratch, options, &result);
                 transformed = result.function;
@@ -221,7 +220,6 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
             case 1:
             {
                 IrOptimizeOptions options = ir_optimize_options();
-                options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                 IrOptimizeResult result = { 0 };
                 check = ir_optimize(&current, output, scratch, options, &result);
                 next = result.function;

@@ -744,7 +744,6 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
     if (ok)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.path = test->vector ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_SCALAR;
         IrOptimizeResult result;
         const IrCheck check = ir_optimize(&promoted, &test->arenas[TIER1_PIPELINE_OPTIMIZED], scratch, options, &result);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real SCCP, DCE and CFG optimization succeeds");

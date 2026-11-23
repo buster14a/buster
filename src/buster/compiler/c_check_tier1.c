@@ -411,7 +411,7 @@ _Static_assert(BUSTER_CHECK_TIER1_UNROLL_OUTCOMES == IR_UNROLL_OUTCOME_COUNT, "a
 // (SCCP, dead-code removal, CFG cleanup and its merges as --tier1-passes= leaves them), whose function goes to `output`
 // and its verified analysis to `analyses` under `revision`. check_tier1_passes ends with them, and so does a candidate's
 // own code that the unroller changed after its summary (check_tier1_unroll_own).
-static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunction* function, bool scalar, bool certify, const CheckTier1Fault* fault, Arena* output, Arena* analyses,
+static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunction* function, bool certify, const CheckTier1Fault* fault, Arena* output, Arena* analyses,
                                                    IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
     Arena* scratch = &lane->scratch;
@@ -442,7 +442,6 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = (on & (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE)) | BUSTER_IR_OPTIMIZE_LAYOUT |
                         BUSTER_IR_OPTIMIZE_IDENTITY | ((on & BUSTER_CHECK_TIER1_PASS_MEMORY) != 0 ? BUSTER_IR_OPTIMIZE_MEMORY : 0);
-        options.scalar = scalar;
         const IrCheck check = ir_optimize_verified(function, output, analyses, scratch, options, revision, &passes->optimized, &passes->analysis);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
@@ -813,7 +812,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
-        outcome = check_tier1_sink_optimize(lane, &wide.function, scalar, certify, fault, output, analyses, revision, passes);
+        outcome = check_tier1_sink_optimize(lane, &wide.function, certify, fault, output, analyses, revision, passes);
     }
     return outcome;
 }
@@ -824,7 +823,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
 // own. Its own code takes the unroller here, on the summary's optimized function (left as it is: the copy is in
 // steps[11]), and where a loop unrolled, the sink and the optimizer again, into steps[2] and steps[3] under a revision
 // of their own. Rerunning the whole pipeline instead (no summary) made -c of sqlite3.c 23% slower.
-static CheckTier1Outcome check_tier1_unroll_own(CheckTier1Lane* lane, bool scalar, bool certify, const CheckTier1Fault* fault, IrVerifiedRevision* revision, CheckTier1Passes* passes)
+static CheckTier1Outcome check_tier1_unroll_own(CheckTier1Lane* lane, bool certify, const CheckTier1Fault* fault, IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
     IrUnrollOptions options = ir_unroll_options();
     IrUnrollResult unrolled = { 0 };
@@ -842,7 +841,7 @@ static CheckTier1Outcome check_tier1_unroll_own(CheckTier1Lane* lane, bool scala
     {
         IrFunction function = unrolled.function;
         *revision = (IrVerifiedRevision){ 0 };
-        outcome = check_tier1_sink_optimize(lane, &function, scalar, certify, fault, &lane->steps[2], &lane->steps[3], revision, passes);
+        outcome = check_tier1_sink_optimize(lane, &function, certify, fault, &lane->steps[2], &lane->steps[3], revision, passes);
     }
     return outcome;
 }
@@ -1065,7 +1064,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         // --tier1-passes=+unroll (#2755): the summary skipped the unroller; its own code takes it here.
         if ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0)
         {
-            outcome = check_tier1_unroll_own(lane, scalar, certify, fault, &revision, &passes);
+            outcome = check_tier1_unroll_own(lane, certify, fault, &revision, &passes);
             stage = outcome.stage;
         }
     }

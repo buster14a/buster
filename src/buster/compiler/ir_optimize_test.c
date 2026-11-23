@@ -189,7 +189,6 @@ static void ir_optimize_test_fold_guards(IrOptimizeTest* test)
         uint64_t* left = (uint64_t*)((char*)mapping + 5 * page_size - count * sizeof(uint64_t));
         uint64_t* right = (uint64_t*)((char*)mapping + 7 * page_size - count * sizeof(uint64_t));
         uint64_t* scalar = (uint64_t*)((char*)mapping + 9 * page_size - count * sizeof(uint64_t));
-        uint64_t* vector = (uint64_t*)((char*)mapping + 11 * page_size - count * sizeof(uint64_t));
         for (uint32_t iteration = 0; iteration < 512; iteration += 1)
         {
             for (uint32_t i = 0; i < count; i += 1)
@@ -199,7 +198,6 @@ static void ir_optimize_test_fold_guards(IrOptimizeTest* test)
                 left[i] = ir_optimize_test_random(test);
                 right[i] = ir_optimize_test_random(test);
                 scalar[i] = UINT64_C(0xfedcba9876543210);
-                vector[i] = scalar[i];
             }
             IrOptimizeFoldBatch batch = {
                 .count = count,
@@ -210,10 +208,7 @@ static void ir_optimize_test_fold_guards(IrOptimizeTest* test)
                 .result = scalar,
             };
             const uint16_t active = iteration == 0 ? UINT16_MAX : ir_optimize_test_random(test);
-            const uint16_t scalar_folded = ir_optimize_fold_scalar(batch, active);
-            batch.result = vector;
-            const uint16_t vector_folded = ir_optimize_fold_vector(batch, active);
-            ir_optimize_test_expect(test, scalar_folded == vector_folded, "guarded scalar/vector fold masks");
+            const uint16_t scalar_folded = ir_optimize_fold_batch(batch, active);
             for (uint32_t i = 0; i < count; i += 1)
             {
                 uint64_t expected = UINT64_C(0xfedcba9876543210);
@@ -222,7 +217,7 @@ static void ir_optimize_test_fold_guards(IrOptimizeTest* test)
                 {
                     expected_folded = ir_optimize_test_fold_oracle(operation[i], width[i], left[i], right[i], &expected);
                 }
-                ir_optimize_test_expect(test, scalar[i] == vector[i] && vector[i] == expected && ((scalar_folded >> i) & 1) == expected_folded, "guarded folds and inactive stores");
+                ir_optimize_test_expect(test, scalar[i] == expected && ((scalar_folded >> i) & 1) == expected_folded, "guarded folds and inactive stores");
             }
         }
     }
@@ -231,7 +226,7 @@ static void ir_optimize_test_fold_guards(IrOptimizeTest* test)
         munmap(mapping, (uint64_t)page_size * 12);
     }
     const IrOptimizeFoldBatch invalid = { .count = BUSTER_IR_OPTIMIZE_BATCH + 1 };
-    ir_optimize_test_expect(test, ir_optimize_fold_scalar(invalid, UINT16_MAX) == 0 && ir_optimize_fold_vector(invalid, UINT16_MAX) == 0, "invalid count without column access");
+    ir_optimize_test_expect(test, ir_optimize_fold_batch(invalid, UINT16_MAX) == 0, "invalid count without column access");
 }
 
 static void ir_optimize_test_instruction(IrFunction* f, uint32_t i, uint8_t op, uint8_t type, uint32_t a, uint32_t b, uint32_t c)
@@ -704,49 +699,37 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
     return ir_optimize_test_execute_table(f, scratch, parameter, unspecified, NULL);
 }
 
-static void ir_optimize_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector_arena, Arena* scalar_arena, Arena* scratch, uint32_t passes)
+static void ir_optimize_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* scratch, uint32_t passes)
 {
-    const uint64_t vm = vector_arena->length;
-    const uint64_t sm = scalar_arena->length;
+    const uint64_t om = output->length;
     const uint64_t tm = scratch->length;
     IrOptimizeOptions options = ir_optimize_options();
     options.passes = passes;
-    options.path = BUSTER_IR_OPTIMIZE_VECTOR;
-    IrOptimizeResult vector = { 0 };
-    IrOptimizeResult scalar = { 0 };
-    const IrCheck vc = ir_optimize(f, vector_arena, scratch, options, &vector);
-    options.path = BUSTER_IR_OPTIMIZE_SCALAR;
-    const IrCheck sc = ir_optimize(f, scalar_arena, scratch, options, &scalar);
-    if ((vc.error != IR_OK || sc.error != IR_OK) && test->failures < 8)
+    IrOptimizeResult result = { 0 };
+    const IrCheck check = ir_optimize(f, output, scratch, options, &result);
+    if (check.error != IR_OK && test->failures < 8)
     {
-        fprintf(stderr, "ir-optimize: vector error=%u at=%u detail=%u, scalar error=%u at=%u detail=%u passes=%u\n", vc.error, vc.instruction, vc.detail, sc.error, sc.instruction, sc.detail, passes);
+        fprintf(stderr, "ir-optimize: error=%u at=%u detail=%u passes=%u\n", check.error, check.instruction, check.detail, passes);
     }
-    ir_optimize_test_expect(test, vc.error == IR_OK && sc.error == IR_OK, "optimizers accept constructed SSA");
+    ir_optimize_test_expect(test, check.error == IR_OK, "optimizers accept constructed SSA");
     ir_optimize_test_expect(test, scratch->length == tm, "optimization restores scratch");
-    if (vc.error == IR_OK && sc.error == IR_OK)
+    if (check.error == IR_OK)
     {
-        ir_optimize_test_expect(test, ir_optimize_test_equal(&vector.function, &scalar.function), "exact vector/worklist rewritten IR agreement");
         for (uint32_t trial = 0; trial < 9; trial += 1)
         {
             const uint64_t parameter = trial == 8 ? UINT64_MAX : trial;
             const IrOptimizeExecution before = ir_optimize_test_execute(f, scratch, parameter, trial & 1);
-            const IrOptimizeExecution after = ir_optimize_test_execute(&vector.function, scratch, parameter, trial & 1);
+            const IrOptimizeExecution after = ir_optimize_test_execute(&result.function, scratch, parameter, trial & 1);
             ir_optimize_test_expect(test, before.status != 4 && before.status == after.status && before.effects == after.effects && (before.status != 1 || before.value == after.value), "independent execution, effects and faults preserved");
         }
-        ir_optimize_test_fold_function(&test->optimize_digest, &scalar.function);
-        const uint64_t counts[] = { scalar.folded, scalar.removed_instructions, scalar.removed_blocks, scalar.merged_blocks, scalar.forwarded_loads };
+        ir_optimize_test_fold_function(&test->optimize_digest, &result.function);
+        const uint64_t counts[] = { result.folded, result.removed_instructions, result.removed_blocks, result.merged_blocks, result.forwarded_loads };
         for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(counts); k += 1)
         {
             ir_optimize_test_fold(&test->optimize_digest, counts[k]);
         }
-        arena_pop_to(scalar_arena, sm);
-        options.path = BUSTER_IR_OPTIMIZE_VECTOR;
-        options.sweep_limit = 0;
-        const IrCheck fallback = ir_optimize(f, scalar_arena, scratch, options, &scalar);
-        ir_optimize_test_expect(test, fallback.error == IR_OK && ir_optimize_test_equal(&vector.function, &scalar.function), "forced worklist completion is exact");
     }
-    arena_pop_to(vector_arena, vm);
-    arena_pop_to(scalar_arena, sm);
+    arena_pop_to(output, om);
 }
 
 static bool ir_optimize_test_diamond(Arena* arena, IrFunction* f, uint32_t kind)
@@ -1031,7 +1014,7 @@ static void ir_optimize_test_joins(IrOptimizeTest* test, Arena* input, Arena* ve
             // The three passes' masks, each also with the merges (#139).
             for (uint32_t passes = 0; created && passes < 16; passes += 1)
             {
-                ir_optimize_test_compare(test, &function, vector, scalar, scratch, (passes & 7) | ((passes & 8) != 0 ? BUSTER_IR_OPTIMIZE_MERGE : 0));
+                ir_optimize_test_compare(test, &function, vector, scratch, (passes & 7) | ((passes & 8) != 0 ? BUSTER_IR_OPTIMIZE_MERGE : 0));
             }
             arena_pop_to(input, 0);
         }
@@ -1039,11 +1022,10 @@ static void ir_optimize_test_joins(IrOptimizeTest* test, Arena* input, Arena* ve
         IrFunction function = { 0 };
         const bool created = ir_optimize_test_chain(input, &function, arms, kind);
         ir_optimize_test_expect(test, created, "long join chain fixture allocation");
-        for (uint32_t path = BUSTER_IR_OPTIMIZE_VECTOR; created && path <= BUSTER_IR_OPTIMIZE_SCALAR; path += 1)
+        if (created)
         {
             const uint64_t mark = vector->length;
-            IrOptimizeOptions options = ir_optimize_options();
-            options.path = path;
+            const IrOptimizeOptions options = ir_optimize_options();
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&function, vector, scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK, "long join chain optimizes");
@@ -1067,8 +1049,7 @@ static void ir_optimize_test_joins(IrOptimizeTest* test, Arena* input, Arena* ve
 static void ir_optimize_test_threading(IrOptimizeTest* test, Arena* scratch)
 {
     uint32_t direct[129];
-    uint32_t scalar[129];
-    uint32_t vector[129];
+    uint32_t targets[129];
     const uint64_t mark = scratch->length;
     for (uint32_t count = 0; count <= 129; count += 1)
     {
@@ -1078,9 +1059,8 @@ static void ir_optimize_test_threading(IrOptimizeTest* test, Arena* scratch)
             {
                 direct[i] = trial == 0 ? (i + 1) % count : trial == 1 ? count - 1 : ir_optimize_test_random(test) % count;
             }
-            const bool a = ir_optimize_thread_targets(scratch, direct, count, scalar, true);
-            const bool b = ir_optimize_thread_targets(scratch, direct, count, vector, false);
-            ir_optimize_test_expect(test, a && b && scratch->length == mark && memcmp(scalar, vector, count * sizeof(uint32_t)) == 0, "functional CFG scalar/vector canonical cycles");
+            const bool threaded = ir_optimize_thread_targets(scratch, direct, count, targets);
+            ir_optimize_test_expect(test, threaded && scratch->length == mark, "functional CFG targets restore scratch");
             for (uint32_t i = 0; i < count; i += 1)
             {
                 uint32_t node = i;
@@ -1094,7 +1074,7 @@ static void ir_optimize_test_threading(IrOptimizeTest* test, Arena* scratch)
                     node = direct[node];
                     minimum = node < minimum ? node : minimum;
                 }
-                ir_optimize_test_expect(test, vector[i] == minimum, "jump threading versus independent orbit traversal");
+                ir_optimize_test_expect(test, targets[i] == minimum, "jump threading versus independent orbit traversal");
             }
         }
     }
@@ -1158,7 +1138,7 @@ static void ir_optimize_test_limits(IrOptimizeTest* test, Arena* input, Arena* o
         Arena reference = arena_reserve(1ull << 20);
         if (reference.base != 0)
         {
-            ir_optimize_test_compare(test, &f, output, &reference, scratch, 7);
+            ir_optimize_test_compare(test, &f, output, scratch, 7);
         }
         else
         {
@@ -1191,13 +1171,11 @@ static void ir_optimize_test_entry_phi(IrOptimizeTest* test, Arena* input, Arena
         ir_optimize_test_expect(test, verified.error == IR_ERROR_PHI && verified.instruction == 0, "shared IR rejects phi with unreachable entry predecessor");
         for (uint32_t passes = 0; passes < 32; passes += 1)
         {
-            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
                 const uint64_t om = output->length;
                 const uint64_t sm = scratch->length;
                 IrOptimizeOptions options = ir_optimize_options();
                 options.passes = passes;
-                options.path = scalar != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                 IrOptimizeResult result = { .folded = 139 };
                 const IrOptimizeResult saved = result;
                 const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
@@ -1386,13 +1364,12 @@ static void ir_optimize_test_records(IrOptimizeTest* test, Arena* input, Arena* 
         ir_optimize_test_expect(test, created && ir_verify(&f, scratch, 0).error == IR_OK, "labels and ABI records fixtures verify");
         for (uint32_t passes = 0; created && passes < 64; passes += 1)
         {
-            ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
+            ir_optimize_test_compare(test, &f, vector, scratch, passes);
         }
-        for (uint32_t path = 0; created && path < 2; path += 1)
+        if (created)
         {
             const uint64_t mark = vector->length;
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             const IrFunction* out = &result.function;
@@ -1564,16 +1541,14 @@ static void ir_optimize_test_identities(IrOptimizeTest* test, Arena* input, Aren
     ir_optimize_test_expect(test, created && ir_optimize_test_identities_left(&f) == 13, "identities fixture has its thirteen identities");
     for (uint32_t passes = 0; created && passes < 64; passes += 1)
     {
-        ir_optimize_test_compare(test, &f, vector, scalar, scratch, passes);
+        ir_optimize_test_compare(test, &f, vector, scratch, passes);
     }
     for (uint32_t identity = 0; created && identity < 2; identity += 1)
     {
-        for (uint32_t path = 0; path < 2; path += 1)
         {
             const uint64_t mark = vector->length;
             IrOptimizeOptions options = ir_optimize_options();
             options.passes |= identity != 0 ? BUSTER_IR_OPTIMIZE_IDENTITY : 0;
-            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             const IrFunction* out = &result.function;
@@ -1644,11 +1619,9 @@ static void ir_optimize_test_vector_compares(IrOptimizeTest* test, Arena* input,
         f.flags[7] = IR_SIMD_LANE_I16;
         ir_optimize_test_instruction(&f, 8, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_expect(test, ir_verify(&f, scratch, 0).error == IR_OK, "vector comparisons fixture verifies");
-        for (uint32_t path = 0; path < 2; path += 1)
         {
             const uint64_t mark = output->length;
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
             const IrFunction* out = &result.function;
@@ -1662,8 +1635,7 @@ static void ir_optimize_test_vector_compares(IrOptimizeTest* test, Arena* input,
                 additions += out->op[i] == IR_FADD ? 1 : out->op[i] == IR_ADD ? 16 : 0;
             }
             ir_optimize_test_expect(test, check.error == IR_OK && floating == 2 && integer == 0 && additions == 1,
-                                    path == 0 ? "the vector path keeps an unused floating comparison and drops an integer one" :
-                                                "the scalar path keeps an unused floating comparison and drops an integer one");
+                                    "the optimizer keeps an unused floating comparison and drops an integer one");
             arena_pop_to(output, mark);
         }
     }
@@ -1723,10 +1695,9 @@ static void ir_optimize_test_debug_bindings(IrOptimizeTest* test, Arena* input, 
         ready = ir_debug_create(input, &function, &seed);
     }
     ir_optimize_test_expect(test, ready, "source assignment optimizer fixture allocated");
-    for (uint32_t path = 0; ready && path < 2; path += 1)
+    if (ready)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult described = { 0 };
         IrOptimizeResult plain = { 0 };
         IrFunction plain_input = function;
@@ -1769,12 +1740,11 @@ static void ir_optimize_test_merges(IrOptimizeTest* test, Arena* input, Arena* v
         IrFunction f = { 0 };
         const bool created = ir_optimize_test_diamond(input, &f, kind);
         ir_optimize_test_expect(test, created, "merge diamond fixture allocation");
-        for (uint32_t run = 0; created && run < 4; run += 1)
+        for (uint32_t run = 0; created && run < 2; run += 1)
         {
             const bool sccp = (run & 1) != 0;
             IrOptimizeOptions options = ir_optimize_options();
             options.passes = (sccp ? BUSTER_IR_OPTIMIZE_SCCP : 0) | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE;
-            options.path = (run & 2) != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             const uint64_t mark = vector->length;
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
@@ -1834,13 +1804,12 @@ static void ir_optimize_test_merges(IrOptimizeTest* test, Arena* input, Arena* v
         ir_optimize_test_expect(test, built && ir_verify(&join, scratch, 0).error == IR_OK, "merged identity join fixture verifies");
         for (uint32_t passes = 0; built && passes < 64; passes += 1)
         {
-            ir_optimize_test_compare(test, &join, vector, scalar, scratch, passes);
+            ir_optimize_test_compare(test, &join, vector, scratch, passes);
         }
-        for (uint32_t path = 0; built && path < 2; path += 1)
+        if (built)
         {
             IrOptimizeOptions options = ir_optimize_options();
             options.passes = BUSTER_IR_OPTIMIZE_PASSES;
-            options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             const uint64_t mark = vector->length;
             IrOptimizeResult result = { 0 };
             const IrCheck check = ir_optimize(&join, vector, scratch, options, &result);
@@ -1868,11 +1837,10 @@ static void ir_optimize_test_merges(IrOptimizeTest* test, Arena* input, Arena* v
         ready = ir_debug_create(input, &chain, &seed);
     }
     ir_optimize_test_expect(test, ready, "merge chain fixture allocated");
-    for (uint32_t run = 0; ready && run < 4; run += 1)
+    for (uint32_t run = 0; ready && run < 2; run += 1)
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = (run & 1) != 0 ? BUSTER_IR_OPTIMIZE_MERGE : BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE;
-        options.path = (run & 2) != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         const uint64_t vm = vector->length;
         const uint64_t sm = scalar->length;
         IrOptimizeResult described = { 0 };
@@ -1920,10 +1888,9 @@ static void ir_optimize_test_debug_blocks(IrOptimizeTest* test, Arena* input, Ar
         ready = ir_debug_create(input, &function, &seed);
     }
     ir_optimize_test_expect(test, ready, "source-region block threading fixture allocated");
-    for (uint32_t path = 0; ready && path < 2; path += 1)
+    if (ready)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult described = { 0 };
         IrOptimizeResult plain = { 0 };
         IrFunction control = function;
@@ -1962,7 +1929,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "diamond fixture allocation");
             for (uint32_t passes = 0; created && passes < 64; passes += 1)
             {
-                ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, passes);
+                ir_optimize_test_compare(test, &function, &vector, &scratch, passes);
             }
             arena_pop_to(&input, 0);
         }
@@ -1971,7 +1938,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         ir_optimize_test_expect(test, loop_created, "loop fixture allocation");
         for (uint32_t passes = 0; loop_created && passes < 64; passes += 1)
         {
-            ir_optimize_test_compare(test, &loop, &vector, &scalar, &scratch, passes);
+            ir_optimize_test_compare(test, &loop, &vector, &scratch, passes);
         }
         arena_pop_to(&input, 0);
         for (uint32_t kind = 0; kind < 2; kind += 1)
@@ -1981,7 +1948,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, effects_created, "effects fixture allocation");
             for (uint32_t passes = 0; effects_created && passes < 64; passes += 1)
             {
-                ir_optimize_test_compare(test, &effects, &vector, &scalar, &scratch, passes);
+                ir_optimize_test_compare(test, &effects, &vector, &scratch, passes);
             }
             arena_pop_to(&input, 0);
             IrFunction switch_function = { 0 };
@@ -1989,7 +1956,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, switch_created, "switch fixture allocation");
             for (uint32_t passes = 0; switch_created && passes < 64; passes += 1)
             {
-                ir_optimize_test_compare(test, &switch_function, &vector, &scalar, &scratch, passes);
+                ir_optimize_test_compare(test, &switch_function, &vector, &scratch, passes);
             }
             arena_pop_to(&input, 0);
             IrFunction jumps = { 0 };
@@ -1997,10 +1964,10 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, jumps_created, "jump chain fixture allocation");
             if (jumps_created)
             {
-                ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 7);
-                ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 15);
-                ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 7 | BUSTER_IR_OPTIMIZE_MERGE);
-                ir_optimize_test_compare(test, &jumps, &vector, &scalar, &scratch, 15 | BUSTER_IR_OPTIMIZE_MERGE);
+                ir_optimize_test_compare(test, &jumps, &vector, &scratch, 7);
+                ir_optimize_test_compare(test, &jumps, &vector, &scratch, 15);
+                ir_optimize_test_compare(test, &jumps, &vector, &scratch, 7 | BUSTER_IR_OPTIMIZE_MERGE);
+                ir_optimize_test_compare(test, &jumps, &vector, &scratch, 15 | BUSTER_IR_OPTIMIZE_MERGE);
             }
             arena_pop_to(&input, 0);
         }
@@ -2020,8 +1987,8 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "random DAG fixture allocation");
             if (created)
             {
-                ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, 7);
-                ir_optimize_test_compare(test, &function, &vector, &scalar, &scratch, 7 | BUSTER_IR_OPTIMIZE_MERGE);
+                ir_optimize_test_compare(test, &function, &vector, &scratch, 7);
+                ir_optimize_test_compare(test, &function, &vector, &scratch, 7 | BUSTER_IR_OPTIMIZE_MERGE);
             }
             arena_pop_to(&input, 0);
         }

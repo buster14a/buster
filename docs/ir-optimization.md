@@ -10,9 +10,9 @@ SSA construction remains [#134](https://github.com/buster14a/buster/issues/134).
 Include `ir_optimize.c` after `ir.c` and `dominators.c`.
 `ir_optimize(function, output_arena, scratch_arena, options, result)` returns
 an `IrCheck`. `ir_optimize_options()` selects SCCP, dead-code removal and CFG
-cleanup, a 64-sweep limit, and the vector path. The `passes` bits are
+cleanup. The `passes` bits are
 `BUSTER_IR_OPTIMIZE_SCCP`, `BUSTER_IR_OPTIMIZE_DCE` and
-`BUSTER_IR_OPTIMIZE_CFG`; `scalar` selects the worklist twins. Tier 1 also
+`BUSTER_IR_OPTIMIZE_CFG`. Tier 1 also
 asks for `_LAYOUT` (#1218), `_IDENTITY` (#2554), `_MERGE`, CFG cleanup's
 merges of single-predecessor chains (#139, `ir_optimize_merges`: "#139's
 acceptance" below and [the Tier 1 guide](tier1.md)), and `_MEMORY`, value
@@ -241,10 +241,19 @@ early exit, clang vectorized the scan into AVX-512 masked gathers, which
 MemorySanitizer reports as reading uninitialized lanes.
 
 SCCP tracks a state and two-word constant per instruction and an executable
-byte per deduplicated CFG edge. It sweeps executable blocks in reverse
-postorder, with 16-instruction transfer batches; the scalar solver queues
+byte per deduplicated CFG edge. Its worklist queues
 changed SSA users and instructions affected by newly executable edges, phis in a
-queue of their own (below). Integer
+queue of their own (below).
+
+The passes are these worklists alone since #2924. The vector passes beside them
+(SCCP sweeping executable blocks in reverse postorder with 16-instruction fold
+batches, dead-code sweeps, pointer jumping for the threads, sixteen-lane ranks,
+roots and identity candidates) took 1.02 to 1.44 times their ticks when forced,
+more with size, on Tier 1's pipeline over `sqlite3.c`, Lua and musl, and #860's
+AUTO bound never chose them below 8,192 instructions ([#2924's
+6987893038](https://github.com/buster14a/buster/issues/2924#issuecomment-6987893038)).
+The owner kept the scalar passes; #3445 is a vectorized form that would have to
+win at every size. Integer
 operations support all IR integer widths, including scalar i128 handling.
 Copies, phis, selects, integer/pointer conversions, bitcasts and floating sign
 negation preserve exact constant bits. Floating arithmetic, comparisons and
@@ -267,8 +276,7 @@ constant, is visited twice rather than once per arm. An unknown phi (its first
 visit) and an overdefined one are visited in turn, as before; the queue is
 reserved, unzeroed, by the first phi moved.
 `IrOptimizeResult.sccp_phi_incoming` counts the incoming values the phi
-transfers examined. The order of visits doesn't change the fixed point, which
-the vector sweeps' exact agreement with the worklist checks.
+transfers examined. The order of visits doesn't change the fixed point.
 
 ### Constant SIMD lanes (#1450)
 
@@ -284,9 +292,9 @@ restores the public call's arenas.
 SCCP folds 8-, 16-, 32- and 64-bit wrapping lane arithmetic, total packed shifts,
 bitwise operations, integer comparisons, lane selects, raw-bit
 scalar splats, copies, phis, scalar selects and 128-bit scalar/vector bitcasts.
-Integer lanes feed the existing bounded 16-item fold batches and their scalar
-twin; oversized packed shifts produce zero or the sign fill, rather than
-using scalar shift refusal. Tests compare both paths against
+Integer lanes feed the existing bounded 16-item fold batches; oversized packed
+shifts produce zero or the sign fill, rather than
+using scalar shift refusal. Tests compare the folds against
 `ir_simd_model.c` and execute complete before/after functions through the
 shared interpreter.
 
@@ -304,16 +312,13 @@ where every lane does. Folding never removes the operation: its row stays, with
 its operands live, ahead of the constant its users receive, for its flags and
 traps.
 
-Neither path reads or writes the compiler's own MXCSR. The scalar twin
+The folds never read or write the compiler's own MXCSR: a lane
 (`ir_optimize_simd_float_lane`) is integer arithmetic on significands and
 exponents: a sum aligned in 128 bits, a product of significands, a quotient's
 divisibility of odd parts, each refused past the format's precision or range.
-The vector path rounds every lane down and up by AVX-512's embedded rounding,
-with exceptions suppressed, and folds the lanes where the two agree. A zero that
-no operand makes exact is refused, since the host's own FTZ would flush a tiny
-result alike in both directions. Comparisons are integer operations on ordered
-keys on both paths, because Clang drops a comparison's suppressed exceptions.
-`test-ir-optimize` checks both paths against a rule taken from the model alone:
+Comparisons are integer operations on ordered keys. (#2924 removed the vector
+form beside it, which rounded every lane down and up by AVX-512's embedded
+rounding.) `test-ir-optimize` checks the folds against a rule taken from the model alone:
 a lane folds exactly where `ir_simd_model.c` gives the default environment's bits
 when rounding down, up and toward zero and under FTZ with DAZ, and has no
 subnormal operand without a NaN. It runs the lane fixtures over
@@ -360,21 +365,18 @@ belong to scratch and do not survive the pass; folded `vconst` payloads append
 to the fresh output's vector-constant table. These changes make no throughput
 claim; target-host measurement remains required.
 
-Dead-code removal classifies roots by a vector opcode-table lookup, skips
-empty liveness batches, and propagates dependencies backwards. A separate
-worklist implementation supplies the exact scalar result and completes a
-bounded sweep. It skips dependencies of folded values and removed conditional
+Dead-code removal classifies each instruction's root by its opcode's table
+entry and propagates dependencies backwards by a worklist. It skips
+dependencies of folded values and removed conditional
 branches, and follows only executable phi edges. Vector floating operations
 stay roots, folded or not, so their dependencies stay live; a scalar one stays
 a root until it folds, which it does only where it raises no flag (#2720).
 
 CFG cleanup compacts unreachable blocks, collapses single-successor
-conditionals, and threads transparent jumps. Pointer jumping and propagated
-minimum IDs canonicalize an empty jump cycle to its smallest member, which
-retains a self-loop and therefore nontermination. Up to 64 target IDs are
-looked up by register permutations; larger graphs use bounded scalar indexed
-loads. The scalar twin walks each functional-graph component with an explicit
-path. Phi destinations stop threading, preserving predecessor identity.
+conditionals, and threads transparent jumps. Each functional-graph component
+is walked once with an explicit path, and an empty jump cycle resolves to its
+smallest member, which retains a self-loop and therefore nontermination. Phi
+destinations stop threading, preserving predecessor identity.
 Merging nonempty one-predecessor blocks is still pending.
 
 The rewrite preserves surviving block order and ordinary instruction order.
@@ -397,10 +399,8 @@ operand are refused. Shift counts retain their own width; a wide count is not
 truncated to the shifted value's width. Refusal leaves the output untouched. Refusing to fold an
 operation does not authorize its removal or its motion to a different block.
 
-`ir_optimize_fold_vector` handles at most 16 independent ready transfers with
-two eight-lane AVX-512 groups. Arithmetic, bitwise operations, shifts and
-comparisons run in vector lanes. Division and remainder use the exact scalar
-transfer. The scalar batch entry point is `ir_optimize_fold_scalar`.
+`ir_optimize_fold_batch` handles at most 16 independent ready transfers, one at
+a time by `ir_optimize_fold_one`.
 
 The producer supplies contiguous operation and width columns of `uint32_t`
 and left/right/result columns of `uint64_t`. The operation column is a transfer
@@ -423,9 +423,7 @@ widths and counts, signed extremes, and random mixtures of operations.
 The analysis lattice has unknown, constant and overdefined states. Unknown
 means that the analysis has not learned a value; an IR `undef` must be
 overdefined. A phi meets only incoming values on executable predecessor
-edges. A branch on an overdefined value exposes every successor. A sweep
-limit must finish the fixed point with the worklist solver before any result
-is used for a rewrite.
+edges. A branch on an overdefined value exposes every successor.
 
 Stores, calls, volatile operations, terminators and potentially faulting
 operations remain liveness roots unless the pass has a separate proof that
@@ -438,8 +436,10 @@ table that contains a value identifier.
 ## Tests and measurements
 
 `test-ir-optimize [--seed N]` checks independent wide arithmetic, guarded
-columns, deterministic functional-graph cycle resolution, exact scalar/vector
-rewrites, forced fallback, invalid SSA and allocation rollback. Its independent
+columns, deterministic functional-graph cycle resolution, the rewrites, whose
+results fold into a digest frozen in #2924 while the vector passes were beside
+them (`BUSTER_IR_OPTIMIZE_TEST_OPTIMIZE_DIGEST`, the default seed), invalid SSA
+and allocation rollback. Its independent
 bounded interpreter checks returns, termination or faults, calls, stores and
 volatile load order for constructed diamonds, loops, switches, jump chains
 and cycles, effects, mixed-width shifts and random arithmetic DAGs. It reads
@@ -463,21 +463,16 @@ are checked. Leaving a threaded label at its old block, a dead label at its
 old block, the labels unrenumbered, or a call's destination unremapped each
 fails the test.
 
-`benchmark-ir-optimize [--instructions N] [--samples 1..21]
-[--only scalar|vector] [--pass all|sccp|dce|cfg] [--after-scalar MS]` measures
+`benchmark-ir-optimize [--instructions N] [--blocks N] [--samples 1..21]
+[--pass all|sccp|dce|cfg]` measures
 complete public calls on frozen small/large arithmetic DAGs, a phi diamond,
 a loop and a jump chain. It includes input validation, CFG/use/dominator
 construction, analysis, allocation, compaction and final SSA verification.
-It checks exact output agreement before timing. Repetitions are calibrated
-once per path to target 2 ms; later samples can be shorter as execution
-conditions change. Default samples alternate which path runs first. `--only`
-isolates one path, and `--after-scalar` runs lighter scalar work before every
-vector sample. The benchmark shares the original test fixture builders and
-is included after `ir_optimize_test.c`. The default 9700X job runs it, and
-`benchmark-ir-optimize-passes`, after the tests, pinned to one allowed CPU;
-on the daily and dispatched runs and on pull requests that change `ir.c`,
-`ir_validate.c` or `ir_optimize*.c`, each also with `--only vector
---after-scalar 200`. Like the others, their measurements are informational.
+Repetitions are calibrated once to target 2 ms; later samples can be shorter as
+execution conditions change. The benchmark shares the original test fixture
+builders and is included after `ir_optimize_test.c`. The default 9700X job runs
+it, and `benchmark-ir-optimize-passes`, after the tests, pinned to one allowed
+CPU. Like the others, their measurements are informational.
 
 The output reports nanoseconds, TSC ticks (not core cycles), useful input
 instructions per second, output size and retained analysis workspace. That

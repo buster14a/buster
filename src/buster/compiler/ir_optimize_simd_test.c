@@ -33,24 +33,17 @@ static void ir_optimize_test_simd_semantics(IrOptimizeTest* test, const IrFuncti
     }
 }
 
-static void ir_optimize_test_simd_rewrite(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* scratch, uint32_t passes)
+static void ir_optimize_test_simd_rewrite(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* scratch, uint32_t passes)
 {
-    const uint64_t vm = vector->length;
-    const uint64_t sm = scalar->length;
+    const uint64_t om = output->length;
     IrOptimizeOptions options = ir_optimize_options();
     options.passes = passes;
-    options.path = BUSTER_IR_OPTIMIZE_VECTOR;
     IrOptimizeResult a = { 0 };
-    IrOptimizeResult b = { 0 };
-    const IrCheck ac = ir_optimize(f, vector, scratch, options, &a);
-    options.path = BUSTER_IR_OPTIMIZE_SCALAR;
-    const IrCheck bc = ir_optimize(f, scalar, scratch, options, &b);
-    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK, "both SCCP paths accept SIMD fixture");
-    if (ac.error == IR_OK && bc.error == IR_OK)
+    const IrCheck ac = ir_optimize(f, output, scratch, options, &a);
+    ir_optimize_test_expect(test, ac.error == IR_OK, "SCCP accepts SIMD fixture");
+    if (ac.error == IR_OK)
     {
-        ir_optimize_test_expect(test, ir_optimize_test_equal(&a.function, &b.function), "SIMD SCCP twins preserve exact wide constants and rows");
         ir_optimize_test_simd_semantics(test, f, &a.function, scratch);
-        ir_optimize_test_simd_semantics(test, f, &b.function, scratch);
         uint32_t before_effects = 0;
         uint32_t after_effects = 0;
         for (uint32_t i = 0; i < f->instruction_count; i += 1)
@@ -62,14 +55,8 @@ static void ir_optimize_test_simd_rewrite(IrOptimizeTest* test, const IrFunction
             after_effects += ir_optimize_simd_effect(&a.function, i);
         }
         ir_optimize_test_expect(test, after_effects == before_effects, "SIMD floating operations retain their environment effects");
-        arena_pop_to(scalar, sm);
-        options.path = BUSTER_IR_OPTIMIZE_VECTOR;
-        options.sweep_limit = 0;
-        const IrCheck fallback = ir_optimize(f, scalar, scratch, options, &b);
-        ir_optimize_test_expect(test, fallback.error == IR_OK && ir_optimize_test_equal(&a.function, &b.function), "SIMD SCCP worklist completion matches converged sweeps");
     }
-    arena_pop_to(vector, vm);
-    arena_pop_to(scalar, sm);
+    arena_pop_to(output, om);
 }
 
 static bool ir_optimize_test_simd_function(Arena* input, uint32_t type, uint32_t lane, uint32_t op, uint32_t predicate,
@@ -266,24 +253,22 @@ static void ir_optimize_test_simd_lanes(IrOptimizeTest* test, Arena* input, Aren
                                 floating_folds[kind] += foldable;
                                 floating_refusals[kind] += !foldable;
                             }
-                            for (uint32_t path = 0; path < 2; path += 1)
                             {
                                 // A compiler embedded in another program must neither use nor leak its caller's FP state.
                                 const uint32_t unusual_mxcsr = UINT32_C(0xffc0) | trial;
                                 _mm_setcsr(unusual_mxcsr);
                                 IrSimdValue folded = { 0 };
-                                const bool ok = ir_optimize_simd_fold(&f, 3, operands, path != 0, &folded);
+                                const bool ok = ir_optimize_simd_fold(&f, 3, operands, &folded);
                                 const uint32_t restored_mxcsr = _mm_getcsr();
                                 _mm_setcsr(UINT32_C(0x1f80));
                                 ir_optimize_test_expect(test, ok == foldable && (!ok || memcmp(&folded, &expected, sizeof(folded)) == 0) && restored_mxcsr == unusual_mxcsr,
-                                                        "SIMD fold twin folds what every environment agrees on, matching model, NaN payloads and caller MXCSR");
+                                                        "SIMD fold folds what every environment agrees on, matching model, NaN payloads and caller MXCSR");
                             }
                             if (trial == 0 || trial == 7 || trial == 8)
                             {
-                                ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+                                ir_optimize_test_simd_rewrite(test, &f, vector, scratch, 7);
                                 IrOptimizeResult result = { 0 };
                                 IrOptimizeOptions options = ir_optimize_options();
-                                options.path = BUSTER_IR_OPTIMIZE_VECTOR;
                                 const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
                                 const IrFunction* out = &result.function;
                                 const uint32_t ret = check.error == IR_OK ? out->instruction_count - 1 : 0;
@@ -407,20 +392,15 @@ static void ir_optimize_test_simd_float_pairs(IrOptimizeTest* test)
         _mm_setcsr(UINT32_C(0x1f80));
         const bool modeled = ir_simd_evaluate(&action, arguments, NULL, NULL, 0, &expected);
         const bool foldable = modeled && ir_optimize_test_simd_environment_free(&action, arguments, &expected, 128 / width, width);
-        IrSimdValue folded[2] = { 0 };
-        bool ok[2] = { false, false };
-        for (uint32_t path = 0; path < 2; path += 1)
-        {
-            _mm_setcsr(UINT32_C(0xffc0) | (trial & 0x3f));
-            ok[path] = ir_optimize_simd_float(op, width, 128, predicate, operands, operands + 1, path != 0, folded + path);
-        }
+        IrSimdValue folded = { 0 };
+        _mm_setcsr(UINT32_C(0xffc0) | (trial & 0x3f));
+        const bool ok = ir_optimize_simd_float(op, width, 128, predicate, operands, operands + 1, &folded);
         const uint32_t restored = _mm_getcsr();
         _mm_setcsr(UINT32_C(0x1f80));
         folds += foldable;
         refusals += !foldable;
-        ir_optimize_test_expect(test, modeled && ok[0] == foldable && ok[1] == foldable && restored == (UINT32_C(0xffc0) | (trial & 0x3f)) &&
-                                (!foldable || (memcmp(folded, &expected, sizeof(expected)) == 0 && memcmp(folded + 1, &expected, sizeof(expected)) == 0)),
-                                "random floating lane pairs: both paths fold exactly what every environment agrees on");
+        ir_optimize_test_expect(test, modeled && ok == foldable && restored == (UINT32_C(0xffc0) | (trial & 0x3f)) && (!foldable || memcmp(&folded, &expected, sizeof(expected)) == 0),
+                                "random floating lane pairs fold exactly what every environment agrees on");
     }
     _mm_setcsr(saved_mxcsr);
     ir_optimize_test_expect(test, folds > 512 && refusals > 512, "random floating lane pairs both fold and refuse");
@@ -717,7 +697,6 @@ static void ir_optimize_test_scalar_floats(IrOptimizeTest* test, Arena* input, A
             ir_optimize_test_instruction(&f, count - 1, IR_RET, IR_VOID, count - 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
             const uint64_t output_mark = output->length;
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
             IrOptimizeResult optimized = { 0 };
             const IrCheck check = ir_optimize(&f, output, scratch, options, &optimized);
             bool kept = false;
@@ -792,7 +771,7 @@ static void ir_optimize_test_simd_flow(IrOptimizeTest* test, Arena* input, Arena
             f.vector_constants[1].words[1] ^= distinct;
             for (uint32_t passes = 0; passes < 16; passes += 1)
             {
-                ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, passes);
+                ir_optimize_test_simd_rewrite(test, &f, vector, scratch, passes);
             }
         }
         // An ordinary scalar select with an unknown predicate must also compare all vector words.
@@ -800,10 +779,10 @@ static void ir_optimize_test_simd_flow(IrOptimizeTest* test, Arena* input, Arena
         f.a[6] = 2;
         f.b[6] = 0;
         f.c[6] = 1;
-        ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+        ir_optimize_test_simd_rewrite(test, &f, vector, scratch, 7);
         const uint64_t scratch_mark = scratch->length;
         IrOptimizeWork work = { 0 };
-        const IrCheck prepared = ir_optimize_prepare(&work, &f, vector, scratch, true, true);
+        const IrCheck prepared = ir_optimize_prepare(&work, &f, vector, scratch, true);
         ir_optimize_test_expect(test, prepared.error == IR_OK && work.vector_indices == NULL && work.vector_values == NULL,
                                 "wide lattice storage is absent until a SIMD transfer");
         if (prepared.error == IR_OK)
@@ -860,7 +839,7 @@ static void ir_optimize_test_simd_loop(IrOptimizeTest* test, Arena* input, Arena
         ir_optimize_test_instruction(&f, 13, IR_RET, IR_VOID, 12, BUSTER_IR_NONE, BUSTER_IR_NONE);
         for (uint32_t passes = 0; passes < 16; passes += 1)
         {
-            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, passes);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scratch, passes);
         }
     }
     arena_pop_to(input, mark);
@@ -905,10 +884,9 @@ static void ir_optimize_test_simd_splats(IrOptimizeTest* test, Arena* input, Are
                 ir_optimize_test_instruction(&f, 3, IR_VCMP, mask, 1, 2, IR_EQ);
                 f.flags[3] = IR_SIMD_LANE_I8;
                 ir_optimize_test_instruction(&f, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+                ir_optimize_test_simd_rewrite(test, &f, vector, scratch, 7);
                 IrOptimizeResult result = { 0 };
                 IrOptimizeOptions options = ir_optimize_options();
-                options.path = BUSTER_IR_OPTIMIZE_VECTOR;
                 const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
                 ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
                                         "constant unary splat folds through lane comparison without reading absent b");
@@ -972,10 +950,9 @@ static void ir_optimize_test_simd_widths(IrOptimizeTest* test, Arena* input, Are
                 differ |= (uint64_t)(mine != inserted) << byte;
             }
             ir_optimize_test_instruction(&f, 11, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scratch, 7);
             IrOptimizeResult result = { 0 };
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
             IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST && result.function.constants[0].low == 0xffff,
                                     "a constant insert's inserted part folds to its every-lane-equal mask");
@@ -1034,10 +1011,9 @@ static void ir_optimize_test_simd_permutes(IrOptimizeTest* test, Arena* input, A
             ir_optimize_test_instruction(&f, 4, IR_VCMP, mask, 2, 3, IR_ULT);
             f.flags[4] = IR_SIMD_LANE_I8;
             ir_optimize_test_instruction(&f, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scratch, 7);
             IrOptimizeResult result = { 0 };
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
                                     "a constant permute folds through a comparison");
@@ -1085,10 +1061,9 @@ static void ir_optimize_test_simd_shifts(IrOptimizeTest* test, Arena* input, Are
                 ir_optimize_test_instruction(&f, 4, IR_VCMP, mask, 2, 3, IR_ULT);
                 f.flags[4] = IR_SIMD_LANE_I8;
                 ir_optimize_test_instruction(&f, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+                ir_optimize_test_simd_rewrite(test, &f, vector, scratch, 7);
                 IrOptimizeResult result = { 0 };
                 IrOptimizeOptions options = ir_optimize_options();
-                options.path = BUSTER_IR_OPTIMIZE_VECTOR;
                 const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
                 ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
                                         "a constant scalar shift folds through a comparison");
@@ -1138,10 +1113,9 @@ static void ir_optimize_test_simd_lane_ops(IrOptimizeTest* test, Arena* input, A
             ir_optimize_test_instruction(&f, 4, IR_VCMP, mask, 2, 3, IR_ULT);
             f.flags[4] = IR_SIMD_LANE_I8;
             ir_optimize_test_instruction(&f, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scratch, 7);
             IrOptimizeResult result = { 0 };
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
                                     "a constant lane operation folds through a comparison");
@@ -1209,10 +1183,9 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
             ir_optimize_test_instruction(&f, 5, IR_VCMP, mask, 4, 2, IR_ULT);
             f.flags[5] = IR_SIMD_LANE_I8;
             ir_optimize_test_instruction(&f, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, 7);
+            ir_optimize_test_simd_rewrite(test, &f, vector, scratch, 7);
             IrOptimizeResult result = { 0 };
             IrOptimizeOptions options = ir_optimize_options();
-            options.path = BUSTER_IR_OPTIMIZE_VECTOR;
             const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
             ir_optimize_test_expect(test, check.error == IR_OK && result.function.instruction_count == 2 && result.function.op[0] == IR_CONST,
                                     "a constant permute2, ternlog, compress, expand, AES round, pairwise operation or dot product folds through a comparison");
@@ -1270,7 +1243,7 @@ static void ir_optimize_test_simd_permute2(IrOptimizeTest* test, Arena* input, A
             ir_optimize_test_instruction(&f, 17, IR_RET, IR_VOID, 16, BUSTER_IR_NONE, BUSTER_IR_NONE);
             for (uint32_t passes = 0; passes < 16; passes += 1)
             {
-                ir_optimize_test_simd_rewrite(test, &f, vector, scalar, scratch, passes);
+                ir_optimize_test_simd_rewrite(test, &f, vector, scratch, passes);
             }
         }
         arena_pop_to(input, mark);

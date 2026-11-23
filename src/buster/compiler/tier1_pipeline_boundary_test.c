@@ -272,7 +272,6 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
     if (ok)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.path = test->vector ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_SCALAR;
         check = ir_optimize(&promoted, &test->arenas[TIER1_PIPELINE_OPTIMIZED], scratch, options, &optimized);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "boundary SSA optimizes");
     }

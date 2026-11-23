@@ -80,7 +80,7 @@ static void ir_verified_test_rebuild(IrOptimizeTest* test, const IrFunction* fun
     arena_pop_to(output, mark);
 }
 
-static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input, Arena* output, Arena* analyses, Arena* reference, Arena* scratch, uint32_t passes, uint32_t path, bool fallback, bool scalar_override)
+static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input, Arena* output, Arena* analyses, Arena* reference, Arena* scratch, uint32_t passes)
 {
     const uint64_t output_mark = output->length;
     const uint64_t analysis_mark = analyses->length;
@@ -88,9 +88,6 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
     const uint64_t scratch_mark = scratch->length;
     IrOptimizeOptions options = ir_optimize_options();
     options.passes = passes;
-    options.path = path;
-    options.scalar = scalar_override;
-    options.sweep_limit = fallback ? 0 : options.sweep_limit;
     IrOptimizeResult expected = { 0 };
     IrOptimizeResult actual = { 0 };
     IrVerifiedRevision revision = { 0 };
@@ -105,16 +102,9 @@ static void ir_verified_test_case(IrOptimizeTest* test, const IrFunction* input,
         ir_optimize_test_expect(test, ir_optimize_test_equal(&expected.function, &actual.function), "verified handoff: unchanged optimized IR");
         ir_optimize_test_expect(test, expected.folded == actual.folded && expected.removed_blocks == actual.removed_blocks &&
                                 expected.removed_instructions == actual.removed_instructions && expected.sccp_visits == actual.sccp_visits &&
-                                expected.sccp_sweeps == actual.sccp_sweeps && expected.sccp_phi_incoming == actual.sccp_phi_incoming &&
-                                expected.dce_visits == actual.dce_visits &&
-                                expected.dce_sweeps == actual.dce_sweeps && expected.worklist_fallback == actual.worklist_fallback &&
+                                expected.sccp_phi_incoming == actual.sccp_phi_incoming && expected.dce_visits == actual.dce_visits &&
                                 expected.scratch_bytes == actual.scratch_bytes,
                                 "verified handoff: unchanged transformation statistics");
-        if (fallback)
-        {
-            ir_optimize_test_expect(test, actual.worklist_fallback && actual.sccp_sweeps == 0,
-                                    "verified handoff: forced worklist fallback ran");
-        }
         ir_optimize_test_expect(test, ir_verified_current(&analysis, &revision, &actual.function), "verified handoff: exact owner and revision accepted");
         ir_optimize_test_expect(test, analysis.shape_checks == 1 && analysis.row_checks == 1 && analysis.graph_checks == 1 &&
                                 analysis.dominance_checks == 1 && analysis.cfg_builds == 1 && analysis.dominator_builds == 1 && after.dominance_checked &&
@@ -343,7 +333,7 @@ static void ir_verified_test_boundaries(IrOptimizeTest* test, const IrFunction* 
     }
     arena_pop_to(analyses, analysis_mark);
     IrOptimizeWork work = { 0 };
-    const IrCheck prepared = ir_optimize_prepare(&work, function, reference, scratch, false, true);
+    const IrCheck prepared = ir_optimize_prepare(&work, function, reference, scratch, true);
     ir_optimize_test_expect(test, prepared.error == prepare_error, "verification reuse: preparation keeps its reachable-use contract");
     arena_pop_to(scratch, scratch_mark);
     arena_pop_to(reference, reference_mark);
@@ -680,15 +670,13 @@ static void ir_verified_test_dominator_policy(IrOptimizeTest* test, Arena* input
     ir_optimize_test_expect(test, created, "dominator policy: branchy fixture allocation");
     if (created)
     {
-        ir_optimize_test_expect(test, ir_optimize_auto_scalar(&function), "dominator policy: fixture chooses scalar transformation passes");
         IrOptimizeWork work = { 0 };
         const uint64_t output_mark = output->length;
         const uint64_t scratch_mark = scratch->length;
-        const IrCheck check = ir_optimize_prepare(&work, &function, output, scratch, true, true);
+        const IrCheck check = ir_optimize_prepare(&work, &function, output, scratch, true);
         ir_optimize_test_expect(test, check.error == IR_OK, "dominator policy: preparation accepted");
         if (check.error == IR_OK)
         {
-            ir_optimize_test_expect(test, work.scalar, "dominator policy: the scalar passes are prepared");
             // Independently known diamond: entry dominates every block, neither arm dominates the join.
             const uint32_t join = function.block_count - 1;
             ir_optimize_test_expect(test, dominators_dominates(&work.dominators, 0, join) &&
@@ -744,18 +732,12 @@ static void ir_verified_tests(IrOptimizeTest* test)
             created = ir_optimize_test_random_dag(&input, &function, test, lengths[kind - fixed]);
         }
         ir_optimize_test_expect(test, created, "verified handoff: original fixture allocation");
-        for (uint32_t path = BUSTER_IR_OPTIMIZE_AUTO; created && path <= BUSTER_IR_OPTIMIZE_SCALAR; path += 1)
+        for (uint32_t passes = 0; created && passes < 32; passes += 1)
         {
-            for (uint32_t passes = 0; passes < 32; passes += 1)
-            {
-                ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, passes, path, false, false);
-            }
+            ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, passes);
         }
         if (created)
         {
-            ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, 7, BUSTER_IR_OPTIMIZE_VECTOR, true, false);
-            ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, 0, BUSTER_IR_OPTIMIZE_AUTO, false, true);
-            ir_verified_test_case(test, &function, &output, &analyses, &reference, &scratch, 0, BUSTER_IR_OPTIMIZE_VECTOR, false, true);
             ir_verified_test_owned(test, &function, &input, &output, &analyses, &reference, &scratch);
         }
         arena_pop_to(&input, 0);
