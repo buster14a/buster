@@ -2339,9 +2339,9 @@ one after the last. `check_literal_table_rows` checks this grammar. Its vector
 path classifies the same 64-token blocks into number, comma, minus and brace
 masks and takes brace depth from a prefix XOR of the brace mask, carried across
 blocks. A `{` must be at depth 0 and a `}` at depth 1, so the parity is the
-depth. Each brace's numbers before it, counted from the table's start by
-`popcnt`, give a `}` its row's count: the `}`'s less its `{`'s, kept across
-blocks. A row may be short: from one to `M` items, the rest of the row zero. A
+depth. Each `}`'s numbers before it are counted from the table's start by
+`popcnt`; numbers appear only inside rows, so that count less the previous
+`}`'s, kept across blocks, is the row's. A row may be short: from one to `M` items, the rest of the row zero. A
 table of full rows is the row-major values. Short rows convert densely into
 scratch, as a full table would, and one pass over the braces copies each row to
 its start in a zeroed payload, so the tails are zero. Rows at most a quarter

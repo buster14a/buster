@@ -59,8 +59,8 @@ static uint64_t check_literal_table_parity(uint64_t bits, bool carry)
 // row being zeros. An empty, elided or excess row, a deeper brace and anything else is ineligible. The SIMD form reads 64
 // token kinds a block: each kind's predecessor (carried from the block before) and brace depth, the lanes after an odd
 // count of braces (check_literal_table_parity, its carry the depth). A `{` must be at depth 0 and a `}` at 1, so depth
-// stays 0 or 1 and its parity is it. Each brace's numbers before it, from the table's start, are a popcount: a `}`'s less
-// its `{`'s (kept across blocks) are its row's.
+// stays 0 or 1 and its parity is it. Each `}`'s numbers before it, from the table's start, are a popcount; as numbers
+// are only inside rows, that less the `}` before it's (kept across blocks) is its row's count.
 static uint32_t check_literal_table_rows(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t columns, bool exact, uint64_t* rows_found)
 {
     uint64_t count = 0;
@@ -91,14 +91,13 @@ static uint32_t check_literal_table_rows(const uint8_t* kinds, uint32_t begin, u
                 (closes & ~before) == 0 && (numbers & ~(comma_before | minus_before | open_before)) == 0 &&
                 (minus & ~(comma_before | open_before)) == 0 && (commas & ~(number_before | close_before)) == 0 &&
                 (opens & ~comma_before) == 0 && (closes & ~(number_before | comma_before)) == 0;
-        for (uint64_t pending = opens | closes; valid && pending != 0; pending &= pending - 1)
+        // Numbers are only inside rows, so a row's are those since the `}` before it.
+        for (uint64_t pending = closes; valid && pending != 0; pending &= pending - 1)
         {
-            const uint64_t bit = pending & (0 - pending);
-            const uint64_t at = count + (uint64_t)__builtin_popcountll(numbers & (bit - 1));
-            const bool close = (closes & bit) != 0;
-            rows += close;
-            valid = !close || (at - row_begin != 0 && (exact ? at - row_begin == columns : at - row_begin <= columns));
-            row_begin = close ? row_begin : at;
+            const uint64_t at = count + (uint64_t)__builtin_popcountll(numbers & ((pending & (0 - pending)) - 1));
+            rows += 1;
+            valid = at - row_begin != 0 && (exact ? at - row_begin == columns : at - row_begin <= columns);
+            row_begin = at;
         }
         count += (uint64_t)__builtin_popcountll(numbers);
         inside = (after >> (take - 1) & 1) != 0;
