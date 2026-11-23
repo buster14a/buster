@@ -2837,29 +2837,26 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
 //     IN[b] = AND over b's predecessors p of OUT[p]        OUT[b] = (IN[b] & LIVE_IN[b]) | SLOT[b]
 //
 // The entry's IN and that of a block without predecessors are empty. A value is live into no block its definition is in,
-// so a loop's earlier iteration proves nothing of the next. The solve starts every other block's IN full and sweeps the
-// blocks in layout order until none changes. `current_in` returns IN and `stored` SLOT, rows of the liveness's words on
-// `scratch`; the result gets each block's values live into it whose slots hold them (current_slot_offsets and
-// current_slots, on `output`). False where an arena is short.
-static bool tier1_cfg_current_slots(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Tier1CfgAllocation* result, Arena* output, Arena* scratch, uint64_t** current_in, uint64_t** stored)
+// so a loop's earlier iteration proves nothing of the next. The rows are the liveness's, eight words to a vector
+// (dataflow.c's), and the solve keeps OUT beside IN, so that an edge costs a load and an AND a vector. It starts every
+// other block's IN full and sweeps the blocks in reverse postorder (the liveness's postorder, which every block is in,
+// unreachable ones too) until none changes: a sweep in layout order, where a loop's header follows its body, took
+// sqlite3VdbeExec 7. `current_out` returns OUT, on `scratch`; the result gets each block's values live into it whose
+// slots hold them (current_slot_offsets and current_slots, on `output`). False where an arena is short.
+static bool tier1_cfg_current_slots(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Tier1CfgAllocation* result, Arena* output, Arena* scratch, uint64_t** current_out)
 {
     const uint32_t blocks = input->block_count;
     const Dataflow* liveness = &prepared->liveness;
     const uint64_t words = liveness->row_words;
     const uint64_t cells = (uint64_t)blocks * words;
     const Tier1Allocation* allocation = &result->allocation;
-    uint64_t* in = arena_push_array(scratch, cells + 1, sizeof(uint64_t), _Alignof(uint64_t));
-    uint64_t* slots = arena_push_array(scratch, cells + 1, sizeof(uint64_t), _Alignof(uint64_t));
-    uint64_t* row = arena_push_array(scratch, words + 1, sizeof(uint64_t), _Alignof(uint64_t));
-    bool ready = in != 0 && slots != 0 && row != 0;
+    uint64_t* in = arena_push(scratch, (cells + BUSTER_DATAFLOW_VECTOR_WORDS) * sizeof(uint64_t), BUSTER_DATAFLOW_VECTOR_BYTES);
+    uint64_t* out = arena_push(scratch, (cells + BUSTER_DATAFLOW_VECTOR_WORDS) * sizeof(uint64_t), BUSTER_DATAFLOW_VECTOR_BYTES);
+    uint64_t* slots = arena_push(scratch, (cells + BUSTER_DATAFLOW_VECTOR_WORDS) * sizeof(uint64_t), BUSTER_DATAFLOW_VECTOR_BYTES);
+    bool ready = in != 0 && out != 0 && slots != 0 && words % BUSTER_DATAFLOW_VECTOR_WORDS == 0;
     if (ready)
     {
         memset(slots, 0, cells * sizeof(uint64_t));
-        for (uint32_t b = 0; b < blocks; b += 1)
-        {
-            const bool entered = b != 0 && input->predecessor_offsets[b + 1] != input->predecessor_offsets[b];
-            memset(in + (uint64_t)b * words, entered ? 0xff : 0, words * sizeof(uint64_t));
-        }
         for (uint32_t i = 0; i < liveness->value_count; i += 1)
         {
             const uint32_t v = prepared->dense_values[i];
@@ -2880,37 +2877,41 @@ static bool tier1_cfg_current_slots(const Tier1CfgInput* input, const Tier1CfgPr
                 }
             }
         }
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            const bool entered = b != 0 && input->predecessor_offsets[b + 1] != input->predecessor_offsets[b];
+            const __m512i full = entered ? _mm512_set1_epi64(-1) : _mm512_setzero_si512();
+            for (uint64_t w = (uint64_t)b * words; w < (uint64_t)(b + 1) * words; w += BUSTER_DATAFLOW_VECTOR_WORDS)
+            {
+                _mm512_store_si512(in + w, full);
+                _mm512_store_si512(out + w, _mm512_ternarylogic_epi64(full, _mm512_load_si512(liveness->in + w), _mm512_load_si512(slots + w), 0xEA));
+            }
+        }
     }
     bool changed = ready;
     while (changed)
     {
-        changed = false;
-        for (uint32_t b = 1; b < blocks; b += 1)
+        __m512i changes = _mm512_setzero_si512();
+        for (uint32_t k = blocks; k > 0; k -= 1)
         {
+            const uint32_t b = liveness->postorder[k - 1];
             const uint32_t first = input->predecessor_offsets[b];
-            const uint32_t end = input->predecessor_offsets[b + 1];
-            if (first != end)
+            const uint32_t end = b != 0 ? input->predecessor_offsets[b + 1] : first;
+            for (uint64_t w = 0; first != end && w < words; w += BUSTER_DATAFLOW_VECTOR_WORDS)
             {
-                memset(row, 0xff, words * sizeof(uint64_t));
+                __m512i meet = _mm512_set1_epi64(-1);
                 for (uint32_t e = first; e < end; e += 1)
                 {
-                    const uint64_t p = input->predecessors[e];
-                    const uint64_t* p_in = in + p * words;
-                    const uint64_t* p_live = liveness->in + p * words;
-                    const uint64_t* p_slots = slots + p * words;
-                    for (uint64_t w = 0; w < words; w += 1)
-                    {
-                        row[w] &= (p_in[w] & p_live[w]) | p_slots[w];
-                    }
+                    meet = _mm512_and_si512(meet, _mm512_load_si512(out + (uint64_t)input->predecessors[e] * words + w));
                 }
-                uint64_t* b_in = in + (uint64_t)b * words;
-                for (uint64_t w = 0; w < words; w += 1)
-                {
-                    changed |= b_in[w] != row[w];
-                    b_in[w] = row[w];
-                }
+                const uint64_t cell = (uint64_t)b * words + w;
+                changes = _mm512_or_si512(changes, _mm512_xor_si512(meet, _mm512_load_si512(in + cell)));
+                _mm512_store_si512(in + cell, meet);
+                // (IN & LIVE_IN) | SLOT.
+                _mm512_store_si512(out + cell, _mm512_ternarylogic_epi64(meet, _mm512_load_si512(liveness->in + cell), _mm512_load_si512(slots + cell), 0xEA));
             }
         }
+        changed = _mm512_test_epi64_mask(changes, changes) != 0;
     }
     // Each block's values live into it whose slots hold them: counted, then filled.
     uint32_t count = 0;
@@ -2939,8 +2940,7 @@ static bool tier1_cfg_current_slots(const Tier1CfgInput* input, const Tier1CfgPr
     if (ready)
     {
         result->current_slot_offsets[blocks] = fill;
-        *current_in = in;
-        *stored = slots;
+        *current_out = out;
     }
     return ready;
 }
@@ -3022,13 +3022,11 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     {
         tier1_cfg_spill_prefix(&candidate, spill_ends);
     }
-    // The slots current at each block's start (#2553), and each dense value's id, for the edges' stores.
-    uint64_t* current_in = 0;
-    uint64_t* stored = 0;
-    ready = ready && (spills == 0 || tier1_cfg_current_slots(input, prepared, &candidate, output, scratch, &current_in, &stored));
+    // The slots current at each block's exit (#2553), and each dense value's id, for the edges' stores.
+    uint64_t* current_out = 0;
+    ready = ready && (spills == 0 || tier1_cfg_current_slots(input, prepared, &candidate, output, scratch, &current_out));
     uint32_t* dense_of = ready && spills != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-    uint64_t* current_out = ready && spills != 0 ? arena_push_array(scratch, words + 1, sizeof(uint64_t), _Alignof(uint64_t)) : 0;
-    ready = ready && (spills == 0 || (dense_of != 0 && current_out != 0));
+    ready = ready && (spills == 0 || dense_of != 0);
     if (ready && spills != 0)
     {
         memset(dense_of, 0xff, ((uint64_t)input->value_count + 1) * sizeof(uint32_t));
@@ -3069,12 +3067,7 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
         const uint32_t exit = input->block_starts[b + 1] - 1;
         edge.block_start = input->block_starts[b];
         // The block's OUT row (tier1_cfg_current_slots).
-        for (uint64_t w = 0; current_in != 0 && w < words; w += 1)
-        {
-            const uint64_t cell = (uint64_t)b * words + w;
-            current_out[w] = (current_in[cell] & liveness.in[cell]) | stored[cell];
-        }
-        edge.current = current_in != 0 ? current_out : 0;
+        edge.current = current_out != 0 ? current_out + (uint64_t)b * words : 0;
         if (bounds.ready)
         {
             uint32_t rank = 0;
