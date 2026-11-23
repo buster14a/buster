@@ -1937,6 +1937,11 @@ struct ParseTestKernelTally
     uint64_t statement_twins;
     uint64_t check_twins;
     uint64_t fallback_items;
+    // By tiles (#2536, parse_test_check_unit): the tiles the units' parses took, and the units a tile sent to be parsed as
+    // one though the parse of the unit as one took it by the vector path, with the first such unit's name.
+    uint64_t tiles;
+    uint64_t tiles_refused;
+    char tiles_refused_first[128];
     // The sum of the units' digests (parse_test_unit_digest, and the vector path's in parse_test_vector_digest),
     // whatever their order: a generated batch's must be its recorded one (parse_kernel_digests).
     uint64_t digest;
@@ -1965,6 +1970,9 @@ static uint32_t parse_test_batch_digest(const ParseTestKernelTally* tally, const
            batch, same ? "give" : "don't give", key, (unsigned long long)tally->units, (unsigned long long)tally->fallback_items,
            (unsigned long long)tally->wide_blocks, (unsigned long long)tally->deep_units, (unsigned long long)tally->statement_twins,
            (unsigned long long)tally->check_twins);
+    printf("%s: by tiles of a token and of 64 the same tokens, outcomes and trees: %llu tiles, %llu parses a tile sent to the unit as one%s%s\n", batch,
+           (unsigned long long)tally->tiles, (unsigned long long)tally->tiles_refused, tally->tiles_refused != 0 ? ", the first of " : "",
+           tally->tiles_refused != 0 ? tally->tiles_refused_first : "");
     return same ? 0 : 1;
 }
 
@@ -2470,19 +2478,38 @@ static uint32_t parse_test_compare_tokens(const ParseTokens* a, const ParseToken
 // Omitting the later stages' traversal must preserve every parser token, tree and diagnostic. The ordinary runs
 // above still build and independently check both traversal columns; this run also proves their arenas stay absent.
 // `tree` has `full`'s options with tree_only, and may have parsed other units before (ParseTestUnits).
-static uint32_t parse_test_tree_only(const Parser* full, Parser* tree, Preprocessor* pp, const char* path)
+// (A second parser that isn't tree-only, as one by tiles that derives the columns a tile at a time, must give the full
+// parser's columns too, their sentinel among them.)
+static uint32_t parse_test_tree_only(const Parser* full, Parser* tree, Preprocessor* pp, const char* path, const char* what)
 {
-    bool same = tree->options.tree_only && tree->options.sizes == full->options.sizes;
+    const bool columns = !tree->options.tree_only;
+    bool same = tree->options.sizes == full->options.sizes;
     if (same)
     {
         const bool parsed = parse_translation_unit(tree, pp);
         same = parsed == (full->errors == 0) && tree->errors == full->errors && tree->fatal == full->fatal &&
                tree->recovered_parameter_types == full->recovered_parameter_types &&
-               tree->diagnostic_count == full->diagnostic_count && parse_test_compare_tokens(&tree->tokens, &full->tokens) == BUSTER_PARSE_NONE &&
-               tree->postorder == 0 && tree->sizes == 0 && tree->positions == 0 && tree->ends == 0 && tree->first_children == 0 && tree->next_siblings == 0;
-        for (uint32_t column = 11; column < BUSTER_ARRAY_LENGTH(tree->columns); column += 1)
+               tree->diagnostic_count == full->diagnostic_count && parse_test_compare_tokens(&tree->tokens, &full->tokens) == BUSTER_PARSE_NONE;
+        if (!columns)
         {
-            same &= tree->columns[column].base == 0;
+            same = same && tree->postorder == 0 && tree->sizes == 0 && tree->positions == 0 && tree->ends == 0 && tree->first_children == 0 && tree->next_siblings == 0;
+            for (uint32_t column = 11; column < BUSTER_ARRAY_LENGTH(tree->columns); column += 1)
+            {
+                same &= tree->columns[column].base == 0;
+            }
+        }
+        else if (same && parsed)
+        {
+            const uint64_t count = full->tokens.count;
+            same = tree->postorder != 0 && tree->sizes != 0 && full->postorder != 0 && full->sizes != 0 &&
+                   memcmp(tree->postorder, full->postorder, count * sizeof(uint32_t)) == 0 && memcmp(tree->sizes, full->sizes, count * sizeof(uint32_t)) == 0 &&
+                   memcmp(tree->positions, full->positions, (count + 1) * sizeof(uint32_t)) == 0 && memcmp(tree->ends, full->ends, (count + 1) * sizeof(uint32_t)) == 0 &&
+                   memcmp(tree->first_children, full->first_children, (count + 1) * sizeof(uint32_t)) == 0 &&
+                   memcmp(tree->next_siblings, full->next_siblings, (count + 1) * sizeof(uint32_t)) == 0;
+        }
+        else if (same)
+        {
+            same = tree->postorder == 0 && tree->sizes == 0 && tree->positions == 0 && tree->ends == 0 && tree->first_children == 0 && tree->next_siblings == 0;
         }
         for (uint32_t d = 0; same && d < full->diagnostic_count; d += 1)
         {
@@ -2501,7 +2528,7 @@ static uint32_t parse_test_tree_only(const Parser* full, Parser* tree, Preproces
     }
     if (!same)
     {
-        parse_test_report("%s: tree-only parsing differs from the full parser\n", path);
+        parse_test_report("%s: %s differs from the full parser\n", path, what);
     }
     return same ? 0 : 1;
 }
@@ -2826,8 +2853,9 @@ typedef struct ParseTestUnits ParseTestUnits;
 struct ParseTestUnits
 {
     InternTable table;
-    // The parser, then the same tree-only.
-    Parser parsers[2];
+    // The parser, then the same tree-only, and by tiles (#2536, ParseOptions.tile_tokens): tree-only by tiles of a token,
+    // which makes every top-level declaration a tile, and with the tree's columns by tiles of 64.
+    Parser parsers[4];
     // The thread's pool (arena_pool) while a unit runs, as a units lane's is: the arenas the unit's preprocessor and
     // the parsers' columns release go to it, emptied, for the next unit's, rather than being unmapped and mapped again.
     ArenaPool pool;
@@ -2882,9 +2910,11 @@ static bool parse_test_units_prepare(ParseTestUnits* units, CLanguage language)
     if (!units->parsers_ready || !same_language)
     {
         // The parse also derives the subtree sizes, which parse_test_postorders checks.
-        const ParseOptions options[2] = {
+        const ParseOptions options[4] = {
             { .sizes = true },
             { .sizes = true, .tree_only = true },
+            { .sizes = true, .tree_only = true, .tile_tokens = 1 },
+            { .sizes = true, .tile_tokens = 64 },
         };
         bool parsers = true;
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(units->parsers); i += 1)
@@ -2918,7 +2948,31 @@ static uint32_t parse_test_check_unit(ParseTestUnits* units, const char* path, c
         if (preprocessed)
         {
             parse_translation_unit(parser, &pp);
-            failures += parse_test_tree_only(parser, &units->parsers[1], &pp, path);
+            failures += parse_test_tree_only(parser, &units->parsers[1], &pp, path, "tree-only parsing");
+            // By tiles: the same tokens, outcome and tree, whatever the tiles, and a unit of several top-level
+            // declarations in more tiles than one unless a tile was refused. A refusal is counted where the unit as one
+            // went by the vector path: a tile that parse_tile_end cut short, which the checks' callers bound.
+            static const char* const tiled[2] = { "parsing by tiles of a token", "parsing by tiles of 64 tokens, with the tree's columns," };
+            for (uint32_t t = 0; t < 2; t += 1)
+            {
+                Parser* tile = &units->parsers[2 + t];
+                failures += parse_test_tree_only(parser, tile, &pp, path, tiled[t]);
+                const bool counted = tile->statistics.tiles != 0 || tile->options.scalar || tile->tokens.count == 0 || tile->fatal != PARSE_MESSAGE_NONE;
+                if (!counted)
+                {
+                    parse_test_report("%s: %s took no tile\n", path, tiled[t]);
+                    failures += 1;
+                }
+                tally->tiles += tile->statistics.tiles;
+                if (tile->statistics.tiles_refused && !parser->statistics.whole)
+                {
+                    if (tally->tiles_refused == 0)
+                    {
+                        snprintf(tally->tiles_refused_first, sizeof(tally->tiles_refused_first), "%s", path);
+                    }
+                    tally->tiles_refused += 1;
+                }
+            }
             *outcome = parse_test_outcome(parser, &pp);
             tally->digest += parse_test_unit_digest(parser, outcome);
             if (outcome->errors == 0)
@@ -4032,6 +4086,142 @@ static uint32_t parse_test_nesting(const PPOptions* options, const char* directo
     failures += within.wide_blocks == 0 || within.deep_units != 0;
     return failures;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Tiles (#2536)
+
+// A unit as its top-level declarations, in order, for parse_test_tiles.
+#define BUSTER_PARSE_TEST_TILE_PIECES 12
+// `x` in 27 pairs of parentheses: three of them nested are 81 deep, past the 64 of a block of tokens.
+#define BUSTER_PARSE_TEST_DEEP(x) "(((((((((((((((((((((((((((" x ")))))))))))))))))))))))))))"
+typedef struct ParseTestTileCase ParseTestTileCase;
+struct ParseTestTileCase
+{
+    const char* name;
+    const char* pieces[BUSTER_PARSE_TEST_TILE_PIECES];
+    // A bit a piece: a declaration whose end parse_tile_end can't tell from the kinds alone, which stays in its tile with
+    // the piece after it.
+    uint32_t joins;
+    // A tile is cut short, so the tiles' parses go to the unit as one.
+    bool refused;
+};
+
+// parse_tile_end's cuts, and the parses by tiles: units given as their top-level declarations, each of which the tiles of
+// a token must end at (but those a case says it can't tell, and the ones before an old-style definition's body, which
+// are inside the piece), and tiles of 16 tokens at the first such end 16 tokens or more past each tile's start. Each
+// piece's tokens are counted by a parse of the piece alone. The unit's parses by tiles then take those tiles
+// (ParseStatistics.tiles) and give the unit's tree (parse_test_check_unit), without a refusal but where a case cuts a
+// declaration short on purpose, which must give the same tree after it.
+static uint32_t parse_test_tiles(const PPOptions* options, const char* directory)
+{
+    static const ParseTestTileCase cases[] =
+    {
+        { .name = "declarations and bodies",
+          .pieces = { "int a;\n", "int f(void) { return 0; }\n", "struct S { int x; };\n", "typedef struct { int y; } T;\n", "T v = { 1 };\n",
+                      "static int g(int b) { if (b) { return 1; } return 0; }\n", "enum E { A, B = 2 };\n", "union U { int i; float f; } u;\n",
+                      "int m[2][2] = { { 1, 2 }, { 3, 4 } };\n", "_Static_assert(1, \"one\");\n", "extern int printf(const char*, ...);\n" } },
+        { .name = "old-style definitions",
+          .pieces = { "int k(a, b) int a; char b; { return a + b; }\n", "int after;\n", "typedef int U;\n", "int o(u) U u; { return u; }\n",
+                      "int (p)(q) register int q; { return q; }\n", "long r(s, t) struct S* s; const long t; { return t; }\n", "int last;\n" } },
+        { .name = "attributes before a brace",
+          .pieces = { "struct __attribute__((packed)) { int x; } s1;\n", "struct __attribute__((packed)) __attribute__((aligned(4))) { int x; } s2;\n",
+                      "void h(void) __attribute__((cold));\n", "__attribute__((noinline)) void h(void) { }\n",
+                      "enum __attribute__((packed)) { P, Q } e1;\n", "__attribute__((unused)) static int w(void) { return 1; }\n", "int z;\n" } },
+        { .name = "compound literals and pointers to functions",
+          .pieces = { "int* p = (int[]){ 1, 2 };\n", "struct P { int x; } q = (struct P){ 1 }, r;\n", "int (*fp(int a))(int) { return 0; }\n",
+                      "int (*table[2])(void) = { 0, 0 };\n", "void (*signal(int s, void (*f)(int)))(int);\n", "int y;\n" } },
+        { .name = "a function that returns a pointer to an array",
+          .pieces = { "int (*arr(void))[3] { return 0; }\n", "int x;\n", "int f2(void) { return 2; }\n" },
+          .joins = 1u << 0 },
+        { .name = "brackets deeper than a block",
+          .pieces = { "int deep = " BUSTER_PARSE_TEST_DEEP(BUSTER_PARSE_TEST_DEEP(BUSTER_PARSE_TEST_DEEP("1"))) ";\n", "int shallow;\n",
+                      "int f3(int c) { return " BUSTER_PARSE_TEST_DEEP(BUSTER_PARSE_TEST_DEEP(BUSTER_PARSE_TEST_DEEP("c"))) "; }\n", "int end;\n" } },
+        { .name = "type names from tile to tile",
+          .pieces = { "typedef int T1;\n", "T1 f1(T1 x) { T1 y = x; return y; }\n", "void f2(void) { typedef char T1; T1 c = 0; (void)c; }\n", "T1 after2;\n",
+                      "int f3(void) { int T1 = 3; return T1; }\n", "T1 after3;\n", "typedef T1 T2, *T3;\n", "T2 f4(T3 t) { return *t; }\n",
+                      "void f5(void) { typedef struct { T2 m; } T2; T2 l = { 0 }; (void)l; }\n", "T2 after5;\n" } },
+        { .name = "an old-style parameter declared after an attribute",
+          .pieces = { "int f(a) __attribute__((unused)) int a; { return 0; }\n", "int z;\n" },
+          .refused = true },
+    };
+    uint32_t failures = 0;
+    ParseTestKernelTally tally = { 0 };
+    static ParseTestUnits units;
+    static char text[1 << 14];
+    char path[4200];
+    snprintf(path, sizeof(path), "%s/tiles.c", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        const ParseTestTileCase* tiles = &cases[c];
+        // Each piece's tokens, by a parse of its own, and the unit.
+        uint32_t ends[BUSTER_PARSE_TEST_TILE_PIECES] = { 0 };
+        uint32_t pieces = 0;
+        uint32_t tokens = 0;
+        size_t length = 0;
+        bool valid = true;
+        ParseTestOutcome ours;
+        for (; pieces < BUSTER_PARSE_TEST_TILE_PIECES && tiles->pieces[pieces] != NULL; pieces += 1)
+        {
+            const size_t piece = strlen(tiles->pieces[pieces]);
+            parse_test_write(path, tiles->pieces[pieces], piece);
+            failures += parse_test_check_file(&units, path, options, &ours, &tally);
+            tokens += units.parsers[0].tokens.count;
+            ends[pieces] = tokens;
+            memcpy(text + length, tiles->pieces[pieces], piece);
+            length += piece;
+        }
+        parse_test_write(path, text, length);
+        const uint32_t differences = parse_test_check_file(&units, path, options, &ours, &tally);
+        failures += differences;
+        const Parser* parser = &units.parsers[0];
+        valid = differences == 0 && ours.errors == 0 && parser->tokens.count == tokens;
+        // The cuts: by tiles of a token, every piece's end but a joined one's; by 16, the first of those that far.
+        static const uint32_t wanted[2] = { 1, 16 };
+        uint32_t expected_tiles = 0;
+        for (uint32_t w = 0; valid && !tiles->refused && w < 2; w += 1)
+        {
+            uint32_t begin = 0;
+            uint32_t piece = 0;
+            uint32_t count = 0;
+            while (valid && begin < tokens)
+            {
+                while (piece + 1 < pieces && (((tiles->joins >> piece) & 1) != 0 || ends[piece] - begin < wanted[w]))
+                {
+                    piece += 1;
+                }
+                const uint32_t end = parse_tile_end(parser->tokens.kinds, begin, tokens, wanted[w]);
+                valid = end == ends[piece];
+                if (!valid)
+                {
+                    printf("tiles: %s: a tile of %u tokens from token %u ends at %u, where the declarations' ends give %u\n", tiles->name, wanted[w], begin, end, ends[piece]);
+                }
+                begin = end;
+                piece += 1;
+                count += 1;
+            }
+            expected_tiles = w == 0 ? count : expected_tiles;
+        }
+        // The parses by tiles took those, or went to the unit as one where the case cuts a declaration short.
+        // (A unit that goes to the scalar parser whole, as one with an old-style definition whose parameter's type only
+        // the declarations before it decide, does so from its tiles too.)
+        const ParseStatistics* by_token = &units.parsers[2].statistics;
+        const bool refused = tiles->refused || parser->statistics.whole;
+        const bool served = valid && by_token->tiles_refused == refused && units.parsers[3].statistics.tiles_refused == refused &&
+                            (refused || by_token->tiles == expected_tiles);
+        if (!served)
+        {
+            printf("tiles: %s: %u errors, %u tokens of the pieces' %u, %u tiles of a token (refused %d) where %u were expected (refused %d, the unit whole %d)\n",
+                   tiles->name, ours.errors, parser->tokens.count, tokens, by_token->tiles, (int)by_token->tiles_refused, expected_tiles, (int)tiles->refused,
+                   (int)parser->statistics.whole);
+        }
+        failures += served ? 0 : 1;
+    }
+    parse_test_units_release(&units);
+    remove(path);
+    printf("tiles: %u units by their top-level declarations, each tile's end where they end and each unit's tree by tiles the unit's: %u failures\n",
+           (uint32_t)BUSTER_ARRAY_LENGTH(cases), failures);
+    return failures;
+}
 #endif
 // ---------------------------------------------------------------------------------------------------------------------
 // The driver
@@ -4887,6 +5077,7 @@ static int run_parser_tests(int argument_count, char** arguments)
             failures += parse_test_reused_scratch(&plain, directory, streams < 256 ? streams : 256, seed);
             failures += parse_test_alignments(0, &plain, directory);
             failures += parse_test_nesting(&plain, directory);
+            failures += parse_test_tiles(&plain, directory);
             failures += parse_test_driver(directory);
         }
         char** files = malloc(sizeof(char*) * (1u << 20));

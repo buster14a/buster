@@ -1855,6 +1855,74 @@ static void check_test_driver_windowed_loop(CheckTest* test, const char* executa
     unlink(reference);
 }
 
+// --parse-tile=N (#2536): the parse by tiles of about N tokens (parse_vector_tiles). At tiles of a token (every
+// top-level declaration a tile), of 16 and of 4,096, each source's exit status, stderr and object are those of the unit
+// parsed as one (--parse-tile=0): type names declared, hidden and declared again from tile to tile; an old-style
+// definition, whose parameter declarations end no tile; a declaration a tile's end cuts short, which sends the unit to be
+// parsed as one; and a syntax error, which the scalar parser reports as it does alone. test-parser compares the trees.
+static void check_test_driver_parse_tiles(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char names[] = "typedef int T;\n"
+                                "T f1(T x) { T y = x; return y; }\n"
+                                "int f2(void) { typedef char T; T c = 1; return c; }\n"
+                                "T g1;\n"
+                                "int f3(void) { int T = 3; return T; }\n"
+                                "typedef T U, *V;\n"
+                                "U f4(V v) { return *v; }\n"
+                                "struct S { U m; } s = { 1 };\n"
+                                "int main(void) { T t = 2; return f1(t) + f2() + f3() + f4(&t) + s.m + g1; }\n";
+    static const char old_style[] = "int k(a, b) int a; char b; { return a + b; }\n"
+                                    "int after;\n"
+                                    "int main(void) { return k(1, 2) + after; }\n";
+    static const char cut_short[] = "int f(a) __attribute__((unused)) int a; { return 0; }\n"
+                                    "int main(void) { return f(1); }\n";
+    static const char error[] = "int a(void) { return 1; }\n"
+                                "int b(void) { return 2 }\n"
+                                "int c(void) { return 3; }\n";
+    static const char* const sources[] = { names, old_style, cut_short, error };
+    static const char* const labels[] = { "type names from tile to tile", "an old-style definition", "a declaration cut short", "a syntax error" };
+    static const char* const tiles[] = { "--parse-tile=1", "--parse-tile=16", "--parse-tile=4096" };
+    char source[256];
+    char object[256];
+    char reference[256];
+    snprintf(source, sizeof(source), "%s/parse_tiles.c", directory);
+    snprintf(object, sizeof(object), "%s/parse_tiles.o", directory);
+    snprintf(reference, sizeof(reference), "%s/parse_tiles_reference.o", directory);
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(sources); s += 1)
+    {
+        const bool written = parse_test_write(source, sources[s], strlen(sources[s]));
+        check_test_expect(test, written, "the parse tiles' fixture is written");
+        unlink(reference);
+        char* const whole[] = { (char*)executable, "--parse-tile=0", "-Wno-deprecated-non-prototype", "-c", "-o", reference, source, NULL };
+        char* whole_text = NULL;
+        const int whole_status = written ? check_test_driver_spawn(whole, &whole_text) : -1;
+        for (uint32_t t = 0; written && t < BUSTER_ARRAY_LENGTH(tiles); t += 1)
+        {
+            unlink(object);
+            char* const tiled[] = { (char*)executable, (char*)tiles[t], "-Wno-deprecated-non-prototype", "-c", "-o", object, source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(tiled, &text);
+            const bool same_text = text != NULL && whole_text != NULL && strcmp(text, whole_text) == 0;
+            const bool objects = access(object, F_OK) == 0 || access(reference, F_OK) == 0;
+            const bool same_object = objects ? check_test_driver_same_files(object, reference) : true;
+            free(text);
+            char description[160];
+            snprintf(description, sizeof(description), "%s on %s: the status, stderr and object of the unit parsed as one", tiles[t], labels[s]);
+            check_test_expect(test, status == whole_status && same_text && same_object, description);
+        }
+        free(whole_text);
+    }
+    char* const invalid[] = { (char*)executable, "--parse-tile=many", "-c", "-o", object, source, NULL };
+    char* invalid_text = NULL;
+    const int invalid_status = check_test_driver_spawn(invalid, &invalid_text);
+    check_test_expect(test, invalid_status != 0 && invalid_text != NULL && strstr(invalid_text, "error: --parse-tile= takes a count of tokens") != NULL,
+                      "--parse-tile= without a count of tokens is refused");
+    free(invalid_text);
+    unlink(source);
+    unlink(object);
+    unlink(reference);
+}
+
 // Builtins clang's Sema takes and its code generation refuses for x86 (#148), which -c refuses by name on both paths:
 // BPF's preserve_access_index and HLSL's resource pointer; an NSString of no literal, which clang's code reads as one
 // (check_test_driver_cfstrings has the constant strings' objects); z/OS's va_start and
@@ -12274,6 +12342,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_selection_census(&test, executable, directory);
                 check_test_driver_provisional_selection(&test, executable, directory);
                 check_test_driver_windowed_loop(&test, executable, directory);
+                check_test_driver_parse_tiles(&test, executable, directory);
                 check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())

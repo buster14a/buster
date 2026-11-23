@@ -12204,6 +12204,8 @@ struct CheckDriverCommand
     bool tier0_inline_shapes;
     // --emit-window=N: each unit's one-lane emission by windows of about N tokens (#2536, CheckProgramLanes.window_tokens).
     uint32_t window_tokens;
+    // --parse-tile=N: each unit's parse by tiles of about N tokens (#2536, ParseOptions.tile_tokens); 0 parses it as one.
+    uint32_t parse_tile_tokens;
     // --tier1-schedule=post|pre (#172): BUSTER_CHECK_TIER1_SCHEDULE_*.
     uint8_t tier1_schedule;
     // --tier1-passes='s turned passes (#139): BUSTER_CHECK_TIER1_PASS_*.
@@ -13265,7 +13267,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     const char* output = command->output;
     // The parse's temporaries in the checker's scratch, whose reader then takes their pages again (#528), and the tree
     // alone: the reader derives the traversal it reads into those pages (check_input_run).
-    const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .scratch = scratch };
+    const ParseOptions parser_options = { .scalar = scalar, .tree_only = true, .tile_tokens = command->parse_tile_tokens, .scratch = scratch };
     bool ready = identifiers != NULL && (!id_ordered || check_driver_id_order(identifiers, options, path, id_order));
     // A preprocessor that refused to start on its own fatal error (an invalid SOURCE_DATE_EPOCH, #2996) has printed it;
     // the unit ends with that error alone, not with a memory failure that didn't happen.
@@ -13352,6 +13354,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             parser->invalid_call_values = NULL;
             parser->invalid_call_count = 0;
             ready = parse_translation_unit(parser, pp);
+            check_clock_parse_tiles(stage_clock, parser->statistics.tiles, parser->statistics.tiles_refused);
             parse_failed = !ready;
             if (ready)
             {
@@ -15162,6 +15165,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool selection_census = false;
     bool provisional_selection = false;
     bool windowed_loop = false;
+    uint32_t parse_tile_tokens = BUSTER_PARSE_TILE_TOKENS;
     bool shared_parts = false;
     uint64_t units_memory = 0;
     bool invalid_units_memory = false;
@@ -15572,6 +15576,20 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             invalid_lanes |= !known;
             lanes->window_tokens = known ? (uint32_t)tokens : 0;
         }
+        else if (match.joined == C_OPTION_PARSE_TILE_EQ)
+        {
+            // #2536: each unit's parse by tiles of about N tokens (parse_vector_tiles); 0 is the unit as one tile, and
+            // BUSTER_PARSE_TILE_TOKENS the default.
+            const char* value = arguments[i] + 13;
+            uint64_t tokens = 0;
+            const bool known = check_driver_unsigned_decimal(value, UINT32_MAX, &tokens);
+            if (!known)
+            {
+                fprintf(stderr, "error: --parse-tile= takes a count of tokens\n");
+            }
+            invalid_lanes |= !known;
+            parse_tile_tokens = known ? (uint32_t)tokens : 0;
+        }
         else if (match.exact == C_OPTION_WORKER_BUDGET || match.joined == C_OPTION_WORKER_BUDGET_EQ)
         {
             const char* value = arguments[i][15] == '=' ? arguments[i] + 16 : i + 1 < count ? arguments[++i] : NULL;
@@ -15967,6 +15985,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .tier0_no_hold = lanes->tier0_no_hold,
         .tier0_inline_shapes = lanes->tier0_inline_shapes,
         .window_tokens = lanes->window_tokens,
+        .parse_tile_tokens = parse_tile_tokens,
         .tier1_schedule = lanes->tier1_schedule,
         .tier1_passes = lanes->tier1_passes,
         .tier1_report = &lanes->tier1_report,
