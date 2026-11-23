@@ -2834,7 +2834,13 @@ What the lowering covers past scalars (#145's programs):
   (a struct of one) pass so too, in their two general registers or xmm
   register, and on the stack as clang's code puts them there: the union's
   slot where clang has no register for them, or the member's value's i128 or
-  vector slot where LLVM has none (`FIRST` past 16 bytes). A first member
+  vector slot where LLVM has none (`FIRST` past 16 bytes). Since #3400 the
+  member in memory may be one LLVM's copy makes larger than its C type (a
+  struct ending in an `_Atomic` of a struct of no size, `LARGER`), whatever
+  the union's own attributes: the byval slot is still the union's bytes at
+  the member's alignment, and a member of 8 bytes or less whose copy takes
+  more (`GROWN`) is the integer of its C size where clang has no general
+  register left, as clang's `getIndirectResult` makes it. A first member
   that passes as a vector wider than 16 bytes or as an `_Atomic` value in
   memory (which clang passes uncounted) is still refused by name,
   and so is a printer's such union of `__builtin_dump_struct`. And a union made transparent, by a
@@ -2857,7 +2863,8 @@ What the lowering covers past scalars (#145's programs):
   (`c_check_program_transparent_test.c`) run each kind of member value, union
   values, unnamed arguments and `va_arg`, in registers and on the stack, and
   unions of a slot of their own of each such member
-  (`BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS`),
+  (`BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS`, and
+  `BUSTER_CHECK_TEST_TRANSPARENT_GROWN_UNIONS` for `LARGER` members),
   against clang -O0's build of the same source, calling the harness's clang
   functions and called by them through pointers, with the registers a
   `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
