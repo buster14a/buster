@@ -932,5 +932,6 @@ static void check_test_driver_vla_fold(CheckTest* test, const char* clang, const
 {
     check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_vla_fold_fixtures,
                                       BUSTER_ARRAY_LENGTH(check_driver_vla_fold_fixtures));
+    check_test_driver_warning_catalog(test, clang, executable, directory, "checker/vla-fold");
     check_test_driver_vla_cast_runs(test, clang, executable, directory);
 }

@@ -1,0 +1,2 @@
+buster-fixtures v1 checker-warnings
+rejected-static-vla.c	10	3	2	Rejected block-scope static VLAs retain bound comma warnings

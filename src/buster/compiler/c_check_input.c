@@ -12859,10 +12859,12 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             const uint32_t vla_reports = reader->output->report_count;
             const bool placed = check_input_vla_declaration(reader, first, vla_begin, name, type, i, storage, is_typedef, initialized, thread_local);
             // A block's static or extern variable-length array or variably modified object (#1447): clang's error at its name,
-            // the declaration invalid, a stand-in int, and the reader goes on. (One with an initializer still stops.)
+            // the declaration invalid, a stand-in int, and the reader goes on. A static VLA's initializer is dropped so its
+            // bound still reaches the graph's warning walk (#2252).
             const CheckInputMessage vla_error = !placed && reader->output->report_count == vla_reports + 1 ? reader->output->reports[vla_reports].message :
                                                 CHECK_INPUT_UNSUPPORTED;
-            const bool vla_recovered = valid && !placed && !initialized && !reader->lane &&
+            const bool vla_drop_initializer = initialized && !direct_initializer && vla_error == CHECK_INPUT_VLA_STATIC;
+            const bool vla_recovered = valid && !placed && (!initialized || vla_drop_initializer) && !reader->lane &&
                                        (vla_error == CHECK_INPUT_VLA_STATIC || vla_error == CHECK_INPUT_VLA_EXTERN || vla_error == CHECK_INPUT_VM_EXTERN) &&
                                        check_input_recover_reports(reader, vla_reports);
             check_input_lane_refuse(reader, valid && !placed && reader->lane && (vla_error == CHECK_INPUT_VLA_STATIC || vla_error == CHECK_INPUT_VLA_EXTERN ||
@@ -12871,6 +12873,7 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             type = vla_recovered ? BUSTER_TYPE_INT : type;
             invalid |= vla_recovered;
             valid &= placed || vla_recovered;
+            reader->vla_initializer_dropped |= vla_recovered && vla_drop_initializer;
             if (__builtin_expect(valid && reader->vla_initializer_dropped, 0))
             {
                 // Its initializer, which clang doesn't check against the type (#1447): skipped, to the declarator's end.
