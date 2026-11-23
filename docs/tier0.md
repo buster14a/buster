@@ -1670,8 +1670,11 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    to its hole indices for the second block of a register, one `vpermb`, one blend and one 64-byte store. A lane of an
    absorbed or deferred entry, or past the last, stores too; the later lanes, the deferred entries and the epilogue
    write over it. The choice requests are compressed into their columns (`vpcompress`), their contexts read from the
-   expanded records. The branches, then the references and the deferred entries, follow in entry order by their masks'
-   bits.
+   expanded records. The branches, then the templates' references, follow in entry order by their masks' bits. The
+   deferred entries are written after the blocks, in order, from measuring's list, each over what the lanes stored at
+   its place; their references go to a column of their own and then into the templates' by instruction, from the end,
+   so that the references stay in the entries' order (#2874). A function with deep entries writes its deferred
+   entries in the blocks' loop, as before, since their branches and choice requests go with the templates'.
 
 The immediates' choice is one `x86_choose_forms` over every request, and each chosen form is applied from a byte per
 form (its immediate's size, and whether it takes no operands or its destination twice) to the record's two 8-byte

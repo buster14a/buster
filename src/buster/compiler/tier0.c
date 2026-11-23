@@ -4038,8 +4038,13 @@ struct Tier0Entries
     // emission reads, or BUSTER_TIER0_CALL_MEMO_NONE; 0 for a function whose calls don't take the table
     // (tier0_call_memo_function).
     uint32_t* call_slots;
-    // The vector path's deferred entries, in order, which its measuring lists from their words and then counts (#2874).
+    // The vector path's deferred entries, in order, which its measuring lists from their words and then counts (#2874),
+    // and emission writes after the blocks; and how many.
     uint32_t* deferred_entries;
+    uint32_t deferred_count;
+    // The deferred entries' references as emission writes them (a call's), before it merges them with the templates' by
+    // instruction (#2874): room for every reference, which tier0_generate pushes after measuring.
+    LinkReference* deferred_references;
 };
 
 // A deep entry's flags (Tier0Entries.deep, tier0_select_deep's): the stacks whose values it reads from their deep slots
@@ -11616,6 +11621,8 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, padded);
     entries->deferred_entries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
+    entries->deferred_count = 0;
+    entries->deferred_references = 0;
     entries->deep = 0;
     entries->deep_depths = 0;
     entries->deep_floating_depths = 0;
@@ -12061,7 +12068,10 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         choices.values = BUSTER_ARENA_PUSH_ARRAY(scratch, int64_t, counts.choices + 8);
         choices.contexts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
         choices.forms = BUSTER_ARENA_PUSH_ARRAY(scratch, uint16_t, counts.choices + 8);
-        const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0;
+        // The vector path's deferred entries' references, before emission merges them with the templates' (#2874).
+        entries->deferred_references = BUSTER_VECTOR_PATH(vector) ? BUSTER_ARENA_PUSH_ARRAY(scratch, LinkReference, (uint64_t)counts.references + 1) : 0;
+        const bool room = choices.records != 0 && choices.rows != 0 && choices.values != 0 && choices.contexts != 0 && choices.forms != 0 &&
+                          (!BUSTER_VECTOR_PATH(vector) || entries->deferred_references != 0);
         if (!room || !tier0_push_output(code, output, entries->record_count + epilogue, counts, function->entry_records ? entries->positions : 0,
                                         function->count))
         {
@@ -14985,6 +14995,7 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
     }
     entries->record_count = (uint64_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
     positions[count] = (uint32_t)entries->record_count;
+    entries->deferred_count = deferred_count;
     return counts;
 }
 
@@ -15157,8 +15168,9 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
         const __m256i target_position = _mm512_cvtepi64_epi32(target_qwords);
         _mm256_storeu_si256((__m256i*)(targets + branches), _mm256_maskz_compress_epi32(branch, target_position));
         branches += (uint32_t)__builtin_popcount(branch);
-        // The references and the deferred entries, in entry order: a call's references come where its records do.
-        const uint32_t deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
+        // The references and, in a function with deep entries, the deferred entries, in entry order: a call's references
+        // come where its records do. Another function's deferred entries are written after the blocks.
+        const uint32_t deferred = deep ? lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED)) : 0;
         uint32_t rest = deferred | (template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_FIXUP)));
         while (rest != 0)
         {
@@ -15168,25 +15180,11 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
             if ((deferred >> lane & 1) != 0)
             {
                 writer.count = positions[i];
-                if (deep)
-                {
-                    writer.branch_count = branches;
-                    choices->count = requests;
-                    tier0_emit_deferred_deep(function, entries, frame, homes, i, &writer);
-                    branches = writer.branch_count;
-                    requests = choices->count;
-                }
-                else if (entries->call_slots != 0 && entries->key_kinds[i] == BUSTER_TYPED_CALL && entries->call_slots[i] != BUSTER_TIER0_CALL_MEMO_NONE)
-                {
-                    tier0_call_memo_write(function, frame, entries->call_slots[i], i, &writer);
-                }
-                else
-                {
-                    // A probed ALLOCA's loop's branches (#177), after its block's templates', as a deep entry's.
-                    writer.branch_count = branches;
-                    tier0_emit_deferred(function, entries, frame, homes, i, &writer);
-                    branches = writer.branch_count;
-                }
+                writer.branch_count = branches;
+                choices->count = requests;
+                tier0_emit_deferred_deep(function, entries, frame, homes, i, &writer);
+                branches = writer.branch_count;
+                requests = choices->count;
                 deferred_count += 1;
             }
             else
@@ -15203,6 +15201,46 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
             }
         }
         previous = current;
+    }
+    // A function without deep entries: its deferred entries in order (measuring's list, Tier0Entries.deferred_entries),
+    // each over what the lanes stored at its place, in a loop of their own (#2874), as selection's and measuring's are.
+    // Their references go to a column of their own, then into the templates' by instruction from the end: their records
+    // are each an entry's, so that the order is the entries' as it was. A probed ALLOCA's loop's branches (#177) and an
+    // asm body's (#1839) come after the templates', which the sort below puts in order, as a deep entry's.
+    if (!deep)
+    {
+        LinkReference* side = entries->deferred_references;
+        const uint32_t template_references = writer.reference_count;
+        writer.references = side;
+        writer.reference_count = 0;
+        for (uint32_t k = 0; k < entries->deferred_count; k += 1)
+        {
+            const uint32_t i = entries->deferred_entries[k];
+            writer.count = positions[i];
+            if (entries->call_slots != 0 && entries->key_kinds[i] == BUSTER_TYPED_CALL && entries->call_slots[i] != BUSTER_TIER0_CALL_MEMO_NONE)
+            {
+                tier0_call_memo_write(function, frame, entries->call_slots[i], i, &writer);
+            }
+            else
+            {
+                writer.branch_count = branches;
+                tier0_emit_deferred(function, entries, frame, homes, i, &writer);
+                branches = writer.branch_count;
+            }
+        }
+        deferred_count += entries->deferred_count;
+        const uint32_t deferred_references = writer.reference_count;
+        uint32_t from_templates = template_references;
+        uint32_t from_side = deferred_references;
+        for (uint32_t at = template_references + deferred_references; from_side > 0; at -= 1)
+        {
+            const bool template_last = from_templates > 0 && links[from_templates - 1].instruction > side[from_side - 1].instruction;
+            links[at - 1] = template_last ? links[from_templates - 1] : side[from_side - 1];
+            from_templates -= template_last ? 1 : 0;
+            from_side -= template_last ? 0 : 1;
+        }
+        writer.references = links;
+        writer.reference_count = template_references + deferred_references;
     }
     writer.count = positions[count];
     tier0_emit_epilogue(function, frame, &writer);
