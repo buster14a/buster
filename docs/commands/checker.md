@@ -890,6 +890,14 @@ builder's observer's `-Wtautological-bitwise-compare`,
 `-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
 order (`c_check_common_cfg.c`).
 
+`tests/checker/system-macros` (#3338) is one too: common warnings at a system
+header's macro expanded in user code, which the expansion location decides as
+clang's DiagnosticsEngine does (`check_common_severity`), and the checks whose
+clang code tests `isInSystemMacro` itself: a conversion's context
+(`check_common_conversion_context`), a discarded value's macro
+(`check_common_unused_quiet`), a format call's extra argument and an array
+index both a system header spells.
+
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
 run, pair each case with data of their own, or pick cases by index (#2053 lists
