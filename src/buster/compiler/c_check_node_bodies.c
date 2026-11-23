@@ -884,7 +884,7 @@ typedef enum NodeProducerReason
     // reason): a block's static or extern declaration, a variable-length array, a cleanup, a statement expression.
     NODE_PRODUCER_GATE,
     // Its function: no type, parameters without a prototype, a result that is neither void nor a scalar of a class I8
-    // to F64.
+    // to F64, a naked one, or one a declaration gives always_inline.
     NODE_PRODUCER_FUNCTION,
     // After the reading. The machine does not take every root of it (the detail is its verdict of the body).
     NODE_PRODUCER_MACHINE,
@@ -1270,10 +1270,14 @@ static uint8_t node_producer_before(struct NodeProducer* producer, const NodeMac
         const bool unprototyped = function && (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 &&
                                   check_sparse_get(input->parameters, opening) != BUSTER_CHECK_NONE;
         const bool naked = declaration < input->token_count && input->function_flags != NULL && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NAKED) != 0;
-        if (!function || unprototyped || (!none && (class < BUSTER_TYPED_CLASS_I8 || class > BUSTER_TYPED_CLASS_F64)) || naked)
+        // Nor one a declaration gives always_inline: the lowering expands a direct call of its inline-only definition from
+        // the body's own nodes (#2983, check_program_select_wrappers), which a taken body has none of.
+        const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
+        const bool inlined = object != 0 && object < typer->machine.reader_objects && (typer->machine.reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_INLINED) != 0;
+        if (!function || unprototyped || (!none && (class < BUSTER_TYPED_CLASS_I8 || class > BUSTER_TYPED_CLASS_F64)) || naked || inlined)
         {
             reason = NODE_PRODUCER_FUNCTION;
-            *detail = !function ? 1 : unprototyped ? 2 : naked ? 4 : 3;
+            *detail = !function ? 1 : unprototyped ? 2 : naked ? 4 : inlined ? 5 : 3;
         }
     }
     return reason;
