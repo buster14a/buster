@@ -1,0 +1,43 @@
+function (i32) -> i64 {
+  slot $0 size=4 align=4 type=i32 flags=0x00
+  slot $1 size=4 align=4 type=i32 flags=0x00
+b0:
+  %0 = stack_addr.ptr $0
+  %1 = stack_addr.ptr $1
+  %2 = param.i32 0
+  %3 = store.void %0, %2 align=4
+  %4 = br.void b1
+b1:
+  %5 = const.i32 0x00000000000000000000000000000000
+  %6 = store.void %1, %5 align=4
+  %7 = br.void b2
+b2:
+  %8 = load.i32 %1 align=4
+  %9 = load.i32 %0 align=4
+  %10 = icmp.i1 %8, %9 lt
+  %11 = cbr.void %10, b3, b4
+b3:
+  %12 = symbol_addr.ptr @1
+  %13 = load.i64 %12 align=1
+  %14 = load.i32 %1 align=4
+  %15 = sext.i64 %14
+  %16 = add.i64 %13, %15
+  %17 = symbol_addr.ptr @1
+  %18 = store.void %17, %16 align=1
+  %19 = symbol_addr.ptr @2
+  %20 = load.i64 %19 align=1
+  %21 = symbol_addr.ptr @2
+  %22 = symbol_addr.ptr @1
+  %23 = load.i64 %22 align=1
+  %24 = xor.i64 %20, %23
+  %25 = store.void %21, %24 align=1
+  %26 = load.i32 %1 align=4
+  %27 = const.i32 0x00000000000000000000000000000001
+  %28 = add.i32 %26, %27
+  %29 = store.void %1, %28 align=4
+  %30 = br.void b2
+b4:
+  %31 = symbol_addr.ptr @2
+  %32 = load.i64 %31 align=1
+  %33 = ret.void %32
+}

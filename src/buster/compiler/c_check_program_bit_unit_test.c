@@ -211,7 +211,11 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                   "struct A{char c;struct{unsigned x:4,y:12;};char d;};struct N{int i;struct B b;};struct C{unsigned a:8,b:8,c:16;};"
                                   "struct C gc;struct F{unsigned a:24;char tail[];};struct E{};struct M{unsigned a:24;struct E e;};"
                                   "struct __attribute__((packed)) W{char c;unsigned:3;long long f:63;};"
-                                  "struct __attribute__((packed)) X{char a:3;unsigned long long g:64;};";
+                                  "struct __attribute__((packed)) X{char a:3;unsigned long long g:64;};"
+                                  "union U17{unsigned x:3;unsigned y:17;unsigned long long z:40;};union __attribute__((packed)) U3B{unsigned x:17;};"
+                                  "struct __attribute__((ms_struct)) MS{unsigned x:3;unsigned y:7;unsigned short z:5;unsigned char w:4;};"
+                                  "struct __attribute__((packed)) R{char c;unsigned long long a:60;unsigned b:20;};"
+                                  "struct __attribute__((packed)) Q12{unsigned a:30,b:30,c:30;};";
     static const char functions[] = "unsigned issue(struct B*b){b->y+=b->x;b->z^=b->w;return b->x+b->y+b->z+b->w;}"
                                     "void guard(struct G*p,unsigned v){p->x=v;p->x++;}"
                                     "void clipped(struct T*p){p->a+=1;}"
@@ -226,7 +230,13 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                     "void flexible(struct F*p){p->a+=1;}"
                                     "void empty(struct M*p){p->a+=1;}"
                                     "long long wide(struct W*p){p->f=p->f*3;return p->f;}"
-                                    "void whole(struct X*p){p->g+=2;}";
+                                    "void whole(struct X*p){p->g+=2;}"
+                                    "void union17(union U17*p){p->y=p->x;p->z+=1;}"
+                                    "void union3(union U3B*p){p->x+=1;}"
+                                    "void discrete(struct MS*p){p->y=p->x;p->w=p->z;}"
+                                    "void spans(struct R*p){p->a=p->b;}"
+                                    "void twelve(struct Q12*p){p->c=p->a;}"
+                                    "unsigned initialized(unsigned n){struct B v={n,n+1,n+2,n+3};return v.w;}";
     typedef struct CheckTestBitCase CheckTestBitCase;
     struct CheckTestBitCase
     {
@@ -241,7 +251,13 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
     // constant addresses and a _Generic selection; F's a [3 x i8] before its flexible array member, which clang stores
     // (its first element is in what would be an i32's last byte), and M's an i32 past its member of an empty struct,
     // which clang doesn't. W's packed 63 bits from bit 11 and X's 64 from bit 3 lie in 9 bytes (#2999), an i72 that
-    // clang's -O0 code reads and writes as an i64 and an i8 after it.
+    // clang's -O0 code reads and writes as an i64 and an i8 after it. A union's fields are an integer of their width's
+    // power of two bytes (U17's 17 bits an i32, 40 an i64), or its bytes where they are fewer (U3B's i24, as pieces). An
+    // ms_struct record's are its runs' declared types: MS's x and y an i32 at 0, z an i16 at 4 and w an i8 at 6. R's
+    // packed run is an i80 at 1 and Q12's an i96 at 0, which clang's code moves as an i64 and the rest's pieces after
+    // it; a field in one of the two takes that one (R's a its first 8 bytes, Q12's a too), where clang's code moves both,
+    // and one across them both (R's b, Q12's c) takes both. A local's initializer stores its fields through their unit,
+    // after the object's zeros, as clang's does.
     static const CheckTestBitCase cases[] = {
         { "issue", "r0:4 w0:4" },
         { "guard", "r0:1 w0:1" },
@@ -258,6 +274,12 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         { "empty", "r0:4 w0:4" },
         { "wide", "r1:8 r9:1 w1:8 w9:1" },
         { "whole", "r0:8 r8:1 w0:8 w8:1" },
+        { "union17", "r0:1 r0:4 w0:4 r0:8 w0:8" },
+        { "union3", "r0:2 r2:1 w0:2 w2:1" },
+        { "discrete", "r0:4 w0:4 r4:2 r6:1 w6:1" },
+        { "spans", "r1:8 r9:2 w1:8" },
+        { "twelve", "r0:8 w0:8 r8:4 w8:4" },
+        { "initialized", "w0:4 r0:4" },
     };
     const uint32_t count = BUSTER_ARRAY_LENGTH(cases);
     char source[sizeof(records) + sizeof(functions)];
@@ -332,6 +354,16 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                               "struct A{char c;struct{unsigned x:4,y:12;};char d;};struct N{int i;struct B b;};struct C{unsigned a:8,b:8,c:16;};"
                               "struct C gc;struct __attribute__((packed)) W{char c;unsigned:3;long long f:63;char d;};"
                               "struct __attribute__((packed)) X{char a:3;unsigned long long g:64;char e;};"
+                              "union U17{unsigned x:3;unsigned y:17;unsigned long long z:40;};union __attribute__((packed)) U3B{unsigned x:17;};"
+                              "struct __attribute__((ms_struct)) MS{unsigned x:3;unsigned y:7;unsigned short z:5;unsigned char w:4;char d;};"
+                              "struct __attribute__((packed)) R{char c;unsigned long long a:60;unsigned b:20;char d;};"
+                              "struct __attribute__((packed)) Q12{unsigned a:30,b:30,c:30;char d;};"
+                              "int extra(int n){union U17 u17;u17.z=0x123456789aULL;u17.x=n;int r=(int)(u17.z%1009);u17.y+=n*1000;r+=(int)(u17.z%1013)+u17.x;"
+                              "union U3B u3;u3.x=0x1ffff;u3.x+=n;r+=u3.x;struct MS ms={5,100,30,15,'m'};ms.y+=ms.x+n;ms.w^=n;ms.z--;"
+                              "r+=ms.x+ms.y*3+ms.z*5+ms.w*7+ms.d;struct R rr={'r',0xfffffffffffffffULL,0xfffff,'d'};rr.b+=n;rr.a-=n;"
+                              "r+=rr.c+(int)(rr.a%1019)+(int)rr.b+rr.d;struct Q12 q={n,2*n,3*n,'q'};q.c+=q.a*0x10000;q.b^=0x3fffffff;"
+                              "r+=(int)(q.a%1021)+(int)(q.b%1031)+(int)(q.c%1033)+q.d;struct MS mi={n,n,n,n,'i'};struct Q12 qi={n,n,n,'j'};"
+                              "return r+mi.x+mi.y+mi.z+mi.w+mi.d+(int)(qi.c%1039)+qi.d;}"
                               "int tested(int n){struct B b={1,2,3,4};struct B*pb=&b;pb->y+=pb->x+n;pb->z^=pb->w*n;b.w=n;b.x--;"
                               "struct G g={5,'g'};g.x=n;g.x+=3;struct T t={0x123456,'t'};t.a+=n*1000;"
                               "struct P p={7,0x123456789ULL};p.x+=n;p.k^=n;struct Q q={1,2,3};q.b=q.a+q.c+n;q.c++;"
@@ -341,6 +373,43 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                               "struct W w={'w',-5,'d'};struct W*pw=&w;pw->f=pw->f*n-3;w.f--;w.c^=n;"
                               "struct X x={2,~0ULL,'e'};x.g+=n+1;x.a=x.a+n;int xg=x.g==(unsigned long long)n;"
                               "return b.x+b.y*3+b.z*5+b.w*7+g.x+g.guard+(int)(t.a%1009)+t.c+(int)(p.x%997)+p.k+q.a+q.b*3+q.c*5+u.a+u.b*3+u.c*5+v.b+"
-                              "a.c+a.x+a.y*3+a.d+m.i+m.b.x+m.b.y+m.b.z+m.b.w+c.a+c.b+c.c+gc.a+gc.b+gc.c+w.c+(int)(w.f%1013)+w.d+x.a+xg+x.e+(int)(x.g>>60);}",
+                              "a.c+a.x+a.y*3+a.d+m.i+m.b.x+m.b.y+m.b.z+m.b.w+c.a+c.b+c.c+gc.a+gc.b+gc.c+w.c+(int)(w.f%1013)+w.d+x.a+xg+x.e+(int)(x.g>>60)+"
+                              "extra(n);}",
                               "bit-field-units", clang);
+    // Natively against clang: the layouts and initialized bits of records with zero-width fields (ordinary, ms_struct,
+    // packed and a union's), an ms_struct union, a packed run of 16 bytes (an i128 unit) and a record that nests them in
+    // an array and a union. image() hashes an object's bytes under a mask that has every named field's bits set, made by
+    // storing all ones to each field of a zeroed object, so the hash compares each field's bits where they lie and none
+    // of the padding's; sizes and offsets are compared too. A volatile object's fields are compared by value.
+    check_test_program_source(test,
+                              "struct Z{unsigned a:5;unsigned:0;unsigned b:7;unsigned char c:3;char d;};"
+                              "struct __attribute__((ms_struct)) MZ{unsigned a:3;unsigned:0;unsigned b:5;unsigned short c:4,d:12;char e;};"
+                              "struct __attribute__((packed)) PZ{char c;unsigned a:9;unsigned:0;unsigned long long b:40;char d;};"
+                              "union __attribute__((ms_struct)) MU{unsigned char a:5;unsigned b:20;};union UZ{unsigned a:3;unsigned:0;unsigned long long b:33;};"
+                              "struct __attribute__((packed)) R16{unsigned long long a:60,b:60;unsigned c:8;char d;};"
+                              "struct NZ{char x;struct Z z[2];union UZ u;struct R16 r;};"
+                              "static void zero(void*p,int s){unsigned char*c=p;for(int i=0;i<s;i++)c[i]=0;}"
+                              "static unsigned image(const void*p,const void*m,int s){const unsigned char*a=p,*k=m;unsigned h=0;"
+                              "for(int i=0;i<s;i++)h=h*31+(unsigned)(a[i]&k[i]);return h;}"
+                              "static void zones(struct Z*m){zero(m,sizeof*m);m->a=~0u;m->b=~0u;m->c=7;m->d=-1;}"
+                              "static void runs(struct R16*m){zero(m,sizeof*m);m->a=~0ULL;m->b=~0ULL;m->c=~0u;m->d=-1;}"
+                              "int tested(int n){unsigned h=0;struct Z mz;zones(&mz);struct Z z={n,n*3,n+1,'z'};h=h*7+image(&z,&mz,sizeof z);"
+                              "z.b+=n;z.a^=z.c;h=h*7+image(&z,&mz,sizeof z);"
+                              "struct MZ mm;zero(&mm,sizeof mm);mm.a=~0u;mm.b=~0u;mm.c=15;mm.d=4095;mm.e=-1;struct MZ ms={n,n*2,n+5,n*100,'m'};"
+                              "h=h*7+image(&ms,&mm,sizeof ms);ms.d+=ms.c*n;ms.a=ms.b;h=h*7+image(&ms,&mm,sizeof ms);"
+                              "struct PZ mp;zero(&mp,sizeof mp);mp.c=-1;mp.a=~0u;mp.b=~0ULL;mp.d=-1;struct PZ p={'p',n*5,n*0x10001ULL,'q'};"
+                              "h=h*7+image(&p,&mp,sizeof p);p.b-=p.a;h=h*7+image(&p,&mp,sizeof p);"
+                              "union MU mu={.b=n*4097};union MU mk;zero(&mk,sizeof mk);mk.b=~0u;h=h*7+image(&mu,&mk,sizeof mu);mu.a+=n;h=h*7+mu.b;"
+                              "union UZ ua={n};union UZ ka;zero(&ka,sizeof ka);ka.a=~0u;h=h*7+image(&ua,&ka,sizeof ua);"
+                              "union UZ ub={.b=0x1abcdef12ULL*n};union UZ kb;zero(&kb,sizeof kb);kb.b=~0ULL;h=h*7+image(&ub,&kb,sizeof ub);"
+                              "struct R16 mr;runs(&mr);struct R16 r={0xfffffffffffffffULL-n,0x123456789abcdefULL*n,n+7,'r'};h=h*7+image(&r,&mr,sizeof r);"
+                              "r.b+=r.a;r.c^=n;r.a=r.b>>4;h=h*7+image(&r,&mr,sizeof r);"
+                              "struct NZ mn;zero(&mn,sizeof mn);mn.x=-1;zones(&mn.z[0]);zones(&mn.z[1]);mn.u.b=~0ULL;runs(&mn.r);"
+                              "struct NZ nz={'x',{{n,1,2,3},{4,n,6,7}},{.b=n*3ULL},{n,n*5ULL,n,'s'}};h=h*7+image(&nz,&mn,sizeof nz);"
+                              "nz.z[1].b+=nz.z[0].a;nz.r.b^=nz.z[1].c;h=h*7+image(&nz,&mn,sizeof nz);"
+                              "volatile struct Z vz={n,2,3,4};vz.b+=n;h=h*7+vz.a+vz.b*3+vz.c*5+vz.d*7;"
+                              "return (int)(h%100003)+(int)(sizeof(struct Z)+sizeof(struct MZ)*3+sizeof(struct PZ)*5+sizeof(union MU)*7+"
+                              "sizeof(union UZ)*11+sizeof(struct R16)*13+sizeof(struct NZ)*17+__builtin_offsetof(struct PZ,d)*19+"
+                              "__builtin_offsetof(struct MZ,e)*23+__builtin_offsetof(struct NZ,r)*29+__builtin_offsetof(struct Z,d)*31)*100003;}",
+                              "bit-field-units-layouts", clang);
 }

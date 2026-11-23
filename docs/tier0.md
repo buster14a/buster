@@ -2360,8 +2360,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   loads the deep slots of its operands in their own slots, which it doesn't read.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - bit-fields need no entry of their own: the checker's lowering reads and writes a field's access unit, clang's
-    (#1372), as pieces of 8, 4, 2 and 1 bytes, with shifts and masks, and a packed field in 9 bytes as its first 8 and
-    its ninth (#2999; `docs/c-checker.md`, "Bit-fields"). It refuses a field wider than 64 bits, with
+    (#1372), as pieces of 8, 4, 2 and 1 bytes, with shifts and masks, and a field across a unit of 9 to 16 bytes as
+    its first 8 and the rest's pieces (#2999; `docs/c-checker.md`, "Bit-fields"). It refuses a field wider than 64 bits, with
     `CHECK_PROGRAM_UNSUPPORTED`;
   - complex values need no entry of their own: the checker's lowering takes them as aggregates of their two parts and
     computes each part, libgcc's functions their products and quotients (`docs/c-checker.md`, "Complex values");

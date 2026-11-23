@@ -1792,7 +1792,8 @@ static bool check_asm_return(uint32_t form)
 
 // The forms common in inline assembly that x86_semantics.c gives only its conservative record (every register, unknown
 // control), with the registers each writes, as the instruction set's references define them: none touches the stack,
-// and each returns to the next instruction (syscall through the kernel). A form of neither keeps its statement's helper.
+// and each returns to the next instruction (syscall through the kernel) but hlt, which faults in user mode and never
+// returns. A form of neither keeps its statement's helper.
 typedef struct CheckAsmImplicit CheckAsmImplicit;
 struct CheckAsmImplicit
 {
@@ -1823,6 +1824,9 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_EMMS, 0 },
     { X86_FORM_CLFLUSH_M8, 0 },
     { X86_FORM_SERIALIZE, 0 },
+    // hlt writes nothing: in user mode it faults (#GP, delivered as SIGSEGV), which is what musl's a_crash wants of it
+    // (#2351's survey: the only form of the corpora's templates whose effects kept its helper).
+    { X86_FORM_HLT, 0 },
     { X86_FORM_XSETBV, 0 },
     { X86_FORM_VZEROUPPER, BUSTER_TIER0_XMM_ALL },
     { X86_FORM_VZEROALL, BUSTER_TIER0_XMM_ALL },
