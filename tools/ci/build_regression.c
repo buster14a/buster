@@ -1331,7 +1331,7 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/ir_source_test.c", "main_unit_backend.c main_unit_checker.c", "source preparation interface for IR commands; CHECKER owns its implementation", UINT64_C(0x8366575ba00f1461) },
     { "src/buster/compiler/tier1_select_test.c", "main_unit_backend.c main_unit_checker.c", "selection equality helper for backend and certificate checks", UINT64_C(0x71c71f12f96e31e5) },
     { "src/buster/compiler/tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c", "BURS verification for backend and checker certificate benchmarks", UINT64_C(0x05e4109ff879494a) },
-    { "src/buster/compiler/tier1_select_source_benchmark.c", "main_unit_backend.c main_unit_checker.c", "source selection runner reused by checker certificate benchmarks", UINT64_C(0xda5e0fb1f328530d) },
+    { "src/buster/compiler/tier1_select_source_benchmark.c", "main_unit_backend.c main_unit_checker.c", "source selection runner reused by checker certificate benchmarks", UINT64_C(0x6b62df0759724469) },
     { "src/buster/compiler/bind_test.c", "main_unit_link.c main_unit_dynamic.c main_unit_executable.c", "bound-program builders for link, dynamic and executable fixtures", UINT64_C(0xf34bd6e22e26a890) },
     { "src/buster/compiler/branch_sizing_test.c", "main.c main_unit_x86.c", "process runner for driver semantics and x86 branch checks", UINT64_C(0x08ec91d539e1427a) },
     { "src/buster/compiler/c_builtin_test.c", "main_unit_types.c main_unit_check_builtins.c", "integer oracle for builtin actions and builtin type tests", UINT64_C(0x0a6a824fedab403e) },
