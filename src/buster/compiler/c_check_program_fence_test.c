@@ -172,12 +172,10 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
             const Tier0Function* function = &code.lowered.functions[f];
-            const Tier0Code scalar = tier0_compile_scalar(function, &scratch);
             const Tier0Code vector = tier0_compile(function, &scratch);
-            const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && scalar.count == vector.count &&
-                                  memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0 &&
+            const bool compiled = vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count &&
                                   tier0_validate(function).error == TIER0_OK;
-            const CheckTestFences fences = compiled ? check_test_fences_summary(function, &scalar, &scratch) : (CheckTestFences){ 0 };
+            const CheckTestFences fences = compiled ? check_test_fences_summary(function, &vector, &scratch) : (CheckTestFences){ 0 };
             const CheckTestFenceCase* expected = &cases[f];
             const bool same = fences.fences == expected->fences && fences.values == expected->values && fences.calls == expected->calls &&
                               (expected->trace == NULL || strcmp(fences.trace, expected->trace) == 0);

@@ -1658,8 +1658,8 @@ jobs:
           taskset -c "$placement" ./build/compiler benchmark-streaming --units 100 --runs 5 --lanes "${#core_cpus[@]}" "${writer[@]}"
 
       - name: Benchmark the backend on the frozen SQLite source's functions
-        # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after both
-        # paths agree on every one. The feature queries answer what this compiler implements, as -c's do: with clang's
+        # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after every
+        # one compiles. The feature queries answer what this compiler implements, as -c's do: with clang's
         # answers (--clang-features), sqlite3.c takes its __atomic_* path, which the producer doesn't lower yet.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend-source,')
         run: |

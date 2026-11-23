@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // test-tier0's masks check (#179): Tier 0's mask class, its values in k1 to k7 by the mask stack's depths and in their
-// frame slots past them. Programs over masks are compiled by both paths, which must give the same records, encoded by
-// both encoders, which must give the same bytes, linked with a callee of their own (whose masks overwrite k1 to k7) and,
+// frame slots past them. Programs over masks are compiled into valid records, encoded, linked with a callee of their
+// own (whose masks overwrite k1 to k7) and,
 // where the host has AVX-512 F, BW and DQ, run natively in a child process:
 //   - random programs: statements that each store a mask of 1, 2, 4 or 8 bytes, or an integer converted from one, into
 //     an output slot, or drop one, from masks loaded from the inputs, converted from integers (constants, loads of every
@@ -842,8 +842,8 @@ static bool tier0_test_mask_native(const uint8_t* code, uint32_t length, Tier0Te
     return ran;
 }
 
-// Each of `count` functions (symbol f + 1) compiled by both paths into the same code, checked as the other checks check
-// theirs, sized and encoded by both encoders into the same bytes, one after another at `image` (16-byte aligned), and
+// Each of `count` functions (symbol f + 1) compiled, checked as the other checks check theirs, sized and encoded, one
+// after another at `image` (16-byte aligned), and
 // their calls' fields patched to their targets. Returns the image's length, 0 if a step failed.
 static uint32_t tier0_test_mask_build(Tier0TestTally* tally, const char* name, const Tier0Function* functions, uint32_t count, Arena* arena, uint8_t* image)
 {
@@ -858,31 +858,29 @@ static uint32_t tier0_test_mask_build(Tier0TestTally* tally, const char* name, c
     {
         const uint64_t mark = arena->length;
         const Tier0Check check = tier0_validate(&functions[f]);
-        const Tier0Code scalar = tier0_compile_scalar(&functions[f], arena);
         const Tier0Code vector = tier0_compile(&functions[f], arena);
         ready = tier0_test_expect(tally, check.error == TIER0_OK, "masks", "%s: function %u refused: rule \"%s\" at %u", name, f, check.rule != 0 ? check.rule : "",
                                   check.node);
-        ready = ready && tier0_test_expect(tally, scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "masks",
-                                           "%s: function %u: the paths differ or fail (%d at %u, %d)", name, f, scalar.error, scalar.node, vector.error);
-        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count &&
-                                                      branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
+        ready = ready && tier0_test_expect(tally, vector.error == TIER0_OK, "masks", "%s: function %u: error %d at %u", name, f, vector.error, vector.node);
+        ready = ready && tier0_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count &&
+                                                      branch_sizing_validate(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count).error ==
                                                           BRANCH_SIZING_OK,
                                            "masks", "%s: function %u: an invalid record or branch column", name, f);
-        ready = ready && tier0_test_covered(tally, "masks", name, &scalar);
-        uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
-        uint32_t* fixup_ends = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(scalar.reference_count)) : 0;
-        const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
+        ready = ready && tier0_test_covered(tally, "masks", name, &vector);
+        uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)vector.count + 1) : 0;
+        uint32_t* fixup_ends = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(vector.reference_count)) : 0;
+        const BranchSizing sizing = offsets != 0 ? size_branches(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count, offsets) : (BranchSizing){ 0 };
         const uint32_t start = (size + 15) & ~15u;
-        const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
+        const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(vector.count);
         ready = ready && tier0_test_expect(tally, offsets != 0 && fixup_ends != 0 && sizing.error == BRANCH_SIZING_OK &&
-                                                      start + room <= BUSTER_TIER0_TEST_MASK_CODE && fixups + scalar.reference_count <= 64,
+                                                      start + room <= BUSTER_TIER0_TEST_MASK_CODE && fixups + vector.reference_count <= 64,
                                            "masks", "%s: function %u: no room, or the branches can't be sized", name, f);
-        const int64_t length = ready ? x86_encode(scalar.records, scalar.count, image + start, room, 0, fixup_ends) : -1;
+        const int64_t length = ready ? x86_encode(vector.records, vector.count, image + start, room, 0, fixup_ends) : -1;
         ready = ready && tier0_test_expect(tally, length > 0, "masks", "%s: function %u: the encoder fails (%" PRId64 ")", name, f, length);
-        for (uint32_t r = 0; ready && r < scalar.reference_count; r += 1)
+        for (uint32_t r = 0; ready && r < vector.reference_count; r += 1)
         {
-            const LinkReference* reference = &scalar.references[r];
-            fields[fixups] = start + fixup_ends[r] - x86_fixup_distance(scalar.records[reference->instruction].form, reference->field);
+            const LinkReference* reference = &vector.references[r];
+            fields[fixups] = start + fixup_ends[r] - x86_fixup_distance(vector.records[reference->instruction].form, reference->field);
             ends[fixups] = start + fixup_ends[r];
             targets[fixups] = reference->target;
             fixups += 1;
@@ -1258,10 +1256,8 @@ static void tier0_test_mask_bound(Tier0TestTally* tally, bool host, Arena* arena
         else if (valid)
         {
             const uint64_t mark = arena->length;
-            const Tier0Code scalar = tier0_compile_scalar(&functions[0], arena);
             const Tier0Code vector = tier0_compile(&functions[0], arena);
-            tier0_test_expect(tally, scalar.error == TIER0_ERROR_DEPTH && tier0_test_same_code(&scalar, &vector), "masks",
-                              "%s: the paths give %d and %d, not TIER0_ERROR_DEPTH", name, scalar.error, vector.error);
+            tier0_test_expect(tally, vector.error == TIER0_ERROR_DEPTH, "masks", "%s: error %d, not TIER0_ERROR_DEPTH", name, vector.error);
             arena_pop_to(arena, mark);
         }
     }
@@ -1271,8 +1267,8 @@ static void tier0_test_mask_bound(Tier0TestTally* tally, bool host, Arena* arena
 
 // And the vector path's byte sums past an int8's range: 239 masks summed by rows of seven mask operands (kaddq into the
 // first one's register: six masks fewer an entry, so that the block of entries 448 to 511, 16 conversions and 33 rows,
-// ends 182 masks below its start) down to five, then XORed into one, converted and stored. Both paths' depths, the
-// vector path's sums of bytes modulo 256, must give the same code, and the native run C's value.
+// ends 182 masks below its start) down to five, then XORed into one, converted and stored. The depths, sums of bytes
+// modulo 256, must give valid code, and the native run C's value.
 static void tier0_test_mask_sums(Tier0TestTally* tally, bool host, Arena* arena)
 {
     static Tier0Operation row;

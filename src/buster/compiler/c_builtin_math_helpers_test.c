@@ -229,15 +229,20 @@ static bool cbuiltin_math_test_caller(CBuiltinMathTestTally* tally, Arena* arena
     };
     const Tier0Check checked = tier0_validate(&function);
     bool result = cbuiltin_math_test_expect(tally, checked.error == TIER0_OK, checked.rule != NULL ? checked.rule : "Tier 0 caller validation", item);
+    // Path 0 compiles with an empty table of calls, whose call's records its emitter writes (tier0_emit_call); path 1
+    // with that table, which then holds them (the calls' memo, #2874): the two must make the same bytes.
+    const Tier0CallMemo thread_memo = tier0_call_memo_swap((Tier0CallMemo){ 0 });
     for (uint32_t path = 0; result && path < 2; path += 1)
     {
-        const Tier0Code code = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+        const Tier0Code code = tier0_compile(&function, arena);
         result = cbuiltin_math_test_expect(tally, code.error == TIER0_OK && code.branch_count == 0 && code.reference_count == 1, "ordinary Tier 0 caller compiled", item);
         if (result)
         {
             result = cbuiltin_math_test_map(tally, &helper->code, &code, programs + path, item);
         }
     }
+    Tier0CallMemo used = tier0_call_memo_swap(thread_memo);
+    arena_release(&used.arena);
     arena_pop_to(arena, mark);
     return result;
 }
