@@ -4038,6 +4038,9 @@ struct Tier0Entries
     // emission reads, or BUSTER_TIER0_CALL_MEMO_NONE; 0 for a function whose calls don't take the table
     // (tier0_call_memo_function).
     uint32_t* call_slots;
+    // The vector path's global entries' accesses (BUSTER_TIER0_ACCESS_*), at those entries alone, which fusion reads
+    // from the symbols' column a global entry at a time before its blocks (tier0_vector_global_accesses, #2874).
+    uint8_t* accesses;
     // The vector path's deferred entries, in order, which its measuring lists from their words and then counts (#2874),
     // and emission writes after the blocks; and how many.
     uint32_t* deferred_entries;
@@ -11632,13 +11635,13 @@ static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* e
 static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t count)
 {
     const uint64_t padded = (uint64_t)count + 64;
-    // The thirteen columns in one push, each from a cache line: eight of bytes, the templates' 16 bits, three of 32 bits
+    // The fourteen columns in one push, each from a cache line: nine of bytes, the templates' 16 bits, three of 32 bits
     // and the words.
     const uint64_t bytes = tier0_column_bytes(padded);
     const uint64_t halves = tier0_column_bytes(2 * padded);
     const uint64_t dwords = tier0_column_bytes(4 * padded);
     const uint64_t qwords = tier0_column_bytes(8 * padded);
-    uint8_t* base = arena_push(scratch, 8 * bytes + halves + 3 * dwords + qwords, 64);
+    uint8_t* base = arena_push(scratch, 9 * bytes + halves + 3 * dwords + qwords, 64);
     uint64_t offset = 0;
     entries->key_kinds = tier0_column(base, &offset, bytes);
     entries->key_classes = tier0_column(base, &offset, bytes);
@@ -11648,6 +11651,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->floating_effects = tier0_column(base, &offset, bytes);
     entries->depths = tier0_column(base, &offset, bytes);
     entries->floating_depths = tier0_column(base, &offset, bytes);
+    entries->accesses = tier0_column(base, &offset, bytes);
     entries->templates = tier0_column(base, &offset, halves);
     entries->lengths = tier0_column(base, &offset, dwords);
     entries->positions = tier0_column(base, &offset, dwords);
@@ -11668,7 +11672,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->call_slots = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
-           entries->positions != 0 && entries->deferred_entries != 0;
+           entries->positions != 0 && entries->deferred_entries != 0 && entries->accesses != 0;
 }
 
 static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error);
@@ -13843,23 +13847,32 @@ static void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
     }
 }
 
-// The labels, a bit per entry: the control entries' targets (found 64 at a time, then set one at a time: they are few),
-// and the labels JUMP_INDIRECT may go to.
-static void tier0_vector_labels(const Tier0Function* function, uint64_t* labels)
+// The labels, a bit per entry: the control entries' targets (found 64 at a time and listed in `listed`, room for the
+// entries and 16 more, then set one at a time: they are few), and the labels JUMP_INDIRECT may go to.
+static void tier0_vector_labels(const Tier0Function* function, uint32_t* listed, uint64_t* labels)
 {
     const uint32_t count = function->count;
+    const __m512i lane_numbers = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    // The control entries of each 64 listed (the list has room for 16 past its last entry: each compressed store writes
+    // 16), then their targets' bits set an entry at a time in a loop of their own (#2874): inside the blocks' loop, a
+    // loop over a block's control lanes mispredicted at its end.
+    uint32_t control_count = 0;
     for (uint32_t first = 0; first < count; first += 64)
     {
         const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
         const __m512i flags = tier0_lookup(tier0_vector_kind_flags, kinds);
-        uint64_t control = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_CONTROL)) & tier0_lanes(first, count);
-        while (control != 0)
+        const uint64_t control = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_CONTROL)) & tier0_lanes(first, count);
+        for (uint32_t group = 0; group < 4; group += 1)
         {
-            const uint32_t entry = first + (uint32_t)__builtin_ctzll(control);
-            const uint64_t target = function->values[entry];
-            labels[target >> 6] |= 1ull << (target & 63);
-            control &= control - 1;
+            const __mmask16 these = (__mmask16)(control >> (16 * group));
+            _mm512_storeu_si512(listed + control_count, _mm512_maskz_compress_epi32(these, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(first + 16 * group)), lane_numbers)));
+            control_count += (uint32_t)__builtin_popcount(these);
         }
+    }
+    for (uint32_t k = 0; k < control_count; k += 1)
+    {
+        const uint64_t target = function->values[listed[k]];
+        labels[target >> 6] |= 1ull << (target & 63);
     }
     tier0_label_entries(function, labels);
 }
@@ -13870,26 +13883,52 @@ static __m512i tier0_variant(uint32_t variant)
     return _mm512_set1_epi8((char)variant);
 }
 
-// tier0_access_kind for the 64 entries from `first`, whose kinds are `kinds`: the global kinds' lanes by compares, each
-// one's symbol's access read from the column (they are few, as the calls are), then each access's lanes keyed by a vpermb
-// of its table.
-static __m512i tier0_vector_access_kinds(const Tier0Function* function, __m512i kinds, uint32_t first, __mmask64 lanes)
+// The global entries' accesses (Tier0Entries.accesses), each from its symbol's in the symbols' column: the global kinds'
+// lanes of each 64 entries by compares, listed (in Tier0Entries.deferred_entries, which selection lists its own entries
+// in later), then read an entry at a time in a loop of their own (#2874): inside fusion's blocks, a loop over a block's
+// global lanes mispredicted at its end.
+static void tier0_vector_global_accesses(const Tier0Function* function, Tier0Entries* entries)
+{
+    const uint32_t count = function->count;
+    const __m512i two = _mm512_set1_epi8(2);
+    const __m512i lane_numbers = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t* listed = entries->deferred_entries;
+    uint32_t global_count = 0;
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, count);
+        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+        const uint64_t global = lanes & (_mm512_cmplt_epu8_mask(_mm512_sub_epi8(kinds, _mm512_set1_epi8(BUSTER_TYPED_GLOBAL)), two) |
+                                         _mm512_cmplt_epu8_mask(_mm512_sub_epi8(kinds, _mm512_set1_epi8(BUSTER_TYPED_STORE_GLOBAL)), two));
+        // The list has room for 16 past its last entry: each compressed store writes 16.
+        for (uint32_t group = 0; group < 4; group += 1)
+        {
+            const __mmask16 these = (__mmask16)(global >> (16 * group));
+            _mm512_storeu_si512(listed + global_count, _mm512_maskz_compress_epi32(these, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(first + 16 * group)), lane_numbers)));
+            global_count += (uint32_t)__builtin_popcount(these);
+        }
+    }
+    for (uint32_t k = 0; k < global_count; k += 1)
+    {
+        const uint32_t i = listed[k];
+        const uint64_t symbol = function->values[i];
+        entries->accesses[i] = (uint8_t)(symbol < function->symbol_count ? function->symbol_access[symbol] & (BUSTER_TIER0_ACCESSES - 1) : BUSTER_TIER0_ACCESS_DIRECT);
+    }
+}
+
+// tier0_access_kind for the 64 entries from `first`, whose kinds are `kinds`: the global kinds' lanes by compares, their
+// accesses from the column (tier0_vector_global_accesses), then each access's lanes keyed by a vpermb of its table.
+static __m512i tier0_vector_access_kinds(const Tier0Entries* entries, __m512i kinds, uint32_t first, __mmask64 lanes)
 {
     const __m512i two = _mm512_set1_epi8(2);
     const uint64_t global = lanes & (_mm512_cmplt_epu8_mask(_mm512_sub_epi8(kinds, _mm512_set1_epi8(BUSTER_TYPED_GLOBAL)), two) |
                                      _mm512_cmplt_epu8_mask(_mm512_sub_epi8(kinds, _mm512_set1_epi8(BUSTER_TYPED_STORE_GLOBAL)), two));
-    uint64_t accesses[BUSTER_TIER0_ACCESSES] = { 0, 0, 0, 0 };
-    for (uint64_t rest = global; rest != 0; rest &= rest - 1)
-    {
-        const uint32_t lane = (uint32_t)__builtin_ctzll(rest);
-        const uint64_t symbol = function->values[first + lane];
-        const uint32_t access = symbol < function->symbol_count ? function->symbol_access[symbol] & (BUSTER_TIER0_ACCESSES - 1) : BUSTER_TIER0_ACCESS_DIRECT;
-        accesses[access] |= 1ull << lane;
-    }
+    const __m512i access = _mm512_maskz_loadu_epi8(global, entries->accesses + first);
     __m512i keys = kinds;
-    for (uint32_t access = BUSTER_TIER0_ACCESS_GOT; access < BUSTER_TIER0_ACCESSES; access += 1)
+    for (uint32_t kind = BUSTER_TIER0_ACCESS_GOT; kind < BUSTER_TIER0_ACCESSES; kind += 1)
     {
-        keys = _mm512_mask_permutexvar_epi8(keys, accesses[access], kinds, _mm512_load_si512(tier0_vector_accesses[access]));
+        const uint64_t these = _mm512_mask_cmpeq_epi8_mask(global, access, _mm512_set1_epi8((char)kind));
+        keys = _mm512_mask_permutexvar_epi8(keys, these, kinds, _mm512_load_si512(tier0_vector_accesses[kind]));
     }
     return keys;
 }
@@ -13902,6 +13941,10 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
     __m512i previous_kinds = _mm512_setzero_si512();
     __m512i previous_classes = _mm512_setzero_si512();
     __m512i previous_kinds_2 = _mm512_setzero_si512();
+    if (function->symbol_access != 0)
+    {
+        tier0_vector_global_accesses(function, entries);
+    }
     // P1: raw effects, leaf fusions, the entries' own variants and keys.
     for (uint32_t block = 0; block < bits->blocks; block += 1)
     {
@@ -13948,7 +13991,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         // The key class: a compare's operands'. The key kind: a global kind's for its symbol's access.
         const __mmask64 compare = _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_TIER0_KIND_COMPARE));
         const __m512i key_class = _mm512_mask_blend_epi8(compare, classes, classes_1);
-        const __m512i key_kind = function->symbol_access != 0 ? tier0_vector_access_kinds(function, kinds, first, lanes) : kinds;
+        const __m512i key_kind = function->symbol_access != 0 ? tier0_vector_access_kinds(entries, kinds, first, lanes) : kinds;
         const __m512i row = tier0_lookup(tier0_vector_rows, key_kind);
         __m512i properties = tier0_lookup256(tier0_vector_properties, _mm512_or_si512(_mm512_slli_epi16(row, 4), key_class));
         const __mmask64 convert = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONVERT));
@@ -14013,23 +14056,34 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         previous_kinds = kinds;
         previous_classes = classes;
     }
-    // The calls' effects, from the calls table (they are few), and the tail calls' in a function with them.
+    // The calls' effects, from the calls table (they are few), and the tail calls' in a function with them: the calls of
+    // each 64 listed (Tier0Entries.deferred_entries, which selection lists its own entries in later; room for 16 past
+    // the last), then their effects a call at a time in a loop of their own (#2874): inside the blocks' loop, a loop over
+    // a block's calls mispredicted at its end.
     const __m512i tail_kind = _mm512_set1_epi8(function->call_tails != 0 ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL);
+    const __m512i lane_numbers = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t* listed = entries->deferred_entries;
+    uint32_t call_count = 0;
     for (uint32_t first = 0; first < count; first += 64)
     {
         const __m512i block_kinds = tier0_bytes_at(function->kinds, first, count);
-        uint64_t calls = (_mm512_cmpeq_epi8_mask(block_kinds, _mm512_set1_epi8(BUSTER_TYPED_CALL)) | _mm512_cmpeq_epi8_mask(block_kinds, tail_kind)) &
-                         tier0_lanes(first, count);
-        while (calls != 0)
+        const uint64_t calls = (_mm512_cmpeq_epi8_mask(block_kinds, _mm512_set1_epi8(BUSTER_TYPED_CALL)) | _mm512_cmpeq_epi8_mask(block_kinds, tail_kind)) &
+                               tier0_lanes(first, count);
+        for (uint32_t group = 0; group < 4; group += 1)
         {
-            const uint32_t entry = first + (uint32_t)__builtin_ctzll(calls);
-            int32_t integer = 0;
-            int32_t floating = 0;
-            tier0_raw_effects(function, entry, &integer, &floating);
-            entries->integer_effects[entry] = (int8_t)integer;
-            entries->floating_effects[entry] = (int8_t)floating;
-            calls &= calls - 1;
+            const __mmask16 these = (__mmask16)(calls >> (16 * group));
+            _mm512_storeu_si512(listed + call_count, _mm512_maskz_compress_epi32(these, _mm512_add_epi32(_mm512_set1_epi32((int32_t)(first + 16 * group)), lane_numbers)));
+            call_count += (uint32_t)__builtin_popcount(these);
         }
+    }
+    for (uint32_t k = 0; k < call_count; k += 1)
+    {
+        const uint32_t entry = listed[k];
+        int32_t integer = 0;
+        int32_t floating = 0;
+        tier0_raw_effects(function, entry, &integer, &floating);
+        entries->integer_effects[entry] = (int8_t)integer;
+        entries->floating_effects[entry] = (int8_t)floating;
     }
     // P2: the compound fusions, from P1's variants of the entries before. A branch's rules read three masks of the
     // entries behind it, each block's kept for the next: the tests against zero, those of them that are EQ, and the
@@ -15356,7 +15410,7 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
     Tier0Error error = pushed && bits.sib_log2 != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
     if (error == TIER0_OK)
     {
-        tier0_vector_labels(function, bits.labels);
+        tier0_vector_labels(function, entries.deferred_entries, bits.labels);
         entries.labels = bits.labels;
         tier0_vector_values(function, &bits);
         tier0_vector_fuse(function, &bits, &entries);
