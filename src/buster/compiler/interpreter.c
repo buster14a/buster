@@ -595,7 +595,7 @@ static bool interpreter_typed_copy_range(InterpreterRuntime* runtime, uint64_t a
     return result;
 }
 
-static InterpreterStatus interpreter_representation_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t bytes)
+static InterpreterStatus interpreter_representation_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t bytes, bool move)
 {
     InterpreterStatus status = INTERPRETER_INVALID;
     if (bytes != 0)
@@ -607,13 +607,14 @@ static InterpreterStatus interpreter_representation_copy(InterpreterRuntime* run
         {
             status = INTERPRETER_MEMORY;
         }
-        // Tier 0's COPY contract admits identical or disjoint ranges, not partial overlap. The range checks above
-        // have proved these additions cannot wrap. A rejected transfer changes neither bytes nor their metadata.
-        else if (destination == source || destination + bytes <= source || source + bytes <= destination)
+        // Tier 0's COPY contract admits identical or disjoint ranges, not partial overlap, but in its move form (#1373),
+        // whose ranges may overlap. The range checks above have proved these additions cannot wrap. A rejected transfer
+        // changes neither bytes nor their metadata.
+        else if (move || destination == source || destination + bytes <= source || source + bytes <= destination)
         {
             if (destination != source)
             {
-                memcpy((void*)(uintptr_t)destination, (const void*)(uintptr_t)source, bytes);
+                memmove((void*)(uintptr_t)destination, (const void*)(uintptr_t)source, bytes);
             }
             if (destination_defined != 0)
             {
@@ -632,9 +633,11 @@ static InterpreterStatus interpreter_representation_copy(InterpreterRuntime* run
     return status;
 }
 
-static InterpreterStatus interpreter_typed_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t bytes)
+// A COPY of `value`'s bytes, or its move form's (tier0_copy_moves).
+static InterpreterStatus interpreter_typed_copy(InterpreterRuntime* runtime, uint64_t destination, uint64_t source, uint64_t value)
 {
-    const InterpreterStatus status = bytes <= BUSTER_TIER0_MAX_COPY_BYTES ? interpreter_representation_copy(runtime, destination, source, bytes) : INTERPRETER_INVALID;
+    const InterpreterStatus status = value <= BUSTER_TIER0_MAX_COPY_VALUE ? interpreter_representation_copy(runtime, destination, source, tier0_copy_bytes(value), tier0_copy_moves(value)) :
+                                                                         INTERPRETER_INVALID;
     return status;
 }
 
@@ -1439,7 +1442,7 @@ static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, 
             }
             if (result == INTERPRETER_OK && object && l < count && function->parameters[l].kind != BUSTER_ABI_LOCATION_IGNORE)
             {
-                result = interpreter_representation_copy(runtime, (uintptr_t)bytes, arguments[l].low, size);
+                result = interpreter_representation_copy(runtime, (uintptr_t)bytes, arguments[l].low, size, false);
             }
         }
     }
@@ -1763,7 +1766,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             shape = tier0_atomic_cas_valid(function, class, value) && classes[top - 2] == class && classes[top - 1] == class;
             break;
         case BUSTER_TYPED_COPY:
-            shape = class == BUSTER_TYPED_CLASS_VOID && classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == BUSTER_TYPED_CLASS_U64 && value != 0 && value <= BUSTER_TIER0_MAX_COPY_BYTES;
+            shape = class == BUSTER_TYPED_CLASS_VOID && classes[top - 2] == BUSTER_TYPED_CLASS_U64 && classes[top - 1] == BUSTER_TYPED_CLASS_U64 && value != 0 && value <= BUSTER_TIER0_MAX_COPY_VALUE;
             break;
         case BUSTER_TYPED_PTR_ADD:
             shape = class == BUSTER_TYPED_CLASS_U64 && classes[top - 2] == BUSTER_TYPED_CLASS_U64 && (classes[top - 1] == BUSTER_TYPED_CLASS_I64 || classes[top - 1] == BUSTER_TYPED_CLASS_U64) && value != 0;
@@ -2329,7 +2332,7 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
             if (depth > 1 && function->result_size != 0 && frame->return_bytes != 0)
             {
                 const uint32_t bytes = frame->return_bytes < function->result_size ? frame->return_bytes : function->result_size;
-                status = interpreter_representation_copy(&runtime, frame->return_address, returned.low, bytes);
+                status = interpreter_representation_copy(&runtime, frame->return_address, returned.low, bytes, false);
                 if (status != INTERPRETER_OK)
                 {
                     break;

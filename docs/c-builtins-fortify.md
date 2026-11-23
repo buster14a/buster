@@ -120,8 +120,13 @@ The lowering now expands a direct call of such a wrapper in its caller
   `pass_object_size`'s private wrappers, above), with a prototype, not
   variadic, of at most eight integer or pointer parameters and an integer,
   pointer or void result, whose body is one statement, `return E;` or, in a
-  void function, `E;`. E reads its parameters and never assigns them or takes
-  their addresses, and refers to nothing but its parameters, constants and
+  void function, `E;`. A wrapper with a result may instead have the shape of
+  glibc's longer ones (`fgets`, `wcscpy`, `realpath`, `strlcpy`): scalar
+  locals, each with an initializer (`size_t sz = __glibc_objsize (__s);`),
+  then guards `if (C) return E;`, then `return E;` or the last guard's
+  `else return E;` (`check_program_wrapper_statements`). The expressions read
+  its parameters and locals and never assign them or take their addresses,
+  and refer to nothing but its parameters, locals, constants and
   objects of external linkage, which the caller's code reaches by their
   symbols, through C's operators that read, convert, select and call. Of the
   builtins it may use only the object-size and constant queries and glibc's
@@ -132,7 +137,11 @@ The lowering now expands a direct call of such a wrapper in its caller
 - **The expansion.** The arguments, each converted to its parameter's type,
   go into temporaries in their order; the parameters' objects then read those
   temporaries (a WRAPPER task binds and unbinds them), and E is lowered in the
-  caller's body, converted to the call's type. A call in the wrapper's own
+  caller's body, converted to the call's type. A longer wrapper's locals go
+  into temporaries of their own, bound with the parameters, in their order,
+  and its guards become a chain of conditionals, as `C ? E : ...` lowers:
+  each C branches past its E, whose value jumps to the chain's end, where the
+  last return's joins it. A call in the wrapper's own
   expression stays a call, and so does one more than four expansions deep, a
   musttail return's and a static chain's. Every other reference to the function
   (its address, a runtime call of the same name, a call the rules above don't
@@ -164,16 +173,21 @@ The two tiers both lower from the expanded typed stream, so `-c`, `--tier1`,
 
 What stays unchecked:
 
-- **Wrappers of more than one statement.** Of the 71 `__fortify_function`
+- **Two of glibc's longer wrappers.** Of the 71 `__fortify_function`
   definitions that glibc 2.39's `<stdio.h>`, `<string.h>`, `<strings.h>`,
   `<stdlib.h>`, `<unistd.h>`, `<wchar.h>`, `<poll.h>`, `<fcntl.h>`,
   `<sys/socket.h>`, `<sys/select.h>`, `<syslog.h>` and `<signal.h>` make with
   `_GNU_SOURCE` at `-O2 -D_FORTIFY_SOURCE=2`, 22 declare a local or test before
-  their return: `fgets`, `fgets_unlocked`, `fread`, `fread_unlocked`, `fgetws`,
-  `fgetws_unlocked`, `recv`, `recvfrom`, `realpath`, `getwd`, `mbstowcs`,
-  `wctomb`, `wcrtomb`, `strlcpy`, `strlcat`, `wcscpy`, `wcpcpy`, `wcscat`,
-  `wcsncat`, `wcslcpy`, `wcslcat` and `vswprintf`. Their calls still reach the
-  external function.
+  their return, and 20 of those expand. Two still reach the external
+  function: `fread_unlocked`, whose body at `-O2` (`__USE_EXTERN_INLINES`)
+  holds a loop that reads small constant counts by `getc_unlocked`, and
+  `recvfrom` under `_GNU_SOURCE`, whose `__SOCKADDR_ARG` parameter is a
+  transparent union, not a pointer (without `_GNU_SOURCE` it is a pointer, and
+  the call expands).
+- **A conditional argument's bound.** `realpath (c ? small : large, ...)`'s
+  bound is unknown: GCC's `__builtin_dynamic_object_size` (level 3) picks the
+  arm's size at run time, and its level 2 takes the larger. Clang's build, as
+  buster's, calls the unchecked function.
 - **Allocations.** A pointer from `malloc (8)` has no named object; clang's
   optimizer bounds it by the allocation (`alloc_size`), and buster's answer is
   unknown.
@@ -183,7 +197,13 @@ unchecked, whose bodies (`__glibc_fortify`) test `__builtin_constant_p` of the
 bound: for an overflowing `read (fd, buf, 16)` into `char buf[8]` its code
 calls the plain `read`. glibc's intent, which
 GCC's build follows and glibc 2.40's Clang overloads restore, is
-`__read_chk`'s abort, and so is buster's.
+`__read_chk`'s abort, and so is buster's. The longer wrappers are the same:
+with glibc 2.39, clang's build of an overflowing `fgets`, `fread`, `recv`,
+`mbstowcs` or `wcscpy` runs on, and GCC's and buster's abort. Buster's
+`__builtin_constant_p` of a wrapper's parameter or local answers false, as in
+the body, so where GCC's build folds a guard to the plain call or to the
+`_chk_warn` alias (the same `__*_chk` symbol), buster's calls `__*_chk` with
+the bound, which checks the same lengths at run time.
 
 ## Validation
 

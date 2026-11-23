@@ -220,6 +220,14 @@ test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" test-ssa-source --typed tests/interpreter/source.c
 "$BUSTER_COMPILER" test-ssa-source --typed --tier1 -DBUSTER_INTERPRETER_LARGE_WORDS=64 tests/interpreter/source.c
 "$BUSTER_COMPILER" interpret-c tests/interpreter/units-main.c tests/interpreter/units-library.c > build/interpreter-units.out && printf 'typed units: 1\n' | cmp - build/interpreter-units.out
+# #3311: structs and unions passed and returned in registers, by the interpreter's forms and both strict Tier 1 paths
+# against clang's output; and their code: an {int, int}'s fields kept in registers with no frame, and a {long, long}'s
+# result loaded from its slot with no red-zone copy.
+"$BUSTER_COMPILER" test-ssa-source --typed --tier1 --clang clang tests/ir-source/register-aggregates.c
+"$BUSTER_COMPILER" --tier1 --tier1-strict --verify -S -o build/register-aggregates.s tests/ir-source/register-aggregates.c
+if awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'rsp'; then exit 1; fi
+if awk '/^add_l2:/,/^\tret/' build/register-aggregates.s | grep -q -- '-8(%rsp)'; then exit 1; fi
+awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'ret'
 == Test native fixed-frame CFI and generated GDB/perf consumers [2 CPUs]
 "$BUSTER_COMPILER" test-unwind --cross-check
 == Test the caret display against clang
