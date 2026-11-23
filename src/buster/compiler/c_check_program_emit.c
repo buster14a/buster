@@ -329,7 +329,7 @@ static void check_program_emit_prefetch_symbol(const CheckProgram* program, cons
     {
         __builtin_prefetch(input->declaration_bits + declaration);
         __builtin_prefetch(input->declaration_kinds + declaration);
-        __builtin_prefetch(parser->tokens.names + declaration);
+        __builtin_prefetch(parser != NULL ? (const void*)(parser->tokens.names + declaration) : (const void*)(input->declaration_bits + declaration));
         __builtin_prefetch(input->declaration_bodies.directory + (declaration >> BUSTER_CHECK_SPARSE_SHIFT));
         if (input->function_flags != NULL)
         {
@@ -341,7 +341,10 @@ static void check_program_emit_prefetch_symbol(const CheckProgram* program, cons
     {
         const uint32_t block = input->declaration_bodies.directory[close >> BUSTER_CHECK_SPARSE_SHIFT] & ~BUSTER_CHECK_SPARSE_CLAIMED;
         __builtin_prefetch(input->declaration_bodies.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT) + (close & (BUSTER_CHECK_SPARSE_TOKENS - 1)));
-        __builtin_prefetch(identifiers->spans + parser->tokens.names[close]);
+        if (parser != NULL)
+        {
+            __builtin_prefetch(identifiers->spans + parser->tokens.names[close]);
+        }
     }
 }
 
@@ -3924,6 +3927,7 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
     }
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
     {
+        check_program_emit_prefetch_symbol(program, NULL, NULL, s);
         const uint32_t object = program->symbol_objects[s];
         const uint32_t declaration = program->object_declarations[object];
         const bool literal = declaration == BUSTER_CHECK_NONE || check_input_bit(program->input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);

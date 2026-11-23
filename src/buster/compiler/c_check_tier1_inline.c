@@ -1065,8 +1065,9 @@ static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const Emitte
     uint32_t dead = 0;
     if (stack != 0)
     {
-        // Every body a root but the candidates that may lose their code.
+        // Every body a root but the candidates that may lose their code; without one, the walk reaches none (#3393).
         uint32_t depth = 0;
+        uint32_t candidates = 0;
         for (uint32_t b = 0; b < count; b += 1)
         {
             const bool assembly = naked != 0 && naked[b].planned;
@@ -1076,13 +1077,15 @@ static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const Emitte
             const bool may = inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE && inlining->rooted[b] == 0 && inlining->lowered->functions[b].label_count == 0 &&
                              codes[b].label_count == 0 && codes[b].asm_label_count == 0 && !assembly;
             reached[b] = may ? 0 : 1;
+            candidates += may ? 1 : 0;
             if (!may)
             {
                 stack[depth++] = b;
             }
         }
+        depth = candidates != 0 ? depth : 0;
         // The helpers' references, then each reached body's.
-        for (uint32_t h = 0; h < helpers->count; h += 1)
+        for (uint32_t h = 0; candidates != 0 && h < helpers->count; h += 1)
         {
             const Tier0Code* code = &helpers->items[h].code;
             depth = check_tier1_inline_reach(inlining, code->references, code->reference_count, helpers->items[h].assembly != 0, asm_symbols, asm_names, reached, stack, depth);
