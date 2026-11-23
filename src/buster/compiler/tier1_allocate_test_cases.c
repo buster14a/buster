@@ -633,8 +633,8 @@ static bool tier1_move_test_defined(const Tier1ParallelMoves* input, const Tier1
 
 static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
 {
-    uint32_t sources[32];
-    uint32_t destinations[32];
+    uint32_t sources[70];
+    uint32_t destinations[70];
     for (uint32_t iteration = 0; iteration < 256; iteration += 1)
     {
         const uint64_t saved = arena->length;
@@ -693,23 +693,24 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
     };
     Tier1ResolvedMoves output = { 0 };
     tier1_allocation_test_expect(tally, tier1_resolve_moves(&broken, arena, &output) == TIER1_ALLOCATION_INVALID, "duplicate move destinations rejected");
-    // A move from or to the scratch register is refused, in each lane of the indexed resolver's steps and of the small
-    // set's: 6 and 24 moves among registers 0 to 23, the scratch (30) put in each one's source and then its destination.
-    for (uint32_t i = 0; i < 24; i += 1)
-    {
-        sources[i] = (i + 1) % 24;
-        destinations[i] = i;
-    }
-    const uint32_t sizes[] = { 6, 24 };
+    // A move from or to the scratch location is refused in each lane of both forms: 6 and 24 moves (the register form's
+    // two halves) and 40 and 70 (the wide form's 16-lane steps, a partial last one among them), the scratch (100) put
+    // in each one's source and then its destination.
+    const uint32_t sizes[] = { 6, 24, 40, 70 };
     bool resolved = true;
     bool refused = true;
-    for (uint32_t s = 0; s < 2; s += 1)
+    for (uint32_t s = 0; s < 4; s += 1)
     {
+        for (uint32_t i = 0; i < sizes[s]; i += 1)
+        {
+            sources[i] = (i + 1) % sizes[s];
+            destinations[i] = i;
+        }
         const Tier1ParallelMoves moves = {
             .sources = sources,
             .destinations = destinations,
             .count = sizes[s],
-            .scratch = 30,
+            .scratch = 100,
         };
         const uint64_t saved = arena->length;
         resolved = resolved && tier1_resolve_moves(&moves, arena, &output) == TIER1_ALLOCATION_OK;
@@ -720,7 +721,7 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
             {
                 uint32_t* edited = side == 0 ? sources : destinations;
                 const uint32_t kept = edited[k];
-                edited[k] = 30;
+                edited[k] = 100;
                 refused = refused && tier1_resolve_moves(&moves, arena, &output) == TIER1_ALLOCATION_INVALID && arena->length == saved;
                 edited[k] = kept;
             }

@@ -305,6 +305,67 @@ static void tier1_move_test_random(Tier1AllocationTestTally* tally, Arena* arena
     tier1_allocation_test_expect(tally, valid, "random wide sets: identities, fan-out and cycles in the definition's order and as a snapshot");
 }
 
+// Large random sets (5,000 and 300,000 moves): many moves ready at once, cycles, fan-out and identities, through the
+// bitset's upper levels and the cycle cursor, checked as a snapshot (the definition's cubic scan is for test sizes).
+static void tier1_move_test_large(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint32_t counts[] = { 5000, 300000 };
+    uint64_t seed = 608;
+    bool valid = true;
+    for (uint32_t c = 0; c < 2; c += 1)
+    {
+        const uint32_t count = counts[c];
+        uint32_t* sources = malloc((uint64_t)count * 4);
+        uint32_t* destinations = malloc((uint64_t)count * 4);
+        uint64_t* values = malloc(((uint64_t)count * 3 + 2) * 8);
+        valid = valid && sources != 0 && destinations != 0 && values != 0;
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            destinations[i] = i;
+        }
+        for (uint32_t i = count; valid && i > 1; i -= 1)
+        {
+            const uint32_t other = tier1_allocation_test_random(&seed) % i;
+            const uint32_t swap = destinations[i - 1];
+            destinations[i - 1] = destinations[other];
+            destinations[other] = swap;
+        }
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            const uint32_t kind = tier1_allocation_test_random(&seed) % 8;
+            sources[i] = kind == 0 ? destinations[i] : kind == 1 ? count + tier1_allocation_test_random(&seed) % (count * 2) :
+                destinations[tier1_allocation_test_random(&seed) % count];
+        }
+        const Tier1ParallelMoves input = {
+            .sources = sources,
+            .destinations = destinations,
+            .count = count,
+            .scratch = count * 3 + 1,
+        };
+        const uint64_t saved = arena->length;
+        Tier1ResolvedMoves output = { 0 };
+        valid = valid && tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && output.count <= (uint64_t)count * 2;
+        for (uint64_t i = 0; valid && i < (uint64_t)count * 3 + 2; i += 1)
+        {
+            values[i] = UINT64_C(0x9e3779b97f4a7c15) * (i + 1);
+        }
+        for (uint32_t i = 0; valid && i < output.count; i += 1)
+        {
+            valid = output.sources[i] <= count * 3 + 1 && output.destinations[i] <= count * 3 + 1;
+            values[valid ? output.destinations[i] : 0] = values[valid ? output.sources[i] : 0];
+        }
+        for (uint32_t i = 0; valid && i < count; i += 1)
+        {
+            valid = values[destinations[i]] == UINT64_C(0x9e3779b97f4a7c15) * ((uint64_t)sources[i] + 1);
+        }
+        arena_pop_to(arena, saved);
+        free(values);
+        free(destinations);
+        free(sources);
+    }
+    tier1_allocation_test_expect(tally, valid, "large random sets (5,000 and 300,000 moves) run as their snapshot");
+}
+
 // A duplicate destination is refused wherever the pair falls: with the last move in every lane of the register form
 // (its two halves, up to 32 moves) and of the wide form, and as the largest destination, the wide form's last sorted
 // pair.
@@ -392,6 +453,7 @@ static void tier1_allocation_test_move_scaling(Tier1AllocationTestTally* tally)
         tier1_move_test_failures(tally);
         tier1_move_test_duplicates(tally, &arena);
         tier1_move_test_random(tally, &arena);
+        tier1_move_test_large(tally, &arena);
         tier1_move_test_guarded(tally, &arena);
     }
     arena_release(&arena);

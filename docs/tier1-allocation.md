@@ -388,18 +388,10 @@ and 13.309–13.314 microseconds with dispatch. Median retired instructions fell
 from 3,842,936,080 to 420,805. Across 32–1024 moves, doubling N increased the
 original chain's instruction work by 7.39–7.96 times, and dispatch's by
 2.13–2.15 times. Reversed chains, independent moves, cycles and fan-out were
-also measured at every requested size and retain the indexed path's bounded
-work. These are resolver measurements, separate from whole-compiler throughput.
-
-At 1024 moves the indexed call peaks at 44 KiB of arena storage versus 21 KiB
-for the scan; both retain 16 KiB. The small cutoff preserves the current
-caller's original algorithm and smaller arena budget. Its tuning remains an
-opportunity: forced indexing takes 43.811–44.878 ns on the six-move synthetic
-chain, while dispatch takes 106.910–117.510 ns; the original scan wins on the
-one- and two-move chains. The actual caller's shuffle distribution remains
-unmeasured, so these data establish neither an optimal cutoff nor a corpus
-speedup. The native/Clang pipeline, allocation, liveness, selection, call-graph
-and resolver ASan/UBSan qualification all passed on the locked host.
+also measured at every requested size. These are resolver measurements,
+separate from whole-compiler throughput; they were the scan and the indexed path
+that #3450 replaced with the two vector forms above, whose own gate is in their
+paragraph.
 
 The [pinned report, harnesses, raw counters/timings, assembly and identities](https://github.com/buster14a/buster-performance/tree/24e978f162396700cfc1848a4d77804e2e7f065e/docs/measurements/tier1-moves-608-2026-10-27)
 record the shapes, complete process ranges, memory costs and validation scope.
@@ -2685,11 +2677,12 @@ victim's register to `UINT8_MAX` and a reload records the new one.
 
 The move-specific fixtures (`tier1_moves_test.c`, #608) exercise the chain,
 reversed chain, independent moves, long and disjoint cycles, fan-out and
-identities at 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 64, 128, 256, 512 and
+identities at 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 128, 256, 512 and
 1024 moves, with sparse ids including UINT32_MAX. A 2^20-move chain checks the
-full accepted limit. Snapshot execution checks meaning, the independent scan
-checks exact ordering on small sets, and the scalar/vector indexed paths agree
-exactly. Read-only guarded columns cover every tail through 33 elements; a
+full accepted limit, and random sets of 5,000 and 300,000 moves (many ready at
+once, cycles, fan-out) the wide form's bitset levels and cycle cursor.
+Snapshot execution checks meaning, and every order up to 1,024 moves is
+`tier1_move_test_definition`'s exactly. Read-only guarded columns cover every tail through 33 elements; a
 byte-by-byte capacity sweep checks rollback, prior arena contents and retained
 output length. Scratch collisions, duplicate destinations, excessive counts
 and absent columns fail transactionally.
