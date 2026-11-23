@@ -92,39 +92,35 @@
 // as GNU ld and lld do, and the call with it. A member's absolute symbol (SHN_ABS) defines its name as any definition
 // does.
 //
-// Two paths, which make the same link (bind_test.c compares them column by column):
-//   - BIND_PATH_VECTOR: the symbols to match tested eight at a time against a filter of the runtime's names (their
-//     hashes and the filter's words gathered), and those to bind selected eight at a time by a compress over the
-//     symbol columns; each object joined as a block of columns: copies, with the ids moved eight or sixteen at a
-//     time, the symbols that join new compressed into place, and the targets of its fixups moved by scalar loads in a
-//     pass of their own.
-//     For a static runtime, the closure in frontier rounds over a bitset of the members: each round's references 16
-//     at a time, the members they load compressed onto a list and marked a byte each after the round, and the next
-//     round's members 64 at a time from the marks.
-//     An object with a COMDAT group to discard joins as the exact path joins it.
-//     With -l libraries whose closure follows a library's reference to another's name, the definitions that satisfy
-//     it found 16 symbols at a time against a filter of the names (bind_library_satisfied_vector).
-//   - BIND_PATH_EXACT: the symbols tested one at a time and each looked up in the index, without the filter, and the
-//     objects joined one record at a time through link.c's checked adds; for a static runtime, the closure from a
-//     queue of the members, each reference tested against the link's symbols and the members loaded so far; and the
-//     definitions that satisfy a library's reference, each symbol tested and looked up alone. It is the vector path's
-//     twin and oracle.
-// Both look names up in the runtime's index (runtime_find_global_name), which bind_test.c checks against a scan.
+// The symbols to match are tested 16 at a time against a filter of the runtime's names (their hashes and the filter's
+// words gathered), and those to bind selected 64 at a time from their columns; each object joins as a block of
+// columns: copies, with the ids moved eight or sixteen at a time, the symbols that join new compressed into place, and
+// the targets of its fixups moved by scalar loads in a pass of their own. An object with a COMDAT group to discard
+// joins one record at a time through link.c's checked adds instead (bind_join_records).
+// For a static runtime, the closure in frontier rounds over a bitset of the members: each round's references 16 at a
+// time, the members they load compressed onto a list and marked a byte each after the round, and the next round's
+// members 64 at a time from the marks; past BUSTER_BIND_BLOCKED names that the program and a member both define, from
+// a queue of the members instead (bind_closure_queue).
+// With -l libraries whose closure follows a library's reference to another's name, the definitions that satisfy it are
+// found 16 symbols at a time against a filter of the names (bind_library_satisfied_vector).
+// An exact twin of each, a symbol or record at a time, was the vector path's oracle until #2924 deleted it; bind_test.c
+// checks the links against their definition and the system's linkers.
+// Names are looked up in the runtime's index (runtime_find_global_name), which bind_test.c checks against a scan.
 //
 // main.c includes this file after runtime.c. bind_begin, bind_begin_borrowed and bind_end take BUSTER_LINKER_ENTRY rather than static:
 // main.c's units compile them in one unit alone (link.c). Layout, in this order:
-//   - API: BindError, BindPath, BindOverride, Bind and the entry points' prototypes.
-//   - Matching: bind_lane_mask, bind_visibility_rank, bind_fail, bind_name_symbol, bind_take_name, bind_match_vector,
-//     bind_match_exact and bind_match.
+//   - API: BindError, BindOverride, Bind and the entry points' prototypes.
+//   - Matching: bind_lane_mask, bind_visibility_rank, bind_fail, bind_name_symbol, bind_take_name, bind_match_filter
+//     and bind_match.
 //   - Joining an object: bind_visibility, bind_install, bind_merge, bind_piece_fits, bind_join_block, bind_join_records,
 //     bind_discards and bind_join.
-//   - Binding: bind_relaxed_name, bind_referring_member, bind_resolve_symbol, bind_resolve_vector, bind_resolve_exact,
-//     bind_resolve, bind_members, bind_keep_imports, bind_keep_as_needed, bind_find_exports, bind_exported_lanes,
+//   - Binding: bind_relaxed_name, bind_referring_member, bind_resolve_symbol, bind_resolve,
+//     bind_members, bind_keep_imports, bind_keep_as_needed, bind_find_exports, bind_exported_lanes,
 //     bind_shared_exports, BindLibraryEdges, bind_library_edges, bind_library_satisfy, bind_library_satisfied_vector,
-//     bind_library_satisfied_exact, bind_library_satisfied, bind_library_versions, bind_needed_libraries,
+//     bind_library_satisfied, bind_library_versions, bind_needed_libraries,
 //     bind_keep_libraries and bind_library_exports.
-//   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_vector,
-//     bind_closure_exact and bind_static_members.
+//   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_queue,
+//     bind_closure and bind_static_members.
 //   - Entry points: bind_capacity, bind_capacity_piece, bind_capacity_needed, bind_start, bind_begin,
 //     bind_begin_borrowed and bind_end.
 
@@ -171,12 +167,6 @@ typedef enum BindError
     BIND_ERROR_MEMBER_UNDEFINED,
 } BindError;
 
-typedef enum BindPath
-{
-    BIND_PATH_VECTOR,
-    BIND_PATH_EXACT,
-} BindPath;
-
 // A definition of the runtime's that takes the program's definition of a name over: the name's entry among the
 // runtime's global names, the runtime's symbol, and the link's atom of its definition (0 for an absolute one).
 typedef struct BindOverride BindOverride;
@@ -191,13 +181,11 @@ typedef struct Bind Bind;
 struct Bind
 {
     const Runtime* runtime;
-    BindPath path;
     // Published by bind_end after as-needed pruning, so the writer needn't receive an unused library's catalog.
-    // Fits the padding after path; the other members' offsets and Bind's size stay the same.
     bool gcc_s_needed;
     // Whether the runtime's atoms' bytes are borrowed, the link's atoms pointing at the runtime's own (a loaded runtime's
     // are in its snapshot's mapping) rather than at copies in `bytes` (bind_begin_borrowed): the link must then be
-    // written without patching an atom in place (ExecutableOptions.stage). Fits the same padding.
+    // written without patching an atom in place (ExecutableOptions.stage).
     bool borrow;
     // Where the runtime's atoms' bytes are copied, unless `borrow`.
     Arena* bytes;
@@ -226,8 +214,8 @@ struct Bind
     // The COMDAT signatures of the groups that have joined, a bit each: a later group of one is discarded.
     uint64_t* signatures;
     // A static runtime's closure: the members of a round, a bit each, the members its references load, compressed, and
-    // those marked a byte each in 64-byte rows that the round leaves clear (the vector path's); and a queue of the
-    // members (the exact path's).
+    // those marked a byte each in 64-byte rows that the round leaves clear; and a queue of the members, for a closure
+    // past what the rounds take (bind_closure_queue).
     // Dynamic binding reuses the frontier as a summary: one bit per 64-member word with new requests.
     uint64_t* frontier;
     uint32_t* loads;
@@ -299,19 +287,18 @@ static __attribute__((unused)) LinkCapacity bind_capacity(const Runtime* runtime
 // its join fails as damaged (BIND_ERROR_SNAPSHOT) and the caller opens the runtime again.
 static __attribute__((unused)) LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* names, uint32_t count, Arena* scratch, uint64_t* name_bytes,
                                                                  uint64_t* atom_bytes);
-// Begins binding `link` against `runtime` by `path`: matches the link's global symbols against the runtime's names and
+// Begins binding `link` against `runtime`: matches the link's global symbols against the runtime's names and
 // appends Scrt1.o, crti.o and crtbeginS.o (crt1.o, crti.o and crtbeginT.o for a static runtime), numbering the
 // runtime's units from unit_base and copying atoms' bytes into `bytes`. Bind's arrays come from `arena`. False, with
 // bind->error, if it fails.
-BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena);
+BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, Arena* bytes, uint32_t unit_base, Arena* arena);
 // bind_begin, but a loaded runtime's atoms' bytes, its own and those of every member bind_end joins, are borrowed from
 // its snapshot's mapping rather than copied (Bind.borrow; an imported runtime's are copied still): the link's atoms
 // point into the mapping, which must outlive the link, and the executable must be written with the mapping as
 // ExecutableOptions.borrowed, so that patching never writes it. For a compile that links once against the snapshot it
 // just mapped: the copies were the most of a static hello world's binding in a fresh process, a fresh page faulted in
 // for every 4 KB of the members' bytes (#2546). `bytes` takes no runtime atom then.
-BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_begin_borrowed(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base,
-                                                                     Arena* arena);
+BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_begin_borrowed(Bind* bind, Link* link, const Runtime* runtime, Arena* bytes, uint32_t unit_base, Arena* arena);
 // Binds every name of the link, appending the archives' members it needs (libgcc.a's and libc_nonshared.a's, or a
 // static runtime's), then crtendS.o (crtend.o) and crtn.o, and lists the imports and exports. False, with bind->error
 // and bind->name, if it fails; the link is then unfit to link.
@@ -385,7 +372,7 @@ static __mmask8 bind_match_filter(const RuntimeNames* names, const Link* link, _
     return _mm512_mask_cmpeq_epi64_mask(kept, _mm512_and_si512(word, bits), bits);
 }
 
-static void bind_match_vector(Bind* bind, const Link* link, SymbolId first, SymbolId end)
+static void bind_match(Bind* bind, const Link* link, SymbolId first, SymbolId end)
 {
     const LinkSymbols* symbols = &link->symbols;
     const RuntimeNames* names = &bind->runtime->global_names;
@@ -404,30 +391,6 @@ static void bind_match_vector(Bind* bind, const Link* link, SymbolId first, Symb
             bind_take_name(bind, link, batch + (SymbolId)__builtin_ctz(maybe));
             maybe &= maybe - 1;
         }
-    }
-}
-
-static void bind_match_exact(Bind* bind, const Link* link, SymbolId first, SymbolId end)
-{
-    const LinkSymbols* symbols = &link->symbols;
-    for (SymbolId symbol = first; symbol < end; symbol += 1)
-    {
-        if ((symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL && symbols->name[symbol] != 0)
-        {
-            bind_take_name(bind, link, symbol);
-        }
-    }
-}
-
-static void bind_match(Bind* bind, const Link* link, SymbolId first, SymbolId end)
-{
-    if (bind->path == BIND_PATH_VECTOR)
-    {
-        bind_match_vector(bind, link, first, end);
-    }
-    else
-    {
-        bind_match_exact(bind, link, first, end);
     }
 }
 
@@ -583,7 +546,7 @@ static void bind_clear(void* to, uint64_t bytes)
     }
 }
 
-// The vector path's join: each table's columns copied as a block (see the orientation comment).
+// An object's join: each table's columns copied as a block (see the orientation comment).
 static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
 {
     const Runtime* runtime = bind->runtime;
@@ -756,7 +719,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     fixups->wide_count += wide_count;
 }
 
-// The exact path's join: one record at a time, through link.c's adds. `discarded`, if not 0, marks the piece's atoms
+// The join of an object with a COMDAT group to discard: one record at a time, through link.c's adds. `discarded` marks the piece's atoms
 // (a byte per atom, by its index in the piece) in COMDAT groups that don't join: they join with no atom, fixups or
 // priorities, their symbols' definitions join as references, and their local symbols don't join, so that a fixup to
 // one from an atom that joins is an error.
@@ -892,7 +855,7 @@ static uint8_t* bind_discards(Bind* bind, uint32_t piece, Arena* arena)
 
 // Joins piece `piece` of the runtime (a crt object, or RUNTIME_OBJECTS + m for member m) to the link, if it has room,
 // once a loaded runtime's piece is found as it was written (runtime_piece_current): binding reads none of a piece's
-// records before. A piece with a COMDAT group to discard, which few have, joins one record at a time on either path.
+// records before. A piece with a COMDAT group to discard, which few have, joins one record at a time.
 static bool bind_join(Bind* bind, Link* link, uint32_t piece)
 {
     const bool current = runtime_piece_current(bind->runtime, piece);
@@ -911,7 +874,7 @@ static bool bind_join(Bind* bind, Link* link, uint32_t piece)
     {
         // bind_discards had no room.
     }
-    else if (bind->path == BIND_PATH_VECTOR && discarded == 0)
+    else if (discarded == 0)
     {
         bind_join_block(bind, link, piece);
     }
@@ -1130,7 +1093,7 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, BindMem
 // linker's or absolute), 64 at a time: their sources compared as bytes in one vector, their atoms and names in four
 // parts of 16, and the selected ones bound in symbol order from the mask's set bits. Binding a symbol changes only its
 // own columns, so the mask of a block taken before binding its first symbol stays the block's.
-static void bind_resolve_vector(Bind* bind, Link* link, SymbolId first, SymbolId end, BindMemberWords* members)
+static void bind_resolve(Bind* bind, Link* link, SymbolId first, SymbolId end, BindMemberWords* members)
 {
     const LinkSymbols* symbols = &link->symbols;
     for (SymbolId block = first; block < end; block += 64)
@@ -1156,32 +1119,6 @@ static void bind_resolve_vector(Bind* bind, Link* link, SymbolId first, SymbolId
             bind_resolve_symbol(bind, link, block + (SymbolId)__builtin_ctzll(undefined), members);
             undefined &= undefined - 1;
         }
-    }
-}
-
-static void bind_resolve_exact(Bind* bind, Link* link, SymbolId first, SymbolId end, BindMemberWords* members)
-{
-    const LinkSymbols* symbols = &link->symbols;
-    for (SymbolId symbol = first; symbol < end; symbol += 1)
-    {
-        const uint8_t source = symbols->source[symbol];
-        if (symbols->atom[symbol] == 0 && symbols->name[symbol] != 0 && source != BUSTER_LINK_SOURCE_PROGRAM && source != BUSTER_LINK_SOURCE_LINKER &&
-            source != BUSTER_LINK_SOURCE_ABSOLUTE)
-        {
-            bind_resolve_symbol(bind, link, symbol, members);
-        }
-    }
-}
-
-static void bind_resolve(Bind* bind, Link* link, SymbolId first, SymbolId end, BindMemberWords* members)
-{
-    if (bind->path == BIND_PATH_VECTOR)
-    {
-        bind_resolve_vector(bind, link, first, end, members);
-    }
-    else
-    {
-        bind_resolve_exact(bind, link, first, end, members);
     }
 }
 
@@ -1315,8 +1252,8 @@ static __mmask16 bind_exported_lanes(__m512i flags, __m512i atoms, __m512i sourc
 // A shared library's exports (Bind.exports): every definition of the link's that is global or weak, with default or
 // protected visibility, in an atom or absolute, as GNU ld and lld export them with -shared: the program's, since the
 // crt objects and libc_nonshared.a's members define only hidden names, and so do libgcc.a's but its decimal
-// floating-point and split-stack members, whose definitions GNU ld and lld export too. In symbol order: by the vector
-// path 16 symbols at a time, compressed from their flags, atoms and sources, by the exact one a symbol at a time.
+// floating-point and split-stack members, whose definitions GNU ld and lld export too. In symbol order, 16 symbols at
+// a time, compressed from their flags, atoms and sources.
 static void bind_shared_exports(Bind* bind, const Link* link)
 {
     // The columns and the count in locals: with the build's -fno-strict-aliasing, each store into the exports would make
@@ -1327,37 +1264,20 @@ static void bind_shared_exports(Bind* bind, const Link* link)
     const uint32_t count = link->symbols.count;
     SymbolId* exports = bind->exports;
     uint32_t export_count = bind->export_count;
-    if (bind->path == BIND_PATH_VECTOR)
+    const __m512i lane_index = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    for (SymbolId batch = 1; batch < count; batch += 16)
     {
-        const __m512i lane_index = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-        for (SymbolId batch = 1; batch < count; batch += 16)
-        {
-            const uint32_t n = count - batch < 16 ? count - batch : 16;
-            const __mmask16 loaded = (__mmask16)((1u << n) - 1);
-            const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, flags_column + batch));
-            const __m512i atoms = _mm512_maskz_loadu_epi32(loaded, atom_column + batch);
-            const __m512i sources = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, source_column + batch));
-            const __mmask16 exported = bind_exported_lanes(flags, atoms, sources) & loaded;
-            // Compressed in a register and stored with a mask of its count.
-            const uint32_t taken = (uint32_t)__builtin_popcount(exported);
-            const __m512i ids = _mm512_maskz_compress_epi32(exported, _mm512_add_epi32(lane_index, _mm512_set1_epi32((int)batch)));
-            _mm512_mask_storeu_epi32(exports + export_count, (__mmask16)((1u << taken) - 1), ids);
-            export_count += taken;
-        }
-    }
-    else
-    {
-        for (SymbolId symbol = 1; symbol < count; symbol += 1)
-        {
-            const uint8_t flags = flags_column[symbol];
-            const bool global = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
-            const bool defined = atom_column[symbol] != 0 || source_column[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
-            if (global && bind_visibility_rank(flags) <= 1 && defined)
-            {
-                exports[export_count] = symbol;
-                export_count += 1;
-            }
-        }
+        const uint32_t n = count - batch < 16 ? count - batch : 16;
+        const __mmask16 loaded = (__mmask16)((1u << n) - 1);
+        const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, flags_column + batch));
+        const __m512i atoms = _mm512_maskz_loadu_epi32(loaded, atom_column + batch);
+        const __m512i sources = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, source_column + batch));
+        const __mmask16 exported = bind_exported_lanes(flags, atoms, sources) & loaded;
+        // Compressed in a register and stored with a mask of its count.
+        const uint32_t taken = (uint32_t)__builtin_popcount(exported);
+        const __m512i ids = _mm512_maskz_compress_epi32(exported, _mm512_add_epi32(lane_index, _mm512_set1_epi32((int)batch)));
+        _mm512_mask_storeu_epi32(exports + export_count, (__mmask16)((1u << taken) - 1), ids);
+        export_count += taken;
     }
     // The bounds the linker defines (bind_resolve_symbol) are a shared library's exports too, as GNU ld's and lld's
     // __start_ and __stop_ are in .dynsym; the pass above's `defined` doesn't take a linker-defined symbol (it has no
@@ -1386,7 +1306,7 @@ static void bind_shared_exports(Bind* bind, const Link* link)
 // (BUSTER_BIND_LOADER, BUSTER_BIND_GCC_S), which GNU ld then keeps for the library's sake (its --as-needed counts a
 // needed library's references), where lld drops it and the program fails to load. By edge: the referring library, its reference, the library it would
 // need, the name's hash, and whether the link's own definition of the name satisfies it, a byte; with the edges by
-// their names' hashes (import_index_build) and a filter of them for the vector path, as RuntimeNames' filter: two bits
+// their names' hashes (import_index_build) and a filter of them for the scan, as RuntimeNames' filter: two bits
 // a name in 2^filter_bits words, chosen by the hash's top bits.
 #define BUSTER_BIND_NO_LIBRARY UINT32_MAX
 #define BUSTER_BIND_LOADER (UINT32_MAX - 1)
@@ -1503,10 +1423,10 @@ static void bind_library_satisfy(const RuntimeLibraries* libraries, const Link* 
     }
 }
 
-// The vector path's scan: 16 symbols at a time, the definitions the executable exports among them (bind_exported_lanes)
+// The scan: 16 symbols at a time, the definitions the executable exports among them (bind_exported_lanes)
 // with a name, their names' hashes gathered eight at a time, and their words of the edges' filter gathered by the
 // hashes' top bits. Only a symbol whose two bits are both set, of a name an edge has or at most about 1.6% of the
-// others, goes on to the index (bind_library_satisfy), as bind_match_vector takes the runtime's names.
+// others, goes on to the index (bind_library_satisfy), as bind_match takes the runtime's names.
 static void bind_library_satisfied_vector(const RuntimeLibraries* libraries, const Link* link, BindLibraryEdges* edges)
 {
     const LinkSymbols* symbols = &link->symbols;
@@ -1540,31 +1460,14 @@ static void bind_library_satisfied_vector(const RuntimeLibraries* libraries, con
     }
 }
 
-// The exact path's scan, its twin: each symbol's flags, atom, source and name tested alone, and each definition the
-// executable exports looked up in the index, without the filter.
-static void bind_library_satisfied_exact(const RuntimeLibraries* libraries, const Link* link, BindLibraryEdges* edges)
-{
-    const LinkSymbols* symbols = &link->symbols;
-    for (SymbolId symbol = 1; symbol < symbols->count; symbol += 1)
-    {
-        const uint8_t flags = symbols->flags[symbol];
-        const bool global = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
-        const bool defined = symbols->atom[symbol] != 0 || symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
-        if (global && bind_visibility_rank(flags) <= 1 && defined && symbols->name[symbol] != 0)
-        {
-            bind_library_satisfy(libraries, link, symbol, edges);
-        }
-    }
-}
-
 // Marks the edges that the link's own definitions satisfy (#398's review): a definition the executable exports (global
 // or weak, with default or protected visibility, in an atom or absolute: bind_exported_lanes) of the reference's name,
 // which the loader binds the library's reference to (bind_library_exports exports it), so that GNU ld and lld need no
 // library for it, nor find it undefined. A hidden or internal one satisfies none, since the loader can't see it: GNU
 // ld refuses such a link, lld refuses it without the library that exports the name and drops that library from it
 // otherwise, so that the program fails to load; binding keeps the library, whose definition the loader then binds the
-// reference to, or without one refuses the link (BIND_ERROR_LIBRARY_UNDEFINED). By the vector path or the exact one
-// over every symbol of the link, after the index and the filter of the edges' names are built in `arena`. False if
+// reference to, or without one refuses the link (BIND_ERROR_LIBRARY_UNDEFINED). By the scan
+// (bind_library_satisfied_vector) over every symbol of the link, after the index and the filter of the edges' names are built in `arena`. False if
 // they don't fit.
 static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdges* edges, Arena* arena)
 {
@@ -1585,14 +1488,7 @@ static bool bind_library_satisfied(Bind* bind, const Link* link, BindLibraryEdge
             const uint64_t hash = edges->hash[e];
             edges->filter[hash >> (64 - filter_bits)] |= (UINT64_C(1) << (hash & 63)) | (UINT64_C(1) << ((hash >> 6) & 63));
         }
-        if (bind->path == BIND_PATH_VECTOR)
-        {
-            bind_library_satisfied_vector(bind->libraries, link, edges);
-        }
-        else
-        {
-            bind_library_satisfied_exact(bind->libraries, link, edges);
-        }
+        bind_library_satisfied_vector(bind->libraries, link, edges);
     }
     return fits;
 }
@@ -1804,8 +1700,8 @@ static void bind_keep_libraries(Bind* bind, Link* link)
 // The link's definitions of names that a library the link needs (Bind.libraries) defines too or refers to, global or
 // weak with default or protected visibility, which the executable exports, as GNU ld and lld export a definition that a
 // shared library on the line defines or refers to: after binding's other exports, each once, in symbol order. The
-// candidates by the vector path 16 symbols at a time (bind_exported_lanes), by the exact one a symbol at a time; each
-// then looked up in the libraries' exports and references, a scalar pass both share, run only with -l libraries.
+// candidates 16 symbols at a time (bind_exported_lanes), each then looked up in the libraries' exports and references,
+// a scalar pass run only with -l libraries.
 static void bind_library_exports(Bind* bind, const Link* link)
 {
     const LinkSymbols* symbols = &link->symbols;
@@ -1817,27 +1713,13 @@ static void bind_library_exports(Bind* bind, const Link* link)
         const uint32_t n = symbols->count - batch < 16 ? symbols->count - batch : 16;
         SymbolId candidates[16];
         uint32_t taken = 0;
-        if (bind->path == BIND_PATH_VECTOR)
-        {
-            const __mmask16 loaded = (__mmask16)((1u << n) - 1);
-            const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, symbols->flags + batch));
-            const __m512i atoms = _mm512_maskz_loadu_epi32(loaded, symbols->atom + batch);
-            const __m512i sources = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, symbols->source + batch));
-            const __mmask16 exported = bind_exported_lanes(flags, atoms, sources) & loaded;
-            taken = (uint32_t)__builtin_popcount(exported);
-            _mm512_mask_storeu_epi32(candidates, (__mmask16)((1u << taken) - 1), _mm512_maskz_compress_epi32(exported, _mm512_add_epi32(lane_index, _mm512_set1_epi32((int)batch))));
-        }
-        else
-        {
-            for (SymbolId symbol = batch; symbol < batch + n; symbol += 1)
-            {
-                const uint8_t flags = symbols->flags[symbol];
-                const bool global = (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL;
-                const bool defined = symbols->atom[symbol] != 0 || symbols->source[symbol] == BUSTER_LINK_SOURCE_ABSOLUTE;
-                candidates[taken] = symbol;
-                taken += global && bind_visibility_rank(flags) <= 1 && defined ? 1 : 0;
-            }
-        }
+        const __mmask16 loaded = (__mmask16)((1u << n) - 1);
+        const __m512i flags = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, symbols->flags + batch));
+        const __m512i atoms = _mm512_maskz_loadu_epi32(loaded, symbols->atom + batch);
+        const __m512i sources = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(loaded, symbols->source + batch));
+        const __mmask16 exported = bind_exported_lanes(flags, atoms, sources) & loaded;
+        taken = (uint32_t)__builtin_popcount(exported);
+        _mm512_mask_storeu_epi32(candidates, (__mmask16)((1u << taken) - 1), _mm512_maskz_compress_epi32(exported, _mm512_add_epi32(lane_index, _mm512_set1_epi32((int)batch))));
         for (uint32_t c = 0; c < taken; c += 1)
         {
             const SymbolId symbol = candidates[c];
@@ -1889,7 +1771,7 @@ static bool bind_entry_defined(const Bind* bind, const Link* link, uint32_t entr
     return (symbol != 0 && bind_symbol_defined(link, symbol)) || bind->runtime->global_names.linker[entry];
 }
 
-// The exact path's step: a strong reference to the runtime's global name `entry` loads the member that defines it,
+// The queue's step: a strong reference to the runtime's global name `entry` loads the member that defines it,
 // unless the link defines it or the member is loaded already; a new one goes on the queue, whose new length it returns.
 static uint32_t bind_closure_need(Bind* bind, const Link* link, uint32_t entry, uint32_t tail)
 {
@@ -1904,9 +1786,10 @@ static uint32_t bind_closure_need(Bind* bind, const Link* link, uint32_t entry, 
     return tail + (loads ? 1 : 0);
 }
 
-// The closure's exact path (see the orientation comment): the link's strong references, among the runtime's names that
-// took a link symbol, then each loaded member's, a member at a time from the queue, one reference at a time.
-static void bind_closure_exact(Bind* bind, const Link* link)
+// The closure past what bind_closure's rounds take (more than BUSTER_BIND_BLOCKED names that the program and a member
+// both define): the link's strong references, among the runtime's names that took a link symbol, then each loaded
+// member's, a member at a time from a queue, one reference at a time.
+static void bind_closure_queue(Bind* bind, const Link* link)
 {
     const Runtime* runtime = bind->runtime;
     uint32_t tail = 0;
@@ -1927,10 +1810,10 @@ static void bind_closure_exact(Bind* bind, const Link* link)
 }
 
 // The most names that the program defines and a member defines too (so that a reference to one doesn't load the member)
-// that the vector path's closure takes; with more, the exact path's runs.
+// that the closure's rounds take; with more, bind_closure_queue runs.
 #define BUSTER_BIND_BLOCKED 16
 
-// The closure's vector path (see the orientation comment). The link's names, among the runtime's that took a link
+// The closure (see the orientation comment). The link's names, among the runtime's that took a link
 // symbol, give the first round: the members their strong references load unless the link defines them, and the names
 // the link defines that a member defines too, whose references don't load the member (a few hundred names, by scalar
 // loads, since the symbols' flags and sources are bytes). A round takes each member of the frontier, a bit each, and
@@ -1939,7 +1822,7 @@ static void bind_closure_exact(Bind* bind, const Link* link)
 // the round's list. The list is marked a byte per member after the round, when the stores that wrote it have left
 // the store queue: marked at once, each batch's loads would wait on its masked store. Then 64 members at a time, the
 // marked bytes as a mask, less the members loaded already, are the next frontier's word, and are cleared.
-static void bind_closure_vector(Bind* bind, const Link* link)
+static void bind_closure(Bind* bind, const Link* link)
 {
     const Runtime* runtime = bind->runtime;
     const RuntimeNames* names = &runtime->global_names;
@@ -2022,27 +1905,20 @@ static void bind_closure_vector(Bind* bind, const Link* link)
         }
         more = any != 0;
     }
-    // Too many of the names to compare with in registers: the exact path's closure, from the start.
+    // Too many of the names to compare with in registers: the queue's closure, from the start.
     if (overflow)
     {
         memset(bind->members_needed, 0, words * sizeof(uint64_t));
-        bind_closure_exact(bind, link);
+        bind_closure_queue(bind, link);
     }
 }
 
-// A static runtime's members: the closure by the path's way, then each needed member joined in archive order.
+// A static runtime's members: the closure, then each needed member joined in archive order.
 static void bind_static_members(Bind* bind, Link* link)
 {
     const Runtime* runtime = bind->runtime;
     const uint32_t words = (runtime->member_count + 63) / 64;
-    if (bind->path == BIND_PATH_VECTOR)
-    {
-        bind_closure_vector(bind, link);
-    }
-    else
-    {
-        bind_closure_exact(bind, link);
-    }
+    bind_closure(bind, link);
     for (uint32_t w = 0; bind->error == BIND_ERROR_NONE && w < words; w += 1)
     {
         for (uint64_t pending = bind->members_needed[w]; pending != 0 && bind->error == BIND_ERROR_NONE; pending &= pending - 1)
@@ -2141,13 +2017,12 @@ static LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* 
 }
 
 // bind_begin and bind_begin_borrowed.
-static bool bind_start(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena, bool borrow)
+static bool bind_start(Bind* bind, Link* link, const Runtime* runtime, Arena* bytes, uint32_t unit_base, Arena* arena, bool borrow)
 {
     const uint32_t words = (runtime->member_count + 63) / 64;
     const uint32_t signature_words = (runtime->group_signatures + 63) / 64;
     *bind = (Bind){
         .runtime = runtime,
-        .path = path,
         .bytes = bytes,
         .borrow = borrow && runtime->snapshot != 0,
         .unit_base = unit_base,
@@ -2214,14 +2089,14 @@ static bool bind_start(Bind* bind, Link* link, const Runtime* runtime, BindPath 
     return bind->error == BIND_ERROR_NONE;
 }
 
-BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
+BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, Arena* bytes, uint32_t unit_base, Arena* arena)
 {
-    return bind_start(bind, link, runtime, path, bytes, unit_base, arena, false);
+    return bind_start(bind, link, runtime, bytes, unit_base, arena, false);
 }
 
-BUSTER_LINKER_ENTRY bool bind_begin_borrowed(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
+BUSTER_LINKER_ENTRY bool bind_begin_borrowed(Bind* bind, Link* link, const Runtime* runtime, Arena* bytes, uint32_t unit_base, Arena* arena)
 {
-    return bind_start(bind, link, runtime, path, bytes, unit_base, arena, true);
+    return bind_start(bind, link, runtime, bytes, unit_base, arena, true);
 }
 
 BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)

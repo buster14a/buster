@@ -196,7 +196,7 @@ static bool bind_test_dirty_arena(Arena* arena, uint64_t bytes)
 // Generates the program with room for the runtime, joins the runtime's first objects after its symbols, adds its atoms,
 // and binds the rest, numbering the runtime's units after the program's; with `dirty`, over binding's arena dirtied that
 // far (bind_test_dirty_arena).
-static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path, uint64_t dirty)
+static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, uint64_t dirty)
 {
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
@@ -205,7 +205,7 @@ static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runt
     test->bind = (Bind){ 0 };
     bool result = link_program_generate_begin(&test->program, options, extra, name_bytes, atom_bytes) && test->arena.base != 0;
     result = result && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
-    result = result && bind_begin(&test->bind, &test->program.link, runtime, path, &test->program.bytes, options.units, &test->arena);
+    result = result && bind_begin(&test->bind, &test->program.link, runtime, &test->program.bytes, options.units, &test->arena);
     result = result && link_program_generate_atoms(&test->program);
     result = result && bind_end(&test->bind, &test->program.link);
     result = result && link_program_generate_end(&test->program);
@@ -214,9 +214,9 @@ static bool bind_test_program_dirtied(BindTestProgram* test, const Runtime* runt
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
-static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path)
+static bool bind_test_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options)
 {
-    return bind_test_program_dirtied(test, runtime, options, path, 0);
+    return bind_test_program_dirtied(test, runtime, options, 0);
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
@@ -656,10 +656,9 @@ static void bind_test_structure(BindTestTally* tally, const BindTestProgram* tes
 static void bind_test_dirty(BindTestTally* tally, const BindTestProgram* clean, const Runtime* runtime, LinkProgramOptions options)
 {
     BindTestProgram dirty;
-    const bool bound = bind_test_program_dirtied(&dirty, runtime, options, clean->bind.path, bind_test_dirty_bytes(clean->arena.length));
+    const bool bound = bind_test_program_dirtied(&dirty, runtime, options, bind_test_dirty_bytes(clean->arena.length));
     bind_test_expect(tally, bound == clean->bound && bind_test_same_links(&clean->program.link, &dirty.program.link) && bind_test_same_binds(&clean->bind, &dirty.bind),
-                     clean->bind.path == BIND_PATH_VECTOR ? "the vector path over a dirty arena as over a clean one" : "the exact path over a dirty arena as over a clean one",
-                     0);
+                     "the binding over a dirty arena as over a clean one", 0);
     bind_test_expect(tally, !bound || bind_test_kept_pattern(&dirty.bind, runtime), "the dirty arena's pattern in Bind.symbols", 0);
     bind_test_release(&dirty);
 }
@@ -668,27 +667,19 @@ static void bind_test_dirty(BindTestTally* tally, const BindTestProgram* clean, 
 // left in `kept` for the cross-check, released by the caller.
 static void bind_test_paths(BindTestTally* tally, const Runtime* runtime, LinkProgramOptions options, const char* name, BindTestProgram* kept, Arena* arena)
 {
-    BindTestProgram exact;
-    const bool vector_bound = bind_test_program(kept, runtime, options, BIND_PATH_VECTOR);
-    const bool exact_bound = bind_test_program(&exact, runtime, options, BIND_PATH_EXACT);
+    const bool vector_bound = bind_test_program(kept, runtime, options);
     bind_test_expect(tally, vector_bound, name, kept->bind.error);
-    bind_test_expect(tally, exact_bound, name, exact.bind.error);
-    if (!vector_bound || !exact_bound)
+    if (!vector_bound)
     {
-        printf("  %s: %s: the vector path: %s (%s), the exact path: %s (%s)\n", tally->check, name, bind_test_errors[kept->bind.error],
-               kept->program.problem != 0 ? kept->program.problem : "", bind_test_errors[exact.bind.error], exact.program.problem != 0 ? exact.program.problem : "");
+        printf("  %s: %s: %s (%s)\n", tally->check, name, bind_test_errors[kept->bind.error], kept->program.problem != 0 ? kept->program.problem : "");
     }
-    bind_test_expect(tally, bind_test_same_links(&kept->program.link, &exact.program.link), "the paths' links the same", 0);
-    bind_test_expect(tally, bind_test_same_binds(&kept->bind, &exact.bind), "the paths' imports, exports and members the same", 0);
     bind_test_dirty(tally, kept, runtime, options);
-    bind_test_dirty(tally, &exact, runtime, options);
     if (vector_bound)
     {
         bind_test_structure(tally, kept, runtime, arena);
         printf("  %s: %u atoms, %u symbols, %u fixups, %u imports, %u exports\n", name, kept->program.link.atoms.count - 1, kept->program.link.symbols.count - 1,
                kept->program.link.fixups.count - 1, kept->bind.import_count, kept->bind.export_count);
     }
-    bind_test_release(&exact);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -970,7 +961,7 @@ struct BindTestRuleLink
     bool ended;
 };
 
-static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, BindTestRule which, BindPath path)
+static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, BindTestRule which)
 {
     const uint8_t global_object = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_OBJECT;
     const uint8_t global_reference = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE;
@@ -1107,7 +1098,7 @@ static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, 
     {
         symbols[0] = bind_test_symbol(test, "__start_buster_absent", global_reference, none);
     }
-    rule->begun = built && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena);
+    rule->begun = built && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena);
     // The program's atoms, and the symbols it adds after bind_begin.
     rule->begun = rule->begun && bind_test_define(test, rule->main);
     if (which == BIND_TEST_RULE_DATA_START || which == BIND_TEST_RULE_EXPORTS || which == BIND_TEST_RULE_LOCAL_INIT || which == BIND_TEST_RULE_WEAK_DATA_START ||
@@ -1397,7 +1388,7 @@ static bool bind_test_steps(const Runtime* runtime)
     BindTestLink* test = &rule.test;
     bool result = bind_test_link_begin(test, runtime, bind_test_room(runtime));
     rule.main = result ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
-    result = rule.main != 0 && bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena) && bind_test_define(test, rule.main);
+    result = rule.main != 0 && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena) && bind_test_define(test, rule.main);
     Bind* bind = &test->bind;
     Link* link = &test->link;
     const SymbolId tmc = result ? bind_test_global(link, "__TMC_END__") : 0;
@@ -1442,9 +1433,7 @@ static bool bind_test_rules(const Runtime* runtime)
         const BindTestRule r = against ? (i == BIND_TEST_RULES ? BIND_TEST_RULE_MORESTACK : BIND_TEST_RULE_SPLITSTACK) : (BindTestRule)i;
         const Runtime* rule_runtime = against ? &without : runtime;
         BindTestRuleLink vector;
-        BindTestRuleLink exact;
-        bind_test_rule_link(&vector, rule_runtime, r, BIND_PATH_VECTOR);
-        bind_test_rule_link(&exact, rule_runtime, r, BIND_PATH_EXACT);
+        bind_test_rule_link(&vector, rule_runtime, r);
         const bool holds = bind_test_rule_holds(&vector, rule_runtime, r);
         if (!holds && tally.failures < BUSTER_BIND_TEST_REPORTED)
         {
@@ -1452,11 +1441,7 @@ static bool bind_test_rules(const Runtime* runtime)
                    bind_test_errors[vector.test.bind.error]);
         }
         bind_test_expect(&tally, holds, bind_test_rule_names[r], i);
-        bind_test_expect(&tally, vector.begun == exact.begun && vector.ended == exact.ended && bind_test_same_links(&vector.test.link, &exact.test.link) &&
-                                     bind_test_same_binds(&vector.test.bind, &exact.test.bind),
-                         "the paths agree", i);
         bind_test_link_end(&vector.test);
-        bind_test_link_end(&exact.test);
     }
     scratch_end(scratch);
     bind_test_expect(&tally, bind_test_strong_after_weak(), "a strong reference joining a weak one left to nothing", 0);
@@ -1524,7 +1509,7 @@ struct BindTestLibraryLink
 
 // The link: with `strong`, main's references to sin, ldexp and write and its definition of cbrt beside the weak
 // reference to cos; without, the weak reference alone.
-static void bind_test_library_link(BindTestLibraryLink* link, const Runtime* runtime, const RuntimeLibraries* libraries, bool strong, BindPath path)
+static void bind_test_library_link(BindTestLibraryLink* link, const Runtime* runtime, const RuntimeLibraries* libraries, bool strong)
 {
     *link = (BindTestLibraryLink){ 0 };
     BindTestLink* test = &link->test;
@@ -1539,7 +1524,7 @@ static void bind_test_library_link(BindTestLibraryLink* link, const Runtime* run
         link->cbrt = bind_test_symbol(test, "cbrt", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM);
     }
     result = link->cos != 0 && (!strong || (link->sin != 0 && link->ldexp != 0 && link->write != 0 && link->cbrt != 0));
-    result = result && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena) && bind_test_define(test, main) &&
+    result = result && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena) && bind_test_define(test, main) &&
              (!strong || bind_test_define(test, link->cbrt));
     test->bind.libraries = libraries;
     link->bound = result && bind_end(&test->bind, &test->link);
@@ -1712,7 +1697,7 @@ static bool bind_test_write_library(const char* directory, const BindTestLibrary
 // b_func as `dependency` has it, bound by `path` against `libraries`. Returns b_func's symbol (0 for none) in *b_func,
 // and whether the link bound.
 static bool bind_test_dependency_link(BindTestLink* test, const Runtime* runtime, const RuntimeLibraries* libraries, BindTestDependency dependency,
-                                      uint32_t calls, uint32_t fillers, BindPath path, SymbolId* b_func)
+                                      uint32_t calls, uint32_t fillers, SymbolId* b_func)
 {
     static const uint8_t flags[BIND_TEST_DEPENDENCIES] = {
         [BIND_TEST_DEPENDENCY_GLOBAL] = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION,
@@ -1752,7 +1737,7 @@ static bool bind_test_dependency_link(BindTestLink* test, const Runtime* runtime
     {
         test->link.symbols.value[*b_func] = 123;
     }
-    result = result && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena) && bind_test_define(test, main);
+    result = result && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena) && bind_test_define(test, main);
     for (uint32_t f = 0; result && f < fillers; f += 1)
     {
         result = bind_test_define(test, filler[f]);
@@ -1842,29 +1827,21 @@ static void bind_test_dependencies(BindTestTally* tally, const Runtime* runtime,
         for (uint32_t fillers = 0; imported == RUNTIME_ERROR_NONE && fillers < filler_counts; fillers += 1)
         {
             BindTestLink vector;
-            BindTestLink exact;
             SymbolId vector_b = 0;
-            SymbolId exact_b = 0;
-            const bool vector_bound = bind_test_dependency_link(&vector, runtime, &libraries, cases[c].dependency, cases[c].calls, fillers, BIND_PATH_VECTOR, &vector_b);
-            const bool exact_bound = bind_test_dependency_link(&exact, runtime, &libraries, cases[c].dependency, cases[c].calls, fillers, BIND_PATH_EXACT, &exact_b);
+            const bool vector_bound = bind_test_dependency_link(&vector, runtime, &libraries, cases[c].dependency, cases[c].calls, fillers, &vector_b);
             const Bind* bind = &vector.bind;
-            const bool same_error = vector.bind.error == exact.bind.error && vector.bind.library == exact.bind.library && vector.bind.reference == exact.bind.reference;
-            const bool agree = vector_bound == exact_bound && same_error && vector.bind.libraries_needed == exact.bind.libraries_needed &&
-                               (!vector_bound || (bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind)));
             const bool exported = vector_b != 0 && bind_test_listed(bind, vector_b, true);
             const bool imported_b = vector_b != 0 && bind_test_listed(bind, vector_b, false);
             const bool expected_import = cases[c].dependency == BIND_TEST_DEPENDENCY_REFERENCE ? imported_b : !imported_b;
             const bool outcome = refused ? !vector_bound && bind->error == BIND_ERROR_LIBRARY_UNDEFINED && bind->library == cases[c].library && bind->reference == reference
                                          : vector_bound && bind->libraries_needed == cases[c].needed && exported == cases[c].exported && expected_import;
-            if (!agree || !outcome)
+            if (!outcome)
             {
-                printf("  %s, after %u definitions: bound %d and %d, paths agree %d, error %s (library %u, reference %u), needed %#x, exported %d, imported %d\n",
-                       cases[c].name, fillers, vector_bound, exact_bound, agree, bind_test_errors[bind->error], bind->library, bind->reference, bind->libraries_needed,
-                       exported, imported_b);
+                printf("  %s, after %u definitions: bound %d, error %s (library %u, reference %u), needed %#x, exported %d, imported %d\n", cases[c].name, fillers,
+                       vector_bound, bind_test_errors[bind->error], bind->library, bind->reference, bind->libraries_needed, exported, imported_b);
             }
-            bind_test_expect(tally, agree && outcome, cases[c].name, fillers);
+            bind_test_expect(tally, outcome, cases[c].name, fillers);
             bind_test_link_end(&vector);
-            bind_test_link_end(&exact);
         }
         runtime_libraries_release(&libraries);
     }
@@ -1955,7 +1932,7 @@ static void bind_test_runtime_dependencies(BindTestTally* tally, const Runtime* 
             }
             defined[p] = result && cases[c].defines ? bind_test_symbol(test, "_Unwind_Backtrace", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
             result = result && (!cases[c].defines || defined[p] != 0);
-            result = result && bind_begin(&test->bind, &test->link, runtime, p == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, &test->bytes, 1, &test->arena) &&
+            result = result && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena) &&
                      bind_test_define(test, main) && (defined[p] == 0 || bind_test_define(test, defined[p]));
             test->bind.libraries = &libraries;
             bound[p] = result && bind_end(&test->bind, &test->link);
@@ -2000,13 +1977,8 @@ static bool bind_test_libraries(const Runtime* runtime, const char* directory)
     for (uint32_t strong = 0; imported == RUNTIME_ERROR_NONE && strong < 2; strong += 1)
     {
         BindTestLibraryLink vector;
-        BindTestLibraryLink exact;
-        bind_test_library_link(&vector, runtime, &libraries, strong != 0, BIND_PATH_VECTOR);
-        bind_test_library_link(&exact, runtime, &libraries, strong != 0, BIND_PATH_EXACT);
-        bind_test_expect(&tally, vector.bound && exact.bound, "bound", strong);
-        bind_test_expect(&tally, bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind) &&
-                                     vector.test.bind.libraries_needed == exact.test.bind.libraries_needed,
-                         "the paths agree", strong);
+        bind_test_library_link(&vector, runtime, &libraries, strong != 0);
+        bind_test_expect(&tally, vector.bound, "bound", strong);
         const Link* link = &vector.test.link;
         const Bind* bind = &vector.test.bind;
         if (strong != 0 && vector.bound)
@@ -2027,7 +1999,6 @@ static bool bind_test_libraries(const Runtime* runtime, const char* directory)
                              "a weak reference alone needs no library", 0);
         }
         bind_test_link_end(&vector.test);
-        bind_test_link_end(&exact.test);
     }
     runtime_libraries_release(&libraries);
     bind_test_library_import_cases(&tally, runtime, directory);
@@ -2074,7 +2045,7 @@ struct BindTestAtexit
 // The program's symbols, then the runtime's first objects, its code, and the rest; without `bound`, only the program,
 // for a link of its own objects by cc. program->bound also needs link_check to accept the link, as the object writer
 // does of the links the cross-check writes. With `dirty`, binding's arena is dirtied that far (bind_test_dirty_arena).
-static void bind_test_atexit_dirtied(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound, uint64_t dirty)
+static void bind_test_atexit_dirtied(BindTestAtexit* program, const Runtime* runtime, bool bound, uint64_t dirty)
 {
     BindTestLink* test = &program->test;
     bool built = bind_test_link_begin(test, runtime, bind_test_room(runtime));
@@ -2083,7 +2054,7 @@ static void bind_test_atexit_dirtied(BindTestAtexit* program, const Runtime* run
     program->atexit = built ? bind_test_symbol(test, "atexit", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE) : 0;
     built = program->main != 0 && program->handler != 0 && program->atexit != 0;
     built = built && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
-    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
+    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena));
     // main: sub rsp, 8; lea rdi, [rip + handler]; call atexit; add rsp, 8; mov eax, 3; ret.
     const X86Instruction main_code[] = {
         {
@@ -2153,9 +2124,9 @@ static void bind_test_atexit_dirtied(BindTestAtexit* program, const Runtime* run
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
-static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, BindPath path, bool bound)
+static void bind_test_atexit(BindTestAtexit* program, const Runtime* runtime, bool bound)
 {
-    bind_test_atexit_dirtied(program, runtime, path, bound, 0);
+    bind_test_atexit_dirtied(program, runtime, bound, 0);
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
@@ -2204,21 +2175,16 @@ static bool bind_test_atexit_program(const Runtime* runtime)
         .check = "atexit",
     };
     BindTestAtexit vector;
-    BindTestAtexit exact;
-    bind_test_atexit(&vector, runtime, BIND_PATH_VECTOR, true);
-    bind_test_atexit(&exact, runtime, BIND_PATH_EXACT, true);
+    bind_test_atexit(&vector, runtime, true);
     bind_test_atexit_checks(&tally, &vector, runtime);
-    bind_test_expect(&tally, exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind),
-                     "the paths agree", 0);
     // Each path again over binding's arena dirtied (bind_test_dirty), with the member that joins.
     const BindTestAtexit* cleans[] = {
         &vector,
-        &exact,
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cleans); c += 1)
     {
         BindTestAtexit dirty;
-        bind_test_atexit_dirtied(&dirty, runtime, cleans[c]->test.bind.path, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
+        bind_test_atexit_dirtied(&dirty, runtime, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
         bind_test_expect(&tally, dirty.bound == cleans[c]->bound && bind_test_same_links(&cleans[c]->test.link, &dirty.test.link) &&
                                      bind_test_same_binds(&cleans[c]->test.bind, &dirty.test.bind),
                          "the path over a dirty arena as over a clean one", c);
@@ -2226,7 +2192,6 @@ static bool bind_test_atexit_program(const Runtime* runtime)
         bind_test_link_end(&dirty.test);
     }
     bind_test_link_end(&vector.test);
-    bind_test_link_end(&exact.test);
     return bind_test_report(&tally);
 }
 #endif
@@ -2260,7 +2225,7 @@ struct BindTestLibgcc
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
 // As bind_test_atexit: the program's symbols, then the runtime's first objects, its code, and the rest; without
 // `bound`, only the program, for a link of its own objects by cc; with `dirty`, over binding's arena dirtied that far.
-static void bind_test_libgcc_dirtied(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound, uint64_t dirty)
+static void bind_test_libgcc_dirtied(BindTestLibgcc* program, const Runtime* runtime, bool bound, uint64_t dirty)
 {
     BindTestLink* test = &program->test;
     bool built = bind_test_link_begin(test, runtime, bind_test_room(runtime));
@@ -2272,7 +2237,7 @@ static void bind_test_libgcc_dirtied(BindTestLibgcc* program, const Runtime* run
         built = built && program->calls[c] != 0;
     }
     built = built && (dirty == 0 || bind_test_dirty_arena(&test->arena, dirty));
-    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
+    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena));
     // main: push rbx (which aligns the stack for the calls); __udivti3 of 100 in rsi:rdi by 7 in rcx:rdx, the quotient's
     // low half in eax, kept in ebx; __fixunsdfti of 3.0 and __fixdfti of -2.0 in xmm0, each low half in eax added to
     // ebx; then eax = ebx, pop rbx, ret.
@@ -2398,9 +2363,9 @@ static void bind_test_libgcc_dirtied(BindTestLibgcc* program, const Runtime* run
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
-static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, BindPath path, bool bound)
+static void bind_test_libgcc(BindTestLibgcc* program, const Runtime* runtime, bool bound)
 {
-    bind_test_libgcc_dirtied(program, runtime, path, bound, 0);
+    bind_test_libgcc_dirtied(program, runtime, bound, 0);
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
@@ -2447,21 +2412,16 @@ static bool bind_test_libgcc_program(const Runtime* runtime)
         .check = "libgcc",
     };
     BindTestLibgcc vector;
-    BindTestLibgcc exact;
-    bind_test_libgcc(&vector, runtime, BIND_PATH_VECTOR, true);
-    bind_test_libgcc(&exact, runtime, BIND_PATH_EXACT, true);
+    bind_test_libgcc(&vector, runtime, true);
     bind_test_libgcc_checks(&tally, &vector, runtime);
-    bind_test_expect(&tally, exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) && bind_test_same_binds(&vector.test.bind, &exact.test.bind),
-                     "the paths agree", 0);
     // Each path again over binding's arena dirtied (bind_test_dirty), with the members that join, in one round.
     const BindTestLibgcc* cleans[] = {
         &vector,
-        &exact,
     };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cleans); c += 1)
     {
         BindTestLibgcc dirty;
-        bind_test_libgcc_dirtied(&dirty, runtime, cleans[c]->test.bind.path, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
+        bind_test_libgcc_dirtied(&dirty, runtime, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
         bind_test_expect(&tally, dirty.bound == cleans[c]->bound && bind_test_same_links(&cleans[c]->test.link, &dirty.test.link) &&
                                      bind_test_same_binds(&cleans[c]->test.bind, &dirty.test.bind),
                          "the path over a dirty arena as over a clean one", c);
@@ -2469,7 +2429,6 @@ static bool bind_test_libgcc_program(const Runtime* runtime)
         bind_test_link_end(&dirty.test);
     }
     bind_test_link_end(&vector.test);
-    bind_test_link_end(&exact.test);
     return bind_test_report(&tally);
 }
 
@@ -2545,7 +2504,7 @@ static bool bind_test_room_bound(const Runtime* runtime, const char* check, Aren
             const LinkCapacity before = bind_test_counts(&test.link);
             const uint64_t names_before = test.names.length;
             const uint64_t bytes_before = test.bytes.length;
-            const bool begun = built && bind_begin(&test.bind, &test.link, runtime, BIND_PATH_VECTOR, &test.bytes, 1, &test.arena);
+            const bool begun = built && bind_begin(&test.bind, &test.link, runtime, &test.bytes, 1, &test.arena);
             const bool ended = begun && bind_end(&test.bind, &test.link);
             bind_test_expect(&tally, ended || (begun && test.bind.error == BIND_ERROR_MEMBER_UNDEFINED), "bound, or refused for a member's reference", m);
             const LinkCapacity after = bind_test_counts(&test.link);
@@ -3315,7 +3274,7 @@ static bool bind_test_case_code(BindTestLink* test, BindTestCase which, SymbolId
 // The case's program: main and the case's symbols, then with `bound` the runtime's first objects, its code, and the
 // rest; without, only the program, for a link of its own objects by cc. program->bound also needs link_check to accept
 // the link, which the object writer needs of the links the cross-check writes.
-static void bind_test_case_program(BindTestCaseProgram* program, const Runtime* runtime, BindTestCase which, BindPath path, bool bound)
+static void bind_test_case_program(BindTestCaseProgram* program, const Runtime* runtime, BindTestCase which, bool bound)
 {
     static const char* const bounds[] = {
         "__init_array_start",
@@ -3366,7 +3325,7 @@ static void bind_test_case_program(BindTestCaseProgram* program, const Runtime* 
     {
         built = built && others[i] != 0;
     }
-    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena));
+    built = built && (!bound || bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena));
     program->built = built && bind_test_case_code(test, which, main, others);
     program->bound = program->built && (!bound || bind_end(&test->bind, &test->link)) && link_check(&test->link) == LINK_ERROR_NONE;
 }
@@ -3482,23 +3441,18 @@ static bool bind_test_linker_cases(const Runtime* runtime, bool cross_check, con
     {
         const BindTestCaseInfo* info = &bind_test_cases[c];
         BindTestCaseProgram vector;
-        BindTestCaseProgram exact;
-        bind_test_case_program(&vector, runtime, (BindTestCase)c, BIND_PATH_VECTOR, true);
-        bind_test_case_program(&exact, runtime, (BindTestCase)c, BIND_PATH_EXACT, true);
+        bind_test_case_program(&vector, runtime, (BindTestCase)c, true);
         if (vector.bound != info->links)
         {
             printf("  %s: %s: built %d, bound %d, error %s\n", tally.check, info->what, vector.built, vector.bound, bind_test_errors[vector.test.bind.error]);
         }
         bind_test_expect(&tally, vector.built && vector.bound == info->links, info->what, c);
-        bind_test_expect(&tally, exact.built == vector.built && exact.bound == vector.bound && bind_test_same_links(&vector.test.link, &exact.test.link) &&
-                                     bind_test_same_binds(&vector.test.bind, &exact.test.bind),
-                         "the paths agree", c);
         bind_test_expect(&tally, !vector.bound || bind_test_loader_holds((BindTestCase)c, &vector.test.link, &vector.test.bind, runtime),
                          "the loader's names bound as GNU ld and lld bind them, needed only for a strong reference", c);
         if (cross_check)
         {
             BindTestCaseProgram own;
-            bind_test_case_program(&own, runtime, (BindTestCase)c, BIND_PATH_VECTOR, false);
+            bind_test_case_program(&own, runtime, (BindTestCase)c, false);
             bind_test_expect(&tally, own.bound, "the program alone", c);
             if (own.bound)
             {
@@ -3517,7 +3471,6 @@ static bool bind_test_linker_cases(const Runtime* runtime, bool cross_check, con
             bind_test_link_end(&own.test);
         }
         bind_test_link_end(&vector.test);
-        bind_test_link_end(&exact.test);
     }
     return bind_test_report(&tally);
 }
@@ -3570,8 +3523,8 @@ static bool bind_test_atexit_cross_check(const Runtime* runtime, const char* dir
     };
     BindTestAtexit bound;
     BindTestAtexit own;
-    bind_test_atexit(&bound, runtime, BIND_PATH_VECTOR, true);
-    bind_test_atexit(&own, runtime, BIND_PATH_VECTOR, false);
+    bind_test_atexit(&bound, runtime, true);
+    bind_test_atexit(&own, runtime, false);
     bind_test_expect(&tally, bound.bound && own.bound, "the atexit program built", 0);
     if (bound.bound && own.bound)
     {
@@ -3592,8 +3545,8 @@ static bool bind_test_libgcc_cross_check(const Runtime* runtime, const char* dir
     };
     BindTestLibgcc bound;
     BindTestLibgcc own;
-    bind_test_libgcc(&bound, runtime, BIND_PATH_VECTOR, true);
-    bind_test_libgcc(&own, runtime, BIND_PATH_VECTOR, false);
+    bind_test_libgcc(&bound, runtime, true);
+    bind_test_libgcc(&own, runtime, false);
     bind_test_expect(&tally, bound.bound && own.bound, "the libgcc program built", 0);
     if (bound.bound && own.bound)
     {
@@ -4068,16 +4021,11 @@ static bool bind_test_static_programs(const Runtime* runtime, uint64_t seed, boo
         if (options[i].libc)
         {
             BindTestProgram vector;
-            BindTestProgram exact;
             LinkProgram own;
-            const bool vector_bound = bind_test_program(&vector, runtime, options[i], BIND_PATH_VECTOR);
-            const bool exact_bound = bind_test_program(&exact, runtime, options[i], BIND_PATH_EXACT);
+            const bool vector_bound = bind_test_program(&vector, runtime, options[i]);
             const bool generated = link_program_generate(&own, options[i]);
-            bind_test_expect(&tally, vector_bound && exact_bound && generated, link_test_program_names[i], vector.bind.error);
-            bind_test_expect(&tally, bind_test_same_links(&vector.program.link, &exact.program.link), "the paths' links the same", i);
-            bind_test_expect(&tally, bind_test_same_binds(&vector.bind, &exact.bind), "the paths' members the same", i);
+            bind_test_expect(&tally, vector_bound && generated, link_test_program_names[i], vector.bind.error);
             bind_test_dirty(&tally, &vector, runtime, options[i]);
-            bind_test_dirty(&tally, &exact, runtime, options[i]);
             if (vector_bound && generated)
             {
                 bind_test_static_expected(runtime, &own.link, expected, arena);
@@ -4116,7 +4064,6 @@ static bool bind_test_static_programs(const Runtime* runtime, uint64_t seed, boo
             }
             link_program_release(&own);
             bind_test_release(&vector);
-            bind_test_release(&exact);
         }
     }
     return bind_test_report(&tally);
@@ -4269,24 +4216,18 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
         bind_test_expect(&tally, compiled, program->name, s);
         const String8 object = compiled ? object_test_read_file(arena, object_path) : (String8){ 0 };
         BindTestLink vector;
-        BindTestLink exact;
         const bool vector_imported = object.pointer != 0 && bind_test_static_import(&vector, runtime, object);
-        const bool exact_imported = object.pointer != 0 && bind_test_static_import(&exact, runtime, object);
-        bind_test_expect(&tally, vector_imported && exact_imported, "the object imported", s);
+        bind_test_expect(&tally, vector_imported, "the object imported", s);
         const uint32_t priorities = vector_imported ? vector.link.priorities.count - 1 : 0;
         if (vector_imported)
         {
             bind_test_static_expected(runtime, &vector.link, expected, arena);
         }
-        const bool vector_bound = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, BIND_PATH_VECTOR, &vector.bytes, 1, &vector.arena) &&
+        const bool vector_bound = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, &vector.bytes, 1, &vector.arena) &&
                                   bind_end(&vector.bind, &vector.link);
-        const bool exact_bound = exact_imported && bind_begin(&exact.bind, &exact.link, runtime, BIND_PATH_EXACT, &exact.bytes, 1, &exact.arena) &&
-                                 bind_end(&exact.bind, &exact.link);
-        bind_test_expect(&tally, vector_bound && exact_bound, "bound by both paths", vector.bind.error);
-        if (vector_bound && exact_bound)
+        bind_test_expect(&tally, vector_bound, "bound", vector.bind.error);
+        if (vector_bound)
         {
-            bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link), "the paths' links the same", s);
-            bind_test_expect(&tally, bind_test_same_binds(&vector.bind, &exact.bind), "the paths' members the same", s);
             bind_test_static_structure(&tally, &vector.link, &vector.bind, runtime, expected, 1, priorities, arena);
             const uint32_t puts_entry = runtime_find_global_name(&runtime->global_names, (const uint8_t*)"puts", 4, link_hash((const uint8_t*)"puts", 4));
             const uint32_t puts_member = puts_entry != 0 ? runtime->global_names.member[puts_entry - 1] : 0;
@@ -4306,7 +4247,6 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
         if (object.pointer != 0)
         {
             bind_test_link_end(&vector);
-            bind_test_link_end(&exact);
         }
         if (!keep)
         {
@@ -4412,7 +4352,7 @@ static SymbolId bind_test_static_absolute(const Runtime* runtime)
 }
 
 // Builds the rule's link (main and the rule's symbols), works out GNU ld's members for it, then binds it by `path`.
-static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtime, BindTestStaticRule rule, BindPath path, uint64_t* expected, Arena* arena, SymbolId* symbols)
+static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtime, BindTestStaticRule rule, uint64_t* expected, Arena* arena, SymbolId* symbols)
 {
     bool result = bind_test_link_begin(test, runtime, bind_test_room(runtime));
     const SymbolId main = result ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
@@ -4502,7 +4442,7 @@ static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtim
     {
         bind_test_static_expected(runtime, &test->link, expected, arena);
     }
-    result = result && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena);
+    result = result && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena);
     if (result)
     {
         bind_end(&test->bind, &test->link);
@@ -4516,22 +4456,17 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
     };
     const uint32_t words = (runtime->member_count + 63) / 64;
     uint64_t* expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
-    uint64_t* exact_expected = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words + 1);
     const RuntimeNames* names = &runtime->global_names;
-    for (uint32_t r = 0; expected != 0 && exact_expected != 0 && r < BIND_TEST_STATIC_RULES; r += 1)
+    for (uint32_t r = 0; expected != 0 && r < BIND_TEST_STATIC_RULES; r += 1)
     {
         const BindTestStaticRule rule = (BindTestStaticRule)r;
         const char* what = bind_test_static_rule_names[r];
         BindTestLink vector;
-        BindTestLink exact;
         SymbolId symbols[BUSTER_BIND_TEST_STATIC_LINKER_NAMES];
-        SymbolId exact_symbols[BUSTER_BIND_TEST_STATIC_LINKER_NAMES];
-        bind_test_static_rule_link(&vector, runtime, rule, BIND_PATH_VECTOR, expected, arena, symbols);
-        bind_test_static_rule_link(&exact, runtime, rule, BIND_PATH_EXACT, exact_expected, arena, exact_symbols);
+        bind_test_static_rule_link(&vector, runtime, rule, expected, arena, symbols);
         const Link* link = &vector.link;
         const LinkSymbols* columns = &link->symbols;
         const SymbolId symbol = symbols[0];
-        bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind), what, r);
         bool members = true;
         for (uint32_t w = 0; w < words; w += 1)
         {
@@ -4591,7 +4526,6 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
         }
         bind_test_expect(&tally, holds, what, vector.bind.error);
         bind_test_link_end(&vector);
-        bind_test_link_end(&exact);
     }
     return bind_test_report(&tally);
 }
@@ -4689,14 +4623,9 @@ static bool bind_test_shared_programs(const Runtime* runtime, uint64_t seed)
         if (options[i].libc)
         {
             BindTestProgram vector;
-            BindTestProgram exact;
-            const bool vector_bound = bind_test_program(&vector, runtime, options[i], BIND_PATH_VECTOR);
-            const bool exact_bound = bind_test_program(&exact, runtime, options[i], BIND_PATH_EXACT);
-            bind_test_expect(&tally, vector_bound && exact_bound, link_test_program_names[i], vector.bind.error);
-            bind_test_expect(&tally, bind_test_same_links(&vector.program.link, &exact.program.link) && bind_test_same_binds(&vector.bind, &exact.bind),
-                             "the paths' links and bindings the same", i);
+            const bool vector_bound = bind_test_program(&vector, runtime, options[i]);
+            bind_test_expect(&tally, vector_bound, link_test_program_names[i], vector.bind.error);
             bind_test_dirty(&tally, &vector, runtime, options[i]);
-            bind_test_dirty(&tally, &exact, runtime, options[i]);
             if (vector_bound)
             {
                 bind_test_shared_structure(&tally, &vector.program.link, &vector.bind);
@@ -4704,7 +4633,6 @@ static bool bind_test_shared_programs(const Runtime* runtime, uint64_t seed)
                        vector.program.link.symbols.count - 1, vector.bind.import_count, vector.bind.export_count);
             }
             bind_test_release(&vector);
-            bind_test_release(&exact);
         }
     }
     return bind_test_report(&tally);
@@ -4732,7 +4660,7 @@ static const char* const bind_test_shared_rule_names[BIND_TEST_SHARED_RULES] = {
 #define BUSTER_BIND_TEST_SHARED_SYMBOLS 4
 
 // Builds the rule's link, without main, and binds it by `path`: `symbols` gets the rule's symbols.
-static void bind_test_shared_rule_link(BindTestLink* test, const Runtime* runtime, BindTestSharedRule rule, BindPath path, SymbolId* symbols)
+static void bind_test_shared_rule_link(BindTestLink* test, const Runtime* runtime, BindTestSharedRule rule, SymbolId* symbols)
 {
     static const char* const definitions[BUSTER_BIND_TEST_SHARED_SYMBOLS] = {
         "buster_default",
@@ -4774,7 +4702,7 @@ static void bind_test_shared_rule_link(BindTestLink* test, const Runtime* runtim
         symbols[0] = bind_test_symbol(test, "__tls_get_addr", strong, BUSTER_LINK_SOURCE_NONE);
         symbols[1] = bind_test_symbol(test, "puts", strong, BUSTER_LINK_SOURCE_NONE);
     }
-    result = result && symbols[0] != 0 && bind_begin(&test->bind, &test->link, runtime, path, &test->bytes, 1, &test->arena);
+    result = result && symbols[0] != 0 && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena);
     if (result)
     {
         bind_end(&test->bind, &test->link);
@@ -4798,14 +4726,10 @@ static bool bind_test_shared_rules(const Runtime* shared_runtime)
         const BindTestSharedRule rule = against ? BIND_TEST_SHARED_MORESTACK : (BindTestSharedRule)r;
         const char* what = against ? "a reference to __morestack, refused without libgcc_s.so.1" : bind_test_shared_rule_names[r];
         BindTestLink vector;
-        BindTestLink exact;
         SymbolId symbols[BUSTER_BIND_TEST_SHARED_SYMBOLS];
-        SymbolId exact_symbols[BUSTER_BIND_TEST_SHARED_SYMBOLS];
-        bind_test_shared_rule_link(&vector, runtime, rule, BIND_PATH_VECTOR, symbols);
-        bind_test_shared_rule_link(&exact, runtime, rule, BIND_PATH_EXACT, exact_symbols);
+        bind_test_shared_rule_link(&vector, runtime, rule, symbols);
         const LinkSymbols* columns = &vector.link.symbols;
         const bool bound = vector.bind.error == BIND_ERROR_NONE;
-        bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind), what, r);
         bool holds = false;
         if (rule == BIND_TEST_SHARED_NOWHERE)
         {
@@ -4844,7 +4768,6 @@ static bool bind_test_shared_rules(const Runtime* shared_runtime)
             bind_test_shared_structure(&tally, &vector.link, &vector.bind);
         }
         bind_test_link_end(&vector);
-        bind_test_link_end(&exact);
     }
     scratch_end(scratch);
     return bind_test_report(&tally);
@@ -5009,18 +4932,13 @@ static bool bind_test_shared_compiled(const Runtime* runtime, const char* direct
         bind_test_expect(&tally, compiled, library->name, s);
         const String8 object = compiled ? object_test_read_file(arena, object_path) : (String8){ 0 };
         BindTestLink vector;
-        BindTestLink exact;
         const bool vector_imported = object.pointer != 0 && bind_test_static_import(&vector, runtime, object);
-        const bool exact_imported = object.pointer != 0 && bind_test_static_import(&exact, runtime, object);
-        bind_test_expect(&tally, vector_imported && exact_imported, "the object imported", s);
-        const bool vector_bound = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, BIND_PATH_VECTOR, &vector.bytes, 1, &vector.arena) &&
+        bind_test_expect(&tally, vector_imported, "the object imported", s);
+        const bool vector_bound = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, &vector.bytes, 1, &vector.arena) &&
                                   bind_end(&vector.bind, &vector.link);
-        const bool exact_bound = exact_imported && bind_begin(&exact.bind, &exact.link, runtime, BIND_PATH_EXACT, &exact.bytes, 1, &exact.arena) &&
-                                 bind_end(&exact.bind, &exact.link);
-        bind_test_expect(&tally, vector_bound && exact_bound, "bound by both paths", vector.bind.error);
-        if (vector_bound && exact_bound)
+        bind_test_expect(&tally, vector_bound, "bound", vector.bind.error);
+        if (vector_bound)
         {
-            bind_test_expect(&tally, bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind), "the paths' links the same", s);
             bind_test_shared_structure(&tally, &vector.link, &vector.bind);
             bind_test_expect(&tally, bind_test_shared_library_holds(&vector.link, &vector.bind, runtime, library->name), library->name, s);
             bind_test_expect(&tally, bind_test_shared_link("-fuse-ld=bfd", 0, object_path, bfd_path, out, err, true) == 0, "linked by cc -shared with GNU ld", s);
@@ -5046,7 +4964,6 @@ static bool bind_test_shared_compiled(const Runtime* runtime, const char* direct
         if (object.pointer != 0)
         {
             bind_test_link_end(&vector);
-            bind_test_link_end(&exact);
         }
         if (!keep)
         {
@@ -5136,19 +5053,13 @@ static void bind_test_split_bind(BindTestTally* tally, const Runtime* runtime, c
     const bool unwinder = runtime->gcc_s.exports.count != 0;
     const String8 object = object_test_read_file(arena, object_path);
     BindTestLink vector;
-    BindTestLink exact;
     const bool vector_imported = object.pointer != 0 && bind_test_static_import(&vector, runtime, object);
-    const bool exact_imported = object.pointer != 0 && bind_test_static_import(&exact, runtime, object);
-    bind_test_expect(tally, vector_imported && exact_imported, what, 0);
-    const bool vector_begun = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, BIND_PATH_VECTOR, &vector.bytes, 1, &vector.arena);
-    const bool exact_begun = exact_imported && bind_begin(&exact.bind, &exact.link, runtime, BIND_PATH_EXACT, &exact.bytes, 1, &exact.arena);
+    bind_test_expect(tally, vector_imported, what, 0);
+    const bool vector_begun = vector_imported && bind_begin(&vector.bind, &vector.link, runtime, &vector.bytes, 1, &vector.arena);
     const bool vector_ended = vector_begun && bind_end(&vector.bind, &vector.link);
-    const bool exact_ended = exact_begun && bind_end(&exact.bind, &exact.link);
     const bool held = unwinder ? vector_ended && link_check(&vector.link) == LINK_ERROR_NONE && bind_test_split_bound(&vector.bind, &vector.link, runtime)
                                : vector_begun && !vector_ended && bind_test_split_refused(&vector.bind, &vector.link, runtime);
     bind_test_expect(tally, held, what, vector.bind.error);
-    bind_test_expect(tally, exact_begun && exact_ended == vector_ended && bind_test_same_links(&vector.link, &exact.link) && bind_test_same_binds(&vector.bind, &exact.bind),
-                     "the paths the same", exact.bind.error);
     if (unwinder && held)
     {
         bind_test_link_and_load(tally, &vector.link, &vector.bind, runtime, 1, directory, name, harness, (const uint8_t*)"", 0, 0, keep, arena);
@@ -5156,7 +5067,6 @@ static void bind_test_split_bind(BindTestTally* tally, const Runtime* runtime, c
     if (object.pointer != 0)
     {
         bind_test_link_end(&vector);
-        bind_test_link_end(&exact);
     }
     arena_pop_to(arena, length);
 }

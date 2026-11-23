@@ -35,7 +35,6 @@ struct CheckProgramBinding
 {
     const Runtime* runtime;
     Bind* bind;
-    BindPath path;
     Arena* arena;
     // The static data the caller publishes after the code (check_data_prepare's objects): binding takes their symbols,
     // as the bodies' and the helpers', for the program's definitions before their atoms join.
@@ -51,8 +50,8 @@ struct CheckProgramBinding
 // bind_begin, or bind_begin_borrowed for a binding that borrows the runtime's bytes.
 static bool check_program_bind_begin(CheckProgramBinding* binding, Link* link, Arena* bytes, uint32_t unit_base)
 {
-    return binding->borrow ? bind_begin_borrowed(binding->bind, link, binding->runtime, binding->path, bytes, unit_base, binding->arena) :
-                             bind_begin(binding->bind, link, binding->runtime, binding->path, bytes, unit_base, binding->arena);
+    return binding->borrow ? bind_begin_borrowed(binding->bind, link, binding->runtime, bytes, unit_base, binding->arena) :
+                             bind_begin(binding->bind, link, binding->runtime, bytes, unit_base, binding->arena);
 }
 
 // A file-scope assembly label that names a C definition of the unit (#1848, check_program_emit_asm_symbols): clang's

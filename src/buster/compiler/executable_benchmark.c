@@ -1033,7 +1033,7 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
         result = link_program_generate_begin(&program, options, extra, name_bytes, atom_bytes) && bind_arena.base != 0;
         tls_first = result && tls != 0 ? executable_benchmark_tls_symbols(&program, functions, local, imported, control) : 0;
         result = result && (tls == 0 || tls_first != 0);
-        result = result && bind_begin(&bind, &program.link, runtime, BIND_PATH_VECTOR, &program.bytes, options.units, &bind_arena);
+        result = result && bind_begin(&bind, &program.link, runtime, &program.bytes, options.units, &bind_arena);
         result = result && link_program_generate_atoms(&program);
         tls_bytes = program.bytes.length;
         result = result && (tls == 0 || executable_benchmark_tls_atoms(&program, tls_first, functions, local, imported, control));

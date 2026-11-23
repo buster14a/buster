@@ -58,7 +58,7 @@ static void dynamic_test_no_pie_program(DynamicTestNoPieProgram* program, const 
     const SymbolId weak = built ? bind_test_symbol(test, "buster_maybe", BUSTER_LINK_SYMBOL_WEAK | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_NONE) : 0;
     const SymbolId imported = built ? bind_test_symbol(test, "environ", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_NOTYPE, BUSTER_LINK_SOURCE_NONE) : 0;
     built = main != 0 && data != 0 && never != 0 && weak != 0 && imported != 0 &&
-            bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena);
+            bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena);
     const X86Instruction main_code[] = {
         { .immediate = 0, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 },
         { .form = X86_FORM_RET },
