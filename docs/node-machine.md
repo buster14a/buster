@@ -8162,7 +8162,8 @@ body.
   another function's lowering reads. The compile built on this piece looks for
   those by compiling with the bodies taken and without; small units of one
   loud or one unusual body each, between two bodies that say nothing, found
-  three, and main's merge a fourth, which the rules above have since:
+  three, main's merge a fourth, and a replay of the tests' own commands a
+  fifth, which the rules above have since:
   - **A target that fuses a product and a sum.** The lowering contracts a
     floating sum with its product operand where the target has FMA or
     AVX-512F (`check_lower_contract_plan`), by an option or by a function's
@@ -8207,13 +8208,32 @@ body.
     still take one, as before #3310, and differ from the lowering's entries
     for it. No compile and no producer runs those forms; the bit is owed
     before one does.
-- **Single faults.** Of 56 single changes to the producer's refusals, to the
-  rules they stand on and to the three above, each built and run against the
-  fixtures, 55 fail one. The one that does not is the compound shift's width
+  - **An array's update.** T's rule for a pointer's update asked whether the
+    destination's value, once converted, is a pointer's, and an array's lvalue
+    converts to one: the producer took `int a[2]; a++;`, which the checker
+    rejects, and the compile built on it accepted the unit with no
+    diagnostic. The log did not see it over the tests' units: the reader
+    reports that error before the producer decides where a unit is only
+    checked, and after it where the unit is compiled to an object, and the
+    tests' unit with it is only checked. A replay of the tests' own commands
+    as compiles, with the bodies taken and without, did. The rule asks the
+    destination's own type since (#3366), and the log has a test of its own in
+    the driver's (`c_check_node_gate_driver_test.c`).
+- **Single faults.** Of 57 single changes to the producer's refusals, to the
+  rules they stand on and to the five above, each built and run against the
+  fixtures, 56 fail one. The one that does not is the compound shift's width
   in the tests' form on the window (`node_tests_constants`), which no path of
   this piece runs: the machine with no node of the walk's asks the census's
   code, and that form's fixture has no compound shift of a narrow operand.
   The first 48 were run before main was merged in, on the same rules.
+
+**The compile that takes its bodies** is `--node-bodies`
+([`commands/lowering.md`](commands/lowering.md), "Compiling with the bodies
+taken"; [`one-core-path.md`](one-core-path.md), "The redesign's seventh
+piece"): the reader masks the bodies the producer takes before the walk, and
+the lowering writes each one's function from its kept controls and tapes. Its
+unit's object, diagnostics and status are the ordinary compile's; it is off by
+default, and slower than without it while the machine is the reference one.
 
 ### What it says of step 2
 
