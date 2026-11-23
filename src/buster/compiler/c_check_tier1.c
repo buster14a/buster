@@ -1119,7 +1119,6 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .frame_flags = (function->frame_pointer != BUSTER_TIER0_FRAME_POINTER_NONE ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0) |
                            (function->probe_stack ? BUSTER_TIER1_FRAME_PROBE_STACK : 0),
             .omit_leaf_frame_pointer = function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF,
-            .vector = !scalar,
             .rematerialize = rematerialize,
             .symbol_access = function->symbol_access,
             .symbol_count = function->symbol_count,

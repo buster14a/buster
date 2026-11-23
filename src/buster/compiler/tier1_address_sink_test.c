@@ -6,8 +6,8 @@
 // branches on v; each arm stores to it and loads it back, and the join returns the loaded value. Where nothing else uses
 // the address, no node computes it: each access addresses p + 8 * i + 16 itself, with p and i its effective uses. An
 // address another user keeps (the returned sum, through a ptrtoint and an addition) stays computed, and the accesses
-// read its value, so that folding never lengthens the base's and index's lives past an address that remains. Both
-// selection paths, with and without a frame pointer, must certify and run natively against C.
+// read its value, so that folding never lengthens the base's and index's lives past an address that remains. With and
+// without a frame pointer, it must certify and run natively against C.
 
 static bool tier1_address_sink_function(Tier1EmitTest* test, bool escapes, IrFunction* function)
 {
@@ -104,11 +104,10 @@ static void tier1_address_sink_execute(Tier1EmitTest* test, Tier1EmitResult* emi
 
 static void tier1_address_sink_tests(Tier1EmitTest* test)
 {
-    for (uint32_t variant = 0; variant < 8; variant += 1)
+    for (uint32_t variant = 0; variant < 4; variant += 1)
     {
         const bool escapes = (variant & 1) != 0;
-        const bool vector = (variant & 2) != 0;
-        const bool pointer = (variant & 4) != 0;
+        const bool pointer = (variant & 2) != 0;
         IrFunction function;
         const bool created = tier1_address_sink_function(test, escapes, &function);
         const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
@@ -118,7 +117,7 @@ static void tier1_address_sink_tests(Tier1EmitTest* test)
         Tier1SelectPlan plan;
         uint32_t node = BUSTER_IR_NONE;
         const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
-        tier1_emit_test_expect(test, planned, "cross-block address fixture selects by both paths");
+        tier1_emit_test_expect(test, planned, "cross-block address fixture selects");
         if (planned)
         {
             // Nodes 7 and 8 are the first arm's store and load, 10 and 11 the second's; node 3 is the address.
@@ -151,7 +150,6 @@ static void tier1_address_sink_tests(Tier1EmitTest* test)
         }
         const Tier1EmitOptions options = {
             .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
-            .vector = vector,
             .rematerialize = true,
             .certify = true,
             .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,

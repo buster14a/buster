@@ -6,7 +6,7 @@
 // lives across a call in a caller-saved register is proved through its save and restore, the callee taking every
 // caller-saved register. f(p0, p1): b0 branches on p0's low bit to b1 or b2; b1 calls g(v, v), v = p1 + 7, and returns
 // its result plus h()'s, p0, u = p0 ^ p1 and w = p0 - p1, which live across the calls (h's takes no arguments, so that
-// its records write no argument register a value lives in across it); b2 returns p1. Emitted by both paths with the caller-saved registers alone
+// its records write no argument register a value lives in across it); b2 returns p1. Emitted with the caller-saved registers alone
 // allocatable, its code is certified. Then each of the call's moves into an argument
 // register made a move of its source into itself (the argument register left as it was), each of its saves and restores
 // made a register's move into itself (left out), and each store before the call with its load after it together, of a
@@ -674,7 +674,7 @@ static uint32_t tier1_code_certificate_prologue(const Tier1EmitResult* emitted, 
     return end;
 }
 
-static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, bool rematerialize, bool pointer, Tier1CodeCertificateCounts* counts)
+static void tier1_code_certificate_compile(Tier1EmitTest* test, bool rematerialize, bool pointer, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
     uint32_t call = BUSTER_IR_NONE;
@@ -691,7 +691,6 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
     const uint32_t caller_saved = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI);
     const Tier1EmitOptions options = {
         .register_mask = caller_saved,
-        .vector = vector,
         .rematerialize = rematerialize,
         .certify = true,
         .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
@@ -793,7 +792,7 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool vector, boo
 // Debug definitions use the same complete code proof even when --verify is absent. Reuse the call fixture with RAX
 // excluded from allocation, forcing its result into another register only after the ABI result copy completes.
 // Mutate the actual copy's bytes and its origin, not a fabricated definition descriptor.
-static void tier1_code_certificate_debug(Tier1EmitTest* test, bool vector)
+static void tier1_code_certificate_debug(Tier1EmitTest* test)
 {
     IrFunction function = { 0 };
     uint32_t call = BUSTER_IR_NONE;
@@ -806,7 +805,6 @@ static void tier1_code_certificate_debug(Tier1EmitTest* test, bool vector)
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     const Tier1EmitOptions options = {
         .register_mask = (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
-        .vector = vector,
         .sources = true,
     };
     Tier1EmitResult emitted = { 0 };
@@ -897,7 +895,7 @@ static void tier1_code_certificate_debug(Tier1EmitTest* test, bool vector)
     arena_pop_to(&test->input, 0);
 }
 
-static void tier1_code_certificate_debug_straight(Tier1EmitTest* test, bool vector)
+static void tier1_code_certificate_debug_straight(Tier1EmitTest* test)
 {
     for (uint32_t alias = 0; alias < 2; alias += 1)
     {
@@ -933,7 +931,6 @@ static void tier1_code_certificate_debug_straight(Tier1EmitTest* test, bool vect
         valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &error_node) == TIER1_SELECT_OK;
         Tier1EmitOptions options = {
             .register_mask = alias ? 1u << X86_REGISTER_RDI : (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
-            .vector = vector,
             .sources = true,
         };
         Tier1EmitResult emitted = { 0 };
@@ -1022,7 +1019,7 @@ static void tier1_code_certificate_debug_straight(Tier1EmitTest* test, bool vect
 
 // The existing pressure/critical-edge fixture joins two different values. Its scalar phi is usable only after
 // every incoming edge's actual copies and predecessor-associated renames pass the full code check.
-static void tier1_code_certificate_debug_phis(Tier1EmitTest* test, bool vector)
+static void tier1_code_certificate_debug_phis(Tier1EmitTest* test)
 {
     IrFunction function = { 0 };
     bool valid = tier1_dropped_function(&test->input, &function);
@@ -1043,7 +1040,7 @@ static void tier1_code_certificate_debug_phis(Tier1EmitTest* test, bool vector)
     Tier1SelectPlan plan = { 0 };
     uint32_t error_node = BUSTER_IR_NONE;
     valid = valid && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &error_node) == TIER1_SELECT_OK;
-    Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .sources = true };
+    Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .sources = true };
     Tier1EmitResult emitted = { 0 };
     valid = valid && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &error_node) == TIER1_EMIT_OK;
     valid = valid && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.debug_phis != NULL &&
@@ -1117,7 +1114,7 @@ static void tier1_code_certificate_debug_phis(Tier1EmitTest* test, bool vector)
     arena_pop_to(&test->input, 0);
 }
 
-static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
+static void tier1_code_certificate_saved(Tier1EmitTest* test, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
     const bool created = tier1_code_certificate_saved_function(&test->input, &function);
@@ -1131,7 +1128,7 @@ static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1
     tier1_emit_test_expect(test, planned, "the code certificate's dynamic-frame fixture selects");
     // Thirteen values live into b1, more than the registers: some are spilled, and the prologue allocates their rows
     // after setting rbp.
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.frame.frame_pointer &&
@@ -1152,7 +1149,7 @@ static void tier1_code_certificate_saved(Tier1EmitTest* test, bool vector, Tier1
     arena_pop_to(&test->input, 0);
 }
 
-static void tier1_code_certificate_narrow(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
+static void tier1_code_certificate_narrow(Tier1EmitTest* test, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
     const bool created = tier1_code_certificate_narrow_function(&test->input, &function);
@@ -1164,7 +1161,7 @@ static void tier1_code_certificate_narrow(Tier1EmitTest* test, bool vector, Tier
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's narrow-parameter fixture selects");
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
@@ -1211,7 +1208,7 @@ static void tier1_code_certificate_narrow(Tier1EmitTest* test, bool vector, Tier
 
 // The realigned frame (#1284's review): its code certified, its prologue pushing a register past rbp before its
 // allocation; then that allocation moved before the pushes, its epilogue matched, refused.
-static void tier1_code_certificate_realigned(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
+static void tier1_code_certificate_realigned(Tier1EmitTest* test, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
     const bool created = tier1_code_certificate_realigned_function(&test->input, &function);
@@ -1223,7 +1220,7 @@ static void tier1_code_certificate_realigned(Tier1EmitTest* test, bool vector, T
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's realigned-frame fixture selects");
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.frame.realigned &&
@@ -1244,7 +1241,7 @@ static void tier1_code_certificate_realigned(Tier1EmitTest* test, bool vector, T
 // it, and restores it after: the value that lives across it in rax is still there. With rax among the few allocatable
 // registers, its code is certified; then the restore made rax's move into itself, or a move from another register, is
 // refused where a value lives in rax across the exchange.
-static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Tier1CodeCertificateCounts* counts)
+static void tier1_code_certificate_exchange(Tier1EmitTest* test, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
     const bool created = tier1_code_certificate_exchange_function(&test->input, &function);
@@ -1257,7 +1254,7 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Ti
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's compare-exchange fixture selects");
     const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI);
-    const Tier1EmitOptions options = { .register_mask = few, .vector = vector, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = few, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
@@ -1283,11 +1280,11 @@ static void tier1_code_certificate_exchange(Tier1EmitTest* test, bool vector, Ti
     arena_pop_to(&test->input, 0);
 }
 
-// The barrier fixture (#2963) by one path, with or without a frame pointer: its code certified, then its barrier aimed at
+// The barrier fixture (#2963), with or without a frame pointer: its code certified, then its barrier aimed at
 // each row a restore after it loads from the frame base register, as each of its variants: one that keeps the row's
 // bytes is certified, one that changes them refused. The body's template and its emitted record change together, and
 // are put back after each.
-static void tier1_code_certificate_barrier(Tier1EmitTest* test, bool vector, bool pointer, Tier1CodeCertificateCounts* counts)
+static void tier1_code_certificate_barrier(Tier1EmitTest* test, bool pointer, Tier1CodeCertificateCounts* counts)
 {
     static const struct
     {
@@ -1323,7 +1320,6 @@ static void tier1_code_certificate_barrier(Tier1EmitTest* test, bool vector, boo
     const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI);
     const Tier1EmitOptions options = {
         .register_mask = few,
-        .vector = vector,
         .certify = true,
         .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
     };
@@ -1384,7 +1380,7 @@ static void tier1_code_certificate_barrier(Tier1EmitTest* test, bool vector, boo
 
 // A seq_cst source store remains IR_STORE and preserves a desired value live past it. Its certified kernel must retain
 // both the copy into the scratch and the locked memory exchange, including when its return takes a different CFG edge.
-static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
+static void tier1_code_certificate_store(Tier1EmitTest* test)
 {
     const IrSizes sizes = { .instruction_count = 9, .block_count = 3, .constant_count = 1, .parameter_count = 3 };
     IrFunction function;
@@ -1421,14 +1417,14 @@ static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
     const bool planned = selection == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's seq_cst store fixture selects");
     Tier1EmitDiagnostic diagnostic = {0};
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true, .diagnostic = &diagnostic };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true, .diagnostic = &diagnostic };
     Tier1EmitResult emitted = {0};
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
     if (!certified)
     {
-        fprintf(stderr, "tier1-emit: seq_cst store certificate: path=%s selection=%u emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n",
-                vector ? "vector" : "scalar", (unsigned)selection, (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node, emitted.code_checked, emitted.code_reason);
+        fprintf(stderr, "tier1-emit: seq_cst store certificate: selection=%u emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n",
+                (unsigned)selection, (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node, emitted.code_checked, emitted.code_reason);
     }
     tier1_emit_test_expect(test, certified, "a seq_cst store that keeps its desired SSA value passes the emitted-code certificate");
     uint32_t mutations = 0;
@@ -1461,7 +1457,7 @@ static void tier1_code_certificate_store(Tier1EmitTest* test, bool vector)
 // these is refused, one at a time, everything put back after: a literal's bytes changed, its width, a load's reference's
 // addend, its target the other literal (whose bytes aren't its constant's), and the emission's index naming the other
 // literal for a constant. The literal's bytes, not its index, are what the certificate checks.
-static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, uint32_t* refused)
+static void tier1_code_certificate_literals(Tier1EmitTest* test, uint32_t* refused)
 {
     const IrSizes sizes = { .instruction_count = 6, .block_count = 1, .parameter_count = 1, .vector_constant_count = 2 };
     IrFunction function;
@@ -1495,14 +1491,14 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
     const bool planned = selection == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the code certificate's literal fixture selects");
     Tier1EmitDiagnostic diagnostic = {0};
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true, .diagnostic = &diagnostic };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true, .diagnostic = &diagnostic };
     Tier1EmitResult emitted = {0};
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
     if (!certified)
     {
-        fprintf(stderr, "tier1-emit: literal certificate: path=%s selection=%u emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n",
-                vector ? "vector" : "scalar", (unsigned)selection, (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node, emitted.code_checked, emitted.code_reason);
+        fprintf(stderr, "tier1-emit: literal certificate: selection=%u emission=%u cause=%u detail=%u node=%u checked=%u reason=%u\n",
+                (unsigned)selection, (unsigned)error, (unsigned)diagnostic.cause, diagnostic.error, node, emitted.code_checked, emitted.code_reason);
     }
     tier1_emit_test_expect(test, certified, "a function whose vector constants are its literals' loads passes the emitted-code certificate");
     // Both constants are literals, each loaded once, rip-relative, by the reference that names it.
@@ -1566,7 +1562,7 @@ static void tier1_code_certificate_literals(Tier1EmitTest* test, bool vector, ui
 // The producer's row owners are assertions, not evidence. Corrupt them without
 // touching the allocation, and corrupt the predecessor's store without changing
 // its metadata: both must be refused even though the register assertion remains.
-static void tier1_code_certificate_carry(Tier1EmitTest* test, bool vector, bool pointer, bool aggregate)
+static void tier1_code_certificate_carry(Tier1EmitTest* test, bool pointer, bool aggregate)
 {
     Tier1CallFixture fixture = { 0 };
     const bool created = tier1_call_carry_fixture(test, &fixture, TIER1_CALL_CARRY);
@@ -1612,7 +1608,6 @@ static void tier1_code_certificate_carry(Tier1EmitTest* test, bool vector, bool 
     const Tier1EmitOptions options = {
         .register_mask = tier1_liveness_register_mask(),
         .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
-        .vector = vector,
         .certify = true,
     };
     Tier1EmitResult emitted;
@@ -2095,7 +2090,7 @@ static void tier1_code_certificate_frame_copy(Tier1EmitTest* test)
 // rdx and goes to rdi, one parallel move whose order matters. Shape 1 then returns d's first quadword, which keeps d live
 // across the call; shape 2's d is an inttoptr of an I64, as ir_lower makes a forwarded call's (#2820's ir_typed_call),
 // which the call's use alone keeps; shape 3 makes the call 48 times, each with its argument, its callee and its
-// destination, more effective uses than one a call and every other node's room hold. Each compile, by each path, is
+// destination, more effective uses than one a call and every other node's room hold. Each compile is
 // certified; each call's effective uses end with its destination, no lea writes rdi, and the native code writes f's
 // result to d's bytes alone, against the callee called directly. The first call's move into rdi made a move of rdi into
 // itself is refused, and so is a plan whose call reads the callee where its destination was (the liveness validation).
@@ -2134,7 +2129,7 @@ static __attribute__((no_sanitize("function"))) int64_t tier1_code_certificate_o
 
 #define BUSTER_TIER1_CODE_CERTIFICATE_FORWARDED_CALLS 48u
 
-static void tier1_code_certificate_forwarded(Tier1EmitTest* test, bool vector, uint32_t shape, uint32_t* refused)
+static void tier1_code_certificate_forwarded(Tier1EmitTest* test, uint32_t shape, uint32_t* refused)
 {
     char text[4096];
     const bool converted = shape == 2;
@@ -2198,7 +2193,7 @@ static void tier1_code_certificate_forwarded(Tier1EmitTest* test, bool vector, u
         tier1_emit_test_expect(test, tier1_liveness_validate_plan(&plan, &test->scratch, true) == TIER1_LIVENESS_INVALID, "a call's effective uses that end with another value than its destination are refused");
         plan.effective_use_values[u] = destination;
     }
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true };
     Tier1EmitResult emitted = { 0 };
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
@@ -2236,7 +2231,7 @@ static void tier1_code_certificate_forwarded(Tier1EmitTest* test, bool vector, u
     uint64_t bytes = 0;
     if (certified && tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
     {
-        uint64_t random = UINT64_C(0x2820282028202820) ^ (vector ? 1 : 0) ^ ((uint64_t)shape << 8);
+        uint64_t random = UINT64_C(0x2820282028202821) ^ ((uint64_t)shape << 8);
         for (uint32_t sample = 0; sample < 16; sample += 1)
         {
             const int64_t x = sample == 0 ? 0 : sample == 1 ? -1 : sample == 2 ? INT64_MAX : (int64_t)tier1_emit_test_random(&random);
@@ -2270,7 +2265,7 @@ static void tier1_code_certificate_forwarded(Tier1EmitTest* test, bool vector, u
 
 // The same call into a 64-byte frame object (#789): its destination is no effective use, a lea of the object writes rdi
 // before the call, and the function returns the object's first quadword, f(x)'s.
-static void tier1_code_certificate_object_destination(Tier1EmitTest* test, bool vector)
+static void tier1_code_certificate_object_destination(Tier1EmitTest* test)
 {
     static const char text[] = "function (i64, ptr) -> i64 {\n"
                                "  passed #0 size=0 loc(1,6,255,0,0)\n"
@@ -2295,7 +2290,7 @@ static void tier1_code_certificate_object_destination(Tier1EmitTest* test, bool 
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     const bool used = planned && plan.effective_use_offsets[4] - plan.effective_use_offsets[3] == 2;
     tier1_emit_test_expect(test, used, "a call into a frame object selects, its destination no effective use");
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true };
     Tier1EmitResult emitted = { 0 };
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK;
@@ -2366,69 +2361,53 @@ static void tier1_code_certificate_tests(Tier1EmitTest* test)
     Tier1CodeCertificateCounts counts = { 0 };
     tier1_code_certificate_aggregate_copy(test);
     tier1_code_certificate_frame_copy(test);
-    for (uint32_t variant = 0; variant < 8; variant += 1)
+    for (uint32_t variant = 0; variant < 4; variant += 1)
     {
-        tier1_code_certificate_carry(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0);
-    }
-    for (uint32_t variant = 0; variant < 8; variant += 1)
-    {
-        tier1_code_certificate_compile(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0, &counts);
-    }
-    for (uint32_t variant = 0; variant < 2; variant += 1)
-    {
-        tier1_code_certificate_debug(test, variant != 0);
-        tier1_code_certificate_debug_straight(test, variant != 0);
-        tier1_code_certificate_debug_phis(test, variant != 0);
-        tier1_code_certificate_saved(test, variant != 0, &counts);
-    }
-    for (uint32_t variant = 0; variant < 2; variant += 1)
-    {
-        tier1_code_certificate_narrow(test, variant != 0, &counts);
-    }
-    for (uint32_t variant = 0; variant < 2; variant += 1)
-    {
-        tier1_code_certificate_exchange(test, variant != 0, &counts);
-        tier1_code_certificate_store(test, variant != 0);
-    }
-    for (uint32_t variant = 0; variant < 2; variant += 1)
-    {
-        tier1_code_certificate_realigned(test, variant != 0, &counts);
+        tier1_code_certificate_carry(test, (variant & 1) != 0, (variant & 2) != 0);
     }
     for (uint32_t variant = 0; variant < 4; variant += 1)
     {
-        tier1_code_certificate_barrier(test, (variant & 1) != 0, (variant & 2) != 0, &counts);
+        tier1_code_certificate_compile(test, (variant & 1) != 0, (variant & 2) != 0, &counts);
     }
-    tier1_emit_test_expect(test, counts.barrier == 4, "the barrier fixture's compiles are certified, each by its path, with and without a frame pointer");
-    printf("tier1 code certificate: barriers in asm bodies %u of 4 certified, aimed at %u rows: writes that keep the row %u of %u certified, writes that change it %u of %u refused\n", counts.barrier,
+    tier1_code_certificate_debug(test);
+    tier1_code_certificate_debug_straight(test);
+    tier1_code_certificate_debug_phis(test);
+    tier1_code_certificate_saved(test, &counts);
+    tier1_code_certificate_narrow(test, &counts);
+    tier1_code_certificate_exchange(test, &counts);
+    tier1_code_certificate_store(test);
+    tier1_code_certificate_realigned(test, &counts);
+    for (uint32_t pointer = 0; pointer < 2; pointer += 1)
+    {
+        tier1_code_certificate_barrier(test, pointer != 0, &counts);
+    }
+    tier1_emit_test_expect(test, counts.barrier == 2, "the barrier fixture's compiles are certified, with and without a frame pointer");
+    printf("tier1 code certificate: barriers in asm bodies %u of 2 certified, aimed at %u rows: writes that keep the row %u of %u certified, writes that change it %u of %u refused\n", counts.barrier,
            counts.barrier_rows, counts.barrier_kept_certified, counts.barrier_kept, counts.barrier_changed_refused, counts.barrier_changed);
     uint32_t literals_refused = 0;
-    for (uint32_t variant = 0; variant < 2; variant += 1)
-    {
-        tier1_code_certificate_literals(test, variant != 0, &literals_refused);
-    }
-    tier1_emit_test_expect(test, literals_refused == 10, "every corrupted literal of both paths' compiles is refused");
+    tier1_code_certificate_literals(test, &literals_refused);
+    tier1_emit_test_expect(test, literals_refused == 5, "every corrupted literal of the compile is refused");
     uint32_t forwarded_refused = 0;
-    for (uint32_t variant = 0; variant < 8; variant += 1)
+    for (uint32_t shape = 0; shape < 4; shape += 1)
     {
-        tier1_code_certificate_forwarded(test, (variant & 1) != 0, variant >> 1, &forwarded_refused);
+        tier1_code_certificate_forwarded(test, shape, &forwarded_refused);
     }
-    tier1_emit_test_expect(test, forwarded_refused == 8, "every compile's destination move into rdi left out is refused (#2820)");
+    tier1_emit_test_expect(test, forwarded_refused == 4, "every compile's destination move into rdi left out is refused (#2820)");
     tier1_code_certificate_registers_into_pointer(test);
-    tier1_code_certificate_object_destination(test, false);
-    tier1_code_certificate_object_destination(test, true);
-    tier1_emit_test_expect(test, counts.realigned == 2 && counts.late == 2, "the realigned-frame fixture's compiles push a register past rbp, and their allocation moves before it");
-    tier1_emit_test_expect(test, counts.narrow == 2 && counts.narrow_register == 2 && counts.narrow_stack == 2, "the narrow-parameter fixture's compiles have an extension in a register and one from a slot");
-    tier1_emit_test_expect(test, counts.exchange == 2 && counts.exchange_live == 2, "the compare-exchange fixture's compiles each restore rax around the exchange");
+    tier1_code_certificate_object_destination(test);
+    tier1_emit_test_expect(test, counts.realigned == 1 && counts.late == 1, "the realigned-frame fixture's compile pushes a register past rbp, and its allocation moves before it");
+    tier1_emit_test_expect(test, counts.narrow == 1 && counts.narrow_register == 1 && counts.narrow_stack == 1, "the narrow-parameter fixture's compile has an extension in a register and one from a slot");
+    tier1_emit_test_expect(test, counts.exchange == 1 && counts.exchange_live == 1, "the compare-exchange fixture's compile restores rax around the exchange");
     const bool kept = tier1_code_certificate_walked(false);
     const bool clobbered = tier1_code_certificate_walked(true);
     tier1_emit_test_expect(test, kept, "a conditional tail whose edge move keeps the flags reaches its true successor");
     tier1_emit_test_expect(test, !clobbered, "a conditional jump after an edge move that writes the flags fails the code's certificate: it reads the move's flags");
-    tier1_emit_test_expect(test, counts.certified == 8 && counts.second != 0 && counts.saves != 0 && counts.untouched != 0 && counts.lowered == 8 && counts.pointers == 4 && counts.saved_moved == 2,
+    tier1_emit_test_expect(test, counts.certified == 4 && counts.second != 0 && counts.saves != 0 && counts.untouched != 0 && counts.lowered == 4 && counts.pointers == 2 && counts.saved_moved == 1,
                            "the fixtures' compiles have a second argument's move, saves and restores to corrupt, one of a register only the callee may change, rows and frame pointers to move");
     printf("tier1 code certificate: %u compiles certified; argument moves stale %u of %u refused (into rsi %u of %u); saves and restores left out %u of %u refused; a store and load around the call left out %u of %u refused; "
-           "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused; dynamic frames %u of 2 certified, their frame pointers set after the allocation %u of %u refused; a conditional jump after an edge's "
-           "flag-writing move %s; narrow parameters %u of 2 certified, their extensions corrupted in a register %u of %u and from a slot %u of %u refused; compare-exchanges %u of 2 certified, "
-           "their restores of rax corrupted %u of %u refused; realigned frames %u of 2 certified, their allocation moved before their pushes %u of %u refused\n",
+           "rows below rsp %u of %u refused; frame pointers set after the allocation %u of %u refused; dynamic frames %u of 1 certified, their frame pointers set after the allocation %u of %u refused; a conditional jump after an edge's "
+           "flag-writing move %s; narrow parameters %u of 1 certified, their extensions corrupted in a register %u of %u and from a slot %u of %u refused; compare-exchanges %u of 1 certified, "
+           "their restores of rax corrupted %u of %u refused; realigned frames %u of 1 certified, their allocation moved before their pushes %u of %u refused\n",
            counts.certified, counts.arguments_refused, counts.arguments, counts.second_refused, counts.second, counts.saves_refused, counts.saves, counts.untouched_refused, counts.untouched, counts.lowered_refused,
            counts.lowered, counts.pointers_refused, counts.pointers, counts.saved, counts.saved_refused, counts.saved_moved, kept && !clobbered ? "refused" : "accepted", counts.narrow,
            counts.narrow_register_refused, counts.narrow_register, counts.narrow_stack_refused, counts.narrow_stack, counts.exchange, counts.exchange_restores_refused, counts.exchange_restores, counts.realigned,

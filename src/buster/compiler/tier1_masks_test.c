@@ -27,8 +27,8 @@
 // vector scan by both paths, which must take masks and refuse a vector at any place, its columns ending at a PROT_NONE
 // page; and each width's kmov forms, none for a width no mask has. Then masks from the typed stream: Tier 0's random mask
 // programs (tier1_masks_test_typed) and every _k* builtin's row (tier1_masks_test_builtins) lowered to the IR, run by its
-// interpreter through SSA and the optimizer, and compiled by Tier 1 natively. --print prints each fixture's records by
-// the vector path, as GNU as reads them.
+// interpreter through SSA and the optimizer, and compiled by Tier 1 natively. --print prints each fixture's records,
+// as GNU as reads them.
 
 #include <inttypes.h>
 #include <signal.h>
@@ -84,7 +84,7 @@ struct Tier1MasksTest
     bool native_vnni;
     // The fixtures that ran natively, by both paths, with and without rematerialization.
     uint32_t native_fixtures;
-    // --print: each fixture's records, by the vector path, as GNU as reads them.
+    // --print: each fixture's records, as GNU as reads them.
     bool print;
     Arena output;
     Arena scratch;
@@ -1373,7 +1373,7 @@ static uint8_t* tier1_masks_test_mxcsr_code(Tier1MasksTest* test, uint32_t op, u
         uint32_t node = BUSTER_IR_NONE;
         const Tier1SelectError selected = ok ? tier1_select_plan(out, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
         ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, "select MXCSR fixture");
-        const Tier1EmitOptions options = { .certify = true, .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true };
+        const Tier1EmitOptions options = { .certify = true, .register_mask = tier1_liveness_register_mask(), .rematerialize = true };
         Tier1EmitResult emitted = { 0 };
         const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->v4, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
         ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK, "emit MXCSR fixture");
@@ -1954,7 +1954,7 @@ static void tier1_masks_test_asm_mutants(Tier1MasksTest* test, const Tier1Select
     }
 }
 
-static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture* fixture, const IrFunction* function, const IrDominance* dominance, bool vector, bool rematerialize, const uint8_t* inputs,
+static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture* fixture, const IrFunction* function, const IrDominance* dominance, bool rematerialize, const uint8_t* inputs,
                                   const uint64_t* counts, const uint8_t* expected)
 {
     const uint64_t output_mark = test->output.length;
@@ -1964,12 +1964,11 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     bool ok = tier1_masks_test_expect(test, selected == TIER1_SELECT_OK, fixture->name);
     if (!ok)
     {
-        printf("test-tier1-masks: %s, %s path: selection error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)selected, node);
+        printf("test-tier1-masks: %s: selection error %u at node %u\n", fixture->name, (unsigned)selected, node);
     }
     const Tier1EmitOptions options = {
         .certify = true,
         .register_mask = tier1_liveness_register_mask(),
-        .vector = vector,
         .rematerialize = rematerialize,
     };
     Tier1EmitResult emitted = { 0 };
@@ -1979,7 +1978,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK && emitted.general, fixture->name);
         if (!ok)
         {
-            printf("test-tier1-masks: %s, %s path: emission error %u at node %u\n", fixture->name, vector ? "vector" : "scalar", (unsigned)error, node);
+            printf("test-tier1-masks: %s: emission error %u at node %u\n", fixture->name, (unsigned)error, node);
         }
     }
     if (ok)
@@ -2051,7 +2050,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         const uint32_t row_moves = fixture->row_moves;
         if (fixture->rows != 0 && !tier1_masks_test_expect(test, emitted.machine_rows == fixture->rows && emitted.row_moves == row_moves, "a fixture's machine rows take the moves into and out of place it counts"))
         {
-            printf("test-tier1-masks: %s, %s path: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, vector ? "vector" : "scalar", emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);
+            printf("test-tier1-masks: %s: %u rows, %u moves around them (%u and %u expected)\n", fixture->name, emitted.machine_rows, emitted.row_moves, fixture->rows, row_moves);
         }
         // The masked comparisons' records (#1847): a vpcmp or a vcmpp under a writemask.
         uint32_t masked_compares = 0;
@@ -2064,7 +2063,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         }
         if (fixture->masked_compares != 0 && !tier1_masks_test_expect(test, masked_compares == fixture->masked_compares, "a comparison ANDed with a mask is one compare under it as its writemask"))
         {
-            printf("test-tier1-masks: %s, %s path: %u masked comparisons (%u expected)\n", fixture->name, vector ? "vector" : "scalar", masked_compares, fixture->masked_compares);
+            printf("test-tier1-masks: %s: %u masked comparisons (%u expected)\n", fixture->name, masked_compares, fixture->masked_compares);
         }
         // The masked operations' records (#1840): an arithmetic record under a writemask.
         uint32_t masked_operations = 0;
@@ -2078,7 +2077,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         }
         if (fixture->masked_operations != 0 && !tier1_masks_test_expect(test, masked_operations == fixture->masked_operations, "a select of an operation is the operation under its mask"))
         {
-            printf("test-tier1-masks: %s, %s path: %u masked operations (%u expected)\n", fixture->name, vector ? "vector" : "scalar", masked_operations, fixture->masked_operations);
+            printf("test-tier1-masks: %s: %u masked operations (%u expected)\n", fixture->name, masked_operations, fixture->masked_operations);
         }
         // A mask's load or store through a frame object: its node's kmov, its last record (after any transitions), at the
         // frame's base, as the object's lea's.
@@ -2125,8 +2124,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         test->call_saves += emitted.call_stores;
     }
     uint64_t mapped = 0;
-    const bool print = test->print;
-    test->print = print && vector;
     if (test->print && ok)
     {
         printf("test-tier1-masks: %s:\n", fixture->name);
@@ -2136,7 +2133,6 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
         tier1_masks_test_upper(test, &plan, &emitted, test->forms);
     }
     uint8_t* machine = ok ? tier1_masks_test_load(test, &emitted, &mapped) : MAP_FAILED;
-    test->print = print;
     ok = machine != MAP_FAILED;
     uint8_t* buffers = ok && test->native ? mmap(0, BUSTER_TIER1_MASKS_TEST_BUFFER * BUSTER_TIER1_MASKS_TEST_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
     if (ok && test->native)
@@ -2179,7 +2175,7 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
             {
                 if (actual[byte] != wanted[byte])
                 {
-                    printf("test-tier1-masks: %s, %s path, input %u: byte %u is %02x, the interpreter's %02x\n", fixture->name, vector ? "vector" : "scalar", input, byte, actual[byte], wanted[byte]);
+                    printf("test-tier1-masks: %s, input %u: byte %u is %02x, the interpreter's %02x\n", fixture->name, input, byte, actual[byte], wanted[byte]);
                     byte = BUSTER_TIER1_MASKS_TEST_BUFFER;
                 }
             }
@@ -2253,7 +2249,7 @@ static void tier1_masks_test_fixture(Tier1MasksTest* test, const Tier1MasksFixtu
         // With rematerialization (as the C driver's --tier1 runs) and without.
         for (uint32_t run = 0; ok && run < 2; run += 1)
         {
-            tier1_masks_test_path(test, fixture, &function, &dominance, true, run != 0, inputs, counts, expected);
+            tier1_masks_test_path(test, fixture, &function, &dominance, run != 0, inputs, counts, expected);
         }
     }
     tier1_masks_test_expect(test, test->scratch.length == 0, "parsing returns the scratch arena");
@@ -2395,7 +2391,6 @@ static void tier1_masks_test_refusals(Tier1MasksTest* test, const uint8_t* basel
             const Tier1EmitOptions options = {
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = true,
             };
             Tier1EmitResult emitted = { 0 };
             const Tier1EmitError error = selected == TIER1_SELECT_OK ? tier1_emit_function(&plan, &options, targets[c], &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_UNSUPPORTED;
@@ -2635,7 +2630,6 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             const Tier1EmitOptions options = {
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = true,
                 .rematerialize = true,
             };
             memset(&emitted[f], 0, sizeof(emitted[f]));

@@ -382,7 +382,7 @@ patterns are:
   addition, a phi the walk reaches through phis alone before its addition, and
   no recurrence through phis or copies alone, or where only the select's result
   or its condition reaches the phi. `test-tier1-emit` compiles such functions,
-  and branches of each shape, through the CFG consumer with both frame planners, with every
+  and branches of each shape, through the CFG consumer, with every
   register and few, with and without a frame pointer, and with the select's
   values ending at it, where its result takes the register of the value it
   keeps, and runs them natively; and a loop of each predicate's select whose
@@ -1329,7 +1329,7 @@ allocation fragments, frame, records and spill/reload/rematerialization counts.
 All failure paths restore both arenas and preserve the result object. Transition
 events use count/prefix/fill CSR over bounded machine positions. Their ordered
 stores and copies are scalar emission work; the existing liveness, allocation,
-frame and rematerialization producers retain their vector/scalar paths. No
+frame and rematerialization producers are unchanged. No
 compile-time speedup is claimed for adding this consumer.
 
 ## AVX-512's masks (#179)
@@ -1444,7 +1444,7 @@ And the refusals: a vector result at selection, a mask's `select` at
 selection, and at emission the baseline target (no opmask form) and AVX512F alone
 for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
 masks alone is taken; and each width's `kmov` forms, none for a width no mask
-has. `--print` prints each fixture's records by the vector path, as GNU as reads
+has. `--print` prints each fixture's records, as GNU as reads
 them.
 
 
@@ -1948,7 +1948,7 @@ complete function's records the same way.
 `test-tier1-emit` executes real pressure plans through liveness, allocation,
 frame planning, fragment emission, branch sizing and encoding. Original
 32/64-bit fixtures keep up to 600 values live with only three allocatable
-registers. Both paths run against an independent integer oracle with stored
+registers. They run against an independent integer oracle with stored
 values and with rematerialized constants, fixed/red-zone/frame-pointer frames,
 and stack probes. Independent allocation verification checks the produced
 fragments. Failures cover target denial, scratch-register conflicts, capacity
@@ -1977,15 +1977,14 @@ with constants rematerialized and not, and with every register and
 a few, against C's own division; both consumers must save values around the
 sequences.
 
-`benchmark-tier1-select [--steps N] [--functions N] [--only scalar|vector]
-[--after-scalar MS]` freezes original synthetic IR with a deterministic seed.
-Its chain, wide-frontier and live-pressure shapes report selection separately
-from the complete backend path: plan, selected-use liveness, required register
-positions, allocation, rematerialization recipes, frame planning, fragment and
-frame emission, branch sizing and encoding. Both rows select with the one
-selector (#2924); the scalar rows' emission and encoding take their twins, the
-encoder's the scalar one. Both paths are validated before timing. Samples alternate order, and report seven-sample
-medians of nanoseconds and invariant TSC ticks per IR instruction. TSC ticks
+`benchmark-tier1-select [--steps N] [--functions N]` freezes original synthetic
+IR with a deterministic seed. Its chain, wide-frontier and live-pressure shapes
+report selection separately from the complete backend path: plan, selected-use
+liveness, required register positions, allocation, rematerialization recipes,
+frame planning, fragment and frame emission, branch sizing and encoding, each by
+its one implementation (#2924). The pipeline is validated before timing. Samples
+report seven-sample medians of nanoseconds and invariant TSC ticks per IR
+instruction. TSC ticks
 are **not core cycles**. The output also reports actual record/code-byte counts,
 unknown model IDs, spill slots, stores, reloads, rematerialized copies, peak
 retained arena bytes and the maximum of liveness and transition scratch bounds.
