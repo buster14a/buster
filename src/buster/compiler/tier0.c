@@ -473,13 +473,16 @@ struct Tier0AsmBody
     const uint32_t* label_records;
     const uint32_t* label_names;
     uint32_t label_count;
-    // An asm goto's body whose exits fall straight into the exit's move into eax, with no store between (#2351): the
-    // record its exits start at, past the template's; 0 for any other body. Its call row's class is I32, and the
-    // statement's dispatch on the exit follows it: SET_LOCAL of a temporary, then for each label l a LOCAL of it, a CONST
-    // of l + 1, an EQ and a BRANCH_TRUE to the label. Where nothing runs after the row (tier0_asm_direct), Tier 0 drops
-    // the exits and the dispatch, and the template's jump to label l (a branch to the exit's record, exits + 2 + 2l)
-    // branches to the label's entry, as clang's callbr does.
+    // An asm goto's body (#2351): the record its exits start at, past the template's; 0 for any other body. Its
+    // `goto_labels` labels' exits are a move of the exit's number and a jump each (the fall-through's first, the last
+    // label's without its jump), then the outputs' stores (and the x87 inputs' pops), then the exit's move into eax, its
+    // last record. Its call row's class is I32, and the statement's dispatch on the exit follows it: SET_LOCAL of a
+    // temporary, then for each label l a LOCAL of it, a CONST of l + 1, an EQ and a BRANCH_TRUE to the label. Where
+    // nothing runs after the row (tier0_asm_direct), Tier 0 drops the exits and the dispatch, and the template's jump to
+    // label l (a branch to the exit's record, exits + 2 + 2l) branches to the label's entry, as clang's callbr does,
+    // through a copy of the stores of its own where the body has stores (tier0_emit_call_record).
     uint32_t exits;
+    uint32_t goto_labels;
     // Whether the template returns (#1839): its `ret`, and the records on the straight way to it (`leave`, `pop`), leave
     // the function as clang's object does, past the epilogue. Its function keeps no local and no value in a
     // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
@@ -1434,17 +1437,28 @@ static bool tier0_aggregate_whole(AbiLocation location)
     return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
 }
 
+// The bytes of an aggregate of `size` bytes that `location` carries: its size, or at a FIRST location its first 16 bytes
+// alone (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's registers or eightbytes'
+// slots, whose bytes past them are padding).
+static uint32_t tier0_location_size(AbiLocation location, uint32_t size)
+{
+    return (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : size;
+}
+
 // The bytes a copy of an aggregate of `size` bytes on the stack whole at `location` moves: its size, or at a PAYLOAD
-// location its vector payload alone (#2113, a record's <size / 8 x double> that LLVM put on the stack).
+// location its vector payload alone (#2113, a record's <size / 8 x double> that LLVM put on the stack), or at a FIRST one
+// its first 16 bytes (tier0_location_size).
 static uint32_t tier0_whole_bytes(AbiLocation location, uint32_t size)
 {
+    size = tier0_location_size(location, size);
     return (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0 ? abi_vector_payload_bytes(size) : size;
 }
 
 // The bytes of the stack an aggregate of `size` bytes on the stack whole at `location` takes: its size rounded up to 8,
-// or at a PAYLOAD location its vector register's width (#2113).
+// or at a PAYLOAD location its vector register's width (#2113), or at a FIRST one its first 16 bytes'.
 static uint64_t tier0_whole_slot(AbiLocation location, uint32_t size)
 {
+    size = tier0_location_size(location, size);
     const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
     return payload ? abi_vector_register_bytes(abi_vector_payload_bytes(size)) : ((uint64_t)size + 7) & ~UINT64_C(7);
 }
@@ -1452,6 +1466,7 @@ static uint64_t tier0_whole_slot(AbiLocation location, uint32_t size)
 // The parts of an aggregate argument or parameter of `size` bytes at `location` (none on the stack whole or ignored).
 static uint32_t tier0_location_parts(AbiLocation location, uint32_t size, Tier0Part* parts)
 {
+    size = tier0_location_size(location, size);
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT;
@@ -1471,7 +1486,8 @@ static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
     const uint32_t alignment_log2 = tier0_is_object(function, p) ? function->local_alignments[p] : 0;
     const bool aligned = alignment_log2 <= BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 && location.stack_offset % (1u << alignment_log2) == 0;
     // A PAYLOAD slot (#2113) holds the payload alone, which may end before the object's size: its bytes are copied.
-    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    // So does a FIRST one (#1844), of the object's first 16 bytes alone.
+    const bool payload = (location.flags & (BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) != 0;
     return tier0_is_object(function, p) ? tier0_aggregate_whole(location) && aligned && !payload : location.kind == BUSTER_ABI_LOCATION_STACK;
 }
 
@@ -1582,6 +1598,10 @@ static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, u
 // an 8-byte slot, as is the high or the low eightbyte alone on the stack, with no register.
 static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes)
 {
+    // FIRST, of a value past 16 bytes, isn't PAYLOAD's.
+    const bool first = (location.flags & BUSTER_ABI_FLAG_FIRST) != 0;
+    const bool first_valid = !first || (size > BUSTER_ABI_REGISTER_BYTES && (location.flags & BUSTER_ABI_FLAG_PAYLOAD) == 0 && location.kind != BUSTER_ABI_LOCATION_IGNORE);
+    size = tier0_location_size(location, size);
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool whole = tier0_aggregate_whole(location);
@@ -1602,7 +1622,7 @@ static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, 
     // LOW is a STACK location's alone, and PAYLOAD a whole one's, of a record past its payload (#2113).
     valid = valid && (!low || location.kind == BUSTER_ABI_LOCATION_STACK);
     valid = valid && (!payload || (whole && size > abi_vector_payload_bytes(size) && size <= 64));
-    return valid;
+    return valid && first_valid;
 }
 
 // How many x87 registers a result comes back in: st0, or st0 and st1 (a COMPLEX_X87 one), each part 16 bytes after the
@@ -6916,7 +6936,8 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
             valid = body->branches[b] < body->count && (b == 0 || body->branches[b - 1] < body->branches[b]) && body->targets[b] <= body->count;
         }
         valid = valid && (body->label_count == 0 || (body->label_records != 0 && body->label_names != 0)) &&
-                (body->exits == 0 || (body->exits < body->count && (body->count - body->exits) % 2 == 0 && body->count - body->exits >= 4));
+                (body->exits == 0 || (body->goto_labels != 0 && body->exits < body->count &&
+                                      (uint64_t)body->exits + 2 * (uint64_t)body->goto_labels + 2 <= body->count));
         for (uint32_t k = 0; valid && k < body->label_count; k += 1)
         {
             valid = body->label_records[k] <= body->count;
@@ -7042,15 +7063,40 @@ static bool tier0_direct(const Tier0Entries* entries, uint32_t i)
     return entries->direct != 0 && (entries->direct[i >> 6] >> (i & 63) & 1) != 0;
 }
 
-// The records an asm body's call row `i` writes: its own, or a direct one's up to its exits (#2351).
+// The stores of an asm goto's body (#2351, Tier0AsmBody.exits): its records between the last exit's move and the move
+// into eax.
+static uint32_t tier0_body_stores(const Tier0AsmBody* body)
+{
+    return body->count - body->exits - 2 * body->goto_labels - 2;
+}
+
+// The records an asm body's call row `i` writes: its own, or a direct one's up to its exits (#2351) and, where it has
+// stores, a copy of them and a jump per exit.
 static uint32_t tier0_body_records(const Tier0Entries* entries, const Tier0AsmBody* body, uint32_t i)
 {
-    return tier0_direct(entries, i) ? body->exits : body->count;
+    const uint32_t stores = tier0_direct(entries, i) ? tier0_body_stores(body) : 0;
+    return !tier0_direct(entries, i) ? body->count : body->exits + (stores != 0 ? (stores + 1) * (body->goto_labels + 1) : 0);
+}
+
+// Record r of an asm body, addressing the block's home if it addresses the block (BUSTER_TIER0_ASM_BLOCK).
+static X86Instruction tier0_body_record(const Tier0AsmBody* body, const Tier0Home* homes, uint32_t r)
+{
+    X86Instruction record = body->records[r];
+    if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK)
+    {
+        const Tier0Home block = homes[body->block];
+        record.rm = block.reg;
+        record.displacement += block.displacement;
+    }
+    return record;
 }
 
 // The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
 // each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home. A direct asm goto's body
 // (#2351) stops at its exits, and its jumps to its labels go to the labels' entries, the dispatch's BRANCH_TRUEs' targets.
+// One with stores writes a copy of them per exit instead, as clang's callbr's targets' blocks have: the fall-through's
+// after the template, jumping past the others, then each label's, which the template's jumps to it reach, jumping to
+// the label's entry.
 static void tier0_emit_call_record(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t call = (uint32_t)function->values[i];
@@ -7058,7 +7104,11 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Ent
     if (body != 0)
     {
         const uint32_t first = writer->count;
-        const uint32_t end = tier0_body_records(entries, body, i);
+        const bool direct = tier0_direct(entries, i);
+        const uint32_t end = direct ? body->exits : body->count;
+        const uint32_t stores = direct ? tier0_body_stores(body) : 0;
+        const uint32_t tail = body->exits + 2 * body->goto_labels + 1;
+        const uint32_t past = first + tier0_body_records(entries, body, i);
         // Its labels' records (#1839), past the labels of the bodies before it.
         uint32_t label_base = 0;
         for (uint32_t b = 0; writer->asm_labels != 0 && body->label_count != 0 && function->asm_bodies + b != body; b += 1)
@@ -7072,28 +7122,39 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Ent
         uint32_t branch = 0;
         for (uint32_t r = 0; r < end; r += 1)
         {
-            X86Instruction record = body->records[r];
-            if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK)
-            {
-                const Tier0Home block = homes[body->block];
-                record.rm = block.reg;
-                record.displacement += block.displacement;
-            }
+            const X86Instruction record = tier0_body_record(body, homes, r);
             if (branch < body->branch_count && body->branches[branch] == r)
             {
                 // The template's own branch, which branch sizing sizes as the function's: its target in the function's records.
                 if (writer->records != 0)
                 {
                     const uint32_t target = body->targets[branch];
-                    // A direct body's jump to label l: the l-th BRANCH_TRUE of the dispatch, 4 entries each past the SET_LOCAL.
-                    const bool label = end != body->count && target > end;
+                    // A direct body's jump to label l: the l-th BRANCH_TRUE of the dispatch, 4 entries each past the SET_LOCAL,
+                    // or the label's copy of the stores.
+                    const bool label = direct && target > end;
+                    const uint32_t l = label ? (target - end - 2) / 2 : 0;
                     writer->branches[writer->branch_count] = writer->count;
-                    writer->targets[writer->branch_count] = label ? entries->positions[function->values[i + 5 + 4 * ((target - end - 2) / 2)]] : first + target;
+                    writer->targets[writer->branch_count] = !label ? first + target : stores != 0 ? first + end + (stores + 1) * (l + 1) :
+                                                            entries->positions[function->values[i + 5 + 4 * l]];
                 }
                 writer->branch_count += 1;
                 branch += 1;
             }
             tier0_put(writer, record);
+        }
+        for (uint32_t e = 0; stores != 0 && e <= body->goto_labels; e += 1)
+        {
+            for (uint32_t r = tail; r < tail + stores; r += 1)
+            {
+                tier0_put(writer, tier0_body_record(body, homes, r));
+            }
+            if (writer->records != 0)
+            {
+                writer->branches[writer->branch_count] = writer->count;
+                writer->targets[writer->branch_count] = e == 0 ? past : entries->positions[function->values[i + 1 + 4 * e]];
+            }
+            writer->branch_count += 1;
+            tier0_put(writer, tier0_instruction(X86_FORM_JMP_REL8, 0, 0, 0, 0, 0));
         }
     }
     else if (function->call_targets[call] == 0)
@@ -7117,14 +7178,17 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Ent
     }
 }
 
-// How many branches tier0_emit_call_record writes for call entry i: an asm body's own, a direct one's before its exits.
+// How many branches tier0_emit_call_record writes for call entry i: an asm body's own, a direct one's before its exits
+// and its copies' jumps.
 static uint32_t tier0_count_call_branches(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
 {
     const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
-    uint32_t count = 0;
+    const bool direct = body != 0 && tier0_direct(entries, i);
+    const uint32_t end = body == 0 ? 0 : direct ? body->exits : body->count;
+    uint32_t count = direct && tier0_body_stores(body) != 0 ? body->goto_labels + 1 : 0;
     for (uint32_t b = 0; body != 0 && b < body->branch_count; b += 1)
     {
-        count += body->branches[b] < tier0_body_records(entries, body, i) ? 1 : 0;
+        count += body->branches[b] < end ? 1 : 0;
     }
     return count;
 }
@@ -11534,7 +11598,7 @@ static bool tier0_asm_dispatch(const Tier0Function* function, const Tier0Entries
         integer += is_floating ? 0 : 1;
         floating += is_floating ? 1 : 0;
     }
-    const uint32_t labels = (body->count - body->exits - 2) / 2;
+    const uint32_t labels = body->goto_labels;
     const uint64_t last = (uint64_t)i + 1 + 4 * (uint64_t)labels;
     bool valid = function->classes[i] == BUSTER_TYPED_CLASS_I32 && entries->depths[i] == integer && entries->floating_depths[i] == floating &&
                  (entries->mask_depths == 0 || entries->mask_depths[i] == 0) && (entries->deep == 0 || entries->deep[i] == 0) && last < function->count &&
@@ -11583,7 +11647,7 @@ static __attribute__((noinline, cold)) Tier0Error tier0_asm_direct(const Tier0Fu
             if (error == TIER0_OK)
             {
                 entries->direct[i >> 6] |= 1ull << (i & 63);
-                const uint32_t last = i + 1 + 4 * ((body->count - body->exits - 2) / 2);
+                const uint32_t last = i + 1 + 4 * body->goto_labels;
                 for (uint32_t e = i + 1; e <= last; e += 1)
                 {
                     entries->absorbed[e] = 1;
@@ -11607,7 +11671,7 @@ static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0F
         {
             const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
             const uint64_t temporary = function->values[i + 1];
-            const uint32_t taken = 1 + (body->count - body->exits - 2) / 2;
+            const uint32_t taken = 1 + body->goto_labels;
             references[temporary] -= references[temporary] >= taken ? taken : references[temporary];
         }
     }
