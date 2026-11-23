@@ -332,7 +332,8 @@ representation, including overlapping moves, without consuming a scalar value.
 The typed stream's `COPY` is the same representation transfer without a scalar
 value: it carries the source's definedness, or defines the destination when the
 source has no tracked map, accepts identical or disjoint ranges only, refuses
-partial overlap, and leaves both bytes and metadata unchanged when either range
+partial overlap but in its move form (#1373, `tier0_copy_moves`), whose ranges
+may overlap as `memmove`'s, and leaves both bytes and metadata unchanged when either range
 fails its bound or permission check. Typed object locals (`local_classes ==
 VOID`, nonzero `local_sizes`, address-taken and with a validated alignment) own
 separate frame storage. Their registered extents exclude alignment padding,

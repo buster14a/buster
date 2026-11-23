@@ -393,7 +393,14 @@ reports where the image, glibc or packages differ from its own.
 A configuration's other items build nothing. After the usual setup, sanitizer
 probes and host report, they wait for its product (`vector-draw.sh product`),
 fail without one, download the artifact by its name, and
-`hosted-product.sh install` checks it:
+`hosted-product.sh install` checks it. The wait ends only when
+`download-artifact`'s own lookup, the Results service's `ListArtifacts` by
+name (the runtime helper's `find`), serves the product, polled every 2 s for at
+most 3 minutes, not when the run's listing first names it: on 2026-11-22 the
+listing named a finalized product about a second before the lookup served it,
+and the download, which asks once, failed "Artifact not found" (#3301). A failed
+download is asked once more after 30 s; a product neither fetches fails the item.
+The install then checks:
 
 1. the archive's SHA-256 against the one its name holds;
 2. that it holds only directories and regular files under `product/`;

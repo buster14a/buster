@@ -454,7 +454,14 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 break;
             }
             case BUSTER_TYPED_COPY:
-                ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value, value > BUSTER_TIER0_COPY_NARROW_BYTES && !tier0_copy_local_source(input, i));
+                if (tier0_copy_moves(value))
+                {
+                    ir_typed_move(&sink, stack[depth - 2], stack[depth - 1], tier0_copy_bytes(value));
+                }
+                else
+                {
+                    ir_typed_copy(&sink, stack[depth - 2], stack[depth - 1], value, value > BUSTER_TIER0_COPY_NARROW_BYTES && !tier0_copy_local_source(input, i));
+                }
                 depth -= 2;
                 break;
             case BUSTER_TYPED_BRANCH_FALSE:

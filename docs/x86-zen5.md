@@ -327,6 +327,11 @@ precision on registers, each 4 cycles' latency, 2 per cycle and one macro-op
 Its scatters then added 10 `MEMORY_INDEX` rows, `vpscatterdd` to `vpscatterqq` at every width x86 has: one every 3
 (`vpscatterqq` of 16 bytes) to 17 cycles (`vpscatterdd` of 64), 16 to 88 macro-ops, and no latency, as a scatter has
 no result (the harness's scatter takes no chain through its index) (the same record).
+[#1387](https://github.com/buster14a/buster/issues/1387)'s positive one (#3140) then added `FLD1` on registers,
+measured as `FLDZ` is (a push and the `fstp st0` that pops it) by one `--missing --table` process on the 9700X
+(CPU 2, under the lock, built `BUSTER_DEBUG_INFO=0` at `4704727a` with the change): its row is `FLDZ`'s, a push
+every 1.1 cycles, one macro-op on the FP pipes
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x87-fld1-row-1387-2026-11-23)).
 
 What the rows say, a few families (cycles; derived values in italics):
 

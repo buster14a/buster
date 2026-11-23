@@ -1,0 +1,5 @@
+buster-fixtures v1 checker-warnings
+issue.c	5	0	2	#2990 shapes: CFG heuristics prune branches and -Wreturn-type fall-offs, parentheses and ! stop them
+runtime.c	1	0	0	deferred runtime warnings follow the CFG heuristics; a cast at the top stops them
+shapes.c	24	0	23	which literals, operands and constants the CFG heuristics read, and a do condition read whole
+tautologies.c	26	0	1	tautological bitwise, overlap and negation warnings in CFG build order, duplicates and macros

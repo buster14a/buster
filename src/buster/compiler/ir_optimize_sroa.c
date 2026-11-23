@@ -27,6 +27,9 @@ struct IrSroaOptions
     bool scalar;
     bool simd;
     bool flagged;
+    // #3311: the eightbytes of slots read and written at mixed widths (ir_sroa_widen), and a register-class aggregate
+    // result's slot returned through a slot of its own. Needs `flagged`.
+    bool widen;
 };
 
 typedef struct IrSroaResult IrSroaResult;
@@ -38,6 +41,9 @@ struct IrSroaResult
     uint32_t refused_slots;
     // The vector loads that became the constant or the splat their block's stores wrote (#1344).
     uint32_t assembled;
+    // #3311's slots rewritten as eightbytes, and the returns rewritten through a slot of their own (ir_sroa_widen).
+    uint32_t widened_slots;
+    uint32_t widened_returns;
     uint64_t scratch_bytes;
 };
 
@@ -75,6 +81,10 @@ struct IrSroaWork
     IrSimdValue* assembled_constants;
     uint32_t assembled_constant_count;
     uint32_t assembled_count;
+    // #3311 (ir_sroa_widen): whether a ret's use of a slot's address is understood rather than an escape, and the slots a
+    // reachable ret returns.
+    bool returns;
+    uint8_t* returned;
     IrSroaResult statistics;
 };
 
@@ -89,9 +99,13 @@ struct IrSroaUseBatch
     uint32_t root[16];
 };
 
-static uint16_t ir_sroa_escape_mask(const IrSroaUseBatch* batch)
+// The batch's uses that escape their slots: any but a load's or a store's address, or a forwarding instruction's operand
+// (which then has the same root), and a volatile or atomic access's address. With `returns` (#3311), a ret's operand is
+// no escape: *returning gets those lanes, whose slots the widening's return rewrite then decides.
+static uint16_t ir_sroa_escape_mask(const IrSroaUseBatch* batch, bool returns, uint16_t* returning)
 {
     uint16_t result = 0;
+    *returning = 0;
     if (batch->count <= 16)
     {
         const __mmask16 valid = (UINT32_C(1) << batch->count) - 1;
@@ -105,19 +119,26 @@ static uint16_t ir_sroa_escape_mask(const IrSroaUseBatch* batch)
                                      _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PTRTOINT)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_INTTOPTR));
         const __mmask16 forward = first & forward_op & _mm512_cmpneq_epi32_mask(forwarded, _mm512_setzero_si512());
         const __mmask16 observable = memory & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_OBSERVABLE));
-        result = valid & (~(memory | forward) | observable);
+        const __mmask16 ret = returns ? first & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_RET)) : 0;
+        result = valid & (~(memory | forward | ret) | observable);
+        *returning = ret;
     }
     return result;
 }
 
 static void ir_sroa_flush_uses(IrSroaWork* work, IrSroaUseBatch* batch)
 {
-    const uint16_t escaped = ir_sroa_escape_mask(batch);
+    uint16_t returning = 0;
+    const uint16_t escaped = ir_sroa_escape_mask(batch, work->returns, &returning);
     for (uint32_t lane = 0; lane < batch->count; lane += 1)
     {
         if ((escaped & (UINT32_C(1) << lane)) != 0)
         {
             work->refused[batch->root[lane]] = 1;
+        }
+        if ((returning & (UINT32_C(1) << lane)) != 0)
+        {
+            work->returned[batch->root[lane]] = 1;
         }
     }
     batch->count = 0;
@@ -188,6 +209,10 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar, bool flagged)
     for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
     {
         work->refused[slot] = (f->slots[slot].flags & refusing) != 0;
+        if (work->returns)
+        {
+            work->returned[slot] = 0;
+        }
     }
     // These pointer definitions have only ordinary SSA operands, so RPO plus in-block order is topological.
     for (uint32_t r = 0; r < work->ir.dominators.reachable_count; r += 1)
@@ -250,9 +275,14 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar, bool flagged)
                     const bool memory = operand.position == 0 && (f->op[i] == IR_LOAD || f->op[i] == IR_STORE);
                     const bool forward = operand.position == 0 && (f->op[i] == IR_COPY || f->op[i] == IR_BITCAST || f->op[i] == IR_ADDRESS || f->op[i] == IR_PTRTOINT || f->op[i] == IR_INTTOPTR) &&
                                          work->roots[i] == root;
-                    if ((!memory && !forward) || (memory && (f->flags[i] & BUSTER_IR_OBSERVABLE) != 0))
+                    const bool ret = work->returns && operand.position == 0 && f->op[i] == IR_RET;
+                    if ((!memory && !forward && !ret) || (memory && (f->flags[i] & BUSTER_IR_OBSERVABLE) != 0))
                     {
                         work->refused[root] = 1;
+                    }
+                    if (ret)
+                    {
+                        work->returned[root] = 1;
                     }
                 }
             }
@@ -788,7 +818,8 @@ static IrError ir_sroa_compact_slots(IrFunction* f, Arena* scratch)
     return error;
 }
 
-static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* function, Arena* output, Arena* scratch, IrSroaOptions options, IrSroaResult* result)
+// The split itself (ir_optimize_sroa, after #3311's widening).
+static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* scratch, IrSroaOptions options, IrSroaResult* result)
 {
     const uint64_t om = output->length;
     const uint64_t sm = scratch->length;
@@ -916,4 +947,825 @@ static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* functi
     }
     arena_pop_to(scratch, sm);
     return check;
+}
+
+// #3311: eightbytes. The typed stream copies a by-value aggregate's bytes by eightbytes (a parameter's into its object,
+// a register-class result's out of the object its ret returns), while the source reads and writes the fields, an int's
+// four bytes at a time: a slot of mixed widths, whose accesses overlap, which the split refuses, and which a result's ret
+// takes the address of. So a struct passed and returned in registers was copied to and from the stack around every
+// field. Before the split, ir_sroa_widen rewrites such slots as their eightbytes, as LLVM's SROA widens an alloca to an
+// integer:
+// - a slot not refused but for its overlaps or a ret (with `returns`, a ret's use of an address is understood), of at
+//   most 64 bytes, all of whose loads and stores are of scalars (integers of 1 to 8 bytes, f32, f64 and ptr) each inside
+//   one aligned eightbyte, has every access made one of its eightbyte's, an i64: a narrower load the eightbyte shifted
+//   right and truncated (bitcast to f32), and a narrower store the eightbyte with the field's bits cleared, or'ed with the
+//   value zero-extended and shifted left; an f64's and a ptr's the eightbyte's bits. Its size is rounded up to 8;
+// - a reachable ret of such a slot's address (offset 0), where the function's result is a register class's of at most
+//   16 bytes in eightbytes (general registers or xmm ones, no x87, no vector whole), returns a new slot of its own
+//   instead, which the eightbytes are loaded from the object into and stored to just before the ret: the object is then
+//   private, and only those stores and their ret stay memory.
+// The split then makes each eightbyte a field of its own, which promotion makes values, and the optimizer folds the
+// shifts and masks: what was three copies through memory is a value's bits. A function with debug information is left
+// as it is, as its objects' homes are its locals'. The rewrite inserts each access's instructions before it in its block,
+// with the unroller's remapping (ir_unroll_remap, ir_unroll_extras); blocks keep their numbers.
+#define BUSTER_IR_SROA_WIDEN_BYTES 64
+#define BUSTER_IR_SROA_WIDEN_KEEP 0
+#define BUSTER_IR_SROA_WIDEN_LOAD 1
+#define BUSTER_IR_SROA_WIDEN_STORE 2
+#define BUSTER_IR_SROA_WIDEN_RET 3
+
+// Whether a scalar of `type` may live in an eightbyte (#3311): an integer of 1 to 8 bytes, an f32, an f64 or a ptr.
+static bool ir_sroa_widen_type(uint32_t type)
+{
+    return type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_F32 || type == IR_F64 || type == IR_PTR;
+}
+
+// The eightbytes a function's result returns in registers (#3311): its result's size over 8, rounded up, where the
+// convention returns it in one or two general or xmm registers an eightbyte each; else 0.
+static uint32_t ir_sroa_widen_result(const IrFunction* f)
+{
+    const AbiReturn result = f->result_abi;
+    bool parts = result.kind == BUSTER_ABI_RESULT_REGISTERS && (result.flags & BUSTER_ABI_FLAG_HIGH) == 0 && result.part_bytes == 8 && result.registers[0] != BUSTER_ABI_REGISTER_NONE &&
+                 result.registers[2] == BUSTER_ABI_REGISTER_NONE && result.registers[3] == BUSTER_ABI_REGISTER_NONE;
+    for (uint32_t k = 0; k < 2; k += 1)
+    {
+        const uint8_t reg = result.registers[k];
+        parts = parts && (reg == BUSTER_ABI_REGISTER_NONE || reg < 16 || (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR);
+    }
+    const uint32_t count = (f->result_size + 7) / 8;
+    return parts && f->result_size != 0 && f->result_size <= 16 && f->result_type == IR_PTR ? count : 0;
+}
+
+// The instructions ir_sroa_widen inserts before instruction `i` of `kind`, an access of `bytes` bytes of `type` at
+// `offset` in its slot, or a ret of `chunks` eightbytes.
+static uint32_t ir_sroa_widen_inserted(uint8_t kind, uint32_t type, uint64_t offset, uint32_t bytes, uint32_t chunks)
+{
+    const uint32_t shifted = (offset & 7) != 0;
+    uint32_t count = 0;
+    if (kind == BUSTER_IR_SROA_WIDEN_LOAD)
+    {
+        count = bytes == 8 ? (type == IR_I64 ? 0 : 1) : shifted + 1 + 2 * shifted + (type == IR_F32);
+    }
+    else if (kind == BUSTER_IR_SROA_WIDEN_STORE)
+    {
+        count = bytes == 8 ? (type == IR_I64 ? 0 : 1) : shifted + 3 + (type == IR_F32) + 1 + 2 * shifted + 1;
+    }
+    else if (kind == BUSTER_IR_SROA_WIDEN_RET)
+    {
+        count = 1 + 2 * (2 * chunks - 1);
+    }
+    return count;
+}
+
+// A new address row `offset` bytes from `base` at `at` (an IR_ADDRESS of no index).
+static void ir_sroa_widen_address(IrUnrollEmit* emit, uint32_t at, uint32_t base, int64_t offset)
+{
+    emit->view->addresses[emit->address] = (IrAddress){ .offset = offset, .scale = 1 };
+    ir_unroll_put(emit, at, IR_ADDRESS, IR_PTR, base, BUSTER_IR_NONE, emit->address);
+    emit->address += 1;
+}
+
+// Instruction `i` of `kind` rewritten (#3311), its inserted instructions from `at` and itself at map[i]: see the header.
+// `slot` is the new slot a ret returns.
+static void ir_sroa_widen_emit(const IrFunction* f, const IrSroaWork* work, IrUnrollEmit* emit, const uint32_t* map, uint32_t i, uint8_t kind, uint32_t chunks, uint32_t slot)
+{
+    IrFunction* view = emit->view;
+    uint32_t at = map[i] - ir_sroa_widen_inserted(kind, kind == BUSTER_IR_SROA_WIDEN_RET ? IR_VOID : (f->op[i] == IR_LOAD ? f->type[i] : f->type[f->b[i]]),
+                                                  kind == BUSTER_IR_SROA_WIDEN_RET ? 0 : work->offsets[f->a[i]], kind == BUSTER_IR_SROA_WIDEN_RET ? 0 : ir_sroa_access_bytes(f, i), chunks);
+    const uint32_t base = map[f->a[i]];
+    if (kind == BUSTER_IR_SROA_WIDEN_RET)
+    {
+        uint32_t loads[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
+        for (uint32_t k = 0; k < chunks; k += 1)
+        {
+            uint32_t pointer = base;
+            if (k != 0)
+            {
+                pointer = at++;
+                ir_sroa_widen_address(emit, pointer, base, 8 * (int64_t)k);
+            }
+            loads[k] = at++;
+            ir_unroll_put(emit, loads[k], IR_LOAD, IR_I64, pointer, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        const uint32_t returned = at++;
+        ir_unroll_put(emit, returned, IR_STACK_ADDR, IR_PTR, slot, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k < chunks; k += 1)
+        {
+            uint32_t pointer = returned;
+            if (k != 0)
+            {
+                pointer = at++;
+                ir_sroa_widen_address(emit, pointer, returned, 8 * (int64_t)k);
+            }
+            ir_unroll_put(emit, at++, IR_STORE, IR_VOID, pointer, loads[k], BUSTER_IR_NONE);
+        }
+        ir_unroll_put(emit, map[i], IR_RET, IR_VOID, returned, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    else
+    {
+        const bool load = kind == BUSTER_IR_SROA_WIDEN_LOAD;
+        const uint32_t type = load ? f->type[i] : f->type[f->b[i]];
+        const uint64_t offset = work->offsets[f->a[i]];
+        const uint32_t bytes = ir_sroa_access_bytes(f, i);
+        const uint32_t shift = (uint32_t)(offset & 7) * 8;
+        const uint8_t flags = view->flags[map[i]];
+        if (bytes == 8)
+        {
+            // The eightbyte's bits: an f64's or a ptr's converted to or from the i64.
+            const uint32_t converted = at++;
+            if (load)
+            {
+                ir_unroll_put(emit, converted, IR_LOAD, IR_I64, base, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_unroll_put(emit, map[i], type == IR_PTR ? IR_INTTOPTR : IR_BITCAST, type, converted, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            else
+            {
+                ir_unroll_put(emit, converted, type == IR_PTR ? IR_PTRTOINT : IR_BITCAST, IR_I64, map[f->b[i]], BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_unroll_put(emit, map[i], IR_STORE, IR_VOID, base, converted, BUSTER_IR_NONE);
+            }
+        }
+        else
+        {
+            uint32_t pointer = base;
+            if (shift != 0)
+            {
+                pointer = at++;
+                ir_sroa_widen_address(emit, pointer, base, -(int64_t)(offset & 7));
+            }
+            const uint32_t word = at++;
+            ir_unroll_put(emit, word, IR_LOAD, IR_I64, pointer, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            const uint64_t field = (bytes == 8 ? UINT64_MAX : (UINT64_C(1) << (8 * bytes)) - 1) << shift;
+            if (load)
+            {
+                uint32_t value = word;
+                if (shift != 0)
+                {
+                    const uint32_t count = at++;
+                    ir_unroll_put_constant(emit, count, IR_I64, shift);
+                    value = at++;
+                    ir_unroll_put(emit, value, IR_LSHR, IR_I64, word, count, BUSTER_IR_NONE);
+                }
+                if (type == IR_F32)
+                {
+                    const uint32_t truncated = at++;
+                    ir_unroll_put(emit, truncated, IR_TRUNC, IR_I32, value, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    ir_unroll_put(emit, map[i], IR_BITCAST, IR_F32, truncated, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                }
+                else
+                {
+                    ir_unroll_put(emit, map[i], IR_TRUNC, type, value, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                }
+            }
+            else
+            {
+                const uint32_t mask = at++;
+                ir_unroll_put_constant(emit, mask, IR_I64, ~field);
+                const uint32_t kept = at++;
+                ir_unroll_put(emit, kept, IR_AND, IR_I64, word, mask, BUSTER_IR_NONE);
+                uint32_t value = map[f->b[i]];
+                if (type == IR_F32)
+                {
+                    const uint32_t bits = at++;
+                    ir_unroll_put(emit, bits, IR_BITCAST, IR_I32, value, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                    value = bits;
+                }
+                uint32_t placed = at++;
+                ir_unroll_put(emit, placed, IR_ZEXT, IR_I64, value, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                if (shift != 0)
+                {
+                    const uint32_t count = at++;
+                    ir_unroll_put_constant(emit, count, IR_I64, shift);
+                    const uint32_t moved = at++;
+                    ir_unroll_put(emit, moved, IR_SHL, IR_I64, placed, count, BUSTER_IR_NONE);
+                    placed = moved;
+                }
+                const uint32_t merged = at++;
+                ir_unroll_put(emit, merged, IR_OR, IR_I64, kept, placed, BUSTER_IR_NONE);
+                ir_unroll_put(emit, map[i], IR_STORE, IR_VOID, pointer, merged, BUSTER_IR_NONE);
+            }
+        }
+        // A plain access (ir_sroa_widen admits no other) keeps its flags, none.
+        view->flags[map[i]] = flags;
+    }
+}
+
+// #3311's rewrite of `function` (see above) into *result, in `scratch`, with the counts of the slots widened and the rets
+// rewritten; *result is `function` itself where there is nothing to rewrite. Its analyses go to `output` and are gone
+// after.
+static IrCheck ir_sroa_widen(const IrFunction* function, Arena* output, Arena* scratch, IrSroaOptions options, IrFunction* result, uint32_t* widened_slots, uint32_t* widened_returns)
+{
+    *result = *function;
+    *widened_slots = 0;
+    *widened_returns = 0;
+    const uint64_t om = output->length;
+    IrSroaWork work = { 0 };
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+    const IrFunction* f = function;
+    const bool eligible = options.flagged && f->debug == NULL && f->slot_count != 0 && output != scratch;
+    if (eligible)
+    {
+        check = ir_optimize_prepare(&work.ir, f, output, scratch, BUSTER_SCALAR_PATH(options.scalar), options.simd);
+    }
+    uint8_t* kinds = NULL;
+    uint8_t* widen = NULL;
+    uint32_t chunks = 0;
+    uint32_t rets = 0;
+    uint64_t inserted = 0;
+    uint64_t constants = 0;
+    uint64_t addresses = 0;
+    if (eligible && check.error == IR_OK)
+    {
+        bool ok = true;
+        const uint64_t n = f->instruction_count;
+        work.roots = ir_allocate(scratch, n, 4, &ok);
+        work.offsets = ir_allocate(scratch, n, 8, &ok);
+        work.refused = ir_allocate(scratch, f->slot_count, 1, &ok);
+        work.returned = ir_allocate(scratch, f->slot_count, 1, &ok);
+        work.returns = true;
+        kinds = ir_allocate(scratch, n, 1, &ok);
+        widen = ir_allocate(scratch, f->slot_count, 1, &ok);
+        uint8_t* mixed = ir_allocate(scratch, f->slot_count, 1, &ok);
+        // Each slot's bytes' first access: its offset and its type, and a bit that one was seen. Two accesses of different
+        // offsets or types that share a byte are a slot's mixed widths.
+        uint32_t* keys = ir_allocate(scratch, (uint64_t)f->slot_count * BUSTER_IR_SROA_WIDEN_BYTES, 4, &ok);
+        check.error = ok ? IR_OK : IR_ERROR_MEMORY;
+        if (ok)
+        {
+            memset(kinds, 0, n);
+            memset(widen, 0, f->slot_count);
+            memset(mixed, 0, f->slot_count);
+            memset(keys, 0, (uint64_t)f->slot_count * BUSTER_IR_SROA_WIDEN_BYTES * 4);
+            ir_sroa_provenance(&work, BUSTER_SCALAR_PATH(options.scalar), true);
+            chunks = ir_sroa_widen_result(f);
+            // Every access of a slot not refused, reachable or not (the split takes both), decides it; widen[] is 1 for a
+            // slot an access refuses, until the decision below.
+            for (uint32_t i = 0; i < f->instruction_count; i += 1)
+            {
+                const uint32_t op = f->op[i];
+                const uint32_t root = (op == IR_LOAD || op == IR_STORE || op == IR_RET) && f->a[i] != BUSTER_IR_NONE ? work.roots[f->a[i]] : BUSTER_IR_NONE;
+                if (root != BUSTER_IR_NONE && work.refused[root] == 0)
+                {
+                    const uint64_t size = f->slots[root].size;
+                    const uint64_t offset = work.offsets[f->a[i]];
+                    const bool reachable = work.ir.dominators.rpo_index[work.ir.cfg.instruction_blocks[i]] != BUSTER_DOMINATOR_NONE;
+                    if (op == IR_RET)
+                    {
+                        // A reachable ret returns the slot's bytes from its start, which the result's eightbytes cover.
+                        const bool returned = reachable && chunks != 0 && offset == 0 && size >= f->result_size && size <= BUSTER_IR_SROA_WIDEN_BYTES;
+                        widen[root] |= !returned;
+                        kinds[i] = returned ? BUSTER_IR_SROA_WIDEN_RET : BUSTER_IR_SROA_WIDEN_KEEP;
+                    }
+                    else
+                    {
+                        const uint32_t type = op == IR_LOAD ? f->type[i] : f->type[f->b[i]];
+                        const uint32_t bytes = ir_sroa_access_bytes(f, i);
+                        const bool fits = f->flags[i] == 0 && ir_sroa_widen_type(type) && size <= BUSTER_IR_SROA_WIDEN_BYTES && offset < size && bytes <= size - offset &&
+                                          (offset & 7) + bytes <= 8;
+                        widen[root] |= !fits;
+                        if (fits)
+                        {
+                            const uint32_t key = UINT32_C(1) << 31 | (uint32_t)offset << 8 | type;
+                            uint32_t* first = &keys[(uint64_t)root * BUSTER_IR_SROA_WIDEN_BYTES + offset];
+                            for (uint32_t k = 0; k < bytes; k += 1)
+                            {
+                                mixed[root] |= first[k] != 0 && first[k] != key;
+                                first[k] = first[k] == 0 ? key : first[k];
+                            }
+                            kinds[i] = op == IR_LOAD ? BUSTER_IR_SROA_WIDEN_LOAD : BUSTER_IR_SROA_WIDEN_STORE;
+                        }
+                    }
+                }
+            }
+            // The decision: a slot no access refused, which has mixed widths or is returned.
+            for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
+            {
+                widen[slot] = work.refused[slot] == 0 && widen[slot] == 0 && (mixed[slot] != 0 || work.returned[slot] != 0);
+                *widened_slots += widen[slot];
+            }
+            for (uint32_t i = 0; i < f->instruction_count; i += 1)
+            {
+                const uint32_t root = kinds[i] != BUSTER_IR_SROA_WIDEN_KEEP ? work.roots[f->a[i]] : BUSTER_IR_NONE;
+                // An eightbyte's i64 is already the eightbyte's access.
+                const bool whole = kinds[i] != BUSTER_IR_SROA_WIDEN_RET && root != BUSTER_IR_NONE && ir_sroa_access_bytes(f, i) == 8 &&
+                                   (f->op[i] == IR_LOAD ? f->type[i] : f->type[f->b[i]]) == IR_I64;
+                kinds[i] = root != BUSTER_IR_NONE && widen[root] != 0 && !whole ? kinds[i] : BUSTER_IR_SROA_WIDEN_KEEP;
+                if (kinds[i] != BUSTER_IR_SROA_WIDEN_KEEP)
+                {
+                    const bool ret = kinds[i] == BUSTER_IR_SROA_WIDEN_RET;
+                    const uint32_t type = ret ? IR_VOID : f->op[i] == IR_LOAD ? f->type[i] : f->type[f->b[i]];
+                    const uint64_t offset = ret ? 0 : work.offsets[f->a[i]];
+                    const uint32_t bytes = ret ? 0 : ir_sroa_access_bytes(f, i);
+                    const bool shifted = !ret && bytes != 8 && (offset & 7) != 0;
+                    inserted += ir_sroa_widen_inserted(kinds[i], type, offset, bytes, chunks);
+                    rets += ret;
+                    constants += ret ? 0 : (kinds[i] == BUSTER_IR_SROA_WIDEN_STORE && bytes != 8) + (shifted ? 1 : 0);
+                    addresses += ret ? 2 * ((uint64_t)chunks - 1) : shifted;
+                }
+            }
+        }
+    }
+    *widened_returns = rets;
+    const bool rewrite = check.error == IR_OK && eligible && *widened_slots != 0;
+    const uint64_t total = (uint64_t)f->instruction_count + inserted;
+    if (rewrite && (total >= UINT32_MAX || (uint64_t)f->constant_count + constants > UINT32_MAX || (uint64_t)f->address_count + addresses > UINT32_MAX ||
+                    (uint64_t)f->slot_count + 1 > UINT32_MAX))
+    {
+        check.error = IR_ERROR_LIMIT;
+    }
+    if (rewrite && check.error == IR_OK)
+    {
+        bool ok = true;
+        const uint64_t extras = (uint64_t)f->extra_count + ir_unroll_extra_words(f, 0, f->instruction_count);
+        uint32_t* map = ir_allocate(scratch, f->instruction_count, 4, &ok);
+        IrFunction view = *f;
+        view.instruction_count = (uint32_t)total;
+        view.op = ir_allocate(scratch, total, 1, &ok);
+        view.type = ir_allocate(scratch, total, 1, &ok);
+        view.flags = ir_allocate(scratch, total, 1, &ok);
+        view.alignment_log2 = ir_allocate(scratch, total, 1, &ok);
+        view.a = ir_allocate(scratch, total, 4, &ok);
+        view.b = ir_allocate(scratch, total, 4, &ok);
+        view.c = ir_allocate(scratch, total, 4, &ok);
+        view.block_offsets = ir_allocate(scratch, (uint64_t)f->block_count + 1, 4, &ok);
+        view.extra = ir_allocate(scratch, extras, 4, &ok);
+        view.calls = ir_allocate(scratch, f->call_count, sizeof(IrCall), &ok);
+        view.constants = ir_allocate(scratch, (uint64_t)f->constant_count + constants, sizeof(IrConstant), &ok);
+        view.addresses = ir_allocate(scratch, (uint64_t)f->address_count + addresses, sizeof(IrAddress), &ok);
+        view.slot_count = f->slot_count + (rets != 0);
+        view.slots = ir_allocate(scratch, view.slot_count, sizeof(IrSlot), &ok);
+        check.error = ok && extras <= UINT32_MAX ? IR_OK : !ok ? IR_ERROR_MEMORY : IR_ERROR_LIMIT;
+        if (check.error == IR_OK)
+        {
+            // Each original instruction's new index, after the instructions inserted before it in its block.
+            uint32_t out = 0;
+            for (uint32_t block = 0; block < f->block_count; block += 1)
+            {
+                view.block_offsets[block] = out;
+                for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+                {
+                    const bool ret = kinds[i] == BUSTER_IR_SROA_WIDEN_RET;
+                    out += kinds[i] == BUSTER_IR_SROA_WIDEN_KEEP ? 0 :
+                           ir_sroa_widen_inserted(kinds[i], ret ? IR_VOID : f->op[i] == IR_LOAD ? f->type[i] : f->type[f->b[i]], ret ? 0 : work.offsets[f->a[i]],
+                                                  ret ? 0 : ir_sroa_access_bytes(f, i), chunks);
+                    map[i] = out;
+                    out += 1;
+                }
+            }
+            view.block_offsets[f->block_count] = out;
+            if (f->extra_count != 0)
+            {
+                memcpy(view.extra, f->extra, (uint64_t)f->extra_count * 4);
+            }
+            if (f->constant_count != 0)
+            {
+                memcpy(view.constants, f->constants, (uint64_t)f->constant_count * sizeof(IrConstant));
+            }
+            if (f->address_count != 0)
+            {
+                memcpy(view.addresses, f->addresses, (uint64_t)f->address_count * sizeof(IrAddress));
+            }
+            for (uint32_t slot = 0; slot < f->slot_count; slot += 1)
+            {
+                view.slots[slot] = f->slots[slot];
+                view.slots[slot].size = widen[slot] != 0 ? (view.slots[slot].size + 7) & ~UINT64_C(7) : view.slots[slot].size;
+            }
+            const uint32_t slot = f->slot_count;
+            if (rets != 0)
+            {
+                view.slots[slot] = (IrSlot){ .size = 8 * (uint64_t)chunks, .alignment = 8, .type = IR_VOID, .flags = BUSTER_IR_SLOT_TEMPORARY };
+            }
+            IrUnrollEmit emit = {
+                .view = &view,
+                .extra = f->extra_count,
+                .call = 0,
+                .constant = f->constant_count,
+                .address = f->address_count,
+            };
+            // Runs of kept instructions are contiguous in the output; each rewritten one is emitted after its run.
+            for (uint32_t block = 0; block < f->block_count; block += 1)
+            {
+                uint32_t first = f->block_offsets[block];
+                const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+                for (uint32_t i = first; i <= end; i += 1)
+                {
+                    const bool kept = i < end && kinds[i] == BUSTER_IR_SROA_WIDEN_KEEP;
+                    if (!kept && first < i)
+                    {
+                        ir_unroll_remap(f, first, i - first, map, &view, map[first]);
+                        ir_unroll_extras(&emit, f, first, i, map[first], map, NULL);
+                    }
+                    if (!kept && i < end)
+                    {
+                        ir_unroll_remap(f, i, 1, map, &view, map[i]);
+                        ir_sroa_widen_emit(f, &work, &emit, map, i, kinds[i], chunks, slot);
+                    }
+                    first = kept ? first : i + 1;
+                }
+            }
+            view.extra_count = emit.extra;
+            view.call_count = emit.call;
+            view.constant_count = emit.constant;
+            view.address_count = emit.address;
+            view.arena_bytes = 0;
+            *result = view;
+        }
+    }
+    *widened_slots = rewrite && check.error == IR_OK ? *widened_slots : 0;
+    *widened_returns = rewrite && check.error == IR_OK ? *widened_returns : 0;
+    // A function the optimizer's preparation refuses (a SIMD one without `simd`) is the split's to refuse.
+    check.error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+    arena_pop_to(output, om);
+    return check;
+}
+
+static __attribute__((unused)) IrCheck ir_optimize_sroa(const IrFunction* function, Arena* output, Arena* scratch, IrSroaOptions options, IrSroaResult* result)
+{
+    const uint64_t sm = scratch->length;
+    IrFunction widened = { 0 };
+    uint32_t widened_slots = 0;
+    uint32_t widened_returns = 0;
+    IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
+    if (options.widen)
+    {
+        check = ir_sroa_widen(function, output, scratch, options, &widened, &widened_slots, &widened_returns);
+    }
+    if (check.error == IR_OK)
+    {
+        check = ir_sroa_split(widened_slots != 0 ? &widened : function, output, scratch, options, result);
+    }
+    if (check.error == IR_OK)
+    {
+        result->widened_slots = widened_slots;
+        result->widened_returns = widened_returns;
+    }
+    arena_pop_to(scratch, sm);
+    return check;
+}
+
+// #3311: a function's own by-value aggregates in registers as scalars. After SROA's widening, a register-class
+// aggregate parameter's ptr (IrPassed.size, its copy's address) is only read by its eightbytes' loads, and a one-eightbyte
+// result's ret only returns the slot one store of that eightbyte filled, yet each still went through memory: the entry
+// stored the parameter's registers into its copy, and the return loaded the result from its slot. ir_sroa_scalarize
+// makes them what the convention already passes, on a function's own code alone (a candidate's inline summary keeps
+// its aggregates, which its callers' expansions copy):
+// - a parameter in one or two registers, an eightbyte each (general or xmm, no flags), of at most 16 bytes, whose ptr
+//   only block 0 reads, by plain loads of a part's offset (its own, or an IR_ADDRESS of offset 8 without an index), of at
+//   most the part's 8 bytes (a general part's i8 to i64, ptr or f64; an xmm part's f64 or i64), becomes a scalar
+//   parameter a part (an i64 in its general register, an f64 in its xmm one: records of no size). The ptr's node becomes
+//   its first part's parameter and its first IR_ADDRESS its second's; each load is that parameter's value, copied,
+//   truncated or converted, and any other IR_ADDRESS of it an undef;
+// - a result of at most 8 bytes in rax or xmm0 whose every reachable ret returns a stack_addr of a slot nothing else
+//   refers to, stored by one i64 store of the same block before the ret and of a value defined before the stack_addr,
+//   becomes that i64 (or its bits as an f64 in xmm0), the stack_addr its copy (or bitcast) and the store an undef; an
+//   unreachable ret's undefined ptr becomes an undefined i64 or f64.
+// Promotion and the optimizer then remove what no longer has a use. Parameters are renumbered; the records stay the
+// function's own. A function with debug information, a variadic one or one whose shapes differ is left as it is.
+#define BUSTER_IR_SCALARIZE_NONE 0u
+// Per node: the parameter part a ptr reaches (its parameter + 1 in the low 24 bits, its part above), or none.
+#define BUSTER_IR_SCALARIZE_PART_SHIFT 24u
+
+// The part of parameter record `record` (#3311) that holds byte offset `k * 8`: its register, or NONE where the record
+// isn't a register class's eightbytes.
+static uint8_t ir_sroa_scalar_register(const IrPassed* record, uint32_t k)
+{
+    const AbiLocation location = record->location;
+    const bool eightbytes = record->size != 0 && record->size <= 16 && location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.flags == 0 &&
+                            location.registers[0] != BUSTER_ABI_REGISTER_NONE && (record->size <= 8) == (location.registers[1] == BUSTER_ABI_REGISTER_NONE);
+    const uint8_t reg = eightbytes && k < 2 ? location.registers[k] : BUSTER_ABI_REGISTER_NONE;
+    const bool usable = reg < 16 || (reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && (reg & 0x1f) < 16);
+    return usable ? reg : BUSTER_ABI_REGISTER_NONE;
+}
+
+// Whether a load of `type` reads a part in register `reg` as its value (#3311): see the header.
+static bool ir_sroa_scalar_load(uint8_t reg, uint32_t type)
+{
+    const bool vector = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+    return vector ? type == IR_F64 || type == IR_I64 : type == IR_I8 || type == IR_I16 || type == IR_I32 || type == IR_I64 || type == IR_PTR || type == IR_F64;
+}
+
+// The conversion of a part's parameter value (an i64, or an f64 for an xmm part) to a load's `type`: its op.
+static uint32_t ir_sroa_scalar_conversion(uint8_t reg, uint32_t type)
+{
+    const bool vector = (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+    const uint32_t part = vector ? IR_F64 : IR_I64;
+    return type == part ? IR_COPY : type == IR_PTR ? IR_INTTOPTR : type == IR_F64 || type == IR_I64 ? IR_BITCAST : IR_TRUNC;
+}
+
+// #3311's scalars (see above) of `function`, whose result goes to `output` as a whole new set of the columns it changes
+// (the others the input's), into *result; with the counts of the parameters and results it made scalars. *result is
+// `function` itself where it made none.
+static __attribute__((unused)) IrError ir_sroa_scalarize(const IrFunction* function, Arena* output, Arena* scratch, IrFunction* result, uint32_t* parameters, uint32_t* results)
+{
+    const IrFunction* f = function;
+    *result = *f;
+    *parameters = 0;
+    *results = 0;
+    const uint64_t om = output->length;
+    const uint64_t sm = scratch->length;
+    const uint64_t n = f->instruction_count;
+    const bool eligible = f->parameter_passed != 0 && f->debug == NULL && !f->variadic && f->block_count != 0;
+    bool ok = true;
+    uint32_t* parts = eligible ? ir_allocate(scratch, n, 4, &ok) : NULL;
+    uint32_t* blocks = eligible ? ir_allocate(scratch, n, 4, &ok) : NULL;
+    uint32_t* uses = eligible ? ir_allocate(scratch, n, 4, &ok) : NULL;
+    uint8_t* refused = eligible ? ir_allocate(scratch, (uint64_t)f->parameter_count + 1, 1, &ok) : NULL;
+    // Each parameter's part's host node (its ptr's, or its first IR_ADDRESS's), two a parameter.
+    uint32_t* hosts = eligible ? ir_allocate(scratch, 2 * ((uint64_t)f->parameter_count + 1), 4, &ok) : NULL;
+    // Each slot's stack_addrs (a lifetime marker counting past any), and those a ret's pattern takes.
+    uint32_t* referenced = eligible ? ir_allocate(scratch, (uint64_t)f->slot_count + 1, 4, &ok) : NULL;
+    uint32_t* matched = eligible ? ir_allocate(scratch, (uint64_t)f->slot_count + 1, 4, &ok) : NULL;
+    IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
+    bool scalar_result = false;
+    uint8_t result_reg = BUSTER_ABI_REGISTER_NONE;
+    if (eligible && error == IR_OK)
+    {
+        memset(parts, 0, n * 4);
+        memset(uses, 0, n * 4);
+        memset(refused, 0, (uint64_t)f->parameter_count + 1);
+        memset(hosts, 0xff, 2 * ((uint64_t)f->parameter_count + 1) * 4);
+        memset(referenced, 0, ((uint64_t)f->slot_count + 1) * 4);
+        memset(matched, 0, ((uint64_t)f->slot_count + 1) * 4);
+        for (uint32_t block = 0; block < f->block_count; block += 1)
+        {
+            for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+            {
+                blocks[i] = block;
+            }
+        }
+        for (uint32_t p = 0; p < f->parameter_count; p += 1)
+        {
+            const IrPassed* record = &f->passed[f->parameter_passed - 1 + p];
+            refused[p] = ir_sroa_scalar_register(record, 0) == BUSTER_ABI_REGISTER_NONE || (record->size > 8 && ir_sroa_scalar_register(record, 1) == BUSTER_ABI_REGISTER_NONE);
+        }
+        // The ptrs: a parameter's node (part 0) and an IR_ADDRESS of offset 8 of it (part 1), in block 0, which comes first.
+        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        {
+            const uint32_t op = f->op[i];
+            if (op == IR_PARAM && f->type[i] == IR_PTR && f->a[i] < f->parameter_count && refused[f->a[i]] == 0)
+            {
+                const uint32_t p = f->a[i];
+                const bool first = blocks[i] == 0 && hosts[2 * p] == BUSTER_IR_NONE;
+                refused[p] |= !first;
+                hosts[2 * p] = first ? i : hosts[2 * p];
+                parts[i] = p + 1;
+            }
+            else if (op == IR_ADDRESS && parts[f->a[i]] != BUSTER_IR_SCALARIZE_NONE && (parts[f->a[i]] >> BUSTER_IR_SCALARIZE_PART_SHIFT) == 0)
+            {
+                const uint32_t p = (parts[f->a[i]] & ((UINT32_C(1) << BUSTER_IR_SCALARIZE_PART_SHIFT) - 1)) - 1;
+                const IrAddress address = f->addresses[f->c[i]];
+                const bool second = blocks[i] == 0 && f->b[i] == BUSTER_IR_NONE && address.offset == 8 && f->passed[f->parameter_passed - 1 + p].size > 8;
+                refused[p] |= !second;
+                hosts[2 * p + 1] = second && hosts[2 * p + 1] == BUSTER_IR_NONE ? i : hosts[2 * p + 1];
+                parts[i] = second ? (p + 1) | UINT32_C(1) << BUSTER_IR_SCALARIZE_PART_SHIFT : BUSTER_IR_SCALARIZE_NONE;
+            }
+        }
+        // Every use of a part's ptr: a plain load in block 0 that its part's register holds (an IR_ADDRESS's, above).
+        for (uint32_t i = 0; i < f->instruction_count; i += 1)
+        {
+            const uint64_t count = ir_operand_count(f, i);
+            for (uint32_t number = 0; number < count; number += 1)
+            {
+                const IrOperand operand = ir_operand(f, i, number, blocks[i]);
+                const uint32_t part = operand.value < n ? parts[operand.value] : BUSTER_IR_SCALARIZE_NONE;
+                uses[operand.value < n ? operand.value : 0] += operand.value < n;
+                if (part != BUSTER_IR_SCALARIZE_NONE)
+                {
+                    const uint32_t p = (part & ((UINT32_C(1) << BUSTER_IR_SCALARIZE_PART_SHIFT) - 1)) - 1;
+                    const uint32_t k = part >> BUSTER_IR_SCALARIZE_PART_SHIFT;
+                    const bool address = f->op[i] == IR_ADDRESS && k == 0 && parts[i] != BUSTER_IR_SCALARIZE_NONE;
+                    const uint8_t reg = ir_sroa_scalar_register(&f->passed[f->parameter_passed - 1 + p], k);
+                    const bool load = f->op[i] == IR_LOAD && operand.position == 0 && blocks[i] == 0 && f->flags[i] == 0 && ir_sroa_scalar_load(reg, f->type[i]);
+                    refused[p] |= !address && !load;
+                }
+            }
+        }
+        // The result's rets.
+        const AbiReturn abi = f->result_abi;
+        result_reg = abi.registers[0];
+        scalar_result = f->result_size != 0 && f->result_size <= 8 && f->result_type == IR_PTR && abi.kind == BUSTER_ABI_RESULT_REGISTERS && abi.flags == 0 &&
+                        (result_reg == BUSTER_ABI_RAX || result_reg == BUSTER_ABI_REGISTER_VECTOR) && abi.registers[1] == BUSTER_ABI_REGISTER_NONE &&
+                        abi.registers[2] == BUSTER_ABI_REGISTER_NONE && abi.registers[3] == BUSTER_ABI_REGISTER_NONE;
+        for (uint32_t i = 0; scalar_result && i < f->instruction_count; i += 1)
+        {
+            if (f->op[i] == IR_STACK_ADDR || f->op[i] == IR_LIFETIME)
+            {
+                referenced[f->a[i]] += f->op[i] == IR_STACK_ADDR ? 1 : f->slot_count + 1;
+            }
+        }
+        for (uint32_t i = 0; scalar_result && i < f->instruction_count; i += 1)
+        {
+            if (f->op[i] == IR_RET)
+            {
+                const uint32_t a = f->a[i];
+                const bool undefined = a < n && f->op[a] == IR_UNDEF && uses[a] == 1;
+                // The stack_addr's two uses: the store before the ret, and the ret.
+                const bool slot = a < n && f->op[a] == IR_STACK_ADDR && uses[a] == 2 && blocks[a] == blocks[i] && a < i;
+                bool stored = false;
+                for (uint32_t s = a + 1; slot && s < i; s += 1)
+                {
+                    const uint32_t w = f->b[s];
+                    stored |= f->op[s] == IR_STORE && f->a[s] == a && f->flags[s] == 0 && f->type[w] == IR_I64 && (blocks[w] != blocks[a] || w < a);
+                }
+                matched[stored ? f->a[a] : f->slot_count] += 1;
+                scalar_result = undefined || stored;
+            }
+        }
+        // Each returned slot's every stack_addr is a ret's.
+        for (uint32_t slot = 0; scalar_result && slot < f->slot_count; slot += 1)
+        {
+            scalar_result = matched[slot] == 0 || matched[slot] == referenced[slot];
+        }
+    }
+    for (uint32_t p = 0; eligible && error == IR_OK && p < f->parameter_count; p += 1)
+    {
+        *parameters += refused[p] == 0;
+    }
+    *results = eligible && error == IR_OK && scalar_result;
+    if (error == IR_OK && (*parameters != 0 || *results != 0))
+    {
+        // The new parameters: a scalarized one's parts in order, every other as it was.
+        uint64_t count = 0;
+        for (uint32_t p = 0; p < f->parameter_count; p += 1)
+        {
+            count += refused[p] == 0 ? (f->passed[f->parameter_passed - 1 + p].size > 8 ? 2 : 1) : 1;
+        }
+        IrFunction view = *f;
+        view.op = ir_allocate(output, n, 1, &ok);
+        view.type = ir_allocate(output, n, 1, &ok);
+        view.flags = ir_allocate(output, n, 1, &ok);
+        view.alignment_log2 = ir_allocate(output, n, 1, &ok);
+        view.a = ir_allocate(output, n, 4, &ok);
+        view.b = ir_allocate(output, n, 4, &ok);
+        view.c = ir_allocate(output, n, 4, &ok);
+        view.parameter_types = ir_allocate(output, count, 1, &ok);
+        view.passed = ir_allocate(output, (uint64_t)f->passed_count - f->parameter_count + count, sizeof(IrPassed), &ok);
+        uint32_t* firsts = ir_allocate(scratch, (uint64_t)f->parameter_count + 1, 4, &ok);
+        error = ok && count <= UINT32_MAX ? IR_OK : !ok ? IR_ERROR_MEMORY : IR_ERROR_LIMIT;
+        if (error == IR_OK)
+        {
+            memcpy(view.op, f->op, n);
+            memcpy(view.type, f->type, n);
+            memcpy(view.flags, f->flags, n);
+            memcpy(view.alignment_log2, f->alignment_log2, n);
+            memcpy(view.a, f->a, n * 4);
+            memcpy(view.b, f->b, n * 4);
+            memcpy(view.c, f->c, n * 4);
+            // The function's records in place of its old ones; the calls' records after them move by the difference.
+            const uint32_t own = f->parameter_passed - 1;
+            const uint32_t after = own + f->parameter_count;
+            const uint32_t grown = (uint32_t)count - f->parameter_count;
+            uint32_t out = 0;
+            for (uint32_t k = 0; k < own; k += 1)
+            {
+                view.passed[out++] = f->passed[k];
+            }
+            for (uint32_t k = after; k < f->passed_count; k += 1)
+            {
+                view.passed[(uint64_t)k + grown] = f->passed[k];
+            }
+            IrAbiCall* calls = f->abi_call_count != 0 ? ir_allocate(output, f->abi_call_count, sizeof(IrAbiCall), &ok) : NULL;
+            error = ok ? error : IR_ERROR_MEMORY;
+            for (uint32_t k = 0; error == IR_OK && k < f->abi_call_count; k += 1)
+            {
+                calls[k] = f->abi_calls[k];
+                calls[k].passed += f->abi_calls[k].passed >= after ? grown : 0;
+            }
+            view.abi_calls = f->abi_call_count != 0 ? calls : f->abi_calls;
+            uint32_t next = 0;
+            for (uint32_t p = 0; error == IR_OK && p < f->parameter_count; p += 1)
+            {
+                const IrPassed* record = &f->passed[own + p];
+                firsts[p] = next;
+                const uint32_t pieces = refused[p] == 0 ? (record->size > 8 ? 2 : 1) : 1;
+                for (uint32_t k = 0; k < pieces; k += 1)
+                {
+                    const uint8_t reg = refused[p] == 0 ? ir_sroa_scalar_register(record, k) : BUSTER_ABI_REGISTER_NONE;
+                    const bool vector = reg != BUSTER_ABI_REGISTER_NONE && (reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
+                    view.parameter_types[next] = refused[p] == 0 ? (uint8_t)(vector ? IR_F64 : IR_I64) : f->parameter_types[p];
+                    view.passed[out++] = refused[p] == 0 ? (IrPassed){ .location = { .kind = BUSTER_ABI_LOCATION_REGISTERS, .registers = { reg, BUSTER_ABI_REGISTER_NONE } }, .size = 0 } : *record;
+                    next += 1;
+                }
+            }
+            view.parameter_count = next;
+            view.passed_count = f->passed_count + grown;
+            for (uint32_t i = 0; error == IR_OK && i < f->instruction_count; i += 1)
+            {
+                const uint32_t op = f->op[i];
+                const uint32_t part = parts[i];
+                const uint32_t p = (part & ((UINT32_C(1) << BUSTER_IR_SCALARIZE_PART_SHIFT) - 1)) - 1;
+                const uint32_t k = part >> BUSTER_IR_SCALARIZE_PART_SHIFT;
+                if (op == IR_PARAM)
+                {
+                    view.a[i] = refused[f->a[i]] == 0 ? firsts[f->a[i]] : firsts[f->a[i]];
+                    view.type[i] = refused[f->a[i]] == 0 ? view.parameter_types[firsts[f->a[i]]] : f->type[i];
+                }
+                else if (op == IR_ADDRESS && part != BUSTER_IR_SCALARIZE_NONE && refused[p] == 0)
+                {
+                    // Its part's parameter where it is the part's host, else an undef no load reads any more.
+                    const bool host = hosts[2 * p + k] == i;
+                    view.op[i] = host ? IR_PARAM : IR_UNDEF;
+                    view.type[i] = host ? view.parameter_types[firsts[p] + k] : IR_PTR;
+                    view.a[i] = host ? firsts[p] + k : BUSTER_IR_NONE;
+                    view.b[i] = BUSTER_IR_NONE;
+                    view.c[i] = BUSTER_IR_NONE;
+                }
+                else if (op == IR_LOAD && f->a[i] < n && parts[f->a[i]] != BUSTER_IR_SCALARIZE_NONE)
+                {
+                    const uint32_t from = parts[f->a[i]];
+                    const uint32_t q = (from & ((UINT32_C(1) << BUSTER_IR_SCALARIZE_PART_SHIFT) - 1)) - 1;
+                    const uint32_t j = from >> BUSTER_IR_SCALARIZE_PART_SHIFT;
+                    if (refused[q] == 0)
+                    {
+                        const uint8_t reg = ir_sroa_scalar_register(&f->passed[own + q], j);
+                        view.op[i] = (uint8_t)ir_sroa_scalar_conversion(reg, f->type[i]);
+                        view.a[i] = hosts[2 * q + j];
+                        view.b[i] = BUSTER_IR_NONE;
+                        view.c[i] = BUSTER_IR_NONE;
+                        view.flags[i] = 0;
+                        view.alignment_log2[i] = 0;
+                    }
+                }
+            }
+            if (*results != 0)
+            {
+                const uint8_t type = result_reg == BUSTER_ABI_RAX ? IR_I64 : IR_F64;
+                for (uint32_t i = 0; i < f->instruction_count; i += 1)
+                {
+                    if (f->op[i] == IR_RET)
+                    {
+                        const uint32_t a = f->a[i];
+                        if (f->op[a] == IR_UNDEF)
+                        {
+                            view.type[a] = type;
+                        }
+                        else
+                        {
+                            // The last store of the slot before the ret is what it returns; any earlier one an undef too.
+                            uint32_t value = BUSTER_IR_NONE;
+                            for (uint32_t s = a + 1; s < i; s += 1)
+                            {
+                                if (f->op[s] == IR_STORE && f->a[s] == a)
+                                {
+                                    value = f->b[s];
+                                    view.op[s] = IR_UNDEF;
+                                    view.type[s] = IR_I64;
+                                    view.a[s] = BUSTER_IR_NONE;
+                                    view.b[s] = BUSTER_IR_NONE;
+                                    view.c[s] = BUSTER_IR_NONE;
+                                    view.flags[s] = 0;
+                                    view.alignment_log2[s] = 0;
+                                }
+                            }
+                            view.op[a] = type == IR_I64 ? IR_COPY : IR_BITCAST;
+                            view.type[a] = type;
+                            view.a[a] = value;
+                            view.b[a] = BUSTER_IR_NONE;
+                            view.c[a] = BUSTER_IR_NONE;
+                        }
+                    }
+                }
+                view.result_type = type;
+                view.result_size = 0;
+                // The slot the result was returned through has no reference left: it goes, and its frame with it.
+                view.slots = ir_allocate(output, f->slot_count, sizeof(IrSlot), &ok);
+                error = ok ? IR_OK : IR_ERROR_MEMORY;
+                if (error == IR_OK && f->slot_count != 0)
+                {
+                    memcpy(view.slots, f->slots, (uint64_t)f->slot_count * sizeof(IrSlot));
+                }
+                error = error == IR_OK ? ir_sroa_compact_slots(&view, scratch) : error;
+            }
+            // A function left with no aggregate at all, whose parameters are each where its type's turn puts it (a
+            // general register in order for an integer or a ptr, an xmm one for a float, none on the stack), needs no
+            // records of its own: without them its frame has no rows for its parameters' copies.
+            bool plain = error == IR_OK && view.result_size == 0 && view.result_abi.kind != BUSTER_ABI_RESULT_MEMORY && view.result_type != IR_F80;
+            uint32_t general = 0;
+            uint32_t vector = 0;
+            for (uint32_t p = 0; plain && p < view.parameter_count; p += 1)
+            {
+                const IrPassed record = view.passed[view.parameter_passed - 1 + p];
+                const uint32_t type = view.parameter_types[p];
+                const bool floating = type == IR_F32 || type == IR_F64;
+                const uint8_t reg = record.location.registers[0];
+                const uint8_t expected = floating ? (vector < BUSTER_ABI_VECTOR_ARGUMENTS ? (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | vector) : BUSTER_ABI_REGISTER_NONE) :
+                                                    (general < BUSTER_ABI_INTEGER_ARGUMENTS ? abi_integer_arguments[general] : BUSTER_ABI_REGISTER_NONE);
+                plain = record.size == 0 && record.location.kind == BUSTER_ABI_LOCATION_REGISTERS && (record.location.flags & ~(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)) == 0 &&
+                        record.location.registers[1] == BUSTER_ABI_REGISTER_NONE && reg != BUSTER_ABI_REGISTER_NONE && reg == expected &&
+                        (floating || type == IR_I32 || type == IR_I64 || type == IR_PTR);
+                general += !floating;
+                vector += floating;
+            }
+            view.parameter_passed = plain ? 0 : view.parameter_passed;
+            *result = view;
+        }
+    }
+    if (error != IR_OK || (*parameters == 0 && *results == 0))
+    {
+        *result = *f;
+        *parameters = 0;
+        *results = 0;
+        arena_pop_to(output, om);
+    }
+    arena_pop_to(scratch, sm);
+    return error;
 }
