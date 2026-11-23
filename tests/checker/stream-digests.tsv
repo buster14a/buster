@@ -26,7 +26,7 @@ graph-barriers/e6ceff35a6966431	5b9dc4492c51b087
 graphs/036ba1765957ba19	593bbbba92284f15
 graphs/04351eac345b492a	c2f8ca6d882ccdcc
 graphs/04c0a6b6111814c5	399c2d24b9f85b65
-graphs/051a2210a1a83c35	5376a7045402d0a1
+graphs/051a2210a1a83c35	2009ee548647fd18
 graphs/0533ddf709b98c88	c49cdcf6b168d73b
 graphs/059bd7b99cdd3553	8f1a3f4f2514ee8c
 graphs/05d589a777b3cfc8	86857e7a5ba78897
@@ -74,7 +74,7 @@ graphs/38cc675a3dbea6c3	804807acab34d42c
 graphs/3abd0bd80c39abaf	a5cb2440b8d5a14c
 graphs/3b02c5bf6774b36b	e4fa8127dc05d2cc
 graphs/3b7fb0f424d6222d	cb0632cee5313dea
-graphs/3d947e95e7ea9008	1d74833e2e1c0423
+graphs/3d947e95e7ea9008	30aad5391a79005a
 graphs/3e1d00112a961a88	872cec5ab8c59cdf
 graphs/3ef5eb8558b27c19	88aeb268a3f767c5
 graphs/3fcb80dc76949b22	1b39f907b91e98b6
@@ -83,10 +83,10 @@ graphs/421fe4aca828b9e2	c5274d7cca0c6590
 graphs/4554b774bd360e66	be3e979730ae9e04
 graphs/458ad34e641408d7	8269719bd63801d3
 graphs/4b2f3f386b770411	aaed56192e47f9b1
-graphs/4b392a03c78278c5	009b83a2fb65c022
+graphs/4b392a03c78278c5	cb5f1b7e8e07cc25
 graphs/4b91451af2c5e188	833a616f541b4a96
 graphs/4bfb80b0dfaa372e	fcb241b48d816fce
-graphs/4c61de0e0d506a98	16e9b4ff380ad4fd
+graphs/4c61de0e0d506a98	0f66df9892b7106b
 graphs/4dcc4843ca8ea919	775506bcce60b730
 graphs/4e7f2b01467cba45	aaed56192e47f9b1
 graphs/4f64b05e403a0f53	4f5697253e5698d3
@@ -132,7 +132,7 @@ graphs/87866cb743655e40	5109129509bf64ac
 graphs/88201fb960ff6465	f14b84b8290b8965
 graphs/88989935a1ef1aa4	221fc8bd6d3aba5f
 graphs/89cb0cd8c6334752	e9a3b2186dabe19a
-graphs/8a97e9a11d0399db	02efca0909eb561d
+graphs/8a97e9a11d0399db	584515c3075e0665
 graphs/8aaa786d7e27d281	5b115c3e38cf4186
 graphs/8c1699aaf08e2a61	f38ed02e3bbc9d79
 graphs/8c343f3841c3135d	19d2e94710765edf
@@ -157,7 +157,7 @@ graphs/a4d7833a46af2cf5	3e30596b23905828
 graphs/af6ac59864fb0f75	461a6e920c1e5730
 graphs/b001899d7b8623c9	d2c5dd35b5d564ad
 graphs/b54d1a015ed33c47	a2e8c5ff28176f65
-graphs/b926787320c64829	93bc80409cfbc227
+graphs/b926787320c64829	ddfa0b76e57f45e7
 graphs/b97c60c657fc3ad5	1949841a64efe94e
 graphs/b9c1b22aac889b19	a2cbb980bdffcd5c
 graphs/bab7a838db3e2f9d	32f036bd7230661d
@@ -169,7 +169,7 @@ graphs/c5b2fa926058d1fd	54fd9b8ce558ce65
 graphs/c668b61795181bed	e9a3b2186dabe19a
 graphs/c68aa724e3672791	a9d16a0305541699
 graphs/c693b6db72a26db7	4f85598096b3ac0e
-graphs/c69dc327aa585bc6	fce095d74d4509b2
+graphs/c69dc327aa585bc6	5af09a114d932c03
 graphs/cb08ca6a999f0cc6	3f6259a1c20a8706
 graphs/cdc5a8d1ef69a547	4132e45ae5016f07
 graphs/ce4f60bbce3a8bf8	590429a030ba4d88
@@ -212,58 +212,58 @@ graphs/fef7db6c7d3d8531	6a58f6fcdad02c65
 graphs/ff6123d013cd5a54	830a3e991394601b
 graphs/ff869cbd8bb1e836	2e4e4004a92368ec
 graphs/ff9109605249c769	effa510d1381b725
-integer-policy-graphs/00e418cba564d69c	aa3f6a34bac3227b
-integer-policy-graphs/04c371aaa13e48fe	31192dd2453533a7
-integer-policy-graphs/08262dd68541bf62	07096fc744b417c6
-integer-policy-graphs/087f10cd920fd230	3761673151ca8038
-integer-policy-graphs/0b662bf68a220d7d	e2c59340ea762378
-integer-policy-graphs/0d103f55a4cca8f2	3d7644d2e0ecb15c
-integer-policy-graphs/1075b3fbe1cf55cb	2e39d4683ddbf342
-integer-policy-graphs/127b788043f45303	595e821e0734f63b
-integer-policy-graphs/13885cfd2dd3b189	8417f4adfd637d17
-integer-policy-graphs/1b87e89160c31fd0	d8bf5e5795ab220b
-integer-policy-graphs/20d8a42d4d07e15e	dc1c8ccc116bdf1d
-integer-policy-graphs/23ea57b2873b8834	12b4d39c2a6b1eb3
-integer-policy-graphs/2ac091e8b0c28837	40744006e16ef5f6
-integer-policy-graphs/2c50166f40b0d9ad	37077d83a7b6ee56
-integer-policy-graphs/316c0fe071e14015	da145c42083bfdcb
-integer-policy-graphs/49089675f12109f6	3d7644d2e0ecb15c
-integer-policy-graphs/4a672380e6204a6a	87e8659a5b451a96
-integer-policy-graphs/4c77e7724926bf19	84c597fd9a5c0ce2
-integer-policy-graphs/4f9ff7a21d4fe02d	57ea57ddf8424406
-integer-policy-graphs/50d5a1edafb82c50	e7f1e6e277a0af12
-integer-policy-graphs/53d21bac1ba5cc0a	f1a6a9ab9f0312bb
-integer-policy-graphs/74b80f047da632f3	595e821e0734f63b
-integer-policy-graphs/78e96aecca35d591	115fd5b1b7da42f3
-integer-policy-graphs/7993957d057a8db3	dd66e8e508613e5d
-integer-policy-graphs/7a5df8859c0d1523	d4bff871280d9cc6
-integer-policy-graphs/7e48dfe0d77dd672	4a8f274d0110a0d6
-integer-policy-graphs/829f3264e0ed28dd	37077d83a7b6ee56
-integer-policy-graphs/83ef912f7250c515	17a90f7176e68e5d
-integer-policy-graphs/899de32b8b3572dd	574cb140cf7cd37b
-integer-policy-graphs/8c30a706cd489a88	e2ae95e298cadd3a
-integer-policy-graphs/93ba5e815f5b402a	4b00e87026dd2f70
-integer-policy-graphs/96f494522a77a379	b5bd2d0b5275120a
-integer-policy-graphs/9953611d6f48b6f8	c5427e3cf759b29e
-integer-policy-graphs/a2649d46ecb7cec2	381b2c4e5e9b65e3
-integer-policy-graphs/a575c143d3746764	efe2ece872a104b6
-integer-policy-graphs/a6c01d29261bf767	b5de976bcb657c20
-integer-policy-graphs/a8b1794357f0926e	1508a2eda7ef54c2
-integer-policy-graphs/b58bec9d51ceeeb7	dd66e8e508613e5d
-integer-policy-graphs/c40fd02b7b31e012	688d0fcb2d9a8e23
-integer-policy-graphs/cf6dd4d63dcdac79	e2c59340ea762378
-integer-policy-graphs/cfb2b5a1abafa12e	4b00e87026dd2f70
-integer-policy-graphs/d3ff035e508a833b	7c5620df64990e3c
+integer-policy-graphs/00e418cba564d69c	76bc2babec1ff901
+integer-policy-graphs/04c371aaa13e48fe	0396ff2a6e59933d
+integer-policy-graphs/08262dd68541bf62	76309127d3d896c0
+integer-policy-graphs/087f10cd920fd230	6ab85c53ecc59ffe
+integer-policy-graphs/0b662bf68a220d7d	92984e1c1ca12bbe
+integer-policy-graphs/0d103f55a4cca8f2	1fa5729a69a7e9e2
+integer-policy-graphs/1075b3fbe1cf55cb	595ed9deed7a50bc
+integer-policy-graphs/127b788043f45303	25db43953891ccc1
+integer-policy-graphs/13885cfd2dd3b189	476336006b7925ed
+integer-policy-graphs/1b87e89160c31fd0	600f11eb3a42b991
+integer-policy-graphs/20d8a42d4d07e15e	59809cafdb131063
+integer-policy-graphs/23ea57b2873b8834	eafa6073e365e4ad
+integer-policy-graphs/2ac091e8b0c28837	b4f8560b1aa972f0
+integer-policy-graphs/2c50166f40b0d9ad	47f9a417a9380e50
+integer-policy-graphs/316c0fe071e14015	5eba1400c7b1ddd1
+integer-policy-graphs/49089675f12109f6	1fa5729a69a7e9e2
+integer-policy-graphs/4a672380e6204a6a	f718bc00f5a9e210
+integer-policy-graphs/4c77e7724926bf19	0a4aaa72453cf45c
+integer-policy-graphs/4f9ff7a21d4fe02d	254fa911204a6a80
+integer-policy-graphs/50d5a1edafb82c50	9aa5dda3e03e278c
+integer-policy-graphs/53d21bac1ba5cc0a	15f577c450588d41
+integer-policy-graphs/74b80f047da632f3	25db43953891ccc1
+integer-policy-graphs/78e96aecca35d591	ec4f5e5e55f6c06d
+integer-policy-graphs/7993957d057a8db3	27b4ad289bdade97
+integer-policy-graphs/7a5df8859c0d1523	e5a8e9ff1e4e7440
+integer-policy-graphs/7e48dfe0d77dd672	5b814de10291c0d0
+integer-policy-graphs/829f3264e0ed28dd	47f9a417a9380e50
+integer-policy-graphs/83ef912f7250c515	602527eff1d86713
+integer-policy-graphs/899de32b8b3572dd	0bf792431236b591
+integer-policy-graphs/8c30a706cd489a88	40e64d3095bbef1c
+integer-policy-graphs/93ba5e815f5b402a	fad3a34b590837b6
+integer-policy-graphs/96f494522a77a379	a78df52c60655720
+integer-policy-graphs/9953611d6f48b6f8	1e3535ac5326e718
+integer-policy-graphs/a2649d46ecb7cec2	0bff5d321f0e84dd
+integer-policy-graphs/a575c143d3746764	173304908fde8d30
+integer-policy-graphs/a6c01d29261bf767	e9358c8e66609be6
+integer-policy-graphs/a8b1794357f0926e	b3a0c6050afff3fc
+integer-policy-graphs/b58bec9d51ceeeb7	27b4ad289bdade97
+integer-policy-graphs/c40fd02b7b31e012	88a9a65b587c4a9d
+integer-policy-graphs/cf6dd4d63dcdac79	92984e1c1ca12bbe
+integer-policy-graphs/cfb2b5a1abafa12e	fad3a34b590837b6
+integer-policy-graphs/d3ff035e508a833b	6c2975a7315b7d02
 integer-policy-graphs/ddbeec0b635beeb7	39624ab958ee145f
-integer-policy-graphs/de7e8515d762987e	3202bcd56fb59b1d
-integer-policy-graphs/dec9986128da3ac1	f137ead2e531e076
-integer-policy-graphs/e3982e852c40e067	0a1902466058c843
-integer-policy-graphs/e4e04d0d00b3805a	dc1c8ccc116bdf1d
-integer-policy-graphs/e6b419c32adaad1e	d614f65b9a9e7886
-integer-policy-graphs/ea4ac4e7ff8834fd	b96df7e1e128ba63
-integer-policy-graphs/f1726b979415acde	d5a680144dea3922
-integer-policy-graphs/f7e60bb4c7743797	6314d3a8cf506c1d
-integer-policy-graphs/f8d86ea7e994a9ad	e946e4ccea318ad2
+integer-policy-graphs/de7e8515d762987e	bc511b059dc6a1d7
+integer-policy-graphs/dec9986128da3ac1	15de06a61d4db170
+integer-policy-graphs/e3982e852c40e067	a1d7e0ec0d6b953d
+integer-policy-graphs/e4e04d0d00b3805a	59809cafdb131063
+integer-policy-graphs/e6b419c32adaad1e	e6fde7e990df5000
+integer-policy-graphs/ea4ac4e7ff8834fd	d98a8e720c0a76dd
+integer-policy-graphs/f1726b979415acde	5b2b9288f8cb209c
+integer-policy-graphs/f7e60bb4c7743797	d28855d31d2e8363
+integer-policy-graphs/f8d86ea7e994a9ad	9bfadb8e52cf034c
 scheduler/5e79388d572afed9	c3796974b2270972
 sizeof/0bbba7197650971b	da80724cfee3c3a7
 sizeof/0bcc3a1201b98f54	28bacdfd4720b34e
@@ -339,7 +339,7 @@ sources/C integer literal types@b75aa875	9047efcc86b99e71
 sources/C23 auto: file scope, a loop's, a parenthesized declarator and the storage class with a type@1c61109c	5194b7bcadd5c920
 sources/C23 auto: lvalue conversion, decay, pointer declarators and later declarators@8e058550	d4e917aace7757e9
 sources/C23 constexpr: a discarded constant still initializes@fba204c3	9461b958f0213195
-sources/C23 constexpr: objects in constant expressions@d500bfff	4e065b3ea48e264f
+sources/C23 constexpr: objects in constant expressions@d500bfff	1e0779ab00a0cdef
 sources/C23 generic intrinsic controls preserve declared types@362f0a19	c6b19ce71b6c022e
 sources/C23 raw attribute arithmetic@480bd27c	e3fd99f79e91104f
 sources/C23 raw attribute cast and conditional@6ef51bfd	e3fd99f79e91104f
@@ -360,7 +360,7 @@ sources/GCC unroll without a count@d6ee0ccc	f7dd336d62f438ac
 sources/GNU attribute ICE integration@2c6a32dc	4a60163f56e92c73
 sources/GNU choose exact selected array@2b7e0206	e2f86fb6eaad6782
 sources/GNU choose exact selected lvalue@ebd0c13d	a3d807b72739d67e
-sources/GNU complex integer product wraps its components@d97806a1	50a66c0f95c33578
+sources/GNU complex integer product wraps its components@d97806a1	82d0687172865b16
 sources/GNU computed floating zero is not a null pointer constant@e1d9be15	a52c544c1bc8a9bb
 sources/GNU constant array bound and raw attribute@648b130f	0706d9a4af755672
 sources/GNU discarded void indirection@c4c8e95b	8a58f23a0ea321e1
@@ -368,14 +368,14 @@ sources/GNU extension prefix preserves operand category@29a2ecfa	9d2e1098d45b372
 sources/GNU fallthrough null statement@1e7e87b0	b9cdc1370ddf06ac
 sources/GNU folded comma zero is not a null pointer constant@1df24120	c7178aba2a360781
 sources/GNU folded-constant extension@72058c43	22f226acacbddf29
-sources/GNU full-width overflow and shift constants@6b391340	2e9e49cc29d69afa
+sources/GNU full-width overflow and shift constants@6b391340	c405ac625e409216
 sources/GNU negative shifts and bit-precise type width@81b5abe7	40189e5fd490f428
 sources/GNU overflow enumeration retains target arithmetic@b439bb7c	7ed723ac41227a86
 sources/GNU real expression folds in integer constant context@e0f2d638	f14b84b8290b8965
 sources/GNU scoped standard fallthrough null statement@43466f88	b9cdc1370ddf06ac
 sources/GNU statement expression folds in integer constant context@7d7c5a65	f14b84b8290b8965
 sources/GNU statement expression zero is not a null pointer constant@0bb27fc2	9af90296763bb065
-sources/GNU wrapped ICE zero remains a null pointer constant@6284ea3e	47c0d1701c08b5e6
+sources/GNU wrapped ICE zero remains a null pointer constant@6284ea3e	f9741009f6e824ce
 sources/GNU17 prototype after parameterless definition@28f33ba5	ed73c291cac58021
 sources/K&R all implicit parameters in C89@30cd8949	8879a5187db4de7c
 sources/K&R anonymous record parameter types remain complete@23e6550c	aaa0587fc3c3ae04
@@ -409,7 +409,7 @@ sources/__auto_type: an assignment to a const one@b6a01ac6	78b6967b2ee65642
 sources/__auto_type: file scope, static, a loop's, structures and compound literals@1be6cdb7	c1ddcc9ffca3764f
 sources/__auto_type: later declarators@96041d51	014255daaa5a710e
 sources/__auto_type: lvalue conversion and decay@6634b095	47e81f324fc432ef
-sources/__auto_type: pointer declarators@b17cae08	31178977453540bb
+sources/__auto_type: pointer declarators@b17cae08	0f96cb17990ec3ab
 sources/__auto_type: the specifiers' qualifiers@361ec9ba	2e9f4152b0bc1155
 sources/a HIP atomic of an _Atomic object refused@6cbe1ecd	b9086c2f520be337
 sources/a HIP atomic's invalid scope refused@2f9ece68	04ee368f9f64fefa
@@ -438,8 +438,8 @@ sources/a record of many members@b5855a23	82e60815d6fb3454
 sources/a rotate of a struct refused@c4b79f1c	657b47feacf04a09
 sources/a same-type pointer cast permits the actual const integer member read@04957256	1a7e5fca564c8095
 sources/a scatter's scale refused@f4b27d39	4c602a35bb7c76eb
-sources/a scoped atomic IEEE maximum's invalid scope refused@255ad05d	e5e955c392008708
-sources/a scoped atomic IEEE maximum_num@ee3d52d6	8c28688b8d68ef72
+sources/a scoped atomic IEEE maximum's invalid scope refused@255ad05d	ad272340e3fb6a2d
+sources/a scoped atomic IEEE maximum_num@ee3d52d6	e006ffb061e98077
 sources/a scoped atomic IEEE minimum_num without its scope refused@68087f7e	d784e89008ce3bbb
 sources/a scoped atomic's invalid scope refused@9c379494	17358710491c0166
 sources/a specifier's cleanup on a function and a variable@33052eeb	f14b84b8290b8965
@@ -476,7 +476,7 @@ sources/added vector builtin source 21@b5c6decb	7a5ce501a544df87
 sources/added vector builtin source 22@a6ed4ac3	9c29612509ce9cef
 sources/added vector builtin source 23@b2fdb8fa	776aef04e9f94e2b
 sources/added vector builtin source 24@c8675586	d646a4916d742ebb
-sources/added vector builtin source 25@0dbdae5f	9f2b308aae09796c
+sources/added vector builtin source 25@0dbdae5f	f9949f17f603a404
 sources/added vector builtin source 26@a1e6ff7e	d891c028b87af947
 sources/added vector builtin source 27@c58c5362	9975008dee2d009b
 sources/added vector builtin source 28@5b7f259b	b6738ac80290ef47
@@ -512,7 +512,7 @@ sources/added vector builtin source 6@4b465a49	2195e98c21264a79
 sources/added vector builtin source 7@d7f6aeb3	3b1d4a7e805619ab
 sources/added vector builtin source 8@b31b210b	7402a394d6bdd94f
 sources/added vector builtin source 9@44800dee	effabc21bac594bf
-sources/address cancels absolute pointer indirection@4ad4ff2a	2bb31a420d341b46
+sources/address cancels absolute pointer indirection@4ad4ff2a	98e519abefba3e9a
 sources/address cancels null pointer indirection@879f05a0	808eedd11fef3630
 sources/address cancels void pointer indirection@ed722dcf	0c7e836b7767cb4f
 sources/address of predefined array retains array extent@fbfea40f	f9604db362c4e617
@@ -582,8 +582,8 @@ sources/an atomic IEEE maximum of a _Complex float@7f551de6	b0337df5d4acf43e
 sources/an atomic IEEE maximum of a _Complex long double@e43400c3	96058d3848b1172f
 sources/an atomic IEEE maximum of a _Float16@fde66256	fbd3fe1af866543e
 sources/an atomic IEEE maximum of a const float refused@2f5ed98f	c4d6770cd4ac97f5
-sources/an atomic IEEE maximum of a double by an int@d385f4d3	945aab036b579c84
-sources/an atomic IEEE maximum of a float by an int@1ce4e019	de7445c4a2651620
+sources/an atomic IEEE maximum of a double by an int@d385f4d3	e6111240f78c6589
+sources/an atomic IEEE maximum of a float by an int@1ce4e019	ea8b1b7bd9e6e305
 sources/an atomic IEEE maximum of a long double refused@8103b07a	1d697159ce12d678
 sources/an atomic IEEE maximum of a struct refused@c5250150	7dd377f5f54d7903
 sources/an atomic IEEE maximum of a value, not its address, refused@774e3624	e7f074e3743342cf
@@ -592,10 +592,10 @@ sources/an atomic IEEE maximum of an _Atomic float refused@a26d70cd	94483a82ae13
 sources/an atomic IEEE maximum of an enum refused@16857a0c	31b57bd4ad57f4db
 sources/an atomic IEEE maximum of an int by a float refused@92581822	ab8460d3c14634de
 sources/an atomic IEEE maximum of an int refused@a65223c3	7cad2f682ae0375d
-sources/an atomic IEEE maximum of an over-aligned float@2299087b	37bd0144616976c1
+sources/an atomic IEEE maximum of an over-aligned float@2299087b	e91878ddcea25250
 sources/an atomic IEEE maximum through a void pointer refused@a0ac2861	fdc27d02273bf762
 sources/an atomic IEEE maximum with an argument too many refused@ce9b7537	157b06990ce7a9d6
-sources/an atomic IEEE maximum with its order known at run time@0f975538	1c067f7953b25c36
+sources/an atomic IEEE maximum with its order known at run time@0f975538	1917ae0ecce810db
 sources/an atomic IEEE maximum with two arguments too many refused@a106b81e	6413bdec773f129d
 sources/an atomic IEEE maximum_num of a _Bool refused@4e34a244	8bc3ccebb7180a98
 sources/an atomic IEEE maximum_num of a __float128@6a78ac73	1ad13a4e53fccddf
@@ -636,8 +636,8 @@ sources/asm goto beside another function label's address@fa114488	748a1bdf1b0a3d
 sources/asm goto out of an array's scope@a85b4a3f	1547a30529ee6cd3
 sources/asm goto within a cleanup's scope@3ab43150	ca0ce968b9ec4a9a
 sources/asm weak visibility declaration integration@3f52b190	bffe70ff5552d7f4
-sources/atomic min and max@caa0e1fb	4a669ca86f5661a7
-sources/atomic read-modify-write builtins and their result types@8a1db8c8	7249c3d9dc81c7bd
+sources/atomic min and max@caa0e1fb	8ee06eae29def866
+sources/atomic read-modify-write builtins and their result types@8a1db8c8	36e2f6e33e1850dc
 sources/atomic vector initializers keep the declared destination@637d0313	a42fde471b701518
 sources/atomic vector rvalues do not initialize plain vectors@48349ec1	1e5f5753a3bd9716
 sources/attribute inside grouped abstract declarator@924ce4c2	82aa8ba32f4808fc
@@ -688,7 +688,7 @@ sources/bits: popcountg of plain char where it is unsigned@dd3bbfce	7ea179b49a23
 sources/bits: result types@bc27ce3e	5f88989d8dc750d7
 sources/block extern before file definition@880eae79	67a1ac70de229880
 sources/block extern uses file object@42b9991a	f338eb6eb20744a0
-sources/block-scope builtin calls of const objects in other families@50b182ae	39518395fcf66a85
+sources/block-scope builtin calls of const objects in other families@50b182ae	a9436177d870bc4c
 sources/block-scope typeof's prototype tag ends with the prototype@211e80a0	05ef343fbfe6f96a
 sources/body expression named callback type@1ce96aff	436e62c1a5b3733f
 sources/body's definition completes its parameter-list tag@f58d1587	d41d429b2fd40a50
@@ -755,7 +755,7 @@ sources/classify: isfpclass without its mask@a3fa4b2f	e31b95ae45b9e8d5
 sources/classify: isnormal of an int@f9536c19	745b3c698b894b25
 sources/classify: issubnormal of a struct@692cf6cd	8122da28d199b3c1
 sources/classify: iszero of two@bc9b5221	1dea34b48b9864d8
-sources/classify: masks of other integer types@1f6d3f6a	208de50ce798f5d0
+sources/classify: masks of other integer types@1f6d3f6a	e358f902c86eed78
 sources/classify: result types@6339484e	3da8af2395bfe5e4
 sources/classify: signbitf of a pointer@075fdf8d	074596bea1981b7a
 sources/cleanup function of a result@5261f30b	f14b84b8290b8965
@@ -809,7 +809,7 @@ sources/const assignment@1f722282	626e50acff5bc9cf
 sources/const atomic scalar may be read during explicit constant evaluation@4ed0c5a6	abbb95e490a047e8
 sources/const atomic scalar supplies a static initializer without becoming a runtime load@feadd8d7	904310bcf0c7ce3a
 sources/const callback parameter@c3334be6	46182ef3cb06042a
-sources/const floating object converts in a static initializer@372f49fc	6ad007e6ed5f20de
+sources/const floating object converts in a static initializer@372f49fc	426ef963a6b24e7e
 sources/const initialization@cbc6487d	38abf372c0e70685
 sources/const nested array member folds a selected element@ee5aa201	19e3ec8825e8b496
 sources/const nonbyte bit-field values retain their stored bits@31329f03	f6eca3ba36e1129e
@@ -826,7 +826,7 @@ sources/const scalar folds a static assertion@589ebeb5	354595a6fbeb4920
 sources/const scalar supplies a static initializer@61f12258	a0ffb79cfc64207d
 sources/const union folds its active member@6bbde82e	8cbc2828e45b17e7
 sources/const unsigned scalar folds a bit-field width@25ea85a7	3435d360331bad11
-sources/constant query saturates floating casts only in proof@2c8cc70b	342809c88ac9ee31
+sources/constant query saturates floating casts only in proof@2c8cc70b	7a4af15f1d319478
 sources/constant static initializer@4e26537f	1609cdc1506b9045
 sources/constant type names retain repeated modifier semantics@6c868298	bd6434fd3d427b0b
 sources/constructor after the definition ignored@b31ddfd2	f14b84b8290b8965
@@ -853,7 +853,7 @@ sources/declaration builtin call of a mutable object@15719b4f	529924b20d6c9e44
 sources/declaration builtin call of a runtime-initialized const object@4fb73264	f67e076dfa8db7b9
 sources/declaration builtin calls of a const integer object@4f8ab943	dd3ffdbe41634c60
 sources/declaration builtin calls of const integer objects across families@b4c0ba28	e7117756682f9db2
-sources/declaration builtin calls of const member, element and floating objects@ca1ad433	a1cc9faffdadd044
+sources/declaration builtin calls of const member, element and floating objects@ca1ad433	205bbf2ae42d76c4
 sources/declaration builtin converted constants@6b5e32f8	3d42d56de5feb693
 sources/declaration builtin invalid zero unevaluated@bf2cf0d9	43b040d5db62aaa3
 sources/declaration complex type names@aecee083	8b299bdc9954d57b
@@ -911,7 +911,7 @@ sources/designated compound array bound is complete before typeof resumes@d23ad1
 sources/diagnostic and nonnull histories coexist@2a6e8520	79c39a845c6e658c
 sources/discarded register array still decays@a8936a78	e6a25a33d39b10c1
 sources/division in required ICE@e0ad61af	79c1bea3868a0aa7
-sources/double evaluation widens expressions and preserves conversion barriers@65a47916	01d61211758422ba
+sources/double evaluation widens expressions and preserves conversion barriers@65a47916	d52bb0f0467180ee
 sources/duplicate declaration modifiers retain warning-only semantics@1fd3dc91	ecfe5a2a49c03daf
 sources/empty attributed null statements outside switch@f4c51b80	e451ab2ae5ab3254
 sources/empty for condition@25d4caf2	f14b84b8290b8965
@@ -983,7 +983,7 @@ sources/floating builtin constants and classify@67c3c9a4	13538ee868babb31
 sources/floating comparison builtin inherits GNU const-read evidence@53d259de	401f6a79497d6f92
 sources/floating environment lexical scopes@91dcf6f9	dc5e2b3b91460d11
 sources/floating first member prevents transparent union argument conversion@ce863e78	8ba6d704fe04f29d
-sources/floating immediate ICE cast@2c903d11	f5eaeaac968233f0
+sources/floating immediate ICE cast@2c903d11	34418dcdf2dc7be0
 sources/floating pack operands are warning-only no-ops@05fc4d49	70d553c81bab3d3f
 sources/floating remainder@5b870187	1d0647d414d2ff8f
 sources/floating return conversion@c562d618	30867fcf41088767
@@ -1115,7 +1115,7 @@ sources/generic: call_with_static_chain of one@1b9fc314	7df9c172a3e1919f
 sources/generic: call_with_static_chain@bb220e06	971e7ead5eb77ee7
 sources/generic: classify_type of nothing@fb922450	3bd94861062001fd
 sources/generic: classify_type of two@f591198f	b7208cf881b9079d
-sources/generic: classify_type's classes@849eae23	9fa1af22a8d33a97
+sources/generic: classify_type's classes@849eae23	048d594f407e9cde
 sources/generic: clear_cache of one@b257e49d	4e9e055b2abf8b6f
 sources/generic: clear_padding of a function pointer@b8d32fcd	f407df863bb4c79c
 sources/generic: clear_padding of an array@3866a34c	7b7b8427d87b7d0e
@@ -1244,7 +1244,7 @@ sources/generic: os_log of an empty mask@04a2b544	e2b972ba0799bfd3
 sources/generic: os_log of an int buffer@09d8135a	85544c13c8b68453
 sources/generic: os_log of no buffer@3922c984	0babfd2cb6987044
 sources/generic: os_log of no format@cd1f7360	39b5594b43dd6b8e
-sources/generic: os_log@35124dfa	a02ade2d21aef8b8
+sources/generic: os_log@35124dfa	8d84a9948199f959
 sources/generic: os_log_format of 256 data arguments@b1959f39	92eac606e09df2d5
 sources/generic: preserve_access_index assigned@6d6fc215	826beccb1b583389
 sources/generic: preserve_access_index of none@ab140bad	3bd94861062001fd
@@ -1310,15 +1310,15 @@ sources/goto within and out of nested statement expressions@2d927f8e	7cba7139526
 sources/goto within variable scope@b1bfd795	64cc1240c3cbce50
 sources/grouped attribute expressions with brackets@409bbe61	f14b84b8290b8965
 sources/grouped comma expression@d9c97c4e	1d53e7cb62575a12
-sources/half arithmetic in required constant expressions@988d878b	3ab9000b8f4a8b62
-sources/half constants round each operation before the next@80dafa63	f6d3aa8282853e77
+sources/half arithmetic in required constant expressions@988d878b	1d255bb0be5850c2
+sources/half constants round each operation before the next@80dafa63	de87712cf33bc537
 sources/half invalid constant arithmetic has Clang NaN signs@bd20cd69	0e90211d242734a9
 sources/half storage type in declaration query@9f431e28	f89b34f67813989b
 sources/implicit const array elements retain initialization zeros@f3cdfd35	1624533e966f9006
 sources/implicit const record members retain initialization zeros@e76cd5cd	13880f585175293e
 sources/implicit float zero uses the selected member's actual type@541cb385	1a7e5fca564c8095
 sources/implicit integer zero uses the selected member's actual type@b0dff5a1	1a7e5fca564c8095
-sources/implicit translation evaluation permits default-method-only typedef uses@fe4126a6	31db31fa0557db51
+sources/implicit translation evaluation permits default-method-only typedef uses@fe4126a6	39c00fb70fc178b0
 sources/implicit void roundtrips still publish legal symbolic addresses@c4b0be76	c1227174770e2ec8
 sources/incompatible pointer initialization@8f2b2043	8eb05ecdea811455
 sources/incomplete array remains incomplete inside its own initializer@b425903d	e59d80efd309b214
@@ -1344,8 +1344,8 @@ sources/independent builtin semantic mutation 8 agrees in -std=gnu17@688d631b	2c
 sources/independent builtin semantic mutation 9 agrees in -std=gnu17@3d7b3cf7	9bad3f22091a94f3
 sources/independent complex mutation 0 agrees in -std=gnu17@80b02480	997671083bdab3e9
 sources/independent complex mutation 1 agrees in -std=gnu17@4819d127	9e63ec202a46de99
-sources/independent complex mutation 10 agrees in -std=gnu17@4f50970d	050dc09c8876c364
-sources/independent complex mutation 11 agrees in -std=gnu17@83d3cc2d	ae4f7453868dd05b
+sources/independent complex mutation 10 agrees in -std=gnu17@4f50970d	9ead44e6a5b1b794
+sources/independent complex mutation 11 agrees in -std=gnu17@83d3cc2d	7ff70b463e9bb29b
 sources/independent complex mutation 12 agrees in -std=gnu17@65b6cf3a	f6653b32282f9c9c
 sources/independent complex mutation 13 agrees in -std=gnu17@b1150f1f	69924ddd945bc1d0
 sources/independent complex mutation 14 agrees in -std=gnu17@de469172	f1608fc77f087550
@@ -1355,7 +1355,7 @@ sources/independent complex mutation 17 agrees in -std=gnu17@06145ea6	c461743b4d
 sources/independent complex mutation 18 agrees in -std=gnu17@deade6f0	ff4be47a8ff79802
 sources/independent complex mutation 19 agrees in -std=gnu17@5dba8d23	137a2492c871c1a7
 sources/independent complex mutation 2 agrees in -std=gnu17@0bdb5905	abcdac802ae30d62
-sources/independent complex mutation 3 agrees in -std=gnu17@2952ddc2	29d0b57ddaa0e7f4
+sources/independent complex mutation 3 agrees in -std=gnu17@2952ddc2	bec3f3fb726c7f74
 sources/independent complex mutation 4 agrees in -std=gnu17@70ed8662	76bab6fbee77406d
 sources/independent complex mutation 5 agrees in -std=gnu17@a4e2869d	524877b695c6192f
 sources/independent complex mutation 6 agrees in -std=gnu17@31564238	8b3c7104ccb79c67
@@ -1393,7 +1393,7 @@ sources/invalid pack values and trailing tokens preserve prior alignment@692f272
 sources/invalid pointer compound difference@e2a84d34	9842150c38f094ee
 sources/invalid rvalue update@4b858f43	42d87ac30e04b891
 sources/known comma local bound remains variable@7e0673eb	4b14f91e9c47bd70
-sources/known computed real local bound remains variable@3b212a0d	92c8b97793e20ce7
+sources/known computed real local bound remains variable@3b212a0d	da023268aef706e7
 sources/labels as values: a computed goto of a conditional's integer@3e24e445	2138da5dc9d43c8d
 sources/labels as values: a computed goto of an integer@cbb95565	4730329c29327958
 sources/labels as values: a computed goto's whole expression@3bf5b81e	0ff42218c19752d2
@@ -1729,7 +1729,7 @@ sources/overload attribute after another in its list@cca8d14a	26928c12eaff6396
 sources/overload attribute with empty arguments@f5ef51c5	655b0f022f2a0943
 sources/overload call in raw attribute@bd37a362	bac264d08cfa70af
 sources/overload common parameter redeclaration@6af41109	348b3ec5b7d912fa
-sources/overload deep pointer qualification@5e56ffbf	a634ddc3ca405ac0
+sources/overload deep pointer qualification@5e56ffbf	21e3648c00978639
 sources/overload exact source visibility@47afd61a	0ee0f49da4839563
 sources/overload incompatible best matches stay ambiguous@f1224b68	e2530d57f0521ee8
 sources/overload lexical hiding@9e9af6e3	d9150b651be2ca7b
@@ -1737,7 +1737,7 @@ sources/overload names outside attribute lists make no tables@3ecf01a0	2495d0116
 sources/overload nested calls use selected type@cea305cb	00a8856124ef1cc0
 sources/overload one unmarked signature@81dda6e4	bff6ac0b4d126cf4
 sources/overload parenthesized callee@7ed6e6df	485777ec03485013
-sources/overload selected unavailable fallback@c0549680	3beec21cef86b120
+sources/overload selected unavailable fallback@c0549680	413999348eec9e51
 sources/overload selects ordinary unmarked definition@33df8e46	87d17eafabd10708
 sources/overload standard attribute in clang's namespace@3effea2e	19ecea942d0e9d2a
 sources/overload tgmath selection and unavailable fallback@8a0a2fe8	491a7b6d0cf0dc7f
@@ -1804,7 +1804,7 @@ sources/pretty array characters are const@12eaca27	907da8d6949e3386
 sources/probability: a NaN@6f87f9da	7a09037d3889257f
 sources/probability: a call's@374e2e89	aecd238b2b2a4e90
 sources/probability: a const object's past 1@de0dfa43	a7ff6e48564fa0e3
-sources/probability: a discarded modification@39d4aafc	31140bc553ada2d6
+sources/probability: a discarded modification@39d4aafc	89bd186615e8dc06
 sources/probability: a discarded read in a condition@5fac6e8e	c0170cc78aba0cc8
 sources/probability: a discarded read@a5589720	bc37b1a7eca80da4
 sources/probability: a pointer@345b53fb	2dbbf47a2c0cc09b

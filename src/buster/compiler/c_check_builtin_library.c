@@ -175,6 +175,7 @@ static void check_builtin_library_fold_call(TypeTable* types, CBuiltinLibraryFol
 {
     const uint32_t count = action->argument_count;
     CheckValue converted[3] = { 0 };
+    uint32_t invalid_constant = 0;
     bool clean = fold != CBUILTIN_LIBRARY_FOLD_NONE && count <= 3 && (count == 0 || (action->arguments != NULL && conversions != NULL)) &&
                  result->diagnostic == CHECK_DIAG_NONE;
     for (uint32_t i = 0; clean && i < count; i += 1)
@@ -188,6 +189,7 @@ static void check_builtin_library_fold_call(TypeTable* types, CBuiltinLibraryFol
         // (BUSTER_CHECK_DISCARDED_UNEVALUABLE: `(s, -3)`); folding would rebuild the value's flags and lose it.
         clean = temporary.diagnostic == CHECK_DIAG_NONE && converted[i].fault == CHECK_FAULT_NONE &&
                 (converted[i].flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0;
+        invalid_constant |= converted[i].flags & BUSTER_CHECK_INVALID_CONSTANT;
     }
     const CheckConstValues* values = action->context.const_values;
     const uint32_t position = action->context.source_position;
@@ -252,7 +254,7 @@ static void check_builtin_library_fold_call(TypeTable* types, CBuiltinLibraryFol
     {
         // An integer fold is an integer constant expression, whatever its operands were (a string's address isn't
         // one), as clang's ICE check takes a constexpr builtin's evaluated call; a floating one never is.
-        folded.flags = folded.constant_kind == CHECK_CONSTANT_INTEGER ? BUSTER_CHECK_ICE : 0;
+        folded.flags = (folded.constant_kind == CHECK_CONSTANT_INTEGER ? BUSTER_CHECK_ICE : 0) | invalid_constant;
         result->value = folded;
     }
 }

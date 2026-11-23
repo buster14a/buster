@@ -2335,8 +2335,9 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             arena_pop_to(&arena, mark);
         }
     }
-    // A copy's rules: between two objects of 256 bytes, all of them, then each way to break them.
-    for (uint32_t way = 0; way < 6; way += 1)
+    // A copy's rules: between two objects of 256 bytes, all of them, then each way to break them; and a move's (#1373,
+    // COPY's move form) of BUSTER_TIER0_MAX_MOVE_BYTES of them, which both paths compile alike.
+    for (uint32_t way = 0; way < 7; way += 1)
     {
         for (uint32_t l = 0; l < 2; l += 1)
         {
@@ -2351,14 +2352,14 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         memcpy(kinds, copy_kinds, sizeof(copy_kinds));
         memcpy(classes, copy_classes, sizeof(copy_classes));
         memcpy(values, copy_values, sizeof(copy_values));
-        static const char* const ways[6] = { "kept", "of no bytes", "past BUSTER_TIER0_MAX_COPY_BYTES", "of a class", "from a constant", "to a constant" };
+        static const char* const ways[7] = { "kept", "of no bytes", "past BUSTER_TIER0_MAX_COPY_VALUE", "of a class", "from a constant", "to a constant", "a move" };
         switch (way)
         {
         case 1:
             values[2] = 0;
             break;
         case 2:
-            values[2] = BUSTER_TIER0_MAX_COPY_BYTES + 1;
+            values[2] = BUSTER_TIER0_MAX_COPY_VALUE + 1;
             break;
         case 3:
             classes[2] = BUSTER_TYPED_CLASS_U64;
@@ -2370,6 +2371,9 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         case 5:
             kinds[0] = BUSTER_TYPED_CONST;
             classes[0] = BUSTER_TYPED_CLASS_I64;
+            break;
+        case 6:
+            values[2] = BUSTER_TIER0_MOVE_VALUE(BUSTER_TIER0_MAX_MOVE_BYTES);
             break;
         default:
             break;
@@ -2386,8 +2390,18 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         function.local_alignments = local_alignments;
         function.local_count = 2;
         const Tier0Check check = tier0_validate(&function);
-        tier0_test_expect(tally, (check.error == TIER0_OK) == (way == 0) && (way == 0 || check.node == 2), "objects", "a copy %s: tier0_validate says %s at %u (%s)",
+        const bool kept = way == 0 || way == 6;
+        tier0_test_expect(tally, (check.error == TIER0_OK) == kept && (kept || check.node == 2), "objects", "a copy %s: tier0_validate says %s at %u (%s)",
                           ways[way], check.error == TIER0_OK ? "valid" : "invalid", check.node, check.rule != 0 ? check.rule : "");
+        if (kept && check.error == TIER0_OK)
+        {
+            const uint64_t mark = arena.length;
+            const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
+            const Tier0Code vector = tier0_compile(&function, &arena);
+            tier0_test_expect(tally, scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "objects",
+                              "a copy %s: the paths' errors %d and %d, or their code differs", ways[way], scalar.error, vector.error);
+            arena_pop_to(&arena, mark);
+        }
     }
     // Random frames: up to 24 locals, objects of 1 to 300 bytes at every alignment to 16, 8-byte values, some
     // address-taken, and VA_LISTs of 24 bytes, all of them address-taken ones read by a LOCAL_ADDRESS each, its lea's
