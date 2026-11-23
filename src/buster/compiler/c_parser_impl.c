@@ -5183,15 +5183,16 @@ static bool parse_scalar_suppress_strings(const ParseScalar* parser, uint32_t fi
     return valid;
 }
 
-// A group skipped during delimiter recovery, including any semicolons in its body. Match the kinds on the parser's
-// existing bounded scratch stack; malformed nested groups do not prove a safe point to resume.
-static uint32_t parse_scalar_attribute_skip_group(const ParseScalar* parser, uint32_t open, bool* balanced)
+// Match a recovery group's delimiters on the parser's bounded scratch stack. A failed argument list may stop
+// at its own semicolon, while semicolons inside nested groups belong to those groups.
+static uint32_t parse_scalar_attribute_skip_group(const ParseScalar* parser, uint32_t open, bool* balanced, bool stop_at_semi)
 {
     uint32_t token = open;
     uint32_t depth = 0;
     do
     {
         const uint8_t kind = parser->kinds[token];
+        *balanced &= !(stop_at_semi && depth == 1 && kind == PARSE_KIND_SEMI);
         if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
         {
             parser->brackets[depth++] = kind;
@@ -5220,7 +5221,7 @@ static bool parse_scalar_suppress_list(const ParseScalar* parser, uint32_t list,
         const uint8_t kind = parser->kinds[token];
         if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
         {
-            token = parse_scalar_attribute_skip_group(parser, token, &balanced);
+            token = parse_scalar_attribute_skip_group(parser, token, &balanced, false);
         }
         else
         {
@@ -5261,7 +5262,7 @@ static void parse_scalar_resume_standard_suppress(ParseScalar* parser, const Par
         const uint8_t kind = parser->kinds[end];
         if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
         {
-            end = parse_scalar_attribute_skip_group(parser, end, &balanced);
+            end = parse_scalar_attribute_skip_group(parser, end, &balanced, false);
         }
         else
         {
@@ -5345,7 +5346,7 @@ static void parse_scalar_resume_suppress(ParseScalar* parser)
             const uint8_t kind = parser->kinds[token];
             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
             {
-                token = parse_scalar_attribute_skip_group(parser, token, &balanced) - 1;
+                token = parse_scalar_attribute_skip_group(parser, token, &balanced, false) - 1;
             }
             else if (token == list + 1 || parser->kinds[token - 1] == PARSE_KIND_COMMA)
             {
@@ -5359,7 +5360,7 @@ static void parse_scalar_resume_suppress(ParseScalar* parser)
             const uint8_t kind = parser->kinds[tail];
             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
             {
-                tail = parse_scalar_attribute_skip_group(parser, tail, &balanced);
+                tail = parse_scalar_attribute_skip_group(parser, tail, &balanced, false);
             }
             else
             {
@@ -5540,6 +5541,22 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
                                 parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION && parse_frame_is_block(caller) &&
                                 caller->statement == PARSE_ITEM_EXPRESSION && (caller->flags & BUSTER_PARSE_FRAME_DECLARATION) == 0;
     const uint32_t at = parser->error_token;
+    // A GNU attribute whose first expression starts with a type is dropped as a whole. Keep the
+    // following attributes and declarator, and leave the original error at the rejected argument.
+    if (call != NULL && call->role == PARSE_ROLE_OPEN_CALL && parse_scalar_gnu_attribute_group(parser, call) &&
+        parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION && at == call->opener + 1 && at < parser->count &&
+        parse_scalar_starts_type(parser, at) && !parser->error_resumed)
+    {
+        bool balanced = true;
+        const uint32_t end = parse_scalar_attribute_skip_group(parser, call->opener, &balanced, true);
+        if (balanced)
+        {
+            parser->error_resumed = true;
+            parser->error_resume_delete = true;
+            parser->error_resume_begin = call->opener - 1;
+            parser->error_resume_end = end;
+        }
+    }
     if (call != NULL && call->role == PARSE_ROLE_OPEN_TERNARY && parser->error_message == PARSE_MESSAGE_EXPECTED_COLON &&
         at < parser->count && parse_argument_delimiter(parser->kinds[at]) && (parser->flags[at] & BUSTER_PARSE_RECOVERY_ARGUMENT) != 0)
     {

@@ -812,4 +812,12 @@ void check(int n)
     known(int, n n; n);
     after_bad_arguments;
 }
+#elif BUSTER_CASE == 100
+int aligned(int, int);
+void check(void)
+{
+    int x __attribute__((vector_size(int + (unread(1, 2)), unread_tail), aligned(0)));
+    aligned(int, missing_call_argument);
+    x = after_bad_attribute;
+}
 #endif
