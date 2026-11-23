@@ -1331,6 +1331,25 @@ static uint64_t check_lower_volatile_mark(CheckLowerWriter* writer, uint8_t clas
     return marked ? BUSTER_TYPED_ACCESS_VOLATILE : 0;
 }
 
+// Whether lvalue `node` is a volatile object's, as the checker reads it (check_action_lvalue_conversion's volatile read): of
+// a volatile-qualified type, or a part of a volatile complex object (`__real__ vc`), whose type the checker leaves
+// unqualified and marks BUSTER_CHECK_VOLATILE_PART (#3329).
+static bool check_lower_node_volatile(const CheckLowerWriter* writer, uint32_t node)
+{
+    const CheckStream* stream = writer->program->stream;
+    return node < stream->count &&
+           ((type_qualifiers(check_stream_type(stream, node)) & BUSTER_TYPE_VOLATILE) != 0 || (check_stream_flags(stream, node) & BUSTER_CHECK_VOLATILE_PART) != 0);
+}
+
+// The volatile mark of an access of a class's value at lvalue `node` (check_lower_node_volatile), which marks the
+// function; 0 for any other.
+static uint64_t check_lower_node_mark(CheckLowerWriter* writer, uint8_t class, uint32_t node)
+{
+    const bool marked = class != BUSTER_TYPED_CLASS_VOID && check_lower_node_volatile(writer, node);
+    writer->volatile_entries = writer->volatile_entries || marked;
+    return marked ? BUSTER_TYPED_ACCESS_VOLATILE : 0;
+}
+
 // The value of a LOAD, STORE or SET of a class's value at an object of `type` (an lvalue's type, with its address space):
 // check_lower_access_value's, in a unit with a segment's space its override (check_lower_segment_override), which marks
 // the function (CheckLowerWriter.segment_entries), and a volatile lvalue's mark (check_lower_volatile_mark).
@@ -1349,6 +1368,7 @@ static uint64_t check_lower_access(CheckLowerWriter* writer, uint8_t class, Type
 // the same access of a vector that isn't volatile (an element of a volatile one is refused by name). So does a complex
 // lvalue's part (`__real__ *p`, `__imag__ *p`), whose type has lost its complex object's space as well, and whose read,
 // store or update clang's code makes through the complex object's override.
+// A complex lvalue's part of a volatile object (BUSTER_CHECK_VOLATILE_PART, #3329) takes the volatile mark as well.
 static uint64_t check_lower_element_segment(CheckLowerWriter* writer, uint32_t node)
 {
     const CheckProgram* program = writer->program;
@@ -1362,7 +1382,9 @@ static uint64_t check_lower_element_segment(CheckLowerWriter* writer, uint32_t n
     const bool element = operand && (part || (op == CHECK_OP_SUBSCRIPT && (check_stream_flags(stream, node) & BUSTER_CHECK_VECTOR_ELEMENT) != 0));
     const uint64_t segment = element ? check_lower_segment_override(program->types, check_stream_type(stream, vector)) : 0;
     writer->segment_entries = writer->segment_entries || segment != 0;
-    return segment;
+    const bool volatile_part = node < stream->count && (check_stream_flags(stream, node) & BUSTER_CHECK_VOLATILE_PART) != 0;
+    writer->volatile_entries = writer->volatile_entries || volatile_part;
+    return segment | (volatile_part ? BUSTER_TYPED_ACCESS_VOLATILE : 0);
 }
 
 // The widest vector register the convention passes a vector in (abi_initialize's vector_bytes), as clang's x86-64 ABI
@@ -3749,13 +3771,13 @@ static bool check_lower_copy_node_volatile(CheckLowerWriter* writer, uint32_t no
 // A kept small destination goes in a temporary: its consumer's class is read from the entry before it (tier0_validate),
 // which a COPY, of class VOID, can't give.
 // Always inlined into both copies of the tasks' loop (check_lower_drain_body).
-static void check_lower_copy_segmented(CheckLowerWriter* writer, uint64_t size, bool keep, uint8_t segments);
+static void check_lower_copy_segmented(CheckLowerWriter* writer, uint64_t size, bool keep, bool volatile_copy, uint8_t segments);
 
 static inline __attribute__((always_inline)) void check_lower_copy(CheckLowerWriter* writer, uint64_t size, bool keep, bool volatile_copy, uint8_t segments)
 {
     if (__builtin_expect(segments != 0, 0))
     {
-        check_lower_copy_segmented(writer, size, keep, segments);
+        check_lower_copy_segmented(writer, size, keep, volatile_copy, segments);
     }
     else if (size == 0)
     {
@@ -3830,8 +3852,9 @@ static uint8_t check_lower_piece_class(uint32_t piece)
 // that hold the addresses. Clang lowers such a copy (llvm.memcpy in a segment's address space, which no library function
 // takes) inline, as at most 8 stores of its widest vector (4 at -Os), and stops with "cannot lower memory intrinsic in
 // address space" past that: so this compiles up to 8 of the target's widest vector registers' bytes (128 for SSE, 256
-// for AVX and 512 for AVX-512, never fewer than clang takes) and refuses a larger copy by name.
-static __attribute__((noinline)) void check_lower_copy_segmented(CheckLowerWriter* writer, uint64_t size, bool keep, uint8_t segments)
+// for AVX and 512 for AVX-512, never fewer than clang takes) and refuses a larger copy by name. A volatile copy's pieces
+// (`volatile_copy`, #3329) are volatile accesses, both the LOAD and the SET, as a flat copy's marked COPY pieces are.
+static __attribute__((noinline)) void check_lower_copy_segmented(CheckLowerWriter* writer, uint64_t size, bool keep, bool volatile_copy, uint8_t segments)
 {
     const uint64_t limit = 8 * (uint64_t)check_lower_vector_register_bytes(writer->target.features);
     if (size > limit)
@@ -3843,7 +3866,9 @@ static __attribute__((noinline)) void check_lower_copy_segmented(CheckLowerWrite
     {
         const uint64_t from = (uint64_t)(segments & 3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
         const uint64_t to = (uint64_t)((segments >> 2) & 3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
+        const uint64_t mark = volatile_copy ? BUSTER_TYPED_ACCESS_VOLATILE : 0;
         writer->segment_entries = true;
+        writer->volatile_entries = writer->volatile_entries || volatile_copy;
         const uint32_t source = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         const uint32_t destination = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, source);
@@ -3857,8 +3882,8 @@ static __attribute__((noinline)) void check_lower_copy_segmented(CheckLowerWrite
             check_lower_offset(writer, offset);
             check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
             check_lower_offset(writer, offset);
-            check_lower_emit(writer, BUSTER_TYPED_LOAD, class, from);
-            check_lower_emit(writer, BUSTER_TYPED_SET, class, to);
+            check_lower_emit(writer, BUSTER_TYPED_LOAD, class, from | mark);
+            check_lower_emit(writer, BUSTER_TYPED_SET, class, to | mark);
             offset += piece;
         }
         if (keep)
@@ -9542,7 +9567,12 @@ static void check_lower_limb_elements_emit(CheckLowerWriter* writer, CheckLowerT
 // override to a frame object of its own (check_lower_copy_segmented), the update runs on that, and its bytes are copied
 // back through the override after: the expression's value, an address or a value, is then the frame object's or of it,
 // kept in a temporary across the copy, so that its consumer reads its class from the entry before it (tier0_validate).
-static __attribute__((noinline)) void check_lower_segment_update(CheckLowerWriter* writer, CheckLowerTask task, uint8_t segment)
+// A volatile destination's (#3329: of a volatile type, or a volatile complex object's part) takes the same route: its
+// bytes are read once into the frame object and written back once, each copy's pieces volatile accesses (a marked COPY,
+// check_lower_copy), as C's one read and one write of the object, which the emitters would otherwise make through
+// unmarked accesses of their own; in a segment's space as well, whose copies' pieces carry both marks
+// (check_lower_copy_segmented).
+static __attribute__((noinline)) void check_lower_segment_update(CheckLowerWriter* writer, CheckLowerTask task, uint8_t segment, bool marked)
 {
     const CheckProgram* program = writer->program;
     const TypeTable* types = program->types;
@@ -9555,7 +9585,7 @@ static __attribute__((noinline)) void check_lower_segment_update(CheckLowerWrite
     check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, original);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, original);
-    check_lower_copy_segmented(writer, size, false, segment);
+    check_lower_copy(writer, size, false, marked, segment);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
     check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
     check_lower_complex_task_body(writer, task);
@@ -9564,7 +9594,7 @@ static __attribute__((noinline)) void check_lower_segment_update(CheckLowerWrite
     check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, value);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, original);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, object);
-    check_lower_copy_segmented(writer, size, false, (uint8_t)(segment << 2));
+    check_lower_copy(writer, size, false, marked, (uint8_t)(segment << 2));
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, class, value);
 }
 
@@ -9575,13 +9605,14 @@ static __attribute__((noinline)) void check_lower_complex_task(CheckLowerWriter*
                                 (uint8_t)(check_lower_segment_override(writer->program->types, check_stream_type(writer->program->stream, writer->program->input->graph.operand0[task.node])) >>
                                           BUSTER_TYPED_ACCESS_SEGMENT_SHIFT) :
                                 0;
+    const bool marked = update && check_lower_node_volatile(writer, writer->program->input->graph.operand0[task.node]);
     if (task.kind == CHECK_LOWER_LIMB_ELEMENTS)
     {
         check_lower_limb_elements_emit(writer, task);
     }
-    else if (segment != 0)
+    else if (segment != 0 || marked)
     {
-        check_lower_segment_update(writer, task, segment);
+        check_lower_segment_update(writer, task, segment, marked);
     }
     else
     {
@@ -16375,7 +16406,9 @@ static __attribute__((noinline)) void check_lower_segment_read(CheckLowerWriter*
         const uint32_t local = check_lower_object(writer, size, type_alignment_log2(types, value->type));
         const uint8_t from = (uint8_t)(check_lower_segment_override(types, value->type) >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
-        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .segments = from });
+        // A volatile object's read is a volatile copy (#3329).
+        const bool volatile_copy = (type_qualifiers(value->type) & BUSTER_TYPE_VOLATILE) != 0;
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COPY, .value = size, .volatile_copy = volatile_copy, .segments = from });
         check_lower_expression(writer, node, true, 0);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
     }
@@ -19060,7 +19093,9 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             {
                 if (place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
                 {
-                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, check_lower_class(writer, place->type), 0);
+                    // A volatile output's read is a volatile access (#3329), as the empty template's are below.
+                    const uint8_t read = check_lower_class(writer, place->type);
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, read, check_lower_node_mark(writer, read, node));
                     check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
                 }
                 check_lower_expression(writer, node, true, 0);
@@ -19214,7 +19249,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (passed && place->written && place->kind != BUSTER_CHECK_ASM_MEMORY)
             {
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_node_mark(writer, class, node));
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_asm_slot(writer, object, place->slot);
             }
@@ -19240,7 +19275,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             {
                 // A `+` x87 operand's value, through its address the slot holds.
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_node_mark(writer, class, node));
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_asm_slot(writer, object, place->slot);
                 check_lower_asm_slot(writer, object, place->value);
@@ -19271,7 +19306,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 check_lower_instruction(writer, BUSTER_TYPED_SET, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_instruction(writer, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_CLASS_U64, local);
                 check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_VECTOR, local);
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, place->size);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, place->size | check_lower_node_mark(writer, BUSTER_TYPED_CLASS_VECTOR, node));
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_asm_slot(writer, object, place->slot);
                 check_lower_asm_slot(writer, object, place->value);
@@ -19280,7 +19315,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             {
                 // A `+` register operand's value, through its address the slot holds.
                 check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_node_mark(writer, class, node));
                 check_lower_instruction(writer, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_asm_slot(writer, object, place->slot);
                 check_lower_asm_slot(writer, object, place->value);
@@ -19335,7 +19370,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                 const CheckAsmPlace* output = plan->places + place->tied;
                 const uint8_t output_class = check_lower_class(writer, output->type);
                 const TypeId placed = check_asm_tied_type(types, place->type, output->type);
-                check_lower_instruction(writer, BUSTER_TYPED_SET, output_class, 0);
+                check_lower_instruction(writer, BUSTER_TYPED_SET, output_class, check_lower_node_mark(writer, output_class, statement->operands[place->tied].node));
                 if (placed != output->type)
                 {
                     check_lower_instruction(writer, BUSTER_TYPED_CONVERT, output_class, 0);
@@ -19350,9 +19385,11 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             }
             else if (place->written && place->read && place->kind != BUSTER_CHECK_ASM_MEMORY)
             {
+                // A `+` operand's read and write, each a volatile access where it is a volatile object's (#3329).
                 const uint8_t class = check_lower_class(writer, place->type);
-                check_lower_instruction(writer, BUSTER_TYPED_SET, class, 0);
-                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, 0);
+                const uint64_t mark = check_lower_node_mark(writer, class, node);
+                check_lower_instruction(writer, BUSTER_TYPED_SET, class, mark);
+                check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, mark);
                 check_lower_instruction(writer, BUSTER_TYPED_DUP, BUSTER_TYPED_CLASS_U64, 0);
                 check_lower_expression(writer, node, true, 0);
             }
