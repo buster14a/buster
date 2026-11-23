@@ -20968,7 +20968,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     shared->local_start = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)program->body_count + 2) : 0;
     // The tokens that declare or start an initializer, which the pass below visits rather than every token of the unit.
     uint32_t* declaring = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : 0;
-    const uint32_t declaring_count = declaring != NULL ? check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring, BUSTER_SCALAR_PATH(scalar)) : 0;
+    const uint32_t declaring_count = declaring != NULL ? check_program_declaring(input->declarations, &input->initializer_nodes, nodes, count, declaring) : 0;
     if (declaring != NULL)
     {
         // The vector writer may store a full last block. Its live prefix is now complete.
