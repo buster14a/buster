@@ -265,8 +265,12 @@ static void debug_rows_vector(DebugWriter* writer, __m128i offset, __m128i line)
     }
 }
 
-static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* addresses)
+// The line program into `output`. Its writer is a local copy, stored back at the end: the bytes it writes could alias
+// `output` itself, so writing through it would reload its pointer and size after every store.
+static void debug_line(const DebugUnit* unit, DebugWriter* output, uint32_t* addresses)
 {
+    DebugWriter local = *output;
+    DebugWriter* writer = &local;
     debug_integer(writer, 0, 4);
     debug_integer(writer, 5, 2);
     debug_integer(writer, 8, 1);
@@ -353,6 +357,7 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
         debug_bytes(writer, end, sizeof(end));
     }
     debug_length(writer, 0, writer->size - 4);
+    *output = local;
 }
 
 // The unit's five sections, into `writers` (measured where they have no bytes), each function's line address into
@@ -367,7 +372,11 @@ static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWr
         2, 0x2e, 0, 3, 8, 0x11, 0x1b, 0x12, 6, 0x3a, 15, 0x3b, 15, 0, 0, 0,
     };
     debug_bytes(&writers[DEBUG_SECTION_ABBREV], abbreviations, sizeof(abbreviations));
-    DebugWriter* info = &writers[DEBUG_SECTION_INFO];
+    // Local copies of the writers, stored back at the end, as debug_line's.
+    DebugWriter info_local = writers[DEBUG_SECTION_INFO];
+    DebugWriter addr_local = writers[DEBUG_SECTION_ADDR];
+    DebugWriter ranges_local = writers[DEBUG_SECTION_RNGLISTS];
+    DebugWriter* info = &info_local;
     debug_integer(info, 0, 4);
     debug_integer(info, 5, 2);
     debug_integer(info, 1, 1); // DW_UT_compile
@@ -391,12 +400,12 @@ static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWr
         fields[DEBUG_SECTION_ADDR] = line_field + 4;
         fields[DEBUG_SECTION_RNGLISTS] = line_field + 8;
     }
-    DebugWriter* addr = &writers[DEBUG_SECTION_ADDR];
+    DebugWriter* addr = &addr_local;
     debug_integer(addr, 4 + 8ull * unit->function_count, 4);
     debug_integer(addr, 5, 2);
     debug_integer(addr, 8, 1);
     debug_integer(addr, 0, 1);
-    DebugWriter* ranges = &writers[DEBUG_SECTION_RNGLISTS];
+    DebugWriter* ranges = &ranges_local;
     debug_integer(ranges, 0, 4);
     debug_integer(ranges, 5, 2);
     debug_integer(ranges, 8, 1);
@@ -420,6 +429,9 @@ static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWr
     debug_integer(ranges, 0, 1);
     debug_length(info, 0, info->size - 4);
     debug_length(ranges, 0, ranges->size - 4);
+    writers[DEBUG_SECTION_INFO] = info_local;
+    writers[DEBUG_SECTION_ADDR] = addr_local;
+    writers[DEBUG_SECTION_RNGLISTS] = ranges_local;
     debug_line(unit, &writers[DEBUG_SECTION_LINE], addresses);
 }
 
