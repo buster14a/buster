@@ -34,6 +34,9 @@ struct IrOptimizeTest
     // test-ir-licm's: every fixture's moved function and counts by LICM's per-loop walk (ir_licm_test_fold), in order,
     // frozen where the walk and its whole-function oracle agreed (#2979): with the default seed, which generates the chains.
     uint64_t licm_digest;
+    // The verified optimizer's results by ir_optimize_test_compare, in order, by its scalar passes, the ones #2924 kept:
+    // frozen while the vector passes were still beside them, with the default seed.
+    uint64_t optimize_digest;
 };
 
 #define BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
@@ -44,6 +47,7 @@ struct IrOptimizeTest
 #define BUSTER_IR_OPTIMIZE_TEST_SEED UINT64_C(139)
 #define BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST UINT64_C(0x5d860cd5f67a13ce)
 #define BUSTER_IR_OPTIMIZE_TEST_LICM_DIGEST UINT64_C(0xfb593fcec3c4c344)
+#define BUSTER_IR_OPTIMIZE_TEST_OPTIMIZE_DIGEST UINT64_C(0x292b130a5600b0e5)
 
 static void ir_optimize_test_expect(IrOptimizeTest* test, bool condition, const char* description)
 {
@@ -728,6 +732,12 @@ static void ir_optimize_test_compare(IrOptimizeTest* test, const IrFunction* f, 
             const IrOptimizeExecution before = ir_optimize_test_execute(f, scratch, parameter, trial & 1);
             const IrOptimizeExecution after = ir_optimize_test_execute(&vector.function, scratch, parameter, trial & 1);
             ir_optimize_test_expect(test, before.status != 4 && before.status == after.status && before.effects == after.effects && (before.status != 1 || before.value == after.value), "independent execution, effects and faults preserved");
+        }
+        ir_optimize_test_fold_function(&test->optimize_digest, &scalar.function);
+        const uint64_t counts[] = { scalar.folded, scalar.removed_instructions, scalar.removed_blocks, scalar.merged_blocks, scalar.forwarded_loads };
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(counts); k += 1)
+        {
+            ir_optimize_test_fold(&test->optimize_digest, counts[k]);
         }
         arena_pop_to(scalar_arena, sm);
         options.path = BUSTER_IR_OPTIMIZE_VECTOR;
@@ -2049,6 +2059,7 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
         .thread_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
         .sink_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
         .memory_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
+        .optimize_digest = BUSTER_IR_OPTIMIZE_TEST_DIGEST_BASIS,
     };
     bool arguments_valid = true;
     bool print_text = false;
@@ -2105,6 +2116,11 @@ static __attribute__((unused)) int run_ir_optimize_tests(int argc, char** argv)
             if (test.memory_digest != BUSTER_IR_OPTIMIZE_TEST_MEMORY_DIGEST)
             {
                 fprintf(stderr, "ir-optimize: memory digest %#018" PRIx64 "\n", test.memory_digest);
+            }
+            ir_optimize_test_expect(&test, test.optimize_digest == BUSTER_IR_OPTIMIZE_TEST_OPTIMIZE_DIGEST, "the verified optimizer's results have their frozen digest");
+            if (test.optimize_digest != BUSTER_IR_OPTIMIZE_TEST_OPTIMIZE_DIGEST)
+            {
+                fprintf(stderr, "ir-optimize: optimize digest %#018" PRIx64 "\n", test.optimize_digest);
             }
         }
         printf("ir-optimize: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
