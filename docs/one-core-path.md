@@ -125,7 +125,7 @@ token; the issue has each row's source:
 | the redesign, 3 | A body's entries from the program's controls and its roots' tapes | every attempted body's entries the lowered function's, kind, class and value | measured, in the shadow: exact on the four corpora with the default warnings, with `-g` and with `-Wall -Wextra` (12,768 bodies); 44.35% of `sqlite3.c`'s body tokens attempted, where the machine after the pipeline takes every root of 48.58% |
 | the redesign, 4 | The same comparison before the walk: the entries from the tapes kept there, and the controls from the tokens | no attempted body differs, in either | measured, in the shadow: exact on the four corpora in the three flag sets (11,145 bodies from the kept tapes, 11,120 from the twin); 32.79% and 32.18% of `sqlite3.c`'s body tokens attempted, of the 35.62% whole before the walk; no body attempted where the program folded an `if` |
 | 3 | The front's row, into the window | 35 cycles a token or less | first part measured, in the shadow: the node machine's front writes the kernel's window and the kernel reads it in place, exact; the kernel with its inputs 29.9 TSC ticks a record on `sqlite3.c` (gate 35), 38.4 on Lua, 61.5 on musl. The lexer's and the parser's rows are not started |
-| 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates. Designed (#2874): a body's row at 14 cycles a typed entry. Its first piece, Tier 0's back half on byte templates, measured in the shadow: exact, and refuted on its cost (62.8 cycles an entry where today's back half takes 43.7). Its second, in the compile: a fixed frame's unwind descriptor from Tier 0's frame, the objects unchanged, 403 cycles a body where main's frame events take 1,512 (its gate 300), 4.0 cycles a token less on `sqlite3.c` |
+| 4 | Tier 0's row | 10 cycles a token or less, the object's bytes unchanged | census measured: the row 64.7 cycles a token (117 a typed entry), Tier 0 38.4 of them; a key of 8 bytes or fewer decides 99.83% of the entries; the encoder, branch sizing and the object 8.3 in a compile, 6.3 at their own rates. Designed (#2874): a body's row at 14 cycles a typed entry. Its first piece, Tier 0's back half on byte templates, measured in the shadow: exact, and refuted on its cost (62.8 cycles an entry where today's back half takes 43.7). Its second, in the compile: a fixed frame's unwind descriptor from Tier 0's frame, the objects unchanged, 403 cycles a body where main's frame events take 1,512 (its gate 300), 4.0 cycles a token less on `sqlite3.c`. Its third, in the compile: a call's records from a memo of the thread's, the objects unchanged, `tier0` 0.20 ms less on `sqlite3.c` (its gate 0.30) |
 | 5 | Fresh memory and the fixed costs | 6 cycles a token or less | census measured: the kernel 121 cycles a token; its floor 5.8 to 6.4 at item 3's costs, 10.3 to 12.5 at the compile's, and 5.2 to 6.7 more beside it: the 6 refuted. Allocated: 14.3 to 15.0 on `sqlite3.c` and 25.0 on musl as one command, each row to the issue that removes it or kept. The kept rows optimized in the compile since (#2885, #2903, #2941): the row about 12 on `sqlite3.c`. Whether the budget's line moves to it is not settled |
 
 ## Step 0: the lanes on the real nodes
@@ -3471,6 +3471,45 @@ benchmarks' rates.
 - **For step 4:** a design on #2874, from these rows. It has to say what the
   unwind table and the atoms become, since they are 10 cycles a token by
   themselves.
+
+## Step 4's row on main, and calls from a memo
+
+[The record of the row on main](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-row-main-2874-2026-11-23)
+and [the memo's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-calls-memo-2874-2026-11-23),
+[#2874](https://github.com/buster14a/buster/issues/2874). Main `9d927943`,
+`-c sqlite3.c`, the 9700X, CPU 2.
+
+**The row then** is 8.27 ms, 63.8 cycles a token, and `lower.validate` 1.15 ms
+more. Its stages take no fault and no system time.
+
+- **Tier 0 is about 165 instructions and 0.52 mispredicted branches a typed
+  entry.** Emission takes 33 of the instructions, measuring 26, fusion 21, the
+  deferred entries' emitter 19 and selection 15.
+- **A warm Tier 0 is 50.9 cycles an entry against 71.4.** Warm means the same
+  body compiled again at once. The gap shows at every body size, so it is not a
+  body's fixed part. It is not the output's fresh memory either (+1.3 cycles
+  with it), nor the interleave with the lowering (`--emit-window=0` gives
+  4.70 ms against 4.78). What remains is Tier 0's own predictors and caches
+  between one body and the next.
+- **The calls:** counting and emitting every call once more costs 2.27 M
+  cycles, about 175 cycles a call, warm.
+
+**Calls from a memo** (tier0.md's "The calls' memo"): a call's records from a
+table of the thread's, keyed by every input of the emitter, with the save
+area's base and displacements and the callee patched in.
+
+- **Exact:** every object is main's on `sqlite3.c` (with and without `-g`),
+  Lua, musl's units, `main.c` and `tests/**/*.c` (2,913 compiles).
+- **Cost:** `tier0` from 4.780 to 4.578 ms (medians of 9 in turn), 0.20 ms
+  less. The piece's gate was 0.30 ms less, refuted under 0.15: missed, not
+  refuted.
+- **Its first form, measured too,** kept a byte key built an argument at a
+  time, hashed it a word at a time and compared and copied with `memcmp` and
+  `memcpy`, and saved 0.09 ms: a call's cost is its chain of dependent loads and branches more than
+  its instructions.
+
+**What the row needs** is still about 40 instructions an entry where Tier 0
+takes 165. No single pass holds the rest: emission is one fifth of it.
 
 ## Step 5's first piece: a census of the kernel's time and fresh memory
 

@@ -1019,6 +1019,14 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         result = result && tier0_test_expect(tally, scalar.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, scalar.error,
                                              scalar.node);
         result = result && tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector), "twins", "seed %" PRIu64 " function %u: the paths differ", seed, f);
+        // The calls' memo (#2874): the same code with an empty table, whatever the thread's held from the functions and
+        // programs compiled before this one.
+        const Tier0CallMemo thread_memo = tier0_call_memo_swap((Tier0CallMemo){ 0 });
+        const Tier0Code fresh = result ? tier0_compile(&wanted, arena) : (Tier0Code){ 0 };
+        Tier0CallMemo emptied = tier0_call_memo_swap(thread_memo);
+        arena_release(&emptied.arena);
+        result = result && tier0_test_expect(tally, tier0_test_same_code(&fresh, &vector), "calls' memo",
+                                             "seed %" PRIu64 " function %u: an empty table of calls gives other code", seed, f);
         // A frame pointer the options keep (#177): every function's, or with the leaf rule every one's that calls.
         bool calls = false;
         for (uint32_t i = 0; i < function->count; i += 1)

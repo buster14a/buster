@@ -4034,6 +4034,10 @@ struct Tier0Entries
     // The asm goto body call rows that branch straight to their labels (tier0_asm_direct, #2351), a bit per entry; 0 for
     // a function without them.
     uint64_t* direct;
+    // Each CALL entry's entry in the thread's table of calls' records (tier0_call_memo_find), which measuring sets and
+    // emission reads, or BUSTER_TIER0_CALL_MEMO_NONE; 0 for a function whose calls don't take the table
+    // (tier0_call_memo_function).
+    uint32_t* call_slots;
 };
 
 // A deep entry's flags (Tier0Entries.deep, tier0_select_deep's): the stacks whose values it reads from their deep slots
@@ -11601,6 +11605,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->snapshot = false;
     entries->labels = 0;
     entries->direct = 0;
+    entries->call_slots = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
            entries->positions != 0;
@@ -11608,6 +11613,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
 
 static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error);
 static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes, uint32_t prologue, bool memory);
+static bool tier0_call_memo_function(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame);
 static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
                               Tier0Code* code, Tier0Choices* choices);
 
@@ -12009,6 +12015,8 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         uint32_t epilogue = 0;
         if (BUSTER_VECTOR_PATH(vector))
         {
+            // The calls' entries in the thread's table (tier0_call_memo_find), where the function's calls can take it.
+            entries->call_slots = tier0_call_memo_function(function, entries, &frame) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)function->count + 64) : 0;
             counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, &frame, homes, references), frame.memory);
             epilogue = tier0_count_epilogue(function, &frame);
             // The prologue's branches: a probe's loop's (#177).
@@ -14579,6 +14587,252 @@ static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries*
     return rare ? tier0_select_vector_memory(function, entries, frame, error) : tier0_select_vector_entries(function, entries, frame, error, false, false);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The calls' memo (#2874's piece 3)
+//
+// A CALL entry's records (tier0_emit_call's) depend on its depths, its arguments' classes and locations, whether it is
+// indirect or variadic (and al's count), whether a vzeroupper comes before it (tier0_call_zeroes_upper), its result's
+// stack, and the save area: where the frame keeps the depths below its arguments across it. In a function without the memory classes' values, masks, aggregate arguments, deep entries or a
+// setjmp's snapshots, and for a call to no asm body with no result object, nothing else: the save area's records are its
+// first and its last ones (the saves, then the restores, a depth at a time), and the callee's symbol is its call record's
+// reference. Such a call's records are kept, by those inputs as a key, in a table of the thread's; the first call with a
+// key runs the emitter on a frame whose save area is at rsp + 0, and every call with it copies its records and puts the
+// save area's base and displacements in them, and its callee in its reference. A table full, or a call of more arguments
+// than the key holds, leaves the call to tier0_count_deferred and tier0_emit_deferred, which make the same records.
+//
+// The key is one 512-bit vector: quadword 0 the depths, the arguments' count, the flags (indirect, variadic, the result's
+// stack, the vzeroupper) and al's count; quadwords 1 to 6 the arguments' locations as AbiLocation has them; the arguments' classes in
+// quadword 7; zeros past them.
+#define BUSTER_TIER0_CALL_MEMO_ARGUMENTS 6
+// The table's slots (a power of two: an entry's index plus one in the low half, its key's hash's high half in the high
+// half), its entries and its records. A key's records are at most BUSTER_TIER0_CALL_MEMO_RECORDS; the emitter stages at
+// most BUSTER_TIER0_CALL_MEMO_STAGE, which a call of six arguments never reaches (25 saves and as many restores, 6
+// extensions, 7 moves, al, the call and its result's move).
+#define BUSTER_TIER0_CALL_MEMO_SLOTS 8192
+#define BUSTER_TIER0_CALL_MEMO_ENTRIES 4096
+#define BUSTER_TIER0_CALL_MEMO_POOL 65536
+#define BUSTER_TIER0_CALL_MEMO_RECORDS 32
+#define BUSTER_TIER0_CALL_MEMO_STAGE 96
+// Tier0Entries.call_slots' value for a call the table doesn't give, and Tier0CallMemoEntry.call's for an indirect call.
+#define BUSTER_TIER0_CALL_MEMO_NONE UINT32_MAX
+#define BUSTER_TIER0_CALL_MEMO_INDIRECT 0xff
+
+typedef struct Tier0CallMemoEntry Tier0CallMemoEntry;
+struct Tier0CallMemoEntry
+{
+    __m512i key;
+    // Its records in the pool, how many, how many of its first ones are saves (and as many of its last ones restores),
+    // and its call record's index (BUSTER_TIER0_CALL_MEMO_INDIRECT for none).
+    uint32_t first;
+    uint8_t count;
+    uint8_t saves;
+    uint8_t call;
+    uint8_t unused;
+};
+
+typedef struct Tier0CallMemo Tier0CallMemo;
+struct Tier0CallMemo
+{
+    Arena arena;
+    uint64_t* slots;
+    Tier0CallMemoEntry* entries;
+    X86Instruction* records;
+    uint32_t entry_count;
+    uint32_t record_count;
+    // 0 before the thread's first use, 1 once its tables are reserved, 2 if they couldn't be (no call takes the table).
+    uint8_t state;
+};
+
+// The thread's table, reserved at its first use and never given back: its keys are a call's inputs alone, so that it
+// serves every function the thread compiles.
+static _Thread_local Tier0CallMemo tier0_call_memo;
+
+static bool tier0_call_memo_ready(Tier0CallMemo* memo)
+{
+    if (memo->state == 0)
+    {
+        // In base pages throughout: a thread touches the pages its calls' keys reach, not the tables whole.
+        const uint64_t bytes = (uint64_t)BUSTER_TIER0_CALL_MEMO_SLOTS * sizeof(uint64_t) + (uint64_t)BUSTER_TIER0_CALL_MEMO_ENTRIES * sizeof(Tier0CallMemoEntry) +
+                               ((uint64_t)BUSTER_TIER0_CALL_MEMO_POOL + 4) * sizeof(X86Instruction) + 256;
+        const uint64_t pages = (bytes + BUSTER_ARENA_PAGE_BYTES - 1) & ~(BUSTER_ARENA_PAGE_BYTES - 1);
+        memo->arena = arena_reserve_small(pages, pages);
+        memo->entries = (Tier0CallMemoEntry*)arena_push(&memo->arena, (uint64_t)BUSTER_TIER0_CALL_MEMO_ENTRIES * sizeof(Tier0CallMemoEntry), 64);
+        // The pool has room for a whole vector past its last record, which a copy's last load may read.
+        memo->records = BUSTER_ARENA_PUSH_ARRAY(&memo->arena, X86Instruction, BUSTER_TIER0_CALL_MEMO_POOL + 4);
+        memo->slots = BUSTER_ARENA_PUSH_ARRAY(&memo->arena, uint64_t, BUSTER_TIER0_CALL_MEMO_SLOTS);
+        memo->entry_count = 0;
+        memo->record_count = 0;
+        memo->state = memo->entries != 0 && memo->records != 0 && memo->slots != 0 ? 1 : 2;
+    }
+    return memo->state == 1;
+}
+
+// The thread's table set aside and `memo` in its place (the one set aside returned): a test compiles a function with an
+// empty table ((Tier0CallMemo){ 0 }, reserved at its first use) and puts the thread's back, so that the code a function
+// gets doesn't depend on what the thread compiled before it (tier0_test_build). The caller releases a table it took
+// back (its arena).
+static __attribute__((unused)) Tier0CallMemo tier0_call_memo_swap(Tier0CallMemo memo)
+{
+    const Tier0CallMemo kept = tier0_call_memo;
+    tier0_call_memo = memo;
+    return kept;
+}
+
+// Whether a function's calls may take their records from the table: one without the memory classes' values, masks,
+// aggregate arguments, deep entries or snapshots, once its frame is laid out.
+static bool tier0_call_memo_function(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame)
+{
+    return frame->calls && !frame->memory && !function->masks && function->argument_sizes == 0 && !function->returns_twice && frame->snapshot_bytes == 0 &&
+           entries->deep == 0;
+}
+
+// How many of call row `call`'s arguments are floating values (tier0_emit_call's count).
+static uint32_t tier0_call_floating_arguments(const Tier0Function* function, uint32_t call)
+{
+    const uint32_t first = function->call_first[call];
+    const uint32_t count = function->call_argument_counts[call];
+    uint32_t floating = 0;
+    for (uint32_t a = 0; a < count; a += 1)
+    {
+        floating += tier0_class_floating(function->argument_classes[first + a]) ? 1 : 0;
+    }
+    return floating;
+}
+
+// Call entry i's entry in the thread's table, made by running the emitter where no call had its key yet:
+// BUSTER_TIER0_CALL_MEMO_NONE where the call has no key (an asm body's, one with a result object or of more than
+// BUSTER_TIER0_CALL_MEMO_ARGUMENTS arguments) or the table no room, and its records are then the emitter's. Its records'
+// count goes to `records`, and its reference to `references`, as tier0_count_deferred's would.
+static uint32_t tier0_call_memo_find(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, uint32_t* records,
+                                     uint32_t* references)
+{
+    Tier0CallMemo* memo = &tier0_call_memo;
+    const uint32_t call = (uint32_t)function->values[i];
+    const uint32_t first = function->call_first[call];
+    const uint32_t count = function->call_argument_counts[call];
+    const bool indirect = function->call_targets[call] == 0;
+    const bool variadic = function->call_variadic[call] != 0;
+    const bool keyed = count <= BUSTER_TIER0_CALL_MEMO_ARGUMENTS && (function->call_asm == 0 || function->call_asm[call] == 0) &&
+                       (function->call_result_objects == 0 || function->call_result_objects[call] == 0);
+    uint32_t found = BUSTER_TIER0_CALL_MEMO_NONE;
+    if (keyed && tier0_call_memo_ready(memo))
+    {
+        // The key: the header in quadword 0, the locations after it, the classes in quadword 7.
+        const uint64_t header = (uint64_t)entries->depths[i] | (uint64_t)entries->floating_depths[i] << 8 | (uint64_t)count << 16 |
+                                (uint64_t)((indirect ? 1u : 0u) | (variadic ? 2u : 0u) | tier0_stack(function->classes[i]) << 2 |
+                                           (tier0_call_zeroes_upper(function, call) ? 16u : 0u)) << 24 |
+                                (uint64_t)(variadic ? function->calls[call].vector_registers : 0) << 32;
+        const __mmask8 arguments = (__mmask8)_bzhi_u32(0xff, count);
+        const __m512i locations = _mm512_maskz_loadu_epi64(arguments, function->argument_locations + first);
+        const __m128i classes = _mm_maskz_loadu_epi8((__mmask16)arguments, function->argument_classes + first);
+        __m512i key = _mm512_alignr_epi64(locations, _mm512_set1_epi64((int64_t)header), 7);
+        key = _mm512_mask_broadcastq_epi64(key, 0x80, classes);
+        // Its hash: each quadword times an odd constant of its own, folded together, then SplitMix64's finalizer.
+        const __m512i odd = _mm512_set_epi64((int64_t)0x9E3779B97F4A7C15ull, (int64_t)0xbf58476d1ce4e5b9ull, (int64_t)0x94d049bb133111ebull,
+                                             (int64_t)0xd6e8feb86659fd93ull, (int64_t)0xa0761d6478bd642full, (int64_t)0xe7037ed1a0b428dbull,
+                                             (int64_t)0x8ebc6af09c88c6e3ull, (int64_t)0x589965cc75374cc3ull);
+        const __m512i mixed = _mm512_mullo_epi64(_mm512_xor_si512(key, _mm512_srli_epi64(key, 29)), odd);
+        uint64_t hash = (uint64_t)_mm512_reduce_add_epi64(mixed);
+        hash = (hash ^ (hash >> 30)) * 0xbf58476d1ce4e5b9ull;
+        hash = (hash ^ (hash >> 27)) * 0x94d049bb133111ebull;
+        hash ^= hash >> 31;
+        const uint64_t tag = hash & 0xffffffff00000000ull;
+        uint32_t slot = (uint32_t)hash & (BUSTER_TIER0_CALL_MEMO_SLOTS - 1);
+        bool probing = true;
+        // Linear probing, which a slot left empty ends: the table never deletes, and its slots are at most half taken.
+        while (probing)
+        {
+            const uint64_t taken = memo->slots[slot];
+            const uint32_t index = (uint32_t)taken;
+            const bool same = index != 0 && (taken & 0xffffffff00000000ull) == tag && _mm512_cmpneq_epi64_mask(memo->entries[index - 1].key, key) == 0;
+            found = same ? index - 1 : found;
+            probing = index != 0 && !same;
+            slot = probing ? (slot + 1) & (BUSTER_TIER0_CALL_MEMO_SLOTS - 1) : slot;
+        }
+        if (found == BUSTER_TIER0_CALL_MEMO_NONE && memo->entry_count < BUSTER_TIER0_CALL_MEMO_ENTRIES && memo->entry_count < BUSTER_TIER0_CALL_MEMO_SLOTS / 2 &&
+            memo->record_count + BUSTER_TIER0_CALL_MEMO_RECORDS <= BUSTER_TIER0_CALL_MEMO_POOL)
+        {
+            // The emitter's records on a frame whose save area is at rsp + 0: its saves' and restores' displacements are
+            // then their offsets in the area, which a use adds the frame's to.
+            Tier0Frame canonical;
+            memset(&canonical, 0, sizeof(canonical));
+            canonical.base = X86_REGISTER_RSP;
+            X86Instruction staged[BUSTER_TIER0_CALL_MEMO_STAGE];
+            LinkReference reference;
+            memset(&reference, 0, sizeof(reference));
+            Tier0Writer writer = { staged, 0, &reference, 0, 0, 0, 0, 0, 0, false, 0, 0 };
+            tier0_emit_call(function, entries, &canonical, homes, i, false, false, false, &writer);
+            const uint32_t floating_arguments = tier0_call_floating_arguments(function, call);
+            const uint32_t below = entries->depths[i] - (count - floating_arguments) - (indirect ? 1u : 0u);
+            const uint32_t floating_below = entries->floating_depths[i] - floating_arguments;
+            const uint32_t saves = tier0_call_saved(function, call, below) + floating_below;
+            if (writer.count <= BUSTER_TIER0_CALL_MEMO_RECORDS && 2 * saves <= writer.count && writer.reference_count == (indirect ? 0u : 1u))
+            {
+                Tier0CallMemoEntry* entry = &memo->entries[memo->entry_count];
+                entry->key = key;
+                entry->first = memo->record_count;
+                entry->count = (uint8_t)writer.count;
+                entry->saves = (uint8_t)saves;
+                entry->call = indirect ? BUSTER_TIER0_CALL_MEMO_INDIRECT : (uint8_t)reference.instruction;
+                entry->unused = 0;
+                memcpy(memo->records + memo->record_count, staged, (uint64_t)writer.count * sizeof(X86Instruction));
+                memo->record_count += writer.count;
+                memo->entry_count += 1;
+                memo->slots[slot] = tag | memo->entry_count;
+                found = memo->entry_count - 1;
+            }
+        }
+    }
+    if (found != BUSTER_TIER0_CALL_MEMO_NONE)
+    {
+        const Tier0CallMemoEntry* entry = &memo->entries[found];
+        *records = entry->count;
+        *references += entry->call != BUSTER_TIER0_CALL_MEMO_INDIRECT ? 1 : 0;
+    }
+    return found;
+}
+
+// Call entry i's records from its entry in the thread's table, at writer's place, four records a vector: the save area's
+// base and displacements put in its saves and restores (the first and the last `saves` records), and its callee in its
+// call record's reference. Exactly its records are written: the entries after it have theirs in place already.
+static void tier0_call_memo_write(const Tier0Function* function, const Tier0Frame* frame, uint32_t found, uint32_t i, Tier0Writer* writer)
+{
+    const Tier0CallMemo* memo = &tier0_call_memo;
+    const Tier0CallMemoEntry* entry = &memo->entries[found];
+    const X86Instruction* from = memo->records + entry->first;
+    X86Instruction* out = writer->records + writer->count;
+    const uint32_t count = entry->count;
+    const uint32_t saves = entry->saves;
+    // The saves' and restores' records as a bit each, then a displacement's dword and the rm byte of each, by its record's
+    // bit: dword 1 and byte 9 of a record's 16 bytes. A displacement takes the area's offset in the frame and the bias
+    // (tier0_spill's: their sum wraps as the displacement's 32 bits do), and rm the frame's base.
+    const uint64_t spilled = _bzhi_u64(~0ull, saves) | (_bzhi_u64(~0ull, saves) << (count - saves));
+    const __m512i addend = _mm512_set1_epi32((int32_t)(frame->save_area + (uint32_t)frame->bias));
+    const __m512i base = _mm512_set1_epi8((char)frame->base);
+    for (uint32_t r = 0; r < count; r += 4)
+    {
+        const uint32_t bits = (uint32_t)(spilled >> r) & 15;
+        const __mmask8 lanes = (__mmask8)_bzhi_u32(0xff, 2 * (count - r));
+        __m512i v = _mm512_maskz_loadu_epi64(lanes, from + r);
+        v = _mm512_mask_add_epi32(v, (__mmask16)_pdep_u32(bits, 0x2222), v, addend);
+        v = _mm512_mask_mov_epi8(v, _pdep_u64(bits, 0x0200020002000200ull), base);
+        _mm512_mask_storeu_epi64(out + r, lanes, v);
+    }
+    if (entry->call != BUSTER_TIER0_CALL_MEMO_INDIRECT)
+    {
+        const uint32_t call = (uint32_t)function->values[i];
+        writer->references[writer->reference_count] = (LinkReference){
+            .instruction = writer->count + entry->call,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = function->call_targets[call],
+            .addend = 0,
+        };
+        writer->reference_count += 1;
+    }
+    writer->count += count;
+}
+
 // Measuring for the vector path, 8 words at a time, from the prologue's length on:
 // - a home-dependent entry's word is resolved to its homes' case: for a uniform slot, the case added to the template;
 //   otherwise, the case's word gathered;
@@ -14661,8 +14915,21 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(rest);
             rest &= rest - 1;
-            const uint32_t records = deep && entries->deep[first + lane] != 0 ? tier0_count_deep(function, entries, homes, first + lane, &counts)
-                                                                              : tier0_count_deferred(function, entries, first + lane, memory, &counts.references, &counts.branches);
+            const uint32_t i = first + lane;
+            // A call the thread's table gives (tier0_call_memo_find): its records' count, and its entry for emission.
+            uint32_t records = 0;
+            const uint32_t found = entries->call_slots != 0 && entries->key_kinds[i] == BUSTER_TYPED_CALL ?
+                                       tier0_call_memo_find(function, entries, homes, i, &records, &counts.references) :
+                                       BUSTER_TIER0_CALL_MEMO_NONE;
+            if (entries->call_slots != 0)
+            {
+                entries->call_slots[i] = found;
+            }
+            if (found == BUSTER_TIER0_CALL_MEMO_NONE)
+            {
+                records = deep && entries->deep[i] != 0 ? tier0_count_deep(function, entries, homes, i, &counts)
+                                                        : tier0_count_deferred(function, entries, i, memory, &counts.references, &counts.branches);
+            }
             length = _mm512_mask_set1_epi64(length, (__mmask8)(1u << lane), (int64_t)records);
         }
         counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
@@ -14867,6 +15134,10 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
                     tier0_emit_deferred_deep(function, entries, frame, homes, i, &writer);
                     branches = writer.branch_count;
                     requests = choices->count;
+                }
+                else if (entries->call_slots != 0 && entries->key_kinds[i] == BUSTER_TYPED_CALL && entries->call_slots[i] != BUSTER_TIER0_CALL_MEMO_NONE)
+                {
+                    tier0_call_memo_write(function, frame, entries->call_slots[i], i, &writer);
                 }
                 else
                 {

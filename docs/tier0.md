@@ -1573,6 +1573,20 @@ parallel move, without emitting it; the scalar path runs the emitter to count, w
   same rule (#221). Every form the emitter writes has `x86_semantics.c`'s effects, which `test-tier0` checks on every
   record it compiles but the X86 entries'.
 
+**The calls' memo (#2874).** A call's records follow from its depths, its arguments' classes and locations, whether it
+is indirect or variadic (and al's count), whether a vzeroupper comes before it (#3335), its result's stack and the save
+area. Nothing else feeds them in a function
+without the memory classes' values, masks, aggregate arguments, deep entries or a setjmp's snapshots, for a call to no
+asm body with no result object and of six arguments or fewer. Measuring takes such a call's records from a table of the
+thread's (`tier0_call_memo_find`), keyed by one 512-bit vector of those inputs: the header, the arguments' locations as
+`AbiLocation` has them, and their classes, hashed by vector multiplies. A key's first call runs `tier0_emit_call` on a
+frame whose save area is at rsp + 0. Every call with the key then writes the kept records, four a masked store
+(`tier0_call_memo_write`), and puts in their saves and restores (its first and last ones) the frame's base and the
+area's offset and bias, and in its call record's reference its callee. The records are the emitter's either way. A call
+with no key, or a full table, takes `tier0_count_deferred` and `tier0_emit_deferred` as before. On `sqlite3.c` the
+table takes `tier0` from 4.780 to 4.578 ms on the 9700X, every object byte for byte the same ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-calls-memo-2874-2026-11-23)).
+
 ## The two paths
 
 **The vector path** finds the fusions, effects and depths 64 entries at a time:
