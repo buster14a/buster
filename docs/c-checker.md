@@ -2341,30 +2341,41 @@ one after the last. `check_literal_table_rows` checks this grammar. Its vector
 path classifies the same 64-token blocks into number, comma, minus and brace
 masks and takes brace depth from a prefix XOR of the brace mask, carried across
 blocks. A `{` must be at depth 0 and a `}` at depth 1, so the parity is the
-depth. Each `}` compares the numbers before it, counted from the table's start
-by `popcnt`, with its rows times `M`. The payload is the row-major values. The
-type of an incomplete array is completed to the row count. A short row, an
-elided or excess one, a deeper array and a designator at either level all keep
-the ordinary path.
+depth. Each `}`'s numbers before it are counted from the table's start by
+`popcnt`; numbers appear only inside rows, so that count less the previous
+`}`'s, kept across blocks, is the row's. A row may be short: from one to `M` items, the rest of the row zero. A
+table of full rows is the row-major values. Short rows convert densely into
+scratch, as a full table would, and one pass over the braces copies each row to
+its start in a zeroed payload, so the tails are zero. Rows at most a quarter
+full on average keep the ordinary path, which bounds the payload at four times
+the values. The type of an incomplete array is completed to the row count. An
+empty, elided or excess row, a deeper array and a designator at either level
+all keep the ordinary path.
 
-Arrays of integer structs (#1383), such as `struct R { int a; char b; long c; }`,
+Arrays of structs (#1383), such as `struct R { int a; char b; double c; }`,
 also use the rows grammar when each brace supplies exactly one literal per
 member in declaration order. Every member must be a non-bit-field, nonvolatile
-8-, 16-, 32- or 64-bit integer other than `_Bool`. The producer gathers literal
-tokens once, converts each member's column with the existing scalar/vector
-batches, and places the results at that member's byte offset in a zeroed record
-payload. Type-table member offsets are in bits and are converted to bytes
+8-, 16-, 32- or 64-bit integer other than `_Bool`, or a `float`, `double` or
+`long double`. The producer gathers literal tokens once, converts each member's
+column with the existing scalar/vector batches, and places the results at that
+member's byte offset in a zeroed record payload. A `float` or `double` column
+converts sixteen spellings at a time as a floating table does (rounding as the
+ordinary initializer rounds, refusing an integer that the format can't hold
+exactly). A `long double` column converts each value through the same literal
+and initialization actions and stores its x87 bytes with the static writer's
+`check_data_float_bytes`, leaving the six padding bytes zero, so zero signs,
+subnormals and extremes match the ordinary path's bytes. Type-table member offsets are in bits and are converted to bytes
 before checking the store bounds. This preserves packed layouts, padding,
 record alignment and omitted outer-array tails. Incomplete outer bounds finish
 at the record count. The source-order reader also accepts block-scope static
-tables; deferred function bodies retain ordinary checking. Floating, atomic,
+tables; deferred function bodies retain ordinary checking. Atomic, complex,
 aggregate and bit-field members, partial records, designators, nonliteral
 expressions and conversions needing warnings retain the ordinary path for the
 whole table. Tests require compact selection, compare its bytes and completed
 types with the full graph, and cover guarded stores, scratch refusal and replay.
 
 Automatic arrays, volatile and atomic elements, 128-bit elements, designators,
-short or elided rows, deeper nesting and nonliteral expressions retain ordinary
+elided or mostly empty rows, deeper nesting and nonliteral expressions retain ordinary
 checking and planning. `check_input_tables_reference` provides that exact
 source path for tests. Permanent tests compare complete bytes and array bounds
 between it and both compact paths, exercise protected syntax/output tails,
@@ -4437,8 +4448,19 @@ What the lowering covers past scalars (#145's programs):
   `_Bool`, or a pointer to a compatible type whatever either's qualifiers, or
   an `_Atomic` one of those, which clang's `CheckAssignmentConstraints` checks
   as its value's type (`_Atomic(int *)`, `_Atomic(void *)`, `_Atomic _Bool`:
-  #1844) ("'cleanup' function 'f' parameter has incompatible type", the spelling of
-  clang's message without its two types). A pointer of another signedness or
+  #1844) ("'cleanup' function 'f' parameter has type 'long *' which is
+  incompatible with type 'int *'", both types as clang prints them: the
+  parameter's typedef and its own qualifiers, which its function's type drops,
+  read back from its declarator, and a pointer to the variable's type with the
+  variable's typedef, each with its a.k.a., #1844's
+  `check_input_cleanup_type_error`). Where the parameter is a pointer to a
+  complete type more aligned than the variable's type (an `aligned(1)`
+  typedef's variable, or another type's), clang's `-Walign-mismatch` comes
+  first, from its `CheckArgAlignment` ("passing 4-byte aligned argument to
+  8-byte aligned parameter 1 of 'f' may result in an unaligned pointer
+  access", `check_input_cleanup_alignment`), and on its own where the types
+  are compatible; after the unit's first error, the driver's later rounds give
+  the errors without it. A pointer of another signedness or
   to a pointer of other qualifiers, which an assignment only warns about, is
   an error here. An `__auto_type` variable's parameter type is checked once
   its initializer gives the type (`check_input_cleanup_deduced`, from the

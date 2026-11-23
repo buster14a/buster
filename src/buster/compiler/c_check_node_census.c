@@ -369,6 +369,8 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_STRING_PLUS_CHAR] = NODE_CENSUS_WARNING_TESTED,
     // Any floating conversion to a lower rank, constant or not (#1875), off by default: a unit that enables it is refused whole.
     [CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION] = NODE_CENSUS_WARNING_WHOLE,
+    // A declaration's cleanup attribute's, the reader's (c_check_cleanup_input.c).
+    [CHECK_WARNING_ID_ALIGN_MISMATCH] = NODE_CENSUS_WARNING_OUTSIDE,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning

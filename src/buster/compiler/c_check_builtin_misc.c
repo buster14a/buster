@@ -328,6 +328,16 @@ static void check_builtin_misc_expect(TypeTable* table, const CheckBuiltinMiscAc
     const bool first = check_builtin_misc_convert(table, input, output, values, 0, BUSTER_TYPE_LONG);
     const bool second = check_builtin_misc_convert(table, input, output, values + 1, 1, BUSTER_TYPE_LONG);
     const bool probability = input->id != CBUILTIN_EXPECT_WITH_PROBABILITY || check_builtin_misc_probability(table, input, output, values + 2);
+    // A pointer argument clang converts to its long with -Wint-conversion's error (#2914): it makes the call, which its
+    // parents check (`long *l = __builtin_expect(p, 0);`'s initialization's own error), of a long's unknown value.
+    // (Only the first's: where the second fails, clang's call may fold to a null pointer constant, which a diagnosed
+    // node's value doesn't carry, and buster gives that call's parents nothing, as before.)
+    const bool soft = output->action.diagnostic == CHECK_DIAG_INCOMPATIBLE && output->action.diagnostic_operand == 0 &&
+                      check_action_kind(table, values[0].type) == BUSTER_TYPE_KIND_POINTER;
+    if (soft)
+    {
+        output->action.value = (CheckValue){ .type = BUSTER_TYPE_LONG, .category = CHECK_RVALUE };
+    }
     if (first && second && probability)
     {
         output->constant_evaluated_operands = 1;
