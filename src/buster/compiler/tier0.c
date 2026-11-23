@@ -16068,15 +16068,25 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     uint8_t* room = valid ? (uint8_t*)arena_push(scratch.arena, depth_bytes + expected_bytes + arrival_bytes + zero_bytes + local_bytes + 2 * call_bytes + argument_bytes + block_bytes, 64)
                           : 0;
     valid = valid && room != 0;
+    // Carved by address, so that a stream refused before the push (no room, a null base) forms no pointer from null;
+    // nothing reads them unless `valid`.
+    const uintptr_t expected_at = (uintptr_t)room + depth_bytes;
+    const uintptr_t arrivals_at = expected_at + expected_bytes;
+    const uintptr_t zero_at = arrivals_at + arrival_bytes;
+    const uintptr_t locals_at = zero_at + zero_bytes;
+    const uintptr_t calls_at = locals_at + local_bytes;
+    const uintptr_t bases_at = calls_at + call_bytes;
+    const uintptr_t arguments_at = bases_at + call_bytes;
+    const uintptr_t blocks_at = arguments_at + argument_bytes;
     uint8_t* depths = room;
-    uint8_t* expected = room + depth_bytes;
-    uint64_t* arrivals = (uint64_t*)(void*)(expected + expected_bytes);
-    uint32_t* zero_targets = (uint32_t*)(void*)((uint8_t*)arrivals + arrival_bytes);
-    uint32_t* local_words = (uint32_t*)(void*)((uint8_t*)zero_targets + zero_bytes);
-    uint32_t* call_words = (uint32_t*)(void*)((uint8_t*)local_words + local_bytes);
-    uint32_t* call_bases = (uint32_t*)(void*)((uint8_t*)call_words + call_bytes);
-    uint32_t* argument_words = (uint32_t*)(void*)((uint8_t*)call_bases + call_bytes);
-    Tier0ScanBlock* blocks = (Tier0ScanBlock*)(void*)((uint8_t*)argument_words + argument_bytes);
+    uint8_t* expected = (uint8_t*)expected_at;
+    uint64_t* arrivals = (uint64_t*)arrivals_at;
+    uint32_t* zero_targets = (uint32_t*)zero_at;
+    uint32_t* local_words = (uint32_t*)locals_at;
+    uint32_t* call_words = (uint32_t*)calls_at;
+    uint32_t* call_bases = (uint32_t*)bases_at;
+    uint32_t* argument_words = (uint32_t*)arguments_at;
+    Tier0ScanBlock* blocks = (Tier0ScanBlock*)blocks_at;
 
     // The locals' classes and the calls' tables (tier0_scan_calls) for vpermi2b where there are 128 or fewer (each
     // table's two halves), and their words for the gathers otherwise; the arguments' classes likewise.
