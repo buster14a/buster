@@ -3962,9 +3962,11 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             // The totals of the calls that end here, in the order of the calls with arguments: each call's from its
             // last argument (a call without arguments keeps its starting ones), and the calls with a deferred argument
             // to abi_assign_lanes.
-            _mm512_mask_compressstoreu_epi32(end_registers, ends, inclusive);
-            _mm512_mask_compressstoreu_epi32(end_stack, ends, stack_inclusive);
-            _mm512_mask_compressstoreu_epi32(end_alignment, ends, alignment_inclusive);
+            // Compressed in registers and stored whole: the loads below forward from a full store, not from a compressing
+            // store's microcoded one, which they wait on to retire (+25% per argument on the 9700X).
+            _mm512_store_si512((void*)end_registers, _mm512_maskz_compress_epi32(ends, inclusive));
+            _mm512_store_si512((void*)end_stack, _mm512_maskz_compress_epi32(ends, stack_inclusive));
+            _mm512_store_si512((void*)end_alignment, _mm512_maskz_compress_epi32(ends, alignment_inclusive));
             const uint32_t ended = (uint32_t)__builtin_popcount(ends);
             for (uint32_t e = 0; e < ended; e += 1)
             {
