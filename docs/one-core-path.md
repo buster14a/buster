@@ -3730,6 +3730,52 @@ objects and one of diagnostics.
   volatile marks, which main merged during it. Each was a difference of an object with nothing said. The oracle on the
   corpora and the units' sweep are run on main's head before a piece of this redesign lands.
 
+## The redesign's eighth piece: a unit that takes no body pays nothing
+
+The seventh piece's pair read a cost that no taken body explains: the compiler's own source takes none and was 18.5 ms
+slower with `--node-bodies`. The option began the reader's machine and the machine with no node of the walk's for
+every unit, and both make and clear columns by the unit's tokens, before the producer asked the unit's own reason. A
+compile asks that reason first now, and a unit with one has no front
+([`commands/lowering.md`](commands/lowering.md), "Compiling with the bodies taken").
+
+### What it measured
+
+The 9700X, Release, CPU 2, paired, five rounds a pair and seven on `sqlite3.c`
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)):
+
+| the option against without, ms | before, at `4fcadeb45` | after, at `b0ee1afaa` |
+| --- | ---: | ---: |
+| the compiler's own source (no body taken: a diagnostic pragma) | +18.549, at `06681bbdb` | -0.670; -2.062, +2.774 |
+| `sqlite3.c` with `-Wall -Wextra` (no body taken: a warning option) | +5.820; +5.270, +5.955 | +0.289; -0.467, +0.429 |
+| `sqlite3.c` (1,753 bodies taken) | +23.064, at `06681bbdb` | +23.659; +23.366, +24.051 |
+| Lua (545) | +10.680, at `06681bbdb` | +10.650; +10.594, +10.987 |
+| musl (4,442) | +95.027, at `06681bbdb` | +93.419; +92.641, +96.511 |
+
+With the option in both arms, the head before against this one on `sqlite3.c`: -0.205 ms (-0.483 to +0.040, six of
+seven rounds lower): the 0.6 ms between the two readings of `sqlite3.c` above is the two jobs', not the piece's. With
+the option off, head against head: `sqlite3.c` +0.025 ms, the compiler's own source -2.273, Lua +0.093, musl +0.655.
+
+### Against its gates
+
+- **U1, the same verdicts: met.** The producer against the oracle on the four corpora, twenty runs, each status 0, the
+  same bodies taken.
+- **U2, exact: met.** The corpora's objects plain, with `-fPIC` and with `-Wall -Wextra`; the 349 units; the option
+  sets' sweep (31,016 pairs); the driver's eight parts, with a unit that has a diagnostic pragma, whose line reads no
+  body decided.
+- **U3, its price: met.** The two units with a reason are within a millisecond of zero, and the three workloads that
+  take bodies are not slower.
+- **U4, the option off: nothing moves.**
+- Two single faults (a unit with a reason still given a front; a diagnostic pragma that is no reason) each fail the
+  option's test.
+
+### What it means
+
+- **A build with warning options no longer pays for the option at all.** Until the producer takes bodies under `-W`
+  options, that is every unit of most builds.
+- **What is left is a unit that takes bodies:** 23.7 ms on `sqlite3.c`. Its machine's columns are still by the unit's
+  tokens, not by the bodies it reads; that, the machine's run and the reading are the next cuts, in that order of
+  ease.
+
 ## Step 5's allocation, and its kept rows in the compile
 
 [#2873](https://github.com/buster14a/buster/issues/2873). After the census,
