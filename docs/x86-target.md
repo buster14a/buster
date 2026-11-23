@@ -234,9 +234,9 @@ explicitly. GCC 16.2.1 has no `__INVPCID__` or `__RDPRU__` macro, and its named
 `znver5` omits `__SHSTK__`, which its native resolver reports on the 9700X.
 Those macro differences do not remove the actual target capabilities. Full
 predefined-preamble equality remains a Clang contract.
-The benchmark checks table equality before reporting 21 interleaved medians
-for building a whole table, including the scalar source as optimized by Clang.
-`--only scalar|avx512` isolates one path. `--after-predefines MS` emits target
+The benchmark checks the table against its definition before reporting 21
+medians for building a whole table (until #2924 it also timed the scalar twin,
+interleaved, with `--only scalar|avx512`). `--after-predefines MS` emits target
 macros for 100–300 ms before each sample, modeling the lighter configuration
 work preceding selection. `--iterations 1` isolates the initial table after
 that conditioning; the default 10,000 measures sustained repetition. Output
@@ -776,8 +776,8 @@ closed; encoder support alone does not make a form legal for a target.
 Build the table once for an unchanged target, retain it through all selecting
 consumers, and do not rebuild it per instruction. The complete table extent,
 not a caller-chosen short slice, is the output capacity. The record validator
-consumes a counted instruction array; scalar/vector table construction must
-agree, including final partial groups. Initialization/ownership is external.
+consumes a counted instruction array; table construction must match the
+table's definition, including final partial groups. Initialization/ownership is external.
 Disposition: retain the shared eligibility table and baseline default.
 `test-x86-target` validates policy and compiler predefines; [#180](https://github.com/buster14a/buster/issues/180)/[#141](https://github.com/buster14a/buster/issues/141) own
 integration of all real selectors and corpus ISA checks. Table-construction
