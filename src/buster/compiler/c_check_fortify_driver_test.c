@@ -424,6 +424,21 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
           "wchar_t*r=argc>5?wcscpy(w[0],L\"0123456789\"):w[0];if(r!=w[0])return 6;"
           "if(mbstowcs(w[0],\"xyz\",4)!=3||wcscmp(w[0],L\"xyz\")||realpath(\".\",p)!=p)return 7;"
           "int s[2];if(socketpair(AF_UNIX,SOCK_STREAM,0,s)||write(s[0],\"0123456789\",10)!=10||recv(s[1],b[1],n,0)!=8)return 8;return calls!=2;}\n", 0 },
+        // A length of 1 (#2983's regression of #3325): glibc's __fgets_chk returns NULL for it and leaves the buffer, where
+        // fgets writes "" and returns it, so the guards must reach the plain call as the caller's code decides them: a
+        // constant length that fits, and a bound that is unknown (through a pointer), as GCC's and clang's builds do.
+        { "fortified fgets of one byte",
+          "#define _GNU_SOURCE 1\n#include <stdio.h>\n#include <wchar.h>\n"
+          "__attribute__((noinline)) static char*c1(char*p,FILE*f){return fgets(p,1,f);}\n"
+          "__attribute__((noinline)) static char*c2(char*p,FILE*f){return fgets_unlocked(p,1,f);}\n"
+          "__attribute__((noinline)) static wchar_t*w1(wchar_t*p,FILE*f){return fgetws(p,1,f);}\n"
+          "__attribute__((noinline)) static wchar_t*w2(wchar_t*p,FILE*f){return fgetws_unlocked(p,1,f);}\n"
+          "int main(void){FILE*f=tmpfile();fputs(\"hello\\n\",f);rewind(f);char b[8]=\"zzz\";wchar_t w[8]=L\"zzz\";"
+          "if(fgets(b,1,f)!=b||b[0])return 1;b[0]='z';if(fgets_unlocked(b,1,f)!=b||b[0])return 2;"
+          "if(fgetws(w,1,f)!=w||w[0])return 3;w[0]='z';if(fgetws_unlocked(w,1,f)!=w||w[0])return 4;"
+          "b[0]='z';if(c1(b,f)!=b||b[0])return 5;b[0]='z';if(c2(b,f)!=b||b[0])return 6;"
+          "w[0]='z';if(w1(w,f)!=w||w[0])return 7;w[0]='z';if(w2(w,f)!=w||w[0])return 8;"
+          "return fgets(b,8,f)!=b||b[0]!='h';}\n", 0 },
         { "fortified header keeps printf security flag", "#include <stdio.h>\nint main(void){char b[32],f[]=\"x%n\";int n=0;snprintf(b,sizeof b,f,&n);return 0;}\n", 128 + SIGABRT },
         // mbstowcs has two distinct extern declarations redirected to the same libc symbol. Validate its object
         // and ABI with Clang's linker independently of the direct binder's existing duplicate-name restriction.

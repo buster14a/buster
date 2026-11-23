@@ -2816,8 +2816,14 @@ What the lowering covers past scalars (#145's programs):
   member's value converted to such a union, of a member passed by its bytes,
   goes through a zeroed object of the union's size and alignment, as clang's
   code's memset and memcpy make it (`check_lower_transparent_value`), so that
-  the union's slot is never copied from past the member. A first member that
-  passes as a pair, a vector or a scalar in memory is still refused by name,
+  the union's slot is never copied from past the member. A pair's member (a
+  128-bit integer, a struct of one, a complex long) and a 16-byte vector's
+  (a struct of one) pass so too, in their two general registers or xmm
+  register, and on the stack as clang's code puts them there: the union's
+  slot where clang has no register for them, or the member's value's i128 or
+  vector slot where LLVM has none (`FIRST` past 16 bytes). A first member
+  that passes as a vector wider than 16 bytes or as an `_Atomic` value in
+  memory (which clang passes uncounted) is still refused by name,
   and so is a printer's such union of `__builtin_dump_struct`. And a union made transparent, by a
   later declaration's attribute, after a function definition or a static
   object's initializer that names a function, whose first member passes
@@ -4270,14 +4276,26 @@ What the lowering covers past scalars (#145's programs):
   bit-field access reads its member's, the one its name finds
   (`check_lower_bit_unit_place`). A constant address of a field's lvalue
   (a local's or a global's, the checker's of the field's first byte) is its
-  unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
-  `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,
-  initializer parts with a bit width and `__builtin_dump_struct`'s reads take
-  the bytes that hold the field's bits. A packed field of up to 64 bits off a
-  byte boundary may lie in 9 bytes (#2999): its read and its store take the
-  first 8 as an integer and the ninth as a byte, joined by shifts on a read and
-  split on a store, as clang's -O0 code does its `i72` (`check_lower_bit_wide`,
-  out of line, apart from the tasks' always-inlined store). A field wider than
+  unit's too (`check_lower_bit_constant_address`). A union's bit-field's unit
+  is at 0, the integer of its width rounded up to a power of two bytes, no more
+  than the union's bytes (`getUIntNType`: `unsigned x : 17` an `i32`, an `i24`
+  in a packed union of 3 bytes). An `ms_struct` record's are clang's discrete
+  units: a run's declared type at its first field, which the fields after it
+  share while they start before its end (`{ unsigned x : 3, y : 7; unsigned
+  short z : 5; }` an `i32` at 0 and an `i16` at 4), and an `ms_struct` union's
+  its declared type. A unit of 9 to 16 bytes (a packed run's `i72` to `i128`)
+  is its first 8 bytes and the rest's pieces, as clang's -O0 code moves it: a
+  field in one of the two takes that part alone, where clang's code moves both,
+  and a field across them both (a packed field of up to 64 bits off a byte
+  boundary in 9 bytes of its own is one, #2999) takes both, joined by shifts
+  on a read and split on a store (`check_lower_bit_wide`, out of line, apart
+  from the tasks' always-inlined store). A local's initializer stores a field
+  through its member's unit too, found by going down the object's elements and
+  members to it (`check_lower_bit_init_unit`), after the object's zeros, as
+  clang's initialization does, but in an object with a volatile part, whose
+  stores are its plan's. A unit wider than 16 bytes, an initializer's cleared
+  bits and `__builtin_dump_struct`'s reads take the bytes that hold the
+  field's bits. A field wider than
   64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
@@ -5795,26 +5813,48 @@ conversion once. The strict initializer publisher still stops on its first
 failure, and a diagnostic walk discards every partial write plan. Its failure
 buffer and source keys are bounded, and resource failure restores both arenas
 and clears the returned metadata. Successful diagnosis restores scratch and may
-retain only its explicit failure list and warning callers' source-root completions.
+retain its explicit failure list, warning callers' source-root completions and
+the invalid-compound dependency mask described below.
 
-Excess-element warnings retain the strict walk's first-failure boundary within
-each initializer. Continuing incompatible conversions must not add a trailing
-excess warning to a rejected list. Earlier valid siblings and independent
-declarations keep their warnings. A valid nested sibling after a rejected one
-can still lack an excess warning that Clang gives; recovering that warning needs
-per-list error state and ordered publication alongside the conversion errors.
+Excess-element warnings track hard conversion failures per open list. A failed
+list and its enclosing lists suppress their own trailing excess warnings, while
+a later nested sibling starts with its own state and keeps its independent
+warning. Pointer/integer and incompatible-pointer conversions, which Clang
+diagnoses but still performs, do not invalidate that list. Conversion errors and
+excess warnings sharing a list's completion are published in source order;
+comma expressions in ignored excess elements still contribute their warnings.
+GNU range repetitions retain their individual excess-list warnings, while a
+repeated overlong string warns once. The warning renderer and output-publication
+decision use the same command-line and source-pragma severity policy: global
+`-Werror` promotes excess warnings, and suppression or a scoped warning mapping
+can keep a declaration accepted where Clang accepts it.
 
 The rejected-comma pass uses those completion tokens to publish all of the
 initializer's comma warnings after its conversion errors, including commas in
-accepted siblings. The runtime `checker/initializer-comma` catalog compares
-complete Clang output, warning policy, both readers, lane requests and rejected
-output preservation. A compound literal's own initializer also gets this recovery.
-An enclosing initializer containing a compound literal retains its prior
-first-failure boundary: invalid-literal dependencies are not modeled yet, so it
-can still give one derivative conversion error that Clang suppresses. A separate
-frozen-output boundary fixture prevents extending those derivative errors while
-checking the literal's own recovery. The broader atomic-conditional residual of
-#2441 remains separate.
+accepted siblings. A compound literal's own initializer also gets this recovery.
+Nested literal initializers are diagnosed before their enclosing initializers,
+in order of source completion. A rejected literal has no usable value: its invalid
+state follows the retained graph's postorder operand and call-argument edges,
+and the driver omits derivative reports through a private reporting view. The
+original checked stream and its rejection state are unchanged. Enclosing
+conversions that consume the rejected literal are skipped, while independent
+arguments, sibling expressions and their comma warnings remain checked.
+
+An earlier invalid statement in a GNU statement expression does not discard its
+later usable final value. Where the rejected literal was its only statement,
+the recovered statement expression has a void value, and an enclosing object
+initialization keeps that independent conversion error. This covers a whole
+initializer or a directly used braced element, including transparent parentheses;
+larger surrounding expressions keep their existing recovery boundary. These checks require
+the existing complete retained source graph and diagnostic cutoff; they do not
+provide general recovery for malformed syntax or unsupported declaration forms.
+The former frozen compound-boundary fixture now compares the whole output with
+Clang. The runtime `checker/initializer-comma` catalog covers these dependencies,
+accepted compound controls, per-list excess warnings and atomic conditional
+diagnostics. `test-checker-driver --initializer-diagnostics-only` runs it in
+GNU17 and C23 with complete output/status comparisons, warning policy, both
+readers, lane requests and rejected-output preservation. The broader recovery
+suite keeps its existing GNU17 catalogue run.
 
 An array of unknown size whose initializer is no list nor a string of its
 element (`int y[] = 5;`) gets clang's `FK_ArrayNeedsInitList` error at its
@@ -9044,7 +9084,13 @@ address-space pointee initializer is rejected by the assignment check, whose
 message names the deduced type rather than clang's undeduced placeholder. An
 `_Atomic` placeholder initialized by an atomic value reports the incompatible
 initializer with both types, keeps its expression's warnings, and recovers the
-invalid declaration without cascading errors from later uses. A redeclaration
+invalid declaration without cascading errors from later uses. Valid conditional
+arms with the same canonical atomic type reach this diagnostic too. Its cold
+renderer reads the retained initialization graph to preserve a typedef shared
+by both value arms, including nested selections, groups and commas; different
+aliases keep the canonical spelling. This changes diagnostic spelling alone,
+not deduction or the initializer evaluator's existing failure path for expressions
+it cannot read. A redeclaration
 of an atomic entity takes its type, as clang's
 `mergeTypes` merges it (#1844): a plain placeholder any atomic type
 (`_Atomic int r; __auto_type r = 1;` is an `_Atomic int`, and so is

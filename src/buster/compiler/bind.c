@@ -111,7 +111,7 @@
 //     twin and oracle.
 // Both look names up in the runtime's index (runtime_find_global_name), which bind_test.c checks against a scan.
 //
-// main.c includes this file after runtime.c. bind_begin and bind_end take BUSTER_LINKER_ENTRY rather than static:
+// main.c includes this file after runtime.c. bind_begin, bind_begin_borrowed and bind_end take BUSTER_LINKER_ENTRY rather than static:
 // main.c's units compile them in one unit alone (link.c). Layout, in this order:
 //   - API: BindError, BindPath, BindOverride, Bind and the entry points' prototypes.
 //   - Matching: bind_lane_mask, bind_visibility_rank, bind_fail, bind_name_symbol, bind_take_name, bind_match_vector,
@@ -125,7 +125,8 @@
 //     bind_keep_libraries and bind_library_exports.
 //   - The static closure: bind_symbol_defined, bind_entry_defined, bind_closure_need, bind_closure_vector,
 //     bind_closure_exact and bind_static_members.
-//   - Entry points: bind_capacity, bind_capacity_piece, bind_capacity_needed, bind_begin and bind_end.
+//   - Entry points: bind_capacity, bind_capacity_piece, bind_capacity_needed, bind_start, bind_begin,
+//     bind_begin_borrowed and bind_end.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -194,7 +195,11 @@ struct Bind
     // Published by bind_end after as-needed pruning, so the writer needn't receive an unused library's catalog.
     // Fits the padding after path; the other members' offsets and Bind's size stay the same.
     bool gcc_s_needed;
-    // Where the runtime's atoms' bytes are copied.
+    // Whether the runtime's atoms' bytes are borrowed, the link's atoms pointing at the runtime's own (a loaded runtime's
+    // are in its snapshot's mapping) rather than at copies in `bytes` (bind_begin_borrowed): the link must then be
+    // written without patching an atom in place (ExecutableOptions.stage). Fits the same padding.
+    bool borrow;
+    // Where the runtime's atoms' bytes are copied, unless `borrow`.
     Arena* bytes;
     // The link's unit for the runtime's unit 0: the runtime's units follow it in their order.
     uint32_t unit_base;
@@ -299,6 +304,14 @@ static __attribute__((unused)) LinkCapacity bind_capacity_needed(const Runtime* 
 // runtime's units from unit_base and copying atoms' bytes into `bytes`. Bind's arrays come from `arena`. False, with
 // bind->error, if it fails.
 BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena);
+// bind_begin, but a loaded runtime's atoms' bytes, its own and those of every member bind_end joins, are borrowed from
+// its snapshot's mapping rather than copied (Bind.borrow; an imported runtime's are copied still): the link's atoms
+// point into the mapping, which must outlive the link, and the executable must be written with the mapping as
+// ExecutableOptions.borrowed, so that patching never writes it. For a compile that links once against the snapshot it
+// just mapped: the copies were the most of a static hello world's binding in a fresh process, a fresh page faulted in
+// for every 4 KB of the members' bytes (#2546). `bytes` takes no runtime atom then.
+BUSTER_LINKER_ENTRY __attribute__((unused)) bool bind_begin_borrowed(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base,
+                                                                     Arena* arena);
 // Binds every name of the link, appending the archives' members it needs (libgcc.a's and libc_nonshared.a's, or a
 // static runtime's), then crtendS.o (crtend.o) and crtn.o, and lists the imports and exports. False, with bind->error
 // and bind->name, if it fails; the link is then unfit to link.
@@ -532,7 +545,7 @@ static bool bind_piece_fits(const Bind* bind, const Link* link, uint32_t piece)
     const ImportMark begin = bind->runtime->pieces[piece].begin;
     const ImportMark end = bind->runtime->pieces[piece].end;
     uint64_t atom_bytes = 0;
-    for (AtomId atom = begin.atoms; atom < end.atoms; atom += 1)
+    for (AtomId atom = begin.atoms; !bind->borrow && atom < end.atoms; atom += 1)
     {
         atom_bytes += from->atoms.bytes[atom] != 0 ? from->atoms.size[atom] + ((uint64_t)1 << from->atoms.alignment_log2[atom]) - 1 : 0;
     }
@@ -607,8 +620,9 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     {
         const AtomId atom = begin.atoms + i;
         const uint8_t* bytes = runtime_atom_bytes(runtime, atom);
-        uint8_t* placed = bytes != 0 ? arena_push(bind->bytes, from->atoms.size[atom], (uint64_t)1 << from->atoms.alignment_log2[atom]) : 0;
-        if (bytes != 0)
+        const bool copied = bytes != 0 && !bind->borrow;
+        uint8_t* placed = copied ? arena_push(bind->bytes, from->atoms.size[atom], (uint64_t)1 << from->atoms.alignment_log2[atom]) : (uint8_t*)(uintptr_t)bytes;
+        if (copied)
         {
             memcpy(placed, bytes, from->atoms.size[atom]);
         }
@@ -741,8 +755,10 @@ static void bind_join_records(Bind* bind, Link* link, uint32_t piece, const uint
     {
         const bool dropped = discarded != 0 && discarded[atom - begin.atoms] != 0;
         const uint8_t* bytes = runtime_atom_bytes(runtime, atom);
-        uint8_t* placed = bytes != 0 && !dropped ? arena_push(bind->bytes, from->atoms.size[atom], (uint64_t)1 << from->atoms.alignment_log2[atom]) : 0;
-        if (placed != 0)
+        const bool copied = bytes != 0 && !dropped && !bind->borrow;
+        uint8_t* placed = copied ? arena_push(bind->bytes, from->atoms.size[atom], (uint64_t)1 << from->atoms.alignment_log2[atom]) :
+                          dropped ? 0 : (uint8_t*)(uintptr_t)bytes;
+        if (copied && placed != 0)
         {
             memcpy(placed, bytes, from->atoms.size[atom]);
         }
@@ -2092,7 +2108,8 @@ static LinkCapacity bind_capacity_needed(const Runtime* runtime, const String8* 
     return result;
 }
 
-BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
+// bind_begin and bind_begin_borrowed.
+static bool bind_start(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena, bool borrow)
 {
     const uint32_t words = (runtime->member_count + 63) / 64;
     const uint32_t signature_words = (runtime->group_signatures + 63) / 64;
@@ -2100,6 +2117,7 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
         .runtime = runtime,
         .path = path,
         .bytes = bytes,
+        .borrow = borrow && runtime->snapshot != 0,
         .unit_base = unit_base,
         .program_symbols = link->symbols.count,
         .capacity = link->symbols.capacity,
@@ -2162,6 +2180,16 @@ BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runti
     bind->symbols_begun = link->symbols.count;
     bind_check_undefined(bind);
     return bind->error == BIND_ERROR_NONE;
+}
+
+BUSTER_LINKER_ENTRY bool bind_begin(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
+{
+    return bind_start(bind, link, runtime, path, bytes, unit_base, arena, false);
+}
+
+BUSTER_LINKER_ENTRY bool bind_begin_borrowed(Bind* bind, Link* link, const Runtime* runtime, BindPath path, Arena* bytes, uint32_t unit_base, Arena* arena)
+{
+    return bind_start(bind, link, runtime, path, bytes, unit_base, arena, true);
 }
 
 BUSTER_LINKER_ENTRY bool bind_end(Bind* bind, Link* link)

@@ -84,8 +84,12 @@ with its unreachable stub, an `int` induction's clamp, byte arithmetic through
 in-place `y[i] += k * x[i]`, an `fma`, an `sitofp` of `i32` to `f32`, an invariant start and index offset, a uniform load,
 a sum of a uniform (no vector load or store), two loops and a nested one; and one fixture per refusal (a prefix sum, a
 histogram, a strided store, the induction as data, a call, a volatile load, a
-division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
-than the limit, a reduction's partial value read, an early exit, a step of two).
+division, FNV-1a's recurrence, a float sum, bytes summed into a 64-bit total (a width no vector holds), more guards
+than the limit, a reduction's partial value read, an early exit, a step of two). #2808's fixtures, past the frozen
+digest's: counts of comparisons (`count-u8`, `count-i32`), strided loads (`aos-sum`, `rgb-gray` through 32-bit
+indices, `strided-pairs-i16`, `stride8-u8`, and `stride8-i64`, whose last element ends the interpreter's buffer, so a
+load past it faults) and a 32-bit index that wraps within a vector (`narrow-wrap`, whose input and result must fault
+alike).
 Each runs by both parser paths and the pass at six targets of every operation
 the IR has: at most 64, 32 and 16 bytes wide with masked moves, 64 bytes without
 them or masks from a general register, 64 bytes with them but no select of 32-
@@ -101,11 +105,12 @@ the ordinary optimizer (whose final verification checks dominance), runs in the
 shared interpreter against the input on one buffer, its pointers placed apart,
 at one address, a byte, an element and a vector apart either way, at lengths
 around the vectors' boundaries (signed bounds negative too): the same bytes,
-value and status. Five mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
+value and status. Seven mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
 test, an unrounded tail, a wrong reduction identity, lanes of the wrong width, a
-masked tail's mask of one lane more) must each be rejected on some fixture. `--print NAME` prints a fixture's
+masked tail's mask of one lane more, no 32-bit index wrap test, a strided load's
+wrong lane) must each be rejected on some fixture. `--print NAME` prints a fixture's
 64-byte result. `test-checker-driver`'s inlining unit compiles a C fixture of
-loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 by
+loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 and znver5 by
 both paths, checks the loops each target vectorizes and that both paths give one
 object, and runs it as clang -O0's build does. [The design and its
 status](../tier1-loop-vectorization.md) has the rules and the measurements.
@@ -152,6 +157,53 @@ short output arena are covered. `test-ir-optimize` runs its text pair
 (`tests/ir/optimize/unroll-loops-*.ir`), and `test-ir-source --passes` the pass
 on c-testsuite's subset, the frozen `sqlite3.c` and musl, where each unrolled
 function must verify with dominance.
+
+## Loop store motion (#3309)
+
+`ir_store_motion.c` is the pass `--tier1-passes=+storemotion` runs on the
+lowered function, before promotion (off by default): a loop's loads of one of the unit's own
+globals read a private slot that the preheader fills and each of the loop's
+stores of the global also writes, and promotion makes the slot a register's
+value. Every store stays where it was. [The design](../tier1-store-motion.md)
+has its rules, the symbols it trusts and the 9700X's record.
+
+`./build/compiler test-ir-store-motion [--seed N] [--print NAME]`
+(`ir_store_motion_test.c`) runs its text fixtures,
+`tests/ir/store-motion/*.ir`: two globals whose second statement reads the
+first's store, a conditional update, nested loops (the outer one takes the
+keys, or calls and leaves them to the inner one), a record's fields through
+the lowering's address chains, every scalar type, a load through a pointer,
+two exits, a loop tested at its end, more keys than the limit, the lowered
+form with its locals in slots, a key the loop never reads, stores to other
+symbols, and loads that overlap a key; and one fixture per refusal (a call, a
+volatile access, a fence, a store through a pointer, an indexed store, an
+overlapping store, a key past its object, no preheader, an irreducible region,
+a type no register holds, a symbol that isn't listed, more keys than the
+analysis follows, an address past the walk's steps). Each is read by both
+parser paths and expects its moved loops and keys, the loads and stores given a
+slot, and its outcome or refusal; results and counts fold into a frozen
+digest. A changed result must verify, promote and pass the optimizer, and runs
+in the shared interpreter as it is, promoted and optimized against the input,
+on equal memory, a pointer parameter at a key's own bytes among its places: the
+same bytes, value and status. Six faults (`BUSTER_IR_STORE_MOTION_MUTATE_*`)
+must each be rejected on some fixture. The symbols' filter and the
+classification are checked against their definitions on random columns at
+every length, and the entry point with arenas of every short size. `--print
+NAME` prints a fixture's result.
+
+`tests/driver/tier1_store_motion.c` is the C driver's test: 21 functions of
+loops over globals compiled strictly at Tier 1 with the pass and without it on both host
+paths, each program's lines clang -O0's; the report's counts; the issue's
+kernel's references to its globals in `objdump`'s text; and 29 declarations
+whose objects the emission's list must take or leave:
+
+```sh
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_store_motion.c -o build/test-driver-tier1-store-motion && ./build/test-driver-tier1-store-motion build/compiler "$(command -v clang)"
+```
+
+`test-ir-source --passes` runs the pass on every function of its files with
+every symbol listed, and `benchmark-ir-source --passes --only store-motion`
+times it ([the IR guide](ir.md)).
 
 ## Vectors assembled in memory (#1344)
 

@@ -1,0 +1,24 @@
+function (i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = const.i64 0x00000000000000000000000000000000
+  %2 = br.void b1
+b1:
+  %3 = phi.i64 [%1, b0], [%13, b2]
+  %4 = icmp.i1 %3, %0 ult
+  %5 = cbr.void %4, b2, b3
+b2:
+  %6 = symbol_addr.ptr @1
+  %7 = load.i64 %6 align=8
+  %8 = symbol_addr.ptr @1
+  %9 = add.i64 %7, %3
+  %10 = store.void %8, %9 align=8
+  %11 = fence.void seq_cst
+  %12 = const.i64 0x00000000000000000000000000000001
+  %13 = add.i64 %3, %12
+  %14 = br.void b1
+b3:
+  %15 = symbol_addr.ptr @1
+  %16 = load.i64 %15 align=8
+  %17 = ret.void %16
+}

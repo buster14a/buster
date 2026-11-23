@@ -23,6 +23,9 @@
 //   with dominance (#2924: its twin is gone).
 // - The loop vectorizer (#2743) on P optimized with Tier 1's set: a changed function must go through the optimizer,
 //   whose final verification checks dominance.
+// - #3309's loop store motion on L, with every symbol listed as an object of a megabyte (the files have no emission to
+//   say which are the unit's own, and this run executes nothing): a changed function must promote, and its promotion go
+//   through the optimizer, whose final verification checks dominance.
 // For each caller among them, the inliner on a unit of it and its direct callees among the file's functions, as the C
 // driver's expansion takes one (every function of internal linkage and #2541's general splice on, so that every such call is
 // a candidate), by both forms of the caller's runs (IrInlineOptions.add_sites: masked adds, or gathers; #2924: its scalar
@@ -50,6 +53,7 @@ typedef enum IrSourcePass
     IR_SOURCE_PASS_LICM,
     IR_SOURCE_PASS_VECTORIZE,
     IR_SOURCE_PASS_UNROLL,
+    IR_SOURCE_PASS_STORE_MOTION,
     IR_SOURCE_PASS_INLINE,
     IR_SOURCE_PASS_COUNT,
 } IrSourcePass;
@@ -68,6 +72,7 @@ static const char* const ir_source_pass_names[IR_SOURCE_PASS_COUNT] = {
     "licm",
     "vectorize",
     "unroll",
+    "store-motion",
     "inline",
 };
 
@@ -272,6 +277,34 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         ir_source_passes_record(totals, IR_SOURCE_PASS_UNROLL, file, name, vector_check, vector_check, verified, true, vector.outcomes[IR_UNROLL_UNROLLED] != 0, vector.copies);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
+    }
+    // #3309's loop store motion on the lowered function, every symbol listed. A changed function must promote and its
+    // promotion go through the optimizer (Tier 1's set), whose final verification checks dominance. Its effect is the
+    // keys moved.
+    {
+        const uint64_t scratch_mark = scratch->length;
+        const uint32_t symbols = source->symbol_count <= (UINT32_C(1) << 24) ? source->symbol_count : 0;
+        uint32_t* listed = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)symbols + 1);
+        for (uint32_t k = 0; listed != 0 && k < symbols; k += 1)
+        {
+            listed[k] = UINT32_C(1) << 20;
+        }
+        IrStoreMotionOptions options = ir_store_motion_options();
+        options.symbol_bytes = listed;
+        options.symbol_count = listed != 0 ? symbols : 0;
+        IrStoreMotionResult moved = { 0 };
+        const IrCheck check = ir_store_motion(lowered, &options, output, scratch, &moved);
+        IrFunction taken = { 0 };
+        IrOptimizeOptions cleanup = ir_optimize_options();
+        cleanup.passes = ir_source_pass_optimizer[IR_SOURCE_PASS_TIER1 - IR_SOURCE_PASS_SCCP];
+        IrOptimizeResult cleaned = { 0 };
+        const bool promotes = check.error != IR_OK || !moved.changed ||
+                              (ssa_ir_promote(&moved.function, promotion, scratch, &taken).error == IR_OK && ir_optimize(&taken, twin, scratch, cleanup, &cleaned).error == IR_OK);
+        ir_source_passes_record(totals, IR_SOURCE_PASS_STORE_MOTION, file, name, check, check, true, promotes, moved.changed, moved.keys[IR_STORE_MOTION_KEY_MOVED]);
+        arena_pop_to(output, output_mark);
+        arena_pop_to(twin, twin_mark);
+        arena_pop_to(promotion, promotion_mark);
+        arena_pop_to(scratch, scratch_mark);
     }
 }
 
@@ -563,6 +596,10 @@ struct IrSourcePassCorpus
     uint64_t instructions;
     uint64_t promoted_instructions;
     uint64_t failures;
+    // Loop store motion's list for the corpus (#3309): every symbol below `symbol_count`, the files' largest bound, an
+    // object of a megabyte.
+    uint32_t* listed;
+    uint32_t symbol_count;
 };
 
 // One run of `pass` by one version over the corpus; the output put back after each function. Returns its reading, with
@@ -613,6 +650,14 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
             IrUnrollOptions options = ir_unroll_options();
             IrUnrollResult result = { 0 };
             check = ir_optimize_unroll(&corpus->promoted[f], output, scratch, options, &result);
+        }
+        else if (pass == IR_SOURCE_PASS_STORE_MOTION)
+        {
+            IrStoreMotionOptions options = ir_store_motion_options();
+            options.symbol_bytes = corpus->listed;
+            options.symbol_count = corpus->symbol_count;
+            IrStoreMotionResult result = { 0 };
+            check = ir_store_motion(&corpus->lowered[f], &options, output, scratch, &result);
         }
         else if (pass == IR_SOURCE_PASS_INLINE)
         {
@@ -793,6 +838,7 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             const bool lowers = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, &kept, &scratch, lowered).error == IR_OK;
             const bool promotes = lowers && ssa_ir_promote(lowered, &kept_promoted, &scratch, &corpus.promoted[corpus.count]).error == IR_OK;
             corpus.failures += !promotes;
+            corpus.symbol_count = source->symbol_count <= (UINT32_C(1) << 24) && source->symbol_count > corpus.symbol_count ? source->symbol_count : corpus.symbol_count;
             corpus.instructions += lowers ? lowered->instruction_count : 0;
             corpus.promoted_instructions += promotes ? corpus.promoted[corpus.count].instruction_count : 0;
             corpus.count += 1;
@@ -808,6 +854,12 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
         arena_pop_to(&lowered_arena, 0);
         arena_pop_to(&arena, 0);
     }
+    corpus.listed = valid ? BUSTER_ARENA_PUSH_ARRAY(&tables, uint32_t, (uint64_t)corpus.symbol_count + 1) : 0;
+    for (uint32_t k = 0; corpus.listed != 0 && k < corpus.symbol_count; k += 1)
+    {
+        corpus.listed[k] = UINT32_C(1) << 20;
+    }
+    corpus.symbol_count = corpus.listed != 0 ? corpus.symbol_count : 0;
     bool reported = false;
     if (valid && corpus.failures == 0 && corpus.count != 0)
     {
@@ -830,7 +882,8 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             memset(values, 0, sizeof(values));
             // The inliner, the unroller, the loop vectorizer and value numbering with memory alone have one path (#2924):
             // timed once.
-            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_INLINE || pass == IR_SOURCE_PASS_MEMORY ? 1 : 2;
+            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_STORE_MOTION || pass == IR_SOURCE_PASS_INLINE ||
+                                              pass == IR_SOURCE_PASS_MEMORY ? 1 : 2;
             for (uint32_t version = 0; version < versions; version += 1)
             {
                 failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;
@@ -877,7 +930,7 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline|memory|tier1-memory] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline|memory|tier1-memory|vectorize|unroll|store-motion] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);
