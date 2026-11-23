@@ -1202,6 +1202,15 @@ static uint8_t node_producer_before(struct NodeProducer* producer, const NodeMac
             *detail = kind;
         }
         else if (kind == PARSE_KIND_IDENTIFIER && token < input->token_count && input->declarations[token] < input->token_count &&
+                 check_input_bit(input->declaration_bits, input->declarations[token], BUSTER_CHECK_BITS_THREAD_LOCAL))
+        {
+            // A thread-local object, named here: in position-independent code its entry is a call of its accessor, which
+            // the lowering makes as it writes the entry (check_lower_tls), a row and a temporary among the expression's own
+            // that a kept tape does not have.
+            reason = NODE_PRODUCER_TOKEN;
+            *detail = PARSE_KIND_QUALIFIER;
+        }
+        else if (kind == PARSE_KIND_IDENTIFIER && token < input->token_count && input->declarations[token] < input->token_count &&
                  input->declaration_kinds[input->declarations[token]] == C_BINDING_FUNCTION &&
                  check_input_linkage(input->declaration_bits, input->declarations[token]) == 1)
         {

@@ -15408,12 +15408,15 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     options.statement_controls = (emit_object || link) && !scalar && !dump && !dump_static &&
                                  !node_window && !node_window_constants && !source_rows;
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    // A test's switch (BUSTER_TEST_NODE_BODIES): --node-bodies for every command that can have it, on any number of lanes;
-    // "N:K" takes the bodies whose place among the producer's is K modulo N, anything else every one.
+    // A test's switch (BUSTER_TEST_NODE_BODIES): --node-bodies for every command that can have it, on any number of lanes,
+    // a link's and a check's without an object among them; "N:K" takes the bodies whose place among the producer's is K
+    // modulo N, anything else every one.
     const char* forced_bodies = getenv("BUSTER_TEST_NODE_BODIES");
     const bool forced = forced_bodies != NULL && forced_bodies[0] != 0;
-    if ((node_bodies || forced) && parsed && emit_object && !link && !scalar && !dump && !dump_static && !source_rows && !lazy_system_headers && !deferred_bodies &&
-        (lanes->lanes == 1 || forced) && !lanes->tier1 && !node_window && !node_window_constants)
+    // (The switch reaches a link's units and a check without an object too, where the option is a compile's to an object:
+    // the programs the tests run then have taken bodies' code, and a fixture's diagnostics are read with the mask on.)
+    if ((node_bodies || forced) && parsed && ((emit_object && !link) || forced) && !scalar && !dump && !dump_static && !source_rows && !lazy_system_headers &&
+        !deferred_bodies && (lanes->lanes == 1 || forced) && !lanes->tier1 && !node_window && !node_window_constants)
     {
         unsigned modulus = 0;
         unsigned residue = 0;

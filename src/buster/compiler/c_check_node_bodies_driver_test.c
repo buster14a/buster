@@ -11,7 +11,8 @@
 // global read, stored and addressed, a static object and a static function named in taken bodies alone, string
 // literals, a local whose address is taken, an array's element, a return with no value, and values of every class from
 // a byte to a double. Two bodies beside them are read as ever: a `switch`, and an initialization of an object aligned
-// past 8 bytes.
+// past 8 bytes; and a third names a thread-local object, whose entry the lowering writes as a call in
+// position-independent code.
 static const char check_driver_node_bodies_text[] =
     "struct P { int a; long c; char *s; };\n"
     "int g; long gl; static int sg; extern int ext;\n"
@@ -33,7 +34,8 @@ static const char check_driver_node_bodies_text[] =
     "double floats(double d, float f, int i) { double r = d * f + i; return r / 2.0; }\n"
     "long widen(int a, unsigned b) { long l = a; l += b; return l << 2; }\n"
     "int chosen(int k) { switch (k) { case 1: return 2; default: return 3; } }\n"
-    "int aligned(int c) { int x __attribute__((aligned(16))) = c; return x; }\n";
+    "int aligned(int c) { int x __attribute__((aligned(16))) = c; return x; }\n"
+    "__thread int tls;\nint threaded(int a) { tls += a; return tls; }\n";
 
 // Whether the files at `left` and `right` hold the same bytes, and some.
 static bool check_test_driver_node_bodies_same(const char* left, const char* right)
@@ -116,9 +118,9 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
     unsigned long long tokens = 0;
     unsigned nodes = 0;
     const bool counted = line != NULL && sscanf(line, "node-bodies: bodies=%u taken=%u tokens=%llu graph-nodes=%u", &bodies, &took, &tokens, &nodes) == 4;
-    check_test_expect(test, timed_status == 0 && counted && bodies == 17 && took == 15 && nodes != 0 && nodes < 32 && check_test_driver_node_bodies_same(plain, taken),
-                      "node-bodies: fifteen of the fixture's seventeen bodies are taken, and the walk makes nodes of the other two alone");
-    if (timed_status == 0 && !(counted && bodies == 17 && took == 15 && nodes != 0 && nodes < 32))
+    check_test_expect(test, timed_status == 0 && counted && bodies == 18 && took == 15 && nodes != 0 && nodes < 48 && check_test_driver_node_bodies_same(plain, taken),
+                      "node-bodies: fifteen of the fixture's eighteen bodies are taken, and the walk makes nodes of the other three alone");
+    if (timed_status == 0 && !(counted && bodies == 18 && took == 15 && nodes != 0 && nodes < 48))
     {
         fprintf(stderr, "test-checker-driver: node-bodies: bodies %u, taken %u, tokens %llu, graph nodes %u\n", bodies, took, tokens, nodes);
     }
@@ -147,6 +149,18 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
                           "node-bodies: with a third of the producer's bodies taken the object is the ordinary compile's");
         free(selected_text);
     }
+    // And as position-independent code, where a thread-local's entry is a call of its accessor.
+    static const char* const pic[] = { "-fPIC" };
+    static const char* const pic_on[] = { "-fPIC", "--node-bodies" };
+    char* pic_text = NULL;
+    char* pic_taken_text = NULL;
+    const int pic_status = plain_status == 0 ? check_test_driver_node_bodies_compile(executable, source, plain, pic, 1, &pic_text) : -1;
+    const int pic_taken_status = pic_status == 0 ? check_test_driver_node_bodies_compile(executable, source, taken, pic_on, 2, &pic_taken_text) : -1;
+    check_test_expect(test, pic_status == 0 && pic_taken_status == 0 && pic_text != NULL && pic_taken_text != NULL && strcmp(pic_text, pic_taken_text) == 0 &&
+                            check_test_driver_node_bodies_same(plain, taken),
+                      "node-bodies: as position-independent code the object is the ordinary compile's");
+    free(pic_text);
+    free(pic_taken_text);
     free(restored);
     free(plain_text);
     unlink(source);

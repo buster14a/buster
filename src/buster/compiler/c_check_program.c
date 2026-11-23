@@ -6764,7 +6764,12 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
         CheckProgramBody* body = &program->bodies[b];
         const uint32_t taken = __builtin_expect(program->input->node_bodies, 0) ? node_bodies_slot(program->input, token) : UINT32_MAX;
         const uint64_t references_start = options->selection_census ? __rdtsc() : 0;
-        if (taken != UINT32_MAX)
+        if (taken == UINT32_MAX && program->input->node_bodies && program->input->deferred_tokens[token] != 0)
+        {
+            // (A masked body is one of the producer's: it has a place among its verdicts.)
+            check_program_fail(program, CHECK_PROGRAM_INVALID, token);
+        }
+        else if (taken != UINT32_MAX)
         {
             // --node-bodies (#2850): a body the producer took before the reader's walk has no control here, and its return
             // flow is proved silent there; its references are the objects its kept tapes name, which the symbols'
