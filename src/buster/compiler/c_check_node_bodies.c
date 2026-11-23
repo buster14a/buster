@@ -54,14 +54,7 @@ static const char* const node_twin_reason_names[NODE_TWIN_REASONS] = {
 //
 // A twin's control has the program's kind, token and target, and whether it has an expression where the program's has a
 // node; an INITIALIZE's target, the program's plan, is not the twin's to name.
-typedef struct NodeTwinControl NodeTwinControl;
-struct NodeTwinControl
-{
-    uint32_t token;
-    uint32_t target;
-    uint8_t kind;
-    bool valued;
-};
+// (NodeTwinControl is c_check_node_machine_front.c's, where the program and the lowering read a taken body's.)
 
 #define BUSTER_NODE_TWIN_TASK_STATEMENT 0u
 #define BUSTER_NODE_TWIN_TASK_LABEL 1u
@@ -1209,6 +1202,15 @@ static uint8_t node_producer_before(struct NodeProducer* producer, const NodeMac
             *detail = kind;
         }
         else if (kind == PARSE_KIND_IDENTIFIER && token < input->token_count && input->declarations[token] < input->token_count &&
+                 check_input_bit(input->declaration_bits, input->declarations[token], BUSTER_CHECK_BITS_THREAD_LOCAL))
+        {
+            // A thread-local object, named here: in position-independent code its entry is a call of its accessor, which
+            // the lowering makes as it writes the entry (check_lower_tls), a row and a temporary among the expression's own
+            // that a kept tape does not have.
+            reason = NODE_PRODUCER_TOKEN;
+            *detail = PARSE_KIND_QUALIFIER;
+        }
+        else if (kind == PARSE_KIND_IDENTIFIER && token < input->token_count && input->declarations[token] < input->token_count &&
                  input->declaration_kinds[input->declarations[token]] == C_BINDING_FUNCTION &&
                  check_input_linkage(input->declaration_bits, input->declarations[token]) == 1)
         {
@@ -1390,6 +1392,49 @@ static void node_producer_keep(struct NodeProducer* producer, NodeFrontShadow* s
     }
 }
 
+// --node-bodies (BUSTER_NODE_READER_BODIES): the bodies the producer took, masked before the walk's first chunk. Each
+// one's tokens, its braces among them, take the lazily deferred bodies' mask (CheckInput.deferred_tokens, which the
+// phases after the reader skip) and no class of the walk's (CheckInputReader.visits); and the input says whose mask it
+// is (CheckInput.node_bodies). The reader's own pass after the walk that reads a body's tokens for what it says
+// outside the body reads a taken body as any body: its uses are uses (check_input_fp_types). A unit with a mask
+// already, or without room, takes none: nothing is then masked, and every body is read as ever.
+static void node_bodies_mask(CheckInputReader* reader, NodeFrontShadow* shadow)
+{
+    CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t modulus = reader->pp->options.node_bodies_modulus;
+    const uint32_t residue = reader->pp->options.node_bodies_residue;
+    uint32_t taken = 0;
+    for (uint32_t b = 0; shadow->produced_reasons != NULL && b < shadow->alone_body_count; b += 1)
+    {
+        taken += shadow->produced_reasons[b] == NODE_PRODUCER_TAKEN;
+    }
+    uint8_t* mask = taken != 0 && input->deferred_tokens == NULL && !input->resource ? arena_push_array(reader->arena, (uint64_t)count + 1, 1, 64) : NULL;
+    if (mask != NULL)
+    {
+        memset(mask, 0, (uint64_t)count + 1);
+        uint32_t place = 0;
+        for (uint32_t b = 0; b < shadow->alone_body_count; b += 1)
+        {
+            const uint32_t opening = shadow->alone_body_openings[b];
+            const uint32_t closing = opening < count ? parser->tree.parents[opening] : count;
+            const bool produced = shadow->produced_reasons[b] == NODE_PRODUCER_TAKEN && closing < count && closing > opening;
+            // (A test's selection, PPOptions.node_bodies_modulus: some of the producer's bodies, the others read as ever.)
+            const bool selected = produced && (modulus == 0 || place % modulus == residue);
+            place += produced;
+            if (selected)
+            {
+                const uint64_t length = (uint64_t)closing - opening + 1;
+                memset(mask + opening, 1, length);
+                memset(reader->visits + opening, 0, length);
+            }
+        }
+        input->deferred_tokens = mask;
+        input->node_bodies = true;
+    }
+}
+
 // The producer's verdicts against every diagnostic of a unit (#2850's P1, against the diagnostics): with
 // BUSTER_TEST_NODE_BODIES_LOG set to a path, the driver runs the producer beside each unit's ordinary read, nothing
 // masked, and each diagnostic at a token of a body the producer takes is a line of that file, with a line a unit for
@@ -1419,6 +1464,99 @@ struct NodeBodiesCheck
 };
 
 static _Thread_local struct NodeBodiesCheck node_bodies_check;
+
+// BUSTER_TEST_NODE_BODIES_KEEP set to a directory: a test's journal of the commands --node-bodies is forced on
+// (BUSTER_TEST_NODE_BODIES), for a replay of each with the bodies taken and without that compares their objects, which
+// no test of a program's behaviour does (the tests' units are temporary files, so their bytes are kept). A command's
+// working directory and arguments, a NUL after each, are DIRECTORY/HASH.command; its inputs' paths the same in
+// HASH.inputs; and each input's bytes HASH.N.input. HASH is of all of them: each distinct command is kept once. A
+// command with an input that is no regular file is not kept.
+static void node_bodies_keep(const char* directory, int count, char** arguments, char** inputs, uint32_t input_count)
+{
+    char cwd[4096];
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    const bool placed = getcwd(cwd, sizeof(cwd)) != NULL;
+    for (const char* c = cwd; placed && *c != 0; c += 1)
+    {
+        hash = (hash ^ (uint8_t)*c) * UINT64_C(0x100000001b3);
+    }
+    for (int a = 0; a < count; a += 1)
+    {
+        for (const char* c = arguments[a]; *c != 0; c += 1)
+        {
+            hash = (hash ^ (uint8_t)*c) * UINT64_C(0x100000001b3);
+        }
+        hash = (hash ^ 0xffu) * UINT64_C(0x100000001b3);
+    }
+    char block[4096];
+    bool read_all = placed;
+    // Each input a regular file: a named pipe's bytes are read once, by the compile, and its open waits for a writer.
+    for (uint32_t n = 0; n < input_count && read_all; n += 1)
+    {
+        struct stat status;
+        read_all = stat(inputs[n], &status) == 0 && S_ISREG(status.st_mode);
+    }
+    for (uint32_t n = 0; n < input_count && read_all; n += 1)
+    {
+        FILE* source = fopen(inputs[n], "rb");
+        read_all = source != NULL;
+        for (size_t read = source != NULL ? fread(block, 1, sizeof(block), source) : 0; read != 0; read = fread(block, 1, sizeof(block), source))
+        {
+            for (size_t i = 0; i < read; i += 1)
+            {
+                hash = (hash ^ (uint8_t)block[i]) * UINT64_C(0x100000001b3);
+            }
+        }
+        if (source != NULL)
+        {
+            fclose(source);
+        }
+    }
+    char kept[4096 + 64];
+    int length = snprintf(kept, sizeof(kept), "%s/%016" PRIx64 ".command", directory, hash);
+    if (read_all && length > 0 && (size_t)length < sizeof(kept) && access(kept, F_OK) != 0)
+    {
+        // The inputs first, the command's file last: a replay reads a command whose file is there.
+        bool written = true;
+        for (uint32_t n = 0; n < input_count && written; n += 1)
+        {
+            length = snprintf(kept, sizeof(kept), "%s/%016" PRIx64 ".%u.input", directory, hash, n);
+            FILE* source = fopen(inputs[n], "rb");
+            FILE* copy = source != NULL && length > 0 && (size_t)length < sizeof(kept) ? fopen(kept, "wb") : NULL;
+            written = copy != NULL;
+            for (size_t read = copy != NULL ? fread(block, 1, sizeof(block), source) : 0; read != 0; read = fread(block, 1, sizeof(block), source))
+            {
+                written = written && fwrite(block, 1, read, copy) == read;
+            }
+            if (copy != NULL)
+            {
+                written = fclose(copy) == 0 && written;
+            }
+            if (source != NULL)
+            {
+                fclose(source);
+            }
+        }
+        length = snprintf(kept, sizeof(kept), "%s/%016" PRIx64 ".inputs", directory, hash);
+        FILE* list = written && length > 0 && (size_t)length < sizeof(kept) ? fopen(kept, "wb") : NULL;
+        for (uint32_t n = 0; list != NULL && n < input_count; n += 1)
+        {
+            (void)fwrite(inputs[n], 1, strlen(inputs[n]) + 1, list);
+        }
+        written = list != NULL && fclose(list) == 0;
+        length = snprintf(kept, sizeof(kept), "%s/%016" PRIx64 ".command", directory, hash);
+        FILE* command = written && length > 0 && (size_t)length < sizeof(kept) ? fopen(kept, "wb") : NULL;
+        if (command != NULL)
+        {
+            (void)fwrite(cwd, 1, strlen(cwd) + 1, command);
+            for (int a = 0; a < count; a += 1)
+            {
+                (void)fwrite(arguments[a], 1, strlen(arguments[a]) + 1, command);
+            }
+            fclose(command);
+        }
+    }
+}
 
 // Whether the unit is checked so: the variable's path, read once a unit.
 static bool node_bodies_check_begin(const char* path)

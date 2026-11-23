@@ -3678,6 +3678,58 @@ which the producer's own passes are 7.56 M before any reading and 7.43 M after i
   The machine is the lowering's mirror, and each change of the lowering's is a change it owes: the oracle on the
   corpora is what says so, and it has to be run on main's head before each piece lands.
 
+## The redesign's seventh piece: a compile that takes the producer's bodies
+
+`--node-bodies` on a compile to an object: the reader masks the bodies the producer takes before the walk reads any,
+and the lowering writes each one's function from its kept controls and tapes
+([`commands/lowering.md`](commands/lowering.md), "Compiling with the bodies taken"). It is the first piece in which a
+compile does less of the old work for a body, and it is off by default: it is exact and slower.
+
+### What it measured
+
+The 9700X, Release, CPU 2, each pair the same binary with the option and without, at `06681bbdb`
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)):
+
+| | without | with `--node-bodies` | paired; its least and most | bodies taken |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, seven rounds, ms | 117.382 | 140.247 | +23.064; +22.266, +23.419 | 1,753 of 2,674 |
+| Lua's 34 units, five rounds | 65.663 | 76.331 | +10.680; +10.403, +10.776 | 545 of 1,096 |
+| the compiler's own source | 617.975 | 636.013 | +18.549; +14.735, +21.119 | none of 8,739 |
+| musl's 1,336 units | 662.998 | 757.900 | +95.027; +94.254, +95.739 | 4,442 of 18,584 |
+
+On `sqlite3.c`: 95.7 M user cycles, 31.9 M kernel cycles and 207.8 M instructions more. Each pair has one set of
+objects and one of diagnostics.
+
+### Against its gates
+
+- **C1, exact: met, by its outputs.** The corpora's objects, diagnostics and statuses are the ordinary compile's, plain
+  and as position-independent code; so are 349 small units' and those units' under every option set that accepts one;
+  and so is every output of the 43,914 commands of the tests' 34 blocks, replayed with the bodies taken and without.
+  The tests pass with the option forced, with every body the producer takes and with each half of them. What found the
+  piece's errors was the outputs, never the tests' programs: `commands/lowering.md` has the list and the counts.
+- **C2, its price: 23.06 ms slower on `sqlite3.c`, and the prediction refuted.** The sixth piece said about 16, and
+  that a reading over 22 would refute it. The producer's path was timed in ticks of its own code (29.14 ms) against
+  what its tokens save (13.04 ms); the pair has 31.9 M kernel cycles more besides, some 6 ms, which a count of the
+  path's own ticks does not see.
+- **C3, the option off: nothing moves.** Against main's commit the branch stood on: -0.120 ms on `sqlite3.c`, -0.183
+  on Lua, -4.950 on the compiler's own source, -2.637 on musl.
+
+### What it means
+
+- **The harness exists.** A piece that makes a taken body cheaper, or takes more bodies, is now priced by one paired
+  reading with the option, and its exactness by the same nets.
+- **A taken body costs more than it saves, and a unit pays before it takes any.** The compiler's own source takes no
+  body and is 18.5 ms slower; musl's 1,336 small units are 71 µs slower each. What the producer sets up for a unit is
+  to be paid for only by a unit that takes bodies, and its memory is part of its price.
+- **The order of what follows is the cost's, not the coverage's:** the machine's run (251 ticks a position, 17 ms of
+  `sqlite3.c`'s 29) in the forms that were measured at a fraction of that on the window, with a volatile access's bit
+  first; the reading's two writes of the same positions; and the unit's fixed cost. Coverage (`sizeof`, a `switch`,
+  the bodies refused after their sweeps) pays only once a taken token costs less than it saves.
+- **A mirror is owed every change of what it mirrors.** Three things the lowering does and the machine did not were
+  found under this piece: a sum fused with a product and #2983's wrappers, which were there before it, and #3310's
+  volatile marks, which main merged during it. Each was a difference of an object with nothing said. The oracle on the
+  corpora and the units' sweep are run on main's head before a piece of this redesign lands.
+
 ## Step 5's allocation, and its kept rows in the compile
 
 [#2873](https://github.com/buster14a/buster/issues/2873). After the census,

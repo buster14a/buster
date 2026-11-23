@@ -109,12 +109,8 @@
 // statement's CONDITION over one. It makes no value; its target and its sense are kept as a tested value's are.
 #define BUSTER_NODE_MACHINE_BRANCHED 0x40u
 #define BUSTER_NODE_MACHINE_NO_OWNER UINT32_MAX
-// A temporary's entry on the tape (an update's of an address, after its postfix): its number among the expression's
-// temporaries, in the order X makes them, with this bit. The lowering's are locals it adds (check_lower_temporary).
-#define BUSTER_NODE_MACHINE_TEMPORARY (UINT64_C(1) << 63)
-// A branch's entry on the tape whose target is its control's (a statement's condition that is branches): a label
-// outside the expression, which the lowering's control numbered before the expression's own and step 2's splice gives.
-#define BUSTER_NODE_MACHINE_CONTROL_LABEL (UINT64_C(1) << 62)
+// (BUSTER_NODE_MACHINE_TEMPORARY and BUSTER_NODE_MACHINE_CONTROL_LABEL, a tape's two marks, are
+// c_check_node_machine_front.c's, where the lowering's splice reads them.)
 // The root's context past the lowering's own bits (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), a statement's
 // CONDITION's alone: its control branches where the condition holds (a do statement's, CHECK_CONTROL_BRANCH_TRUE), not
 // where it doesn't. C reads it where the condition is branches, and keeps it out of the root's context.

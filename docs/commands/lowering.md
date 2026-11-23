@@ -2882,6 +2882,119 @@ line, the first field that differs among `count`, `locals`, `calls`,
 `calls'-rows`, `kind`, `class`, `local`, `label`, `temporary` and `value`,
 and the entry).
 
+### Compiling with the bodies taken (#2850)
+
+`./build/compiler --node-bodies --lanes 1 -c file.c -o file.o` takes the
+function bodies the node machine's producer takes
+([`node-machine.md`](../node-machine.md), "The producer, deciding before the
+walk"). It is off by default, and applies to a compile to an object on one lane
+at Tier 0, without `-g`, lazily deferred bodies or #113's deferred bodies; any
+other command ignores it. The unit's object, diagnostics and exit status are
+the ordinary compile's.
+
+For a body it takes:
+
+- **The reader** decides every body before its expressions' walk reads any
+  (`check_input_expressions_coded_range`) and masks the taken ones' tokens
+  (`node_bodies_mask`: `CheckInput.deferred_tokens`, with
+  `CheckInput.node_bodies` saying whose mask it is). The walk makes no node of
+  them. Every pass before the walk has read the body as any body: its names,
+  its declarations, its strings' records, its labels. The reader's pass after
+  the walk that reads a body's tokens for what it reports outside the body
+  still reads it (`check_input_fp_types`: a type that is available only in the
+  default evaluation method, used in a body and reported at its typedef): a
+  use in a taken body is a use.
+- **The initializers' stage** makes no plan for a declaration in it.
+- **The program** keeps it as its unit's, with no control and no return flow
+  of its own (the producer proved that silent); its references are the objects
+  its kept tapes name, a global's entry's and a direct call's callee's
+  (`check_program_taken_references`).
+- **The lowering** runs its own setup of the function (its ABI row, its
+  parameters, its declared locals in their order) and its own end (the
+  implicit return, the labels' resolution, the calls' locations, the
+  validation), unchanged. Between them `check_lower_taken_body` writes each
+  control the producer kept, in order: its label; its expression's kept tape
+  (`check_lower_taken_tape`: a temporary is a local the writer adds, a label
+  one the writer numbers and places at its entry, a call's row one the writer
+  adds as a plain call's with its signature for the part's locations, a
+  declared object's local the writer's map's, its address marked taken where an
+  entry takes it, and a global's object the program's symbol); and the
+  control's own entries, as `check_lower_control` writes them (a condition's
+  branch where its expression is none, a jump, a return, an initialization's
+  store).
+- **What the splice does not expect of a tape fails the unit** as an internal
+  error (a root not kept, a local without a place, a callee without a symbol):
+  nothing is guessed.
+
+With `--time-stages` the unit prints `node-bodies: bodies=N taken=M tokens=T
+graph-nodes=G`: the bodies the producer decided, those the compile took, their
+tokens, and the nodes the walk made of what is left.
+
+`BUSTER_TEST_NODE_BODIES` is the tests' switch: any value forces the option on
+every command that can have it, on any number of lanes, a link's units and a
+check without an object among them, so that the programs the tests run have
+taken bodies' code and the fixtures' diagnostics are read with the mask on;
+`N:K` takes only the producer's bodies whose place among them is K modulo N,
+the others read as ever.
+
+**What it was checked against** (Develop, this session's machine, at
+`4fcadeb45`, main's head merged in; [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)).
+A compile that takes bodies is tested by its outputs, compared with the
+ordinary compile's, and not by what its programs do: a call where the lowering
+expands one, or two operations where it fuses them, runs as well.
+
+- **The corpora:** each unit's object, diagnostics and status are the ordinary
+  compile's with the option: `sqlite3.c` (1,753 of 2,674 bodies taken), Lua's
+  34 units (545 taken), the compiler's own source (none taken: a diagnostic
+  pragma), musl's 1,336 units (4,442 taken); the same as position-independent
+  code, and with each half of the producer's bodies taken (877 and 876 of
+  `sqlite3.c`'s). With `-Wall -Wextra` the same, no body taken.
+- **349 small units,** each with one loud or unusual body between two that say
+  nothing (`scripts/gen.py`, `gen2.py`): the same, with a body taken in 329 of
+  them, 120 of those in a unit that says something; and under the 104 option
+  sets of 230 that accept a unit, 31,016 pairs of compiles, the same.
+- **The tests' own commands.** With `BUSTER_TEST_NODE_BODIES_KEEP` a run of
+  the tests with the option forced keeps each distinct command it is forced
+  on: 44,274 of the 34 blocks that compile a unit. Each replayed as ever and
+  with the bodies taken, a check without an object replayed as a compile to
+  one: 1,529 take a body, 1,041 of those make an output both ways, and every
+  output and status is the same; the diagnostics differ in 22 commands, each
+  `--time-stages`' own text.
+- **The tests with the option forced** (`BUSTER_TEST_NODE_BODIES=1`, then
+  `2:0` and `2:1`, each half of the producer's bodies): the 34 blocks pass each
+  way, 4,962 of their units with a taken body. The whole inventory forced
+  (at `d06fbb705`): no block of its 156 fails that passes without the option;
+  26 fail both ways on this machine, which lacks the frozen corpora and the
+  CPU counts they ask.
+- **The memory and address rows** with the option forced: 34 blocks each, 34 passed and
+  no report; and the sanitized compiler with the option forced on `sqlite3.c`,
+  Lua's units and a quarter of musl's (418 units, 407 to an object): each
+  object the plain compile's, no report.
+- **Single faults:** twelve single changes to the splice, the program's hook,
+  the initializers' skip, the reader's pass and two of the producer's rules,
+  each built and run against the driver's eight parts: each fails the option's
+  test or the gate's.
+
+**Its price** (the 9700X, Release, CPU 2, paired with the same binary without
+the option, at `06681bbdb`; one set of objects and of diagnostics in each
+pair):
+
+| | without | with `--node-bodies` | paired; its least and most |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`, seven rounds, ms | 117.382 | 140.247 | +23.064; +22.266, +23.419 |
+| Lua's 34 units, five rounds | 65.663 | 76.331 | +10.680; +10.403, +10.776 |
+| the compiler's own source | 617.975 | 636.013 | +18.549; +14.735, +21.119 |
+| musl's 1,336 units | 662.998 | 757.900 | +95.027; +94.254, +95.739 |
+
+It is slower on each: the reference machine that makes a taken body's tapes
+costs more than the walk and the lowering's tasks it replaces, and a unit pays
+for the producer's columns whether it takes a body or not (the compiler's own
+source takes none). On `sqlite3.c` the 23.06 ms are 95.7 M user cycles and
+31.9 M kernel cycles more. With the option off nothing moves against main's
+commit the branch stood on (`89362fd0f`): `sqlite3.c` -0.120 ms, Lua -0.183,
+the compiler's own source -4.950, musl -2.637.
+
+
 ### Compiling with the window (#2850)
 
 `./build/compiler --node-window -c file.c -o file.o` enables the first production

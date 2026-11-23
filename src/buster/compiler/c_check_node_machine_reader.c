@@ -647,9 +647,12 @@ static void node_machine_reader_side(NodeFrontTypes* types, NodeMachine* machine
             types->side_call_argument_counts[row] = count;
             types->side_call_argument_firsts[row] = (uint32_t)types->side_argument_count;
             types->side_call_variadic[row] = node_machine_call_variadic(machine, r);
+            types->side_call_types[row] = node_machine_callee_function(machine, node_machine_record_left(machine, r));
+            types->side_call_results[row] = node_machine_record_type(machine, r);
             for (uint32_t i = 0; i < count; i += 1)
             {
                 types->side_argument_classes[types->side_argument_count + i] = node_machine_class(machine, node_machine_record_argument_converted(machine, r, i));
+                types->side_argument_types[types->side_argument_count + i] = node_machine_record_argument_converted(machine, r, i);
             }
             types->side_argument_count += count;
             types->side_call_count += 1;

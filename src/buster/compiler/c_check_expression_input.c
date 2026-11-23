@@ -2351,6 +2351,15 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     const bool produced = front != NULL && (reader->pp->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0;
     uint64_t* visit_ticks = profile ? &visited : NULL;
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (produced && front->alone != NULL && (reader->pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0)
+    {
+        // --node-bodies: every body decided before the walk's first chunk is compacted, and the ones the producer takes
+        // masked from here on (the chunks' own calls below then find no body left to read).
+        node_alone_bodies(front->alone, front, reader, begin, stop);
+        node_bodies_mask(reader, front->shadow);
+    }
+#endif
     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint64_t start = profile ? __rdtsc() : 0;
