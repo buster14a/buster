@@ -2,7 +2,81 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Parallel-assignment qualification for #608. Included after the allocation test helpers. Snapshot execution is
-// independent of dependency construction; small cases also require the original scan's exact move order.
+// independent of dependency construction, and every case's exact move order is tier1_move_test_definition's, the
+// policy written as its plainest scan (#2924: no resolver is another's oracle).
+
+// The order by its definition (docs/tier1-allocation.md): repeatedly emit the lowest pending input index whose
+// destination no pending move still reads; when none is ready, save the lowest pending destination to scratch, and
+// its readers read scratch from then on. Identity moves disappear. Cubic, for test sizes only; `sources` is the
+// caller's copy, rewritten. Returns the emitted count, or UINT32_MAX past `capacity`.
+static uint32_t tier1_move_test_definition(uint32_t* sources, const uint32_t* destinations, uint32_t count, uint32_t scratch, uint32_t* out_sources,
+    uint32_t* out_destinations, uint32_t capacity)
+{
+    uint32_t emitted = 0;
+    uint32_t remaining = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        remaining += sources[i] != destinations[i];
+    }
+    bool room = true;
+    while (room && remaining != 0)
+    {
+        uint32_t chosen = UINT32_MAX;
+        uint32_t lowest = UINT32_MAX;
+        for (uint32_t i = 0; chosen == UINT32_MAX && i < count; i += 1)
+        {
+            if (sources[i] != destinations[i] && sources[i] != UINT32_MAX - 1)
+            {
+                lowest = lowest == UINT32_MAX ? i : lowest;
+                bool read = false;
+                for (uint32_t j = 0; j < count; j += 1)
+                {
+                    read |= sources[j] != destinations[j] && sources[j] != UINT32_MAX - 1 && sources[j] == destinations[i];
+                }
+                chosen = read ? UINT32_MAX : i;
+            }
+        }
+        room = emitted < capacity;
+        if (room && chosen != UINT32_MAX)
+        {
+            out_sources[emitted] = sources[chosen];
+            out_destinations[emitted] = destinations[chosen];
+            // Done: no location id is UINT32_MAX - 1 in these tests.
+            sources[chosen] = UINT32_MAX - 1;
+            remaining -= 1;
+        }
+        else if (room)
+        {
+            const uint32_t preserved = destinations[lowest];
+            out_sources[emitted] = preserved;
+            out_destinations[emitted] = scratch;
+            for (uint32_t j = 0; j < count; j += 1)
+            {
+                sources[j] = sources[j] == preserved && sources[j] != destinations[j] ? scratch : sources[j];
+            }
+        }
+        emitted += 1;
+    }
+    return room ? emitted : UINT32_MAX;
+}
+
+// Whether `output` is exactly the definition's order of `input`'s moves.
+static bool tier1_move_test_defined(const Tier1ParallelMoves* input, const Tier1ResolvedMoves* output)
+{
+    const uint64_t count = input->count;
+    uint32_t* sources = malloc(count * 4 + 4);
+    uint32_t* out = malloc(count * 16 + 8);
+    bool same = sources != 0 && out != 0;
+    if (same)
+    {
+        memcpy(sources, input->sources, count * 4);
+        const uint32_t emitted = tier1_move_test_definition(sources, input->destinations, input->count, input->scratch, out, out + count * 2 + 1, input->count * 2);
+        same = emitted == output->count && memcmp(out, output->sources, (uint64_t)emitted * 4) == 0 && memcmp(out + count * 2 + 1, output->destinations, (uint64_t)emitted * 4) == 0;
+    }
+    free(out);
+    free(sources);
+    return same;
+}
 
 static uint32_t tier1_move_test_location(uint32_t index)
 {
@@ -60,16 +134,10 @@ static void tier1_move_test_shape(Tier1AllocationTestTally* tally, Arena* arena,
         .scratch = tier1_move_test_location(count * 2),
     };
     Tier1ResolvedMoves output = { 0 };
-    Tier1ResolvedMoves indexed = { 0 };
     valid = valid && tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && output.count <= count * 2;
-    // The indexed path at every count, the small-set path's eight and fewer among them.
-    valid = valid && tier1_resolve_moves_indexed(&input, arena, &indexed) == TIER1_ALLOCATION_OK && indexed.count == output.count;
-    valid = valid && memcmp(output.sources, indexed.sources, output.count * 4) == 0 && memcmp(output.destinations, indexed.destinations, output.count * 4) == 0;
-    if (valid && count <= 64)
+    if (valid && count <= 1024)
     {
-        Tier1ResolvedMoves oracle = { 0 };
-        valid = tier1_resolve_moves_scalar(&input, arena, &oracle) == TIER1_ALLOCATION_OK && oracle.count == output.count;
-        valid = valid && memcmp(output.sources, oracle.sources, output.count * 4) == 0 && memcmp(output.destinations, oracle.destinations, output.count * 4) == 0;
+        valid = tier1_move_test_defined(&input, &output);
     }
     for (uint32_t i = 0; valid && i <= count * 2; i += 1)
     {
@@ -191,9 +259,7 @@ static void tier1_move_test_guarded(Tier1AllocationTestTally* tally, Arena* aren
             .scratch = count + 1,
         };
         Tier1ResolvedMoves output = { 0 };
-        Tier1ResolvedMoves oracle = { 0 };
-        valid = valid && tier1_resolve_moves_indexed(&input, arena, &output) == TIER1_ALLOCATION_OK && tier1_resolve_moves_scalar(&input, arena, &oracle) == TIER1_ALLOCATION_OK;
-        valid = valid && output.count == oracle.count && memcmp(output.sources, oracle.sources, output.count * 4) == 0 && memcmp(output.destinations, oracle.destinations, output.count * 4) == 0;
+        valid = valid && tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && tier1_move_test_defined(&input, &output);
         arena_pop_to(arena, saved);
     }
     tier1_allocation_test_expect(tally, valid, "move columns: immutable guarded tails at every small and vector boundary");

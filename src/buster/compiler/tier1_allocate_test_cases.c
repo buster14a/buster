@@ -628,6 +628,9 @@ static void tier1_allocation_test_mask_k0(Tier1AllocationTestTally* tally, Arena
     fixed_registers[0] = BUSTER_TIER1_ALLOCATE_MASK_FILE;
 }
 
+// tier1_moves_test.c, included below.
+static bool tier1_move_test_defined(const Tier1ParallelMoves* input, const Tier1ResolvedMoves* output);
+
 static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* arena, uint64_t seed)
 {
     uint32_t sources[32];
@@ -663,9 +666,7 @@ static void tier1_allocation_test_moves(Tier1AllocationTestTally* tally, Arena* 
         };
         Tier1ResolvedMoves output = { 0 };
         bool valid = tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && output.count <= count * 2;
-        Tier1ResolvedMoves oracle = { 0 };
-        valid = valid && tier1_resolve_moves_scalar(&input, arena, &oracle) == TIER1_ALLOCATION_OK;
-        valid = valid && oracle.count == output.count && memcmp(oracle.sources, output.sources, output.count * 4) == 0 && memcmp(oracle.destinations, output.destinations, output.count * 4) == 0;
+        valid = valid && tier1_move_test_defined(&input, &output);
         for (uint32_t i = 0; valid && i < output.count; i += 1)
         {
             valid = output.sources[i] < 33 && output.destinations[i] < 33;
