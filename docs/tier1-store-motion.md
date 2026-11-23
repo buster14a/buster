@@ -13,14 +13,16 @@ has the 9700X's records and what they decided.
 `--tier1`: each iteration loads what the last one stored. This pass runs on
 the lowered function, before SSA promotion. For each such global it adds one
 load before the loop and a private stack slot: the loop's loads of the global
-read the slot, and each of its stores also stores its value in the slot.
+read the slot, and its stores write the slot — alone where they sink to the
+loop's exits (#3346), and the global too where they stay.
 Promotion then turns the slot into values and phis, as it does a local
 variable's. The loop's loads are gone, and its stores write a register's
-value. Every store the source makes still happens where it did, so memory is
-never stale and no store is added. On the 9700X a loop over a `double` global
-runs 2.4 times as fast with it. A loop over integer globals runs as it did,
-because there the trip through memory was costing nothing: the issue's 7 times
-was a cloud Xeon's. And of `sqlite3.c`'s, Lua's and musl's loops the pass
+value. No store the source didn't make is ever added. On the 9700X a loop over
+a `double` global runs 2.4 times as fast with it, and the integer kernel, once
+its stores sink, as fast as clang's build that stores after the loop. Keeping a
+loop's integer global in a register alone changed nothing there, because the
+trip through memory was costing Zen 5 nothing: the issue's 7 times was a cloud
+Xeon's. And of `sqlite3.c`'s, Lua's and musl's loops the pass
 changes one, which runs once at start-up: their loops over globals call
 functions. A `--tier1` compile of `sqlite3.c` costs 0.4% more with it. So it
 is opt-in.
@@ -479,14 +481,57 @@ don't forward an integer's store for nothing, as much as the issue found.
 
 Two things would change the decision, and both are follow-ups:
 
-- **Sinking the stores**, for the loops whose every access is known. That is
-  where the 9700X's time is on the integer kernel (1.365 cycles an iteration
-  against 1.001).
+- ~~**Sinking the stores**, for the loops whose every access is known.~~ Done
+  in #3346, above: the integer kernel now reads 1.001 cycles an iteration.
 - **A cheaper refusal.** Nine tenths of the pass's time on `sqlite3.c` is
   spent before any loop's rule is applied. A store's address needs its walk
   only where the walk can end at a listed symbol, and a loop with a call
   needs no dominator analysis: a candidate store's block that is on no cycle
   of call-free blocks is in no loop the pass can take.
+
+### What sinking the stores added (#3346)
+
+On the 9700X under the lock, 2026-11-23: Release builds (`BUSTER_DEBUG_INFO=0`)
+of `e5f3e304b` (this pass as it is), `42770575f` (its first commit, where the
+write-back compared a value held in a register across the loop) and
+`0766f0a44` (#3328's head, where the stores stay). The record, with every run,
+script and log, is buster-performance's
+[`store-sinking-3346-2026-11-23`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/store-sinking-3346-2026-11-23).
+
+The four kernels above, each linked at the same four placements, cycles an
+iteration (the least and the most of the four placements' medians):
+
+| Build | k1: `g_a += i; g_b ^= g_a;` | k2: k1 and `g_arr[i & 15] += 1;` | k3: sums through a pointer | k4: two `double`s and a `long` |
+| --- | ---: | ---: | ---: | ---: |
+| `--tier1` without the pass | 1.365 to 2.001 | 2.185 | 4.001 | 15.594 to 15.599 |
+| With #3328: the stores stay | 1.365 to 1.408 | 2.147 | 4.001 | 6.569 to 6.589 |
+| With sinking, the value held in a register | 1.001 to 1.155 | 2.186 to 2.193 | 4.001 | 6.385 to 6.386 |
+| **With sinking (this PR)** | 1.001 | 1.696 to 1.710 | 4.001 | 6.385 to 6.387 |
+| clang -O2 | 1.877 | 1.516 | 3.001 | 6.001 |
+| clang -O2, no unrolling or vectors | 1.001 | 1.473 | 3.003 | 6.001 |
+| Instructions an iteration: without the pass, with #3328, with sinking | 9, 7, 5 | 15, 13, 11 | 14, 12, 12 | 17, 16, 13 |
+
+- **The integer kernel is clang's.** k1 reads 1.001 cycles an iteration at
+  every placement, which is what clang -O2 reads when it doesn't unroll or
+  vectorize, and its five instructions an iteration are clang's. That closes
+  the gap #3309's record left.
+- **k2**, with an indexed store beside the two globals, goes from 2.147 to
+  between 1.696 and 1.710; **k4**, the `double`s, from 6.57 to 6.385.
+- **k3 is refused** (`sink.load=2`: it reads through a pointer) and takes
+  4.001 cycles an iteration by every build of this compiler, as before.
+- **Why the write-back reads the key instead of a held register.** The first
+  version compared the slot against the preheader's loaded value, so each key
+  held a register across the whole loop. k2 then spilled and reloaded one
+  every iteration: 2.186 to 2.193 cycles an iteration, slower than `--tier1`
+  without the pass, with 14 instructions an iteration against 13. Reading the
+  key at the exit costs a load there and keeps the loop's registers.
+
+The corpora are as #3309 measured, since the pass still moves nothing in them:
+`sqlite3.c`'s object is byte-identical and its loops are `barrier=27
+unknown-store=1`, and a `--tier1 --lanes 1 -c` of it costs 1.0028 instructions
+and 1.0046 user cycles with the pass (11 runs each). Lua's 33 units are
+byte-identical too and cost 1.0008 instructions and 1.0016 cycles (12 runs
+each way).
 
 ## Algorithm sources and provenance
 
