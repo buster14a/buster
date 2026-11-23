@@ -1040,6 +1040,26 @@ for march in x86-64 x86-64-v4; do
     test "$(cat "$objects/vector.all")" -eq 2
 done
 test "$(cat "$objects/vector_wide.all")" -eq 2
+# A volatile object in %gs's space: a complex update's copies and a struct's assignment and read, each piece a volatile
+# access through %gs (check_lower_copy_segmented), in both printed forms; the passes keep every %gs access.
+for counted in complex_update:4 assigned:4 read:4; do
+    name=${counted%%:*}
+    "$BUSTER_COMPILER" test-ir-source --print "$name" tests/ir-source/volatile-segments.c > "$objects/$name.ir"
+    test "$(grep -cE 'align=[0-9]+ volatile gs' "$objects/$name.ir")" -eq "${counted#*:}"
+    test "$(grep -cE 'align=[0-9]+ gs' "$objects/$name.ir")" -eq 0
+done
+"$BUSTER_COMPILER" --tier1 --tier1-strict -c tests/ir-source/volatile-segments.c -o "$objects/default.o"
+"$BUSTER_COMPILER" --tier1 --tier1-strict --tier1-passes=+all -c tests/ir-source/volatile-segments.c -o "$objects/all.o"
+for name in complex_update assigned read; do
+    for build in default all; do
+        objdump -d --no-show-raw-insn --disassemble="$name" "$objects/$build.o" | grep -c '%gs:' > "$objects/$name.$build" || true
+    done
+    cat "$objects/$name.all"
+    cmp "$objects/$name.default" "$objects/$name.all"
+done
+test "$(cat "$objects/complex_update.all")" -eq 2
+test "$(cat "$objects/assigned.all")" -eq 2
+test "$(cat "$objects/read.all")" -eq 2
 rm -r "$objects"
 == Test deferred-body source-position environments
 "$BUSTER_COMPILER" test-environments
