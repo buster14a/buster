@@ -269,7 +269,7 @@ On the 9700X under the lock, 2026-11-23: a Release build of `f16b0523a`, the
 pull request's head at the time, with the pass on by default as it then was.
 "Without the pass" is that compiler with `--tier1-passes=-storemotion`. The
 record, with every run, script and log, is buster-performance's
-[`store-motion-3309-2026-11-22`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/store-motion-3309-2026-11-22).
+[`store-motion-3309-2026-11-22`](https://github.com/buster14a/buster-performance/tree/2b293ab52a9927d1ec1c13fffed6303535399b49/docs/measurements/store-motion-3309-2026-11-22).
 
 ### Four kernels
 
