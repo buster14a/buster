@@ -454,6 +454,24 @@ static bool unwind_test_emitters(void)
             valid &= unwind_write(functions, count, &outputs[way], way == 0) == UNWIND_OK && unwind_test_decode(functions, count, &outputs[way]);
         }
         valid &= outputs[0].size == outputs[1].size && memcmp(bytes[0], bytes[1], outputs[0].size) == 0 && memcmp(locations[0], locations[1], sizeof(locations[0])) == 0;
+        // The vector writer's bytes and locations, frozen (FNV-1a) while the exact writer wrote the same: pairs, then one
+        // shared CIE.
+        static const uint64_t frozen[2] = { UINT64_C(0xf339e5aad4c85f73), UINT64_C(0x386e7d0eb0a3cfb0) };
+        uint64_t digest = UINT64_C(0xcbf29ce484222325);
+        for (uint64_t byte = 0; byte < outputs[1].size; byte += 1)
+        {
+            digest = (digest ^ bytes[1][byte]) * UINT64_C(0x100000001b3);
+        }
+        for (uint32_t location = 0; location < count; location += 1)
+        {
+            digest = (digest ^ locations[1][location]) * UINT64_C(0x100000001b3);
+        }
+        if (digest != frozen[shared])
+        {
+            printf("unwind-test: emitters' frozen digest, %s CIE: 0x%016llx, expected 0x%016llx (%llu bytes)\n", shared != 0 ? "shared" : "paired",
+                   (unsigned long long)digest, (unsigned long long)frozen[shared], (unsigned long long)outputs[1].size);
+            valid = false;
+        }
         // Negative controls for the independent interpreter: corrupt the return-address rule and the first FDE's range.
         bytes[0][21] ^= 3;
         valid &= !unwind_test_decode(functions, count, &outputs[0]);
