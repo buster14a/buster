@@ -7757,11 +7757,13 @@ static bool check_lower_wrapper_query(const CheckLowerWriter* writer, uint32_t n
     return found;
 }
 
+static void check_lower_part_value(CheckLowerWriter* writer, const CheckInitPart* write);
+
 // Call `node` of wrapper `index` (#2983, check_lower_wrapper_of) expanded in place, as clang's AlwaysInliner expands it:
 // its arguments, each converted to its parameter's type, into temporaries in their order; then, with the parameters'
-// objects at those temporaries (the WRAPPER tasks' frame), the wrapper's expression, converted to the call's type, which
-// a void wrapper's is. Each argument's object sizes are taken now, for the expression's queries of its parameter. The
-// tasks run in reverse.
+// objects at those temporaries (the WRAPPER tasks' frame), its locals' values into theirs, and the wrapper's expression,
+// converted to the call's type, which a void wrapper's is; or its guards' conditionals and its last return's expression.
+// Each argument's object sizes are taken now, for the queries of its parameter. The tasks run in reverse.
 static void check_lower_wrapper_call(CheckLowerWriter* writer, uint32_t node, uint32_t index)
 {
     const CheckProgram* program = writer->program;
@@ -7783,8 +7785,42 @@ static void check_lower_wrapper_call(CheckLowerWriter* writer, uint32_t node, ui
             frame->sizes[p][mode] = check_lower_wrapper_size(writer, graph->argument_nodes[first + p], mode, wrapper->sizes[p]);
         }
     }
+    for (uint32_t l = 0; l < wrapper->local_count; l += 1)
+    {
+        const CheckInitPart* part = program->initializers->plans[wrapper->plans[l]].parts;
+        frame->temporaries[wrapper->parameter_count + l] = check_lower_temporary(writer, check_lower_class(writer, part->conversion.type));
+    }
+    const TypeId type = check_stream_type(stream, node);
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth, .address = true });
-    check_lower_expression(writer, wrapper->node, false, check_stream_type(stream, node));
+    if (wrapper->guard_count == 0)
+    {
+        check_lower_expression(writer, wrapper->node, false, type);
+    }
+    else
+    {
+        // `if (C) return E;`s, then `return E;`: as many conditionals' arms, each guard's E's value joined at `end`
+        // (check_lower_logical's), C's branch past it to the next one's.
+        const uint8_t class = check_lower_class(writer, type);
+        const uint32_t end = check_lower_label(writer);
+        check_lower_mark(writer, end);
+        check_lower_expression(writer, wrapper->node, false, type);
+        for (uint32_t g = wrapper->guard_count; g-- > 0;)
+        {
+            const uint32_t next = check_lower_label(writer);
+            check_lower_mark(writer, next);
+            check_lower_instruction(writer, BUSTER_TYPED_JUMP_VALUE, class, end);
+            check_lower_expression(writer, wrapper->guards[g][1], false, type);
+            check_lower_instruction(writer, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, next);
+            check_lower_expression(writer, wrapper->guards[g][0], false, 0);
+        }
+    }
+    // Its locals' values, in their order, each in its temporary.
+    for (uint32_t l = wrapper->local_count; l-- > 0;)
+    {
+        const CheckInitPart* part = program->initializers->plans[wrapper->plans[l]].parts;
+        check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, part->conversion.type), frame->temporaries[wrapper->parameter_count + l]);
+        check_lower_part_value(writer, part);
+    }
     check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_WRAPPER, .node = depth });
     for (uint32_t p = wrapper->parameter_count; p-- > 0;)
     {
@@ -7807,7 +7843,7 @@ static __attribute__((noinline)) void check_lower_wrapper_task(CheckLowerWriter*
     else
     {
         const CheckProgramWrapper* wrapper = program->wrappers + frame->wrapper;
-        for (uint32_t p = 0; p < wrapper->parameter_count; p += 1)
+        for (uint32_t p = 0; p < wrapper->parameter_count + wrapper->local_count; p += 1)
         {
             const uint32_t object = program->wrapper_parameters[wrapper->parameter_first + p];
             if (object != 0 && object < program->object_count)
@@ -13496,14 +13532,19 @@ static void check_lower_piece_address(CheckLowerWriter* writer, uint32_t pointer
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, pointer);
 }
 
-// memcpy, memmove and memset of a constant size of at most BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES, plain (#1373,
+// memcpy, memmove and memset of a constant size of at most cbuiltin_library_inline_bytes's, plain (#1373,
 // check_program_call_computed), as clang -O0's code computes llvm.memcpy of such a size: the destination's and the
 // source's operands (memset's value's) evaluated in order, each into a temporary; then memcpy's COPY of the size (its
 // ranges are apart, or the same, or the call is undefined), as __builtin_memcpy's recipe copies (c_builtin_misc_lower.c);
-// memmove's pieces, all loaded before any is stored, so that ranges that overlap in either direction move right: 8 bytes
-// each, the last ending at the size, or below 8 bytes, the widest that fits at the start and one ending at the size;
+// memmove's pieces, all loaded before any is stored, so that ranges that overlap in either direction move right: past
+// BUSTER_TIER0_COPY_NARROW_BYTES, COPY's move form (tier0_copy_moves, 16-byte pieces that Tier 0 holds in XMM registers),
+// else 8 bytes each, the last ending at the size, or below 8 bytes, the widest that fits at the start and one ending at
+// the size;
 // memset's stores of those pieces of its value's byte repeated, a constant value's computed here. The size, a constant,
 // runs no code, and nor does memset's constant value. Its value is the destination. The tasks run in reverse.
+_Static_assert(BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES <= BUSTER_TIER0_MAX_MOVE_BYTES && BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES == BUSTER_TIER0_COPY_NARROW_BYTES,
+               "a computed memmove past the scalar pieces' bytes is COPY's move form");
+
 static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, CBuiltinLibraryComputed computed)
 {
     const CheckProgram* program = writer->program;
@@ -13520,11 +13561,12 @@ static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, 
     const uint32_t piece = bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1;
     const uint8_t class = check_lower_piece_class(piece);
     const uint32_t count = bytes == 0 ? 0 : bytes >= 8 ? (bytes + 7) / 8 : bytes > piece ? 2 : 1;
+    const bool vectors = computed == CBUILTIN_LIBRARY_COMPUTED_MOVE && bytes > BUSTER_TIER0_COPY_NARROW_BYTES;
     const uint32_t destination = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     // memcpy's and memmove's source, or memset's repeated byte where its value is no constant.
     const uint32_t source = !constant ? check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64) : BUSTER_CHECK_NONE;
     uint32_t pieces[4] = { 0 };
-    for (uint32_t p = 0; computed == CBUILTIN_LIBRARY_COMPUTED_MOVE && p < count; p += 1)
+    for (uint32_t p = 0; computed == CBUILTIN_LIBRARY_COMPUTED_MOVE && !vectors && p < count; p += 1)
     {
         pieces[p] = check_lower_temporary(writer, class);
     }
@@ -13533,6 +13575,12 @@ static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, 
     if (computed == CBUILTIN_LIBRARY_COMPUTED_COPY && bytes != 0)
     {
         check_lower_instruction(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, bytes);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+    }
+    else if (vectors)
+    {
+        check_lower_instruction(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_MOVE_VALUE(bytes));
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
     }
@@ -16432,7 +16480,13 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     {
         const uint32_t selected = check_program_builtin_index(stream->floating, stream->floating_count, sizeof(CheckBuiltinFloatEffect), node);
         const CheckBuiltinFloatEffect* effect = selected != BUSTER_CHECK_NONE ? stream->floating + selected : NULL;
-        if (effect != NULL && effect->math_kind != CHECK_BUILTIN_MATH_NONE && effect->runtime_builtin != CBUILTIN_NONE)
+        if (effect != NULL && effect->math_kind == CHECK_BUILTIN_MATH_COPYSIGN && effect->runtime_builtin != CBUILTIN_NONE)
+        {
+            // __builtin_copysign and __builtin_copysignf, computed in place as the plain copysign's call is (#1373): no
+            // helper was planned for them (check_program_helpers).
+            check_lower_library_sign(writer, node, true);
+        }
+        else if (effect != NULL && effect->math_kind != CHECK_BUILTIN_MATH_NONE && effect->runtime_builtin != CBUILTIN_NONE)
         {
             check_lower_math(writer, node, effect);
         }

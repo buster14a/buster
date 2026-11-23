@@ -944,11 +944,13 @@ static const char node_census_test_silent[] =
 // Under the sign comparison's warning every comparison is sent to its tests whatever its operands, and two pointers'
 // ordered comparison is not one the loop leaves out.
 static const char node_census_test_signs[] =
-    "int order(long a, int* p, int* e)\n"
+    "int order(long a, int* p, int* e, unsigned u)\n"
     "{\n"
     "    int x = p < e; // take\n"
     "    while (p < e) p++; // take\n"
     "    x = a < p; // refuse: pointer-integer-order\n"
+    "    x = -2 < 3u; // take\n"
+    "    x = u < -2; // refuse: sign-compare\n"
     "    return x; // take\n"
     "}\n";
 
@@ -7198,17 +7200,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                                                              BUSTER_NODE_FRONT_AFTER, 7, 1, windowed_segments),
                       "node-tests: at reader time a value of a type in a segment's address space is refused by its type's byte");
     static const NodeTestsWindowed windowed_signs = {
-        .expressions = 5,
-        .operators = 3,
-        .sent = 3,
+        .expressions = 7,
+        .operators = 5,
+        .sent = 5,
+        .quiet = 3,
         .casts_left = 1,
-        .spared = 4,
+        .values = 7,
+        .spared = 8,
         .direct = 2,
         .apart = 1,
-        .decided = 5,
+        .decided = 7,
     };
     check_test_expect(test, ready && node_tests_test_fixture(directory, "signs.c", node_census_test_signs, signs, BUSTER_ARRAY_LENGTH(signs),
-                                                             BUSTER_NODE_FRONT_AFTER, 1, 1, windowed_signs),
+                                                             BUSTER_NODE_FRONT_AFTER, 2, 1, windowed_signs),
                       "node-tests: at reader time, under the sign comparison's warning, the loop leaves no pointers' comparison out");
     static const NodeTestsWindowed windowed_silent = {
         .expressions = 7,

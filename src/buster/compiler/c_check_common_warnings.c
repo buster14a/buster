@@ -2834,7 +2834,14 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
                              (normalized == CHECK_OP_LESS || normalized == CHECK_OP_GREATER_EQUAL);
             }
         }
-        if (mixed && !suppressed)
+        bool warn = mixed && !suppressed;
+        if (warn && (check_stream_flags(stream, node) & BUSTER_CHECK_ICE) != 0)
+        {
+            // AnalyzeComparison exempts the comparison itself when it is a strict integer constant expression (#3300).
+            const CheckValue comparison = check_stream_value(stream, node);
+            warn = !check_action_integer_constant(&comparison, 0);
+        }
+        if (warn)
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                 check_stream_type(stream, left),
