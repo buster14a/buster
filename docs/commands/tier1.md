@@ -44,7 +44,10 @@ requirements. [Command index](README.md).
   definition. A straight line whose allocation can't place a value (an evicted
   parameter whose incoming register another operand holds) goes through the CFG
   consumer too. The 128-bit integers are split into 64-bit halves before the
-  optimizer (`ir_wide.c`, #141): `test-tier1-wide [--seed N] [--programs N]
+  optimizer (`ir_wide.c`, #141), and their frame objects then into two `I64`
+  fields that promotion makes values (#3299, `check_tier1_passes`; the
+  driver's 128-bit integers' fixture in `test-checker-driver` checks them
+  against clang across units): `test-tier1-wide [--seed N] [--programs N]
   [--print] [--file IR]` runs hand-written and random 128-bit IR, and Tier 0's
   random 128-bit programs, through the split by both paths, the optimizer and
   both of Tier 1's paths natively, against the IR's interpreter on the unsplit

@@ -478,6 +478,37 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    // The 128-bit integers' frame objects in registers (#3299): the checker gives an __int128 local, parameter and
+    // temporary a 16-byte object, which the lowering copies by 8-byte pieces and reads and writes whole, so that promotion
+    // keeps it in memory and each operation's value went through its slot. The split makes every access of such an object
+    // an 8-byte half at offset 0 or 8, which SROA (flagged: the typed stream marks every object address-taken, and SROA
+    // takes one whose every use its provenance understands) splits into two I64 fields, and promotion then makes the
+    // halves values. An object whose address escapes (a call's argument or result, a return's bytes) stays memory. In
+    // steps[8], as --tier1-passes=+sroa's; a function SROA refuses or splits nothing of goes on as the split left it.
+    if (stage == CHECK_TIER1_COMPILED && wide.split && !check_tier1_lane_reserve(lane, 1))
+    {
+        outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+    }
+    if (stage == CHECK_TIER1_COMPILED && wide.split)
+    {
+        IrSroaOptions options = ir_sroa_options();
+        options.scalar = scalar;
+        options.simd = true;
+        options.flagged = true;
+        IrSroaResult fields = { 0 };
+        IrCheck check = ir_optimize_sroa(&wide.function, &lane->steps[8], scratch, options, &fields);
+        IrFunction halves = { 0 };
+        if (check.error == IR_OK && fields.split_slots != 0)
+        {
+            check = ssa_ir_promote_verified_input(&fields.function, !scalar, promotion, scratch, &halves);
+            wide.function = check.error == IR_OK ? halves : wide.function;
+        }
+        // A refusal or a function past a pass's limits goes on as the split left it; any other error is the function's.
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        stage = outcome.stage;
+    }
     // The vectors wider than the target moves whole, as its widest vectors' pieces (#1624, ir_vector_split.c), in the same
     // step's arena, after the halves: a function without any is the halves' (or the promoted one) itself, borrowed.
     if (stage == CHECK_TIER1_COMPILED)

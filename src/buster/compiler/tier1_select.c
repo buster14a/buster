@@ -4680,11 +4680,14 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 
 // Whether a function's own result part is loaded straight from the result's address on the way out (#1847): a whole
 // vector register's, 16, 32 or 64 bytes of a split vector (tier1_select_result_parts), which no byte past the object's
-// widens and whose load can't overwrite the address, a general register; and a record's payload (#2798), in pieces that
-// stay inside it (tier0_payload_load). Any other part is staged in the red zone.
+// widens and whose load can't overwrite the address, a general register; a record's payload (#2798), in pieces that
+// stay inside it (tier0_payload_load); and since #3299 a whole eightbyte's, 8 bytes of the object into a general
+// register (an __int128's halves into rax and rdx) or an xmm one, whose load reads no byte past them either. A general
+// register's load may overwrite the address: tier1_select_result_order loads that part last. Any other part (an
+// eightbyte's tail of fewer bytes, which an 8-byte load would read past) is staged in the red zone.
 static bool tier1_select_part_direct(Tier1SelectPart part)
 {
-    return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16;
+    return ((part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16) || part.bytes == 8;
 }
 
 // The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
@@ -4728,6 +4731,21 @@ static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t 
         slot += tier1_select_part_direct(parts[j]) ? 0 : tier1_select_part_slots(parts[j].bytes);
     }
     return slot;
+}
+
+// The part a function's own result loads `k`th of its `count` parts on the way out (#3299), from the address in general
+// register `source`: the parts in order, but a general register's part loaded straight from the address
+// (tier1_select_part_direct) into `source` itself, which goes last, so that no load reads the address after another
+// overwrote it. Its registers differ, so one part at most is that.
+static uint32_t tier1_select_result_order(const Tier1SelectPart* parts, uint32_t count, uint8_t source, uint32_t k)
+{
+    uint32_t last = count;
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        const bool general = (parts[j].reg & 0xe0) != BUSTER_ABI_REGISTER_VECTOR;
+        last = general && tier1_select_part_direct(parts[j]) && parts[j].reg == source ? j : last;
+    }
+    return last == count ? k : k + 1 == count ? last : k < last ? k : k + 1;
 }
 
 // Whether a function's own result parts, `count` of them, fit the red zone's slots, as its return stages them all at
