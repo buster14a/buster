@@ -1980,7 +1980,8 @@ struct NodeProducerExpected
 // unit does not define, named). The machine's: `shifted` (a compound shift by its operand's own width, the census's
 // constants'). Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility). An
 // initialization of another form: `aligned` and `typed` (an object aligned past 8 bytes, by its attribute and by its
-// type, whose local is a frame object).
+// type, whose local is a frame object). A gate of the controls': `bounded` (a parameter whose array's bound the
+// function's entry evaluates).
 static const char node_producer_test_text[] =
     "enum A { A0, A1 };\nenum B { B0, B1 };\nstruct S { enum A a; enum B b; unsigned char c; int n; };\nvoid take(enum A);\n"
     "static int missing(void);\nstatic int present(void) { return 1; }\n"
@@ -2001,7 +2002,8 @@ static const char node_producer_test_text[] =
     "int undefined(void) { return missing(); }\n"
     "int shifted(struct S *p) { p->c <<= 8; return p->c; }\n"
     "int aligned(int c) { int x __attribute__((aligned(16))) = c; return x; }\n"
-    "typedef int wide_t __attribute__((aligned(32)));\nint typed(int c) { wide_t y = c; return y; }\n";
+    "typedef int wide_t __attribute__((aligned(32)));\nint typed(int c) { wide_t y = c; return y; }\n"
+    "int bounded(int n, int a[n]) { return a[0]; }\n";
 // A unit with a member marked unavailable, one with a member of the counted_by family, one with a function declared with
 // internal linkage by its attribute, and one with a result's attribute on a type: none takes a body.
 static const char node_producer_test_members_text[] = "struct M { int n; int gone __attribute__((unavailable(\"gone\"))); };\nint member(struct M *p) { return p->n; }\n";
@@ -7794,16 +7796,17 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // The refusals that stand for a diagnostic of the walk's or of a pass after it, each beside a body that is taken; and
     // the two units that take no body for a member's mark and for a result's attribute on a type.
     NodeProducerExpected produced_silent = {
-        .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_MACHINE] = 1, [NODE_PRODUCER_INITIALIZER] = 2,
+        .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_GATE] = 1, [NODE_PRODUCER_MACHINE] = 1,
+                     [NODE_PRODUCER_INITIALIZER] = 2,
                      [NODE_PRODUCER_LOUD] = 6 },
     };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), false,
                                                                  &produced_silent),
                       "node-producer: two enumerations meeting, a conditional's constant arm changed, a pragma, an undefined internal function and a narrow compound shift are left");
-    produced_silent.unread = 3;
+    produced_silent.unread = 4;
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), true,
                                                                  &produced_silent),
-                      "node-producer: the same as a compile would run it, three bodies unread");
+                      "node-producer: the same as a compile would run it, four bodies unread");
     const NodeProducerExpected produced_members = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_MEMBERS };
     const NodeProducerExpected produced_results = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_RESULTS };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_members_text, sizeof(node_producer_test_members_text) - 1, quiet,

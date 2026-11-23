@@ -439,9 +439,14 @@ static void node_twin_gates(NodeTwin* twin, uint32_t opening)
             node_twin_fail(twin, NODE_TWIN_VARIABLE);
         }
     }
+    // A variably modified declaration of the body's, or of its function's parameters (a prototype's, or an old-style
+    // definition's declarations before the brace): the function's entry evaluates a parameter's bounds, in controls the
+    // program makes before the body's first.
+    const uint32_t function = check_sparse_get(input->body_declarations, opening);
+    const uint32_t declared_from = function < opening ? function : opening;
     for (uint32_t v = 0; v < input->vla_count && twin->reason == NODE_TWIN_ATTEMPTED; v += 1)
     {
-        if (input->vlas[v].declaration > opening && input->vlas[v].declaration < closing)
+        if (input->vlas[v].declaration > declared_from && input->vlas[v].declaration < closing)
         {
             node_twin_fail(twin, NODE_TWIN_VARIABLE);
         }
