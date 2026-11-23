@@ -1814,6 +1814,36 @@ static int run_assembler_tests(int count, char** arguments)
         const AsmResult integrated = asm_assemble(BUSTER_S8("movl x(,%eax,8), %ecx\n"), test.index, (AsmOptions){ .integrated = true }, &test.vector);
         asm_test_check(&test, integrated.error == 0 && integrated.link.fixups.count == 2 && integrated.link.fixups.kind[1] == BUSTER_LINK_FIXUP_ABS32S,
                        "a C unit's 32-bit address's disp32 relocates as clang's 32S", integrated.error);
+        // Names of 64 bytes and more, which the lexer's 64-byte scan (asm_word_length) reads whole: a '.' and a '9' past the
+        // first 64 of a label's bytes, at every distance from the start of a load, keep it one token. A label cut there
+        // wouldn't assemble, or would give another difference than 3.
+        for (uint32_t pad = 0; pad < 64; pad += 1)
+        {
+            char long_name[160];
+            char long_source[512];
+            memset(long_name, 'a', 100);
+            long_name[70] = '.';
+            long_name[80] = '9';
+            long_name[99] = '0' + pad % 10;
+            long_name[100] = 0;
+            const int long_length = snprintf(long_source, sizeof(long_source), "%*s.data\nstart:\n.byte 1,2,3\n%s:\n.byte %s-start\n", (int)pad, "", long_name, long_name);
+            const AsmResult named = asm_assemble((String8){.pointer = long_source, .length = (uint64_t)long_length}, test.index, (AsmOptions){0}, &test.vector);
+            static const uint8_t difference[] = {1, 2, 3, 3};
+            bool found = false;
+            for (uint32_t a = 1; named.error == 0 && a < named.link.atoms.count; a += 1)
+            {
+                found |= named.link.atoms.size[a] == sizeof(difference) && memcmp(named.link.atoms.bytes[a], difference, sizeof(difference)) == 0;
+            }
+            asm_test_check(&test, found, "a label of 100 bytes with '.' and '9' past its first 64 is one name", named.error);
+        }
+        // A section past the 256 MiB layout limit, by fills of 128, 128 and 4 MiB between two labels: the first addresses
+        // (asm_relax_first) name the fill that crosses it, the third.
+        static const char oversized_section[] = ".data\nbefore:\n.zero 0x8000000\n.zero 0x8000000\n.zero 0x400000\nafter:\n.quad after-before\n";
+        const AsmResult oversized_layout = asm_assemble(BUSTER_S8(oversized_section), test.index, (AsmOptions){0}, &test.vector);
+        const char* const crossing = strstr(oversized_section, ".zero 0x400000");
+        asm_test_check(&test, oversized_layout.error != 0 && strcmp(oversized_layout.error, "section exceeds the 256 MiB layout limit") == 0 &&
+                                  oversized_layout.location == (uint32_t)(crossing - oversized_section),
+                       "a section past 256 MiB fails at the fill that crosses the limit", oversized_layout.error);
         // A unit's entry atom and code, its first control flow, and its absolute symbols (#812): the C checker's planner
         // uses them to decide whether a template calls nothing, refuses a helper's early return and shares `.set`.
         const AsmResult alignment_only = asm_test_pair(&test, BUSTER_S8(".p2align 4\n"), 1, 0);
