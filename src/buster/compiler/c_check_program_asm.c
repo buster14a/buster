@@ -1792,7 +1792,8 @@ static bool check_asm_return(uint32_t form)
 
 // The forms common in inline assembly that x86_semantics.c gives only its conservative record (every register, unknown
 // control), with the registers each writes, as the instruction set's references define them: none touches the stack,
-// and each returns to the next instruction (syscall through the kernel). A form of neither keeps its statement's helper.
+// and each returns to the next instruction (syscall through the kernel) but hlt, which faults in user mode and never
+// returns. A form of neither keeps its statement's helper.
 typedef struct CheckAsmImplicit CheckAsmImplicit;
 struct CheckAsmImplicit
 {

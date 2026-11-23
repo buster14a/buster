@@ -230,7 +230,8 @@ The touched registers are the operands', the clobbers', the stores' and what
 `x86_semantics.c` says the template's records write. Some forms common in
 inline assembly have only the tables' conservative record: `cpuid`, `rdtsc`,
 `rdtscp`, `rdpmc`, `xgetbv`, `syscall`, `fnstsw %ax`, `ldmxcsr`, `fldcw`, the
-x87's control forms, `clflush`, `serialize`, `xsetbv` and `vzeroupper`/`vzeroall`.
+x87's control forms, `clflush`, `serialize`, `hlt`, `xsetbv` and
+`vzeroupper`/`vzeroall`.
 These take their implicit registers from `check_asm_implicit`. An x87 operation
 (`fsqrt`, `fxch`, `fld %st(1)`, `fxsave`) writes no general register. A record
 of any other unknown form keeps the helper. So does one that touches the stack
