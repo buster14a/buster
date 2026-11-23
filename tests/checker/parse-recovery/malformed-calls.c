@@ -512,4 +512,26 @@ void check(void)
     known(int x; 0; 1 + missing_tail_operand) skipped_tail;
     after_invalid_binary;
 }
+#elif BUSTER_CASE == 68
+void check(int c)
+{
+    for (; c;) ); { }
+    after_orphan_for_body;
+}
+#elif BUSTER_CASE == 69
+void check(int c)
+{
+    for (; c;);
+        ) + 1;
+}
+void later(void)
+{
+    after_orphan_after_loop;
+}
+#elif BUSTER_CASE == 70
+void check(void)
+{
+    fprintf(int);
+    after_recovered_library;
+}
 #endif

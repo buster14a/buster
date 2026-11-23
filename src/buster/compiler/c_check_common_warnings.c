@@ -5803,6 +5803,20 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
     return result;
 }
 
+// A `;` that a recovery view kept after deleting a malformed statement's tokens before it, such as an orphan `)`'s
+// (#2406). Clang made that statement a StmtError, which is neither a null body nor the statement after a loop.
+static bool check_common_recovered_semi(const Parser* parser, uint32_t token)
+{
+    bool result = false;
+    if (!parser->tokens.identity_sources && token != 0 && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_SEMI)
+    {
+        const uint32_t source = parse_source_index(&parser->tokens, token);
+        const uint32_t before = parse_source_index(&parser->tokens, token - 1);
+        result = before < source && before + 1 != source;
+    }
+    return result;
+}
+
 // Clang emits an if's or switch's `;`-body warning when the statement parses, but a for's or while's
 // only once its block's `}` is seen — there its elements are known and the next statement's shape or
 // indentation decides. Publishing a loop's at its owner's position replays that later diagnostic order.
@@ -5829,8 +5843,8 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
                                   parser->tokens.kinds[token + 1] == PARSE_KIND_ELSE && parser->tree.parents[token + 1] == parent;
             // The `;` must spell on the `)`'s line: `while (x)\n;` is quiet, as is a `;` a macro's body
             // provides (its spelling line is its definition's).
-            bool warn = kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR ||
-                        kind == PARSE_KIND_SWITCH;
+            bool warn = (kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR ||
+                         kind == PARSE_KIND_SWITCH) && !check_common_recovered_semi(parser, token);
             warn = warn && !has_else && check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_EMPTY_BODY, false) != CHECK_WARNING_IGNORE &&
                    check_common_spelling_line(parser, pp, token) != 0 &&
                    check_common_spelling_line(parser, pp, token) == check_common_expansion_point(parser, pp, parent, 0);
@@ -5847,7 +5861,7 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
                 uint32_t sibling = BUSTER_CHECK_NONE;
                 for (uint32_t t = warn ? token + 1 : owner; t < owner; t += 1)
                 {
-                    if (parser->tree.parents[t] == owner)
+                    if (parser->tree.parents[t] == owner && !check_common_recovered_semi(parser, t))
                     {
                         sibling = t;
                         break;
@@ -12594,10 +12608,14 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
         {
             end += 1;
         }
-        if (semis[1] == BUSTER_CHECK_NONE || open >= close)
+        // A loop whose body a recovery view reduced to its `;` was clang's StmtError: ActOnForStmt never saw it (#2406).
+        if (semis[1] == BUSTER_CHECK_NONE || open >= close || check_common_recovered_semi(parser, close + 1))
         {
             continue;
         }
+        // Clang's ActOnForStmt runs before the next statement parses: where the view deleted that statement's tokens
+        // before a kept `;`, publish before the error its first token had (#2406).
+        const uint32_t publication = check_common_recovered_semi(parser, end + 1) ? end : end + 1;
         // The condition, clang's Second: its truth test's operand, the root a token of it climbs to that is the test (a
         // statement expression's statements and a static selection's other operands are roots of their own). Clang skips
         // it where the warning is ignored at its first token.
@@ -12666,7 +12684,7 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
                                                    (int)names[0].length, names[0].pointer, (int)names[1].length, names[1].pointer,
                                                    (int)names[2].length, names[2].pointer, (int)names[3].length, names[3].pointer) :
                     "variables used in loop condition not modified in loop body";
-                check_common_report_at(parser, pp, input, at, end + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, NULL, 0, scratch);
+                check_common_report_at(parser, pp, input, at, publication, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, NULL, 0, scratch);
             }
         }
         // The increment and the body block's last statement, each exactly a variable's ++ or --.
@@ -12709,7 +12727,7 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
                 const char* message = check_warning_text(scratch, "variable '%.*s' is %s both in the loop header and in the loop body",
                                                          (int)intern_length(pp->table, name), intern_bytes(pp->table, name), word);
                 const CheckCommonNote note = { header_name, check_warning_text(scratch, "%s here", word) };
-                check_common_report_at(parser, pp, input, body_name, end + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, &note, 1, scratch);
+                check_common_report_at(parser, pp, input, body_name, publication, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, &note, 1, scratch);
             }
         }
     }

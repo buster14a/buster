@@ -787,6 +787,9 @@ typedef enum CheckWarningUnitEnd
 #define BUSTER_CHECK_WARNING_GROUP_ERROR 0x80000000u
 // CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE's payload.data bit of a C23 attribute's spelling, past its scope's identifier.
 #define BUSTER_CHECK_WARNING_STANDARD_ATTRIBUTE 0x80000000u
+// CHECK_WARNING_EVENT_BUILTIN_HEADER's data: the header clang names for the builtin's row.
+#define BUSTER_CHECK_WARNING_HEADER_STDIO 0u
+#define BUSTER_CHECK_WARNING_HEADER_SETJMP 1u
 
 typedef struct CheckWarningPayload CheckWarningPayload;
 struct CheckWarningPayload
