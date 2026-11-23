@@ -84,6 +84,8 @@ struct CheckInitFailureSink
     // Rejected declarations retain the completion of every source value, including accepted siblings, for commas.
     uint32_t* roots;
     uint32_t root_count;
+    // A sole rejected compound statement leaves an empty GNU statement expression, whose diagnostic value is void.
+    const uint8_t* recovered_void;
 };
 
 typedef struct CheckInitPart CheckInitPart;
@@ -177,9 +179,12 @@ struct CheckInitFrame
     bool wrapper;
     // Whether the frame is a brace elision's, whose list ends at the last value it takes.
     bool counted_elided;
-    // Whether a designator that names no member failed in this list or one inside it while it was open (#1842): clang's
-    // InitListChecker has an error there, and gives no excess warning for its leftover values.
+    // A rejected conversion, or a designator that names no member (#1842), suppresses this list's excess tail, while a
+    // later nested sibling starts afresh.
     bool failed;
+    // Whether a designator that names no member failed in this list or one inside it while it was open (#1842): clang's
+    // InitListChecker has an error there, and its braces fill in no counted_by list as they close.
+    bool member_failed;
 };
 
 // The lists of records with counted_by or counted_by_or_null pointer members (#1842's 3d), which a diagnostic walk traces
@@ -382,11 +387,9 @@ struct CheckInitWalker
     CheckInitializer* result;
     CheckInitFailureSink* failures;
     CheckInitFailure first_failure;
-    // Whether first_failure holds a failure the walk recovered from: a conversion's (`converted` too, which holds back
-    // every later excess warning), or a designator's that names no member (check_init_skip_member, #1842), after which
-    // `skipped` says the designation's value is to be skipped.
+    // Whether first_failure holds a failure the walk recovered from: a conversion's, or a designator's that names no
+    // member (check_init_skip_member, #1842), after which `skipped` says the designation's value is to be skipped.
     bool recovered;
-    bool converted;
     bool skipped;
     // The counted members' trace (#1842's 3d), only in a diagnostic walk of a unit that has them.
     CheckInitCounted* counted;
@@ -480,6 +483,22 @@ static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uin
     }
 }
 
+// Clang's pointer/integer and incompatible-pointer diagnostics default to errors, but still produce a converted
+// initializer value. Only hard type incompatibility invalidates the list and suppresses its excess tail. Preserve
+// atomic rvalues here, as check_driver_conversion_source does when wording the same conversion.
+static bool check_init_recoverable_conversion(const TypeTable* types, const CheckStream* stream, TypeId target, uint32_t node)
+{
+    const bool present = node < stream->count;
+    const TypeId type = present ? check_stream_type(stream, node) : 0;
+    const TypeId source = present && check_stream_category(stream, node) != CHECK_RVALUE ? type_conversion_operand(types, type) : type;
+    const uint8_t from = present ? check_action_kind(types, source) : BUSTER_TYPE_KIND_NONE;
+    const uint8_t to = check_action_kind(types, type_conversion_operand(types, target));
+    const bool pointer = from == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(from) || from == BUSTER_TYPE_KIND_FUNCTION;
+    const bool integer = from == BUSTER_TYPE_KIND_INTEGER || from == BUSTER_TYPE_KIND_ENUM || from == BUSTER_TYPE_KIND_BIT_INT;
+    const bool to_integer = to == BUSTER_TYPE_KIND_INTEGER || to == BUSTER_TYPE_KIND_ENUM || to == BUSTER_TYPE_KIND_BIT_INT;
+    return (to == BUSTER_TYPE_KIND_POINTER && (pointer || integer)) || (to_integer && pointer);
+}
+
 // A subobject's conversion that failed (#147): CHECK_INIT_INVALID at `token` (or its resource failure), its target `type` and
 // its source `node` kept where it is the first failure and an incompatible conversion, for clang's words of it.
 static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic diagnostic, uint32_t token, TypeId type, uint32_t node, uint64_t offset)
@@ -491,6 +510,7 @@ static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic 
         const CheckInitFailure failure = {
             .status = CHECK_INIT_INVALID,
             .failed_type = type,
+            .recovered_type = node < failures->root_count && failures->recovered_void != NULL && failures->recovered_void[node] ? BUSTER_TYPE_VOID : 0,
             .failed_source = node + 1,
             .failed_offset = offset,
             .failed_declaration = failures->declaration,
@@ -502,7 +522,14 @@ static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic 
             walker->first_failure = failure;
         }
         walker->recovered = true;
-        walker->converted = true;
+        // Each active frame is marked at most once: stop at an ancestor already marked by an earlier child.
+        // New sibling frames remain clear, so their independent excess warnings survive the earlier failure.
+        CheckInitFrame* frames = walker->frames;
+        const bool hard = failure.recovered_type != 0 || !check_init_recoverable_conversion(walker->types, walker->stream, type, node);
+        for (uint32_t depth = hard ? walker->depth : 0; depth != 0 && !frames[depth - 1].failed; depth -= 1)
+        {
+            frames[depth - 1].failed = true;
+        }
         if (token >= failures->token_count || node >= failures->root_count ||
             (!failures->seen[token] && failures->count == failures->capacity))
         {
@@ -604,6 +631,10 @@ static void check_init_member_use(CheckInitWalker* walker, uint32_t member, uint
     }
 }
 
+// Above the warning bit in an excess event's payload.data: the initialized object's type goes in first_type and
+// the string-overflow form gets this marker, so the render picks clang's "initializer-string" message.
+#define CHECK_INIT_EXCESS_STRING UINT32_C(0x10000)
+
 static bool check_init_semantic_publish(CheckInitWalker* walker)
 {
     CheckInitWarningSink* sink = walker->warnings != NULL ? walker->warnings->sink : NULL;
@@ -620,12 +651,13 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
         const bool selected = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_UNDEFINED_INTERNAL && event->payload.first_type != 0;
         const uint64_t key = (uint64_t)(selected ? CHECK_WARNING_EVENT_KIND_COUNT : event->kind) << 32 | ((uint64_t)event->token + 1);
         const bool excess = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS;
+        const bool repeated_excess = excess && (event->payload.data & CHECK_INIT_EXCESS_STRING) == 0;
         const bool once = selected || excess || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES || event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL ||
                           event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION;
-        // GNU range initialization converts each selected element, and clang diagnoses each noderef removal. Keep
-        // repeats from this walk, but still drop a scalar conversion already diagnosed by the graph or an earlier walk.
+        // GNU ranges diagnose each noderef removal and excess list tail, but a repeated overlong string once. Keep
+        // those list repeats from this walk, but drop diagnostics already published by the graph or an earlier walk.
         // `keys` is a private copy on its first insertion; the sink's prefix stays frozen until publication below.
-        const CheckWarningSet* seen = event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION ? sink->event_keys : &keys;
+        const CheckWarningSet* seen = event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION || repeated_excess ? sink->event_keys : &keys;
         if (!once || sink->event_keys == NULL || !check_warning_set_contains(seen, key))
         {
             const CheckWarningNote* notes = event->note_count != 0 ? walker->warning_events.notes + event->note_first : NULL;
@@ -650,22 +682,11 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
 
 #include "c_check_init_history.c"
 
-// Above the warning bit in an excess event's payload.data: the initialized object's type goes in first_type and
-// the string-overflow form gets this marker, so the render picks clang's "initializer-string" message.
-#define CHECK_INIT_EXCESS_STRING UINT32_C(0x10000)
-
 static void check_init_warning(CheckInitWalker* walker, uint32_t token, TypeId object_type, bool string)
 {
-    // Conversion recovery visits elements the strict walk never reached (#2441). Keep its excess-warning
-    // frontier: a rejected list must not acquire a trailing excess warning. Later valid nested lists still
-    // need their own error state and interleaved publication before their excess warnings can be recovered.
-    // Nor does a list in which a designator that names no member failed (#1842): the innermost braces open.
-    uint32_t list = walker->depth;
-    while (list > 1 && !walker->frames[list - 1].braced)
-    {
-        list -= 1;
-    }
-    if (!walker->converted && !(list != 0 && walker->frames[list - 1].failed))
+    // A failed list has no excess tail, but later independent lists and string subobjects still warn (#2441). A
+    // designator that names no member marks its lists the same way (check_init_skip_member, #1842).
+    if (string || walker->depth == 0 || !walker->frames[walker->depth - 1].failed)
     {
         if (walker->result->warning_count == 0)
         {
@@ -1510,9 +1531,9 @@ static __attribute__((noinline, cold)) void check_init_counted_close(CheckInitWa
             CheckInitCountedMissing* found = pass == 1 && missing != 0 ? BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitCountedMissing, 2 * (uint64_t)missing) : NULL;
             counted->failed |= pass == 1 && missing != 0 && found == NULL;
             uint32_t count = 0;
-            // Braces with a designator that named no member (CheckInitFrame.failed, #1842) fill nothing in: clang's
+            // Braces with a designator that named no member (CheckInitFrame.member_failed, #1842) fill nothing in: clang's
             // InitListChecker has an error there.
-            for (uint32_t i = closing->counted_first; !counted->failed && !closing->failed && i < counted->list_count; i += 1)
+            for (uint32_t i = closing->counted_first; !counted->failed && !closing->member_failed && i < counted->list_count; i += 1)
             {
                 const CheckInitCountedList* list = counted->lists + i;
                 const TypeId record = list->alive ? type_strip_aligned(types, list->type) : 0;
@@ -1611,6 +1632,35 @@ static uint32_t check_init_node(CheckInitWalker* walker, uint32_t begin, uint32_
         }
     }
     return result;
+}
+
+// Excess values are parsed expressions even though they never initialize storage. A rejected declaration drops
+// them from the ordinary warning walk; retain their comma nodes without creating conversions or writes. Compound
+// literals own their initializer's completion and are diagnosed separately, so their bodies are skipped here.
+static void check_init_excess_commas(CheckInitWalker* walker, uint32_t begin, uint32_t end)
+{
+    CheckInitFailureSink* failures = walker->failures;
+    const CheckGraph* graph = walker->graph;
+    const Parser* parser = walker->parser;
+    const uint32_t* nodes = walker->token_nodes;
+    const uint32_t first = walker->token_nodes_first;
+    const uint32_t count = walker->token_nodes_count;
+    for (uint32_t token = begin; failures != NULL && graph != NULL && nodes != NULL && token < end; token += 1)
+    {
+        if (parser->tree.roles[token] == PARSE_ROLE_OPEN_COMPOUND_BODY)
+        {
+            token = check_init_excess_end(parser, token + 1, end);
+        }
+        else
+        {
+            const bool present = count == 0 || (token >= first && token - first < count);
+            const uint32_t node = present ? nodes[token - first] : BUSTER_CHECK_NONE;
+            if (node < failures->root_count && node < graph->count && graph->ops[node] == CHECK_OP_COMMA && failures->roots[node] == 0)
+            {
+                failures->roots[node] = failures->completion;
+            }
+        }
+    }
 }
 
 static bool check_init_index(CheckInitWalker* walker, uint32_t begin, uint32_t end, uint64_t* index)
@@ -1810,6 +1860,7 @@ static bool check_init_skip_member(CheckInitWalker* walker, uint32_t name_token,
         for (uint32_t d = 0; d < walker->depth; d += 1)
         {
             walker->frames[d].failed = true;
+            walker->frames[d].member_failed = true;
         }
         walker->skipped = true;
     }
@@ -3102,6 +3153,8 @@ static bool check_init_const_copy(CheckInitWalker* walker, const CheckInitSelect
 static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* selected, uint32_t token, uint32_t end,
                              uint32_t node, const CheckInitString* string)
 {
+    const bool recovered = walker->failures != NULL && node < walker->failures->root_count &&
+                           walker->failures->recovered_void != NULL && walker->failures->recovered_void[node];
     if (__builtin_expect(walker->counted != NULL, 0))
     {
         check_init_counted_value(walker, selected, token, end);
@@ -3133,7 +3186,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     const CheckInitConstants* previous_constants = walker->constants;
     CheckInitConstants constants = { 0 };
     // An object's read too, which may be a scalar compound literal's (check_init_scalar_literal, #1447).
-    if (!walker->infer && walker->static_storage && node < walker->stream->count && walker->graph != NULL && walker->constants == NULL &&
+    if (!walker->infer && !recovered && walker->static_storage && node < walker->stream->count && walker->graph != NULL && walker->constants == NULL &&
         (check_stream_constant_kind(walker->stream, node) == CHECK_CONSTANT_NONE ||
          (check_stream_category(walker->stream, node) == CHECK_LVALUE && check_action_is_scalar(walker->types, check_stream_type(walker->stream, node))) ||
          (check_vector_type(walker->types, check_stream_type(walker->stream, node)) && check_init_constant_bytes(walker, node) == NULL)))
@@ -3194,11 +3247,11 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
     }
     else if (!walker->infer)
     {
-        if (node == BUSTER_CHECK_NONE || walker->stream->diagnostics[node] != CHECK_DIAG_NONE)
+        if (node == BUSTER_CHECK_NONE || (!recovered && walker->stream->diagnostics[node] != CHECK_DIAG_NONE))
         {
             check_init_fail(walker, CHECK_INIT_CHECK_FAILED, token);
         }
-        else if (walker->const_values != NULL && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) &&
+        else if (!recovered && walker->const_values != NULL && (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) &&
                  check_stream_category(walker->stream, node) == CHECK_LVALUE && check_stream_constant_kind(walker->stream, node) == CHECK_CONSTANT_ADDRESS &&
                  check_stream_value(walker->stream, node).fault == CHECK_FAULT_NONE &&
                  (check_stream_flags(walker->stream, node) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
@@ -3207,7 +3260,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
         {
             check_init_const_copy(walker, selected, token, node);
         }
-        else if (check_vector_type(walker->types, type))
+        else if (!recovered && check_vector_type(walker->types, type))
         {
             check_init_history_value(walker, selected, token, node, false, 0);
             check_init_vector_value(walker, selected, destination, token, node);
@@ -3220,7 +3273,7 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
                 .node = node,
                 .context = check_init_context(walker, node, token),
             };
-            action.operands[0] = check_init_constant_value(walker, node);
+            action.operands[0] = recovered ? (CheckValue){ .type = BUSTER_TYPE_VOID, .category = CHECK_RVALUE } : check_init_constant_value(walker, node);
             const uint32_t overload_head = action.operands[0].overload_head;
             CheckActionResult converted = { 0 };
             uint32_t candidate = 0;
@@ -3450,6 +3503,7 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
                         // Expression checking already visited this span. It contributes no initialization,
                         // conversion, runtime evaluation or reference, including calls and string addresses.
                         check_init_warning(walker, token, frame->type, false);
+                        check_init_excess_commas(walker, token, stop);
                         token = stop;
                         after_value = true;
                         excess = true;

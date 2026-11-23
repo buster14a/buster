@@ -389,6 +389,56 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
           "int main(void){struct S t;strcpy(t.a,s);return t.a[7];}\n", 0, false, false, true },
         { "fortified read past a local array", "#include <unistd.h>\n#include <fcntl.h>\nstatic volatile unsigned long n=16;"
           "int main(void){char b[8];int fd=open(\"/dev/zero\",O_RDONLY);return read(fd,b,n)!=16;}\n", 128 + SIGABRT, false, true },
+        // The wrappers of more than one statement, `size_t sz = ...; if (C) return E; ... return E;` (#2983): an overflow
+        // aborts, as GCC's build does. Clang's build of glibc 2.39's wrappers reaches the plain call (their bounds'
+        // __builtin_constant_p tests fold to false), 2.40's Clang overloads check some: clang isn't run.
+        { "fortified fgets past a local array", "#include <stdio.h>\nstatic volatile int n=20;"
+          "int main(void){char b[8];FILE*f=tmpfile();fputs(\"hello world, a long line\\n\",f);rewind(f);return fgets(b,n,f)==0;}\n", 128 + SIGABRT, false, true },
+        { "fortified fread past a local array", "#include <stdio.h>\nstatic volatile unsigned long n=20;"
+          "int main(void){char b[8];FILE*f=tmpfile();fputs(\"hello world, a long line\\n\",f);rewind(f);return fread(b,1,n,f)==0;}\n", 128 + SIGABRT, false, true },
+        { "fortified wcscpy past a local array", "#include <wchar.h>\nstatic const wchar_t*volatile s=L\"0123456\";"
+          "int main(void){wchar_t w[4];wcscpy(w,s);return w[0]==0;}\n", 128 + SIGABRT, false, true },
+        { "fortified wcsncat past a local array", "#include <wchar.h>\nstatic volatile unsigned long n=6;"
+          "int main(void){wchar_t w[4]=L\"a\";wcsncat(w,L\"0123456\",n);return w[0]==0;}\n", 128 + SIGABRT, false, true },
+        { "fortified strlcpy's length past a local array", "#include <string.h>\nstatic volatile unsigned long n=12;"
+          "int main(void){char b[8];return strlcpy(b,\"0123456789\",n)!=10;}\n", 128 + SIGABRT, false, true },
+        { "fortified recv past a local array", "#include <sys/socket.h>\n#include <unistd.h>\nstatic volatile unsigned long n=16;"
+          "int main(void){int s[2];char b[8];if(socketpair(AF_UNIX,SOCK_STREAM,0,s))return 1;write(s[0],\"0123456789abcdef\",16);"
+          "return recv(s[1],b,n,0)!=16;}\n", 128 + SIGABRT, false, true },
+        { "fortified realpath into a small array", "#include <limits.h>\n#include <stdlib.h>\n"
+          "int main(void){char b[16];return realpath(\".\",b)==0;}\n", 128 + SIGABRT, false, true },
+        { "fortified mbstowcs past a local array", "#include <stdlib.h>\nstatic volatile unsigned long n=9;"
+          "int main(void){wchar_t w[4];return mbstowcs(w,\"abcdefgh\",n)!=8;}\n", 128 + SIGABRT, false, true },
+        // Within their objects: the arguments' effects once each and in order, a wrapper's call in another's argument and
+        // in an arm not taken, and the guards' each way.
+        { "fortified longer wrappers within their objects",
+          "#include <limits.h>\n#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <wchar.h>\n#include <sys/socket.h>\n#include <unistd.h>\n"
+          "static volatile unsigned long n=8;static int calls;static unsigned long count(unsigned long v){calls+=1;return v;}\n"
+          "int main(int argc,char**argv){char b[2][8],p[PATH_MAX];wchar_t w[2][4];int i=0;(void)argv;FILE*f=tmpfile();"
+          "fputs(\"0123456789abcdefghij\\n\",f);rewind(f);"
+          "if(fgets(b[i++],(int)count(n),f)!=b[0]||i!=1||calls!=1||strcmp(b[0],\"0123456\"))return 1;"
+          "if(fread(b[i++],1,count(n),f)!=8||i!=2||calls!=2||memcmp(b[1],\"789abcde\",8))return 2;"
+          "if(wcscpy(w[1],wcscpy(w[0],L\"ab\"))!=w[1]||wcscmp(w[1],L\"ab\"))return 3;"
+          "if(wcscat(w[0],L\"c\")!=w[0]||wcscmp(w[0],L\"abc\")||wcsncat(w[1],L\"xyz\",1)!=w[1]||wcscmp(w[1],L\"abx\"))return 4;"
+          "if(strlcpy(b[0],\"0123456789\",n)!=10||strcmp(b[0],\"0123456\")||strlcat(b[0],\"z\",n)!=8)return 5;"
+          "wchar_t*r=argc>5?wcscpy(w[0],L\"0123456789\"):w[0];if(r!=w[0])return 6;"
+          "if(mbstowcs(w[0],\"xyz\",4)!=3||wcscmp(w[0],L\"xyz\")||realpath(\".\",p)!=p)return 7;"
+          "int s[2];if(socketpair(AF_UNIX,SOCK_STREAM,0,s)||write(s[0],\"0123456789\",10)!=10||recv(s[1],b[1],n,0)!=8)return 8;return calls!=2;}\n", 0 },
+        // A length of 1 (#2983's regression of #3325): glibc's __fgets_chk returns NULL for it and leaves the buffer, where
+        // fgets writes "" and returns it, so the guards must reach the plain call as the caller's code decides them: a
+        // constant length that fits, and a bound that is unknown (through a pointer), as GCC's and clang's builds do.
+        { "fortified fgets of one byte",
+          "#define _GNU_SOURCE 1\n#include <stdio.h>\n#include <wchar.h>\n"
+          "__attribute__((noinline)) static char*c1(char*p,FILE*f){return fgets(p,1,f);}\n"
+          "__attribute__((noinline)) static char*c2(char*p,FILE*f){return fgets_unlocked(p,1,f);}\n"
+          "__attribute__((noinline)) static wchar_t*w1(wchar_t*p,FILE*f){return fgetws(p,1,f);}\n"
+          "__attribute__((noinline)) static wchar_t*w2(wchar_t*p,FILE*f){return fgetws_unlocked(p,1,f);}\n"
+          "int main(void){FILE*f=tmpfile();fputs(\"hello\\n\",f);rewind(f);char b[8]=\"zzz\";wchar_t w[8]=L\"zzz\";"
+          "if(fgets(b,1,f)!=b||b[0])return 1;b[0]='z';if(fgets_unlocked(b,1,f)!=b||b[0])return 2;"
+          "if(fgetws(w,1,f)!=w||w[0])return 3;w[0]='z';if(fgetws_unlocked(w,1,f)!=w||w[0])return 4;"
+          "b[0]='z';if(c1(b,f)!=b||b[0])return 5;b[0]='z';if(c2(b,f)!=b||b[0])return 6;"
+          "w[0]='z';if(w1(w,f)!=w||w[0])return 7;w[0]='z';if(w2(w,f)!=w||w[0])return 8;"
+          "return fgets(b,8,f)!=b||b[0]!='h';}\n", 0 },
         { "fortified header keeps printf security flag", "#include <stdio.h>\nint main(void){char b[32],f[]=\"x%n\";int n=0;snprintf(b,sizeof b,f,&n);return 0;}\n", 128 + SIGABRT },
         // mbstowcs has two distinct extern declarations redirected to the same libc symbol. Validate its object
         // and ABI with Clang's linker independently of the direct binder's existing duplicate-name restriction.
