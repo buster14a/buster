@@ -4434,6 +4434,19 @@ static __attribute__((noinline)) void tier0_hidden_references(const Tier0Functio
 
 static __mmask64 tier0_lanes(int64_t first, uint32_t count);
 
+// `count` bytes from `bytes` cleared 64 at a time, the last 64's under a mask: a small function's columns take a few
+// lines, which a call of the C library's memset cost more than (#2972).
+static inline __attribute__((always_inline)) void tier0_clear(void* bytes, uint64_t count)
+{
+    uint8_t* at = bytes;
+    for (uint64_t first = 0; first < count; first += 64)
+    {
+        const uint64_t left = count - first;
+        const __mmask64 lanes = left >= 64 ? ~UINT64_C(0) : _bzhi_u64(~UINT64_C(0), (uint32_t)left);
+        _mm512_mask_storeu_epi8(at + first, lanes, _mm512_setzero_si512());
+    }
+}
+
 // Each local's references: its LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL entries (`references` has local_count),
 // and the hidden pointer's that calls pass on (tier0_hidden_references). The referring entries of 64 at a time as a
 // mask (vpshufbitqmb of their kinds in the five kinds' bitset), then a count per set bit, without a branch per entry:
@@ -4443,7 +4456,7 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
     const uint8_t* kinds = function->kinds;
     const uint64_t* values = function->values;
     const uint32_t count = function->count;
-    memset(references, 0, function->local_count * sizeof(uint32_t));
+    tier0_clear(references, (uint64_t)function->local_count * sizeof(uint32_t));
     const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL |
                                      1ull << BUSTER_TYPED_ATOMIC_CAS;
     const __m512i referring = _mm512_set1_epi64((int64_t)kinds_referring);
@@ -14493,7 +14506,7 @@ static inline __attribute__((always_inline)) Tier0Error tier0_vector_front(const
     pushed = pushed && column_words != 0;
     if (column_words != 0)
     {
-        memset(column_words, 0, words * BUSTER_ARRAY_LENGTH(columns) * sizeof(uint64_t));
+        tier0_clear(column_words, words * BUSTER_ARRAY_LENGTH(columns) * sizeof(uint64_t));
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
         {
             *columns[c] = column_words + words * c;
