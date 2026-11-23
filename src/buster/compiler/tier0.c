@@ -4924,10 +4924,11 @@ static uint32_t tier0_register_locals_vector(const Tier0Function* function, cons
 // The greedy loop of tier0_assign_homes for the vector path, for up to 64 locals, without the order: the loop gives the
 // k-th local that takes a register (not in one yet, its address not taken, referenced), counted among its kind's by
 // references and then index, the k-th free register of its kind: an integer one the caller-saved registers in depth
-// order, then the callee-saved ones if it is referenced twice or more (those come first in the order), and a floating
-// one the XMM registers. So each eligible local's rank among its kind's (by vector compares, 16 locals at a time
-// against each eligible local) gives its register (vpermd of the free registers' list), and its home is a masked
-// store. Returns the callee-saved registers taken (Tier0Frame.saved's bits).
+// order, then the callee-saved ones if its references are worth at least 2 (a push and a pop: referenced twice, or once
+// in a loop; those come first in the order), and a floating one the XMM registers. So each eligible local's rank among
+// its kind's (by vector compares, 16 locals at a time against each eligible local) gives its register (vpermd of the
+// free registers' list), and its home is a masked store. Returns the callee-saved registers taken (Tier0Frame.saved's
+// bits).
 static uint32_t tier0_assign_registers_vector(const Tier0Function* function, Tier0Home* homes, const uint32_t* references, uint32_t taken)
 {
     const uint32_t locals = function->local_count;
@@ -5002,7 +5003,7 @@ static uint32_t tier0_assign_registers_vector(const Tier0Function* function, Tie
                 rank = _mm512_mask_add_epi32(rank, same & ahead, rank, one);
             }
             // Integer locals: a caller-saved register below `callers`, a callee-saved one below `callers + callees` when
-            // referenced twice; floating ones an XMM register below `xmms`.
+            // their references are worth at least 2; floating ones an XMM register below `xmms`.
             const __mmask16 caller_lanes = integer_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)callers));
             const __mmask16 callee_lanes = integer_lanes & ~caller_lanes & _mm512_cmplt_epu32_mask(rank, _mm512_set1_epi32((int32_t)(callers + callees))) &
                                            _mm512_cmpge_epu32_mask(counts, _mm512_set1_epi32(2));

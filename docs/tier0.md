@@ -1445,9 +1445,12 @@ past it, finding the branches 64 entries at a time (`vpshufbitqmb` of their kind
 time gives each entry's depth and its weight, `1 << 3 * min(depth, 4)`; both paths' counts add each reference's
 weight, saturating at `UINT32_MAX`. A function without back edges keeps a weight of 1 everywhere and allocates
 nothing. A local nothing references still counts 0, so the frame's slots and the prologue's moves are unchanged;
-`tier0_direct_references` takes an asm goto dispatch's references back at its call's weight. `test-tier0`'s "loop
-weights" checks the weights against a naive count of the back edges around each entry, and a function whose loop's
-two locals take registers from 18 straight-line locals named more often.
+`tier0_direct_references` takes a direct asm goto dispatch's references back at each of its entries' own weights
+(its SET_LOCAL's and each label's LOCAL): a dispatch's branch back to an earlier label ends a loop inside it, so those
+weights differ from its call's, and taking the call's back left an exit temporary that another site reads with no
+references and no home (the driver's inlining fixture's `polled`). `test-tier0`'s "loop weights" checks the weights
+against a naive count of the back edges around each entry, and a function whose loop's two locals take registers from
+18 straight-line locals named more often.
 
 This is what beats clang -O0, which loads and stores every local at every use. The counting loop for `s += i` compiles
 to `xor edx, edx; xor ecx, ecx; mov eax, ecx; cmp eax, edi; jge; add edx, ecx; inc ecx; jmp`.
@@ -1575,8 +1578,9 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    kinds in the four kinds' bitset), then each set bit's loop weight ("Loop weights", above), without a branch per
    entry. The greedy loop gives the k-th local of
    a kind that takes a register (not in one yet, its address not taken, referenced) the k-th free register of its
-   kind: the caller-saved registers in depth order, then the callee-saved ones to a local referenced twice or more
-   (those come first in the order), or the XMM registers. So for up to 64 locals the vector path needs no order:
+   kind: the caller-saved registers in depth order, then the callee-saved ones to a local whose references are worth
+   at least 2 (those come first in the order), or the XMM registers. So for up to 64 locals the vector path needs no
+   order:
    each such local's rank among its kind's, counted by vector compares 16 locals at a time, picks its register from
    the free registers' list (`vpermd`), and its home is a masked store. Where no local can take a register, the lists
    and ranks are skipped. Past 64 locals, and for the scalar twin, only
