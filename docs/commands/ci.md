@@ -340,6 +340,22 @@ there at a time, so everything takes one lock:
   measured what it changes, and the full set took the job past its 10 minutes.
   The daily and dispatched runs, and the nightly snapshot's, have 25 minutes;
   a nightly backlog run has a pull request's 20.
+- The job's last measurement holds the compile to a count (#2850): "Hold
+  sqlite3.c's compile to its instructions' baseline" runs `measure-compile
+  --runs 3 --instructions-baseline tools/ci/compile-instructions.txt` on the
+  frozen `sqlite3.c`, and fails where the default compile's median user
+  instructions are more than 0.5% from the file's count, above or below. The
+  count repeats to a thousandth on the 9700X, and a day of main's merges once
+  moved it 15% unseen (11% of it one merge's regression). No pull request's or
+  candidate's run reaches the 9700X, so the step tells after the merge, in the
+  nightly's runs:
+  - A change that means to move the count, a feature's cost or a cut's gain,
+    states it: it writes the count the step prints into the file.
+  - A count out of its band that no change meant is a regression. The
+    instructions place it exactly: count main's merges since the last run that
+    passed, each built as the job builds it.
+  - The file's count is this job's build's (`BUSTER_HOST_ARCH=znver5`) on this
+    host. A toolchain's upgrade moves it, and states it the same way.
 - A pull request that changes the checker's sources (the `changes` job's
   `checker` output isn't `false`) also compares `-c sqlite3.c` by its base and
   by its tree ("Compare check-expressions with the pull request's base over
