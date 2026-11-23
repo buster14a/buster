@@ -7434,6 +7434,51 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     check_test_expect(test, qualified, "measure-compile qualifies the stage system-time attribution");
     check_test_expect(test, walked, "measure-compile reports the reader's expressions' walk, its parts and its usage under its stage");
     check_test_expect(test, coverage_once, "measure-compile reports the lowering's coverage once");
+    // --instructions-baseline (#2850): the default compile's user instructions held to a file's count. A test's switch
+    // gives the count in the median's place, since no test's host need count instructions: in the band at its two ends
+    // and out of it one instruction past each, a file that states no count, a band of none, and a band past a million.
+    typedef struct CheckTestHeld CheckTestHeld;
+    struct CheckTestHeld
+    {
+        const char* file;
+        const char* measured;
+        const char* tolerance;
+        int status;
+        const char* said;
+    };
+    static const CheckTestHeld held[] = {
+        { "# A comment and an empty line, then the count.\n\n1000000\n", "1000000", NULL, 0, "+0.000% of " },
+        { "1000000\n", "1005000", NULL, 0, "+0.500% of " },
+        { "1000000\n", "1005001", NULL, 1, "takes more user instructions than the baseline's band holds; a change that means to states it: write 1005001 in " },
+        { "1000000\n", "995000", NULL, 0, "-0.500% of " },
+        { "1000000\n", "994999", NULL, 1, "takes fewer user instructions than the baseline's band holds; a change that means to states it: write 994999 in " },
+        { "# No count.\n", "1000000", NULL, 1, "states no baseline" },
+        { "1000000 instructions\n", "1000000", NULL, 1, "states no baseline" },
+        { "1000000\n", "1000001", "0", 1, "takes more user instructions" },
+        { "1000000\n", "1000000", "0", 0, "whose band is 0.000%" },
+        { "1000000\n", "1000000", "1000001", 1, NULL },
+    };
+    char baseline[PATH_MAX + 32];
+    snprintf(baseline, sizeof(baseline), "%s/instructions.txt", directory);
+    bool holds = made;
+    for (uint32_t h = 0; holds && h < BUSTER_ARRAY_LENGTH(held); h += 1)
+    {
+        FILE* stated = fopen(baseline, "w");
+        const bool written = stated != NULL && fputs(held[h].file, stated) >= 0;
+        const bool closed = stated != NULL && fclose(stated) == 0;
+        char* const with_band[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--instructions-baseline", baseline,
+                                    "--instructions-tolerance", (char*)held[h].tolerance, "--", "-c", source, NULL };
+        char* const with_default[] = { compiler, "measure-compile", "--runs", "1", "--directory", (char*)directory, "--instructions-baseline", baseline, "--", "-c", source,
+                                       NULL };
+        char* said = NULL;
+        const bool switched = written && closed && setenv("BUSTER_TEST_MEASURE_INSTRUCTIONS", held[h].measured, 1) == 0;
+        const int status = switched ? check_test_driver_spawn_stream(held[h].tolerance != NULL ? with_band : with_default, &said, true) : -1;
+        holds = status == held[h].status && (held[h].said == NULL || (said != NULL && strstr(said, held[h].said) != NULL));
+        free(said);
+    }
+    unsetenv("BUSTER_TEST_MEASURE_INSTRUCTIONS");
+    unlink(baseline);
+    check_test_expect(test, holds, "measure-compile holds the default compile's instructions to a file's count, within its band and no further");
     const char* const files[] = { source, plain, timed, linked, debug_source, one_lane, two_lanes };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {

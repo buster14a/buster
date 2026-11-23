@@ -1855,6 +1855,19 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
 
+      - name: Hold sqlite3.c's compile to its instructions' baseline
+        # #2850: the user instructions of `-c` of the frozen corpus's sqlite3.c, the median of three compiles, against
+        # the count tools/ci/compile-instructions.txt states: the step fails where they are more than half a percent away
+        # from it, above or below (measure-compile --instructions-baseline). They repeat to a thousandth on this host. No
+        # pull request's or candidate's run reaches the 9700X (#2055, #1430), so this is what tells of a merge that moved
+        # the compile: the daily, dispatched and backlog runs' check. A change that means to move the count writes the new
+        # one in the file. The last of the measurements, so that a count out of its band costs the run none of them.
+        run: |
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          taskset -c 2 ./build/compiler measure-compile --runs 3 --instructions-baseline tools/ci/compile-instructions.txt -- \
+            -c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c"
+
       - name: Remove the comparison build worktree
         if: ${{ always() && steps.compiler_builds.outputs.directory != '' }}
         env:
