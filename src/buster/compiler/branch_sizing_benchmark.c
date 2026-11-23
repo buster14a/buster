@@ -617,7 +617,7 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
         else
         {
             result.length = length;
-            branch_sizing_write_short(records, branches, branch_count, &columns, columns.displacement0);
+            result.long_branches = branch_sizing_write(records, branches, branch_count, &columns, columns.displacement0);
         }
     }
     scratch_end(scratch);

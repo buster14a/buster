@@ -52,8 +52,7 @@
 //   - The phases: lengths (x86_measure's offsets: the first round), setup (D0 and the jmps), and only when a branch
 //     grew, ranks (in registers below 512 records, or from the byte map), round, prefix, the worklist's marks
 //     (branch_sizing_mark_vector) and offsets; then
-//     branch_sizing_worklist (the rare cases) and the records (branch_sizing_write, and branch_sizing_write_short when
-//     no branch grew).
+//     branch_sizing_worklist (the rare cases) and the records (branch_sizing_write).
 //   - The driver: branch_sizing_run.
 
 #include <stdint.h>
@@ -162,8 +161,6 @@ static __attribute__((unused)) BranchSizingCheck branch_sizing_validate_branches
 // branches a pass (#2946).
 #define BUSTER_BRANCH_SIZING_REGISTER_RECORDS (BUSTER_BRANCH_SIZING_LANES * BUSTER_BRANCH_SIZING_RANK_RECORDS)
 #define BUSTER_BRANCH_SIZING_REGISTER_BRANCHES 8
-// The branches the write takes at a time, with the lanes past the last aimed at a record of scratch memory (#2946).
-#define BUSTER_BRANCH_SIZING_WRITE_BRANCHES 8
 
 // The branches' rel8 forms, the jmp and the 16 jcc, whose rel32 forms follow them in the form table.
 static const uint16_t branch_sizing_forms[] = {
@@ -333,8 +330,6 @@ struct BranchSizingColumns
     uint32_t* prefix[2];
     // branch_sizing_worklist's dirty bits, one per branch, and a word more (branch_sizing_mark_vector's spill).
     uint64_t* dirty;
-    // BUSTER_BRANCH_SIZING_WRITE_BRANCHES records the write's lanes past the last branch write to, a record each.
-    X86Instruction* sink;
     bool valid;
 };
 
@@ -357,8 +352,7 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
     const uint64_t column_bytes = branch_sizing_lines(padded, sizeof(uint32_t));
     const uint64_t prefix_bytes = branch_sizing_lines(padded + BUSTER_BRANCH_SIZING_LANES, sizeof(uint32_t));
     const uint64_t dirty_bytes = branch_sizing_lines(branch_count / 64 + 2, sizeof(uint64_t));
-    const uint64_t sink_bytes = branch_sizing_lines(BUSTER_BRANCH_SIZING_WRITE_BRANCHES, sizeof(X86Instruction));
-    uint8_t* base = arena_push(arena, map_bytes + ranks_bytes + 5 * column_bytes + 2 * prefix_bytes + dirty_bytes + sink_bytes, 64);
+    uint8_t* base = arena_push(arena, map_bytes + ranks_bytes + 5 * column_bytes + 2 * prefix_bytes + dirty_bytes, 64);
     BranchSizingColumns result = {
         .valid = base != 0,
     };
@@ -377,7 +371,6 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
         result.prefix[0] = (uint32_t*)columns;
         result.prefix[1] = (uint32_t*)(columns + prefix_bytes);
         result.dirty = (uint64_t*)(columns + 2 * prefix_bytes);
-        result.sink = (X86Instruction*)(columns + 2 * prefix_bytes + dirty_bytes);
     }
     return result;
 }
@@ -878,58 +871,28 @@ static void branch_sizing_offsets_vector(uint64_t count, const uint32_t* branche
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The records: each branch's displacement, and the rel32 form for a long one. The records are 16 bytes apart at the
-// branches' indices, so these are scalar stores (a scatter would cost more: see the coding style), 8 branches at a time:
-// their records' addresses from a vector of their indices, with the lanes past the last branch aimed at the columns'
-// sinks, so every pass stores 8 whatever the count (#2946). `displacements` is the last round's column, or D0's when no
-// round ran. Returns how many branches are long.
+// branches' indices, so these are scalar stores (a scatter would cost more: see the coding style).
+// `displacements` is the last round's column, or D0's when no round ran. Returns how many branches are long.
+//
+// Every branch's form is stored, as form + 0 where it stays short: leaving those stores out, so that the write of a
+// function with no long branch touched the displacements alone, made sizing 1.5% faster and the caller's sizing and
+// encoding together 4 to 6% slower on the 40-record rows, since the encode reads every record's form straight after
+// (#2946, docs/branch-sizing.md). A pass of 8 branches, with the lanes past the last storing to sink records so that
+// the loop's exit costs nothing, is not here either, for the same reason.
 
 static uint64_t branch_sizing_write(X86Instruction* records, const uint32_t* branches, uint64_t branch_count, const BranchSizingColumns* columns,
                                     const int32_t* displacements)
 {
     uint64_t result = 0;
-    const __m512i base = _mm512_set1_epi64((int64_t)(uintptr_t)records);
-    const __m512i sink = _mm512_add_epi64(_mm512_set1_epi64((int64_t)(uintptr_t)columns->sink), _mm512_setr_epi64(0, 16, 32, 48, 64, 80, 96, 112));
-    for (uint64_t k = 0; k < branch_count; k += BUSTER_BRANCH_SIZING_WRITE_BRANCHES)
+    for (uint64_t k = 0; k < branch_count; k += 1)
     {
-        const __mmask8 lanes = (__mmask8)branch_sizing_lanes(k, branch_count);
-        const __m512i index = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, branches + k));
-        const __m512i address = _mm512_mask_add_epi64(sink, lanes, base, _mm512_slli_epi64(index, 4));
-        // The growths past the branches are 0, so the sink's form doesn't change and no long branch is counted twice.
-        const __m256i growth = _mm256_load_si256((const __m256i*)(columns->growth + k));
-        const __mmask8 grown = _mm256_test_epi32_mask(growth, growth);
-        uint64_t at[BUSTER_BRANCH_SIZING_WRITE_BRANCHES] __attribute__((aligned(64)));
-        _mm512_store_si512(at, address);
-        for (uint32_t l = 0; l < BUSTER_BRANCH_SIZING_WRITE_BRANCHES; l += 1)
-        {
-            X86Instruction* record = (X86Instruction*)(uintptr_t)at[l];
-            record->displacement = displacements[k + l];
-            record->form = (uint16_t)(record->form + ((grown >> l) & 1));
-        }
-        result += (uint64_t)__builtin_popcount(grown);
+        X86Instruction* record = &records[branches[k]];
+        const bool grown = columns->growth[k] != 0;
+        record->displacement = displacements[k];
+        record->form = (uint16_t)(record->form + grown);
+        result += grown;
     }
     return result;
-}
-
-// The records of a function whose branches all fit: their displacements alone, D0, 8 branches at a time as
-// branch_sizing_write's are, with the lanes past the last aimed at the sinks.
-static void branch_sizing_write_short(X86Instruction* records, const uint32_t* branches, uint64_t branch_count, const BranchSizingColumns* columns,
-                                      const int32_t* displacements)
-{
-    const __m512i base = _mm512_set1_epi64((int64_t)(uintptr_t)records);
-    const __m512i sink = _mm512_add_epi64(_mm512_set1_epi64((int64_t)(uintptr_t)columns->sink), _mm512_setr_epi64(0, 16, 32, 48, 64, 80, 96, 112));
-    for (uint64_t k = 0; k < branch_count; k += BUSTER_BRANCH_SIZING_WRITE_BRANCHES)
-    {
-        const __mmask8 lanes = (__mmask8)branch_sizing_lanes(k, branch_count);
-        const __m512i index = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, branches + k));
-        const __m512i address = _mm512_mask_add_epi64(sink, lanes, base, _mm512_slli_epi64(index, 4));
-        uint64_t at[BUSTER_BRANCH_SIZING_WRITE_BRANCHES] __attribute__((aligned(64)));
-        _mm512_store_si512(at, address);
-        for (uint32_t l = 0; l < BUSTER_BRANCH_SIZING_WRITE_BRANCHES; l += 1)
-        {
-            X86Instruction* record = (X86Instruction*)(uintptr_t)at[l];
-            record->displacement = displacements[k + l];
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1000,7 +963,7 @@ static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, c
             else
             {
                 result.length = length;
-                branch_sizing_write_short(records, branches, branch_count, &columns, columns.displacement0);
+                result.long_branches = branch_sizing_write(records, branches, branch_count, &columns, columns.displacement0);
             }
         }
         scratch_end(scratch);

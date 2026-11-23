@@ -194,9 +194,11 @@ popcount of its bits below the target's. The offsets phase reads it too.
   count with `vpopcntd` (`branch_sizing_ranks_table`).
 
 Before #2946 every function took the byte map: a `memset`, a store per branch
-and a 64-byte load of those stores, then gathers of the table just stored. On
-functions of 40 records that cost 5.1 to 5.9 cycles per branch, against the
-removed scalar path's 2.7 and 3.4.
+and a 64-byte load of those stores, then gathers of the table just stored. The
+register build takes 4.2 and 4.7 cycles per branch on the 40-record rows
+against 5.3 and 6.2, and 2.0 to 3.3 on the rows of 250 records and the mix
+against 3.6 to 4.7, below the removed scalar path's figures in nine of the
+eleven rows.
 
 ### Offsets
 
@@ -211,47 +213,56 @@ one before.
 ### What a small function stores
 
 The benchmark times a phase as the difference between a run through it and a
-run that stops before it. A phase then pays for every store before it that
-hasn't reached the cache, so on functions of 40 records the last phase, the
-write, measured 2.5 to 3 times the removed scalar path's cycles with the same
-code, and the ranks phase 1.9 times its own work. Most of those functions
-settle in the first round (#2946).
+run that stops before it, so a phase pays for every store before it that
+hasn't reached the cache. On functions of 40 records, where most functions
+settle in the first round, that made the last phase, the write, measure 2 to 3
+times the removed scalar path's cycles with the same code. Setup stored six
+512-bit columns per 16 branches, two of them across a cache line; two are gone
+(#2946):
 
-- **Setup** stored six 512-bit columns per 16 branches, two of them across a
-  cache line. Two are gone: D0 is no longer copied into the displacement
-  column, which the rounds write and which the write reads only after a round,
-  and the round before's prefix sums are no longer zeroed, since only
-  `branch_sizing_worklist` reads them, which `branch_sizing_run` zeroes for it
-  when it goes there from the first round.
-- **With no round:** the offsets are `x86_measure`'s and the forms the
-  records'. `branch_sizing_write_short` stores the displacements alone, from
-  D0.
-- **The write** takes 8 branches a pass. Their records' addresses come from a
-  vector of their indices. The lanes past the last branch aim at 8 sink
-  records in the columns, one each, so no lane's form waits for another lane's
-  store.
-- **The loop it replaced:** a store per branch ended at a branch the predictor
-  missed 0.64 times per function of 40 records, since their branch counts
-  vary.
+- D0 is no longer copied into the displacement column, which the rounds write
+  and which the write reads only after a round.
+- The round before's prefix sums are no longer zeroed. Only
+  `branch_sizing_worklist` reads them, and it is only reached from the first
+  round when the round limit is 1 (the tests'), where `branch_sizing_run`
+  zeroes them for it.
+
+A function no branch grew in also skips the offsets pass, whose records all
+keep `x86_measure`'s offsets, and its write takes the displacements from D0.
+
+The write still stores every branch's form, as `form + 0` where it stays
+short. Leaving those stores out, so that the write of a function with no long
+branch touched the displacements alone, made sizing 1.5% faster and the
+caller's sizing and encoding together (`size_encode`) 5 to 6% **slower** on
+the 40-record rows: the encode reads every record's form straight after.
+
+### What a pass of 8 branches cost
+
+The write's loop ends at a branch the predictor misses 0.64 times per function
+of 40 records, since their branch counts vary. Taking 8 branches a pass, with
+the lanes past the last storing to sink records so that every pass stores 8,
+removed those misses (perf: 836,000 extra mispredicts over the pool to 48,000)
+and took 0.3 cycles per branch off this phase. It is not in the module:
+`size_encode` was 1 to 5% slower in nine of the eleven rows, because stores to
+8 records at once leave the encode after them more to wait for. Nor is a
+2-byte mask of the jmps per 16 branches in place of the growth-if-long column,
+which was slower in every row measured (60.80 against 60.28 cycles per branch
+on tier0-40), or a pass of its own after setup for the growth columns and the
+first prefix sums, which made the ranks and the write measure less but cost
+the functions of 250 records 2% of the whole path.
 
 ### What the phase figures mean
 
-The ranks phase reads 3.8 to 4.1 cycles per branch on the 40-record rows,
-above the removed scalar path's 2.7 and 3.4, and the write 3.7 to 3.8 against
-2.0 to 3.0, although the whole path is 8% faster there than before #2946. Two
-measurements separate the phases' own work from what they inherit:
-
-- A variant that moved the growth columns and the first prefix sums out of
-  setup into a pass of their own, after it, left the same ranks code reading
-  1.2 to 1.5 cycles per branch. The 2.6 cycles that moved with those stores
-  were setup's, paid in the ranks interval.
-- A variant that ends every run with an `mfence`, so each phase pays only for
-  its own stores, left the write at 3.6 to 3.9: the write's own passes of 8
-  stores, not stores inherited from earlier phases.
-
-That deferring pass cost the functions of 250 records 2% of the whole path, so
-it isn't in the module; the figures above are what the benchmark's method
-gives. #2946 stays open for the write's own cost.
+The ranks phase reads 4.2 cycles per branch on tier0-40 and 4.7 on
+optimized-40, above the removed scalar path's 2.7 and 3.4, and the write 7.2
+and 6.5 against 3.0 and 2.0, although the whole path is 4.7 and 5.4% faster
+there than before #2946 (4.1% on the mix) and the caller's sizing and encoding
+together 3.0 and 3.7% faster (3.3% on the mix). The
+figures hold the stores of the phases before them: with the growth columns
+moved into a pass of their own, the same ranks code read 1.2 to 1.5 cycles per
+branch, and with an `mfence` closing every run, so that each phase pays only
+for its own stores, the write read 3.6 to 3.9 with the 8-branch passes below.
+#2946 stays open for the rest.
 
 ### Lengths and memory
 

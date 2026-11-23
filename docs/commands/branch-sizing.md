@@ -77,8 +77,8 @@ record, and be long exactly where a rel8 can't reach:
   ranks' table is built in registers, a branch every 1 to 4 records with far
   targets, so that most of them grow: each must be the reference's, through the
   register build's passes of 8 branches, the direct ranks of up to 16, the byte
-  map past 511 records, the write's passes and the records a function with no
-  round leaves alone (#2946);
+  map past 511 records, and the offsets and displacements a function with no
+  round takes from x86_measure's (#2946);
 - page edges: the records, the branch columns and the offsets each ending at a
   `PROT_NONE` page, for every count up to 70 records at every branch density
   and every branch count up to 40, checked by the columns' check and sized,
