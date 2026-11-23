@@ -41,7 +41,7 @@ static const char check_driver_node_bodies_text[] =
 // Units that say something, each with the body `beside` that says nothing: with --node-bodies each one's diagnostics
 // and status are the ordinary compile's, and where it compiles its object too, with `taken` of its bodies taken. What is
 // said is of a stage each: before the walk (a break outside a loop); by the walk (a division by zero, a result not
-// used, a deprecated function's call); by the reader's passes after it (a naked function's statement, a packed member's
+// used, a deprecated function's call), or after it where the unit is compiled to an object (an array's increment); by the reader's passes after it (a naked function's statement, a packed member's
 // address, a type that is available only in the default evaluation method, used in a body the producer takes and
 // reported at its typedef); by the common warnings' pass (an empty body); by the program (a function that may not
 // return a value, an enumeration's value a switch does not handle); by the initializers (excess elements); at the
@@ -58,6 +58,7 @@ static const struct
 } check_driver_node_bodies_units[] = {
     { "said", "void f(void) { break; }\nint beside(int a) { return a + 2; }\n", NULL, -1 },
     { "zero", "int f(int a) { return a / 0; }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "array", "void f(void) { int a[2]; a++; }\nint beside(int a) { return a + 2; }\n", NULL, -1 },
     { "result", "__attribute__((warn_unused_result)) int must(void);\nvoid f(void) { must(); }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
     { "deprecated", "__attribute__((deprecated)) void old(void);\nvoid f(void) { old(); }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
     { "naked", "int g;\n__attribute__((naked)) void f(void) { g = 1; }\nint beside(int a) { return a + 2; }\n", NULL, -1 },
