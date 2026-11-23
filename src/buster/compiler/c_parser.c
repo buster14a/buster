@@ -344,6 +344,9 @@ static const char* const parse_predeclared_typedefs[] =
 // preprocessor's printing flag before either recovery uses it.
 #define BUSTER_PARSE_RECOVERED_TYPE 0x40u
 #define BUSTER_PARSE_DROPPED_DECLARATOR BUSTER_PARSE_RECOVERED_TYPE
+// The same private bit on a recovery view's `;` that ends a statement the repair deleted whole (#2406): clang's
+// StmtError, which is neither an empty body nor a statement after a loop (ParseDiagnostic.resume_statement).
+#define BUSTER_PARSE_DROPPED_STATEMENT BUSTER_PARSE_RECOVERED_TYPE
 _Static_assert(BUSTER_PARSE_RECOVERED_TYPE == BUSTER_PP_NAME_LINE, "private parser flag cleared during preprocessing-token conversion");
 // Private recovery views mark an inserted suppress argument ')' when clang dropped the attribute. Its original
 // arguments still produce diagnostics; the repaired closer must not make the attribute applicable. The parser
@@ -899,6 +902,9 @@ struct ParseDiagnostic
     // GNU suppress leaves a declarator error before an unread C23 list. Argument names the owning suppress token;
     // the driver's resumed stream omits the scaffold only after the reader reports its corresponding error.
     bool resume_attribute;
+    // The deletion (resume_begin to resume_end) is a whole statement clang's recovery made a StmtError, such as one
+    // that starts at an orphan `)` (#2406). check_prefix_resume marks the `;` it keeps (BUSTER_PARSE_DROPPED_STATEMENT).
+    bool resume_statement;
     // A case's or default's missing `:` before a `;`, which clang's recovery reads as the label's empty statement
     // (check_prefix_resume puts a `:` before the `;` and parses the view again).
     bool resume_colon;
@@ -1349,6 +1355,8 @@ struct ParseScalar
     uint8_t error_resume_closers;
     uint8_t error_resume_follow;
     bool error_resume_attribute;
+    // Whether the deletion is a whole statement (ParseDiagnostic.resume_statement).
+    bool error_resume_statement;
     // Whether the error is a case's or default's missing `:` before a `;` (ParseDiagnostic.resume_colon).
     bool error_resume_colon;
     // Whether the error is an expression statement's missing `;` after its first name (ParseDiagnostic.probe).

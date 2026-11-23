@@ -122,7 +122,9 @@ Later compatible declarations share the entity; an incompatible library
 prototype warns under `-Wincompatible-library-redeclaration`. Static linkage
 conflicts and malformed calls remain errors. Header-dependent descriptors such
 as `FILE *` do not become invented types: a direct pre-C23 call falls back to
-the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`.
+the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`,
+naming `<stdio.h>` as clang does. Only `FILE` rows reach it: every `jmp_buf` or
+`ucontext_t` library row has attribute `T`, which clang declares without it.
 
 An implicit library declaration warns by default even in C89. The ordinary
 implicit-declaration warning switches, promotion/demotion and source pragmas
@@ -7204,7 +7206,12 @@ arm a `_Generic` or `__builtin_choose_expr` selects. A dereference, a
 comparison, a comma's left operand, a `?:` condition (a GNU `?:` included), a
 selection's controlling expression and its other arms consume it or don't
 return it. `-Wempty-body` leaves an `if` that has an
-`else` alone. A loop and its following statement use their outer macro
+`else` alone. A statement a recovery view deleted whole (one that starts at an
+orphan `)`, #2406) keeps its `;` marked `BUSTER_PARSE_DROPPED_STATEMENT`. That
+was clang's StmtError, and so is a `for` or `while` whose body is one: neither
+is an empty body or a loop's following statement, and such a `for` gets no
+`-Wfor-loop-analysis`. A repair that keeps the statement (an extraneous `)`
+before its `;`) leaves it an ordinary statement. A loop and its following statement use their outer macro
 invocations' columns, including an argument-first or nested expansion (#1339).
 Only an enabled candidate whose position comes from a macro requests deferred
 expansion history; file-spelled positions and units without empty-body candidates keep
