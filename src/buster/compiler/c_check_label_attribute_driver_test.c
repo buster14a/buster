@@ -324,6 +324,27 @@ static void check_test_driver_label_attributes(CheckTest* test, const char* clan
           "case 24: if (h > 2049 && h < 2050) ; else return 24; __attribute__((fallthrough)); x++;\n"
           "case 25: if (h != 65504 || h != 70000) return 25; __attribute__((fallthrough)); x++;\n"
           "case 26: return 0;\n}\nreturn 0;\n}\n" },
+        // __float128's constants in binary128, exactly (two literals one long double can't tell apart), and __bf16's
+        // rounded to it (257 is 256), integer literals' among them (#1844).
+        { "unreachable fallthroughs after tautologies of __float128 and __bf16 constants",
+          "int f(int x, __float128 q, __bf16 b) {\nswitch (x) {\n"
+          "case 1: if (q > 1.0Q || q < 2.0Q) return 1; __attribute__((fallthrough)); x++;\n"
+          "case 2: if (q > 2.0Q && q < 1.0Q) ; else return 2; __attribute__((fallthrough)); x++;\n"
+          "case 3: if (q >= 1.000000000000000000000000000001Q || q < 1.000000000000000000000000000002Q) return 3; __attribute__((fallthrough)); x++;\n"
+          "case 4: if (q == 1.0Q || q != 1.0Q) return 4; __attribute__((fallthrough)); x++;\n"
+          "case 5: if (1.0Q < q || 2.0Q > q) return 5; __attribute__((fallthrough)); x++;\n"
+          "case 6: if (q > 1 && q < -1) ; else return 6; __attribute__((fallthrough)); x++;\n"
+          "case 7: if (q > -1e4000Q || q < 1e4000Q) return 7; __attribute__((fallthrough)); x++;\n"
+          "case 8: if (b > 1 || b < 2) return 8; __attribute__((fallthrough)); x++;\n"
+          "case 9: if (b > 257 && b < 258) ; else return 9; __attribute__((fallthrough)); x++;\n"
+          "case 10: return 0;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after __float128 literals long double rounds alike", "int f(int x, __float128 q) {\nswitch (x) {\n"
+          "case 1: if (q > 1.000000000000000000000000000002Q || q <= 1.000000000000000000000000000001Q) return 1; __attribute__((fallthrough)); x++;\n"
+          "case 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after a __float128 compared with double literals", "int f(int x, __float128 q) {\nswitch (x) {\n"
+          "case 1: if (q > 1.0 || q < 2.0) return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
+        { "a reachable fallthrough after __bf16 casts", "int f(int x, __bf16 b) {\nswitch (x) {\n"
+          "case 1: if (b > (__bf16)1.0f || b < (__bf16)2.0f) return 1; __attribute__((fallthrough)); x++;\ncase 2: return 1;\n}\nreturn 0;\n}\n" },
         { "unreachable fallthroughs after tautologies of fixed enumerations' enumerators",
           "enum E : long { A = 3, B = 5 };\nenum G : unsigned char { P = 1, Q = 2 };\nint f(int x, long y, enum G g) {\nswitch (x) {\n"
           "case 1: if (y > B && y < A) ; else return 1; __attribute__((fallthrough)); x++;\n"
