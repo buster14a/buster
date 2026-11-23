@@ -242,10 +242,12 @@ the census below measures, run in the compile). `--attested=MODE` picks:
 As the reader ends, while it has its binding events, it tests each reading's
 file-scope `DECLARE` and `USE` events and its tags' completions against the
 declaration's list (`check_attested_events`, a declaration's list marked by key
-as its events start). At the unit's end (`check_attested_after`) the memo
-learns the misses read silently (no diagnostic placed at their tokens by output
-position, or by location for one published past the last token, as
-`-Wunused-function`'s), purely and listed, in a unit without an error. A unit
+as its events start; an event in a function body by the identifier at its own
+token, and only where that doesn't spell the name, by the body's names
+marked). At the unit's end (`check_attested_after`) the memo learns the misses
+read silently (no diagnostic placed at their tokens by output position, or by
+location for one published past the last token, as `-Wunused-function`'s),
+purely and listed, in a unit without an error. A unit
 that skipped is read again from its start with nothing skipped, into its stream
 from its start and its arenas emptied (`check_units_compile`), where its first
 reading may have depended on what it skipped: an error or the failure of any
@@ -297,12 +299,20 @@ sets, at two places: its reader's call and its unit's end.
   vector path the declarations' bounds go 64 tokens at a time, then the own
   hashes eight a register (a function definition's is zero, its body unread),
   then each declaration's list from the lane's cache by its own hash, or made
-  a token at a time and kept; `--scalar` runs the lists' walk over the unit,
-  their twin, and the own hashes' scalar loop after it. A body's list holds
-  each key and class once. `--twins` makes each unit's lists, own hashes and
+  a step a token with a part (64 tokens' parts at a time by masks) and kept;
+  `--scalar` runs the lists' walk over the unit, their twin, and the own
+  hashes' scalar loop after it, and a command of one source file, which keeps
+  no cache, walks the unit too, its own hashes the vector path's after the
+  lists. A function body's names make no list (#2769): a definition is a root
+  of every unit, so the reach and the chain take them by key, the last body
+  that names a key (`CheckAttested.namings`, a store a name) and the first
+  that may declare it (`declarings`), and the binding events find them at the
+  events' own tokens. `--twins` makes each unit's lists, own hashes and
   literals again by the other path and counts the units whose results differ,
-  and makes the reader's tree columns whole too and counts each unit whose
-  cached columns differ as a contradiction. Each pass is timed by the thread's user-mode cycles, branch
+  tests each event in a body by the body's names marked and by a search of
+  them too, and makes the reader's tree columns whole and counts each unit
+  whose cached columns differ as a contradiction. Each pass is timed by the
+  thread's user-mode cycles, branch
   misses and L1D read misses (`rdpmc`) and TSC ticks: the first run's, the
   one inside the compile, and with `--passes N` the least of N runs. The
   report gives them a token of the units' tokens.
