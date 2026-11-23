@@ -1790,6 +1790,100 @@ static Tier1CfgBoundaries tier1_cfg_boundaries(const Tier1CfgInput* input, const
     return bounds;
 }
 
+// The interval of the operand interval `i`'s tie names (tier1_cfg_ties, #2685), which ends where `i` starts at its
+// value's definition, or BUSTER_TIER1_CFG_NONE where a tie doesn't hint it.
+static uint32_t tier1_cfg_tied_operand(const Tier1CfgInput* input, const Tier1CfgPieces* pieces, uint32_t i)
+{
+    const uint32_t v = pieces->values[i];
+    const uint32_t hint = pieces->hints[i];
+    const uint32_t named = pieces->hint_intervals[i];
+    const bool exit = named != BUSTER_TIER1_CFG_NONE && (named & BUSTER_TIER1_ALLOCATE_HINT_EXIT) != 0;
+    const uint32_t taken = exit ? named & ~BUSTER_TIER1_ALLOCATE_HINT_EXIT : BUSTER_TIER1_CFG_NONE;
+    const bool tied = input->ties != 0 && hint != BUSTER_TIER1_CFG_NONE && hint != v && (input->ties[2 * (uint64_t)v] == hint || input->ties[2 * (uint64_t)v + 1] == hint);
+    const bool defined = taken != BUSTER_TIER1_CFG_NONE && pieces->starts[i] == input->definitions[v] && pieces->ends[taken] == pieces->starts[i] && pieces->values[taken] == hint;
+    return tied && defined ? taken : BUSTER_TIER1_CFG_NONE;
+}
+
+// Whether interval i may take a call's argument register and avoid the others' (#2823): a general one, not a phi's
+// (`phis`, whose edges place it), with no alternate, that nothing hints or a tie alone.
+static bool tier1_cfg_argument_open(const Tier1CfgInput* input, const Tier1CfgPieces* pieces, const uint8_t* phis, uint32_t i)
+{
+    const bool unhinted = pieces->hints[i] == BUSTER_TIER1_CFG_NONE && pieces->hint_intervals[i] == BUSTER_TIER1_CFG_NONE;
+    const bool tied = !unhinted && tier1_cfg_tied_operand(input, pieces, i) != BUSTER_TIER1_CFG_NONE;
+    return (unhinted || tied) && pieces->alternates[i] == BUSTER_TIER1_CFG_NONE && phis[pieces->values[i]] == 0 && pieces->classes[i] == BUSTER_TIER1_ALLOCATE_GPR;
+}
+
+// A general interval whose last use is a call's register argument, and that nothing but that register and a tie hints
+// (#2646: no other value, named interval or alternate), and not a phi's, whose edges place it, avoids the general registers the call reads its other
+// arguments in (#2823), added to `crossed`. Where its own register is taken, by a value the call reads in another
+// register or one that lives past it, it took the lowest free one, often the register another argument goes to while
+// that argument sat in this one's: the call's parallel move then swapped them through the scratch register, three moves
+// where one was owed. Lua's luaT_callorderiTM calls put the constant for rcx in rsi while the value for rsi sat in rcx. A
+// register it avoids stays its last choice (Tier1AllocationInput.avoided_registers), and a hinted interval keeps its
+// hint.
+//
+// A two-address result takes its dying operand's register (#2685), so the register and the avoided ones go back along
+// the ties to the operand's interval where nothing else hints that one, and to its own tied operand's: lua_settable's
+// `L->top - 2` for rdx and `L->top - 1` for rcx, each a load then an add, loaded each into the other's register. Only
+// where the chain starts at a definition nothing hints: one whose first tie names an operand that can't follow (a value
+// live past it, or one hinted elsewhere) keeps its ties instead, as rebuildPage's copy of sz into rdx does, which would
+// otherwise leave rsi for another register and move there.
+//
+// Each position's registers are one pass over the uses, scattered into a column on `scratch`, and each interval reads
+// its end's. Scalar: the scatter's positions collide (a call's arguments share one), and the walks back are chains, one
+// or two ties long. False where `scratch` is short; it ends as it began.
+static bool tier1_cfg_argument_avoidance(const Tier1CfgInput* input, const Tier1CfgPieces* pieces, uint8_t* register_hints, uint32_t count, Arena* scratch, uint32_t* crossed)
+{
+    const uint64_t mark = scratch->length;
+    uint32_t* read = arena_push_array(scratch, (uint64_t)input->position_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint8_t* phis = read != 0 ? arena_push(scratch, (uint64_t)input->value_count + 1, 1) : 0;
+    if (phis != 0)
+    {
+        memset(read, 0, ((uint64_t)input->position_count + 1) * sizeof(uint32_t));
+        memset(phis, 0, (uint64_t)input->value_count + 1);
+        for (uint32_t k = 0; k < input->phi_count; k += 1)
+        {
+            phis[input->phi_values[k]] = 1;
+        }
+        for (uint32_t v = 0; v < input->value_count; v += 1)
+        {
+            const bool general = input->classes[v] == BUSTER_TIER1_ALLOCATE_GPR;
+            for (uint32_t u = input->use_offsets[v]; general && u < input->use_offsets[v + 1]; u += 1)
+            {
+                const uint8_t reg = input->use_registers[u];
+                read[input->use_positions[u]] |= reg < 32 ? 1u << reg : 0;
+            }
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint8_t reg = register_hints[i];
+            const bool argument = reg < 32 && tier1_cfg_argument_open(input, pieces, phis, i) && pieces->ends[i] != 0;
+            // The chain back along the ties, through operands with no register hint of their own (one step each), to its
+            // root: a definition nothing hints. A chain that stops at a tie it can't follow, an operand live on or hinted
+            // elsewhere, is left to its ties, which avoiding the registers would break.
+            uint32_t root = i;
+            uint32_t operand = argument ? tier1_cfg_tied_operand(input, pieces, i) : BUSTER_TIER1_CFG_NONE;
+            for (uint32_t steps = 0; operand != BUSTER_TIER1_CFG_NONE && steps < count; steps += 1)
+            {
+                const bool open = register_hints[operand] == UINT8_MAX && tier1_cfg_argument_open(input, pieces, phis, operand);
+                root = open ? operand : root;
+                operand = open ? tier1_cfg_tied_operand(input, pieces, operand) : BUSTER_TIER1_CFG_NONE;
+            }
+            const bool rooted = argument && tier1_cfg_tied_operand(input, pieces, root) == BUSTER_TIER1_CFG_NONE;
+            const uint32_t avoided = rooted ? read[pieces->ends[i] - 1] & ~(1u << reg) : 0;
+            uint32_t member = rooted ? i : BUSTER_TIER1_CFG_NONE;
+            for (uint32_t steps = 0; member != BUSTER_TIER1_CFG_NONE && steps < count; steps += 1)
+            {
+                crossed[member] |= avoided;
+                register_hints[member] = reg;
+                member = member != root ? tier1_cfg_tied_operand(input, pieces, member) : BUSTER_TIER1_CFG_NONE;
+            }
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return phis != 0;
+}
+
 // The general registers each of `count` intervals avoids (Tier1CfgInput.sequences, #2767), into `crossed`: those of the
 // fixed sequences that a range of its value's phi web lives across (at positions after the range's start and before its
 // end), but those a sequence leaves to its reader where the range is the reader's (a shift's count in cl); 0 for another
@@ -2417,6 +2511,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         Tier1CfgPieces pieces = { 0 };
         uint64_t interval_count = 0;
         uint64_t split_count = 0;
+        // The intervals' register hints (#2646), which tier1_cfg_argument_avoidance carries back along ties (#2823).
+        uint8_t* argument_hints = 0;
         for (uint32_t pass = 0; ready && pass < 2; pass += 1)
         {
             uint32_t* use_offsets = 0;
@@ -2594,6 +2690,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 tier1_cfg_operand_targets(input, phi_hints, ups, phis, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_ties(input, candidate.value_interval_offsets, &pieces);
                 tier1_cfg_body_hints(input, candidate.value_interval_offsets, &pieces);
+                argument_hints = register_hints;
                 candidate.block_starts = input->block_starts;
                 candidate.block_count = input->block_count;
                 candidate.intervals = (Tier1AllocationInput){
@@ -2635,7 +2732,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         // the same in every problem over these intervals. The ranges are whole now, a merged block's having grown past the
         // piece the builder started.
         // And every general range avoids the problem's avoided_general registers (#2819).
-        const bool avoids = input->sequence_count != 0 || input->avoided_general != 0;
+        // And a call's unhinted argument avoids the call's other argument registers (#2823).
+        const bool avoids = input->sequence_count != 0 || input->avoided_general != 0 || argument_hints != 0;
         uint32_t* crossed = ready && avoids ? arena_push_array(output, (uint64_t)candidate.intervals.count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
         if (crossed != 0 && input->sequence_count == 0)
         {
@@ -2646,6 +2744,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         {
             crossed[i] |= pieces.classes[i] == BUSTER_TIER1_ALLOCATE_GPR ? input->avoided_general : 0;
         }
+        ready = ready && (argument_hints == 0 || tier1_cfg_argument_avoidance(input, &pieces, argument_hints, candidate.intervals.count, scratch, crossed));
         candidate.intervals.avoided_registers = crossed;
         if (ready)
         {
