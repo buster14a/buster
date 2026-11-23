@@ -41,6 +41,13 @@ static void check_test_driver_sign_compare(CheckTest* test, const char* clang, c
         { "subtraction after explicit signed cast still warns", "int f(unsigned short b,unsigned m){return (int)b-1<m;}\n", 1, NULL, NULL },
         { "nonnegative constant remains quiet", "int f(unsigned long m){return 3<m;}\n", 0, NULL, NULL },
         { "negative constant still warns", "int f(unsigned long m){return -2<m;}\n", 1, NULL, NULL },
+        { "integer constant comparisons", "enum { K = -1 };\n"
+          "_Static_assert(K >= sizeof(int), \"\");\n"
+          "int f(void){return (-1 < 0u) + (K <= 2u) + (4u > (K-1)) + (sizeof(int) >= K) + (K == 2u) + (2u != K);}\n", 0, NULL, NULL },
+        { "C23 constexpr comparisons", "constexpr int k = -2; constexpr unsigned limit = 2u;\n"
+          "int f(void){return k < limit;}\nint g(unsigned u){return u < k;}\n", 1, "-std=c23", NULL },
+        { "folded comparisons outside integer constant expressions", "int f(void){return ((void)0, -2) < 2u;}\n"
+          "int g(int x){return 2u > (x = -2);}\n", 2, NULL, NULL },
         { "wider signed type represents unsigned int", "int f(unsigned b,long m){return b<m;}\n", 0, NULL, NULL },
         { "wide signed and unsigned remain different", "int f(unsigned long b,long m){return b<m;}\n", 1, NULL, NULL },
         { "both narrow operands promote to signed int", "int f(signed char b,unsigned short m){return b<m;}\n", 0, NULL, NULL },

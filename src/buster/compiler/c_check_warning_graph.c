@@ -5,6 +5,8 @@
 // sixteen-node blocks. Only established warning facts allocate storage.
 // Stage a new immutable suffix so failure cannot publish an event pointer into a rolled-back arena.
 
+#include "c_check_logical_constant.c"
+
 static uint32_t check_warning_graph_first(const CheckGraph* graph, const Parser* parser, uint32_t node)
 {
     uint32_t first = graph->tokens[node];
@@ -1520,6 +1522,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
     uint32_t* void_candidates = NULL;
     uint32_t void_count = 0;
     uint32_t void_capacity = 0;
+    CheckLogicalConstants logical_constants = { 0 };
     for (uint32_t first = 0; valid && first < graph->count; first += 16)
     {
         const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
@@ -1534,6 +1537,8 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CAST));
         for (; valid && selected != 0; selected &= selected - 1)
         {
@@ -1557,6 +1562,24 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                         event.payload.name = check_input_operand_spelling(&reader, graph->operand0[node]);
                         event.payload.data = check_input_operand_spelling(&reader, graph->operand1[node]);
                         check_input_warning_once(&reader, &event);
+                    }
+                }
+                else if (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR)
+                {
+                    const TypeId left = check_stream_type(stream, graph->operand0[node]);
+                    const TypeId right = check_stream_type(stream, graph->operand1[node]);
+                    if (check_action_is_integer(types, left) && check_action_is_integer(types, right) &&
+                        type_unqualified(type_strip_aligned(types, left)) != BUSTER_TYPE_BOOL &&
+                        !check_warning_graph_macro(parser, token) &&
+                        !check_input_logical_enumerator(&staged, parser, token != 0 ? token - 1 : BUSTER_CHECK_NONE, token) &&
+                        !check_input_logical_enumerator(&staged, parser, token + 1, token))
+                    {
+                        CheckAction action;
+                        check_graph_action(graph, stream, node, NULL, &action);
+                        action.node = token;
+                        action.operands[1] = check_warning_logical_constant(&reader, stream, graph->operand1[node], completion, &logical_constants);
+                        const CheckActionResult checked = { 0 };
+                        check_input_constant_logical_warning(&reader, &action, &checked, completion);
                     }
                 }
                 else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)

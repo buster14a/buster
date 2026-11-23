@@ -3372,6 +3372,12 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             break;
         }
         case BUSTER_TIER1_FLOAT_RESIZE:
+            // Legacy cvtss2sd and cvtsd2ss merge into their destination's upper lanes: break that dependency where the
+            // destination isn't the operand's own register (#3308), whose zero would clobber the operand.
+            if (x != (holes->left & 15))
+            {
+                tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
+            }
             tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->resize, x, holes->left & 15));
             break;
         case BUSTER_TIER1_FLOAT_FROM_BITS:
@@ -4581,10 +4587,11 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
 
 // Whether an aggregate argument's or parameter's `location` has it on the stack whole, its bytes in its slots from its
 // first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot, and a record's vector
-// payload alone (PAYLOAD, #2798), whose slot is a part's (tier1_select_location_parts).
+// payload alone (PAYLOAD, #2798), whose slot is a part's (tier1_select_location_parts), and a FIRST location's (#1844), whose
+// slots are its first 16 bytes' alone.
 static bool tier1_select_location_whole(AbiLocation location)
 {
-    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0;
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0;
 }
 
 // The bytes of the vector register a part of `bytes` takes whole (#141, #2798): its own 16, 32 or 64, or a payload's
@@ -4610,6 +4617,9 @@ static bool tier1_select_part_payload(uint32_t bytes)
 // register; none on the stack whole or ignored.
 static uint32_t tier1_select_location_parts(AbiLocation location, uint32_t size, Tier1SelectPart* parts)
 {
+    // A FIRST location's (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's registers),
+    // of the value's first 16 bytes alone.
+    size = (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : size;
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
@@ -4674,11 +4684,14 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 
 // Whether a function's own result part is loaded straight from the result's address on the way out (#1847): a whole
 // vector register's, 16, 32 or 64 bytes of a split vector (tier1_select_result_parts), which no byte past the object's
-// widens and whose load can't overwrite the address, a general register; and a record's payload (#2798), in pieces that
-// stay inside it (tier0_payload_load). Any other part is staged in the red zone.
+// widens and whose load can't overwrite the address, a general register; a record's payload (#2798), in pieces that
+// stay inside it (tier0_payload_load); and since #3299 a whole eightbyte's, 8 bytes of the object into a general
+// register (an __int128's halves into rax and rdx) or an xmm one, whose load reads no byte past them either. A general
+// register's load may overwrite the address: tier1_select_result_order loads that part last. Any other part (an
+// eightbyte's tail of fewer bytes, which an 8-byte load would read past) is staged in the red zone.
 static bool tier1_select_part_direct(Tier1SelectPart part)
 {
-    return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16;
+    return ((part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16) || part.bytes == 8;
 }
 
 // The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
@@ -4763,6 +4776,21 @@ static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t 
     return slot;
 }
 
+// The part a function's own result loads `k`th of its `count` parts on the way out (#3299), from the address in general
+// register `source`: the parts in order, but a general register's part loaded straight from the address
+// (tier1_select_part_direct) into `source` itself, which goes last, so that no load reads the address after another
+// overwrote it. Its registers differ, so one part at most is that.
+static uint32_t tier1_select_result_order(const Tier1SelectPart* parts, uint32_t count, uint8_t source, uint32_t k)
+{
+    uint32_t last = count;
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        const bool general = (parts[j].reg & 0xe0) != BUSTER_ABI_REGISTER_VECTOR;
+        last = general && tier1_select_part_direct(parts[j]) && parts[j].reg == source ? j : last;
+    }
+    return last == count ? k : k + 1 == count ? last : k < last ? k : k + 1;
+}
+
 // Whether a function's own result parts, `count` of them, fit the red zone's slots, as its return stages them all at
 // once (#1847, the #1645 review's bound): tier1_select_result_parts admits no other, and its consumer and the code's
 // certificate refuse one.
@@ -4812,7 +4840,9 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
             placed &= parts[k].reg != BUSTER_ABI_REGISTER_NONE || slotted;
         }
         // A PAYLOAD slot (#2798) is a part's, its payload alone (tier1_select_location_parts).
-        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0 &&
+        // So is a FIRST location's (#1844), whose parts are its first 16 bytes' alone; a FIRST location on the stack whole
+        // isn't taken (tier1_select_location_whole).
+        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0 &&
                     (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
     }
     return supported;

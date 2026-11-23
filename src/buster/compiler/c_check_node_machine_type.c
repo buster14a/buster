@@ -132,6 +132,7 @@ static const uint32_t node_machine_row_candidates[] = {
     BUSTER_CHECK_INACTIVE_UNION_ADDRESS,
     BUSTER_CHECK_GNU_DIVISION,
     BUSTER_CHECK_GNU_FLOAT_RANGE,
+    BUSTER_CHECK_INVALID_CONSTANT,
 };
 
 // T's table, made by node_machine_tables_initialize from the actions and baked (baked.c): by row operator, then the
@@ -1219,9 +1220,10 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
 // computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library) and any the reader marked for one in a
 // unit with a rename pragma (node_machine_renames), any call in a unit with overload sets (node_machine_overloads), a
 // callee without a prototype or of another convention than System V's (what check_lower_convention_call refuses, and
-// the conventions that keep more registers), more arguments than Tier 0's calls take, or a callee that returns twice
-// (check_lower_calls_twice's and check_lower_indirect_twice's, which the lowering marks its function for). The census
-// refuses before it the callees whose attributes or names the warnings read (node_census_callee).
+// the conventions that keep more registers), more arguments than Tier 0's calls take, a callee that returns twice
+// (check_lower_calls_twice's and check_lower_indirect_twice's, which the lowering marks its function for), or one a
+// declaration gives always_inline, whose direct call the lowering may expand in its caller (#2983). The census refuses
+// before it the callees whose attributes or names the warnings read (node_census_callee).
 static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a)
 {
     const NodeMachineColumns* columns = machine->columns;
@@ -1237,7 +1239,7 @@ static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, 
     if (!refused && object != 0)
     {
         const IdentId name = node_machine_object_name(machine, object);
-        refused = node_machine_object_twice(machine, object);
+        refused = node_machine_object_twice(machine, object) || node_machine_object_inlined(machine, object);
         for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
         {
             refused |= name != 0 && machine->twice_names[k] == name;
@@ -1629,8 +1631,10 @@ static __attribute__((noinline)) bool node_machine_update_pointer_rule(NodeMachi
     NodeMachineOperand pointer_operand;
     NodeMachineOperand index_operand;
     CheckConversion conversions[2] = { { 0 }, { 0 } };
+    // (The destination's own type is a pointer's: an array's lvalue converts to one as a value, and is no modifiable
+    // lvalue, which the action reports of `a++`.)
     bool taken = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_SUBTRACT_ASSIGN && (standing_a & 0x03u) == CHECK_LVALUE &&
-                 (columns->value_types[a] & BUSTER_TYPE_QUALIFIERS) == 0 &&
+                 (columns->value_types[a] & BUSTER_TYPE_QUALIFIERS) == 0 && check_action_kind(types, columns->value_types[a]) == BUSTER_TYPE_KIND_POINTER &&
                  (flags_a & (BUSTER_CHECK_VECTOR_DUPLICATE | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_VOLATILE_PART)) == 0 &&
                  node_machine_operand_value(machine, a, &pointer_operand, conversions) && check_action_kind(types, pointer_operand.type) == BUSTER_TYPE_KIND_POINTER &&
                  pointer_operand.constant_kind == CHECK_CONSTANT_NONE && node_machine_record_fault(machine, a) == CHECK_FAULT_NONE;
@@ -2241,6 +2245,32 @@ static bool node_machine_symbolic_operand(const NodeMachine* machine, uint32_t r
            (columns->conversion_flags[2 * r + k] & BUSTER_CHECK_CONVERT_LVALUE) == 0;
 }
 
+// The window publishes its tape and summary from runtime lvalues. Defer an expression that may need
+// the emission-only initializer proof (#2987). A call or store that merely takes a const argument
+// can still use its tape.
+static bool node_machine_const_control(const NodeMachine* machine, uint32_t records)
+{
+    const CheckGraph* graph = machine->graph;
+    const uint32_t root = records - 1;
+    const CheckOp op = node_machine_record_op(machine, root);
+    bool control = check_action_is_integer(machine->types, node_machine_record_type(machine, root)) &&
+                   (op == CHECK_OP_VALUE || op == CHECK_OP_MEMBER || op == CHECK_OP_SUBSCRIPT || check_program_const_operator(op));
+    bool receipt = false;
+    for (uint32_t r = 0; r < records && !(receipt && control); r += 1)
+    {
+        const CheckOp current = node_machine_record_op(machine, r);
+        control |= current == CHECK_OP_LOGICAL_AND || current == CHECK_OP_LOGICAL_OR || current == CHECK_OP_CONDITIONAL;
+        if (!receipt && (type_qualifiers(node_machine_record_type(machine, r)) & (BUSTER_TYPE_CONST | BUSTER_TYPE_VOLATILE)) == BUSTER_TYPE_CONST &&
+            node_machine_record_category(machine, r) == CHECK_LVALUE && check_action_is_integer(machine->types, node_machine_record_type(machine, r)))
+        {
+            const uint32_t node = node_machine_node(machine, r);
+            const uint32_t position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE;
+            receipt = check_const_find(graph->const_values, node_machine_record_object(machine, r), position, NULL) != NULL;
+        }
+    }
+    return receipt && control;
+}
+
 // T: every record's value and its operands' conversions, up the postorder, for the expression of `count` records, graph
 // nodes `first` to first + count - 2 and `root`. A refusal stops it, at machine->stopped.
 static NodeMachineRefusal node_machine_type_in_context(NodeMachine* machine, uint32_t first, uint32_t root, uint32_t count, bool constant_evaluated)
@@ -2259,6 +2289,7 @@ static NodeMachineRefusal node_machine_type_in_context(NodeMachine* machine, uin
     machine->action_warnings = 0;
     // The nodes a row or a rule typed, counted here and added to the machine's once: a store into the machine at each
     // record would make every read of its fields after it a load again (-fno-strict-aliasing).
+    TypeId qualifiers = 0;
     uint64_t rows = 0;
     uint32_t r = 0;
     while (refusal == NODE_MACHINE_TAKEN && r < records)
@@ -2346,7 +2377,14 @@ static NodeMachineRefusal node_machine_type_in_context(NodeMachine* machine, uin
         columns->words[r] = word;
         columns->facts[r] = facts;
         columns->value_classes[r] = (facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)word;
+        qualifiers |= columns->value_types[r];
         r += refusal == NODE_MACHINE_TAKEN;
+    }
+    if (refusal == NODE_MACHINE_TAKEN && (type_qualifiers(qualifiers) & BUSTER_TYPE_CONST) != 0 && graph->const_values != NULL &&
+        (graph->const_values->count != 0 || graph->const_values->prefix != NULL) && node_machine_const_control(machine, records))
+    {
+        refusal = NODE_MACHINE_REFUSED_CONTEXT;
+        r = records - 1;
     }
     machine->row_nodes += rows;
     // The record T stopped at: the one that refused, or else the last; none where the shape refused before the loop.

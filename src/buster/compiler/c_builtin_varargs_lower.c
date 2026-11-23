@@ -71,15 +71,19 @@ static bool cbuiltin_varargs_aggregate_plan(const CBuiltinLowerBuffer* buffer, c
         vector += plan.sources[k] == BUSTER_ABI_VA_VECTOR ? 1 : 0;
     }
     const bool high = (plan.flags & BUSTER_ABI_FLAG_HIGH) != 0;
+    // A FIRST plan's registers (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's
+    // registers) are its first 16 bytes'.
+    const bool first = (plan.flags & BUSTER_ABI_FLAG_FIRST) != 0 && call->size > BUSTER_ABI_REGISTER_BYTES;
+    const uint32_t size = first ? BUSTER_ABI_REGISTER_BYTES : call->size;
     const bool object = call->object < buffer->local_count && buffer->local_classes[call->object] == BUSTER_TYPED_CLASS_VOID &&
                         (buffer->local_flags[call->object] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
     // A 17--23-byte SSE/SSEUP record uses one save-area XMM slot, but advances over its full 24-byte overflow slot.
-    const bool short_vector = call->size > BUSTER_ABI_REGISTER_BYTES && call->size < BUSTER_ABI_REGISTER_BYTES + BUSTER_ABI_SLOT_BYTES &&
+    const bool short_vector = size > BUSTER_ABI_REGISTER_BYTES && size < BUSTER_ABI_REGISTER_BYTES + BUSTER_ABI_SLOT_BYTES &&
                               !high && general == 0 && vector == 1 && plan.sources[0] == BUSTER_ABI_VA_VECTOR && plan.sources[1] == BUSTER_ABI_VA_NONE;
-    const bool registers = plan.kind == BUSTER_ABI_LOCATION_REGISTERS && (call->size <= 2 * BUSTER_ABI_SLOT_BYTES || short_vector) && general == plan.integer_registers &&
-                           vector == plan.vector_registers && general + vector != 0 && (plan.flags & ~BUSTER_ABI_FLAG_HIGH) == 0 &&
-                           (high ? plan.sources[0] == BUSTER_ABI_VA_NONE && plan.sources[1] != BUSTER_ABI_VA_NONE && call->size > BUSTER_ABI_SLOT_BYTES
-                                 : plan.sources[0] != BUSTER_ABI_VA_NONE && (plan.sources[1] == BUSTER_ABI_VA_NONE || call->size > BUSTER_ABI_SLOT_BYTES));
+    const bool registers = plan.kind == BUSTER_ABI_LOCATION_REGISTERS && (size <= 2 * BUSTER_ABI_SLOT_BYTES || short_vector) && general == plan.integer_registers &&
+                           vector == plan.vector_registers && general + vector != 0 && (plan.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_FIRST)) == 0 &&
+                           (high ? plan.sources[0] == BUSTER_ABI_VA_NONE && plan.sources[1] != BUSTER_ABI_VA_NONE && size > BUSTER_ABI_SLOT_BYTES
+                                 : plan.sources[0] != BUSTER_ABI_VA_NONE && (plan.sources[1] == BUSTER_ABI_VA_NONE || size > BUSTER_ABI_SLOT_BYTES));
     const bool stack = plan.kind == BUSTER_ABI_LOCATION_STACK && plan.integer_registers == 0 && plan.vector_registers == 0 && plan.flags == 0 &&
                        plan.sources[0] == BUSTER_ABI_VA_NONE && plan.sources[1] == BUSTER_ABI_VA_NONE;
     const bool area = plan.stack_bytes == slots && plan.overflow_alignment_log2 >= BUSTER_ABI_SLOT_LOG2 && plan.overflow_alignment_log2 <= 31;

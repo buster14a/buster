@@ -257,7 +257,10 @@ static bool check_control_switch_prune(CheckControlWriter* writer, uint32_t keyw
     const uint32_t expression = graph->ops[condition] == CHECK_OP_CONDITION ? graph->operand0[condition] : condition;
     const CheckValue value = expression < graph->count ? check_stream_value(program->stream, expression) : (CheckValue){ 0 };
     bool folded = value.constant_kind == CHECK_CONSTANT_INTEGER && value.fault == CHECK_FAULT_NONE && (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
-                  check_control_foldable(writer, expression) && !check_control_labeled(writer, keyword + 1, token);
+                  check_control_foldable(writer, expression);
+    CheckValue initialized;
+    const bool from_initializer = !folded && check_program_const_integer(program, expression, &initialized);
+    folded = (folded || from_initializer) && !check_control_labeled(writer, keyword + 1, token);
     uint32_t selected = BUSTER_CHECK_NONE;
     uint32_t fallback = BUSTER_CHECK_NONE;
     uint32_t range = 0;
@@ -276,7 +279,8 @@ static bool check_control_switch_prune(CheckControlWriter* writer, uint32_t keyw
         else
         {
             unsigned __int128 integer = 0;
-            const bool matches = check_program_case_value(program, expression, item->type, &integer, NULL) && integer == item->lower;
+            const bool matches = check_program_case_integer(program, from_initializer ? &initialized : NULL, expression, item->type, &integer, NULL) &&
+                                 integer == item->lower;
             selected = matches && (selected == BUSTER_CHECK_NONE || item->token > selected) ? item->token : selected;
         }
     }
