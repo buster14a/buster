@@ -391,6 +391,11 @@ struct CheckInitWalker
     // member (check_init_skip_member, #1842), after which `skipped` says the designation's value is to be skipped.
     bool recovered;
     bool skipped;
+    // A static vector subobject's value that is no constant, in a diagnostic walk that defers constants: reported at the
+    // walk's end only where it recovered from nothing else, as clang checks constants only in a list without errors
+    // (#1842's `{ .nope = 1, 0, gv }`), and as the walk's scalar values are (defer_constants).
+    bool nonconstant_pending;
+    uint32_t nonconstant_token;
     // The counted members' trace (#1842's 3d), only in a diagnostic walk of a unit that has them.
     CheckInitCounted* counted;
 };
@@ -1896,6 +1901,8 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     const bool scalar = BUSTER_SCALAR_PATH(parser->options.scalar);
     uint32_t token = *position;
     const bool old_style = check_init_old_style_designator(parser, token, end);
+    // Whether a brace elision's list was open here: the designation ends it, and its member is behind the list's place.
+    const bool elided = walker->depth > 1 && !walker->frames[walker->depth - 1].braced;
     while (walker->depth > 1 && !walker->frames[walker->depth - 1].braced)
     {
         walker->depth -= 1;
@@ -2159,9 +2166,14 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
             token += !square && token < end && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
         }
         token += token < end && (parser->tokens.kinds[token] == PARSE_KIND_EQUAL || (old_style && parser->tokens.kinds[token] == PARSE_KIND_COLON));
+        // As clang's: past a brace elision's member, which the designation ended, and past a union's members, which
+        // count the failed designation as their initialized one (CheckStructUnionTypes' InitializedSomething).
+        CheckInitFrame* base = &walker->frames[base_depth - 1];
+        const TypeId base_type = type_strip_aligned(walker->types, base->type);
+        const bool base_union = !base->wrapper && type_kind(walker->types, base_type) == BUSTER_TYPE_KIND_UNION;
         walker->depth = base_depth;
-        walker->frames[base_depth - 1].next = base_next;
-        walker->frames[base_depth - 1].designator = base_designator;
+        base->next = base_union ? walker->types->tags.member_count[walker->types->types.index[type_index(base_type)]] : base_next + (elided ? 1 : 0);
+        base->designator = base_designator;
     }
     else if (walker->result->status == CHECK_INIT_OK)
     {
@@ -2886,6 +2898,21 @@ static bool check_init_whole(CheckInitWalker* walker, const CheckInitSelection* 
 
 #include "c_check_initializer_vector.c"
 
+// A static vector subobject's value that is no constant, at its culprit `token`: kept for the walk's end in a diagnostic
+// walk that defers constants (CheckInitWalker.nonconstant_pending), or the walk's failure.
+static void check_init_vector_nonconstant(CheckInitWalker* walker, uint32_t token)
+{
+    if (walker->defer_constants && walker->failures != NULL)
+    {
+        walker->nonconstant_token = walker->nonconstant_pending ? walker->nonconstant_token : token;
+        walker->nonconstant_pending = true;
+    }
+    else
+    {
+        check_init_fail(walker, CHECK_INIT_NON_CONSTANT, token);
+    }
+}
+
 static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSelection* selected, TypeId destination, uint32_t token, uint32_t node)
 {
     const TypeId target = type_unqualified(type_strip_aligned(walker->types, selected->type));
@@ -2925,7 +2952,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         }
         else if (walker->static_storage && !check_value_evaluated_constant(&converted.value))
         {
-            check_init_fail(walker, CHECK_INIT_NON_CONSTANT, check_init_culprit(walker, source_node, token, element));
+            check_init_vector_nonconstant(walker, check_init_culprit(walker, source_node, token, element));
         }
         else
         {
@@ -2965,7 +2992,7 @@ static void check_init_vector_value(CheckInitWalker* walker, const CheckInitSele
         }
         else if (walker->static_storage)
         {
-            check_init_fail(walker, CHECK_INIT_NON_CONSTANT, check_init_culprit(walker, node, token, destination));
+            check_init_vector_nonconstant(walker, check_init_culprit(walker, node, token, destination));
         }
         else
         {
@@ -3828,6 +3855,12 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
                 result->failed_token = walker.first_failure.token;
             }
             valid = false;
+        }
+        if (valid && walker.nonconstant_pending)
+        {
+            valid = false;
+            result->status = CHECK_INIT_NON_CONSTANT;
+            result->failed_token = walker.nonconstant_token;
         }
         if (!check_init_semantic_publish(&walker))
         {

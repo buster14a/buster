@@ -6424,14 +6424,23 @@ returns before it moves the list's next member (`check_init_skip_member`):
   (`check_init_skip_value`), and the list's next element is the one before
   the designation, an array's index too: `{ .nope = 1, { 1, 2 } }` gives the
   braces to the record's first member;
-- the lists open there have the error (`CheckInitFrame.failed`): their leftover
-  values give no excess warning, and their braces fill in no `counted_by`
-  list as they close (clang's "cannot implicitly initialize"), while braces
-  that follow the error, for later members, fill theirs and warn of their own
-  excess;
+- the lists open there have the error: their leftover values give no excess
+  warning (`CheckInitFrame.failed`, the bit #2441's hard conversions set, so an
+  overlong string still warns), and their braces fill in no `counted_by` list
+  as they close (`CheckInitFrame.member_failed`; clang's "cannot implicitly
+  initialize"), while braces that follow the error, for later members, fill
+  theirs and warn of their own excess;
+- a designation that ends a brace elision's list resumes past the elided
+  member (`{ 1, 2, 3, [2].nope = 4, 5 }` gives 5 to `t[2].x`), and one in a
+  union's list counts as the union's member, so later values are left over
+  (clang's `InitializedSomething`);
 - a conversion's second error, clang's "initializer element is not a
   compile-time constant", isn't given in the same initializer, whose list
-  clang leaves invalid.
+  clang leaves invalid; a static vector member's value that is no constant
+  waits for the walk's end for the same reason
+  (`CheckInitWalker.nonconstant_pending`);
+- the error sorts among the list's conversions and warnings by its token, as
+  #2916 sorts the conversions.
 
 A designator chain whose earlier designators named members (`.b.nope`) keeps
 what they selected as used, so later braces for that member get clang's
@@ -6443,8 +6452,6 @@ is (`check_test_driver_warning_catalog`).
 Differences left:
 - clang's typo correction (`.xvl` "did you mean 'xval'?" and its note), after
   which clang initializes the corrected member;
-- an initializer's warnings publish before its errors (#2914), so an excess or
-  `-Winitializer-overrides` warning comes before the designator's error;
 - an override warning of braces that have a hard error of their own, which
   clang leaves out (also without a failed designator:
   `struct P a[2] = { [1] = { 0 }, [1] = { 1, gp } };`).

@@ -13617,7 +13617,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     .repeated = after_counted,
                                     .default_source = default_error ? failure.failed_source : 0,
                                     .default_target = default_error ? failure.failed_type : 0,
-                                    .suborder = failure.failed_source != 0 && failure.token < tokens ? (uint64_t)parse_source_index(&checking->tokens, failure.token) + 1u : 0,
+                                    // (A designator that names no member too, which the walk recovers from among the conversions, #1842.)
+                                    .suborder = (failure.failed_source != 0 || failure.status == CHECK_INIT_MEMBER) && failure.token < tokens ?
+                                                    (uint64_t)parse_source_index(&checking->tokens, failure.token) + 1u : 0,
                                 };
                                 // A static object's braced subobject whose conversion clang warns of and makes, where its value is
                                 // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
