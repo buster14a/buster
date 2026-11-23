@@ -44,7 +44,10 @@ requirements. [Command index](README.md).
   definition. A straight line whose allocation can't place a value (an evicted
   parameter whose incoming register another operand holds) goes through the CFG
   consumer too. The 128-bit integers are split into 64-bit halves before the
-  optimizer (`ir_wide.c`, #141): `test-tier1-wide [--seed N] [--programs N]
+  optimizer (`ir_wide.c`, #141), and their frame objects then into two `I64`
+  fields that promotion makes values (#3299, `check_tier1_passes`; the
+  driver's 128-bit integers' fixture in `test-checker-driver` checks them
+  against clang across units): `test-tier1-wide [--seed N] [--programs N]
   [--print] [--file IR]` runs hand-written and random 128-bit IR, and Tier 0's
   random 128-bit programs, through the split by both paths, the optimizer and
   both of Tier 1's paths natively, against the IR's interpreter on the unsplit
@@ -56,8 +59,7 @@ requirements. [Command index](README.md).
   the interpreter and the optimizer, natively at x86-64's pieces, with its
   refusals and its scan's two paths (`tier1_wide_vectors_test.c`).
   A register-class aggregate's fields stay in registers (#3311: SROA's
-  widening, the function's own scalar parameters and result, and its result's
-  eightbytes loaded straight from their slot; the [IR optimization
+  widening, and the function's own scalar parameters and result; the [IR optimization
   guide](ir-optimization.md#register-class-aggregates-in-registers-3311)).
   The convention's rarer aggregate shapes are taken; those of vectors still
   refuse explicitly ([the Tier 1 guide](../../docs/tier1.md)'s list). AVX-512's

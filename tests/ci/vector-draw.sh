@@ -22,11 +22,12 @@ command -v jq > /dev/null || fail 'jq is required'
 # The row's items as hosted-correctness.yml lists them, the costliest first; a pull request's row is `none` alone.
 every='m1 m2 m3 m4 a1 a2 a3 a4 t1 t2 t3 t4 n1 n2 n3 n4'
 export LC_ALL=C GITHUB_REPOSITORY=buster14a/buster GITHUB_RUN_ID=7 BUSTER_VECTOR_CONFIGURATIONS=none BUSTER_SANITIZER_OPTIMIZATION=3
-export BUSTER_VECTOR_ITEMS="$every" VECTOR_DRAW_POLL=0 VECTOR_DRAW_COLLECT_LIMIT=2 VECTOR_DRAW_TAKE_LIMIT=2 VECTOR_DRAW_PRODUCT_LIMIT=2 VECTOR_DRAW_PRODUCT_POLL=0 GH_TOKEN=fixture
+export BUSTER_VECTOR_ITEMS="$every" VECTOR_DRAW_POLL=0 VECTOR_DRAW_COLLECT_LIMIT=2 VECTOR_DRAW_TAKE_LIMIT=2 VECTOR_DRAW_PRODUCT_LIMIT=2 VECTOR_DRAW_PRODUCT_POLL=0 VECTOR_DRAW_SERVED_POLL=0 VECTOR_DRAW_SERVED_LIMIT=2 GH_TOKEN=fixture
 export RUNNER_TEMP="$work/runner" FIXTURE="$work/api"
 mkdir -p "$RUNNER_TEMP" "$FIXTURE" "$work/bin"
 : > "$FIXTURE/rest-calls"
 printf '0\n' > "$FIXTURE/artifact-calls"
+printf '0\n' > "$FIXTURE/find-calls"
 p=vector-O3
 products=vector-product-O3
 sha=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -83,6 +84,19 @@ export PATH="$work/bin:$PATH"
 cat > "$work/bin/artifacts" <<'ARTIFACTS'
 #!/usr/bin/env bash
 set -euo pipefail
+# find NAME: download-artifact's lookup, which serves a listed artifact only after its first FIXTURE_FIND_MISSES
+# lookups (#3301), and fails every lookup with FIXTURE_FIND_FAIL=1.
+if [ "$#" -eq 2 ] && [ "$1" = find ]; then
+    count=$(($(cat "$FIXTURE/find-calls") + 1))
+    printf '%s\n' "$count" > "$FIXTURE/find-calls"
+    [ "${FIXTURE_FIND_FAIL:-0}" -eq 0 ] || { echo 'fixture Results lookup unavailable' >&2; exit 1; }
+    [ "$count" -gt "${FIXTURE_FIND_MISSES:-0}" ] || exit 0
+    { jq -r '.artifacts[].name' "$FIXTURE/artifacts.json"
+      if [ -n "${FIXTURE_PRODUCT_AFTER_JOBS:-}" ] && grep -q '/jobs?' "$FIXTURE/rest-calls"; then
+          printf '%s\n' "$FIXTURE_PRODUCT_AFTER_JOBS"
+      fi; } | grep -Fx -- "$2" || true
+    exit 0
+fi
 [ "$#" -eq 1 ] && [ "$1" = list ] || exit 1
 count=$(($(cat "$FIXTURE/artifact-calls") + 1))
 printf '%s\n' "$count" > "$FIXTURE/artifact-calls"
@@ -97,7 +111,8 @@ if [ -n "${FIXTURE_PRODUCT_AFTER_JOBS:-}" ] && grep -q '/jobs?' "$FIXTURE/rest-c
 fi
 ARTIFACTS
 export VECTOR_ARTIFACT_NODE=bash VECTOR_ARTIFACT_HELPER="$work/bin/artifacts"
-reset_calls() { : > "$FIXTURE/rest-calls"; printf '0\n' > "$FIXTURE/artifact-calls"; }
+reset_calls() { : > "$FIXTURE/rest-calls"; printf '0\n' > "$FIXTURE/artifact-calls"; printf '0\n' > "$FIXTURE/find-calls"; }
+find_calls() { cat "$FIXTURE/find-calls"; }
 rest_calls() { wc -l < "$FIXTURE/rest-calls"; }
 job_calls() { grep -c '/jobs?' "$FIXTURE/rest-calls" || true; }
 charged() { awk 'END { print NR - 1 }' "$RUNNER_TEMP/vector-rest/$1.tsv"; }
@@ -262,6 +277,22 @@ jobs 1 "$(draw 2 4 in_progress 1)" "$(draw 1 2 in_progress 1)"
 product thread || { cat "$work/log"; fail 'a published product'; }
 [ "$(rest_calls)" -eq 0 ] && [ "$(charged product)" -eq 0 ] || fail 'a published first-attempt product reads jobs'
 [ "$(output name)" = "$products-1-thread-$sha" ] && [ "$(output digest)" = "$sha" ] || fail "the product's name and digest: $(output name)"
+[ "$(find_calls)" -eq 1 ] || fail "a served product took $(find_calls) lookups"
+pass
+# Listed before the download's lookup serves it (#3301): it waits for the lookup, and names nothing until then.
+FIXTURE_FIND_MISSES=2 product thread || { cat "$work/log"; fail 'a listed product the lookup serves late'; }
+[ "$(find_calls)" -eq 3 ] && [ "$(output name)" = "$products-1-thread-$sha" ] || fail "a late-served product: $(find_calls) lookups, $(output name)"
+grep -q 'lookup served thread.s product after' "$work/log" || fail 'a late-served product without its wait'
+# The lookup never serves it, or always fails: it fails closed, naming no product for the download.
+for variant in misses fail; do
+    if [ "$variant" = misses ]; then
+        if FIXTURE_FIND_MISSES=1000000 product thread; then fail 'a product the lookup never serves'; fi
+    elif FIXTURE_FIND_FAIL=1 product thread; then
+        fail 'a product whose lookup always fails'
+    fi
+    grep -q "the download's lookup of it found none" "$work/log" || { cat "$work/log"; fail "a never-served product without its reason ($variant)"; }
+    [ -z "$(output name)" ] || fail "a never-served product was named ($variant)"
+done
 pass
 # Not yet published while its builder runs: the limit fails it.
 artifacts "$p-1-assign-1-m1x2-t2x3" "$p-1-assign-2-t1x4"

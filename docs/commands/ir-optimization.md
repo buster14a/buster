@@ -216,8 +216,8 @@ forwarding. Tier 1 now takes them in three steps, all in
 Tier 1 runs the widening SROA on every function with its own ABI records
 (`check_tier1_compile`, and `check_tier1_inline_expand` where the expansion
 runs), and a two-eightbyte result is loaded straight from its slot into `rax`
-and `rdx` (or `xmm0` and `xmm1`) rather than staged in the red zone
-(`tier1_select_result_eightbytes`, which the code certificate mirrors).
+and `rdx` (or `xmm0` and `xmm1`) rather than staged in the red zone (#3299's
+`tier1_select_part_direct`).
 `tests/ir-source/register-aggregates.c` checks the shapes (mixed widths,
 floats, padding, nesting, arrays, 9 to 16 bytes, fields left unread, an
 escaping parameter, several returns, unions) by both strict native paths

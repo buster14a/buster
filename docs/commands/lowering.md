@@ -371,7 +371,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone|--front-alone-split|--front-alone-first] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone|--front-alone-split|--front-alone-first] [--bodies] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -1706,8 +1706,8 @@ The report adds:
   not-their-payloads'=0`: the operators the rule left out, of every record
   the loop swept; with `--verify`, those of them in an expression the tests
   ran on, each checked (a swept record of an expression without tests has
-  none to check), and the integer constants whose record says its value
-  (one folded from a floating constant is a wide value, which says none);
+  none to check), and the integer constants whose record says its value, including ordinary integers folded from floating
+  constants;
 - `node-shadow: own tests calls-left-out=N checked=N of-them-with-a-test=0
   of-them-with-a-loud-argument=0 casts-over-one=N
   callees-asked-for-their-result=N
@@ -2795,6 +2795,78 @@ faults. `--list N` prints the first N
 differences (`alone difference file=... line=... field=...`), the first N
 bodies it refuses whose popped roots the other takes, and the first N bodies
 the scan and the front disagree on (`alone the scan finds ...`).
+
+### A body's entries from its controls and its tapes (#2850)
+
+`./build/compiler measure-node-machine --shadow --bodies [--list N] [preprocessor options] file...`
+makes each lowered body's stream again, after the pipeline, from the
+program's controls and the tapes the machine makes of the body's roots, and
+compares it with the lowered function's, entry for entry: kind, class and
+value. No compile takes it
+([the node machine](../node-machine.md#a-bodys-entries-from-its-controls-and-its-tapes)).
+
+It reports two lines a run, and a third where it applies:
+
+- `bodies lowered=... the-machine-takes-every-root-of=... attempted=...
+  same=... different=...`: the lowered bodies and their tokens; those whose
+  every popped root the machine takes; those the piece attempts, with their
+  tokens and the entries it made; those whose entries are the lowered
+  function's, and those that differ.
+- `bodies left out, by the first reason: ...`: the others, in bodies and
+  tokens: a root the machine does not take; a root that is no control's of
+  its own; a tracked stack; copies of parameters without a prototype; a
+  result of another class; a control of another kind; a return of another
+  kind; an initialization of another form; no room.
+
+Where a body is left out for a control of another kind, a third line counts
+those bodies by the first such control's kind (`switch=...`).
+
+With `--front-alone` the comparison is made a second time before the walk
+([the node machine](../node-machine.md#the-same-comparison-before-the-walk)),
+and the run has these lines more:
+
+- `alone roots against the program's controls with an expression, in the
+  lowered bodies: evaluate=... branch=... return=... initialize=...
+  another=...`: by the control's kind, the controls, those whose
+  expression's root's token has one root the machine ran on before the walk,
+  none or several, and those whose root's control's token is the control's;
+  then the roots it ran on in those bodies and those some control has.
+- `bodies before the walk lowered=... attempted=... same=... different=...`
+  and `bodies before the walk left out, by the first reason: ...`: the same
+  two lines for the entries made from the tapes kept before the walk, each
+  control finding its root by its token; "every root the machine's" is that
+  machine's verdict of the body before the walk. Two reasons are its own: a
+  control whose root is not kept before the walk, and a condition that is a
+  constant (an `if`'s).
+- `bodies before the walk the program dropped a range of=...
+  attempted-there=...`: the bodies with a constant `if` the program folded,
+  and those of them attempted, which must be none.
+- `controls from the tokens: attempted=... same=... different=... left out:
+  ...`: the bodies whose controls the twin made from the tokens, its
+  controls, the bodies whose controls are the program's and those that
+  differ, and the others by reason (not whole before the walk, a range the
+  program dropped, a `switch`, an `asm` statement, a variable-length array or
+  `typeof`, a cleanup, a jump of another kind, a block's static or extern
+  declaration, a statement expression, a shape it does not know, no room).
+
+- `controls from the tokens, the return flow: its silence proved for=...
+  the program warns of=... proved-silent-and-warned-of=...`: of the bodies
+  the twin attempts, those whose END its controls cannot reach (or whose
+  function is `main`, or has no result and is not `noreturn`), those the
+  program's own return flow has a warning for, and those of them the proof
+  called silent, which must be none.
+
+A body that differs in either, one attempted where the program dropped a
+range, or one proved silent that the program warns of makes the command exit
+1; `--list N` prints the first N of each
+(`bodies before the walk difference ...`, `controls from the tokens
+difference file=... line=... field=... control=...`).
+
+A body that differs makes the command exit 1. `--list N` prints the first N
+(`bodies difference file=... line=... field=... entry=...`: the body's first
+line, the first field that differs among `count`, `locals`, `calls`,
+`calls'-rows`, `kind`, `class`, `local`, `label`, `temporary` and `value`,
+and the entry).
 
 ### Compiling with the window (#2850)
 

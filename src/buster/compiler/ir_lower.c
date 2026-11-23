@@ -81,8 +81,9 @@ static bool ir_typed_access_valid(uint8_t kind, uint8_t class, uint64_t value)
     const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
     const uint32_t orders = kind == BUSTER_TYPED_LOAD ? 0x27u : 0x29u;
     const uint64_t order = value & BUSTER_TYPED_FENCE_ORDER;
-    // A segment override (#1447) goes to the access's flags (ir_typed_access); the rest is the class's.
-    value &= ~BUSTER_TYPED_ACCESS_SEGMENT;
+    // A segment override (#1447) and a volatile access's mark (#3310) go to the access's flags (ir_typed_access); the rest
+    // is the class's.
+    value &= ~(BUSTER_TYPED_ACCESS_SEGMENT | (integer ? BUSTER_TYPED_ACCESS_VOLATILE : 0));
     return !integer || value == 0 || ((value & ~(uint64_t)(BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_ORDER)) == 0 && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0 && (orders >> order & 1) != 0);
 }
 
@@ -648,9 +649,11 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_emit(IrTypedSink*
 // BUSTER_IR_ATOMIC and its order, and its natural alignment, which the checker's direct access has proven and the
 // verifier requires of an atomic access. The flags column starts zeroed, which an ordinary access keeps.
 // A segment override (#1447, BUSTER_TYPED_ACCESS_SEGMENT) of any class it admits (ir_typed_segment_class) goes to
-// BUSTER_IR_SEGMENT, numbered as the typed stream numbers it.
+// BUSTER_IR_SEGMENT, numbered as the typed stream numbers it, and a volatile access's mark (#3310,
+// BUSTER_TYPED_ACCESS_VOLATILE, a scalar class's alone) to BUSTER_IR_VOLATILE.
 static __attribute__((always_inline)) inline void ir_typed_access(IrTypedSink* sink, uint32_t id, uint8_t class, uint64_t value)
 {
+    const bool scalar = class != BUSTER_TYPED_CLASS_VECTOR && class != BUSTER_TYPED_CLASS_MASK;
     const bool integer = class >= BUSTER_TYPED_CLASS_I8 && class <= BUSTER_TYPED_CLASS_U64;
     const uint8_t segment = (uint8_t)((value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT) << BUSTER_IR_SEGMENT_SHIFT);
     if (sink->output != 0 && integer && (value & BUSTER_TYPED_ACCESS_ATOMIC) != 0)
@@ -661,6 +664,10 @@ static __attribute__((always_inline)) inline void ir_typed_access(IrTypedSink* s
     if (sink->output != 0 && __builtin_expect(segment != 0, 0))
     {
         sink->output->flags[id] |= segment;
+    }
+    if (sink->output != 0 && scalar && __builtin_expect((value & BUSTER_TYPED_ACCESS_VOLATILE) != 0, 0))
+    {
+        sink->output->flags[id] |= BUSTER_IR_VOLATILE;
     }
 }
 

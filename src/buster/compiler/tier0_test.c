@@ -963,6 +963,29 @@ static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const c
 // sizes the branches and encodes each function into `code`.
 static void tier0_test_scan_program(Tier0TestTally* tally, const Tier0Function* function, Arena* arena, uint64_t seed, uint32_t changes, uint64_t* taken);
 
+// #3308: the first of `count` records that is a legacy SSE conversion merging into its XMM destination (cvtsi2ss/sd,
+// cvtss2sd, cvtsd2ss) without the record before it zeroing that destination (xorps), but where it reads the destination
+// itself, which the dependency is then the operand's; `count` when there is none. Also counts the conversions into
+// `conversions`.
+static uint32_t tier0_test_unbroken_conversion(const X86Instruction* records, uint32_t count, uint32_t* conversions)
+{
+    uint32_t first = count;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        const X86Instruction* record = &records[r];
+        const uint32_t form = record->form & BUSTER_X86_FORM_NUMBER;
+        const bool integer = form == X86_FORM_CVTSI2SS_X_RM32 || form == X86_FORM_CVTSI2SS_X_RM64 || form == X86_FORM_CVTSI2SD_X_RM32 || form == X86_FORM_CVTSI2SD_X_RM64;
+        const bool resize = form == X86_FORM_CVTSS2SD_X_XM32 || form == X86_FORM_CVTSD2SS_X_XM64;
+        const bool in_place = resize && record->mode == BUSTER_X86_REGISTER_DIRECT && record->rm == record->reg;
+        const X86Instruction* before = r > 0 ? &records[r - 1] : 0;
+        const bool zeroed = before != 0 && (before->form & BUSTER_X86_FORM_NUMBER) == X86_FORM_XORPS_X_XM128 && before->mode == BUSTER_X86_REGISTER_DIRECT &&
+                            before->reg == record->reg && before->rm == record->reg;
+        *conversions += integer || resize ? 1 : 0;
+        first = first == count && (integer || resize) && !in_place && !zeroed ? r : first;
+    }
+    return first;
+}
+
 static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functions, Arena* arena, Tier0TestCode* code, uint64_t seed)
 {
     bool result = true;
@@ -1021,6 +1044,10 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             char name[64];
             snprintf(name, sizeof(name), "seed %" PRIu64 " function %u", seed, f);
             result = result && tier0_test_covered(tally, "effects", name, &scalar);
+            uint32_t conversions = 0;
+            const uint32_t unbroken = tier0_test_unbroken_conversion(scalar.records, scalar.count, &conversions);
+            result = result && tier0_test_expect(tally, unbroken == scalar.count, "conversions",
+                                                 "seed %" PRIu64 " function %u: record %u converts into a register it doesn't zero first (#3308)", seed, f, unbroken);
         }
         if (result)
         {
@@ -3234,6 +3261,61 @@ static const float tier0_test_unsigned_floats[BUSTER_TIER0_TEST_UNSIGNED_VALUES]
 static const char* const tier0_test_unsigned_names[4] = { "to double", "to float", "from double", "from float" };
 static const uint8_t tier0_test_unsigned_to[4] = { BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64 };
 static const uint8_t tier0_test_unsigned_from[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_F32 };
+
+// #3308: every conversion to F32 or F64 from another class (U64's deferred one among them), of a local's home and of a
+// register (the local negated first), zeroes its destination before a legacy conversion that merges into it, as
+// tier0_test_unbroken_conversion checks every program's records; and a resize in place keeps its operand.
+static void tier0_test_conversion_zeroes(Tier0TestTally* tally)
+{
+    Arena arena = arena_reserve(1u << 20);
+    tier0_test_expect(tally, arena.base != 0, "conversion zeroes", "no memory");
+    for (uint32_t to = BUSTER_TYPED_CLASS_F32; to <= BUSTER_TYPED_CLASS_F64 && arena.base != 0; to += 1)
+    {
+        for (uint32_t from = BUSTER_TYPED_CLASS_I8; from <= BUSTER_TYPED_CLASS_F64; from += 1)
+        {
+            // Narrow integers have no NEG of their own (C promotes them): their conversion from a register is the random
+            // programs'.
+            const uint32_t shapes = tier0_class_bytes(from) < 4 ? 1 : 2;
+            for (uint32_t negated = 0; negated < shapes && from != to; negated += 1)
+            {
+                const uint8_t kinds[4] = { BUSTER_TYPED_LOCAL, negated != 0 ? BUSTER_TYPED_NEG : BUSTER_TYPED_CONVERT, BUSTER_TYPED_CONVERT, BUSTER_TYPED_RETURN };
+                const uint8_t classes[4] = { (uint8_t)from, (uint8_t)(negated != 0 ? from : to), (uint8_t)to, (uint8_t)to };
+                const uint8_t* used_kinds = negated != 0 ? kinds : (const uint8_t[3]){ kinds[0], kinds[1], kinds[3] };
+                const uint8_t* used_classes = negated != 0 ? classes : (const uint8_t[3]){ classes[0], classes[1], classes[3] };
+                const uint64_t values[4] = { 0, 0, 0, 0 };
+                const uint8_t local_classes[1] = { (uint8_t)from };
+                const uint8_t local_flags[1] = { 0 };
+                const bool from_floating = tier0_class_floating(from);
+                const AbiLocation parameter = { .registers = { from_floating ? BUSTER_ABI_REGISTER_VECTOR : BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE },
+                                                .kind = BUSTER_ABI_LOCATION_REGISTERS };
+                Tier0Function function;
+                memset(&function, 0, sizeof(function));
+                function.kinds = used_kinds;
+                function.classes = used_classes;
+                function.values = values;
+                function.count = negated != 0 ? 4 : 3;
+                function.local_classes = local_classes;
+                function.local_flags = local_flags;
+                function.local_count = 1;
+                function.parameter_count = 1;
+                function.parameters = &parameter;
+                function.result = (AbiReturn){ .kind = BUSTER_ABI_RESULT_REGISTERS, .part_bytes = 8,
+                                               .registers = { BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE } };
+                const uint64_t mark = arena.length;
+                const Tier0Code code = tier0_compile(&function, &arena);
+                uint32_t conversions = 0;
+                const uint32_t unbroken = code.error == TIER0_OK ? tier0_test_unbroken_conversion(code.records, code.count, &conversions) : 0;
+                // A U64's conversion is one cvtsi2s*; another integer's or a float's, one, but a resize of the negated
+                // value, in its own register, which needs no zero.
+                tier0_test_expect(tally, code.error == TIER0_OK && unbroken == code.count && conversions == 1, "conversion zeroes",
+                                  "class %u to %u%s: error %d, record %u of %u converts into a register it doesn't zero first, %u conversions", from, to,
+                                  negated != 0 ? " (negated)" : "", code.error, unbroken, code.count, conversions);
+                arena_pop_to(&arena, mark);
+            }
+        }
+    }
+    arena_release(&arena);
+}
 
 static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floating(Tier0TestTally* tally)
 {
@@ -6739,6 +6821,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_unsigned_floating(&tally);
                 tier0_test_report("unsigned floating", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_conversion_zeroes(&tally);
+                tier0_test_report("conversion zeroes", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
