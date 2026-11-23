@@ -2134,6 +2134,46 @@ static X86Instruction tier1_emit_vex_canonical(X86Instruction record)
 }
 
 #include "tier1_emit_cfg.c"
+// Rewrites a function's legacy SSE records as their VEX twins (tier1_emit_vex_forms, #2830), for a target that allows
+// them, but in a function with an asm body, whose records are the program's own; each rewritten record's Zen 5 case
+// again. One record for one, so that every index into the records (branches, references, origins, the frame's events
+// and the debug definitions) stays. Sixteen records a step: their forms gathered, each one's entry gathered from the
+// table by its row (its number less its segment override's rows, FS's and GS's, which every row has), the records with
+// an entry rewritten one by one. Before the code's certificate and the debug definitions, which read each twin as its
+// legacy record (tier1_emit_vex_canonical): each twin computes its legacy form's low 128 bits (test-tier1-emit runs each
+// pair natively).
+static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, Tier1SelectCode* code)
+{
+    const bool avx = x86_target_form_allowed(allowed_forms, X86_FORM_VADDSS_X_X_XM32) && x86_target_form_allowed(allowed_forms, X86_FORM_VMOVQ_X_RM64);
+    bool body = false;
+    for (uint32_t node = 0; avx && node < plan->function->instruction_count; node += 1)
+    {
+        body = body || tier1_select_body_call(plan->function, node);
+    }
+    for (uint32_t first = 0; avx && !body && first < code->count; first += 16)
+    {
+        uint32_t found = tier1_emit_vex_lookup(code->records + first, code->count - first, tier1_emit_vex_forms);
+        while (found != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(found);
+            found &= found - 1;
+            const uint32_t r = first + lane;
+            const X86Instruction record = code->records[r];
+            const uint32_t legacy = record.form & BUSTER_X86_FORM_NUMBER;
+            const uint32_t segment = legacy - (legacy % X86_FORM_COUNT);
+            const uint32_t entry = tier1_emit_vex_forms[legacy - segment];
+            const X86Instruction twin = tier1_emit_vex_record(record, entry, segment);
+            if (x86_target_form_allowed(allowed_forms, twin.form))
+            {
+                code->records[r] = twin;
+                const uint8_t id = x86_zen5_id(&twin);
+                code->unknown_costs += (id == 0) - (code->cost_ids[r] == 0);
+                code->cost_ids[r] = id;
+            }
+        }
+    }
+}
+
 #include "tier1_certificate_emitted.c"
 #include "tier1_debug_straight.c"
 
@@ -2278,6 +2318,10 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
     {
         error = tier1_emit_records(plan, allowed_forms, options->sources, output, scratch, &emitted, error_node);
     }
+    if (error == TIER1_EMIT_OK)
+    {
+        tier1_emit_vex(plan, allowed_forms, &emitted.code);
+    }
     if (error == TIER1_EMIT_OK && chain && options->sources)
     {
         error = tier1_debug_straight(plan, options, output, &emitted);
@@ -2374,45 +2418,6 @@ static bool tier1_emit_upper_dirty(const X86Instruction* records, uint32_t count
     return dirty != 0;
 }
 
-// Rewrites a function's legacy SSE records as their VEX twins (tier1_emit_vex_forms, #2830), for a target that allows
-// them, but in a function with an asm body, whose records are the program's own; each rewritten record's Zen 5 case
-// again. One record for one, so that every index into the records (branches, references, origins, the frame's events
-// and the debug definitions) stays. Sixteen records a step: their forms gathered, each one's entry gathered from the
-// table by its row (its number less its segment override's rows, FS's and GS's, which every row has), the records with
-// an entry rewritten one by one. After the certificate, which checks the legacy records: each twin computes its legacy
-// form's low 128 bits (test-tier1-emit runs each pair natively).
-static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, Tier1SelectCode* code)
-{
-    const bool avx = x86_target_form_allowed(allowed_forms, X86_FORM_VADDSS_X_X_XM32) && x86_target_form_allowed(allowed_forms, X86_FORM_VMOVQ_X_RM64);
-    bool body = false;
-    for (uint32_t node = 0; avx && node < plan->function->instruction_count; node += 1)
-    {
-        body = body || tier1_select_body_call(plan->function, node);
-    }
-    for (uint32_t first = 0; avx && !body && first < code->count; first += 16)
-    {
-        uint32_t found = tier1_emit_vex_lookup(code->records + first, code->count - first, tier1_emit_vex_forms);
-        while (found != 0)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctz(found);
-            found &= found - 1;
-            const uint32_t r = first + lane;
-            const X86Instruction record = code->records[r];
-            const uint32_t legacy = record.form & BUSTER_X86_FORM_NUMBER;
-            const uint32_t segment = legacy - (legacy % X86_FORM_COUNT);
-            const uint32_t entry = tier1_emit_vex_forms[legacy - segment];
-            const X86Instruction twin = tier1_emit_vex_record(record, entry, segment);
-            if (x86_target_form_allowed(allowed_forms, twin.form))
-            {
-                code->records[r] = twin;
-                const uint8_t id = x86_zen5_id(&twin);
-                code->unknown_costs += (id == 0) - (code->cost_ids[r] == 0);
-                code->cost_ids[r] = id;
-            }
-        }
-    }
-}
-
 // Whether a function likely leaves the upper state dirty (#2830): one of its values is a 32- or 64-byte vector, which
 // Tier 1 keeps in a ymm or zmm register. Sixty-four types a step, by masked loads that stay inside the type column. A
 // machine row or an asm body may name such a register without one, and a function with one may not, which
@@ -2436,8 +2441,8 @@ static bool tier1_emit_upper_likely(const IrFunction* function)
 // zmm register below 16 (Tier1EmitResult.zero_upper, #2830), as clang's code has. Whether it will is predicted from its
 // values' types (tier1_emit_upper_likely) and checked on its code (tier1_emit_upper_dirty): a wrong prediction emits the
 // function again, as the code says, so that only a mispredicted function pays a second emission (one emission of every
-// function that names such a register cost main.c's compile 5.7% at -march=znver5 on the 9700X). Then, at a target with
-// AVX, its legacy SSE records become their VEX twins (tier1_emit_vex).
+// function that names such a register cost main.c's compile 5.7% at -march=znver5 on the 9700X). Each pass, at a target
+// with AVX, makes its legacy SSE records their VEX twins (tier1_emit_vex) before certifying them.
 static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const uint64_t output_mark = output != 0 ? output->length : 0;
@@ -2449,10 +2454,6 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     {
         arena_pop_to(output, output_mark);
         error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, dirty);
-    }
-    if (error == TIER1_EMIT_OK)
-    {
-        tier1_emit_vex(plan, allowed_forms, &result->code);
     }
     return error;
 }

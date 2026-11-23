@@ -489,6 +489,17 @@ static void check_debug_tier1_values_parameters(CheckDebugTestTally* tally)
     Tier1SelectCode code = { .records = linear, .count = BUSTER_ARRAY_LENGTH(linear) };
     check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, expected[0],
                                            "whole and narrow copies, floating carriers, real writes and suspended caller clobbers");
+    // The same copies at a target with AVX, as their VEX twins (#2830, tier1_emit_vex): `vmovaps` for `movaps`, and the
+    // merges `vmovsd x, x, y` and `vmovss x, x, y`, whose VEX.vvvv is the destination. Each carries its parameter alike.
+    const X86Instruction legacy_double = linear[4];
+    const X86Instruction legacy_single = linear[5];
+    linear[4] = (X86Instruction){ .form = X86_FORM_VMOVAPS_X_XM128, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = 2, .rm = 0 };
+    linear[5] = (X86Instruction){ .form = X86_FORM_VMOVSS_X_X_X, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = 0, .vvvv = 0, .rm = 1 };
+    check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, expected[0], "a vmovaps copy and a vmovss merge carry floating parameters");
+    linear[4] = (X86Instruction){ .form = X86_FORM_VMOVSD_X_X_X, .mode = BUSTER_X86_REGISTER_DIRECT, .reg = 2, .vvvv = 2, .rm = 0 };
+    check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, expected[0], "a vmovsd merge whose VEX.vvvv is its destination carries a double");
+    linear[4] = legacy_double;
+    linear[5] = legacy_single;
     linear[8].form = X86_FORM_MOV_R32_RM32;
     check_debug_tier1_values_parameter_case(tally, &function, values, code, NULL, expected[0],
                                            "a partial-width overwrite kills a formerly preserved 64-bit parameter");

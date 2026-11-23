@@ -559,10 +559,14 @@ after `vzeroupper` ([the record](https://github.com/buster14a/buster-performance
   runs every pair natively on random state and compares the registers, flags,
   MXCSR and memory. A function with an asm body keeps its legacy records: the
   body's are the program's own.
-  The certificate decodes and compares records through
-  `tier1_emit_vex_canonical`, which maps a twin back to its legacy record. That
-  is sound because its register cells never read a register's upper bytes apart
-  from its low ones.
+  Each emission pass rewrites the records before the code's certificate and the
+  debug definitions read them, so `--verify` and `-g` check the final code. They
+  decode and compare records through `tier1_emit_vex_canonical`, which maps a
+  twin back to its legacy record. That is sound because the certificate's
+  register cells never read a register's upper bytes apart from its low ones. The
+  debug locations' parameter copies (`check_tier1_debug_transfer`) read twins the
+  same way, so a parameter's location follows a `vmovaps` or `vmovss x, x, y` copy
+  as it follows `movaps` or `movss`.
 
 The per-unit helpers (`c_check_program_helpers.c`) write no ymm or zmm register,
 so they leave the state as they find it, and Tier 1 clears it before calling them.

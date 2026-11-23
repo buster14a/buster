@@ -1230,3 +1230,42 @@ static void check_debug_tier1_loop_test(CheckDebugTestTally* tally, const char* 
         check_debug_tier1_loop_read(tally, linked, script, directory, arena);
     }
 }
+
+// Floating parameters swapped through a register (#2830): at a target with AVX, Tier 1's copies are the VEX twins of its
+// legacy `movaps` (tier1_emit_vex), and each parameter's location must still follow its copy into xmm15 or xmm0, as at
+// x86-64. Each object compiled strictly with --verify, so the code's certificate reads the twins too; each parameter's
+// list then has its two ranges, four DW_OP_regx in all, one of them xmm15.
+static void check_debug_tier1_vex_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    static const char source_text[] = "void use(double, double);\nvoid f(double a, double b)\n{\n    use(b, a);\n}\n";
+    static const char* const targets[] = { "-march=x86-64", "-march=x86-64-v3", "-march=znver5" };
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_t1v.c", directory);
+    const bool written = foreign_test_write(source, source_text, sizeof(source_text) - 1);
+    check_debug_test_expect(tally, written, "write the Tier 1 VEX parameter fixture", directory);
+    for (uint32_t t = 0; written && t < BUSTER_ARRAY_LENGTH(targets); t += 1)
+    {
+        char object[PATH_MAX];
+        char report[PATH_MAX + 24];
+        char errors[PATH_MAX + 24];
+        snprintf(object, sizeof(object), "%s/dbg_t1v_%u.o", directory, t);
+        snprintf(report, sizeof(report), "%s.info", object);
+        snprintf(errors, sizeof(errors), "%s.err", object);
+        char* compile[] = { (char*)"/proc/self/exe", (char*)"--tier1", (char*)"--tier1-strict", (char*)"--verify", (char*)targets[t], (char*)"-g", (char*)"-c",
+                            (char*)"-o", object, source, NULL };
+        const bool compiled = object_test_run(compile, "/dev/null", errors) == 0;
+        check_debug_test_expect(tally, compiled, "the VEX parameter fixture compiles strictly through Tier 1 with --verify", targets[t]);
+        char* dump[] = { (char*)"llvm-dwarfdump", (char*)"--debug-info", object, NULL };
+        const bool dumped = compiled && object_test_run(dump, report, errors) == 0;
+        const String8 info = dumped ? foreign_test_read(arena, report) : (String8){ 0 };
+        uint32_t ranges = 0;
+        const char* cursor = info.pointer;
+        while (cursor != NULL && (cursor = strstr(cursor, ": DW_OP_regx XMM")) != NULL)
+        {
+            ranges += 1;
+            cursor += 1;
+        }
+        check_debug_test_expect(tally, info.pointer != NULL && ranges == 4 && strstr(info.pointer, "DW_OP_regx XMM15") != NULL,
+                                "each swapped floating parameter's location follows its copy, VEX twin or legacy", targets[t]);
+    }
+}
