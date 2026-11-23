@@ -5731,7 +5731,7 @@ static AsmCode asm_assemble_code(String8 source, const X86MatchIndex* index, Asm
                 }
                 else if (expression.relocation != ASM_RELOCATION_NONE)
                 {
-                    // A C template's references take the code generators' kinds (link_kind_fits), which the 64-bit TLS
+                    // A C template's references take the code generators' kinds (link_add_code_fixups' fit), which the 64-bit TLS
                     // offsets aren't.
                     kind = asm_tls_kind(&parser, instruction->location, expression.relocation, displacement && (operand->mode & BUSTER_X86_MODE_RIP) != 0,
                                         !pc_relative && width == 4 && signed_field, false);

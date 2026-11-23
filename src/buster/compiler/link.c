@@ -76,7 +76,7 @@
 //   - Names: link_hash, link_hash_rows, link_hash_names, link_add_name and link_add_name_hashed.
 //   - Tables: link_capacity_bytes, link_initialize, link_add_atom, link_add_symbol, link_define_symbol, link_add_fixup,
 //     link_fixup_addend and link_add_priority.
-//   - Code: link_instruction_field, link_kind_fits and link_add_code_fixups.
+//   - Code: link_add_code_fixups.
 //   - Checks: link_check_fixups, link_check_target, link_groups_valid, link_check_lanes_below, link_check_in_set,
 //     link_check_gather_bytes, link_check_gather_words, link_check_first, link_check_symbols, link_check_priorities,
 //     link_check_own, link_check_atom_fixups and link_check.
@@ -242,7 +242,7 @@ typedef uint32_t FixupId;
 #define BUSTER_LINK_FIXUP_KIND 0x7f
 #define BUSTER_LINK_FIXUP_WIDE 0x80
 
-// The fields of an instruction a fixup can patch, as link_instruction_field classifies them: a branch's rel32, a
+// The fields of an instruction a fixup can patch, as link_add_code_fixups classifies them: a branch's rel32, a
 // RIP-relative displacement, any other 32-bit displacement or a 32-bit immediate, and a 64-bit immediate or address.
 // Fields of 8 and 16 bits, and displacements that aren't 32-bit, are none of these.
 typedef enum LinkField
@@ -604,7 +604,7 @@ static __attribute__((unused)) bool link_add_priority(Link* link, AtomId atom, u
 // per reference. fixup_ends are the ends x86_encode reported for the instructions marked with BUSTER_X86_FORM_FIXUP, of
 // which there are `marked`. References are sorted by instruction, and an instruction's displacement comes before its
 // immediate; every marked instruction has at least one, and every reference's instruction is marked. Returns false if
-// they don't match, or if a field isn't one its kind can patch (link_instruction_field and LinkFixupKind.fields; and
+// they don't match, or if a field isn't one its kind can patch (link_add_code_fixups' fields and LinkFixupKind.fields; and
 // CALL_GOT only on call and jmp, LOAD_GOT only on mov r64 and GOTTPOFF only on mov and add r64, without a segment
 // override, since linkers rewrite those instructions); the fixups added before the failure stay.
 static __attribute__((unused)) bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* instructions, uint64_t instruction_count, const uint32_t* fixup_ends,
@@ -1266,71 +1266,20 @@ static bool link_add_priority(Link* link, AtomId atom, uint32_t priority)
 // ---------------------------------------------------------------------------------------------------------------------
 // Code
 
-// What field `field` of an instruction is (LinkField), from its form and operands. A memory operand's displacement is
-// 32-bit when it is RIP-relative, absolute or index-only; after a base, only when it doesn't fit in 8 bits in units of
-// an EVEX form's N, since the encoder makes small ones 8-bit or leaves them out, as GNU as does with numbers. So a
-// symbolic one there needs a placeholder that doesn't fit, such as INT32_MIN (x86_fixup_distance says the same).
-static LinkField link_instruction_field(const X86Instruction* instruction, X86FixupField field)
-{
-    const X86FormDescription* form = x86_form_description(instruction->form);
-    const uint8_t mode = instruction->mode;
-    const bool has_modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT) != 0;
-    const bool memory = has_modrm && (form->rm & BUSTER_X86_OPERAND_MEMORY) != 0 && (mode & BUSTER_X86_MODE_MEMORY) != 0;
-    const int32_t scale = form->disp8_scale;
-    const int32_t scaled = instruction->displacement / scale;
-    const bool short_displacement = instruction->displacement % scale == 0 && scaled >= -128 && scaled <= 127;
-    LinkField result = LINK_FIELD_NONE;
-    if (field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 4)
-    {
-        result = LINK_FIELD_BRANCH32;
-    }
-    else if (field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 0 && memory && (mode & BUSTER_X86_MODE_RIP) != 0)
-    {
-        result = LINK_FIELD_RIP32;
-    }
-    else if (field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 0 && memory && ((mode & BUSTER_X86_MODE_BASE) == 0 || !short_displacement))
-    {
-        result = LINK_FIELD_ABSOLUTE32;
-    }
-    else if (field == X86_FIXUP_IMMEDIATE && form->immediate_bytes == 4)
-    {
-        result = LINK_FIELD_ABSOLUTE32;
-    }
-    else if (field == X86_FIXUP_IMMEDIATE && form->immediate_bytes == 8)
-    {
-        result = LINK_FIELD_ABSOLUTE64;
-    }
-    return result;
-}
-
-// Whether `kind` can patch the instruction's field: one of the kind's fields and, for the kinds whose instructions
-// linkers rewrite (call and jmp through the GOT into direct ones, mov from the GOT into lea, initial-exec into
-// local-exec), one of those instructions.
-static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, X86FixupField field)
-{
-    const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
-    bool result = kind < BUSTER_LINK_FIXUP_KINDS && (link_fixup_kinds[kind].fields & BUSTER_LINK_FIELD_BIT(link_instruction_field(instruction, field))) != 0;
-    if (kind == BUSTER_LINK_FIXUP_CALL_GOT)
-    {
-        result = result && (form == X86_FORM_CALL_RM64 || form == X86_FORM_JMP_RM64);
-    }
-    else if (kind == BUSTER_LINK_FIXUP_LOAD_GOT)
-    {
-        result = result && form == X86_FORM_MOV_R64_RM64;
-    }
-    else if (kind == BUSTER_LINK_FIXUP_GOTTPOFF)
-    {
-        result = result && (form == X86_FORM_MOV_R64_RM64 || form == X86_FORM_ADD_R64_RM64);
-    }
-    else if (kind == BUSTER_LINK_FIXUP_TLSGD || kind == BUSTER_LINK_FIXUP_TLSLD || kind == BUSTER_LINK_FIXUP_DTPOFF32 || kind == BUSTER_LINK_FIXUP_TPOFF64 ||
-             kind == BUSTER_LINK_FIXUP_DTPOFF64)
-    {
-        // Only imported objects and the assembler have them (see the kinds above).
-        result = false;
-    }
-    return result;
-}
-
+// What field of an instruction a reference patches (LinkField), from its form and operands: a memory operand's
+// displacement is 32-bit when it is RIP-relative, absolute or index-only; after a base, only when it doesn't fit in 8 bits
+// in units of an EVEX form's N, since the encoder makes small ones 8-bit or leaves them out, as GNU as does with numbers.
+// So a symbolic one there needs a placeholder that doesn't fit, such as INT32_MIN (x86_fixup_distance says the same). A
+// kind fits one of its fields (LinkFixupKind.fields), and the kinds whose instructions linkers rewrite (call and jmp
+// through the GOT into direct ones, mov from the GOT into lea, initial-exec into local-exec) fit those instructions alone.
+//
+// link_add_code_fixups' references eight at a time (#3393): each batch's references, instructions and their forms'
+// descriptions gathered; each reference's field (a short displacement's division in doubles, exact for 32-bit values),
+// its kind's fit, its marked instruction's ordinal (a prefix count of the new
+// instructions) and its offset and addend in vectors; then link_add_fixup's rules, in its order, for each lane as if the
+// lanes before it were added. The lanes before the first that fails are added (their fields cleared by masked
+// stores), and that one fails as the scalar loop failed it: a field's problem, then a full table, an id, a record.
+#define BUSTER_LINK_CODE_BATCH 8
 static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* instructions, uint64_t instruction_count, const uint32_t* fixup_ends,
                                  uint64_t marked, const LinkReference* references, uint64_t reference_count)
 {
@@ -1339,43 +1288,195 @@ static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* 
     {
         link_fail(link, LINK_ERROR_ID);
     }
+    LinkFixups* fixups = &link->fixups;
+    LinkAtoms* atoms = &link->atoms;
+    _Static_assert(sizeof(LinkReference) == 24, "a reference's fields are where the gathers read them");
+    _Static_assert(__builtin_offsetof(X86FormDescription, encoding) + 4 <= sizeof(X86FormDescription) && __builtin_offsetof(X86FormDescription, rm) + 4 <= sizeof(X86FormDescription) &&
+                       __builtin_offsetof(X86FormDescription, disp8_scale) + 4 <= sizeof(X86FormDescription),
+                   "a form's fields are read as 32-bit words within its description");
+    _Static_assert(__builtin_offsetof(LinkFixupKind, width) + 4 <= sizeof(LinkFixupKind), "a kind's width, PC-relativity and fields are one 32-bit word");
+    // The atom's bytes and size, and the end of its last fixup, which a new one starts at or after: none for an atom
+    // without fixups, and one that isn't the table's last can't be followed.
+    const uint8_t* atom_bytes = result ? atoms->bytes[atom] : 0;
+    const uint64_t atom_size = result ? atoms->size[atom] : 0;
+    const uint32_t had = result ? atoms->fixup_count[atom] : 0;
+    const FixupId had_last = had != 0 ? atoms->fixup_begin[atom] + had - 1 : 0;
+    bool chained = had == 0 || had_last + 1 == fixups->count;
+    uint64_t chain_end = had != 0 ? (uint64_t)fixups->offset[had_last] + link_fixup_kinds[fixups->kind[had_last] & BUSTER_LINK_FIXUP_KIND].width : 0;
     // The previous reference's instruction and field, and its instruction's ordinal among the marked ones: one less
     // than the first's, before the first, so that it wraps to 0 there.
     uint64_t previous = UINT64_MAX;
-    uint8_t previous_field = X86_FIXUP_IMMEDIATE;
+    uint64_t previous_field = X86_FIXUP_IMMEDIATE;
     uint64_t ordinal = UINT64_MAX;
-    for (uint64_t i = 0; result && i < reference_count; i += 1)
+    const __m512i lane_ids = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7);
+    const __m512i prefixes = _mm512_setr_epi64(0x1, 0x3, 0x7, 0xf, 0x1f, 0x3f, 0x7f, 0xff);
+    const __m512i byte = _mm512_set1_epi64(0xff);
+    const uint8_t* descriptions = (const uint8_t*)x86_form_descriptions;
+    const uint8_t* kinds = (const uint8_t*)link_fixup_kinds;
+    for (uint64_t i = 0; result && i < reference_count; i += BUSTER_LINK_CODE_BATCH)
     {
-        const LinkReference* reference = &references[i];
-        const uint64_t index = reference->instruction;
-        const bool next_instruction = previous == UINT64_MAX || index > previous;
-        const bool next_field = index == previous && previous_field == X86_FIXUP_DISPLACEMENT && reference->field == X86_FIXUP_IMMEDIATE;
-        ordinal += next_instruction ? 1 : 0;
-        result = index < instruction_count && (next_instruction || next_field) && reference->field <= X86_FIXUP_IMMEDIATE && ordinal < marked &&
-                 (instructions[index].form & BUSTER_X86_FORM_FIXUP) != 0 && link_kind_fits(reference->kind, &instructions[index], reference->field);
-        uint32_t offset = 0;
-        int64_t addend = reference->addend;
-        if (result)
+        const uint32_t n = reference_count - i < BUSTER_LINK_CODE_BATCH ? (uint32_t)(reference_count - i) : BUSTER_LINK_CODE_BATCH;
+        const __mmask8 lanes = (__mmask8)_bzhi_u32(0xff, n);
+        const __m512i at = _mm512_mullo_epi64(_mm512_add_epi64(lane_ids, _mm512_set1_epi64((long long)i)), _mm512_set1_epi64(sizeof(LinkReference)));
+        const __m512i head = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), lanes, at, (const uint8_t*)references, 1);
+        const __m512i target = _mm512_and_si512(_mm512_mask_i64gather_epi64(_mm512_setzero_si512(), lanes, at, (const uint8_t*)references + __builtin_offsetof(LinkReference, target), 1),
+                                                _mm512_set1_epi64(UINT32_MAX));
+        const __m512i addend = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), lanes, at, (const uint8_t*)references + __builtin_offsetof(LinkReference, addend), 1);
+        const __m512i index = _mm512_and_si512(head, _mm512_set1_epi64(UINT32_MAX));
+        const __m512i field = _mm512_and_si512(_mm512_srli_epi64(head, 8 * __builtin_offsetof(LinkReference, field)), byte);
+        const __m512i kind = _mm512_and_si512(_mm512_srli_epi64(head, 8 * __builtin_offsetof(LinkReference, kind)), byte);
+        // Each lane's previous reference: the lane before, or the batch's carry.
+        const __m512i before = _mm512_alignr_epi64(index, _mm512_set1_epi64((long long)previous), 7);
+        const __m512i before_field = _mm512_alignr_epi64(field, _mm512_set1_epi64((long long)previous_field), 7);
+        const __mmask8 next_instruction = _mm512_cmpeq_epi64_mask(before, _mm512_set1_epi64(-1)) | _mm512_cmpgt_epu64_mask(index, before);
+        const __mmask8 next_field = _mm512_cmpeq_epi64_mask(index, before) & _mm512_cmpeq_epi64_mask(before_field, _mm512_set1_epi64(X86_FIXUP_DISPLACEMENT)) &
+                                    _mm512_cmpeq_epi64_mask(field, _mm512_set1_epi64(X86_FIXUP_IMMEDIATE));
+        const __m512i ordinals = _mm512_add_epi64(_mm512_set1_epi64((long long)ordinal),
+                                                  _mm512_popcnt_epi64(_mm512_and_si512(_mm512_set1_epi64(next_instruction), prefixes)));
+        // The instructions and their forms' descriptions.
+        const __mmask8 indexed = lanes & _mm512_cmplt_epu64_mask(index, _mm512_set1_epi64((long long)instruction_count));
+        const __m512i instruction_at = _mm512_slli_epi64(index, 4);
+        const __m512i low = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), indexed, instruction_at, (const uint8_t*)instructions, 1);
+        const __m512i high = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), indexed, instruction_at, (const uint8_t*)instructions + 8, 1);
+        _Static_assert(__builtin_offsetof(X86Instruction, displacement) == 4 && __builtin_offsetof(X86Instruction, mode) == 11 && __builtin_offsetof(X86Instruction, form) == 12,
+                       "an instruction's displacement, mode and form are where the gathers read them");
+        const __m512i displacement = _mm512_srai_epi64(low, 32);
+        const __m512i mode = _mm512_and_si512(_mm512_srli_epi64(high, 24), byte);
+        const __m512i form = _mm512_and_si512(_mm512_srli_epi64(high, 32), _mm512_set1_epi64(0xffff));
+        const __m512i number = _mm512_and_si512(form, _mm512_set1_epi64(BUSTER_X86_FORM_NUMBER));
+        // x86_form_description's row: a segment override's forms are their row's.
+        const __mmask8 fs = _mm512_cmpge_epu64_mask(number, _mm512_set1_epi64(BUSTER_X86_FORM_FS));
+        const __mmask8 gs = _mm512_cmpge_epu64_mask(number, _mm512_set1_epi64(BUSTER_X86_FORM_GS));
+        const __mmask8 ss = _mm512_cmpge_epu64_mask(number, _mm512_set1_epi64(BUSTER_X86_FORM_SS));
+        __m512i row = _mm512_mask_sub_epi64(number, fs & (__mmask8)~gs, number, _mm512_set1_epi64(BUSTER_X86_FORM_FS));
+        row = _mm512_mask_sub_epi64(row, gs & (__mmask8)~ss, number, _mm512_set1_epi64(BUSTER_X86_FORM_GS));
+        row = _mm512_mask_sub_epi64(row, ss, number, _mm512_set1_epi64(BUSTER_X86_FORM_SS));
+        const __m512i description_at = _mm512_mullo_epi64(row, _mm512_set1_epi64(sizeof(X86FormDescription)));
+        const __m512i coding = _mm512_cvtepu32_epi64(_mm512_mask_i64gather_epi32(_mm256_setzero_si256(), indexed, description_at, descriptions + __builtin_offsetof(X86FormDescription, encoding), 1));
+        const __m512i operand = _mm512_cvtepu32_epi64(_mm512_mask_i64gather_epi32(_mm256_setzero_si256(), indexed, description_at, descriptions + __builtin_offsetof(X86FormDescription, rm), 1));
+        const __m256i scale = _mm256_mask_blend_epi32(indexed, _mm256_set1_epi32(1),
+                                                      _mm256_and_si256(_mm512_mask_i64gather_epi32(_mm256_setzero_si256(), indexed, description_at,
+                                                                                                   descriptions + __builtin_offsetof(X86FormDescription, disp8_scale), 1),
+                                                                       _mm256_set1_epi32(0xff)));
+        _Static_assert(__builtin_offsetof(X86FormDescription, immediate_bytes) == __builtin_offsetof(X86FormDescription, encoding) + 1 &&
+                           __builtin_offsetof(X86FormDescription, relative_bytes) == __builtin_offsetof(X86FormDescription, encoding) + 2,
+                       "a form's encoding, immediate and relative bytes are one word's bytes");
+        const __m512i encoding = _mm512_and_si512(coding, byte);
+        const __m512i immediate_bytes = _mm512_and_si512(_mm512_srli_epi64(coding, 8), byte);
+        const __m512i relative_bytes = _mm512_and_si512(_mm512_srli_epi64(coding, 16), byte);
+        const __m512i rm = _mm512_and_si512(operand, _mm512_set1_epi64(0xffff));
+        // The field: a memory operand's displacement after a base is short when it is a multiple of the
+        // form's N whose quotient fits in 8 bits; the quotient of two 32-bit values is exact in doubles, truncated.
+        const __m256i displacement32 = _mm512_cvtepi64_epi32(displacement);
+        const __m256i quotient = _mm512_cvttpd_epi32(_mm512_div_pd(_mm512_cvtepi32_pd(displacement32), _mm512_cvtepi32_pd(scale)));
+        const __mmask8 exact = _mm256_cmpeq_epi32_mask(_mm256_mullo_epi32(quotient, scale), displacement32);
+        const __mmask8 short_displacement = exact & _mm256_cmpge_epi32_mask(quotient, _mm256_set1_epi32(-128)) & _mm256_cmple_epi32_mask(quotient, _mm256_set1_epi32(127));
+        const __mmask8 has_modrm = _mm512_cmpeq_epi64_mask(encoding, _mm512_set1_epi64(BUSTER_X86_ENCODING_R)) | _mm512_test_epi64_mask(encoding, _mm512_set1_epi64(BUSTER_X86_ENCODING_DIGIT));
+        const __mmask8 memory = has_modrm & _mm512_test_epi64_mask(rm, _mm512_set1_epi64(BUSTER_X86_OPERAND_MEMORY)) & _mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_MEMORY));
+        const __mmask8 displacement_field = _mm512_cmpeq_epi64_mask(field, _mm512_set1_epi64(X86_FIXUP_DISPLACEMENT));
+        const __mmask8 immediate_field = _mm512_cmpeq_epi64_mask(field, _mm512_set1_epi64(X86_FIXUP_IMMEDIATE));
+        const __mmask8 unrelative = _mm512_cmpeq_epi64_mask(relative_bytes, _mm512_setzero_si512());
+        const __mmask8 branch32 = displacement_field & _mm512_cmpeq_epi64_mask(relative_bytes, _mm512_set1_epi64(4));
+        const __mmask8 rip32 = displacement_field & unrelative & memory & _mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_RIP));
+        const __mmask8 absolute32 = ((displacement_field & unrelative & memory & (__mmask8)~rip32 &
+                                      ((__mmask8)~_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_BASE)) | (__mmask8)~short_displacement)) |
+                                     (immediate_field & _mm512_cmpeq_epi64_mask(immediate_bytes, _mm512_set1_epi64(4))));
+        const __mmask8 absolute64 = immediate_field & _mm512_cmpeq_epi64_mask(immediate_bytes, _mm512_set1_epi64(8));
+        __m512i link_field = _mm512_maskz_mov_epi64(branch32, _mm512_set1_epi64(LINK_FIELD_BRANCH32));
+        link_field = _mm512_mask_mov_epi64(link_field, rip32, _mm512_set1_epi64(LINK_FIELD_RIP32));
+        link_field = _mm512_mask_mov_epi64(link_field, absolute32, _mm512_set1_epi64(LINK_FIELD_ABSOLUTE32));
+        link_field = _mm512_mask_mov_epi64(link_field, absolute64, _mm512_set1_epi64(LINK_FIELD_ABSOLUTE64));
+        // The kind's fit: its fields, and the instructions the kinds that linkers rewrite are on.
+        const __mmask8 known = lanes & _mm512_cmplt_epu64_mask(kind, _mm512_set1_epi64(BUSTER_LINK_FIXUP_KINDS));
+        const __m512i kind_info = _mm512_cvtepu32_epi64(_mm512_mask_i64gather_epi32(_mm256_setzero_si256(), known, _mm512_mullo_epi64(kind, _mm512_set1_epi64(sizeof(LinkFixupKind))),
+                                                                                    kinds + __builtin_offsetof(LinkFixupKind, width), 1));
+        _Static_assert(__builtin_offsetof(LinkFixupKind, pc_relative) == __builtin_offsetof(LinkFixupKind, width) + 1 && __builtin_offsetof(LinkFixupKind, fields) == __builtin_offsetof(LinkFixupKind, width) + 2,
+                       "a kind's width, PC-relativity and fields are one word's bytes");
+        const __m512i width = _mm512_and_si512(kind_info, byte);
+        const __mmask8 pc_relative = _mm512_test_epi64_mask(kind_info, _mm512_set1_epi64(0xff00));
+        const __m512i kind_fields = _mm512_and_si512(_mm512_srli_epi64(kind_info, 16), byte);
+        const __m512i form_number = _mm512_and_si512(form, _mm512_set1_epi64(BUSTER_X86_FORM_NUMBER));
+        const __mmask8 call_jump = _mm512_cmpeq_epi64_mask(form_number, _mm512_set1_epi64(X86_FORM_CALL_RM64)) | _mm512_cmpeq_epi64_mask(form_number, _mm512_set1_epi64(X86_FORM_JMP_RM64));
+        const __mmask8 load = _mm512_cmpeq_epi64_mask(form_number, _mm512_set1_epi64(X86_FORM_MOV_R64_RM64));
+        const __mmask8 add = _mm512_cmpeq_epi64_mask(form_number, _mm512_set1_epi64(X86_FORM_ADD_R64_RM64));
+        const __mmask8 call_got = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_LINK_FIXUP_CALL_GOT));
+        const __mmask8 load_got = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_LINK_FIXUP_LOAD_GOT));
+        const __mmask8 gottpoff = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_LINK_FIXUP_GOTTPOFF));
+        const uint64_t foreign_kinds = (1ull << BUSTER_LINK_FIXUP_TLSGD) | (1ull << BUSTER_LINK_FIXUP_TLSLD) | (1ull << BUSTER_LINK_FIXUP_DTPOFF32) |
+                                       (1ull << BUSTER_LINK_FIXUP_TPOFF64) | (1ull << BUSTER_LINK_FIXUP_DTPOFF64);
+        const __mmask8 foreign = known & _mm512_test_epi64_mask(_mm512_srlv_epi64(_mm512_set1_epi64((long long)foreign_kinds), kind), _mm512_set1_epi64(1));
+        const __mmask8 fits = known & _mm512_test_epi64_mask(_mm512_sllv_epi64(_mm512_set1_epi64(1), link_field), kind_fields) & (__mmask8)~foreign &
+                              (__mmask8)~(call_got & (__mmask8)~call_jump) & (__mmask8)~(load_got & (__mmask8)~load) & (__mmask8)~(gottpoff & (__mmask8)~(load | add));
+        const __mmask8 placed = indexed & (next_instruction | next_field) & _mm512_cmple_epu64_mask(field, _mm512_set1_epi64(X86_FIXUP_IMMEDIATE)) &
+                                _mm512_cmplt_epu64_mask(ordinals, _mm512_set1_epi64((long long)marked)) &
+                                _mm512_test_epi64_mask(form, _mm512_set1_epi64(BUSTER_X86_FORM_FIXUP)) & fits;
+        // Its offset, from its marked instruction's end, and its addend, without the distance for a PC-relative kind.
+        const __m512i end = _mm512_cvtepu32_epi64(_mm512_mask_i64gather_epi32(_mm256_setzero_si256(), placed, ordinals, (const int*)fixup_ends, 4));
+        const __m512i distance = _mm512_add_epi64(immediate_bytes, _mm512_maskz_mov_epi64(displacement_field, _mm512_mask_mov_epi64(relative_bytes, unrelative, _mm512_set1_epi64(4))));
+        const __m512i taken = _mm512_sub_epi64(addend, distance);
+        const __mmask8 overflow = pc_relative & _mm512_cmpgt_epi64_mask(taken, addend);
+        const __mmask8 fielded = placed & _mm512_cmple_epu64_mask(distance, end) & (__mmask8)~overflow;
+        const __m512i offset = _mm512_sub_epi64(end, distance);
+        const __m512i value = _mm512_mask_mov_epi64(addend, pc_relative, taken);
+        // link_add_fixup's rules for each lane after the ones before it: room, ids, and link_fixup_follows.
+        const __mmask8 wide = _mm512_cmplt_epi64_mask(value, _mm512_set1_epi64(INT32_MIN)) | _mm512_cmpgt_epi64_mask(value, _mm512_set1_epi64(INT32_MAX));
+        const __m512i wide_before = _mm512_popcnt_epi64(_mm512_and_si512(_mm512_set1_epi64(wide), _mm512_srli_epi64(prefixes, 1)));
+        const __mmask8 room = _mm512_cmplt_epu64_mask(_mm512_add_epi64(lane_ids, _mm512_set1_epi64(fixups->count)), _mm512_set1_epi64(fixups->capacity)) &
+                              ((__mmask8)~wide | _mm512_cmplt_epu64_mask(_mm512_add_epi64(wide_before, _mm512_set1_epi64(fixups->wide_count)), _mm512_set1_epi64(fixups->wide_capacity)));
+        const __mmask8 ids = _mm512_test_epi64_mask(target, target) & _mm512_cmplt_epu64_mask(target, _mm512_set1_epi64(link->symbols.count));
+        const __m512i field_end = _mm512_add_epi64(offset, width);
+        const __m512i follows_from = _mm512_alignr_epi64(field_end, _mm512_set1_epi64((long long)chain_end), 7);
+        const __mmask8 follows = (atom_bytes != 0 ? 0xff : 0) & _mm512_test_epi64_mask(kind, kind) & _mm512_cmple_epu64_mask(field_end, _mm512_set1_epi64((long long)atom_size)) &
+                                 _mm512_cmpge_epu64_mask(offset, follows_from) & (chained ? 0xff : 0xfe);
+        const uint32_t field_failed = lanes & (__mmask8)~fielded;
+        const uint32_t full = lanes & (__mmask8)~room;
+        const uint32_t unknown = lanes & (__mmask8)~ids;
+        const uint32_t unfollowed = lanes & (__mmask8)~follows;
+        const uint32_t failed = field_failed | full | unknown | unfollowed;
+        const uint32_t added = failed != 0 ? (uint32_t)__builtin_ctz(failed) : n;
+        const __mmask8 adding = (__mmask8)_bzhi_u32(0xff, added);
+        const __mmask8 widened = adding & wide;
+        const uint32_t first = fixups->count;
+        const __m512i wide_index = _mm512_add_epi64(wide_before, _mm512_set1_epi64(fixups->wide_count));
+        _mm256_mask_storeu_epi32(fixups->offset + first, adding, _mm512_cvtepi64_epi32(offset));
+        _mm256_mask_storeu_epi32(fixups->target + first, adding, _mm512_cvtepi64_epi32(target));
+        _mm_mask_storeu_epi8(fixups->kind + first, adding, _mm512_cvtepi64_epi8(_mm512_mask_or_epi64(kind, widened, kind, _mm512_set1_epi64(BUSTER_LINK_FIXUP_WIDE))));
+        _mm256_mask_storeu_epi32(fixups->addend + first, adding, _mm512_cvtepi64_epi32(_mm512_mask_mov_epi64(value, widened, wide_index)));
+        _mm512_mask_compressstoreu_epi64(fixups->wide_addends + fixups->wide_count, widened, value);
+        // Each added field's bytes cleared, as x86_encode left its placeholder there.
+        uint64_t offsets[BUSTER_LINK_CODE_BATCH];
+        uint64_t widths[BUSTER_LINK_CODE_BATCH];
+        _mm512_storeu_si512(offsets, offset);
+        _mm512_storeu_si512(widths, width);
+        for (uint32_t lane = 0; lane < added; lane += 1)
         {
-            const uint32_t end = fixup_ends[ordinal];
-            const uint32_t distance = x86_fixup_distance(instructions[index].form, reference->field);
-            offset = end - distance;
-            result = distance <= end && !(link_fixup_kinds[reference->kind].pc_relative && __builtin_sub_overflow(reference->addend, (int64_t)distance, &addend));
+            _mm_mask_storeu_epi8(atoms->bytes[atom] + offsets[lane], (__mmask16)_bzhi_u32(0xffff, (uint32_t)widths[lane]), _mm_setzero_si128());
         }
-        if (!result)
+        if (added != 0 && atoms->fixup_count[atom] == 0)
         {
-            link_fail(link, LINK_ERROR_FIELD);
+            atoms->fixup_begin[atom] = first;
         }
-        else
+        atoms->fixup_count[atom] += added;
+        fixups->count += added;
+        fixups->wide_count += (uint32_t)__builtin_popcount(widened);
+        if (failed != 0)
         {
-            result = link_add_fixup(link, atom, offset, reference->kind, reference->target, addend) != 0;
+            const uint32_t lane = 1u << added;
+            link_fail(link, (field_failed & lane) != 0 ? LINK_ERROR_FIELD : (full & lane) != 0 ? LINK_ERROR_FULL : (unknown & lane) != 0 ? LINK_ERROR_ID : LINK_ERROR_RECORD);
+            result = false;
         }
-        if (result)
-        {
-            memset(link->atoms.bytes[atom] + offset, 0, link_fixup_kinds[reference->kind].width);
-        }
-        previous = index;
-        previous_field = reference->field;
+        // The carries: the batch's last reference.
+        uint64_t indices[BUSTER_LINK_CODE_BATCH];
+        uint64_t fields[BUSTER_LINK_CODE_BATCH];
+        uint64_t counted[BUSTER_LINK_CODE_BATCH];
+        _mm512_storeu_si512(indices, index);
+        _mm512_storeu_si512(fields, field);
+        _mm512_storeu_si512(counted, ordinals);
+        previous = indices[n - 1];
+        previous_field = fields[n - 1];
+        ordinal = counted[n - 1];
+        chain_end = offsets[n - 1] + widths[n - 1];
+        chained = true;
     }
     // Every marked instruction has a reference.
     if (result && ordinal + 1 != marked)
