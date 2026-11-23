@@ -36,7 +36,7 @@
 //     rootless world (AbiTestWorld.rootless), whose levels only the waits order, this shows a type the levels took
 //     before what it reads.
 //   - Assignment: random calls over a world's types, named and variadic, with results in memory and in registers,
-//     assigned by the vector path and by its fallback, the per-call assignment (abi_test_check_assignment), each alone:
+//     assigned by abi_assign and by its per-call kernel over every call (abi_test_check_assignment), each alone:
 //     seed 1's against frozen digests, every call within the registers there are and its stack arguments in order, and
 //     a call assigned again alone as in its batch; calls around the vector path's most arguments
 //     (abi_test_long_calls); and the vector path with its argument and location columns ending at a PROT_NONE page.
@@ -156,8 +156,8 @@ static uint64_t abi_test_table_digest(const AbiTable* abi, uint32_t count)
     return hash;
 }
 
-// The routes the vector paths take without scratch, checked as the default ones are and never against them: abi_assign
-// with every scratch arena of the thread exhausted takes the per-call assignment; abi_classify_all's scan, which takes
+// The routes the vector paths take besides their default ones, checked as the default ones are and never against them:
+// the assignment's per-call kernel over every call (abi_test_assign_starved); abi_classify_all's scan, which takes
 // every level when scratch can't hold the levels' columns (abi_classify_scan; abi_wide_alignment's walk needs scratch of
 // its own), is driven here alone.
 typedef struct AbiTestStarved AbiTestStarved;
@@ -207,10 +207,37 @@ static uint32_t abi_test_classify_all_fallback(AbiTable* abi, const TypeTable* t
     return classified;
 }
 
+// Every call by the per-call kernel alone (abi_assign_lanes, eight at a time), which abi_assign takes only for the calls
+// its prefix sums can't place: each call's result and starting totals as abi_assign's setup writes them, then the
+// kernel over all of them, with every scratch arena of the thread exhausted, as neither route needs scratch.
 static void abi_test_assign_starved(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
     const AbiTestStarved starved = abi_test_starve();
-    abi_assign(abi, signatures, locations, calls);
+    uint32_t group[BUSTER_ABI_ASSIGN_DEFERRED];
+    uint64_t firsts[BUSTER_ABI_ASSIGN_DEFERRED];
+    uint32_t grouped = 0;
+    uint64_t first = 0;
+    for (uint32_t c = 0; c < signatures.count; c += 1)
+    {
+        const AbiReturn result = abi->results[signatures.results[c] >> BUSTER_TYPE_INDEX_SHIFT];
+        calls[c] = (AbiCall){
+            .stack_bytes = 0,
+            .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+            .integer_registers = result.kind == BUSTER_ABI_RESULT_MEMORY ? 1 : 0,
+            .vector_registers = 0,
+            .padding = 0,
+            .result = result,
+        };
+        group[grouped] = c;
+        firsts[grouped] = first;
+        grouped += 1;
+        first += signatures.counts[c];
+        if (grouped == BUSTER_ABI_ASSIGN_DEFERRED || c + 1 == signatures.count)
+        {
+            abi_assign_deferred(abi, signatures, group, firsts, grouped, locations, calls);
+            grouped = 0;
+        }
+    }
     abi_test_feed(starved);
 }
 
@@ -5326,7 +5353,7 @@ static bool abi_test_gcc_bit_fields(void)
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// Assignment: random calls over a world's types, by the vector path and by its fallback.
+// Assignment: random calls over a world's types, by abi_assign and by its per-call kernel over every call.
 
 // A type an argument or a result may have: not an array, a function or __fp16, not UNSUPPORTED, nor too large to pass.
 static bool abi_test_passable(const AbiTable* abi, const TypeTable* table, TypeId type)
@@ -5481,8 +5508,8 @@ static void abi_test_assignment_invariants(AbiTestTally* tally, AbiSignatures si
     }
 }
 
-// An assignment of `signatures` by each route, alone: the vector path, and the same entry starved (abi_test_starve),
-// which takes the fallbacks. Each must match `frozen` when given (abi_test_assignment_digest, of seed 1's calls) and
+// An assignment of `signatures` by each route, alone: abi_assign, and the per-call kernel over every call
+// (abi_test_assign_starved). Each must match `frozen` when given (abi_test_assignment_digest, of seed 1's calls) and
 // hold the invariants; and a call of the vector path's, assigned again alone, must take the same locations, as no call
 // depends on the others in its batch (every `stride`-th call, for the long batches' cost).
 static void abi_test_check_assignment(AbiTestTally* tally, const AbiTable* abi, AbiSignatures signatures, uint64_t argument_count, AbiLocation* vector_locations,
