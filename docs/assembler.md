@@ -250,8 +250,9 @@ and `{store}` selects the reverse form for register moves and arithmetic.
 `{vex}` and `{evex}` select the encoding family within the target's enabled
 forms. A direction and a family can appear together in either order.
 `{disp32}` selects a direct branch's rel32 form even when its target is
-within rel8 reach. Forcing a ModRM memory displacement to 32 bits is outside
-this subset. The assembly writer's explicit `.section .eh_frame,"a",@unwind`
+within rel8 reach. On a ModRM memory operand it requests a four-byte
+displacement, including zero and values that fit in an EVEX compressed
+displacement. The assembly writer's explicit `.section .eh_frame,"a",@unwind`
 produces an ELF section of type `SHT_X86_64_UNWIND`.
 
 An AT&T size suffix is the matcher's to check, by each form's suffix width

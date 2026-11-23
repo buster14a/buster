@@ -1626,6 +1626,7 @@ typedef struct CheckCommonEmission
     // Separate ownership for the ordinary tree, detached count scans, count publication, the conversion visit and the
     // literal-only source context (BUSTER_CHECK_EMITTED_*).
     uint8_t* emitted;
+    bool float_precision;
     // The full expression's end a brace initializer's conversions all complete at (check_common_initializer_conversions),
     // or BUSTER_CHECK_NONE, where each conversion's root gives it (check_common_full_expression_end).
     uint32_t at_once;
@@ -1753,6 +1754,8 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 // against its context's target after the arm's (CheckConditionalOperand; the owner the conditional).
 #define BUSTER_CHECK_EMIT_CONVERSION_EDGE 23u
 #define BUSTER_CHECK_EMIT_CONVERSION_ARM 24u
+// A builtin call's floating argument converted to a lower-rank parameter (#3371, check_common_float_argument).
+#define BUSTER_CHECK_EMIT_BUILTIN_FLOAT_ARGUMENT 25u
 // An arm frame's owner (BUSTER_CHECK_EMIT_ARM): a conversion node, or a call argument's slot with this bit, and the
 // prototype bit where its call has one (#1895).
 #define BUSTER_CHECK_ARM_ARGUMENT 0x80000000u
@@ -4476,6 +4479,48 @@ static void check_common_assign_enum(const Parser* parser, Preprocessor* pp, con
     }
 }
 
+// Both a declared call and a builtin record their parameter conversions on argument edges. A
+// type-generic builtin can have arguments without converting any of them to a parameter type.
+static bool check_common_float_argument_narrows(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t index)
+{
+    const uint32_t argument = graph->argument_nodes[index];
+    const CheckConversion edge = stream->argument_conversions[index];
+    return argument < graph->count && argument < stream->count &&
+           (edge.flags & (BUSTER_CHECK_CONVERT_ASSIGNMENT | BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == BUSTER_CHECK_CONVERT_ASSIGNMENT &&
+           check_float_narrows(types, check_stream_type(stream, argument), edge.type);
+}
+
+static bool check_common_builtin_float_candidate(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, uint32_t node)
+{
+    bool candidate = false;
+    if (graph->argument_offsets != NULL && graph->argument_counts != NULL && stream->argument_conversions != NULL)
+    {
+        const uint32_t offset = graph->argument_offsets[node];
+        for (uint32_t i = 0; i < graph->argument_counts[node] && !candidate; i += 1)
+        {
+            candidate = check_common_float_argument_narrows(graph, stream, types, offset + i);
+        }
+    }
+    return candidate;
+}
+
+static void check_common_float_argument(CheckCommonEmission* emission, uint32_t index)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const CheckStream* stream = emission->stream;
+    const uint32_t argument = graph->argument_nodes[index];
+    if (check_common_emit_evaluated(emission, argument) || (emission->emitted[argument] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0)
+    {
+        // Only an ordinary call has a source declaration that can supply a typedef spelling.
+        const uint32_t parent = emission->parents != NULL ? emission->parents[argument] : BUSTER_CHECK_NONE;
+        const uint32_t call = parent < graph->count && graph->ops[parent] == CHECK_OP_CALL && index >= graph->argument_offsets[parent] ? parent : BUSTER_CHECK_NONE;
+        const CheckCommonEnumTarget place = { .conversion = BUSTER_CHECK_NONE, .call = call,
+                                              .argument = call != BUSTER_CHECK_NONE ? index - graph->argument_offsets[call] : 0 };
+        check_common_float_precision(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument,
+                                     stream->argument_conversions[index].type, &place, emission->parents, emission->at_once, emission->scratch);
+    }
+}
+
 // One argument conversion, interleaved with its own subtree. K&R parameters receive their promoted types;
 // only a prototype converts directly to the declared parameter type.
 static uint32_t check_common_enum_cast_arms(const CheckCommonEmission* emission, uint32_t owner);
@@ -4516,18 +4561,9 @@ static void check_common_call_argument(CheckCommonEmission* emission, uint32_t i
             check_common_enum_cast(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type, &place,
                                    false, emission->parents, emission->at_once, emission->scratch);
         }
-        if (argument < graph->count && prototype && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-            (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
-            (check_common_emit_evaluated(emission, argument) || (emission->emitted[argument] & BUSTER_CHECK_EMITTED_LITERAL_CONTEXT) != 0) &&
-            check_float_narrows(emission->types, check_stream_type(stream, argument), conversion.type))
+        if (prototype && emission->float_precision && check_common_float_argument_narrows(graph, stream, emission->types, index))
         {
-            // A floating argument passed to a parameter of a lower floating rank (#1875, check_common_float_precision).
-            const uint32_t parent = emission->parents != NULL ? emission->parents[argument] : BUSTER_CHECK_NONE;
-            const uint32_t call = parent < graph->count && graph->ops[parent] == CHECK_OP_CALL && index >= graph->argument_offsets[parent] ? parent : BUSTER_CHECK_NONE;
-            const CheckCommonEnumTarget place = { .conversion = BUSTER_CHECK_NONE, .call = call,
-                                                  .argument = call != BUSTER_CHECK_NONE ? index - graph->argument_offsets[call] : 0 };
-            check_common_float_precision(emission->parser, emission->pp, emission->input, stream, emission->types, emission->spell, argument, conversion.type,
-                                         &place, emission->parents, emission->at_once, emission->scratch);
+            check_common_float_argument(emission, index);
         }
         if (argument < graph->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && !check_common_query_suppressed(graph, argument) &&
             (conversion.flags & (BUSTER_CHECK_CONVERT_CAST | BUSTER_CHECK_CONVERT_ATOMIC)) == 0 &&
@@ -5709,7 +5745,13 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                     {
                         for (uint32_t i = 0; i < graph->argument_counts[node]; i += 1)
                         {
-                            check_common_emit_reach(emission, graph->argument_nodes[graph->argument_offsets[node] + i], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
+                            const uint32_t index = graph->argument_offsets[node] + i;
+                            check_common_emit_reach(emission, graph->argument_nodes[index], BUSTER_CHECK_EMIT_CONVERSIONS, BUSTER_CHECK_REACH_CONVERSION);
+                            if (emission->float_precision && emission->stream->argument_conversions != NULL &&
+                                check_common_float_argument_narrows(graph, emission->stream, emission->types, index))
+                            {
+                                check_common_emit_push(emission, index, BUSTER_CHECK_EMIT_BUILTIN_FLOAT_ARGUMENT);
+                            }
                         }
                     }
                 }
@@ -5740,6 +5782,9 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                 {
                     check_common_emit_kids(emission, node, graph->ops[node] == CHECK_OP_CONDITIONAL ? 1u : 3u, BUSTER_CHECK_EMIT_TREE);
                 }
+                break;
+            case BUSTER_CHECK_EMIT_BUILTIN_FLOAT_ARGUMENT:
+                check_common_float_argument(emission, node);
                 break;
             case BUSTER_CHECK_EMIT_ARGUMENT:
             case BUSTER_CHECK_EMIT_PROMOTED_ARGUMENT:
@@ -6232,8 +6277,11 @@ static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckC
                 // A compound assignment's computation stored back (#1875, check_common_float_result_precision): +=, -=, *=
                 // (/= is the class's already).
                 const __mmask16 lanes = (__mmask16)(live == 16 ? 0xffffu : (1u << live) - 1);
-                const __m512i offsets = _mm512_sub_epi32(_mm512_maskz_loadu_epi32(lanes, graph->ops + first), _mm512_set1_epi32(CHECK_OP_ADD_ASSIGN));
+                const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+                const __m512i offsets = _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_ADD_ASSIGN));
                 selected |= _mm512_mask_cmple_epu32_mask(lanes, offsets, _mm512_set1_epi32(CHECK_OP_MULTIPLY_ASSIGN - CHECK_OP_ADD_ASSIGN));
+                // All builtin operators with an argument slice start at BUILTIN_MISC. The edge test filters this superset.
+                selected |= _mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_MISC));
             }
             if (edges)
             {
@@ -8914,8 +8962,7 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                 }
                 conversion |= enum_cast;
                 // A floating argument to a prototype's parameter of a lower floating rank (#1875, check_common_float_precision).
-                conversion |= float_precision && (stream->argument_conversions[offset + i].flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 &&
-                              check_float_narrows(types, check_stream_type(stream, source), stream->argument_conversions[offset + i].type);
+                conversion |= float_precision && check_common_float_argument_narrows(graph, stream, types, offset + i);
                 if (!conversion && check_common_bool_candidate(graph, source))
                 {
                     // A `<<` passed to a _Bool parameter, constant or not (#1447): an unprototyped call's promoted one is never _Bool.
@@ -8925,6 +8972,10 @@ static uint8_t check_common_candidate_bits(const Parser* parser, const CheckGrap
                 }
             }
         }
+    }
+    else if (float_precision && check_graph_has_arguments(op))
+    {
+        conversion = check_common_builtin_float_candidate(graph, stream, types, node);
     }
     else if (op == CHECK_OP_SUBSCRIPT)
     {
@@ -9477,6 +9528,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
     const uint8_t* evaluated = facts->evaluated;
     const uint32_t* parents = facts->parents;
     bool source_contexts = false;
+    const bool float_precision = check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION, true);
     if (evaluated != NULL)
     {
         // Only an unevaluated conversion, call or truth-context node can need a literal-only source context. Unevaluated
@@ -9485,7 +9537,6 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // (check_common_literal_blocked): every glibc assert has one, `sizeof ((e) ? 1 : 0)` (#1360). Its readers say so where
         // the graph is a tree, each node's one reader its parent (facts->roots); the facts' fallback takes every candidate.
         const bool tree = facts->roots != NULL && parents != NULL;
-        const bool float_precision = check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION, true);
         const bool promotion = check_common_enabled(pp, input, CHECK_WARNING_ID_DOUBLE_PROMOTION, true);
         const bool int_float = check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_INT_FLOAT_CONVERSION, true);
         CheckCommonScan scan = { 0 };
@@ -9525,9 +9576,13 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                     candidate |= stream->argument_conversions != NULL &&
                                  check_common_enum_cast_candidate(input->enum_names, parser, graph, stream, types, argument,
                                                                   stream->argument_conversions[graph->argument_offsets[node] + i].type);
-                    candidate |= float_precision && argument < graph->count && stream->argument_conversions != NULL &&
-                                 check_float_narrows(types, check_stream_type(stream, argument), stream->argument_conversions[graph->argument_offsets[node] + i].type);
+                    candidate |= float_precision && stream->argument_conversions != NULL &&
+                                 check_common_float_argument_narrows(graph, stream, types, graph->argument_offsets[node] + i);
                 }
+            }
+            else if (evaluated[node] == 0 && float_precision && check_graph_has_arguments(op))
+            {
+                candidate |= check_common_builtin_float_candidate(graph, stream, types, node);
             }
             source_contexts = candidate && !(tree && check_common_literal_blocked(graph, parents, node));
         }
@@ -9595,6 +9650,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .shift_extras = &shift_extras,
             .evaluated = evaluated,
             .parents = parents,
+            .float_precision = float_precision,
             .flushed = facts->flushed,
             .emitted = emitted,
             .at_once = BUSTER_CHECK_NONE,
