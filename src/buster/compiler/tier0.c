@@ -16085,43 +16085,142 @@ static void tier0_scan_locals(const Tier0Function* function, uint32_t first, __m
     *high = _mm512_or_si512(classes_high, _mm512_maskz_mov_epi8(taken, _mm512_set1_epi8((char)0x80)));
 }
 
-// The operands (each argument, and an indirect call's callee) of the 64 calls from `first` (below the count), by lane
-// (zero past the calls), in a register; it reads no quarter of 16 past the calls (tier0_scan_locals).
-static __m512i tier0_scan_operands(const Tier0Function* function, uint32_t first)
+// The classes a CALL may have by each of 8 calls' results (AbiCall.result, a qword a lane), tier0_validate_scalar's
+// rules (tier0_x87_parts, tier0_x87_result_valid): with its result in x87 registers, F80 where it is a long double's value
+// in st0 and none otherwise; with any other result, every class but a 128-bit integer's and F80.
+static __m512i tier0_scan_results(__m512i results)
 {
-    const uint32_t count = function->call_count;
-    __m512i operands[4] = { _mm512_setzero_si512(), _mm512_setzero_si512(), _mm512_setzero_si512(), _mm512_setzero_si512() };
-    for (uint32_t q = 0; q < 4 && first + 16 * q < count; q += 1)
-    {
-        const __mmask16 quarter = (__mmask16)(tier0_lanes(first, count) >> (16 * q));
-        const uintptr_t arguments = (uintptr_t)function->call_argument_counts + ((uintptr_t)first + 16 * q) * sizeof(uint32_t);
-        const uintptr_t targets = (uintptr_t)function->call_targets + ((uintptr_t)first + 16 * q) * sizeof(SymbolId);
-        const __m512i target = _mm512_maskz_loadu_epi32(quarter, (const void*)targets);
-        const __m512i argument = _mm512_maskz_loadu_epi32(quarter, (const void*)arguments);
-        operands[q] = _mm512_mask_add_epi32(argument, quarter & _mm512_testn_epi32_mask(target, target), argument, _mm512_set1_epi32(1));
-    }
-    _Static_assert(sizeof(SymbolId) == 4, "a call's target is a dword");
-    return tier0_scan_bytes(operands);
+    const __m512i byte = _mm512_set1_epi64(0xff);
+    const __m512i none = _mm512_set1_epi64(BUSTER_ABI_REGISTER_NONE);
+    _Static_assert(offsetof(AbiReturn, kind) == 0 && offsetof(AbiReturn, flags) == 1 && offsetof(AbiReturn, part_bytes) == 2 && offsetof(AbiReturn, registers) == 3 &&
+                       BUSTER_ABI_RESULT_PARTS == 4,
+                   "a result's fields in its qword");
+    const __mmask8 x87 = _mm512_cmpeq_epi64_mask(_mm512_and_si512(results, byte), _mm512_set1_epi64(BUSTER_ABI_RESULT_REGISTERS)) &
+                         _mm512_cmpeq_epi64_mask(_mm512_and_si512(_mm512_srli_epi64(results, 24), byte), _mm512_set1_epi64(BUSTER_ABI_REGISTER_X87));
+    const __mmask8 single = _mm512_cmpeq_epi64_mask(_mm512_and_si512(_mm512_srli_epi64(results, 32), byte), none) &
+                            _mm512_cmpeq_epi64_mask(_mm512_and_si512(_mm512_srli_epi64(results, 40), byte), none) &
+                            _mm512_cmpeq_epi64_mask(_mm512_and_si512(_mm512_srli_epi64(results, 48), byte), none) &
+                            _mm512_cmpeq_epi64_mask(_mm512_and_si512(_mm512_srli_epi64(results, 16), byte), _mm512_set1_epi64(16)) &
+                            _mm512_testn_epi64_mask(results, _mm512_set1_epi64((int64_t)BUSTER_ABI_FLAG_HIGH << 8));
+    const __m512i others = _mm512_set1_epi64(BUSTER_TIER0_CLASSES_ALL & ~(BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I128) | BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U128) |
+                                                                          BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80)));
+    return _mm512_mask_mov_epi64(others, x87, _mm512_maskz_mov_epi64(single, _mm512_set1_epi64(BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80))));
 }
 
-// The classes a CALL of call `call` may have (tier0_validate_scalar's rules): VOID alone where an object takes its
-// result, no 128-bit integer (an object takes one), and with a result in x87 registers F80 where it is a long double's
-// value in st0, and VOID where an object takes it.
-static uint32_t tier0_scan_call(const Tier0Function* function, uint32_t call)
+// Both qwords of each of the calls from `first` in `lanes` (up to 16), by qword lane, 8 calls a vector: `areas` (each
+// call's first: its area's bytes and alignment) and `results` (AbiCall.result), zero past the calls; four calls a load, of
+// the loads that hold calls alone.
+static void tier0_scan_call_qwords(const AbiCall* calls, uint32_t first, __mmask16 lanes, __m512i* areas, __m512i* results)
 {
-    const bool object = function->call_result_objects != 0 && function->call_result_objects[call] != 0;
-    const AbiReturn returned = function->calls[call].result;
-    uint32_t classes = BUSTER_TIER0_CLASSES_ALL &
-                       ~(BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_I128) | BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_U128) | BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80));
-    if (object)
+    _Static_assert(sizeof(AbiCall) == 16 && offsetof(AbiCall, stack_bytes) == 0 && offsetof(AbiCall, stack_alignment_log2) == 4 && offsetof(AbiCall, result) == 8,
+                   "a call's area and result in its qwords");
+    __m512i parts[4];
+    for (uint32_t z = 0; z < 4; z += 1)
     {
-        classes = BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_VOID);
+        const uint32_t held = ((uint32_t)lanes >> (4 * z)) & 0xf;
+        const __mmask8 qwords = (__mmask8)(_pdep_u32(held, 0x55) * 3);
+        parts[z] = held != 0 ? _mm512_maskz_loadu_epi64(qwords, (const void*)((uintptr_t)calls + ((uintptr_t)first + 4 * z) * sizeof(AbiCall))) : _mm512_setzero_si512();
     }
-    else if (tier0_x87_parts(returned) != 0)
+    const __m512i even = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
+    const __m512i odd = _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15);
+    areas[0] = _mm512_permutex2var_epi64(parts[0], even, parts[1]);
+    areas[1] = _mm512_permutex2var_epi64(parts[2], even, parts[3]);
+    results[0] = _mm512_permutex2var_epi64(parts[0], odd, parts[1]);
+    results[1] = _mm512_permutex2var_epi64(parts[2], odd, parts[3]);
+}
+
+// 16 calls from `first` by dword lane (zero past the calls), tier0_scan_call_words' reading of them.
+typedef struct Tier0ScanCallQuarter Tier0ScanCallQuarter;
+struct Tier0ScanCallQuarter
+{
+    __m512i words;
+    __m512i bases;
+    __m512i firsts;
+    __m512i counts;
+    // The calls that break their own rules (tier0_calls_valid's): more arguments than BUSTER_TIER0_MAX_CALL_ARGUMENTS, an
+    // area aligned past 2^30, or a result through a hidden pointer (no object to take it).
+    __mmask16 refused;
+    __mmask16 lanes;
+};
+
+// The words of the 16 calls from `first` (below the count), by dword lane (zero past the calls): each call's operands
+// (its arguments, and an indirect call's callee) in bits 0 to 7, the classes a CALL of it may have in bits 8 to 23
+// (VOID alone where an object takes its result, tier0_scan_results' otherwise) and whether it is indirect in bit 24; its
+// base, where its operands' classes start in the arguments' column: its first argument's, one before for an indirect
+// call, whose first operand, its callee, the column doesn't hold; its first argument and its count. It reads no call
+// past the count.
+static Tier0ScanCallQuarter tier0_scan_call_words(const Tier0Function* function, uint32_t first)
+{
+    Tier0ScanCallQuarter quarter;
+    const __mmask16 lanes = (__mmask16)tier0_lanes(first, function->call_count);
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i counts = _mm512_maskz_loadu_epi32(lanes, (const void*)((uintptr_t)function->call_argument_counts + (uintptr_t)first * sizeof(uint32_t)));
+    const __m512i targets = _mm512_maskz_loadu_epi32(lanes, (const void*)((uintptr_t)function->call_targets + (uintptr_t)first * sizeof(SymbolId)));
+    const __m512i firsts = _mm512_maskz_loadu_epi32(lanes, (const void*)((uintptr_t)function->call_first + (uintptr_t)first * sizeof(uint32_t)));
+    _Static_assert(sizeof(SymbolId) == 4, "a call's target is a dword");
+    const __mmask16 indirect = lanes & _mm512_testn_epi32_mask(targets, targets);
+    __m512i areas[2];
+    __m512i halves[2];
+    tier0_scan_call_qwords(function->calls, first, lanes, areas, halves);
+    __m512i results = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(tier0_scan_results(halves[0]))), _mm512_cvtepi64_epi32(tier0_scan_results(halves[1])), 1);
+    if (function->call_result_objects != 0)
     {
-        classes = tier0_x87_parts(returned) == 1 && tier0_x87_result_valid(returned, 0) ? BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_F80) : 0;
+        const __m512i objects = _mm512_maskz_loadu_epi32(lanes, (const void*)((uintptr_t)function->call_result_objects + (uintptr_t)first * sizeof(uint32_t)));
+        results = _mm512_mask_mov_epi32(results, _mm512_test_epi32_mask(objects, objects), _mm512_set1_epi32(BUSTER_TIER0_CLASS(BUSTER_TYPED_CLASS_VOID)));
     }
-    return classes;
+    // Each call's alignment and result kind, from its two qwords' low bytes (the alignment's byte shifted down first).
+    const __m512i alignments = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(_mm512_srli_epi64(areas[0], 32))), _mm512_cvtepi64_epi32(_mm512_srli_epi64(areas[1], 32)), 1);
+    const __m512i kinds = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(halves[0])), _mm512_cvtepi64_epi32(halves[1]), 1);
+    const __m512i byte = _mm512_set1_epi32(0xff);
+    quarter.refused = lanes & (_mm512_cmpgt_epu32_mask(counts, _mm512_set1_epi32(BUSTER_TIER0_MAX_CALL_ARGUMENTS)) |
+                               _mm512_cmpgt_epu32_mask(_mm512_and_si512(alignments, byte), _mm512_set1_epi32(BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2)) |
+                               _mm512_cmpeq_epi32_mask(_mm512_and_si512(kinds, byte), _mm512_set1_epi32(BUSTER_ABI_RESULT_MEMORY)));
+    const __m512i operands = _mm512_mask_add_epi32(counts, indirect, counts, one);
+    const __m512i words = _mm512_or_si512(_mm512_or_si512(operands, _mm512_slli_epi32(results, 8)), _mm512_maskz_mov_epi32(indirect, _mm512_set1_epi32(1 << 24)));
+    quarter.words = _mm512_maskz_mov_epi32(lanes, words);
+    quarter.bases = _mm512_mask_sub_epi32(firsts, indirect, firsts, one);
+    quarter.firsts = firsts;
+    quarter.counts = counts;
+    quarter.lanes = lanes;
+    return quarter;
+}
+
+// The 64 calls from `first` (below the count) by byte lane, from their words (tier0_scan_call_words), for vpermi2b: their
+// operands, the low and high bytes of the classes a CALL of each may have, whether each is indirect (0xff) and the low
+// bytes of their bases (where the function has 128 arguments or fewer, the whole base).
+typedef struct Tier0ScanCalls Tier0ScanCalls;
+struct Tier0ScanCalls
+{
+    __m512i operands;
+    __m512i results_low;
+    __m512i results_high;
+    __m512i indirect;
+    __m512i bases;
+};
+
+// The tables of 64 calls from the four quarters of their words and bases (zero past the calls).
+static Tier0ScanCalls tier0_scan_calls(const __m512i* words, const __m512i* bases)
+{
+    __m512i shifted[4];
+    Tier0ScanCalls calls;
+    calls.operands = tier0_scan_bytes(words);
+    calls.bases = tier0_scan_bytes(bases);
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        shifted[q] = _mm512_srli_epi32(words[q], 8);
+    }
+    calls.results_low = tier0_scan_bytes(shifted);
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        shifted[q] = _mm512_srli_epi32(words[q], 16);
+    }
+    calls.results_high = tier0_scan_bytes(shifted);
+    for (uint32_t q = 0; q < 4; q += 1)
+    {
+        shifted[q] = _mm512_srli_epi32(words[q], 24);
+    }
+    calls.indirect = _mm512_movm_epi8(_mm512_test_epi8_mask(tier0_scan_bytes(shifted), tier0_scan_bytes(shifted)));
+    return calls;
 }
 
 // The classes call `call`'s operands must have on the stack, from the first pushed (an indirect call's callee, U64, then
@@ -16181,36 +16280,80 @@ static bool tier0_scan_locals_valid(const Tier0Function* function)
     return valid && (uint64_t)_mm512_reduce_add_epi64(object_bytes) <= BUSTER_TIER0_MAX_OBJECT_BYTES;
 }
 
-// The calls' rules of tier0_calls_valid and tier0_validate_tables for a function without aggregates' metadata, each
-// call's arguments eight at a time: the arguments in range, at most BUSTER_TIER0_MAX_CALL_ARGUMENTS, the area's alignment
-// 2^30 at most, and no result through a hidden pointer (no object to take it); each argument of a value's class (not VOID,
-// not a 128-bit integer's or a vector's) ignored, in an argument register of its kind that no other argument of the call
-// takes, or in an 8-byte slot inside the call's area, a long double's a 16-byte one at a multiple of 16.
-static bool tier0_scan_calls_valid(const Tier0Function* function)
+// The calls in their order, 16 at a time: their words and bases (tier0_scan_call_words) into `words` and `bases` where
+// they are given (room for call_count + 16 each), and for vpermi2b into `tables` (each half of 64) where there are 128
+// calls or fewer; and where `check`, the calls' own rules (tier0_scan_call_words' `refused`) and their arguments within
+// the column.
+static bool tier0_scan_call_pass(const Tier0Function* function, bool check, Tier0ScanCalls* tables, uint32_t* words, uint32_t* bases)
 {
+    const uint32_t call_count = function->call_count;
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i arguments = _mm512_set1_epi32((int)function->argument_count);
+    __m512i half_words[4] = {
+        zero,
+        zero,
+        zero,
+        zero,
+    };
+    __m512i half_bases[4] = {
+        zero,
+        zero,
+        zero,
+        zero,
+    };
+    bool valid = true;
+    for (uint32_t c = 0; valid && c < call_count; c += 16)
+    {
+        const Tier0ScanCallQuarter quarter = tier0_scan_call_words(function, c);
+        const __mmask16 within = _mm512_cmple_epu32_mask(quarter.firsts, arguments) & _mm512_cmple_epu32_mask(quarter.counts, _mm512_sub_epi32(arguments, quarter.firsts));
+        valid = !check || (quarter.refused | (quarter.lanes & ~within)) == 0;
+        if (words != 0)
+        {
+            _mm512_storeu_si512((void*)(words + c), quarter.words);
+            _mm512_storeu_si512((void*)(bases + c), quarter.bases);
+        }
+        half_words[(c >> 4) & 3] = quarter.words;
+        half_bases[(c >> 4) & 3] = quarter.bases;
+        if (call_count <= 128 && (((c >> 4) & 3) == 3 || c + 16 >= call_count))
+        {
+            tables[c >> 6] = tier0_scan_calls(half_words, half_bases);
+            for (uint32_t q = 0; q < 4; q += 1)
+            {
+                half_words[q] = zero;
+                half_bases[q] = zero;
+            }
+        }
+    }
+    return valid;
+}
+
+// The arguments' rules (tier0_calls_valid's and tier0_validate_tables'), a call at a time and its arguments 8 at a time,
+// of calls within the column (tier0_scan_call_pass): each argument of a value's class (not VOID, not a 128-bit integer's
+// or a vector's) ignored, in an argument register of its kind that no other argument of the call takes, or in an 8-byte
+// slot inside the call's area, a long double's a 16-byte one at a multiple of 16.
+static bool tier0_scan_arguments(const Tier0Function* function)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i low_dwords = _mm512_set1_epi64(0xffffffffll);
+    const __m512i byte = _mm512_set1_epi64(0xff);
     bool valid = true;
     for (uint32_t c = 0; valid && c < function->call_count; c += 1)
     {
         const uint32_t first = function->call_first[c];
         const uint32_t count = function->call_argument_counts[c];
-        const AbiCall* call = &function->calls[c];
-        const __m512i stack_bytes = _mm512_set1_epi64((int64_t)call->stack_bytes);
-        valid = (uint64_t)first + count <= function->argument_count && count <= BUSTER_TIER0_MAX_CALL_ARGUMENTS &&
-                call->stack_alignment_log2 <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2 && call->result.kind != BUSTER_ABI_RESULT_MEMORY;
-        uint64_t either = 0;
-        uint64_t sum = 0;
+        const __m512i stack_bytes = _mm512_set1_epi64((int64_t)function->calls[c].stack_bytes);
+        // The argument registers the call's arguments took in its vectors before (past 8 arguments).
+        uint64_t taken = 0;
         for (uint32_t a = 0; valid && a < count; a += 8)
         {
             const __mmask8 lanes = (__mmask8)_bzhi_u32(0xff, count - a);
-            const uintptr_t at = (uintptr_t)function->argument_locations + ((uintptr_t)first + a) * sizeof(AbiLocation);
-            const uintptr_t classes_at = (uintptr_t)function->argument_classes + first + a;
-            const __m512i locations = _mm512_maskz_loadu_epi64(lanes, (const void*)at);
-            const __m512i classes = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8((__mmask16)lanes, (const void*)classes_at));
+            const __m512i locations = _mm512_maskz_loadu_epi64(lanes, (const void*)((uintptr_t)function->argument_locations + ((uintptr_t)first + a) * sizeof(AbiLocation)));
+            const __m512i classes = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8((__mmask16)lanes, (const void*)((uintptr_t)function->argument_classes + first + a)));
             _Static_assert(sizeof(AbiLocation) == 8 && offsetof(AbiLocation, registers) == 4 && offsetof(AbiLocation, kind) == 6, "a location's fields in its qword");
-            const __m512i offset = _mm512_and_si512(locations, _mm512_set1_epi64(0xffffffffll));
-            const __m512i reg = _mm512_and_si512(_mm512_srli_epi64(locations, 32), _mm512_set1_epi64(0xff));
-            const __m512i kind = _mm512_and_si512(_mm512_srli_epi64(locations, 48), _mm512_set1_epi64(0xff));
-            const __mmask8 registers = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_ABI_LOCATION_REGISTERS));
+            const __m512i offset = _mm512_and_si512(locations, low_dwords);
+            const __m512i reg = _mm512_and_si512(_mm512_srli_epi64(locations, 32), byte);
+            const __m512i kind = _mm512_and_si512(_mm512_srli_epi64(locations, 48), byte);
+            const __mmask8 registers = lanes & _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_ABI_LOCATION_REGISTERS));
             const __mmask8 stack = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_ABI_LOCATION_STACK));
             // A register's bit (tier0_register_bit): a vector one's from BUSTER_TIER0_XMM(0), of the argument registers.
             const __mmask8 vector = _mm512_test_epi64_mask(reg, _mm512_set1_epi64(BUSTER_ABI_REGISTER_VECTOR));
@@ -16221,30 +16364,64 @@ static bool tier0_scan_calls_valid(const Tier0Function* function)
             const __mmask8 slot = _mm512_testn_epi64_mask(offset, _mm512_set1_epi64(BUSTER_ABI_SLOT_BYTES - 1)) &
                                   _mm512_cmple_epu64_mask(_mm512_add_epi64(offset, _mm512_set1_epi64(BUSTER_ABI_SLOT_BYTES)), stack_bytes);
             const __mmask8 placed = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_ABI_LOCATION_IGNORE)) | (registers & argument_register) | (stack & slot);
-            const __mmask8 floating = _mm512_cmpeq_epi64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F32)) |
-                                      _mm512_cmpeq_epi64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F64));
+            const __mmask8 floating = _mm512_cmpeq_epi64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F32)) | _mm512_cmpeq_epi64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F64));
             const __mmask8 x87 = _mm512_cmpeq_epi64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F80));
             const __mmask8 x87_placed = stack & _mm512_testn_epi64_mask(offset, _mm512_set1_epi64(15)) &
                                         _mm512_cmple_epu64_mask(_mm512_add_epi64(offset, _mm512_set1_epi64(16)), stack_bytes);
-            __mmask8 refused = ~placed | (registers & (floating ^ vector)) | (x87 & ~x87_placed);
-            refused |= _mm512_cmpeq_epi64_mask(classes, _mm512_setzero_si512()) | _mm512_cmpgt_epu64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F80));
-            const __m512i taken = _mm512_maskz_mov_epi64(registers & lanes, bit);
-            either |= (uint64_t)_mm512_reduce_or_epi64(taken);
-            sum += (uint64_t)_mm512_reduce_add_epi64(taken);
+            // No register two arguments of the call take: no two of these lanes with one (vpconflictq of the registers'
+            // numbers, the other lanes' distinct and past them), and none an earlier vector's took (`taken`).
+            const __m512i keys = _mm512_mask_mov_epi64(_mm512_setr_epi64(64, 65, 66, 67, 68, 69, 70, 71), registers, number);
+            const __m512i conflicts = _mm512_conflict_epi64(keys);
+            __mmask8 refused = ~placed | (registers & ((floating ^ vector) | _mm512_test_epi64_mask(conflicts, conflicts) | _mm512_test_epi64_mask(bit, _mm512_set1_epi64((int64_t)taken)))) |
+                               (x87 & ~x87_placed);
+            refused |= _mm512_cmpeq_epi64_mask(classes, zero) | _mm512_cmpgt_epu64_mask(classes, _mm512_set1_epi64(BUSTER_TYPED_CLASS_F80));
             valid = (refused & lanes) == 0;
+            taken |= count > 8 ? (uint64_t)_mm512_mask_reduce_or_epi64(registers, bit) : 0;
         }
-        // No register two arguments take: their bits' sum is their union.
-        valid = valid && either == sum;
     }
     return valid;
 }
 
+// The 64 dwords of `words` (four quarters of 16) at byte positions `positions` below 64, for the 16 lanes of quarter
+// `q`: a permute of the four quarters by each position's bit 5.
+static __m512i tier0_scan_dwords_at(const __m512i* words, __m512i positions, uint32_t q)
+{
+    const __m512i at = _mm512_cvtepu8_epi32(tier0_scan_quarter(positions, q));
+    const __m512i low = _mm512_permutex2var_epi32(words[0], at, words[1]);
+    const __m512i high = _mm512_permutex2var_epi32(words[2], at, words[3]);
+    return _mm512_mask_blend_epi32(_mm512_test_epi32_mask(at, _mm512_set1_epi32(32)), low, high);
+}
+
+// For each lane, the first lane after it in the block whose floor is at or below `place`, as a byte from 1 to 127, 64 or
+// more where none is (the value at the place outlives the block): the doubling search of tier0_scan_previous, ahead.
+// `ahead[s]` holds each lane's lowest floor over its next 2^s lanes from itself as a key (tier0_scan_previous'), and
+// 0xff past the block.
+static __m512i tier0_scan_next(const __m512i* ahead, __m512i place)
+{
+    const __m512i threshold = _mm512_xor_si512(_mm512_add_epi8(place, _mm512_set1_epi8(1)), _mm512_set1_epi8((char)0x80));
+    const __m512i past = _mm512_set1_epi8((char)0xff);
+    __m512i lane = _mm512_add_epi8(_mm512_load_si512(tier0_scan_lane_indices), _mm512_set1_epi8(1));
+    for (int32_t s = 5; s >= 0; s -= 1)
+    {
+        const __mmask64 none = _mm512_cmpge_epu8_mask(_mm512_permutex2var_epi8(ahead[s], lane, past), threshold);
+        lane = _mm512_mask_add_epi8(lane, none, lane, _mm512_set1_epi8((char)(1 << s)));
+    }
+    return lane;
+}
+
+// A byte lane of a vector, through a register: a scalar load of a vector just stored would wait for the store.
+static uint32_t tier0_scan_lane(__m512i bytes, uint32_t lane)
+{
+    return (uint32_t)(uint8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_set1_epi8((char)lane), bytes)));
+}
+
 // tier0_validate_scalar's checks of the frame and the tables (tier0_frame_input_valid, tier0_calls_valid,
 // tier0_parameters_valid and tier0_validate_tables): for a function without the optional parts that only those take
-// (aggregates' metadata, an incoming variadic area, vectors' constants and operations), the locals 64 at a time and each
-// call's arguments eight at a time, and the scalar helpers' for the parameters and the rest; the scalar helpers' alone
-// for a function with them.
-static bool tier0_scan_tables(const Tier0Function* function)
+// (aggregates' metadata, an incoming variadic area, vectors' constants and operations), the locals 64 at a time, the
+// calls 16 at a time and each one's arguments 8 at a time (tier0_scan_call_pass, tier0_scan_arguments), and the scalar
+// helpers' for the parameters and the rest; the scalar helpers' alone for a function with them. Either way the calls'
+// tables for the blocks (tier0_scan_call_pass: `tables`, or `call_words` and `call_bases`).
+static bool tier0_scan_tables(const Tier0Function* function, Tier0ScanCalls* tables, uint32_t* call_words, uint32_t* call_bases)
 {
     const bool plain = function->argument_sizes == 0 && function->call_result_objects == 0 && function->incoming_variadic == 0 && function->result_size == 0 &&
                        function->result.kind != BUSTER_ABI_RESULT_MEMORY && function->vector_constant_count == 0 && function->operation_count == 0;
@@ -16252,17 +16429,18 @@ static bool tier0_scan_tables(const Tier0Function* function)
     if (valid && !plain)
     {
         valid = tier0_frame_input_valid(function) && tier0_calls_valid(function) && tier0_parameters_valid(function);
-        Tier0Validator tables;
-        memset(&tables, 0, sizeof(tables));
+        Tier0Validator scalar_tables;
+        memset(&scalar_tables, 0, sizeof(scalar_tables));
         if (valid)
         {
-            tier0_validate_tables(function, &tables);
+            tier0_validate_tables(function, &scalar_tables);
         }
-        valid = valid && tables.check.error == TIER0_OK;
+        valid = valid && scalar_tables.check.error == TIER0_OK && tier0_scan_call_pass(function, false, tables, call_words, call_bases);
     }
     else if (valid)
     {
-        valid = tier0_scan_locals_valid(function) && tier0_scan_calls_valid(function) && tier0_parameters_valid(function);
+        valid = tier0_scan_locals_valid(function) && tier0_scan_call_pass(function, true, tables, call_words, call_bases) && tier0_scan_arguments(function) &&
+                tier0_parameters_valid(function);
         // Each parameter that isn't an object in a register of its kind or on the stack (tier0_parameters_valid checks the
         // registers and the slots).
         for (uint32_t p = 0; valid && p < function->parameter_count; p += 1)
@@ -16280,6 +16458,50 @@ static bool tier0_scan_tables(const Tier0Function* function)
     return valid;
 }
 
+// A block's first pass (tier0_validate_accepts), which its second reads: what needs nothing of the blocks before it.
+#define BUSTER_TIER0_SCAN_GROUP 16
+typedef struct Tier0ScanBlock Tier0ScanBlock;
+struct Tier0ScanBlock
+{
+    // The values' low dwords, by quarter.
+    __m512i words[4];
+    // Each lane's depth before it and its floor, relative to the block's start, the lowest place it reads, its kind's
+    // rules, its producers (bit 7 for the carried stack's) and their classes where the block has them.
+    __m512i before;
+    __m512i floors;
+    __m512i lowest;
+    __m512i rules;
+    __m512i first;
+    __m512i second;
+    __m512i top;
+    __m512i under;
+    // The short calls' operands' classes (with 128 calls and arguments or fewer), the long calls' consumers, their
+    // operands' places, and each lane's lowest place the lanes before it reached (in a block with long calls).
+    __m512i operand_first;
+    __m512i operand_second;
+    __m512i consumers;
+    __m512i places;
+    __m512i reached;
+    __mmask64 refused;
+    __mmask64 pushes;
+    __mmask64 returns;
+    __mmask64 empty_returns;
+    __mmask64 tops;
+    __mmask64 short_calls;
+    __mmask64 one_operand;
+    __mmask64 indirect_calls;
+    __mmask64 long_calls;
+    __mmask64 fed;
+    __mmask64 callees;
+    __mmask64 carried_calls;
+    __mmask64 controls;
+    __mmask64 globals;
+    __mmask64 left;
+    // The depth the block's entries change (the last one's after it) and the lowest place it reaches (0 or below).
+    int32_t effect;
+    int32_t reach;
+};
+
 // The vector path: whether it takes the function's stream, which is then one tier0_validate_scalar takes too. False
 // leaves the function to the scalar validator, for the verdict and the rule.
 static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function* function)
@@ -16287,47 +16509,99 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     const uint32_t count = function->count;
     const uint32_t local_count = function->local_count;
     const uint32_t call_count = function->call_count;
-    // What tier0_validate_scalar checks before the stream: the limits, the frame, the calls, the parameters and the tables.
     // A function with vectors, masks or tail calls is the scalar validator's (its TAIL_CALL entries are refused below too).
     bool valid = !function->vectors && !function->masks && function->call_tails == 0 && count <= BUSTER_TIER0_MAX_ENTRIES && (function->label_count == 0 || function->label_entries != 0) &&
-                 tier0_jump_tables_valid(function) && tier0_scan_tables(function);
+                 tier0_jump_tables_valid(function);
     Scratch scratch = scratch_begin(0);
-    // Per entry, the depth before it (and room for a block's store past the last); per entry and the end, the depth the
-    // forward arrivals there bring (UNREACHED before the first) and what else they bring: the producer just below what
-    // they may differ in, whether they bring a value (a JUMP_VALUE's) and its class; and past 128 locals or calls, their
-    // words for the gathers (tier0_scan_local's, and a call's operands).
-    uint8_t* depths = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64) : 0;
-    uint8_t* expected = depths != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 65) : 0;
-    uint64_t* arrivals = expected != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count + 1) : 0;
-    // Per entry and the end, a bit where an arrival there brings nothing but depth 0, the most of them (statements').
-    uint64_t* emptied_targets = arrivals != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count / 64 + 1) : 0;
     const bool few_locals = local_count <= 128;
     const bool few_calls = call_count <= 128;
-    uint32_t* local_words = arrivals != 0 && !few_locals ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, local_count) : 0;
-    uint32_t* call_words = arrivals != 0 && !few_calls ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, call_count) : 0;
-    valid = valid && emptied_targets != 0 && (few_locals || local_words != 0) && (few_calls || call_words != 0);
-    // The locals' classes and the calls' operands for vpermi2b where there are 128 or fewer (each table's two halves),
-    // and their words for the gathers otherwise.
+    // Where the calls and their arguments are 128 or fewer each, a call's operands' classes come from registers
+    // (vpermi2b); otherwise from the calls' words and bases and the arguments' classes by dword, by gathers.
+    const bool few_operands = few_calls && function->argument_count <= 128;
+    // The scratch columns, from one push, each at a multiple of 64 bytes: per entry, the depth before it (and room for a
+    // block's store past the last); per entry and the end, the depth the forward arrivals there bring (UNREACHED before
+    // the first, stored 64 bytes at a time) and what else they bring (written where the depth is): the producer just below
+    // what they may differ in, whether they bring a value (a JUMP_VALUE's) and its class; the targets of the arrivals
+    // that bring nothing but depth 0, the most of them (statements'), in the blocks' order, which the end checks against
+    // the targets' depths at once (and room for a block's quarter stored whole); and past 128 locals, calls or arguments,
+    // their words for the gathers (tier0_scan_local's, the calls' words and bases, the arguments' classes).
+    const uint64_t depth_bytes = ((uint64_t)count + 64 + 63) & ~63ull;
+    const uint64_t expected_bytes = ((uint64_t)count + 65 + 63) & ~63ull;
+    const uint64_t arrival_bytes = (((uint64_t)count + 1) * sizeof(uint64_t) + 63) & ~63ull;
+    const uint64_t zero_bytes = (((uint64_t)count + 16) * sizeof(uint32_t) + 63) & ~63ull;
+    const uint64_t local_bytes = few_locals ? 0 : ((uint64_t)local_count * sizeof(uint32_t) + 63) & ~63ull;
+    const uint64_t call_bytes = few_operands ? 0 : (((uint64_t)call_count + 16) * sizeof(uint32_t) + 63) & ~63ull;
+    const uint64_t argument_bytes = few_operands ? 0 : (((uint64_t)function->argument_count + 16) * sizeof(uint32_t) + 63) & ~63ull;
+    const uint64_t block_bytes = ((uint64_t)BUSTER_TIER0_SCAN_GROUP * sizeof(Tier0ScanBlock) + 63) & ~63ull;
+    uint8_t* room = valid ? (uint8_t*)arena_push(scratch.arena, depth_bytes + expected_bytes + arrival_bytes + zero_bytes + local_bytes + 2 * call_bytes + argument_bytes + block_bytes, 64)
+                          : 0;
+    valid = valid && room != 0;
+    // Carved by address, so that a stream refused before the push (no room, a null base) forms no pointer from null;
+    // nothing reads them unless `valid`.
+    const uintptr_t expected_at = (uintptr_t)room + depth_bytes;
+    const uintptr_t arrivals_at = expected_at + expected_bytes;
+    const uintptr_t zero_at = arrivals_at + arrival_bytes;
+    const uintptr_t locals_at = zero_at + zero_bytes;
+    const uintptr_t calls_at = locals_at + local_bytes;
+    const uintptr_t bases_at = calls_at + call_bytes;
+    const uintptr_t arguments_at = bases_at + call_bytes;
+    const uintptr_t blocks_at = arguments_at + argument_bytes;
+    uint8_t* depths = room;
+    uint8_t* expected = (uint8_t*)expected_at;
+    uint64_t* arrivals = (uint64_t*)arrivals_at;
+    uint32_t* zero_targets = (uint32_t*)zero_at;
+    uint32_t* local_words = (uint32_t*)locals_at;
+    uint32_t* call_words = (uint32_t*)calls_at;
+    uint32_t* call_bases = (uint32_t*)bases_at;
+    uint32_t* argument_words = (uint32_t*)arguments_at;
+    Tier0ScanBlock* blocks = (Tier0ScanBlock*)blocks_at;
+
+    // The locals' classes and the calls' tables (tier0_scan_calls) for vpermi2b where there are 128 or fewer (each
+    // table's two halves), and their words for the gathers otherwise; the arguments' classes likewise.
     __m512i local_low[2] = { _mm512_setzero_si512(), _mm512_setzero_si512() };
     __m512i local_high[2] = { _mm512_setzero_si512(), _mm512_setzero_si512() };
-    __m512i call_operands[2] = { _mm512_setzero_si512(), _mm512_setzero_si512() };
+    const __m512i zero = _mm512_setzero_si512();
+    Tier0ScanCalls call_tables[2] = {
+        {
+            .operands = zero,
+            .results_low = zero,
+            .results_high = zero,
+            .indirect = zero,
+            .bases = zero,
+        },
+        {
+            .operands = zero,
+            .results_low = zero,
+            .results_high = zero,
+            .indirect = zero,
+            .bases = zero,
+        },
+    };
+    __m512i argument_tables[2] = {
+        zero,
+        zero,
+    };
     for (uint32_t h = 0; valid && h < 2 && few_locals && 64 * h < local_count; h += 1)
     {
         tier0_scan_locals(function, 64 * h, &local_low[h], &local_high[h]);
     }
-    for (uint32_t h = 0; valid && h < 2 && few_calls && 64 * h < call_count; h += 1)
+    for (uint32_t h = 0; valid && h < 2 && function->argument_count <= 128 && 64 * h < function->argument_count; h += 1)
     {
-        call_operands[h] = tier0_scan_operands(function, 64 * h);
+        argument_tables[h] = tier0_bytes_at(function->argument_classes, 64 * h, function->argument_count);
     }
+    for (uint32_t a = 0; valid && !few_operands && a < function->argument_count; a += 16)
+    {
+        const __mmask16 quarter = (__mmask16)tier0_lanes(a, function->argument_count);
+        _mm512_storeu_si512(argument_words + a, _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(quarter, (const void*)((uintptr_t)function->argument_classes + a))));
+    }
+    // What tier0_validate_scalar checks before the stream: the frame, the calls, the parameters and the tables; and the
+    // calls' tables.
+    valid = valid && tier0_scan_tables(function, call_tables, few_operands ? 0 : call_words, call_bases);
     for (uint32_t l = 0; valid && !few_locals && l < local_count; l += 1)
     {
         local_words[l] = tier0_scan_local(function, l);
     }
-    for (uint32_t c = 0; valid && !few_calls && c < call_count; c += 1)
-    {
-        // Counts fit in a byte, including an indirect callee. More than 64 operands defer to the scalar validator.
-        call_words[c] = function->call_argument_counts[c] + (function->call_targets[c] == 0 ? 1 : 0);
-    }
+    uint32_t zero_count = 0;
     // The values' bounds, by BUSTER_TIER0_BOUND_* (an empty range where there is nothing to name: [1, 0]), built in
     // registers: a vector load of words just stored one at a time would stall.
     _Static_assert(BUSTER_TIER0_BOUND_NONE == 0 && BUSTER_TIER0_BOUND_LOCAL == 1 && BUSTER_TIER0_BOUND_CALL == 2 && BUSTER_TIER0_BOUND_TARGET == 3 &&
@@ -16357,9 +16631,10 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     own_high = _mm512_mask_mov_epi8(own_high, (__mmask64)1 << BUSTER_TYPED_JUMP_INDIRECT, _mm512_set1_epi8((char)(indirect >> 8)));
     if (valid)
     {
-        memset(expected, BUSTER_TIER0_SCAN_UNREACHED, (uint64_t)count + 65);
-        memset(arrivals, 0, ((uint64_t)count + 1) * sizeof(uint64_t));
-        memset(emptied_targets, 0, ((uint64_t)count / 64 + 1) * sizeof(uint64_t));
+        for (uint64_t i = 0; i < expected_bytes; i += 64)
+        {
+            _mm512_store_si512((void*)(expected + i), _mm512_set1_epi8((char)BUSTER_TIER0_SCAN_UNREACHED));
+        }
     }
     // The labels JUMP_INDIRECT may go to: arrivals with nothing on the stack, before the first entry.
     for (uint32_t k = 0; valid && k < function->label_count; k += 1)
@@ -16375,11 +16650,10 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     // The carried stack: each place's class, by lane from place 0, and its producer, from place 0 at index 64.
     __m512i carried = _mm512_setzero_si512();
     uint32_t stack_producers[BUSTER_TIER0_SCAN_STACK] __attribute__((aligned(64)));
-    for (uint32_t p = 0; p < 64; p += 1)
+    for (uint32_t p = 0; p < 64; p += 16)
     {
-        stack_producers[p] = BUSTER_TIER0_SCAN_NONE;
+        _mm512_store_si512((void*)(stack_producers + p), _mm512_set1_epi32((int)BUSTER_TIER0_SCAN_NONE));
     }
-    const __m512i zero = _mm512_setzero_si512();
     const __m512i one = _mm512_set1_epi8(1);
     const __m512i lane_indices = _mm512_load_si512(tier0_scan_lane_indices);
     const __m512i even = _mm512_set_epi32(30, 28, 26, 24, 22, 20, 18, 16, 14, 12, 10, 8, 6, 4, 2, 0);
@@ -16388,326 +16662,512 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     uint32_t previous_kind = BUSTER_TYPED_NONE;
     uint32_t previous_class = BUSTER_TYPED_CLASS_VOID;
     uint32_t return_class = BUSTER_TIER0_SCAN_UNREACHED;
-    for (uint32_t first = 0; valid && first < count; first += 64)
+    // The blocks, BUSTER_TIER0_SCAN_GROUP at a time in two passes. The first takes each block's work that needs nothing of
+    // the blocks before it: its loads, the values' bounds, its depths relative to its start, the producers its lanes find
+    // in it and their classes, and the rules that don't read the stack's operands; every block of the group in turn, which
+    // no block's result waits on, so that the processor overlaps them (one pass a block was bound by its chain of
+    // dependent searches and checks, not by its instructions). The second takes the blocks a block at a time with what the
+    // blocks before them leave: the carried stack's operands, the depths from the function's start, the operands' rules,
+    // the arrivals and what each block leaves on the stack.
+    for (uint32_t group_first = 0; valid && group_first < count; group_first += 64 * BUSTER_TIER0_SCAN_GROUP)
     {
-        const __mmask64 lanes = tier0_lanes(first, count);
-        const uint32_t live = count - first < 64 ? count - first : 64;
-        const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
-        const __m512i classes = tier0_bytes_at(function->classes, first, count);
-        const __m512i previous_kinds = tier0_shift_back(kinds, _mm512_set1_epi8((char)previous_kind), 1);
-        const __m512i previous_classes = tier0_shift_back(classes, _mm512_set1_epi8((char)previous_class), 1);
-        // An unknown kind or class, a tail call, an X86 entry and a vector's class: the scalar validator's.
-        _Static_assert(BUSTER_TYPED_TAIL_CALL + 1 == BUSTER_TYPED_X86, "a tail call and the vectors' kind are the kinds past the others");
-        __mmask64 refused = lanes & (_mm512_cmpeq_epi8_mask(kinds, zero) | _mm512_cmpge_epu8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_TAIL_CALL)) |
-                                     _mm512_cmpge_epu8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_VECTOR)));
-        const __m512i shapes = tier0_lookup(tier0_scan_shapes, kinds);
-        const __m512i rules = tier0_lookup(tier0_scan_rules, kinds);
-        const __m512i sides = tier0_lookup(tier0_scan_sides, kinds);
-        const __mmask64 x87_constants = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONST)) &
-                                        _mm512_cmpeq_epi8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_F80));
-        const __m512i bounds = _mm512_mask_mov_epi8(tier0_lookup(tier0_scan_bounds, kinds), x87_constants, _mm512_set1_epi8(BUSTER_TIER0_BOUND_X87));
-        // The values, by their low and high dwords in quarters of 16 lanes, against their kinds' bounds; their low bytes
-        // index the locals' and the calls' tables. No load of eight past the entries (tier0_scan_locals).
-        __m512i low_words[4];
-        __mmask64 bounded = 0;
-        __mmask64 nonzero = 0;
-        for (uint32_t q = 0; q < 4; q += 1)
+        const uint32_t group_end = count - group_first > 64 * BUSTER_TIER0_SCAN_GROUP ? group_first + 64 * BUSTER_TIER0_SCAN_GROUP : count;
+        for (uint32_t first = group_first; first < group_end; first += 64)
         {
-            const uintptr_t at = (uintptr_t)function->values + ((uintptr_t)first + 16 * q) * sizeof(uint64_t);
-            const __m512i a = first + 16 * q < count ? _mm512_maskz_loadu_epi64((__mmask8)(lanes >> (16 * q)), (const void*)at) : zero;
-            const __m512i b = first + 16 * q + 8 < count ? _mm512_maskz_loadu_epi64((__mmask8)(lanes >> (16 * q + 8)), (const void*)(at + 64)) : zero;
-            low_words[q] = _mm512_permutex2var_epi32(a, even, b);
-            const __m512i high_words = _mm512_permutex2var_epi32(a, odd, b);
-            const __m512i bound = _mm512_cvtepu8_epi32(tier0_scan_quarter(bounds, q));
-            const __mmask16 inside = _mm512_cmpge_epu32_mask(low_words[q], _mm512_permutexvar_epi32(bound, minimum)) &
-                                     _mm512_cmple_epu32_mask(low_words[q], _mm512_permutexvar_epi32(bound, maximum)) &
-                                     (_mm512_cmpeq_epi32_mask(high_words, zero) | _mm512_cmpeq_epi32_mask(bound, zero));
-            const __m512i any = _mm512_or_si512(low_words[q], high_words);
-            bounded |= (__mmask64)inside << (16 * q);
-            nonzero |= (__mmask64)_mm512_test_epi32_mask(any, any) << (16 * q);
-        }
-        refused |= lanes & (~bounded | (_mm512_test_epi8_mask(shapes, _mm512_set1_epi8(BUSTER_TIER0_SCAN_NONZERO)) & ~nonzero));
-        const __m512i indices = tier0_scan_bytes(low_words);
-        // What each entry pops: its kind's, a call's operands, nothing for a RETURN of nothing; and what it pushes: a value
-        // of its class, for a call only where it has one.
-        const __mmask64 calls = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_CALL));
-        const __mmask64 returns = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_RETURN));
-        const __mmask64 empty_returns = returns & _mm512_cmpeq_epi8_mask(classes, zero);
-        __m512i operands = zero;
-        if (few_calls)
-        {
-            operands = _mm512_permutex2var_epi8(call_operands[0], indices, call_operands[1]);
-        }
-        else if (calls != 0)
-        {
-            __m512i words[4];
-            tier0_scan_gather(call_words, low_words, calls & bounded, words);
-            operands = tier0_scan_bytes(words);
-        }
-        // One comparison register holds at most 64 operands. An indirect call with 64 arguments has 65; its
-        // complete operand check belongs to the scalar validator rather than dropping the last argument.
-        refused |= calls & _mm512_cmpgt_epu8_mask(operands, _mm512_set1_epi8(64));
-        __m512i pops = _mm512_and_si512(shapes, _mm512_set1_epi8(3));
-        pops = _mm512_mask_mov_epi8(pops, calls, operands);
-        pops = _mm512_mask_mov_epi8(pops, empty_returns, zero);
-        const __mmask64 pushes = lanes & _mm512_test_epi8_mask(shapes, _mm512_set1_epi8(BUSTER_TIER0_SCAN_PUSH)) & ~(calls & _mm512_cmpeq_epi8_mask(classes, zero));
-        valid = valid && (uint64_t)_mm512_reduce_add_epi64(_mm512_sad_epu8(pops, zero)) <= BUSTER_TIER0_SCAN_POPS;
-        // The depths before and after each entry, relative to the block's start: prefix sums of the effects in six shifted
-        // adds, and its floor, the depth after its pops.
-        const __m512i effects = _mm512_sub_epi8(_mm512_maskz_mov_epi8(pushes, one), pops);
-        __m512i after = effects;
-        for (uint32_t step = 1; step < 64; step *= 2)
-        {
-            after = _mm512_add_epi8(after, tier0_shift_back(after, zero, step));
-        }
-        const __m512i before = _mm512_sub_epi8(after, effects);
-        const __m512i floors = _mm512_sub_epi8(before, pops);
-        // An operand the stack doesn't have: the lowest place an entry reads (its floor, or DUP's top) below the stack's
-        // bottom.
-        const __mmask64 tops = lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_TOP)) & ~empty_returns;
-        const __m512i lowest = _mm512_sub_epi8(before, _mm512_max_epu8(pops, _mm512_maskz_mov_epi8(tops, one)));
-        refused |= lanes & _mm512_cmplt_epi8_mask(lowest, _mm512_set1_epi8((char)-(int32_t)base));
-        // Each operand's producer: for the top (place before - 1) and the one below it (before - 2), the nearest lane whose
-        // floor is at or below the place, or the carried stack's below the block's start; and its class.
-        __m512i windows[6];
-        windows[0] = _mm512_xor_si512(floors, _mm512_set1_epi8((char)0x80));
-        for (uint32_t s = 1; s < 6; s += 1)
-        {
-            windows[s] = _mm512_min_epu8(windows[s - 1], tier0_shift_back(windows[s - 1], _mm512_set1_epi8((char)0xff), 1u << (s - 1)));
-        }
-        const __m512i first_producers = tier0_scan_previous(windows, _mm512_sub_epi8(before, one));
-        const __m512i second_producers = tier0_scan_previous(windows, _mm512_sub_epi8(before, _mm512_set1_epi8(2)));
-        const __m512i top = _mm512_mask_blend_epi8(~_mm512_movepi8_mask(first_producers), _mm512_permutexvar_epi8(_mm512_add_epi8(before, _mm512_set1_epi8((char)(base - 1))), carried),
-                                                   _mm512_permutexvar_epi8(first_producers, classes));
-        const __m512i second = _mm512_mask_blend_epi8(~_mm512_movepi8_mask(second_producers), _mm512_permutexvar_epi8(_mm512_add_epi8(before, _mm512_set1_epi8((char)(base - 2))), carried),
-                                                      _mm512_permutexvar_epi8(second_producers, classes));
-        // The rules: each entry's class; its top's, by its kind's mask, its own, or CONVERT's mask by its class; the one
-        // below, by its kind's mask, its own or the top's; the top the entry before (tier0_last_mismatch's); and nothing
-        // under a RETURN's or a JUMP_INDIRECT's operand.
-        refused |= lanes & ~tier0_scan_member(_mm512_permutexvar_epi8(kinds, own_low), _mm512_permutexvar_epi8(kinds, own_high), classes);
-        __mmask64 top_fits = tier0_scan_member(tier0_lookup(tier0_scan_top_low, kinds), tier0_lookup(tier0_scan_top_high, kinds), top);
-        top_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_TOP_SELF)) & _mm512_cmpeq_epi8_mask(top, classes);
-        top_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_CONVERT)) &
-                    tier0_scan_member(tier0_lookup(tier0_scan_convert_low, classes), tier0_lookup(tier0_scan_convert_high, classes), top);
-        refused |= tops & ~top_fits;
-        __mmask64 second_fits = tier0_scan_member(tier0_lookup(tier0_scan_second_low, kinds), tier0_lookup(tier0_scan_second_high, kinds), second);
-        second_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_SECOND_SELF)) & _mm512_cmpeq_epi8_mask(second, classes);
-        second_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_COMPARE)) & _mm512_cmpeq_epi8_mask(second, top);
-        refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_SECOND)) & ~second_fits;
-        refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_LAST)) & ~empty_returns & _mm512_cmpneq_epi8_mask(top, previous_classes);
-        const __mmask64 emptied = _mm512_cmpeq_epi8_mask(floors, _mm512_set1_epi8((char)-(int32_t)base));
-        refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8((char)BUSTER_TIER0_RULE_FLOOR)) & ~emptied;
-        // A local's classes by the function's table (the bit LOCAL_ADDRESS tests, 15, where its address is taken).
-        const __mmask64 locals = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_LOCAL | BUSTER_TIER0_SIDE_ADDRESS));
-        __m512i local_classes_low = zero;
-        __m512i local_classes_high = zero;
-        if (few_locals)
-        {
-            local_classes_low = _mm512_permutex2var_epi8(local_low[0], indices, local_low[1]);
-            local_classes_high = _mm512_permutex2var_epi8(local_high[0], indices, local_high[1]);
-        }
-        else if (locals != 0)
-        {
-            __m512i words[4];
-            tier0_scan_gather(local_words, low_words, locals & bounded, words);
-            local_classes_low = tier0_scan_bytes(words);
+            Tier0ScanBlock* block = &blocks[(first - group_first) >> 6];
+            const __mmask64 lanes = tier0_lanes(first, count);
+            const uint32_t live = count - first < 64 ? count - first : 64;
+            const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+            const __m512i classes = tier0_bytes_at(function->classes, first, count);
+            // An unknown kind or class, a tail call, an X86 entry and a vector's class: the scalar validator's.
+            _Static_assert(BUSTER_TYPED_TAIL_CALL + 1 == BUSTER_TYPED_X86, "a tail call and the vectors' kind are the kinds past the others");
+            __mmask64 refused = lanes & (_mm512_cmpeq_epi8_mask(kinds, zero) | _mm512_cmpge_epu8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_TAIL_CALL)) |
+                                         _mm512_cmpge_epu8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_VECTOR)));
+            const __m512i shapes = tier0_lookup(tier0_scan_shapes, kinds);
+            const __m512i sides = tier0_lookup(tier0_scan_sides, kinds);
+            const __mmask64 x87_constants = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONST)) &
+                                            _mm512_cmpeq_epi8_mask(classes, _mm512_set1_epi8(BUSTER_TYPED_CLASS_F80));
+            const __m512i bounds = _mm512_mask_mov_epi8(tier0_lookup(tier0_scan_bounds, kinds), x87_constants, _mm512_set1_epi8(BUSTER_TIER0_BOUND_X87));
+            // The values, by their low and high dwords in quarters of 16 lanes, against their kinds' bounds; their low bytes
+            // index the locals' and the calls' tables. No load of eight past the entries (tier0_scan_locals); a block of 64
+            // entries loads them whole.
+            __m512i value_words[8];
+            if (live == 64)
+            {
+                for (uint32_t e = 0; e < 8; e += 1)
+                {
+                    value_words[e] = _mm512_loadu_si512((const void*)((uintptr_t)function->values + ((uintptr_t)first + 8 * e) * sizeof(uint64_t)));
+                }
+            }
+            else
+            {
+                for (uint32_t e = 0; e < 8; e += 1)
+                {
+                    const uintptr_t at = (uintptr_t)function->values + ((uintptr_t)first + 8 * e) * sizeof(uint64_t);
+                    value_words[e] = first + 8 * e < count ? _mm512_maskz_loadu_epi64((__mmask8)(lanes >> (8 * e)), (const void*)at) : zero;
+                }
+            }
+            __mmask16 inside[4];
+            __mmask16 nonzero[4];
             for (uint32_t q = 0; q < 4; q += 1)
             {
-                words[q] = _mm512_srli_epi32(words[q], 8);
+                const __m512i a = value_words[2 * q];
+                const __m512i b = value_words[2 * q + 1];
+                block->words[q] = _mm512_permutex2var_epi32(a, even, b);
+                const __m512i high_words = _mm512_permutex2var_epi32(a, odd, b);
+                const __m512i bound = _mm512_cvtepu8_epi32(tier0_scan_quarter(bounds, q));
+                const __mmask16 small = _kor_mask16(_mm512_testn_epi32_mask(high_words, high_words), _mm512_testn_epi32_mask(bound, bound));
+                inside[q] = _mm512_mask_cmple_epu32_mask(_mm512_mask_cmpge_epu32_mask(small, block->words[q], _mm512_permutexvar_epi32(bound, minimum)), block->words[q],
+                                                         _mm512_permutexvar_epi32(bound, maximum));
+                nonzero[q] = _mm512_test_epi32_mask(_mm512_or_si512(block->words[q], high_words), _mm512_or_si512(block->words[q], high_words));
             }
-            local_classes_high = tier0_scan_bytes(words);
-        }
-        const __m512i local_bit = _mm512_mask_mov_epi8(classes, _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_ADDRESS)), _mm512_set1_epi8(15));
-        refused |= locals & ~tier0_scan_member(local_classes_low, local_classes_high, local_bit);
-        // One class for every RETURN: the first one's.
-        uint8_t class_lanes[64] __attribute__((aligned(64)));
-        _mm512_store_si512(class_lanes, classes);
-        const uint32_t first_return = returns != 0 ? class_lanes[__builtin_ctzll(returns)] : return_class;
-        return_class = return_class == BUSTER_TIER0_SCAN_UNREACHED ? first_return : return_class;
-        refused |= returns & _mm512_cmpneq_epi8_mask(classes, _mm512_set1_epi8((char)return_class));
-        // The lane-at-a-time checks below index the producer stack and shift by classes. Only a block whose
-        // kinds, classes, bounds and depths already passed may execute them; malformed byte depths can wrap.
-        valid = valid && refused == 0;
-        // The lanes' depths, producers and classes for the arrivals' and the calls' checks, which take them a lane at a
-        // time; and each lane's lowest place the lanes before it in the block reached (the place 0 where none did).
-        uint8_t depth_lanes[64] __attribute__((aligned(64)));
-        uint8_t kind_lanes[64] __attribute__((aligned(64)));
-        uint8_t first_lanes[64] __attribute__((aligned(64)));
-        uint8_t second_lanes[64] __attribute__((aligned(64)));
-        uint8_t top_lanes[64] __attribute__((aligned(64)));
-        uint8_t second_class_lanes[64] __attribute__((aligned(64)));
-        uint8_t reached_lanes[64] __attribute__((aligned(64)));
-        const __m512i depth = _mm512_add_epi8(before, _mm512_set1_epi8((char)base));
-        __m512i reached = _mm512_mask_mov_epi8(_mm512_set1_epi8(127), lanes, floors);
-        for (uint32_t step = 1; step < 64; step *= 2)
-        {
-            reached = _mm512_min_epi8(reached, tier0_shift_back(reached, _mm512_set1_epi8(127), step));
-        }
-        _mm512_storeu_si512(depths + first, depth);
-        _mm512_store_si512(depth_lanes, depth);
-        _mm512_store_si512(kind_lanes, kinds);
-        _mm512_store_si512(first_lanes, first_producers);
-        _mm512_store_si512(second_lanes, second_producers);
-        _mm512_store_si512(top_lanes, top);
-        _mm512_store_si512(second_class_lanes, second);
-        _mm512_store_si512(reached_lanes, tier0_shift_back(reached, zero, 1));
-        // The targets the block holds, as forward arrivals from earlier blocks left them: read before this block's own
-        // arrivals, which store no target of the block's (a vector load of bytes just stored a byte at a time stalls).
-        const __m512i expectations = _mm512_loadu_si512(expected + first);
-        // Each arrival's depth (a branch's and a JUMP_VALUE's after its pop, a JUMP_VALUE's with its value) and those that
-        // bring nothing to compare but depth 0, a statement's: a bit for the target (checked where the target's block
-        // is, `emptied_targets`), and backward, its depth 0 now.
-        const __mmask64 controls = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_CONTROL)) & bounded;
-        const __mmask64 jumps = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_JUMP));
-        const __mmask64 brought_values = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_JUMP_VALUE));
-        const __m512i arrivals_depth = _mm512_add_epi8(_mm512_sub_epi8(depth, _mm512_maskz_mov_epi8(~jumps, one)), _mm512_maskz_mov_epi8(brought_values, one));
-        const __mmask64 empty = controls & _mm512_cmpeq_epi8_mask(arrivals_depth, zero);
-        bool failed = false;
-        for (uint64_t pending = empty; valid && pending != 0; pending &= pending - 1)
-        {
-            const uint32_t entry = first + (uint32_t)__builtin_ctzll(pending);
-            const uint32_t target = (uint32_t)function->values[entry];
-            emptied_targets[target >> 6] |= 1ull << (target & 63);
-            failed |= (target <= entry) & (depths[target] != 0);
-        }
-        // The others: forward, the depth, the producer just below what they may differ in (of the top for a JUMP, which
-        // pops nothing, and of the one below for a branch's and a JUMP_VALUE's) and the class of the value a JUMP_VALUE
-        // brings, against the target's own where the block holds it (`near`), and otherwise against the first forward
-        // arrival's, which the target's block checks; backward, the scalar validator's.
-        __mmask64 near = 0;
-        for (uint64_t pending = controls & ~empty; valid && pending != 0; pending &= pending - 1)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
-            const uint32_t entry = first + lane;
-            const uint32_t target = (uint32_t)function->values[entry];
-            const uint32_t popped = kind_lanes[lane] != BUSTER_TYPED_JUMP ? 1 : 0;
-            const uint32_t brings = kind_lanes[lane] == BUSTER_TYPED_JUMP_VALUE ? 1 : 0;
-            const uint32_t arrival = depth_lanes[lane] - popped + brings;
-            const uint32_t below = tier0_scan_producer(first, (popped != 0 ? second_lanes : first_lanes)[lane], depth_lanes[lane], 1 + popped, stack_producers);
-            const uint32_t value_class = brings != 0 ? class_lanes[lane] : 0;
-            const bool forward = target > entry;
-            const bool inside = forward && target < first + live;
-            const uint32_t at = (target - first) & 63;
-            const uint32_t at_below = tier0_scan_producer(first, (brings != 0 ? second_lanes : first_lanes)[at], depth_lanes[at], 1 + brings, stack_producers);
-            failed |= inside && (depth_lanes[at] != arrival || at_below != below || (brings != 0 && top_lanes[at] != value_class));
-            near |= (__mmask64)(inside ? 1 : 0) << at;
-            const uint64_t brought = below | (uint64_t)brings << 32 | (uint64_t)value_class << 40;
-            const bool far = forward && !inside;
-            const uint32_t old = expected[target];
-            const uint64_t old_brought = arrivals[target];
-            const bool fresh = old == BUSTER_TIER0_SCAN_UNREACHED;
-            failed |= (far && !fresh && (old != arrival || old_brought != brought)) || !forward;
-            expected[target] = (uint8_t)(far && fresh ? arrival : old);
-            arrivals[target] = far && fresh ? brought : old_brought;
-        }
-        // The targets' depths: 0 where an arrival brings nothing else; from earlier blocks' other arrivals, theirs, and
-        // the same producer below what they bring and the same value a JUMP_VALUE brings; and code no path reaches before
-        // a target, after a jump or a return, at depth 0, where tier0_validate_scalar starts again.
-        refused |= lanes & emptied_targets[first >> 6] & _mm512_test_epi8_mask(depth, depth);
-        const __mmask64 reached_before = lanes & _mm512_cmpneq_epi8_mask(expectations, _mm512_set1_epi8((char)BUSTER_TIER0_SCAN_UNREACHED));
-        refused |= reached_before & _mm512_cmpneq_epi8_mask(expectations, depth);
-        refused |= lanes & _mm512_test_epi8_mask(tier0_lookup(tier0_scan_sides, previous_kinds), _mm512_set1_epi8(BUSTER_TIER0_SIDE_TRANSFER)) & ~(reached_before | near) &
-                   _mm512_test_epi8_mask(depth, depth);
-        valid = valid && refused == 0 && !failed;
-        for (uint64_t pending = reached_before & _mm512_test_epi8_mask(expectations, expectations); valid && pending != 0; pending &= pending - 1)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
-            const uint64_t brought = arrivals[first + lane];
-            const uint32_t brings = (uint32_t)(brought >> 32) & 1;
-            const uint32_t below = tier0_scan_producer(first, (brings != 0 ? second_lanes : first_lanes)[lane], depth_lanes[lane], 1 + brings, stack_producers);
-            failed |= below != (uint32_t)brought || (brings != 0 && top_lanes[lane] != (uint8_t)(brought >> 40));
-        }
-        // Each call: its class by its own rules, and its operands' (an indirect call's callee, U64, then its arguments, the
-        // first pushed first) on the stack: for two or fewer, the top's and the one below's; for more, from the carried
-        // stack below the lowest place the lanes before it reached and above it the values those lanes left, in order.
-        const __mmask64 few_operands = calls & bounded & _mm512_cmple_epu8_mask(operands, _mm512_set1_epi8(2));
-        for (uint64_t pending = few_operands; valid && pending != 0; pending &= pending - 1)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
-            const uint32_t call = (uint32_t)function->values[first + lane];
-            uint32_t count_operands = 0;
-            const __m512i wanted = tier0_scan_call_operands(function, call, &count_operands);
-            const __m512i stack = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)second_class_lanes[lane]), (__mmask64)1 << ((count_operands - 1) & 63),
-                                                       _mm512_set1_epi8((char)top_lanes[lane]));
-            failed |= ((tier0_scan_call(function, call) >> class_lanes[lane]) & 1) == 0 || _mm512_mask_cmpneq_epi8_mask(_bzhi_u64(~0ull, count_operands), stack, wanted) != 0;
-        }
-        for (uint64_t pending = calls & bounded & ~few_operands; valid && pending != 0; pending &= pending - 1)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
-            const uint32_t call = (uint32_t)function->values[first + lane];
-            uint32_t count_operands = 0;
-            const __m512i wanted = tier0_scan_call_operands(function, call, &count_operands);
-            const int32_t at = (int32_t)depth_lanes[lane];
-            // Below the stack's bottom (an operand it doesn't have), the call is refused already: its places from 0.
-            const int32_t bottom = at >= (int32_t)count_operands ? at - (int32_t)count_operands : 0;
-            const int32_t lowest_place = (int32_t)base + (int8_t)reached_lanes[lane];
-            const int32_t below = (lowest_place < at ? lowest_place : at) - bottom;
-            const uint32_t kept = below > 0 ? (uint32_t)below : 0;
-            const __m512i held_below = _mm512_maskz_permutexvar_epi8(_bzhi_u64(~0ull, kept), _mm512_add_epi8(lane_indices, _mm512_set1_epi8((char)bottom)), carried);
-            const __mmask64 earlier = _bzhi_u64(~0ull, lane);
-            const __m512i held = _mm512_maskz_compress_epi8(pushes & earlier & _mm512_cmplt_epi8_mask(floors, tier0_scan_later_floors(floors, earlier)), classes);
-            const __m512i inside = _mm512_permutexvar_epi8(_mm512_add_epi8(lane_indices, _mm512_set1_epi8((char)(bottom - lowest_place))), held);
-            const __m512i stack = _mm512_mask_blend_epi8(_bzhi_u64(~0ull, kept), inside, held_below);
-            failed |= ((tier0_scan_call(function, call) >> class_lanes[lane]) & 1) == 0 || _mm512_mask_cmpneq_epi8_mask(_bzhi_u64(~0ull, count_operands), stack, wanted) != 0;
-        }
-        // A global entry's symbol's access, where the function has the column.
-        if (function->symbol_access != 0)
-        {
-            for (uint64_t pending = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_GLOBAL)) & bounded; pending != 0; pending &= pending - 1)
+            const __mmask64 bounded = _mm512_kunpackd(_mm512_kunpackw(inside[3], inside[2]), _mm512_kunpackw(inside[1], inside[0]));
+            refused |= lanes & ~bounded;
+            const __mmask64 sized = lanes & _mm512_test_epi8_mask(shapes, _mm512_set1_epi8(BUSTER_TIER0_SCAN_NONZERO));
+            if (sized != 0)
             {
-                failed |= function->symbol_access[(uint32_t)function->values[first + (uint32_t)__builtin_ctzll(pending)]] >= BUSTER_TIER0_ACCESSES;
+                refused |= sized & ~_mm512_kunpackd(_mm512_kunpackw(nonzero[3], nonzero[2]), _mm512_kunpackw(nonzero[1], nonzero[0]));
             }
+            const __m512i indices = tier0_scan_bytes(block->words);
+            // What each entry pops: its kind's, a call's operands, nothing for a RETURN of nothing; and what it pushes: a
+            // value of its class, for a call only where it has one.
+            const __mmask64 calls = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_CALL));
+            const __mmask64 returns = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_RETURN));
+            const __mmask64 empty_returns = returns & _mm512_cmpeq_epi8_mask(classes, zero);
+            // Each call's operands, the classes it may have and its operands' base and whether it is indirect, by its lane.
+            __m512i operands = zero;
+            __m512i results_low = zero;
+            __m512i results_high = zero;
+            __m512i call_indirect = zero;
+            __m512i call_base = zero;
+            if (few_calls && calls != 0)
+            {
+                operands = _mm512_permutex2var_epi8(call_tables[0].operands, indices, call_tables[1].operands);
+                results_low = _mm512_permutex2var_epi8(call_tables[0].results_low, indices, call_tables[1].results_low);
+                results_high = _mm512_permutex2var_epi8(call_tables[0].results_high, indices, call_tables[1].results_high);
+                call_indirect = _mm512_permutex2var_epi8(call_tables[0].indirect, indices, call_tables[1].indirect);
+                call_base = _mm512_permutex2var_epi8(call_tables[0].bases, indices, call_tables[1].bases);
+            }
+            else if (calls != 0)
+            {
+                __m512i words[4];
+                tier0_scan_gather(call_words, block->words, calls & bounded, words);
+                operands = tier0_scan_bytes(words);
+                for (uint32_t q = 0; q < 4; q += 1)
+                {
+                    words[q] = _mm512_srli_epi32(words[q], 8);
+                }
+                results_low = tier0_scan_bytes(words);
+                for (uint32_t q = 0; q < 4; q += 1)
+                {
+                    words[q] = _mm512_srli_epi32(words[q], 8);
+                }
+                results_high = tier0_scan_bytes(words);
+                for (uint32_t q = 0; q < 4; q += 1)
+                {
+                    words[q] = _mm512_srli_epi32(words[q], 8);
+                }
+                call_indirect = _mm512_movm_epi8(_mm512_test_epi8_mask(tier0_scan_bytes(words), tier0_scan_bytes(words)));
+            }
+            // A call's own class, by its result (tier0_validate_scalar's: VOID alone where an object takes it, no 128-bit
+            // integer, F80 exactly where it is a long double's value in st0).
+            refused |= calls & bounded & ~tier0_scan_member(results_low, results_high, classes);
+            // One comparison register holds at most 64 operands. An indirect call with 64 arguments has 65; its
+            // complete operand check belongs to the scalar validator rather than dropping the last argument.
+            refused |= calls & _mm512_cmpgt_epu8_mask(operands, _mm512_set1_epi8(64));
+            __m512i pops = _mm512_and_si512(shapes, _mm512_set1_epi8(3));
+            pops = _mm512_mask_mov_epi8(pops, calls, operands);
+            pops = _mm512_mask_mov_epi8(pops, empty_returns, zero);
+            const __mmask64 pushes = lanes & _mm512_test_epi8_mask(shapes, _mm512_set1_epi8(BUSTER_TIER0_SCAN_PUSH)) & ~(calls & _mm512_cmpeq_epi8_mask(classes, zero));
+            // A block whose pops come to more than BUSTER_TIER0_SCAN_POPS: its relative depths leave a byte.
+            refused |= (uint64_t)_mm512_reduce_add_epi64(_mm512_sad_epu8(pops, zero)) > BUSTER_TIER0_SCAN_POPS ? lanes | 1 : 0;
+            // The depths before and after each entry, relative to the block's start: prefix sums of the effects in six
+            // shifted adds, and its floor, the depth after its pops.
+            const __m512i effects = _mm512_sub_epi8(_mm512_maskz_mov_epi8(pushes, one), pops);
+            __m512i after = effects;
+            for (uint32_t step = 1; step < 64; step *= 2)
+            {
+                after = _mm512_add_epi8(after, tier0_shift_back(after, zero, step));
+            }
+            const __m512i before = _mm512_sub_epi8(after, effects);
+            const __m512i floors = _mm512_sub_epi8(before, pops);
+            // The lowest place an entry reads (its floor, or DUP's top), against the stack's bottom in the second pass.
+            const __m512i rules = tier0_lookup(tier0_scan_rules, kinds);
+            const __mmask64 tops = lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_TOP)) & ~empty_returns;
+            block->lowest = _mm512_sub_epi8(before, _mm512_max_epu8(pops, _mm512_maskz_mov_epi8(tops, one)));
+            // Each operand's producer in the block: for the top (place before - 1) and the one below it (before - 2), the
+            // nearest lane whose floor is at or below the place (bit 7 where the carried stack has it); and its class.
+            __m512i windows[6];
+            windows[0] = _mm512_xor_si512(floors, _mm512_set1_epi8((char)0x80));
+            for (uint32_t s = 1; s < 6; s += 1)
+            {
+                windows[s] = _mm512_min_epu8(windows[s - 1], tier0_shift_back(windows[s - 1], _mm512_set1_epi8((char)0xff), 1u << (s - 1)));
+            }
+            block->first = tier0_scan_previous(windows, _mm512_sub_epi8(before, one));
+            block->second = tier0_scan_previous(windows, _mm512_sub_epi8(before, _mm512_set1_epi8(2)));
+            block->top = _mm512_permutexvar_epi8(block->first, classes);
+            block->under = _mm512_permutexvar_epi8(block->second, classes);
+            // Each entry's class by its kind's mask (bit 15 for LOCAL_ADDRESS, the local's address taken).
+            refused |= lanes & ~tier0_scan_member(_mm512_permutexvar_epi8(kinds, own_low), _mm512_permutexvar_epi8(kinds, own_high), classes);
+            // A local's classes by the function's table (the bit LOCAL_ADDRESS tests, 15, where its address is taken).
+            const __mmask64 locals = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_LOCAL | BUSTER_TIER0_SIDE_ADDRESS));
+            __m512i local_classes_low = zero;
+            __m512i local_classes_high = zero;
+            if (few_locals && locals != 0)
+            {
+                local_classes_low = _mm512_permutex2var_epi8(local_low[0], indices, local_low[1]);
+                local_classes_high = _mm512_permutex2var_epi8(local_high[0], indices, local_high[1]);
+            }
+            else if (locals != 0)
+            {
+                __m512i words[4];
+                tier0_scan_gather(local_words, block->words, locals & bounded, words);
+                local_classes_low = tier0_scan_bytes(words);
+                for (uint32_t q = 0; q < 4; q += 1)
+                {
+                    words[q] = _mm512_srli_epi32(words[q], 8);
+                }
+                local_classes_high = tier0_scan_bytes(words);
+            }
+            const __m512i local_bit = _mm512_mask_mov_epi8(classes, _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_ADDRESS)), _mm512_set1_epi8(15));
+            refused |= locals & ~tier0_scan_member(local_classes_low, local_classes_high, local_bit);
+            // Each call of one or two operands (an indirect call's callee, U64, then its arguments, the first pushed first):
+            // the classes its top and the one below must have, from the arguments' column at the call's base (where the
+            // function has 128 arguments or fewer; by gathers in the second pass otherwise), which the second pass checks.
+            // Calls of more operands take them below.
+            const __mmask64 short_calls = calls & bounded & _mm512_test_epi8_mask(operands, operands) & _mm512_cmple_epu8_mask(operands, _mm512_set1_epi8(2));
+            const __mmask64 one_operand = short_calls & _mm512_cmpeq_epi8_mask(operands, one);
+            const __mmask64 indirect_calls = _mm512_test_epi8_mask(call_indirect, call_indirect);
+            block->operand_first = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(argument_tables[0], call_base, argument_tables[1]), indirect_calls,
+                                                        _mm512_set1_epi8(BUSTER_TYPED_CLASS_U64));
+            block->operand_second = _mm512_permutex2var_epi8(argument_tables[0], _mm512_add_epi8(call_base, one), argument_tables[1]);
+            const __mmask64 long_calls = calls & bounded & _mm512_cmpgt_epu8_mask(operands, _mm512_set1_epi8(2));
+            // Their operands that lanes of the block push, in a block that has such a call: each such value's consumer, the
+            // first lane after its own whose floor is at or below the value's place, its own floor (tier0_scan_next); where
+            // that lane is a call of more than two operands, the value is its operand at the place less the call's floor,
+            // whose class the call's table gives: from the arguments' column at the call's base (by gathers in the second
+            // pass past 128 calls or arguments), an indirect call's first, its callee, a U64. Such a call that also pops
+            // values of earlier blocks (its floor below the lowest place the lanes before it reached) takes them a call at a
+            // time in the second pass.
+            block->fed = 0;
+            block->callees = 0;
+            block->consumers = zero;
+            block->places = zero;
+            block->reached = zero;
+            block->carried_calls = 0;
+            if (long_calls != 0)
+            {
+                __m512i reached = _mm512_mask_mov_epi8(_mm512_set1_epi8(127), lanes, floors);
+                for (uint32_t step = 1; step < 64; step *= 2)
+                {
+                    reached = _mm512_min_epi8(reached, tier0_shift_back(reached, _mm512_set1_epi8(127), step));
+                }
+                block->reached = tier0_shift_back(reached, zero, 1);
+                block->carried_calls = long_calls & _mm512_cmplt_epi8_mask(floors, block->reached);
+                __m512i ahead[6];
+                ahead[0] = _mm512_mask_mov_epi8(_mm512_set1_epi8((char)0xff), lanes, windows[0]);
+                for (uint32_t s = 1; s < 6; s += 1)
+                {
+                    ahead[s] = _mm512_min_epu8(ahead[s - 1], tier0_shift_ahead(ahead[s - 1], _mm512_set1_epi8((char)0xff), 1u << (s - 1)));
+                }
+                block->consumers = tier0_scan_next(ahead, floors);
+                block->fed = pushes & _mm512_test_epi8_mask(_mm512_permutex2var_epi8(_mm512_movm_epi8(long_calls), block->consumers, zero), _mm512_set1_epi8((char)0xff));
+                block->places = _mm512_sub_epi8(floors, _mm512_permutexvar_epi8(block->consumers, floors));
+                block->callees = block->fed & _mm512_test_epi8_mask(_mm512_permutexvar_epi8(block->consumers, call_indirect), _mm512_set1_epi8((char)0xff)) &
+                                 _mm512_cmpeq_epi8_mask(block->places, zero);
+                if (few_operands)
+                {
+                    const __m512i at = _mm512_add_epi8(_mm512_permutexvar_epi8(block->consumers, call_base), block->places);
+                    const __m512i wanted = _mm512_mask_mov_epi8(_mm512_permutex2var_epi8(argument_tables[0], at, argument_tables[1]), block->callees,
+                                                                _mm512_set1_epi8(BUSTER_TYPED_CLASS_U64));
+                    refused |= block->fed & _mm512_cmpneq_epi8_mask(wanted, classes);
+                }
+            }
+            // The values the block leaves on the stack: each lane's that pushes and whose floor is below every later lane's,
+            // and the lowest place the block reached (its lanes' lowest floor, or its start).
+            block->left = pushes & _mm512_cmplt_epi8_mask(floors, tier0_scan_later_floors(floors, lanes));
+            const __m512i lowest_floors = _mm512_min_epi8(_mm512_maskz_mov_epi8(lanes, floors), _mm512_shuffle_i64x2(_mm512_maskz_mov_epi8(lanes, floors), _mm512_maskz_mov_epi8(lanes, floors), 0x4e));
+            __m512i lowest_reached = _mm512_min_epi8(lowest_floors, _mm512_shuffle_i64x2(lowest_floors, lowest_floors, 0xb1));
+            lowest_reached = _mm512_min_epi8(lowest_reached, _mm512_shuffle_epi32(lowest_reached, (_MM_PERM_ENUM)0x4e));
+            lowest_reached = _mm512_min_epi8(lowest_reached, _mm512_shuffle_epi32(lowest_reached, (_MM_PERM_ENUM)0xb1));
+            lowest_reached = _mm512_min_epi8(lowest_reached, _mm512_srli_epi32(lowest_reached, 16));
+            lowest_reached = _mm512_min_epi8(lowest_reached, _mm512_srli_epi16(lowest_reached, 8));
+            block->reach = (int8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(lowest_reached));
+            block->effect = (int8_t)_mm_extract_epi8(_mm512_extracti32x4_epi32(after, 3), 15);
+            block->before = before;
+            block->floors = floors;
+            block->rules = rules;
+            block->refused = refused;
+            block->pushes = pushes;
+            block->returns = returns;
+            block->empty_returns = empty_returns;
+            block->tops = tops;
+            block->short_calls = short_calls;
+            block->one_operand = one_operand;
+            block->indirect_calls = indirect_calls;
+            block->long_calls = long_calls;
+            block->controls = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_CONTROL)) & bounded;
+            block->globals = lanes & _mm512_test_epi8_mask(sides, _mm512_set1_epi8(BUSTER_TIER0_SIDE_GLOBAL)) & bounded;
         }
-        valid = valid && refused == 0 && !failed;
-        if (valid)
+        for (uint32_t first = group_first; valid && first < group_end; first += 64)
         {
-            // The values the block leaves on the stack, onto the carried stack: each lane's that pushes and whose floor is
-            // below every later lane's, in order from the lowest place the block reached.
-            uint8_t lowest_lanes[64] __attribute__((aligned(64)));
-            _mm512_store_si512(lowest_lanes, reached);
-            const uint32_t place = base + (uint32_t)(int32_t)(int8_t)lowest_lanes[live - 1];
-            const __mmask64 left = pushes & _mm512_cmplt_epi8_mask(floors, tier0_scan_later_floors(floors, lanes));
-            const __m512i left_classes = _mm512_maskz_compress_epi8(left, classes);
-            carried = _mm512_mask_blend_epi8(~_bzhi_u64(~0ull, place), carried, _mm512_permutexvar_epi8(_mm512_sub_epi8(lane_indices, _mm512_set1_epi8((char)place)), left_classes));
-            uint32_t offset = 64 + place;
+            const Tier0ScanBlock* block = &blocks[(first - group_first) >> 6];
+            const __mmask64 lanes = tier0_lanes(first, count);
+            const uint32_t live = count - first < 64 ? count - first : 64;
+            const __m512i kinds = tier0_bytes_at(function->kinds, first, count);
+            const __m512i classes = tier0_bytes_at(function->classes, first, count);
+            const __m512i previous_kinds = tier0_shift_back(kinds, _mm512_set1_epi8((char)previous_kind), 1);
+            const __m512i previous_classes = tier0_shift_back(classes, _mm512_set1_epi8((char)previous_class), 1);
+            const __m512i rules = block->rules;
+            const __m512i before = block->before;
+            const __m512i floors = block->floors;
+            __mmask64 refused = block->refused;
+            // An operand the stack doesn't have: the lowest place an entry reads below the stack's bottom.
+            refused |= lanes & _mm512_cmplt_epi8_mask(block->lowest, _mm512_set1_epi8((char)-(int32_t)base));
+            // The operands' classes: the block's producers', or the carried stack's below the block's start.
+            const __m512i top = _mm512_mask_blend_epi8(~_mm512_movepi8_mask(block->first), _mm512_permutexvar_epi8(_mm512_add_epi8(before, _mm512_set1_epi8((char)(base - 1))), carried),
+                                                       block->top);
+            const __m512i second = _mm512_mask_blend_epi8(~_mm512_movepi8_mask(block->second), _mm512_permutexvar_epi8(_mm512_add_epi8(before, _mm512_set1_epi8((char)(base - 2))), carried),
+                                                          block->under);
+            // The rules: the top's class, by its kind's mask, its own, or CONVERT's mask by its class; the one below, by
+            // its kind's mask, its own or the top's; the top the entry before's (tier0_last_mismatch's); and nothing under a
+            // RETURN's or a JUMP_INDIRECT's operand.
+            __mmask64 top_fits = tier0_scan_member(tier0_lookup(tier0_scan_top_low, kinds), tier0_lookup(tier0_scan_top_high, kinds), top);
+            top_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_TOP_SELF)) & _mm512_cmpeq_epi8_mask(top, classes);
+            top_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_CONVERT)) &
+                        tier0_scan_member(tier0_lookup(tier0_scan_convert_low, classes), tier0_lookup(tier0_scan_convert_high, classes), top);
+            refused |= block->tops & ~top_fits;
+            __mmask64 second_fits = tier0_scan_member(tier0_lookup(tier0_scan_second_low, kinds), tier0_lookup(tier0_scan_second_high, kinds), second);
+            second_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_SECOND_SELF)) & _mm512_cmpeq_epi8_mask(second, classes);
+            second_fits |= _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_COMPARE)) & _mm512_cmpeq_epi8_mask(second, top);
+            refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_SECOND)) & ~second_fits;
+            refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8(BUSTER_TIER0_RULE_LAST)) & ~block->empty_returns & _mm512_cmpneq_epi8_mask(top, previous_classes);
+            const __mmask64 emptied = _mm512_cmpeq_epi8_mask(floors, _mm512_set1_epi8((char)-(int32_t)base));
+            refused |= lanes & _mm512_test_epi8_mask(rules, _mm512_set1_epi8((char)BUSTER_TIER0_RULE_FLOOR)) & ~emptied;
+            // One class for every RETURN: the first one's.
+            const uint32_t first_return = block->returns != 0 ? tier0_scan_lane(classes, (uint32_t)__builtin_ctzll(block->returns)) : return_class;
+            return_class = return_class == BUSTER_TIER0_SCAN_UNREACHED ? first_return : return_class;
+            refused |= block->returns & _mm512_cmpneq_epi8_mask(classes, _mm512_set1_epi8((char)return_class));
+            // The short calls' operands (where the function has 128 calls and arguments or fewer).
+            if (few_operands)
+            {
+                refused |= block->one_operand & _mm512_cmpneq_epi8_mask(top, block->operand_first);
+                refused |= (block->short_calls & ~block->one_operand) & (_mm512_cmpneq_epi8_mask(top, block->operand_second) | _mm512_cmpneq_epi8_mask(second, block->operand_first));
+            }
+            // The lane-at-a-time checks below index the producer stack and shift by classes. Only a block whose
+            // kinds, classes, bounds and depths already passed may execute them; malformed byte depths can wrap.
+            valid = valid && refused == 0;
+            const __m512i depth = _mm512_add_epi8(before, _mm512_set1_epi8((char)base));
+            _mm512_storeu_si512(depths + first, depth);
+            // The targets the block holds, as forward arrivals from earlier blocks left them: read before this block's own
+            // arrivals, which store no target of the block's (a vector load of bytes just stored a byte at a time stalls).
+            const __m512i expectations = _mm512_loadu_si512(expected + first);
+            // Each arrival's depth (a branch's and a JUMP_VALUE's after its pop, a JUMP_VALUE's with its value) and those
+            // that bring nothing to compare but depth 0, a statement's: their targets in `zero_targets`, whose depths the
+            // end checks.
+            const __mmask64 controls = block->controls;
+            const __mmask64 jumps = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_JUMP));
+            const __mmask64 brought_values = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_JUMP_VALUE));
+            const __m512i arrivals_depth = _mm512_add_epi8(_mm512_sub_epi8(depth, _mm512_maskz_mov_epi8(~jumps, one)), _mm512_maskz_mov_epi8(brought_values, one));
+            const __mmask64 empty = controls & _mm512_cmpeq_epi8_mask(arrivals_depth, zero);
             for (uint32_t q = 0; q < 4; q += 1)
             {
-                const __mmask16 quarter = (__mmask16)(left >> (16 * q));
-                const __m512i producers = _mm512_add_epi32(_mm512_set1_epi32((int)(first + 16 * q)), _mm512_cvtepu8_epi32(tier0_scan_quarter(lane_indices, 0)));
-                _mm512_storeu_si512(stack_producers + offset, _mm512_maskz_compress_epi32(quarter, producers));
-                offset += (uint32_t)__builtin_popcount(quarter);
+                const __mmask16 quarter = (__mmask16)(empty >> (16 * q));
+                _mm512_storeu_si512(zero_targets + zero_count, _mm512_maskz_compress_epi32(quarter, block->words[q]));
+                zero_count += (uint32_t)__builtin_popcount(quarter);
             }
-            base = (uint32_t)((int32_t)base + (int8_t)_mm_extract_epi8(_mm512_extracti32x4_epi32(after, 3), 15));
-            valid = base <= BUSTER_TIER0_SCAN_DEPTH;
-            previous_kind = kind_lanes[live - 1];
-            previous_class = class_lanes[live - 1];
+            bool failed = false;
+            // The lanes' depths, producers and classes for the checks that take them a lane at a time, the arrivals' that
+            // bring values and the calls' that pop earlier blocks' values, where the block has them.
+            const __mmask64 far_reached = lanes & _mm512_cmpneq_epi8_mask(expectations, _mm512_set1_epi8((char)BUSTER_TIER0_SCAN_UNREACHED)) &
+                                          _mm512_test_epi8_mask(expectations, expectations);
+            uint8_t depth_lanes[64] __attribute__((aligned(64)));
+            uint8_t kind_lanes[64] __attribute__((aligned(64)));
+            uint8_t class_lanes[64] __attribute__((aligned(64)));
+            uint8_t first_lanes[64] __attribute__((aligned(64)));
+            uint8_t second_lanes[64] __attribute__((aligned(64)));
+            uint8_t top_lanes[64] __attribute__((aligned(64)));
+            uint8_t reached_lanes[64] __attribute__((aligned(64)));
+            if (((controls & ~empty) | far_reached | block->carried_calls) != 0)
+            {
+                _mm512_store_si512(depth_lanes, depth);
+                _mm512_store_si512(kind_lanes, kinds);
+                _mm512_store_si512(class_lanes, classes);
+                _mm512_store_si512(first_lanes, block->first);
+                _mm512_store_si512(second_lanes, block->second);
+                _mm512_store_si512(top_lanes, top);
+                _mm512_store_si512(reached_lanes, block->reached);
+            }
+            // The others: forward, the depth, the producer just below what they may differ in (of the top for a JUMP, which
+            // pops nothing, and of the one below for a branch's and a JUMP_VALUE's) and the class of the value a
+            // JUMP_VALUE brings, against the target's own where the block holds it (`near`), and otherwise against the first
+            // forward arrival's, which the target's block checks; backward, the scalar validator's.
+            __mmask64 near = 0;
+            for (uint64_t pending = controls & ~empty; valid && pending != 0; pending &= pending - 1)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+                const uint32_t entry = first + lane;
+                const uint32_t target = (uint32_t)function->values[entry];
+                const uint32_t popped = kind_lanes[lane] != BUSTER_TYPED_JUMP ? 1 : 0;
+                const uint32_t brings = kind_lanes[lane] == BUSTER_TYPED_JUMP_VALUE ? 1 : 0;
+                const uint32_t arrival = depth_lanes[lane] - popped + brings;
+                const uint32_t below = tier0_scan_producer(first, (popped != 0 ? second_lanes : first_lanes)[lane], depth_lanes[lane], 1 + popped, stack_producers);
+                const uint32_t value_class = brings != 0 ? class_lanes[lane] : 0;
+                const bool forward = target > entry;
+                const bool inside = forward && target < first + live;
+                const uint32_t at = (target - first) & 63;
+                const uint32_t at_below = tier0_scan_producer(first, (brings != 0 ? second_lanes : first_lanes)[at], depth_lanes[at], 1 + brings, stack_producers);
+                failed |= inside && (depth_lanes[at] != arrival || at_below != below || (brings != 0 && top_lanes[at] != value_class));
+                near |= (__mmask64)(inside ? 1 : 0) << at;
+                const uint64_t brought = below | (uint64_t)brings << 32 | (uint64_t)value_class << 40;
+                const bool far = forward && !inside;
+                const uint32_t old = expected[target];
+                const bool fresh = old == BUSTER_TIER0_SCAN_UNREACHED;
+                // What the first forward arrival there brought, written with its depth (`arrivals` holds nothing elsewhere).
+                const uint64_t old_brought = fresh ? 0 : arrivals[target];
+                failed |= (far && !fresh && (old != arrival || old_brought != brought)) || !forward;
+                expected[target] = (uint8_t)(far && fresh ? arrival : old);
+                arrivals[target] = far && fresh ? brought : old_brought;
+            }
+            // The targets' depths: 0 where an arrival brings nothing else; from earlier blocks' other arrivals, theirs, and
+            // the same producer below what they bring and the same value a JUMP_VALUE brings; and code no path reaches
+            // before a target, after a jump or a return, at depth 0, where tier0_validate_scalar starts again.
+            const __mmask64 arrived = lanes & _mm512_cmpneq_epi8_mask(expectations, _mm512_set1_epi8((char)BUSTER_TIER0_SCAN_UNREACHED));
+            refused |= arrived & _mm512_cmpneq_epi8_mask(expectations, depth);
+            refused |= lanes & _mm512_test_epi8_mask(tier0_lookup(tier0_scan_sides, previous_kinds), _mm512_set1_epi8(BUSTER_TIER0_SIDE_TRANSFER)) & ~(arrived | near) &
+                       _mm512_test_epi8_mask(depth, depth);
+            valid = valid && refused == 0 && !failed;
+            for (uint64_t pending = far_reached; valid && pending != 0; pending &= pending - 1)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+                const uint64_t brought = arrivals[first + lane];
+                const uint32_t brings = (uint32_t)(brought >> 32) & 1;
+                const uint32_t below = tier0_scan_producer(first, (brings != 0 ? second_lanes : first_lanes)[lane], depth_lanes[lane], 1 + brings, stack_producers);
+                failed |= below != (uint32_t)brought || (brings != 0 && top_lanes[lane] != (uint8_t)(brought >> 40));
+            }
+            // With more than 128 calls or arguments, the short calls' operands by gathers: each call's base (call_bases),
+            // and its operands' classes (argument_words), once the block's kinds, classes, values and depths passed (the
+            // gathers' indices are its calls' numbers).
+            for (uint32_t q = 0; valid && !few_operands && q < 4; q += 1)
+            {
+                const __mmask16 quarter = (__mmask16)(block->short_calls >> (16 * q));
+                if (quarter != 0)
+                {
+                    const __mmask16 single = (__mmask16)(block->one_operand >> (16 * q));
+                    const __mmask16 indirect = (__mmask16)(block->indirect_calls >> (16 * q));
+                    const __m512i bases = _mm512_mask_i32gather_epi32(zero, quarter, block->words[q], (const void*)call_bases, 4);
+                    const __m512i operand_first = _mm512_mask_mov_epi32(_mm512_mask_i32gather_epi32(zero, quarter & ~indirect, bases, (const void*)argument_words, 4), indirect,
+                                                                        _mm512_set1_epi32(BUSTER_TYPED_CLASS_U64));
+                    const __m512i operand_second = _mm512_mask_i32gather_epi32(zero, quarter & ~single, _mm512_add_epi32(bases, _mm512_set1_epi32(1)), (const void*)argument_words, 4);
+                    const __m512i top_classes = _mm512_cvtepu8_epi32(tier0_scan_quarter(top, q));
+                    const __m512i second_classes = _mm512_cvtepu8_epi32(tier0_scan_quarter(second, q));
+                    failed |= _mm512_mask_cmpneq_epi32_mask(single, top_classes, operand_first) != 0;
+                    failed |= _mm512_mask_cmpneq_epi32_mask(quarter & ~single, top_classes, operand_second) != 0;
+                    failed |= _mm512_mask_cmpneq_epi32_mask(quarter & ~single, second_classes, operand_first) != 0;
+                }
+            }
+            // With more than 128 calls or arguments, the long calls' operands the block's lanes push by gathers, once the
+            // block's kinds, classes, values and depths passed (the gathers' indices are theirs).
+            for (uint32_t q = 0; valid && !few_operands && q < 4; q += 1)
+            {
+                const __mmask16 quarter = (__mmask16)(block->fed >> (16 * q));
+                if (quarter != 0)
+                {
+                    const __mmask16 callee = (__mmask16)(block->callees >> (16 * q));
+                    const __m512i call = tier0_scan_dwords_at(block->words, block->consumers, q);
+                    const __m512i at = _mm512_add_epi32(_mm512_mask_i32gather_epi32(zero, quarter, call, (const void*)call_bases, 4), _mm512_cvtepu8_epi32(tier0_scan_quarter(block->places, q)));
+                    const __m512i wanted = _mm512_mask_mov_epi32(_mm512_mask_i32gather_epi32(zero, quarter & ~callee, at, (const void*)argument_words, 4), callee, _mm512_set1_epi32(BUSTER_TYPED_CLASS_U64));
+                    failed |= _mm512_mask_cmpneq_epi32_mask(quarter, wanted, _mm512_cvtepu8_epi32(tier0_scan_quarter(classes, q))) != 0;
+                }
+            }
+            // A long call that pops values of earlier blocks: its operands from the carried stack below the lowest place the
+            // lanes before it reached and above it the values those lanes left, in order.
+            for (uint64_t pending = block->carried_calls; valid && pending != 0; pending &= pending - 1)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
+                const uint32_t call = (uint32_t)function->values[first + lane];
+                uint32_t count_operands = 0;
+                const __m512i wanted = tier0_scan_call_operands(function, call, &count_operands);
+                const int32_t at = (int32_t)depth_lanes[lane];
+                // Below the stack's bottom (an operand it doesn't have), the call is refused already: its places from 0.
+                const int32_t bottom = at >= (int32_t)count_operands ? at - (int32_t)count_operands : 0;
+                const int32_t lowest_place = (int32_t)base + (int8_t)reached_lanes[lane];
+                const int32_t below = (lowest_place < at ? lowest_place : at) - bottom;
+                const uint32_t kept = below > 0 ? (uint32_t)below : 0;
+                const __m512i held_below = _mm512_maskz_permutexvar_epi8(_bzhi_u64(~0ull, kept), _mm512_add_epi8(lane_indices, _mm512_set1_epi8((char)bottom)), carried);
+                const __mmask64 earlier = _bzhi_u64(~0ull, lane);
+                const __m512i held = _mm512_maskz_compress_epi8(block->pushes & earlier & _mm512_cmplt_epi8_mask(floors, tier0_scan_later_floors(floors, earlier)), classes);
+                const __m512i inside = _mm512_permutexvar_epi8(_mm512_add_epi8(lane_indices, _mm512_set1_epi8((char)(bottom - lowest_place))), held);
+                const __m512i stack = _mm512_mask_blend_epi8(_bzhi_u64(~0ull, kept), inside, held_below);
+                failed |= _mm512_mask_cmpneq_epi8_mask(_bzhi_u64(~0ull, count_operands), stack, wanted) != 0;
+            }
+            // A global entry's symbol's access, where the function has the column.
+            if (function->symbol_access != 0)
+            {
+                for (uint64_t pending = block->globals; pending != 0; pending &= pending - 1)
+                {
+                    failed |= function->symbol_access[(uint32_t)function->values[first + (uint32_t)__builtin_ctzll(pending)]] >= BUSTER_TIER0_ACCESSES;
+                }
+            }
+            valid = valid && refused == 0 && !failed;
+            const uint32_t left_depth = (uint32_t)((int32_t)base + block->effect);
+            if (valid && left_depth != 0)
+            {
+                // The values the block leaves on the stack, onto the carried stack, in order from the lowest place the block
+                // reached. An empty stack carries nothing.
+                const uint32_t place = base + (uint32_t)block->reach;
+                const __m512i left_classes = _mm512_maskz_compress_epi8(block->left, classes);
+                carried = _mm512_mask_blend_epi8(~_bzhi_u64(~0ull, place), carried, _mm512_permutexvar_epi8(_mm512_sub_epi8(lane_indices, _mm512_set1_epi8((char)place)), left_classes));
+                uint32_t offset = 64 + place;
+                for (uint32_t q = 0; q < 4; q += 1)
+                {
+                    const __mmask16 quarter = (__mmask16)(block->left >> (16 * q));
+                    const __m512i producers = _mm512_add_epi32(_mm512_set1_epi32((int)(first + 16 * q)), _mm512_cvtepu8_epi32(tier0_scan_quarter(lane_indices, 0)));
+                    _mm512_storeu_si512(stack_producers + offset, _mm512_maskz_compress_epi32(quarter, producers));
+                    offset += (uint32_t)__builtin_popcount(quarter);
+                }
+            }
+            if (valid)
+            {
+                base = left_depth;
+                valid = base <= BUSTER_TIER0_SCAN_DEPTH;
+                previous_kind = tier0_scan_lane(kinds, live - 1);
+                previous_class = tier0_scan_lane(classes, live - 1);
+            }
         }
     }
     // The end, where no value is left and a function returning an aggregate never arrives (its RETURNs leave the address
     // the epilogue reads).
+    // The targets of the arrivals that bring depth 0 alone at it, 16 at a time: the end, or an entry at depth 0.
+    bool ended = false;
+    for (uint32_t k = 0; valid && k < zero_count; k += 16)
+    {
+        // A remaining count past 255 keeps every lane (_bzhi_u32 reads its index's low byte alone).
+        const __mmask16 quarter = zero_count - k >= 16 ? (__mmask16)0xffff : (__mmask16)_bzhi_u32(0xffff, zero_count - k);
+        const __m512i targets = _mm512_maskz_loadu_epi32(quarter, (const void*)(zero_targets + k));
+        const __mmask16 end = quarter & _mm512_cmpeq_epi32_mask(targets, _mm512_set1_epi32((int)count));
+        // A dword at each target's depth (depths has 64 bytes past the last entry), its low byte the depth.
+        const __m512i at = _mm512_mask_i32gather_epi32(zero, quarter & ~end, targets, (const void*)depths, 1);
+        valid = _mm512_mask_test_epi32_mask(quarter & ~end, at, _mm512_set1_epi32(0xff)) == 0;
+        ended |= end != 0;
+    }
     if (valid)
     {
         const bool falls = count == 0 || (tier0_scan_sides[function->kinds[count - 1]] & BUSTER_TIER0_SIDE_TRANSFER) == 0;
-        const bool jumped = expected[count] != BUSTER_TIER0_SCAN_UNREACHED || ((emptied_targets[count >> 6] >> (count & 63)) & 1) != 0;
+        const bool jumped = expected[count] != BUSTER_TIER0_SCAN_UNREACHED || ended;
         valid = base == 0 && (expected[count] == BUSTER_TIER0_SCAN_UNREACHED || expected[count] == 0) && !(aggregate && (falls || jumped));
     }
     scratch_end(scratch);
     return valid;
 }
 
-#define BUSTER_TIER0_VALIDATE_SMALL_COUNT 16
-
-// tier0_validate's body, for a function without segment overrides.
+// tier0_validate's body, for a function without segment overrides: the vector path, and the scalar validator for the
+// verdict and the rule of a stream it doesn't take (#3394: every function, small ones too, takes the vector path first).
 static Tier0Check tier0_validate_entries(const Tier0Function* function)
 {
     Tier0Check check;
     memset(&check, 0, sizeof(check));
-    // Locked 9700X size controls favor scalar validation through 16 entries. Keep empty streams on their cheap
-    // vector setup path and do not infer a small total workload from entry count when metadata tables are large.
-    const bool small = function->count != 0 && function->count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT &&
-                       function->local_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT && function->call_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT &&
-                       function->argument_count <= BUSTER_TIER0_VALIDATE_SMALL_COUNT;
-    if (small || !tier0_validate_accepts(function))
+    if (!tier0_validate_accepts(function))
     {
         check = tier0_validate_scalar_entries(function);
     }

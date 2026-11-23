@@ -160,6 +160,34 @@ static void check_test_driver_conventions(CheckTest* test, const char* clang, co
                                     strstr(text, "unsupported: calls of intel_ocl_bicc functions on an AVX-512 target") != NULL, description);
         free(text);
     }
+    // A call of a type no convention takes (a vector of long doubles) in a part of 256, 271 and 512 arguments and results,
+    // its argument the part's second (the function's parameter is the first): the lowering checks the part's types 16 at a
+    // time, and a lane mask from a remaining count past 255 must keep every lane (#3394's review).
+    static const uint32_t argument_counts[] = { 256, 271, 512 };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(argument_counts); c += 1)
+    {
+        static const char head[] = "typedef long double V __attribute__((vector_size(64)));\nvoid k(V);\nvoid h(int);\nvoid f(V* p) { k(*p);";
+        static const char call[] = " h(1);";
+        char source[8192];
+        uint32_t length = (uint32_t)(sizeof(head) - 1);
+        memcpy(source, head, length);
+        for (uint32_t i = 2; i < argument_counts[c]; i += 1)
+        {
+            memcpy(source + length, call, sizeof(call) - 1);
+            length += (uint32_t)(sizeof(call) - 1);
+        }
+        memcpy(source + length, " }\n", 3);
+        length += 3;
+        const bool written = parse_test_write(path, source, length);
+        char* arguments[] = { (char*)executable, "-std=gnu17", "-w", "-march=x86-64-v4", "-c", path, "-o", object, NULL };
+        const int status = written ? check_test_driver_spawn(arguments, &text) : -1;
+        char description[1024];
+        snprintf(description, sizeof(description), "conventions: a call of a type no convention takes, in a part of %u arguments, is refused by name (status %d: %s)",
+                 argument_counts[c], status, text != NULL ? text : "");
+        check_test_expect(test, status == 1 && text != NULL && strstr(text, "unsupported: this type in a call (its calling convention)") != NULL, description);
+        free(text);
+        text = NULL;
+    }
     unlink(callee_path);
     unlink(caller_path);
     unlink(callee_object);

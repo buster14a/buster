@@ -1701,11 +1701,9 @@ stack of classes, an entry at a time. At each target it records a hash of the st
 compares it on every other arrival. It reports the first entry that breaks a rule, and the rule. `--scalar` runs it
 alone.
 
-The selected validator uses the scalar path for nonempty streams of at most 16 entries when the local, call and
-argument tables each have at most 16 entries too. Locked 9700X size controls put the crossover between 16 and 24
-entries, both alone and after 200 ms of scalar work. Empty streams keep the vector setup path; larger tables
-keep the vector path so a small entry count does not hide substantial metadata work. The vector acceptor remains
-tested independently at these tiny sizes.
+Every stream takes the vector path first, small ones too, and the scalar validator only where the vector path leaves
+it (#3394; before it, streams of at most 16 entries took the scalar path alone, #2972's size controls, which the
+vector path's cheaper setup has since moved past).
 
 **The vector path** (`tier0_validate_accepts`) takes a stream only where the scalar validator does. It leaves every
 other stream to the scalar validator, which then gives the verdict and the rule. It reads 64 entries at a time in byte
@@ -1722,17 +1720,30 @@ lanes, as Tier 0's own passes do:
    or against the entry's own class, a compare's top, or CONVERT's mask by class. The top's class must be the entry
    before's (`tier0_last_mismatch`'s rule), and the values must be within bounds by kind. A local's classes come from a
    per-function table of masks, and every RETURN must be of one class. A call's operands are its top and the one below,
-   or for more than two, the stack's places: the carried stack below the lowest place the block reached before the
-   call, and the values the block left above it, in order.
-4. **Arrivals.** An arrival that brings only depth 0 (a statement's) sets its target's bit, which the target's block
-   checks; a backward one checks the target's stored depth at once. Any other arrival brings its depth, the producer
-   just below what it may differ in, and the class of a JUMP_VALUE's value. It is checked against the target's own
-   where the same block holds the target. Otherwise it is checked against the first forward arrival's, and the target's
+   or for more than two, each value a lane of the block pushes and the call pops: its consumer, the first lane after it
+   whose floor is at or below its place (`tier0_scan_next`, the producers' search ahead), gives it its operand's place
+   and so its class in the arguments' column, in a block that has such a call. A call of more than two operands that
+   also pops values of earlier blocks takes those from the carried stack below the lowest place the block reached before
+   the call, and the values the block left above it, in order, a call at a time. A call's own class comes from its
+   table too, by its result (`tier0_scan_results`).
+4. **Arrivals.** The targets of the arrivals that bring only depth 0 (a statement's) are kept in the blocks' order, and
+   the end checks each one's depth, 16 at a time by a gather of the depths the blocks stored. Any other arrival brings
+   its depth, the producer just below what it may differ in, and the class of a JUMP_VALUE's value. It is checked
+   against the target's own where the same block holds the target. Otherwise it is checked against the first forward arrival's, and the target's
    block checks that one against its own. Code no path reaches, after a jump or a return and before a target, is at
    depth 0.
-5. **Tables.** A plain function's locals are checked 64 at a time and each call's arguments eight at a time
-   (`tier0_scan_tables`). A function with aggregates' metadata, an incoming variadic area, or vectors' constants and
-   operations takes the scalar helpers instead.
+5. **Tables** (`tier0_scan_tables`). A plain function's locals are checked 64 at a time and its calls' own rules 16 at
+   a time, where the blocks' call tables are made from the same loads (`tier0_scan_call_pass`). Each call's arguments
+   are checked eight at a time, no register taken by two of them, by `vpconflictq` (`tier0_scan_arguments`). A function
+   with aggregates' metadata, an incoming variadic area, or vectors' constants and operations takes the scalar helpers
+   instead.
+
+The blocks go in groups of 16 (`BUSTER_TIER0_SCAN_GROUP`), in two passes (#3394). The first takes each block's work that
+needs nothing of the blocks before it, steps 1 and 2 and the rules that read no operand, every block of the group in
+turn: no block's result waits on another's, so the processor overlaps them, where one pass a block was bound by its
+chain of dependent searches and checks rather than by its instructions. The second takes the group's blocks in order
+with what the blocks before leave: the carried stack's operands, the depths from the function's start, the operands'
+rules, the arrivals and the values each block leaves (`Tier0ScanBlock` holds what the first pass leaves the second).
 
 The vector path leaves these to the scalar validator:
 
@@ -1799,6 +1810,17 @@ vector, 11.9 ns against scalar's 14.6 ns. The 16-entry dispatch threshold follow
 cap as a conservative guard. These synthetic controls do not establish a universal threshold or whole-corpus gain.
 The [retained campaign and review evidence](https://github.com/buster14a/buster-performance/pull/57) includes all
 samples, source and binary identities, exact commands, native/sanitizer qualification and defect-detecting mutations.
+#3394 has since removed that threshold (above).
+
+**#3394's measurements.** On the 9700X, CPU 2, Release `znver5`, `-c sqlite3.c` of the frozen corpus (2,602 bodies,
+371,237 entries), medians of 7 with main in the same hold: the lowering's `lower.validate` lap went from 1.159 ms to
+1.078 ms, and `benchmark-backend-source --only validate` from 12.67 to 11.48 cycles and from 32.96 to 31.81
+instructions an entry. Of main's lap, `abi_assign` took 0.17 ms, the convention check of the calls' types 0.07 ms and
+`tier0_validate` 0.99 ms: 0.59 ms its blocks (about 480 cycles a block at an IPC of 1.9), 0.19 ms its tables and setup
+and 0.09 ms the small scalar route. The two passes, the calls' tables and the gathered arrivals took most of the gain;
+#3394's 0.5 ms target was not reached. The record
+([`tier0-validate-3394-2026-11-23`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-validate-3394-2026-11-23))
+has the laps, the ablations, the profiles, the series of builds and what would go further.
 
 ## Tests
 
