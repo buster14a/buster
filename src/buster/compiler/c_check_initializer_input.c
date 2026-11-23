@@ -273,6 +273,9 @@ struct CheckInitDiagnostic
     uint32_t failure_count;
     // An event-collecting caller also retains each rejected braced initializer's value completions; zero means not selected.
     uint32_t* rejected_roots;
+    // A rejected compound literal and the expression nodes depending on it have no value. The diagnostic driver
+    // suppresses their derivative reports through this private mask; the original checked stream stays rejected.
+    uint8_t* invalid_nodes;
     CheckInitStatus status;
     TypeId failed_type;
     TypeId recovered_type;
@@ -300,6 +303,76 @@ static bool check_init_diagnostic_append(CheckInitDiagnostic* result, CheckInitF
         result->token = failure->token;
     }
     return room;
+}
+
+// A compound literal must be diagnosed before an enclosing initializer can decide whether its source exists.
+// Completion order is a postorder of the nested source spans; equal ends take the inner declaration first. The
+// existing stable scalar/vector radix kernel retains that tie order, supplied by reversing the declaration list.
+// Initializers without a compound literal keep their original order and pay no extra allocation or sorting.
+static bool check_init_diagnostic_order(const CheckInput* input, uint32_t* declarations, uint32_t count, bool scalar, Arena* scratch, bool* compounds)
+{
+    *compounds = false;
+    for (uint32_t d = 0; !*compounds && d < count; d += 1)
+    {
+        *compounds = check_input_bit(input->declaration_bits, declarations[d], BUSTER_CHECK_BITS_COMPOUND) != 0;
+    }
+    bool valid = true;
+    if (*compounds && count > 1)
+    {
+        const uint64_t mark = scratch->length;
+        uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count * 2);
+        valid = keys != NULL;
+        uint32_t any = 0;
+        uint32_t every = UINT32_MAX;
+        for (uint32_t d = 0; valid && d < count; d += 1)
+        {
+            const uint32_t declaration = declarations[count - d - 1];
+            const uint32_t end = check_sparse_get(input->initializer_ends, declaration);
+            keys[d] = (uint64_t)end << 32 | declaration;
+            any |= end;
+            every &= end;
+        }
+        if (valid)
+        {
+            const uint64_t* sorted = c_bindings_sort(keys, keys + count, count, !scalar, any ^ every);
+            for (uint32_t d = 0; d < count; d += 1)
+            {
+                declarations[d] = (uint32_t)sorted[d];
+            }
+        }
+        arena_pop_to(scratch, mark);
+    }
+    return valid;
+}
+
+// A literal's body is checked independently of the VALUE leaf naming its object. Carry a rejected leaf through
+// the graph's existing postorder edges, without making an independent argument or sibling expression invalid.
+static void check_init_diagnostic_dependencies(const CheckGraph* graph, const uint8_t* recovered_void, uint8_t* invalid)
+{
+    for (uint32_t node = 0; node < graph->count; node += 1)
+    {
+        const uint32_t operands[] = {
+            graph->operand0[node],
+            graph->operand1[node],
+            graph->operand2[node],
+        };
+        const bool recovered = recovered_void != NULL && recovered_void[node];
+        for (uint32_t i = 0; !recovered && i < BUSTER_ARRAY_LENGTH(operands); i += 1)
+        {
+            invalid[node] |= operands[i] < node && invalid[operands[i]];
+        }
+        if (!recovered && check_graph_has_arguments(graph->ops[node]) && graph->argument_counts != NULL)
+        {
+            const uint32_t first = graph->argument_offsets != NULL ? graph->argument_offsets[node] : 0;
+            const uint32_t count = graph->argument_counts[node];
+            const bool bounded = first <= graph->argument_count && count <= graph->argument_count - first && graph->argument_nodes != NULL;
+            for (uint32_t i = 0; bounded && i < count; i += 1)
+            {
+                const uint32_t operand = graph->argument_nodes[first + i];
+                invalid[node] |= operand < node && invalid[operand];
+            }
+        }
+    }
 }
 
 // Whether a static object's scalar initializer, whose INITIALIZE (`initialize`, to the declared `target`) failed as one of
@@ -352,10 +425,10 @@ static bool check_init_source_poisons(const Parser* parser, uint32_t begin, uint
 }
 
 // Clang omits an invalid expression statement. A GNU statement expression whose only statement is a rejected
-// atomic literal then has an empty body and a void value. With any earlier statement, its invalid last statement
+// compound literal then has an empty body and a void value. With any earlier statement, its invalid last statement
 // instead invalidates the whole expression. Prove only the single-literal body here, through transparent parentheses;
 // the original graph and its initializer plans keep their actual failure state (#2441).
-static bool check_init_empty_atomic_statement(const CheckInput* input, const Parser* parser, uint32_t begin, uint32_t end, uint32_t literal)
+static bool check_init_empty_compound_statement(const CheckInput* input, const Parser* parser, uint32_t begin, uint32_t end, uint32_t literal)
 {
     uint32_t first = begin;
     uint32_t last = end;
@@ -379,6 +452,90 @@ static bool check_init_empty_atomic_statement(const CheckInput* input, const Par
     }
     empty = empty && first == literal && check_sparse_get(input->initializer_ends, literal) == last;
     return empty;
+}
+
+// The same empty statement expression used directly as one braced element, optionally parenthesized. Its void
+// conversion fails independently, so the other elements still receive their conversions. Larger expressions need
+// expression recovery of their own; the source delimiters bound this case without changing the canonical graph.
+static uint32_t check_init_empty_compound_element(const CheckInput* input, const Parser* parser, uint32_t begin, uint32_t end, uint32_t literal)
+{
+    uint32_t opening = BUSTER_CHECK_NONE;
+    const uint8_t* kinds = parser->tokens.kinds;
+    const uint32_t* parents = parser->tree.parents;
+    for (uint32_t token = begin; token + 1 < literal; token += 1)
+    {
+        const bool statement = kinds[token] == PARSE_KIND_L_PAREN && kinds[token + 1] == PARSE_KIND_L_BRACE && parents[token] > literal;
+        opening = statement ? token : opening;
+    }
+    const uint32_t closing = opening != BUSTER_CHECK_NONE ? parents[opening] : end;
+    const bool empty = closing < end && check_init_empty_compound_statement(input, parser, opening, closing + 1, literal);
+    uint32_t first = empty ? opening : end;
+    uint32_t last = empty ? closing + 1 : end;
+    while (first > begin && last < end && parser->tree.roles[first - 1] == PARSE_ROLE_OPEN_GROUP && parents[first - 1] == last)
+    {
+        first -= 1;
+        last += 1;
+    }
+    uint32_t enclosing = begin;
+    for (uint32_t token = begin; empty && token < first; token += 1)
+    {
+        const bool group = kinds[token] == PARSE_KIND_L_PAREN || kinds[token] == PARSE_KIND_L_BRACE || kinds[token] == PARSE_KIND_L_SQUARE;
+        enclosing = group && parents[token] >= last && parents[token] < end ? token : enclosing;
+    }
+    const uint8_t role = parser->tree.roles[enclosing];
+    const bool braced = role == PARSE_ROLE_OPEN_INITIALIZER || role == PARSE_ROLE_OPEN_COMPOUND_BODY;
+    // A designator's '=' starts an element; an assignment expression's '=' still needs expression recovery.
+    const bool assignment = first > begin && kinds[first - 1] == PARSE_KIND_EQUAL;
+    uint32_t head = enclosing + 1;
+    for (uint32_t token = head; empty && braced && assignment && token < first; token += 1)
+    {
+        const bool group = kinds[token] == PARSE_KIND_L_PAREN || kinds[token] == PARSE_KIND_L_BRACE || kinds[token] == PARSE_KIND_L_SQUARE;
+        head = kinds[token] == PARSE_KIND_COMMA ? token + 1 : head;
+        token = group && parents[token] > token && parents[token] < first ? parents[token] : token;
+    }
+    const bool designated = assignment && head < first && (kinds[head] == PARSE_KIND_PERIOD || kinds[head] == PARSE_KIND_L_SQUARE);
+    const bool element = first > begin && last < end &&
+                         braced && (kinds[first - 1] == PARSE_KIND_L_BRACE || kinds[first - 1] == PARSE_KIND_COMMA || designated) &&
+                         (kinds[last] == PARSE_KIND_COMMA || kinds[last] == PARSE_KIND_R_BRACE);
+    const uint32_t node = element ? input->token_nodes[closing] : BUSTER_CHECK_NONE;
+    return node < input->graph.count && input->graph.ops[node] == CHECK_OP_STATEMENT_VALUE && input->graph.tokens[node] == closing ? node : BUSTER_CHECK_NONE;
+}
+
+// An accepted literal in a rejected initializer still checks its body, even in a discarded excess element. Keep
+// those commas at the literal's completion; the enclosing list's completion would delay warnings past later errors.
+// Skip nested literal bodies in each inner scan: every source token belongs to at most one such scan, while the
+// outer scan still visits nested literal declarations to retain their own sources at their earlier completion.
+static bool check_init_accepted_compound_commas(const CheckInput* input, const uint8_t* complete, const uint8_t* rejected_compounds,
+                                               uint32_t declaration, uint32_t begin, uint32_t end, uint32_t* roots)
+{
+    bool retained = false;
+    for (uint32_t token = begin; token < end; token += 1)
+    {
+        if (token != declaration && !rejected_compounds[token] && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) != 0)
+        {
+            const uint32_t first = check_sparse_get(input->initializer_begins, token);
+            const uint32_t last = check_sparse_get(input->initializer_ends, token);
+            for (uint32_t source = first; last <= end && source < last; source += 1)
+            {
+                const uint32_t nested = check_input_bit(input->declaration_bits, source, BUSTER_CHECK_BITS_COMPOUND) != 0 ?
+                                        check_sparse_get(input->initializer_ends, source) : BUSTER_CHECK_NONE;
+                if (nested > source && nested <= last)
+                {
+                    source = nested - 1;
+                }
+                else
+                {
+                    const uint32_t node = input->token_nodes[source];
+                    if (node < input->graph.count && complete[node] && input->graph.ops[node] == CHECK_OP_COMMA && (roots[node] == 0 || roots[node] > last))
+                    {
+                        roots[node] = last;
+                        retained = true;
+                    }
+                }
+            }
+        }
+    }
+    return retained;
 }
 
 static void check_init_listless_drop(CheckInput* input, const Parser* parser, const CheckStream* stream, const TypeTable* types, Arena* scratch)
@@ -575,6 +732,12 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
     }
+    bool compounds = false;
+    if (valid && !check_init_diagnostic_order(input, declarations, declaration_count, parser->options.scalar, scratch, &compounds))
+    {
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
     // At most one conversion report per source token, plus one terminal failure per declaration. The token key
     // deduplicates GNU range repetitions and compound literals reached through an enclosing initializer as well.
     const uint64_t failure_room = (uint64_t)cutoff + declaration_count;
@@ -587,7 +750,16 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
     CheckInitFailure* failures = valid && declaration_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckInitFailure, failure_capacity) : NULL;
     uint8_t* failed_tokens = valid && declaration_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->token_count) : NULL;
     uint32_t* rejected_roots = valid && declaration_count != 0 && stream->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, stream->count) : NULL;
+    uint8_t* rejected_compounds = valid && compounds ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, input->token_count) : NULL;
+    uint8_t* invalid_nodes = valid && compounds && stream->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, stream->count) : NULL;
+    const bool regions = compounds && input->region_count != 0 && stream->count != 0;
+    uint8_t* recovered_void = valid && regions ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, stream->count) : NULL;
     if (valid && declaration_count != 0 && (failures == NULL || failed_tokens == NULL || (stream->count != 0 && rejected_roots == NULL)))
+    {
+        valid = false;
+        result->status = CHECK_INIT_RESOURCE;
+    }
+    if (valid && compounds && (rejected_compounds == NULL || (stream->count != 0 && invalid_nodes == NULL) || (regions && recovered_void == NULL)))
     {
         valid = false;
         result->status = CHECK_INIT_RESOURCE;
@@ -599,8 +771,21 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         {
             memset(rejected_roots, 0, (uint64_t)stream->count * sizeof(uint32_t));
         }
+        if (compounds)
+        {
+            memset(rejected_compounds, 0, input->token_count);
+            if (stream->count != 0)
+            {
+                memset(invalid_nodes, 0, stream->count);
+                if (recovered_void != NULL)
+                {
+                    memset(recovered_void, 0, stream->count);
+                }
+            }
+        }
     }
     bool recovered_elements = false;
+    bool rejected_literal = false;
     CheckInitWarningCollector collector = { 0 };
     if (valid && !check_init_warning_collector(&collector, warnings, parser->tokens.count, scratch))
     {
@@ -622,32 +807,65 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         // tokens: the conversion error it has is clang's one for the initializer, which isn't checked again here (#147).
         const uint32_t initialize = check_sparse_get(input->initializer_nodes, declaration);
         const bool placed = begin < end && end <= cutoff && end <= check_input_diagnostic_limit(input, begin) && type_is_valid(types, input->declared_types[declaration]);
+        const bool static_storage = placed && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0;
         bool eligible = placed && (initialize >= stream->count || complete[initialize]);
-        bool empty_atomic = false;
-        // A compound literal's initializer is diagnosed independently. Keep the enclosing declaration's existing
-        // first-failure boundary until invalid-literal dependencies can suppress its derivative conversions.
-        bool nested_compound = false;
-        for (uint32_t token = begin; eligible && token < end; token += 1)
+        bool empty_compound = false;
+        bool poisoned = false;
+        // The inner initializers have already completed. An invalid literal gives the containing expression no
+        // value, so Clang skips the whole enclosing initializer's conversions while still checking later source
+        // expressions. A statement expression can shield its earlier invalid statement from the final value.
+        for (uint32_t token = begin; placed && token < end; token += 1)
         {
-            const uint32_t node = input->token_nodes[token];
-            eligible = node == BUSTER_CHECK_NONE || (node < stream->count && complete[node]);
-            // An atomic compound literal has no value: its own initializer reports the illegal atomic type at `{`
-            // (#2441). Do not also diagnose the initializer that uses it, except for a separate void value left by an
-            // otherwise-empty statement expression below. The literal's declaration is at `(`, outside its own
-            // initializer span, so that span remains eligible and independent later declarations still run.
-            const bool compound = eligible && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_COMPOUND) != 0;
-            nested_compound |= compound;
-            const TypeId literal = compound ? input->declared_types[token] : 0;
-            const uint32_t body = compound ? check_sparse_get(input->initializer_begins, token) : BUSTER_CHECK_NONE;
-            const bool atomic_literal = body < end && parser->tree.roles[body] == PARSE_ROLE_OPEN_COMPOUND_BODY &&
-                                        type_is_valid(types, literal) && type_kind(types, type_strip_aligned(types, literal)) == BUSTER_TYPE_KIND_ATOMIC &&
-                                        check_init_source_poisons(parser, begin, token);
-            empty_atomic = atomic_literal && check_init_empty_atomic_statement(input, parser, begin, end, token);
-            eligible &= !atomic_literal;
+            const bool rejected = rejected_compounds != NULL && rejected_compounds[token] && check_init_source_poisons(parser, begin, token);
+            const uint32_t recovered = rejected && recovered_void != NULL && parser->tokens.kinds[begin] == PARSE_KIND_L_BRACE ?
+                                       check_init_empty_compound_element(input, parser, begin, end, token) : BUSTER_CHECK_NONE;
+            if (recovered < stream->count)
+            {
+                recovered_void[recovered] = 1;
+                token = input->graph.tokens[recovered];
+            }
+            else
+            {
+                if (eligible)
+                {
+                    const uint32_t node = input->token_nodes[token];
+                    const bool checked = node == BUSTER_CHECK_NONE || (node < stream->count && complete[node]);
+                    eligible = checked || !check_init_source_poisons(parser, begin, token);
+                }
+                poisoned |= rejected;
+                empty_compound |= rejected && check_init_empty_compound_statement(input, parser, begin, end, token);
+                if (rejected)
+                {
+                    // Its body has already been diagnosed. The later comma-root scan still visits independent
+                    // source expressions, but this enclosing conversion needs no repeated body eligibility scan.
+                    const uint32_t literal_end = check_sparse_get(input->initializer_ends, token);
+                    token = literal_end > token && literal_end <= end ? literal_end - 1 : token;
+                }
+            }
         }
-        if (empty_atomic)
+        eligible &= !poisoned;
+        if (poisoned)
         {
-            // The literal keeps its own atomic-brace error. Its otherwise-empty statement expression is a separate
+            // Keep independently valid comma expressions, even in later elements whose conversions are skipped.
+            // The dependency pass below removes only commas that themselves consume an invalid literal. Inner
+            // initializer roots keep their earlier completion, so the enclosing expression cannot delay them.
+            for (uint32_t token = begin; token < end; token += 1)
+            {
+                const uint32_t node = input->token_nodes[token];
+                if (node < stream->count && complete[node] && input->graph.ops[node] == CHECK_OP_COMMA && rejected_roots[node] == 0)
+                {
+                    rejected_roots[node] = end;
+                    recovered_elements = true;
+                }
+            }
+            if (initialize < stream->count)
+            {
+                invalid_nodes[initialize] = 1;
+            }
+        }
+        if (empty_compound)
+        {
+            // The literal keeps its own initializer error. Its otherwise-empty statement expression is a separate
             // void value, which cannot initialize the enclosing object. Retain that fact solely for diagnostics.
             const CheckInitFailure failure = {
                 .status = CHECK_INIT_INVALID,
@@ -670,7 +888,7 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
                 result->completion = end;
             }
         }
-        if (valid && placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
+        if (valid && placed && !eligible && !poisoned && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0 && begin < result->token &&
             check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))
         {
@@ -679,13 +897,19 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
             result->token = begin;
             result->completion = end;
         }
-        if (valid && placed && !eligible && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
+        if (valid && placed && !eligible && !poisoned && initialize < stream->count && stream->diagnostics[initialize] == CHECK_DIAG_INCOMPATIBLE &&
             check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
             check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))
         {
             const CheckInitFailure failure = { .status = CHECK_INIT_NON_CONSTANT, .token = begin, .completion = end };
             valid = check_init_diagnostic_append(result, failures, failure_capacity, &failure);
         }
+        // Relaxed pointer/integer conversions keep the declaration for the ordinary warning pass. Only a hard
+        // rejection needs extra literal-body roots; retaining them for a relaxed conversion would warn twice.
+        bool discarded = poisoned || (placed && !eligible && (initialize >= stream->count || stream->diagnostics[initialize] != CHECK_DIAG_INCOMPATIBLE ||
+                         !check_init_recoverable_conversion(types, stream, input->declared_types[declaration], input->graph.operand0[initialize]) ||
+                         (static_storage && check_init_converted_nonconstant(input, stream, types, input->declared_types[declaration], initialize))));
+        bool initialized = false;
         if (eligible)
         {
             CheckInitializer plan = { 0 };
@@ -700,12 +924,26 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
                 .token_count = input->token_count,
                 .roots = rejected_roots,
                 .root_count = stream->count,
+                .recovered_void = recovered_void,
             };
             check_initializers_noderef(warnings, input, declaration);
             const bool accepted = check_initializer_plan_warnings(types, parser, input->token_nodes, stream, input->strings, input->string_count, input->string_ids,
                                                          input->declared_types[declaration], begin, end, check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_STATIC) != 0,
                                                          true, true, output, scratch, &plan, &input->graph, warnings != NULL ? &collector : NULL, &objects,
-                                                         nested_compound ? NULL : &sink, counted);
+                                                         &sink, counted);
+            initialized = accepted;
+            if (!accepted)
+            {
+                discarded |= plan.status != CHECK_INIT_INVALID || plan.failed_source == 0 ||
+                             !check_init_recoverable_conversion(types, stream, plan.failed_type, plan.failed_source - 1) ||
+                             (static_storage && check_init_value_nonconstant(stream, types, plan.failed_type, plan.failed_source - 1));
+                for (uint32_t failure = failure_start; failure < sink.count; failure += 1)
+                {
+                    const CheckInitFailure* rejected = failures + failure;
+                    discarded |= rejected->recovered_type != 0 || !check_init_recoverable_conversion(types, stream, rejected->failed_type, rejected->failed_source - 1) ||
+                                 (static_storage && check_init_value_nonconstant(stream, types, rejected->failed_type, rejected->failed_source - 1));
+                }
+            }
             recovered_elements |= sink.count != result->failure_count;
             result->failure_count = sink.count;
             if (sink.count != failure_start && failures[failure_start].token < result->token)
@@ -759,6 +997,28 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
             }
             arena_pop_to(output, mark);
         }
+        if (valid && placed && !initialized && discarded && compounds)
+        {
+            recovered_elements |= check_init_accepted_compound_commas(input, complete, rejected_compounds, declaration, begin, end, rejected_roots);
+        }
+        if (valid && placed && !initialized && discarded && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) != 0)
+        {
+            rejected_compounds[declaration] = 1;
+            rejected_literal = true;
+            const uint32_t node = input->token_nodes[end - 1];
+            if (node < stream->count)
+            {
+                invalid_nodes[node] = 1;
+            }
+        }
+    }
+    if (valid && rejected_literal && stream->count != 0)
+    {
+        check_init_diagnostic_dependencies(&input->graph, recovered_void, invalid_nodes);
+        for (uint32_t node = 0; node < stream->count; node += 1)
+        {
+            rejected_roots[node] = invalid_nodes[node] ? 0 : rejected_roots[node];
+        }
     }
     if (valid)
     {
@@ -780,6 +1040,19 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         result->status = CHECK_INIT_RESOURCE;
     }
     result->failures = kept;
+    if (valid && rejected_literal && stream->count != 0)
+    {
+        result->invalid_nodes = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, stream->count);
+        if (result->invalid_nodes != NULL)
+        {
+            memcpy(result->invalid_nodes, invalid_nodes, stream->count);
+        }
+        else
+        {
+            valid = false;
+            result->status = CHECK_INIT_RESOURCE;
+        }
+    }
     if (valid && recovered_elements && warnings != NULL && warnings->events != NULL)
     {
         result->rejected_roots = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, stream->count);
@@ -803,6 +1076,7 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         }
         result->failures = NULL;
         result->rejected_roots = NULL;
+        result->invalid_nodes = NULL;
     }
     if (scratch != 0)
     {
