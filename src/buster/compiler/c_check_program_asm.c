@@ -182,6 +182,9 @@ struct CheckAsmPlace
     bool global;
     // A symbol operand's name (BUSTER_CHECK_ASM_SYMBOL and _SYMBOL_MEMORY, #1845).
     String8 symbol;
+    // An asm body's register output that its call row returns in its register (#2144, CheckProgramAsm.inline_result),
+    // which the body doesn't store.
+    bool returned;
 };
 
 // A label a template defines (AsmCodeLabel): its spelling, its record in its code, the helper's or the naked function's
@@ -271,6 +274,9 @@ struct CheckProgramAsm
     // its labels' count; 0 for any other body.
     uint32_t inline_exits;
     uint32_t inline_goto_labels;
+    // The register output its body's call row returns (#2144, Tier0AsmBody.result): its operand's index plus one, 0 for
+    // none. The lowering stores the row's result into the output's local.
+    uint32_t inline_result;
     // Whether its template returns (Tier0AsmBody.leaves).
     bool inline_leaves;
     // Whether it moves rsp's variable's input into rsp (#1846, Tier0AsmBody.stack).
@@ -1527,6 +1533,22 @@ static Tier0Code check_asm_helper_code(const CheckAsmPlace* places, uint32_t cou
 // the fall-through's move of 0 into `exit` and its jump to the stores, then each label's move of its index plus one and
 // jump (the last one falling into them), and after the stores the exit's move into eax, which its call row returns; the
 // caller makes the jumps branches.
+// Whether asm body output `place` (operand k of `statement`) may be its call row's result (#2144): a general register's
+// int or long of 4 or 8 bytes, not a high byte's, A's widened one or a register variable's (global or explicit), whose
+// lvalue is an automatic object named by itself and not volatile, so that the lowering stores the row's result into the object's local (SET_LOCAL), with
+// no address in the block and no store in the body.
+static bool check_asm_returnable(const CheckProgram* program, const CheckInputAsm* statement, const CheckAsmPlace* place, uint32_t k)
+{
+    const CheckStream* stream = program->stream;
+    const uint32_t node = statement->operands[k].node;
+    const bool named = node < stream->count && program->input->graph.ops[node] == CHECK_OP_VALUE;
+    const uint32_t object = named ? check_stream_value(stream, node).object : 0;
+    const CheckValue value = named ? check_stream_value(stream, node) : (CheckValue){ 0 };
+    return place->kind == BUSTER_CHECK_ASM_GENERAL && place->written && !place->high && !place->global && !place->atomic && !place->packed && !place->m64 &&
+           !place->wide && (place->size == 4 || place->size == 8) && named && object != 0 && object < program->object_count && program->object_symbols[object] == 0 &&
+           (value.flags & BUSTER_CHECK_REGISTER) == 0 && (check_stream_flags(stream, node) & BUSTER_CHECK_VOLATILE_PART) == 0;
+}
+
 static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t count, const AsmCode* code, const uint8_t stores[2], uint32_t pops,
                                       bool passed, uint32_t labels, uint8_t exit, X86Instruction** records, uint32_t* first, bool* room, Arena* output)
 {
@@ -1669,7 +1691,7 @@ static uint32_t check_asm_inline_code(const CheckAsmPlace* places, uint32_t coun
         for (uint32_t k = 0; k < count; k += 1)
         {
             const CheckAsmPlace* place = places + k;
-            if (check_asm_stores(place))
+            if (check_asm_stores(place) && !place->returned)
             {
                 written[at++] = (X86Instruction){ .form = X86_FORM_MOV_R64_RM64, .reg = stores[1], .rm = BUSTER_TIER0_ASM_BLOCK, .mode = BUSTER_X86_MEMORY_BASE,
                                                   .displacement = (int32_t)place->slot };
@@ -3392,6 +3414,17 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         bool room = false;
         // An asm goto's (#1839's item 2): the helper's exits in the body, its exit number the call row's result.
         const uint32_t labels = statement->is_goto ? statement->label_count : 0;
+        // The first register output its call row may return (#2144), which then needs no store through its address.
+        uint32_t result = 0;
+        for (uint32_t k = 0; passed && !statement->is_goto && !returns && !program->asm_bodies && result == 0 && k < statement->output_count; k += 1)
+        {
+            result = check_asm_returnable(program, statement, places + k, k) && ((inline_touched >> places[k].reg) & 1) != 0 ? k + 1 : 0;
+        }
+        if (result != 0)
+        {
+            places[result - 1].returned = true;
+        }
+        plan->inline_result = result;
         const uint32_t records_count = check_asm_inline_code(places, count, &code, stores, pops, passed, labels, exit, &records, &first, &room, output);
         plan->inline_passed = passed;
         const uint32_t branch_count = code.branch_count + goto_count + labels;
@@ -3542,6 +3575,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         plan->inline_count = 0;
         plan->inline_exits = 0;
         plan->inline_goto_labels = 0;
+        plan->inline_result = 0;
         plan->inline_label_records = 0;
         plan->inline_label_names = 0;
         plan->inlined = false;

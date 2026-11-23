@@ -190,10 +190,11 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
 // - FLOAT_ABSOLUTE and COPY_SIGN: fabs, fabsf and fabsl, llvm.fabs's, and copysign, copysignf and copysignl,
 //   llvm.copysign's: the first argument's bits with its sign bit cleared, or replaced by the second's.
 // - COPY, MOVE and SET: memcpy, memmove and memset, llvm.memcpy's, memmove's and memset's, of a constant size of at most
-//   BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES: their bytes' loads and stores, as __builtin_memcpy's are (#1373). clang's
-//   FastISel copies at most 32 bytes so and calls memcpy past them; its memmove inlines more, and its memset calls the
-//   library's whatever the size, which a few stores beat. A size that is no constant, or a larger one, calls the
-//   library's function, whose vector loops a large size wants.
+//   BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES (memmove's of at most BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES): their bytes'
+//   loads and stores, as __builtin_memcpy's are (#1373). clang's FastISel copies at most 32 bytes so and calls memcpy
+//   past them; its memmove stores up to 8 of its widest vectors inline (128 bytes at x86-64, 256 with AVX, 512 with
+//   512-bit vectors preferred), and its memset calls the library's whatever the size, which a few stores beat. A size
+//   that is no constant, or a larger one, calls the library's function, whose vector loops a large size wants.
 typedef enum CBuiltinLibraryComputed
 {
     CBUILTIN_LIBRARY_COMPUTED_NONE,
@@ -207,6 +208,14 @@ typedef enum CBuiltinLibraryComputed
 } CBuiltinLibraryComputed;
 
 #define BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES 32u
+#define BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES 128u
+
+// The largest constant size whose call of `computed`, a memory function's, the code computes in place: memmove's 8 of
+// x86-64's 16-byte vectors, which clang's code moves inline at every target, and memcpy's and memset's 32 bytes.
+static inline __attribute__((always_inline, unused)) uint64_t cbuiltin_library_inline_bytes(CBuiltinLibraryComputed computed)
+{
+    return computed == CBUILTIN_LIBRARY_COMPUTED_MOVE ? BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES : BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
+}
 
 // The plain library builtins whose rows have attribute E and that this compiler folds (c_builtin_library_plain.inc's), each
 // with its row's prototype and its fold: a call of the unit's declaration of one, where clang makes that declaration the

@@ -50,12 +50,25 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
     if (builtin == CBUILTIN_BIT_CAST)
     {
         // Integer operands provide an exact object representation only after the complete expression has
-        // evaluated without effects, faults or volatile access. The module independently checks destination
-        // eligibility and size; no lvalue conversion, array decay or half promotion precedes that check.
+        // evaluated without effects, faults or volatile access. A retained const integer may supply that
+        // representation through a pure receipt load; arrays, bit-fields, atomic and volatile values keep
+        // their original representation/type checks, without decay or promotion.
         const CheckValue* source = count == 1 ? arguments : 0;
+        CheckValue loaded;
+        CheckActionResult converted = { 0 };
+        if (source != NULL && source->category == CHECK_LVALUE && check_action_is_integer(reader->types, source->type) &&
+            (source->flags & BUSTER_CHECK_BIT_FIELD) == 0)
+        {
+            const CheckAction operand = { .op = CHECK_OP_VALUE, .node = closing, .operands = { *source }, .context = context };
+            loaded = check_action_operand(reader->types, &operand, &converted, 0);
+            if (converted.diagnostic == CHECK_DIAG_NONE && loaded.constant_kind == CHECK_CONSTANT_INTEGER && check_value_evaluated_constant(&loaded))
+            {
+                source = &loaded;
+            }
+        }
         const bool constant = source != 0 && type_is_valid(reader->types, source->type) && type_is_valid(reader->types, destination_type) &&
                               source->category == CHECK_RVALUE && source->constant_kind == CHECK_CONSTANT_INTEGER &&
-                              source->fault == CHECK_FAULT_NONE && (source->flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_BIT_FIELD)) == 0 &&
+                              check_value_evaluated_constant(source) && (source->flags & BUSTER_CHECK_BIT_FIELD) == 0 &&
                               (type_qualifiers(type_strip_aligned(reader->types, source->type)) & BUSTER_TYPE_VOLATILE) == 0 &&
                               check_action_is_integer(reader->types, source->type);
         // Clang never takes __builtin_bit_cast as a C integer constant expression: a strict context (an aligned
@@ -63,13 +76,14 @@ static bool check_constant_call(CheckConstantInput* input, uint32_t keyword, uin
         // as a GNU extension. The source therefore certifies a constant, never an ICE.
         const CheckBuiltinBitCastAction action =
         {
-            .id = builtin, .destination_type = destination_type, .arguments = arguments, .argument_count = count, .node = closing,
+            .id = builtin, .destination_type = destination_type, .arguments = constant ? source : arguments, .argument_count = count, .node = closing,
             .context = context,
             .source_proof = constant ? CHECK_BUILTIN_BIT_CAST_PROOF_CONSTANT : CHECK_BUILTIN_BIT_CAST_PROOF_NONE,
         };
         CheckBuiltinBitCastResult checked;
         check_builtin_bit_cast(reader->types, &action, &checked, 1);
         result = checked.action;
+        check_action_diagnose(&result, converted.diagnostic, 0);
         if (result.diagnostic == CHECK_DIAG_NONE && (checked.unsupported & BUSTER_CHECK_BUILTIN_BIT_CAST_RESULT_TYPE) != 0)
         {
             check_action_diagnose(&result, CHECK_DIAG_UNSUPPORTED, 0);

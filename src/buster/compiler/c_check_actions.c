@@ -70,6 +70,8 @@ typedef enum CheckFault
 #define BUSTER_CHECK_FP_ENVIRONMENT 0x800u
 #define BUSTER_CHECK_VECTOR_ELEMENT 0x1000u
 #define BUSTER_CHECK_VECTOR_DUPLICATE 0x2000u
+// A GNU constant that a strict fold fails on: a division's overflow, or a comma's discarded left operand that folded
+// undefined behavior (#2264, check_action_comma_provenance). An array bound or an `aligned` argument is no constant.
 #define BUSTER_CHECK_GNU_DIVISION 0x4000u
 // A floating value converted to an integer type outside its range, which clang's folding saturates (a NaN to 0): a GNU
 // constant where an integer constant expression is required, and a static initializer's value, but no array bound's.
@@ -100,6 +102,11 @@ typedef enum CheckFault
 // The address of an object or function that is not weak. It is never null, at any byte displacement. A weak
 // declaration or `#pragma weak` can be a null pointer, so those addresses do not carry this flag.
 #define BUSTER_CHECK_NONNULL_ADDRESS 0x800000u
+// This evaluation performed an operation that only GNU required-constant folding accepts: integer overflow, an
+// invalid shift, or an out-of-range floating conversion. A later read of the completed object's stored value starts
+// a new evaluation and drops this proof. Construction-time warnings can require a defined constant evaluation
+// without changing the GNU initializer/ICE rules or their existing provenance flags.
+#define BUSTER_CHECK_INVALID_CONSTANT 0x2000000u
 
 // -std=gnu*. GNU's extensions themselves (void * arithmetic, sizeof(void), a void conditional arm) apply in every
 // language mode, as clang's Sema has them; GNU_CONSTANT, folding beyond ICEs, is every mode's too (c_check_constant.c).
@@ -872,6 +879,7 @@ static __attribute__((noinline)) bool check_action_convert_half(const TypeTable*
         const unsigned __int128 bits = value->integer & mask;
         const bool negative = source_signed && (bits >> (source_width - 1)) != 0;
         value->floating = check_action_half_value(half, check_action_half_round(half, negative, negative ? (0 - bits) & mask : bits, 0));
+        value->integer = 0;
         value->constant_kind = CHECK_CONSTANT_FLOATING;
     }
     else if (floating)
@@ -900,13 +908,15 @@ static __attribute__((noinline)) void check_action_convert_quad_integer(CheckVal
         const bool negative = (value->integer & BUSTER_CHECK_QUAD_SIGN) != 0;
         value->integer = nan ? 0 : negative ? (is_signed ? high_bit : 0) : (is_signed ? high_bit - 1 : check_action_mask(width));
         value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
-        value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE;
+        value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_INVALID_CONSTANT;
     }
     else
     {
         value->integer = input < 0 ? (unsigned __int128)(__int128)input : (unsigned __int128)input;
         value->integer &= check_action_mask(width);
     }
+    value->floating_storage[0] = 0;
+    value->floating_storage[1] = 0;
     value->constant_kind = CHECK_CONSTANT_INTEGER;
 }
 
@@ -964,6 +974,8 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         const long double limit = (long double)high_bit * (target_signed ? 1.0L : 2.0L);
         const long double minimum = target_signed ? -limit : 0;
         const long double input = value->floating;
+        value->floating_storage[0] = 0;
+        value->floating_storage[1] = 0;
         // For 128-bit signed values the host x87 cannot distinguish minimum - 1 from minimum.
         const bool lower = target_signed && target_width == 128 ? input >= minimum : input > minimum - 1;
         if (!__builtin_isfinite(input) || !lower || input >= limit)
@@ -973,7 +985,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
             value->integer = __builtin_isnan(input) ? 0 : input < 0 ? (target_signed ? high_bit : 0) : (target_signed ? high_bit - 1 : check_action_mask(target_width));
             value->constant_kind = CHECK_CONSTANT_INTEGER;
             value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM);
-            value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE;
+            value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_INVALID_CONSTANT;
         }
         else
         {
@@ -988,6 +1000,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         if (value->object == 0 && pointer)
         {
             value->integer = (unsigned __int128)(uint64_t)value->offset & check_action_mask(target_width);
+            value->offset = 0;
             value->constant_kind = CHECK_CONSTANT_INTEGER;
         }
         else if (target_width != 64 || (!pointer && (!source_integer || source_width != 64)) || (value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0)
@@ -1063,6 +1076,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
                     number = (long double)magnitude;
                 }
                 number = negative ? -number : number;
+                value->integer = 0;
             }
             const TypeId to = type_unqualified(type_strip_aligned(table, destination));
             number = check_action_convert_nan(type_unqualified(type_strip_aligned(table, source)), to, number);
@@ -1075,6 +1089,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         value->constant_kind = CHECK_CONSTANT_ADDRESS;
         value->object = 0;
         value->offset = 0;
+        value->integer = 0;
     }
     else if (target_kind == BUSTER_TYPE_KIND_POINTER && source_integer && value->constant_kind == CHECK_CONSTANT_INTEGER)
     {
@@ -1089,6 +1104,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         value->constant_kind = CHECK_CONSTANT_ADDRESS;
         value->object = 0;
         value->offset = (int64_t)(uint64_t)bits;
+        value->integer = 0;
     }
     else if (target_kind == BUSTER_TYPE_KIND_POINTER && value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {
@@ -1543,7 +1559,7 @@ static uint32_t check_action_fold_integer_result(CheckIntegerFold fold, CheckVal
     {
         const bool ice_form = (value->flags & (BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM)) != 0;
         value->flags &= ~BUSTER_CHECK_ICE;
-        value->flags |= BUSTER_CHECK_GNU_CONSTANT | (ice_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
+        value->flags |= BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_INVALID_CONSTANT | (ice_form ? BUSTER_CHECK_GNU_ICE_FORM : 0);
         value->flags |= fold.op == CHECK_OP_DIVIDE || fold.op == CHECK_OP_REMAINDER ? BUSTER_CHECK_GNU_DIVISION : 0;
         value->constant_kind = CHECK_CONSTANT_INTEGER;
         value->integer = extension.integer;

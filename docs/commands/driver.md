@@ -141,7 +141,8 @@ requirements. [Command index](README.md).
   The checker reads
   a unit in source order; `--deferred-bodies` reads its function bodies apart on
   those lanes too (#113's deferred reader, `check_input_deferred_compile`), where
-  its bodies' tokens pay for four lanes or more (two with `--lanes N`), with
+  its bodies' tokens pay for four lanes or more (two with `--lanes N`) and no
+  body dominates the unit (#1668), with
   source order's result, and `--no-deferred-bodies` undoes it: the [lanes
   guide](../../docs/function-lanes.md)'s "The checker's bodies on lanes" has why
   it is off by default. An executable carries the program's symbols in `.symtab` (but `.L` labels; with
