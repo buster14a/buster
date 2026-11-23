@@ -41,14 +41,35 @@ requirements. [Command index](README.md).
   The allocation guide's "Allocation over a CFG (#140)" and "The opmask class
   (#179)" have the contract and what is pending.
 
-## Edge-local phi storage (#1384)
+## Liveness storage (#1384)
 
 Phi operands passed only by their defining block, with no ordinary use outside
 it, are excluded from global liveness. Their intervals still reach that block's
 exit, and the forward boundary sweep retains their edge-move sources. Remote
 phi occurrences enter global liveness, including when the same value also has
-local occurrences. The four dense matrices retain the existing scalar/vector
-solver; two phi scans replace the fifth `passed` matrix.
+local occurrences. Each global value's phi occurrences replace the fifth
+`passed` matrix.
+
+The global values are solved in groups of 512 dense ids
+(`tier1_cfg_live_sets`). Each group's use and def rows are seeded and solved by
+`dataflow_liveness`, one vector row per block. The group's phi operands are then
+added to the out rows, and the rows are counted into, then filled into, each
+block's ascending live-in and live-out lists. The four matrices therefore take
+`blocks * 256` bytes however many values are global. A function of at most 512
+global values makes the single solve it made before. Liveness is per value, so a
+group's rows are exactly its columns of one solve over every value, and
+allocations are unchanged. While counting, the group pass also records three
+facts a vector at a time: whether each block's live-in values are live out of
+the block before it (the continuation test), whether each live-in entry is live
+out of its block, and whether each global value is live out of its home. That
+way no reader searches the lists. The entry-state sizes, each value's block
+list, the later-successor entry test, the boundary sweep and the edge moves read
+the lists directly.
+
+With more than one group, each group is solved again for the fill rather than
+kept, and every group's solve sweeps every block. The solve's time is still
+`groups * blocks`, although its storage is now linear. A worklist over the
+blocks a group touches would remove that term.
 
 `test-tier1-cfg` checks the local/global partition, duplicate local occurrences,
 remote occurrences and uses, self-phis, undefined operands, sibling edges,
@@ -58,8 +79,16 @@ mutation checks. The dispatch-entry fixture (#2782) checks that a handler a
 `goto` and a dispatch's multiway branch both enter starts its phi in the
 dispatch's register for the phi's operand. Wide joins of 8, 65, 513 and 8,193 predecessors must prepare
 within 8 MiB of scratch with zero or one global value, and every local operand
-must keep exactly its home-tail interval. These are capacity and semantic
-checks, not timing or RSS measurements.
+must keep exactly its home-tail interval. A ladder of 255, 511, 512, 1,100 and
+20,000 rungs uses each rung's value up to three rungs later, passes it to the
+next rung's phi from both predecessors, and loops on every fifth rung. That
+gives 256 to 20,001 global values, around and across the 512-value group
+boundary. Each must prepare within 32 MiB of scratch with one group's matrices,
+where the old ones took 410 MB at 20,000 rungs. Its live lists must equal a
+per-value walk from each use back to the definition. Every generated case's
+lists are checked against the same walk, and the ladders up to 1,100 rungs run
+as whole cases through the checker and the certificate. These are capacity and
+semantic checks, not timing or RSS measurements.
 
 `tier1_cfg_edge_ordinals` maps each successor edge to the source's ordinal in
 the target's original predecessor row in `O(blocks + edges)`. Allocation keeps
@@ -69,9 +98,28 @@ check rollback at each allocation failure. The mapping removes a repeated
 predecessor search at large joins without changing phi operand associations.
 
 `cross_block_values` counts genuinely nonlocal values, `edge_local_values`
-counts excluded phi operands, and `liveness_bytes` counts the four dense
-matrices only. The general nonlocal case remains dense; see the allocation
-guide for its storage formula and scope.
+counts excluded phi operands, `liveness_bytes` counts one group's four matrices,
+`live_entries` counts the entries of the live-in and live-out lists, and
+`liveness_iterations` counts the sweeps of every group's first solve.
+
+The measurements are from a cloud VM with AVX-512 (Release, `--tier1
+--tier1-strict -c`), not the 9700X, so they are indicative only. They use `{ int
+t = g(a + i); if (a > i) h(t); }` repeated N times. Each statement adds two
+blocks and one global value, so main `b7d0b5ed`'s matrices were `blocks ×
+values`:
+
+| N | main peak RSS | main wall | grouped peak RSS | grouped wall |
+| ---: | ---: | ---: | ---: | ---: |
+| 8,000 | 222 MB | 214 ms | 166 MB | 175 ms |
+| 16,000 | 551 MB | 591 ms | 315 MB | 399 ms |
+| 32,000 | 1,570 MB | 1,547 ms | 612 MB | 972 ms |
+| 64,000 | 5,091 MB | 5,642 ms | 1,207 MB | 2,482 ms |
+
+Peak RSS now grows 1.9 to 2.0 times per doubling of N. Wall time still grows 2.3
+to 2.6 times: 64,000 statements make 125 groups over 128,001 blocks, and about half
+of 30 stack samples fell in `dataflow_liveness` or the group scan. Every object
+was byte-identical to main's, and so was `main.c` compiled with `--tier1`. The
+issue's `||` chain needs no group: 8,000 operands peak at 51 MB on both.
 
 ## One allocation for two problems (#2538)
 
