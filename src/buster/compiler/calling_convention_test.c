@@ -2558,6 +2558,107 @@ static void abi_test_ordering(AbiTestTally* tally)
     }
 }
 
+// Calls the per-call kernel alone assigns (abi_assign_lanes), whose locations clang 23's code gives (-O1, at
+// -march=x86-64-v3 for the vectors): f(_Atomic int, struct {long, long, long}, long x4, packed {__int128}, long) puts the
+// i128, which LLVM has one register left for after the uncounted _Atomic int, whole on the stack at 32, aligned to 16
+// past the 24-byte struct at 0, and the long in r9; f(long x6, a transparent union of a long * aligned to 16, long) gives
+// the union its own 16-byte slot at 0, the long at 16; variadic f(float vector(32) x9, long, ...), all named, puts each
+// vector on the stack (32 apart), clang having counted eight registers that LLVM keeps from a variadic call, the long
+// in rdi; and variadic f(int, ...) with an unnamed _Atomic float vector(32) puts the vector on the stack at 0, no
+// vector register used. By abi_assign and by the kernel over every call (abi_test_assign_starved).
+static void abi_test_kernel_rules(AbiTestTally* tally)
+{
+    AbiTestTables tables;
+    if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "the tables can't be made"))
+    {
+        TypeTable* table = &tables.types.table;
+        AbiTestBuilder builder = {
+            .table = table,
+            .expectations = 0,
+            .count = 0,
+            .next_name = 32000,
+            .vector_bytes = 32,
+        };
+        const bool started = abi_test_tables_start(&tables, 32);
+        TypeMember m[3];
+        m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+        const TypeId packed = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+        m[0] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+        m[1] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+        m[2] = abi_test_member(&builder, BUSTER_TYPE_LONG);
+        const TypeId three = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 3, false, 0);
+        m[0] = abi_test_member(&builder, type_pointer(table, BUSTER_TYPE_LONG));
+        const TypeId transparent = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 5);
+        const bool marked = transparent != 0 && type_mark_transparent_union(table, transparent).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        const TypeId atomic_int = type_atomic(table, BUSTER_TYPE_INT);
+        const TypeId vector = abi_test_vector(&builder, BUSTER_TYPE_FLOAT, 32);
+        const TypeId atomic_vector = type_atomic(table, vector);
+        const bool made = started && marked && packed != 0 && three != 0 && atomic_int != 0 && vector != 0 && atomic_vector != 0;
+        abi_test_expect(tally, made, "fixtures", "the kernel's fixtures can't be made");
+        if (made)
+        {
+            abi_classify_all(&tables.abi, table);
+            const TypeId arguments[] = {
+                atomic_int, three, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, packed, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, transparent, BUSTER_TYPE_LONG,
+                vector, vector, vector, vector, vector, vector, vector, vector, vector, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_INT, atomic_vector,
+            };
+            const TypeId results[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID };
+            const uint32_t counts[] = { 8, 8, 10, 2 };
+            const uint32_t named[] = { 8, 8, 10, 1 };
+            const uint8_t variadic[] = { 0, 0, 1, 1 };
+            const AbiSignatures signatures = {
+                .results = results,
+                .counts = counts,
+                .named = named,
+                .variadic = variadic,
+                .count = 4,
+                .arguments = arguments,
+            };
+            // Each checked argument: its index, kind, first register and stack offset.
+            const uint32_t checked[][4] = {
+                { 1, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 6, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 32 },
+                { 7, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 14, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 15, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 16, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 24, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 256 },
+                { 25, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, 0 },
+                { 26, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, 0 },
+                { 27, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+            };
+            for (uint32_t route = 0; route < 2; route += 1)
+            {
+                AbiLocation locations[BUSTER_ARRAY_LENGTH(arguments)];
+                AbiCall calls[4];
+                memset(locations, 0x5a, sizeof(locations));
+                if (route == 0)
+                {
+                    abi_assign(&tables.abi, signatures, locations, calls);
+                }
+                else
+                {
+                    abi_test_assign_starved(&tables.abi, signatures, locations, calls);
+                }
+                for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(checked); k += 1)
+                {
+                    const AbiLocation got = locations[checked[k][0]];
+                    char detail[192];
+                    snprintf(detail, sizeof(detail), "the kernel's rules (%s): argument %u is kind %u, register %02x, offset %u, not %u, %02x, %u",
+                             route == 0 ? "abi_assign" : "the kernel alone", checked[k][0], got.kind, got.registers[0], got.stack_offset, checked[k][1], checked[k][2],
+                             checked[k][3]);
+                    abi_test_expect(tally, got.kind == checked[k][1] && got.registers[0] == checked[k][2] && got.stack_offset == checked[k][3], "fixtures", detail);
+                }
+                abi_test_expect(tally, calls[2].vector_registers == 0 && calls[3].vector_registers == 0 && calls[1].stack_bytes == 24 && calls[2].stack_bytes == 288,
+                                "fixtures", route == 0 ? "the kernel's rules (abi_assign): the calls' totals" : "the kernel's rules (the kernel alone): the calls' totals");
+            }
+        }
+        abi_test_tables_close(&tables);
+    }
+}
+
 // The walk without scratch memory for its stack (abi_wide_alignment): with the thread's first scratch arena replaced by
 // one of `room` bytes, from 64 up, 512 more at a time, until both paths' walks have room, every classifiable type must be
 // classified all the same (none waiting forever), and an _Atomic of a struct of no size that an array of none of a
@@ -4331,6 +4432,7 @@ static bool abi_test_fixtures(void)
     }
     abi_test_ordering(&tally);
     abi_test_short_scratch(&tally);
+    abi_test_kernel_rules(&tally);
     abi_test_reversed_chain(&tally);
     abi_test_shared_records(&tally);
     abi_test_char_signedness(&tally);
