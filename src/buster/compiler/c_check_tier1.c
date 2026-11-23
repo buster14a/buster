@@ -21,6 +21,7 @@
 #include "ir_switch_table.c"
 #include "ir_vectorize_loops.c"
 #include "ir_vectorize_target.c"
+#include "ir_store_motion.c"
 #include "tier1_schedule_ir.c"
 #include "c_check_tier1_schedule.c"
 
@@ -184,6 +185,7 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
 }
 
 _Static_assert(BUSTER_CHECK_TIER1_VECTORIZE_COUNTS == 7 + IR_VECTORIZE_REFUSALS, "the report keeps every vectorizer count");
+_Static_assert(BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS == IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_COUNT + 3, "the report keeps every store motion count");
 _Static_assert(BUSTER_CHECK_TIER1_PASS_SCCP == BUSTER_IR_OPTIMIZE_SCCP && BUSTER_CHECK_TIER1_PASS_DCE == BUSTER_IR_OPTIMIZE_DCE &&
                    BUSTER_CHECK_TIER1_PASS_CFG == BUSTER_IR_OPTIMIZE_CFG && BUSTER_CHECK_TIER1_PASS_MERGE == BUSTER_IR_OPTIMIZE_MERGE,
                "--tier1-passes= passes the optimizer's own bits");
@@ -394,6 +396,8 @@ struct CheckTier1Passes
     uint32_t unroll_copies;
     uint32_t unroll_reductions;
     uint32_t unroll_added;
+    // Loop store motion's counts (#3309, BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS).
+    uint32_t store_motion[BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS];
     // #3298's switches of constants: per input table (CheckTier1PassesInput.tables), its entries' values where its
     // dispatch became a load of them, which the emission writes in place of its labels' offsets; null where none did.
     int32_t** table_values;
@@ -491,15 +495,74 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         }
         stage = outcome.stage;
     }
+    // #3309's loop store motion, in steps[12], on the function promotion is about to take: a loop's accesses of the
+    // unit's distinct objects go through private slots, which promotion then makes values of. Only a function that names
+    // a listed symbol reserves the step or runs past the pass's first scan, and a body with a volatile expression keeps
+    // every access (the typed stream's indirect accesses carry no flag, #2805). A function past its loop analysis'
+    // limits (IR_ERROR_UNSUPPORTED) goes on as it was; any other error is the function's.
+    IrStoreMotionResult motion = { 0 };
+    bool moved = false;
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_STORE_MOTION) != 0 && lane->symbol_bytes != NULL && !input->vectorize_volatile)
+    {
+        const IrFunction* unssa = numbered ? &shared.function : input->function;
+        IrStoreMotionOptions options = ir_store_motion_options();
+        options.symbol_bytes = lane->symbol_bytes;
+        options.symbol_count = lane->symbol_bytes_count;
+        if (ir_store_motion_symbols(unssa, &options))
+        {
+            if (!check_tier1_lane_reserve(lane, 5))
+            {
+                outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
+            }
+            else
+            {
+                const IrCheck check = ir_store_motion(unssa, &options, &lane->steps[12], scratch, &motion);
+                const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+                outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+                moved = check.error == IR_OK && motion.changed;
+            }
+            stage = outcome.stage;
+        }
+    }
     IrFunction promoted = { 0 };
     if (stage == CHECK_TIER1_COMPILED)
     {
         // The solver's result is verified whole as it is made.
         const IrFunction* unssa = numbered ? &shared.function : input->function;
         const uint64_t mark = promotion->length;
-        IrCheck check = numbered || input->verified ? ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted) :
-                        scalar                      ? ssa_ir_promote_scalar(unssa, promotion, scratch, &promoted) :
-                                                      ssa_ir_promote(unssa, promotion, scratch, &promoted);
+        // Store motion's result is new: promotion checks it as it does any input that isn't known verified. One it
+        // refuses or finds past its limits is dropped for the function it was made from.
+        IrCheck check = ir_check(IR_ERROR_UNSUPPORTED, BUSTER_IR_NONE, 0);
+        if (moved)
+        {
+            check = scalar ? ssa_ir_promote_scalar(&motion.function, promotion, scratch, &promoted) : ssa_ir_promote(&motion.function, promotion, scratch, &promoted);
+            moved = check.error == IR_OK;
+            if (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT)
+            {
+                arena_pop_to(promotion, mark);
+            }
+        }
+        if (!moved && (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT))
+        {
+            check = numbered || input->verified ? ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted) :
+                    scalar                      ? ssa_ir_promote_scalar(unssa, promotion, scratch, &promoted) :
+                                                  ssa_ir_promote(unssa, promotion, scratch, &promoted);
+        }
+        // The pass's counts: what it looked at, and what it moved where promotion took its function (a dropped one moved
+        // nothing).
+        const bool dropped = motion.changed && !moved;
+        uint32_t at = 0;
+        for (uint32_t k = 0; k < IR_STORE_MOTION_OUTCOME_COUNT; k += 1)
+        {
+            passes->store_motion[at++] = dropped && k == IR_STORE_MOTION_MOVED ? 0 : motion.outcomes[k];
+        }
+        for (uint32_t k = 0; k < IR_STORE_MOTION_KEY_COUNT; k += 1)
+        {
+            passes->store_motion[at++] = dropped && k == IR_STORE_MOTION_KEY_MOVED ? 0 : motion.keys[k];
+        }
+        passes->store_motion[at++] = moved ? motion.loads : 0;
+        passes->store_motion[at++] = moved ? motion.stores : 0;
+        passes->store_motion[at++] = moved ? motion.added : 0;
         // An expansion promotion refuses or finds past its limits keeps the function's calls: the lowering is promoted
         // instead, so that inlining is never a refusal. Any other error is the expansion's.
         passes->unexpanded = input->unexpanded != NULL && (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT);
@@ -758,6 +821,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const uint32_t on = check_tier1_passes_on(lane);
     const bool sroa = (on & BUSTER_CHECK_TIER1_PASS_SROA) != 0;
     lane->preserve_local_storage = BUSTER_TIER1_PRIVATE_VALUES && (gvn || sroa);
+    // (Store motion's step, bit 5, is reserved at the lane's first function that names a listed symbol.)
     const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0) |
                                        ((on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 ? 8u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 ? 16u : 0));
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
@@ -1126,6 +1190,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         };
         memcpy(counts->unroll_outcomes, passes.unroll_outcomes, sizeof(counts->unroll_outcomes));
         memcpy(counts->vectorize, passes.vectorize, sizeof(counts->vectorize));
+        memcpy(counts->store_motion, passes.store_motion, sizeof(counts->store_motion));
         if (emitted.frame_event_count != 0)
         {
             memcpy(frames, emitted.frame_events, (uint64_t)emitted.frame_event_count * sizeof(EmissionFrameEvent));
@@ -1334,5 +1399,28 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             fprintf(stream, "\t%s=%" PRIu64, ir_unroll_outcome_names[k], report->unroll_outcomes[k]);
         }
         fprintf(stream, "\tcopies=%" PRIu64 "\treductions=%" PRIu64 "\tadded=%" PRIu64 "\n", report->unroll_copies, report->unroll_reductions, report->unroll_added);
+    }
+    // Loop store motion's (#3309), where it looked at a loop: the loops that store to a listed symbol by outcome, their
+    // stored keys by refusal (`keys` the moved ones), the loads that read a slot, the stores a slot takes too and the
+    // instructions added.
+    uint64_t motion_loops = 0;
+    for (uint32_t k = 0; k < IR_STORE_MOTION_OUTCOME_COUNT; k += 1)
+    {
+        motion_loops += report->store_motion[k];
+    }
+    if (motion_loops != 0)
+    {
+        fprintf(stream, "tier1-store-motion\tloops=%" PRIu64, motion_loops);
+        for (uint32_t k = 0; k < IR_STORE_MOTION_OUTCOME_COUNT; k += 1)
+        {
+            fprintf(stream, "\t%s=%" PRIu64, ir_store_motion_outcome_names[k], report->store_motion[k]);
+        }
+        fprintf(stream, "\tkeys=%" PRIu64, report->store_motion[IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_MOVED]);
+        for (uint32_t k = 1; k < IR_STORE_MOTION_KEY_COUNT; k += 1)
+        {
+            fprintf(stream, "\tkey.%s=%" PRIu64, ir_store_motion_key_names[k], report->store_motion[IR_STORE_MOTION_OUTCOME_COUNT + k]);
+        }
+        const uint32_t tail = IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_COUNT;
+        fprintf(stream, "\tloads=%" PRIu64 "\tstores=%" PRIu64 "\tadded=%" PRIu64 "\n", report->store_motion[tail], report->store_motion[tail + 1], report->store_motion[tail + 2]);
     }
 }

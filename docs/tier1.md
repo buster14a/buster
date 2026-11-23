@@ -180,7 +180,8 @@ LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
 [its guide](tier1-loop-vectorization.md)), `unroll` (#2755's [loop
 unrolling](tier1-loop-unrolling.md)), `tables` (#3298's switches of
 constants as loads of their jump tables' values, [the optimization
-guide](ir-optimization.md#switches-of-constants-3298)), `gvn` (as
+guide](ir-optimization.md#switches-of-constants-3298)), `storemotion` (#3309's
+[loop store motion](tier1-store-motion.md), before promotion), `gvn` (as
 `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or `all`. The
 default is SCCP, dead-code removal, CFG cleanup, its merges, the inlining,
 `vectors` and `tables`. The restricted
@@ -210,7 +211,13 @@ loop was seen: the natural loops (`loops`), how many were `unrolled`, each
 refusal's count by its name (`outer`, `irreducible`, `preheader`, `latch`,
 `exit`, `call`, `control`, `stack`, `test`, `predicate`, `bound`, `induction`,
 `size`, `growth`), and the main loops' `copies`, the `reductions` they split
-and the instructions they `added`.
+and the instructions they `added`. With `+storemotion`, a `tier1-store-motion`
+line follows wherever the pass looked at a loop: the loops that store to one of
+the unit's distinct objects (`loops`), each outcome's count (`moved`,
+`irreducible`, `barrier`, `preheader`, `unknown-store`, `many`, `no-key`), the
+`keys` moved and the stored keys left by refusal (`key.met`, `key.bounds`,
+`key.type`, `key.unread`, `key.limit`, `key.chain`), the `loads` that read a
+slot, the `stores` a slot takes too and the instructions `added`.
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block

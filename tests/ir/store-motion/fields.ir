@@ -1,0 +1,72 @@
+function (i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = symbol_addr.ptr @3
+  %2 = ptrtoint.i64 %1
+  %3 = const.i64 0x00000000000000000000000000000000
+  %4 = br.void b1
+b1:
+  %5 = phi.i64 [%3, b0], [%57, b2]
+  %6 = icmp.i1 %5, %0 ult
+  %7 = cbr.void %6, b2, b3
+b2:
+  %8 = const.i64 0x00000000000000000000000000000008
+  %9 = inttoptr.ptr %2
+  %10 = address.ptr %9 + %8 * 1 offset=0
+  %11 = ptrtoint.i64 %10
+  %12 = inttoptr.ptr %11
+  %13 = load.i32 %12 align=4
+  %14 = trunc.i32 %5
+  %15 = add.i32 %13, %14
+  %16 = const.i64 0x00000000000000000000000000000008
+  %17 = inttoptr.ptr %2
+  %18 = address.ptr %17 + %16 * 1 offset=0
+  %19 = ptrtoint.i64 %18
+  %20 = inttoptr.ptr %19
+  %21 = store.void %20, %15 align=4
+  %22 = const.i64 0x00000000000000000000000000000010
+  %23 = inttoptr.ptr %2
+  %24 = address.ptr %23 + %22 * 1 offset=0
+  %25 = ptrtoint.i64 %24
+  %26 = inttoptr.ptr %25
+  %27 = load.i64 %26 align=8
+  %28 = const.i64 0x00000000000000000000000000000010
+  %29 = inttoptr.ptr %2
+  %30 = address.ptr %29 + %28 * 1 offset=0
+  %31 = ptrtoint.i64 %30
+  %32 = inttoptr.ptr %31
+  %33 = const.i64 0x00000000000000000000000000000008
+  %34 = inttoptr.ptr %2
+  %35 = address.ptr %34 + %33 * 1 offset=0
+  %36 = ptrtoint.i64 %35
+  %37 = inttoptr.ptr %36
+  %38 = load.i32 %37 align=4
+  %39 = sext.i64 %38
+  %40 = xor.i64 %27, %39
+  %41 = store.void %32, %40 align=8
+  %42 = const.i64 0x00000000000000000000000000000018
+  %43 = inttoptr.ptr %2
+  %44 = address.ptr %43 + %42 * 1 offset=0
+  %45 = ptrtoint.i64 %44
+  %46 = inttoptr.ptr %45
+  %47 = load.f64 %46 align=8
+  %48 = const.i64 0x00000000000000000000000000000018
+  %49 = inttoptr.ptr %2
+  %50 = address.ptr %49 + %48 * 1 offset=0
+  %51 = ptrtoint.i64 %50
+  %52 = inttoptr.ptr %51
+  %53 = const.f64 0x00000000000000003ff4000000000000
+  %54 = fadd.f64 %47, %53
+  %55 = store.void %52, %54 align=8
+  %56 = const.i64 0x00000000000000000000000000000001
+  %57 = add.i64 %5, %56
+  %58 = br.void b1
+b3:
+  %59 = const.i64 0x00000000000000000000000000000010
+  %60 = inttoptr.ptr %2
+  %61 = address.ptr %60 + %59 * 1 offset=0
+  %62 = ptrtoint.i64 %61
+  %63 = inttoptr.ptr %62
+  %64 = load.i64 %63 align=8
+  %65 = ret.void %64
+}

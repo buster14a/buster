@@ -153,6 +153,53 @@ short output arena are covered. `test-ir-optimize` runs its text pair
 on c-testsuite's subset, the frozen `sqlite3.c` and musl, where each unrolled
 function must verify with dominance.
 
+## Loop store motion (#3309)
+
+`ir_store_motion.c` is the pass `--tier1-passes=+storemotion` runs on the
+lowered function, before promotion (off by default): a loop's loads of one of the unit's own
+globals read a private slot that the preheader fills and each of the loop's
+stores of the global also writes, and promotion makes the slot a register's
+value. Every store stays where it was. [The design](../tier1-store-motion.md)
+has its rules, the symbols it trusts and the 9700X's record.
+
+`./build/compiler test-ir-store-motion [--seed N] [--print NAME]`
+(`ir_store_motion_test.c`) runs its text fixtures,
+`tests/ir/store-motion/*.ir`: two globals whose second statement reads the
+first's store, a conditional update, nested loops (the outer one takes the
+keys, or calls and leaves them to the inner one), a record's fields through
+the lowering's address chains, every scalar type, a load through a pointer,
+two exits, a loop tested at its end, more keys than the limit, the lowered
+form with its locals in slots, a key the loop never reads, stores to other
+symbols, and loads that overlap a key; and one fixture per refusal (a call, a
+volatile access, a fence, a store through a pointer, an indexed store, an
+overlapping store, a key past its object, no preheader, an irreducible region,
+a type no register holds, a symbol that isn't listed, more keys than the
+analysis follows, an address past the walk's steps). Each is read by both
+parser paths and expects its moved loops and keys, the loads and stores given a
+slot, and its outcome or refusal; results and counts fold into a frozen
+digest. A changed result must verify, promote and pass the optimizer, and runs
+in the shared interpreter as it is, promoted and optimized against the input,
+on equal memory, a pointer parameter at a key's own bytes among its places: the
+same bytes, value and status. Six faults (`BUSTER_IR_STORE_MOTION_MUTATE_*`)
+must each be rejected on some fixture. The symbols' filter and the
+classification are checked against their definitions on random columns at
+every length, and the entry point with arenas of every short size. `--print
+NAME` prints a fixture's result.
+
+`tests/driver/tier1_store_motion.c` is the C driver's test: 21 functions of
+loops over globals compiled strictly at Tier 1 with the pass and without it on both host
+paths, each program's lines clang -O0's; the report's counts; the issue's
+kernel's references to its globals in `objdump`'s text; and 29 declarations
+whose objects the emission's list must take or leave:
+
+```sh
+clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_store_motion.c -o build/test-driver-tier1-store-motion && ./build/test-driver-tier1-store-motion build/compiler "$(command -v clang)"
+```
+
+`test-ir-source --passes` runs the pass on every function of its files with
+every symbol listed, and `benchmark-ir-source --passes --only store-motion`
+times it ([the IR guide](ir.md)).
+
 ## Vectors assembled in memory (#1344)
 
 clang's headers write `_mm512_set1_epi8`, `_mm512_setzero_si512`,
