@@ -13933,11 +13933,19 @@ static __m512i tier0_vector_access_kinds(const Tier0Entries* entries, __m512i ki
     return keys;
 }
 
-// P1 and P2: each consumer's fusions and key, and every entry's raw effects, 64 entries at a time.
-static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
+// P1 and P2: each consumer's fusions and key, and every entry's raw effects, 64 entries at a time. P2 runs only in a
+// function with one of the kinds its fusions end at (LOAD, SET, the branches and SET_LOCAL): without them it changes
+// nothing. Returns whether any entry is absorbed (a leaf, HOME_CONST or compound fusion), without which P3 has nothing to
+// fold (tier0_vector_depths).
+static bool tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
 {
     const uint32_t count = function->count;
     const __m512i one = _mm512_set1_epi8(1);
+    const uint64_t compound_kinds = 1ull << BUSTER_TYPED_LOAD | 1ull << BUSTER_TYPED_SET | 1ull << BUSTER_TYPED_BRANCH_TRUE | 1ull << BUSTER_TYPED_BRANCH_FALSE |
+                                    1ull << BUSTER_TYPED_SET_LOCAL;
+    _Static_assert(BUSTER_TYPED_KIND_LIMIT == 64, "a kind is a bit of a quadword");
+    uint64_t compound = 0;
+    uint64_t absorbing = 0;
     __m512i previous_kinds = _mm512_setzero_si512();
     __m512i previous_classes = _mm512_setzero_si512();
     __m512i previous_kinds_2 = _mm512_setzero_si512();
@@ -14031,6 +14039,8 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const uint64_t leaf = lanes & has_last & ~labels & (leaf_constant | leaf_home) & ~home_const & ~home_home & ~sequential & (block != 0 ? ~0ull : ~1ull);
         bits->leaf[block] = leaf;
         bits->home_const[block] = home_const | home_home;
+        absorbing |= leaf | home_const | home_home;
+        compound |= _mm512_mask_bitshuffle_epi64_mask(lanes, _mm512_set1_epi64((int64_t)compound_kinds), kinds);
         // The variants: the entry's own, then the leaf fusion's.
         __m512i variant = _mm512_setzero_si512();
         const uint64_t floating_zero = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONST)) & _mm512_cmpeq_epi8_mask(stack, _mm512_set1_epi8(2)) &
@@ -14098,7 +14108,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
     uint64_t previous_tests = 0;
     uint64_t previous_equals = 0;
     uint64_t previous_takable = 0;
-    for (uint32_t block = 0; block < bits->blocks; block += 1)
+    for (uint32_t block = 0; compound != 0 && block < bits->blocks; block += 1)
     {
         const uint32_t first = block * 64;
         const __mmask64 lanes = tier0_lanes(first, count);
@@ -14191,6 +14201,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         bits->one[block] = load | fused_branch | tested | rmw;
         bits->two[block] = store;
         bits->rmw[block] = rmw | twice;
+        absorbing |= load | fused_branch | tested | rmw | store | twice;
         // The keys and variants of the compound fusions.
         __m512i variant = variants;
         variant = _mm512_mask_mov_epi8(variant, load & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_OFFSET));
@@ -14229,19 +14240,21 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         previous_equals = equals;
         previous_takable = takable;
     }
+    return absorbing != 0;
 }
 
 // P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, and up to BUSTER_TIER0_ABSORB_REACH
 // after one pointer-jump step for an absorber that is absorbed itself: the constant of the first of two tests behind a
 // branch is one before its test and four before the branch), the effects folded into the absorbers, and the depths,
-// their prefix sums.
-static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
+// their prefix sums. In a function where fusion absorbed no entry (`absorbing` false, tier0_vector_fuse), every distance
+// is 0 and every entry's effects its own: P4 alone, on the raw effects.
+static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries, bool absorbing)
 {
     const uint32_t count = function->count;
     const uint32_t blocks = bits->blocks;
     // P3a: the direct absorber's distance (0 for none), into the `absorbed` column (overwritten in P3b by the absorbed
     // flag).
-    for (uint32_t block = 0; block < blocks; block += 1)
+    for (uint32_t block = 0; absorbing && block < blocks; block += 1)
     {
         const uint32_t first = block * 64;
         const __mmask64 lanes = tier0_lanes(first, count);
@@ -14266,13 +14279,13 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
     const __m512i lane_index = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36,
                                                35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7,
                                                6, 5, 4, 3, 2, 1, 0);
-    __m512i next_direct = blocks > 0 ? _mm512_maskz_loadu_epi8(tier0_lanes(0, count), entries->absorbed) : _mm512_setzero_si512();
+    __m512i next_direct = absorbing && blocks > 0 ? _mm512_maskz_loadu_epi8(tier0_lanes(0, count), entries->absorbed) : _mm512_setzero_si512();
     for (uint32_t block = 0; block < blocks; block += 1)
     {
         const uint32_t first = block * 64;
         const __mmask64 lanes = tier0_lanes(first, count);
         const __m512i direct = next_direct;
-        next_direct = block + 1 < blocks ? _mm512_maskz_loadu_epi8(tier0_lanes(first + 64, count), entries->absorbed + first + 64) : _mm512_setzero_si512();
+        next_direct = absorbing && block + 1 < blocks ? _mm512_maskz_loadu_epi8(tier0_lanes(first + 64, count), entries->absorbed + first + 64) : _mm512_setzero_si512();
         // The absorber's own distance: lane j + direct[j], across into the next block.
         const __m512i at = _mm512_add_epi8(lane_index, direct);
         const __m512i absorber_direct = _mm512_permutex2var_epi8(direct, at, next_direct);
@@ -14284,7 +14297,7 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
         // ultimate absorber it is.
         __m512i integer = _mm512_maskz_mov_epi8(~absorbed, integer_raw);
         __m512i floating = _mm512_maskz_mov_epi8(~absorbed, floating_raw);
-        for (uint32_t back = 1; back <= BUSTER_TIER0_ABSORB_REACH; back += 1)
+        for (uint32_t back = 1; absorbing && back <= BUSTER_TIER0_ABSORB_REACH; back += 1)
         {
             const __m512i ultimate_back = tier0_shift_back(ultimate, previous_ultimate, back);
             const __mmask64 mine = _mm512_cmpeq_epi8_mask(ultimate_back, _mm512_set1_epi8((char)back));
@@ -15463,12 +15476,12 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
         tier0_vector_labels(function, entries.deferred_entries, bits.labels);
         entries.labels = bits.labels;
         tier0_vector_values(function, &bits);
-        tier0_vector_fuse(function, &bits, &entries);
+        const bool absorbing = tier0_vector_fuse(function, &bits, &entries);
         if (function->vectors)
         {
             tier0_operation_effects(function, &entries);
         }
-        tier0_vector_depths(function, &bits, &entries);
+        tier0_vector_depths(function, &bits, &entries, absorbing);
         if (function->masks)
         {
             entries.mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
