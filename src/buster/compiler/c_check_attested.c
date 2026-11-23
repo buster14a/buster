@@ -803,6 +803,15 @@ struct CheckAttestedListing
     bool any_definition;
 };
 
+// `words`' lanes `lanes`, in order, to `to`: compressed in a register and stored by a masked store (a compress to memory
+// is 8 uops on Zen 5, in a register 2). Their count.
+static inline uint32_t check_attested_compress_words(uint32_t* to, __mmask16 lanes, __m512i words)
+{
+    const uint32_t count = (uint32_t)__builtin_popcount(lanes);
+    _mm512_mask_storeu_epi32(to, (__mmask16)_bzhi_u32(0xffffu, count), _mm512_maskz_compress_epi32(lanes, words));
+    return count;
+}
+
 // A function definition's body's inside, tokens [begin, end) of declaration `listing->declaration`: each identifier
 // looks its name up, and declares it at file scope where the body can: a callee (an implicit function's declaration) and,
 // in a body with an `extern` declaration, every name (a block's extern declaration's, without telling which). Any other
@@ -854,12 +863,10 @@ static void check_attested_list_body(CheckAttestedListing* listing, uint32_t beg
             entries = _mm512_or_si512(entries, _mm512_set1_epi32((int32_t)(BUSTER_ATTESTED_LOOKS_UP << BUSTER_ATTESTED_CLASS_SHIFT | declares)));
             entries = _mm512_or_si512(entries, _mm512_maskz_set1_epi32(tagged, (int32_t)(BUSTER_ATTESTED_TAG << BUSTER_ATTESTED_CLASS_SHIFT)));
             entries = _mm512_or_si512(entries, _mm512_maskz_set1_epi32(called, (int32_t)(BUSTER_ATTESTED_DECLARES << BUSTER_ATTESTED_CLASS_SHIFT)));
-            _mm512_mask_compressstoreu_epi32(listing->name_entries + count, group, entries);
-            count += (uint32_t)__builtin_popcount(group);
+            count += check_attested_compress_words(listing->name_entries + count, group, entries);
             // The declared ones' keys: the callees, or every one in a body with an extern declaration.
             const __mmask16 declaring = externs ? group : called;
-            _mm512_mask_compressstoreu_epi32(listing->declared_keys + declared, declaring, _mm512_add_epi32(_mm512_slli_epi32(ids, 1), _mm512_maskz_set1_epi32(tagged, 1)));
-            declared += (uint32_t)__builtin_popcount(declaring);
+            declared += check_attested_compress_words(listing->declared_keys + declared, declaring, _mm512_add_epi32(_mm512_slli_epi32(ids, 1), _mm512_maskz_set1_epi32(tagged, 1)));
         }
         uint64_t texts = asms ? _mm512_mask_cmpeq_epi8_mask(lanes, kind, _mm512_set1_epi8(PARSE_KIND_STRING)) : 0;
         while (texts != 0)
@@ -977,16 +984,16 @@ static void check_attested_list_run(CheckAttestedListing* listing, uint32_t d, u
         const uint32_t length = bodies != 0 ? (uint32_t)_tzcnt_u64(bodies) + 1 : (uint32_t)_mm_popcnt_u64(lanes);
         lanes = length == 64 ? UINT64_MAX : _bzhi_u64(UINT64_MAX, length);
         // The levels, from the block's lowest (consecutive tokens' depths differ by one at most: 64 bytes hold them).
-        uint32_t low = UINT32_MAX;
-        uint32_t high = 0;
+        __m512i least = _mm512_set1_epi32(-1);
+        __m512i most = _mm512_setzero_si512();
         for (uint32_t g = 0; g < 4; g += 1)
         {
             const __mmask16 group = (__mmask16)(lanes >> (16 * g));
-            const uint32_t least = _mm512_mask_reduce_min_epu32(group, depth[g]);
-            const uint32_t most = _mm512_mask_reduce_max_epu32(group, depth[g]);
-            low = least < low ? least : low;
-            high = most > high ? most : high;
+            least = _mm512_mask_min_epu32(least, group, least, depth[g]);
+            most = _mm512_mask_max_epu32(most, group, most, depth[g]);
         }
+        const uint32_t low = _mm512_reduce_min_epu32(least);
+        const uint32_t high = _mm512_reduce_max_epu32(most);
         __m128i quarters[4];
         for (uint32_t g = 0; g < 4; g += 1)
         {
@@ -1082,11 +1089,9 @@ static void check_attested_list_run(CheckAttestedListing* listing, uint32_t d, u
             __m512i entries = _mm512_or_si512(keys, _mm512_maskz_set1_epi32((__mmask16)(declaring >> (16 * g)), (int32_t)(BUSTER_ATTESTED_DECLARES << BUSTER_ATTESTED_CLASS_SHIFT)));
             entries = _mm512_or_si512(entries, _mm512_maskz_set1_epi32((__mmask16)(looking >> (16 * g)), (int32_t)(BUSTER_ATTESTED_LOOKS_UP << BUSTER_ATTESTED_CLASS_SHIFT)));
             entries = _mm512_or_si512(entries, _mm512_maskz_set1_epi32(tag, (int32_t)(BUSTER_ATTESTED_TAG << BUSTER_ATTESTED_CLASS_SHIFT)));
-            _mm512_mask_compressstoreu_epi32(listing->name_entries + listing->names_count, group, entries);
-            listing->names_count += (uint32_t)__builtin_popcount(group);
+            listing->names_count += check_attested_compress_words(listing->name_entries + listing->names_count, group, entries);
             const __mmask16 declared = (__mmask16)(declaring >> (16 * g));
-            _mm512_mask_compressstoreu_epi32(listing->declared_keys + listing->declared_count, declared, keys);
-            listing->declared_count += (uint32_t)__builtin_popcount(declared);
+            listing->declared_count += check_attested_compress_words(listing->declared_keys + listing->declared_count, declared, keys);
         }
         // The strings inside an asm or attribute group, each with its declaration; an asm declaration's keyword, its
         // declaration's first token or the one after its __extension__.
@@ -1672,10 +1677,45 @@ static bool check_attested_lists_walk(CheckAttested* census, const Parser* parse
     return valid;
 }
 
+// Declarations [from, to), each missing from the lane's cache (or every one of a command of one source file, which
+// keeps none: CheckAttested.alone): their lists made by one run of check_attested_list_run, then each one that can be
+// kept, kept, in order. A declaration whose key an earlier one of the run kept takes that list, as it would have from
+// the cache before the run: the same tokens, so the same list.
+static void check_attested_list_misses(CheckAttested* census, CheckAttestedListing* listing, const uint32_t* parents, uint32_t from, uint32_t to)
+{
+    uint32_t strings = listing->strings;
+    check_attested_list_run(listing, from, to);
+    for (uint32_t d = from; d < to; d += 1)
+    {
+        uint32_t strings_to = strings;
+        while (strings_to < listing->strings && listing->string_declarations[strings_to] == d)
+        {
+            strings_to += 1;
+        }
+        const uint32_t first = census->firsts[d];
+        const uint32_t last = census->lasts[d];
+        // (A definition's own hash is zero: its list is made, never kept. A key's low word is never zero.)
+        const bool kept = !census->alone && parents[last] == BUSTER_PARSE_ROOT && (census->flags[d] & BUSTER_ATTESTED_DEFINITION) == 0;
+        const uint64_t low = census->owns[d].low | 1;
+        const uint64_t high = census->owns[d].high;
+        const uint32_t length = last - first + 1;
+        const CheckAttestedListSlot* slot = kept ? check_attested_list_slot(census, low, high, length) : NULL;
+        const bool held = slot != NULL && slot->low != 0;
+        census->list_blocks[d] = held ? slot->offset : BUSTER_ATTESTED_NONE;
+        census->list_hits += held ? 1u : 0u;
+        census->list_misses += held ? 0u : 1u;
+        if (slot != NULL && !held)
+        {
+            check_attested_list_keep(census, low, high, length, d, first, strings, strings_to);
+        }
+        strings = strings_to;
+    }
+}
+
 // The lists of `parser`'s unit on the vector path, with the own hashes (check_attested_hashes, which they are keyed by and
-// which the scalar path makes after its lists): whether there was room. A command of one source file keeps no cache
-// (CheckAttested.alone): its unit's lists are one run of check_attested_list_run. A lane's take each declaration's from
-// its cache by its own hash, or make it (a run of one) and keep it. check_attested_lists_walk is its twin.
+// which the scalar path makes after its lists): whether there was room. Each declaration's list from the lane's cache
+// by its own hash, or, for each run of declarations it doesn't hold, made by check_attested_list_misses. A command of
+// one source file keeps no cache (CheckAttested.alone): its unit is one run. check_attested_lists_walk is its twin.
 static bool check_attested_lists_cached(CheckAttested* census, const Parser* parser)
 {
     const uint32_t* const parents = parser->tree.parents;
@@ -1687,19 +1727,13 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
         check_attested_hashes(census, parser, false);
     }
     const uint32_t declarations = valid ? census->declaration_count : 0;
-    if (census->alone && declarations != 0)
-    {
-        check_attested_list_run(&listing, 0, declarations);
-        memset(census->list_blocks, 0xff, (uint64_t)declarations * sizeof(uint32_t));
-        census->list_misses += declarations;
-    }
+    // The first declaration of the run of misses since the last hit.
+    uint32_t pending = census->alone ? 0 : BUSTER_ATTESTED_NONE;
     for (uint32_t d = 0; !census->alone && d < declarations; d += 1)
     {
         const uint32_t first = census->firsts[d];
         const uint32_t last = census->lasts[d];
-        const bool rooted = parents[last] == BUSTER_PARSE_ROOT;
-        // (A definition's own hash is zero: its list is made, never kept. A key's low word is never zero.)
-        const bool kept = rooted && (census->flags[d] & BUSTER_ATTESTED_DEFINITION) == 0;
+        const bool kept = parents[last] == BUSTER_PARSE_ROOT && (census->flags[d] & BUSTER_ATTESTED_DEFINITION) == 0;
         const uint64_t low = census->owns[d].low | 1;
         const uint64_t high = census->owns[d].high;
         const uint32_t length = last - first + 1;
@@ -1707,9 +1741,16 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
         // while this one's list is copied.
         const uint32_t ahead = d + BUSTER_ATTESTED_LIST_AHEAD < declarations ? d + BUSTER_ATTESTED_LIST_AHEAD : d;
         __builtin_prefetch(census->list_slots + ((census->owns[ahead].low | 1) & census->list_mask));
-        CheckAttestedListSlot* slot = kept ? check_attested_list_slot(census, low, high, length) : NULL;
-        census->list_blocks[d] = BUSTER_ATTESTED_NONE;
-        if (slot != NULL && slot->low != 0)
+        const CheckAttestedListSlot* slot = kept ? check_attested_list_slot(census, low, high, length) : NULL;
+        const bool hit = slot != NULL && slot->low != 0;
+        if (hit && pending != BUSTER_ATTESTED_NONE)
+        {
+            // The run before the hit, whose keeping may have moved the table.
+            check_attested_list_misses(census, &listing, parents, pending, d);
+            pending = BUSTER_ATTESTED_NONE;
+            slot = check_attested_list_slot(census, low, high, length);
+        }
+        if (hit)
         {
             census->list_blocks[d] = slot->offset;
             const uint32_t* const pool = census->list_pool + slot->offset + 1;
@@ -1728,16 +1769,11 @@ static bool check_attested_lists_cached(CheckAttested* census, const Parser* par
             census->declared_starts[d + 1] = listing.declared_count;
             census->list_hits += 1;
         }
-        else
-        {
-            const uint32_t strings_from = listing.strings;
-            check_attested_list_run(&listing, d, d + 1);
-            census->list_misses += 1;
-            if (slot != NULL)
-            {
-                check_attested_list_keep(census, low, high, length, d, first, strings_from, listing.strings);
-            }
-        }
+        pending = !hit && pending == BUSTER_ATTESTED_NONE ? d : pending;
+    }
+    if (pending != BUSTER_ATTESTED_NONE && pending < declarations)
+    {
+        check_attested_list_misses(census, &listing, parents, pending, declarations);
     }
     check_attested_listed(census, &listing);
     arena_pop_to(&census->unit_arena, mark);
