@@ -33,7 +33,10 @@ An address is then a root, an optional index value with its scale, and a
 constant offset. Every value it is read through is the identities' forwarded
 one. A step whose offset would leave `int64_t`'s range doesn't happen: the value
 it would have left is the root. A slot's `stack_addr`s all have the slot's first
-one as their root. The access's family is (root, index, scale), and its key the
+one as their root, and a symbol's `symbol_addr`s the first of them among the
+accesses' roots (#2826): the lowering takes a global's address at each use, so a
+global stored and read again is one family without #866's solver merging the
+two `symbol_addr`s. The access's family is (root, index, scale), and its key the
 family, the offset and the access's type. Two accesses of one key read and
 write the same bytes: their addresses are the same values' same arithmetic.
 
@@ -126,13 +129,19 @@ gathers can't index (below).
   instruction: kind, type, SCCP's constant and reachability).
 - **Derivation:** the slot each value's chain starts at, by pointer jumping
   along those operands until no jump moves (the scalar fallback: reverse
-  postorder).
+  postorder). The jumps run over a compressed list of the values that have an
+  operand to follow, and a value leaves it once its jump reaches a chain's
+  start (#2826): an address step is a small part of a function's values.
 - **Escapes:** the values derived from a slot, found 16 at a time by a mask,
   and their uses (the use lists the optimizer built).
 - **Events:** each block's accesses, writes and markers, compressed into one
   list 16 instructions at a time (`vpcompressd`), and the accesses into
   another; the walk and the blocks' summaries read these, not every
   instruction.
+- **Early exits (#2826):** the accesses' loads, and their byte and word loads,
+  counted 16 at a time from their info words. A function with no load or one
+  access stops there; one whose every key is one access's, with no byte or
+  word load, stops after the grouping. Neither forwards anything.
 - **Hashes:** the families' and keys' 64-bit hashes 8 at a time; the grouping
   (an open-addressed table numbering them in access order, comparing whole
   keys) is shared.

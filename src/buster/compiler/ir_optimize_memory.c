@@ -315,43 +315,53 @@ static void ir_memory_derive_scalar(IrMemoryWork* m)
 }
 
 // The vector derivation: pointer jumping along the reachable values' follow operands until no jump moves (a reachable
-// value's operand is reachable and dominates it, so no chain is a cycle), then each chain's start's slot.
+// value's operand is reachable and dominates it, so no chain is a cycle), then each chain's start's slot. The jumps run
+// over a compressed list of the linked values alone (#2826: an address step is a small part of a function's values),
+// and a value leaves the list once its jump stops moving: its target is then a chain's start.
 static bool ir_memory_derive_vector(IrMemoryWork* m, Arena* scratch)
 {
     const IrFunction* f = m->ir->function;
     const uint32_t n = f->instruction_count;
     bool ok = true;
     uint32_t* jump = ir_memory_push(scratch, n, sizeof(uint32_t), &ok);
+    uint32_t* list = ir_memory_push(scratch, (uint64_t)n + 16, sizeof(uint32_t), &ok);
+    uint32_t count = 0;
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     for (uint64_t first = 0; ok && first < n; first += 16)
     {
-        const uint32_t count = n - first < 16 ? (uint32_t)(n - first) : 16;
-        const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
+        const uint32_t chunk = n - first < 16 ? (uint32_t)(n - first) : 16;
+        const __mmask16 valid = (__mmask16)((UINT32_C(1) << chunk) - 1);
         const __m512i info = _mm512_maskz_loadu_epi32(valid, m->info + first);
         const __m512i follow = _mm512_maskz_loadu_epi32(valid, m->follow + first);
-        const __mmask16 linked = _mm512_test_epi32_mask(info, _mm512_set1_epi32((int)BUSTER_IR_MEMORY_REACHABLE)) &
+        const __mmask16 linked = valid & _mm512_test_epi32_mask(info, _mm512_set1_epi32((int)BUSTER_IR_MEMORY_REACHABLE)) &
                                  _mm512_cmpneq_epi32_mask(follow, _mm512_set1_epi32((int)BUSTER_IR_NONE));
-        _mm512_mask_storeu_epi32(jump + first, valid, _mm512_mask_mov_epi32(_mm512_add_epi32(_mm512_set1_epi32((int)first), lanes), linked, follow));
+        const __m512i self = _mm512_add_epi32(_mm512_set1_epi32((int)first), lanes);
+        _mm512_mask_storeu_epi32(jump + first, valid, _mm512_mask_mov_epi32(self, linked, follow));
+        _mm512_mask_compressstoreu_epi32(list + count, linked, self);
+        count += (uint32_t)__builtin_popcount(linked);
     }
-    bool changed = ok;
-    while (changed)
+    while (ok && count != 0)
     {
-        changed = false;
-        for (uint64_t first = 0; first < n; first += 16)
+        uint32_t kept = 0;
+        for (uint32_t first = 0; first < count; first += 16)
         {
-            const uint32_t count = n - first < 16 ? (uint32_t)(n - first) : 16;
-            const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
-            const __m512i to = _mm512_maskz_loadu_epi32(valid, jump + first);
+            const uint32_t chunk = count - first < 16 ? count - first : 16;
+            const __mmask16 valid = (__mmask16)((UINT32_C(1) << chunk) - 1);
+            const __m512i value = _mm512_maskz_loadu_epi32(valid, list + first);
+            const __m512i to = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), valid, value, jump, 4);
             const __m512i further = _mm512_mask_i32gather_epi32(to, valid, to, jump, 4);
             const __mmask16 moved = valid & _mm512_cmpneq_epi32_mask(further, to);
-            _mm512_mask_storeu_epi32(jump + first, moved, further);
-            changed = changed || moved != 0;
+            _mm512_mask_i32scatter_epi32(jump, moved, value, further, 4);
+            // The list is rewritten in place: `kept` never passes the chunk this pass has read.
+            _mm512_mask_compressstoreu_epi32(list + kept, moved, value);
+            kept += (uint32_t)__builtin_popcount(moved);
         }
+        count = kept;
     }
     for (uint64_t first = 0; ok && first < n; first += 16)
     {
-        const uint32_t count = n - first < 16 ? (uint32_t)(n - first) : 16;
-        const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
+        const uint32_t chunk = n - first < 16 ? (uint32_t)(n - first) : 16;
+        const __mmask16 valid = (__mmask16)((UINT32_C(1) << chunk) - 1);
         const __mmask16 reachable = valid & _mm512_test_epi32_mask(_mm512_maskz_loadu_epi32(valid, m->info + first), _mm512_set1_epi32((int)BUSTER_IR_MEMORY_REACHABLE));
         const __m512i start = _mm512_maskz_loadu_epi32(valid, jump + first);
         const __m512i start_info = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), reachable, start, m->info, 4);
@@ -1135,6 +1145,32 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
         access_first[b] = k;
     }
     const uint32_t a = m.access_count;
+    // The loads among the accesses, and the byte and word loads, which may take a wider store's extended operand
+    // (ir_memory_narrow_load): 16 accesses' info words at a time. A function with no load or a single access forwards
+    // nothing, and the phases after this one are skipped (#2826).
+    uint32_t loads = 0;
+    uint32_t narrow = 0;
+    for (uint32_t first = 0; ok && !scalar && first < a; first += 16)
+    {
+        const uint32_t count = a - first < 16 ? a - first : 16;
+        const __mmask16 valid = (__mmask16)((UINT32_C(1) << count) - 1);
+        const __m512i at = _mm512_maskz_loadu_epi32(valid, m.accesses + first);
+        const __m512i info = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), valid, at, m.info, 4);
+        const __m512i type = _mm512_and_si512(_mm512_srli_epi32(info, BUSTER_IR_MEMORY_TYPE_SHIFT), _mm512_set1_epi32(0xff));
+        const __mmask16 load = valid & _mm512_cmpeq_epi32_mask(_mm512_and_si512(info, _mm512_set1_epi32(BUSTER_IR_MEMORY_KIND)), _mm512_set1_epi32(BUSTER_IR_MEMORY_LOAD));
+        const __mmask16 small = _mm512_cmpeq_epi32_mask(type, _mm512_set1_epi32(IR_I8)) | _mm512_cmpeq_epi32_mask(type, _mm512_set1_epi32(IR_I16));
+        loads += (uint32_t)__builtin_popcount(load);
+        narrow += (uint32_t)__builtin_popcount(load & small);
+    }
+    for (uint32_t access = 0; ok && scalar && access < a; access += 1)
+    {
+        const uint32_t info = m.info[m.accesses[access]];
+        const bool load = (info & BUSTER_IR_MEMORY_KIND) == BUSTER_IR_MEMORY_LOAD;
+        const uint32_t type = (info >> BUSTER_IR_MEMORY_TYPE_SHIFT) & 0xff;
+        loads += load ? 1u : 0u;
+        narrow += load && (type == IR_I8 || type == IR_I16) ? 1u : 0u;
+    }
+    bool live = loads != 0 && a >= 2;
     m.roots = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
     m.indices = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
     m.scales = ir_memory_push(scratch, a, sizeof(uint32_t), &ok);
@@ -1156,8 +1192,11 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
         buckets *= 2;
     }
     uint32_t* heads = ir_memory_push(scratch, buckets, sizeof(uint32_t), &ok);
-    if (ok)
+    // A symbol's first address among the accesses' roots (#2826), by an open-addressed table of its symbol.
+    uint32_t* symbols = ir_memory_push(scratch, buckets, sizeof(uint32_t), &ok);
+    if (ok && live)
     {
+        memset(symbols, 0xff, buckets * sizeof(uint32_t));
         for (uint32_t access = 0; access < a; access += 1)
         {
             m.classes[access] = ir_memory_class(&m, m.accesses[access]);
@@ -1167,6 +1206,18 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
         {
             const uint32_t root = m.roots[access];
             m.roots[access] = (m.info[root] & BUSTER_IR_MEMORY_KIND) == BUSTER_IR_MEMORY_SLOT ? m.slot_first[f->a[root]] : root;
+            // Every symbol_addr of one symbol is one address: their accesses share a root, as a slot's stack_addrs do, so
+            // a global stored and read again through two of them (the lowering makes one at each use) is one family.
+            if (f->op[root] == IR_SYMBOL_ADDR)
+            {
+                uint64_t bucket = ir_memory_mix(BUSTER_IR_MEMORY_HASH_BASIS, f->a[root]) & (buckets - 1);
+                while (symbols[bucket] != BUSTER_IR_NONE && f->a[symbols[bucket]] != f->a[root])
+                {
+                    bucket = (bucket + 1) & (buckets - 1);
+                }
+                symbols[bucket] = symbols[bucket] == BUSTER_IR_NONE ? root : symbols[bucket];
+                m.roots[access] = symbols[bucket];
+            }
         }
         for (uint32_t pass = 0; pass < 2; pass += 1)
         {
@@ -1187,14 +1238,16 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
                 m.key_count = ir_memory_group(&m, true, heads, buckets);
             }
         }
-        ok = ir_memory_overlaps(&m, scratch);
+        // Where every key is one access's and no byte or word load may take an extension, no load has a source.
+        live = m.key_count < a || narrow != 0;
+        ok = !live || ir_memory_overlaps(&m, scratch);
     }
     IrMemoryEntry* entries = ir_memory_push(scratch, m.key_count, sizeof(IrMemoryEntry), &ok);
     uint32_t* class_counts = ir_allocate(scratch, (uint64_t)f->slot_count + 1, sizeof(uint32_t), &ok);
     uint32_t* family_counts = ir_allocate(scratch, m.family_count, sizeof(uint32_t), &ok);
     IrMemoryUndo* undo = ir_memory_push(scratch, m.undo_bound, sizeof(IrMemoryUndo), &ok);
     IrMemoryFrame* frames = ir_memory_push(scratch, f->block_count, sizeof(IrMemoryFrame), &ok);
-    if (ok)
+    if (ok && live)
     {
         for (uint32_t key = 0; key < m.key_count; key += 1)
         {
@@ -1203,7 +1256,7 @@ static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* f
         ir_memory_dirty(&m);
         ok = ir_memory_clear(&m, scratch);
     }
-    if (ok)
+    if (ok && live)
     {
         *forwarded += ir_memory_walk(&m, entries, class_counts, family_counts, undo, frames, access_first);
         // An identity's operand may be a load forwarded since: each forward names a value that isn't forwarded.

@@ -422,6 +422,7 @@ struct IrOptimizeExecution
 
 // The fixtures' producer defines label k's symbol as BUSTER_IR_OPTIMIZE_TEST_LABEL + k (#131's labels).
 #define BUSTER_IR_OPTIMIZE_TEST_LABEL 64
+#define BUSTER_IR_OPTIMIZE_TEST_SYMBOLS 16
 
 // Independent bounded interpreter used only by the original fixtures. It does not use optimizer opcode tables,
 // use enumeration, lattice, CFG, or fold code. Integer arithmetic goes through the independent wide-C oracle.
@@ -432,6 +433,9 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
     uint64_t* phis = arena_push_array(scratch, f->instruction_count, sizeof(uint64_t), _Alignof(uint64_t));
     IrOptimizeExecution execution = { 0 };
     uint8_t memory[256] = { 0 };
+    // A data symbol's bytes (#2826): symbol k below BUSTER_IR_OPTIMIZE_TEST_SYMBOLS has 32 of its own at its address,
+    // k << 32 (a label's symbol, from BUSTER_IR_OPTIMIZE_TEST_LABEL, has none).
+    uint8_t symbol_memory[BUSTER_IR_OPTIMIZE_TEST_SYMBOLS * 32] = { 0 };
     uint32_t block = 0;
     uint32_t predecessor = BUSTER_IR_NONE;
     bool active = f->block_count != 0 && values != 0 && phis != 0;
@@ -549,14 +553,18 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                 {
                     const uint64_t address = values[a];
                     const uint32_t bytes = (ir_type_bits[op == IR_LOAD ? f->type[i] : f->type[b]] + 7) / 8;
-                    folded = address != 0 && address - 1 <= sizeof(memory) && bytes <= sizeof(memory) - (address - 1);
+                    const uint64_t symbol = address >> 32;
+                    const uint64_t within = address & UINT32_MAX;
+                    const bool symbolic = symbol != 0 && symbol < BUSTER_IR_OPTIMIZE_TEST_SYMBOLS && within + bytes <= 32;
+                    uint8_t* bank = symbolic ? symbol_memory + symbol * 32 + within : memory + address - 1;
+                    folded = symbolic || (address != 0 && address - 1 <= sizeof(memory) && bytes <= sizeof(memory) - (address - 1));
                     if (folded)
                     {
                         if (op == IR_STORE)
                         {
                             for (uint32_t byte = 0; byte < bytes; byte += 1)
                             {
-                                memory[address - 1 + byte] = values[b] >> (byte * 8);
+                                bank[byte] = values[b] >> (byte * 8);
                             }
                             execution.effects = execution.effects * 65537 + address * 17 + values[b];
                         }
@@ -564,7 +572,7 @@ static IrOptimizeExecution ir_optimize_test_execute(const IrFunction* f, Arena* 
                         {
                             for (uint32_t byte = 0; byte < bytes; byte += 1)
                             {
-                                value |= (uint64_t)memory[address - 1 + byte] << (byte * 8);
+                                value |= (uint64_t)bank[byte] << (byte * 8);
                             }
                             if ((f->flags[i] & BUSTER_IR_VOLATILE) != 0)
                             {
