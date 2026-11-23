@@ -97,8 +97,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, including the real system-header lazy-policy
   fixtures and eager/lazy object comparisons, since the others run the same either way, and
-  `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
-  `CheckDriverPart`; #2071's run modes, for every run of buster and of the
+  `--part K/N` runs the K-th of N parts its checks are dealt to, each unit
+  to the part that weighs the least so far (`CheckDriverPart`, #3399): a unit
+  weighs what it takes in hundredths of a second of one CPU on a 4-CPU Xeon
+  VM, the usual `BUSTER_CHECK_DRIVER_UNIT_WEIGHT` or, for one that takes 2 s
+  or more, its own (`check_test_driver_takes_weighing`), and a sweep that
+  would take more than about 20 s deals each of its cases, since a long unit
+  late in the order makes its part the longest whatever the weights;
+  #2071's run modes, for every run of buster and of the
   oracle clang that goes through the shared helpers
   (`check_test_driver_spawn_stream`, `check_test_driver_run_with`):
   `--in-process` runs buster's source commands as this process's
