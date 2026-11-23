@@ -1391,8 +1391,19 @@ whose dead definitions read the marks. A mask recipe would need its own `kxor`,
 don't touch a mask, which keeps its opmask register across the sequence; their
 saves take the general call-save rows, before the masks' own.
 
-`test-tier1-masks [--seed N] [--print]` (`tier1_masks_test.c`) takes
-hand-written IR of masks through this path: each fixture is a function of a
+`test-tier1-masks [--seed N] [--print] [--fixtures DIR]` (`tier1_masks_test.c`)
+takes hand-written IR of masks through this path. The fixtures are runtime data
+(#2053): `tests/tier1/masks/` holds `catalog.tsv` and one `.ir` file a case,
+read from `tests/` under the working directory or `--fixtures DIR`, so that
+editing or adding a case rebuilds nothing. The catalog's first line is
+`buster-fixtures v1 tier1-masks`; each case is a line of ID, FILE, FLAGS and
+NAME, tab-separated, its flags `Tier1MasksFixture`'s fields (`count=N`,
+`spills`, `v3`, `rows=N` and the others the test file lists) and its C model
+and preparation by name (`model=NAME`, `prepare=NAME`), which stay compiled.
+A missing or malformed catalog, a missing file, a repeated ID or file, an
+unknown flag or name, a file no line names or an empty catalog fails the run,
+and no case runs. The refusals take the catalog's first case, "logic at every
+width". Each fixture is a function of a
 pointer to a 256-byte buffer, and of a count where it loops, that loads masks of
 every width from the buffer's first half and stores masks into its second half
 (the IR has no mask argument or result, and no conversion between a mask and an

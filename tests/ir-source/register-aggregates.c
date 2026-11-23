@@ -5,7 +5,8 @@
 // whose fields Tier 1 keeps in registers: SROA widens their slots to eightbytes, a one-eightbyte result and register
 // parameters become scalars. Every shape is checked against clang's output: fields of mixed widths, floats, padding,
 // nesting, arrays, 9 to 16 bytes, fields left unread, a parameter whose address escapes, a parameter written before
-// it is read, several returns and a union read by another member than it was written by.
+// it is read, several returns, a union read by another member than it was written by and a field written on one
+// path alone.
 #include <stdio.h>
 #include <string.h>
 
@@ -249,6 +250,29 @@ __attribute__((noinline)) static long small_args(int n)
     return total + s2.a + s2.b;
 }
 
+// #3424: a field left zero on one path and written on the other. Its eightbyte starts as an undef (the padding no
+// store writes), and the `and` that clears the field's bits in it was forwarded to that undef, which reached the
+// join's phi with no definition: the field came back as whatever its register held.
+__attribute__((noinline)) static I3 set_on_one_path(const int* p, int x)
+{
+    I3 v = { 1, 2 };
+    if (p != 0)
+    {
+        v.a = *p;
+        v.c = x;
+    }
+    return v;
+}
+
+// Its call with rdx and rcx, the registers the result's eightbytes and the call's spare argument use, holding values
+// other than zero, which the undefined register showed.
+__attribute__((noinline)) static I3 set_on_one_path_dirty(const int* p, int x, long dirty_rdx, long dirty_rcx)
+{
+    (void)dirty_rdx;
+    (void)dirty_rcx;
+    return set_on_one_path(p, x);
+}
+
 int main(void)
 {
     I4 acc4 = { 0 };
@@ -325,5 +349,9 @@ int main(void)
     printf("sum %ld\n", sum_args((I2){ 1, 2 }, (L2){ 3, 4 }, 5, (F2){ 0.5f, 0.7f }, (I3){ 6, 7, 8 }));
     printf("callers %ld %ld\n", callers(10), callers(37 + vz));
     printf("small %ld\n", small_args(9 + vz));
+    const int k = 5 + vz;
+    const I3 none = set_on_one_path_dirty(0, 7 + vz, 0x5a5a + vz, 0x3c3c + vz);
+    const I3 some = set_on_one_path_dirty(&k, 7 + vz, 0x5a5a + vz, 0x3c3c + vz);
+    printf("one path %d %d %d %d %d %d\n", none.a, none.b, none.c, some.a, some.b, some.c);
     return 0;
 }

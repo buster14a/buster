@@ -1,0 +1,53 @@
+function (ptr) -> void {
+  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x81 0x81 0x80 0x00 0x00 0x00 0 0] [VPXORD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]
+b0:
+  %0 = param.ptr 0
+  %1 = address.ptr %0 offset=0
+  %2 = load.v16i32 %1 align=4
+  %3 = address.ptr %0 offset=4
+  %4 = load.v16i32 %3 align=4
+  %5 = address.ptr %0 offset=8
+  %6 = load.v16i32 %5 align=4
+  %7 = address.ptr %0 offset=12
+  %8 = load.v16i32 %7 align=4
+  %9 = address.ptr %0 offset=16
+  %10 = load.v16i32 %9 align=4
+  %11 = address.ptr %0 offset=20
+  %12 = load.v16i32 %11 align=4
+  %13 = address.ptr %0 offset=24
+  %14 = load.v16i32 %13 align=4
+  %15 = address.ptr %0 offset=28
+  %16 = load.v16i32 %15 align=4
+  %17 = address.ptr %0 offset=32
+  %18 = load.v16i32 %17 align=4
+  %19 = address.ptr %0 offset=36
+  %20 = load.v16i32 %19 align=4
+  %21 = address.ptr %0 offset=40
+  %22 = load.v16i32 %21 align=4
+  %23 = address.ptr %0 offset=44
+  %24 = load.v16i32 %23 align=4
+  %25 = address.ptr %0 offset=48
+  %26 = load.v16i32 %25 align=4
+  %27 = address.ptr %0 offset=52
+  %28 = load.v16i32 %27 align=4
+  %29 = address.ptr %0 offset=56
+  %30 = load.v16i32 %29 align=4
+  %31 = call.v16i32 row #0(%2, %4) fixed=(v16i32, v16i32) variadic=0
+  %32 = xor.v16i32 %6, %8
+  %33 = xor.v16i32 %32, %10
+  %34 = xor.v16i32 %33, %12
+  %35 = xor.v16i32 %34, %14
+  %36 = xor.v16i32 %35, %16
+  %37 = xor.v16i32 %36, %18
+  %38 = xor.v16i32 %37, %20
+  %39 = xor.v16i32 %38, %22
+  %40 = xor.v16i32 %39, %24
+  %41 = xor.v16i32 %40, %26
+  %42 = xor.v16i32 %41, %28
+  %43 = xor.v16i32 %42, %30
+  %44 = address.ptr %0 offset=128
+  %45 = store.void %44, %43 align=1
+  %46 = address.ptr %0 offset=192
+  %47 = store.void %46, %31 align=1
+  %48 = ret.void
+}

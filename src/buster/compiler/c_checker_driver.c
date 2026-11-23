@@ -96,7 +96,8 @@ static const char* check_driver_action_message(CheckDiagnostic diagnostic)
         case CHECK_DIAG_ADDRESS_SPACE_NESTED: result = "conversion changes address space of nested pointer"; break;
         case CHECK_DIAG_OVERFLOW_BIT_INT: result = "__builtin_mul_overflow does not support 'signed _BitInt' operands of more than 128 bits"; break;
         case CHECK_DIAG_COUNTED_INCOMPLETE: result = "cannot use a '__counted_by' attributed pointer whose pointee type is incomplete"; break;
-        case CHECK_DIAG_NONE: break;
+        case CHECK_DIAG_NONE:
+        case CHECK_DIAG_RECOVERED_MEMBER: break;
     }
     return result;
 }
@@ -10165,8 +10166,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
     const CheckProgramAsms* asms = &code->lowered.asms;
     const bool inline_assembly = asms->plan_count != 0 || asms->naked != 0 || asms->file_assembled || code->asm_atom_count != 0 || code->unit_atom_count != 0;
     const bool multiversioned = program->cpu_group_count != 0 || program->target_group_count != 0;
-    const char* refusal = inline_assembly ? "inline assembly" : code->patchable_count != 0 ? "patchable function entries" :
-                          multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
+    const char* refusal = inline_assembly ? "inline assembly" : multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
     uint8_t* temporary = 0;
     const bool linked = refusal == 0 && link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
     AssemblyResult printed = { .error = ASSEMBLY_FULL };

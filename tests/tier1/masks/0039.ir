@@ -1,0 +1,38 @@
+function (ptr) -> void {
+  row #0 (vector64, vector64) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x00 0 0]
+  row #1 (vector64, vector64, vector64) -> vector64 [VPTERNLOGD_Z_Z_ZM512_IMM8 0x80 0x81 0x82 0x00 0x00 0x00 150 0]
+  row #2 (vector64) -> u32 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0] [VMOVD_RM32_X_EVEX 0x80 0x00 0x90 0x00 0x00 0x00 0 0]
+  row #3 (vector32, vector32, vector32) -> vector32 [VPBLENDVB_Y_Y_YM256_Y 0x80 0x80 0x81 0x00 0x00 0x00 32 0]
+  row #4 (vector64, vector64, mask2) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x81 0x00 0x00 0x0a 0 0]
+  row #5 (vector64) -> vector16 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]
+  row #6 (vector16) -> vector64 [VPADDD_Z_Z_ZM512 0x80 0x80 0x80 0x00 0x00 0x00 0 0]
+  row #7 (vector16) -> vector64 [VPMOVZXBD_Z_XM128 0x80 0x00 0x80 0x00 0x00 0x00 0 0]
+b0:
+  %0 = param.ptr 0
+  %1 = load.v16i32 %0 align=1
+  %2 = address.ptr %0 offset=64
+  %3 = load.v16i32 %2 align=1
+  %4 = load.m16 %0 align=2
+  %5 = call.v16i32 row #0(%1, %3) fixed=(v16i32, v16i32) variadic=0
+  %6 = call.v16i32 row #1(%5, %1, %3) fixed=(v16i32, v16i32, v16i32) variadic=0
+  %7 = call.v16i32 row #4(%1, %6, %4) fixed=(v16i32, v16i32, m16) variadic=0
+  %8 = call.v4i32 row #5(%3) fixed=(v16i32) variadic=0
+  %9 = call.v16i32 row #6(%8) fixed=(v4i32) variadic=0
+  %10 = call.v16i32 row #7(%8) fixed=(v4i32) variadic=0
+  %11 = call.v16i32 row #1(%9, %10, %7) fixed=(v16i32, v16i32, v16i32) variadic=0
+  %12 = call.i32 row #2(%7) fixed=(v16i32) variadic=0
+  %13 = address.ptr %0 offset=128
+  %14 = store.void %13, %11 align=1
+  %15 = load.v8i32 %0 align=1
+  %16 = address.ptr %0 offset=32
+  %17 = load.v8i32 %16 align=1
+  %18 = load.v8i32 %2 align=1
+  %19 = call.v8i32 row #3(%15, %17, %18) fixed=(v8i32, v8i32, v8i32) variadic=0
+  %20 = address.ptr %0 offset=192
+  %21 = store.void %20, %19 align=1
+  %22 = address.ptr %0 offset=224
+  %23 = store.void %22, %8 align=1
+  %24 = address.ptr %0 offset=240
+  %25 = store.void %24, %12 align=4
+  %26 = ret.void
+}

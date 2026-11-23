@@ -1484,6 +1484,7 @@ static int run_check_debug_tests(int argc, char** argv)
             check_debug_values_test(&tally, directory, &arena);
             check_debug_tier1_values_test(&tally, directory, &arena);
             check_debug_tier1_inline_test(&tally, directory, &arena);
+            check_debug_tier1_forward_test(&tally, directory, &arena);
             check_debug_tier1_header_test(&tally, directory, &arena);
             check_debug_tier1_loop_test(&tally, directory, &arena);
             check_debug_tier1_vex_test(&tally, directory, &arena);
