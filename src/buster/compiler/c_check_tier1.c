@@ -478,6 +478,37 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    // The 128-bit integers' frame objects in registers (#3299): the checker gives an __int128 local, parameter and
+    // temporary a 16-byte object, which the lowering copies by 8-byte pieces and reads and writes whole, so that promotion
+    // keeps it in memory and each operation's value went through its slot. The split makes every access of such an object
+    // an 8-byte half at offset 0 or 8, which SROA (flagged: the typed stream marks every object address-taken, and SROA
+    // takes one whose every use its provenance understands) splits into two I64 fields, and promotion then makes the
+    // halves values. An object whose address escapes (a call's argument or result, a return's bytes) stays memory. In
+    // steps[8], as --tier1-passes=+sroa's; a function SROA refuses or splits nothing of goes on as the split left it.
+    if (stage == CHECK_TIER1_COMPILED && wide.split && !check_tier1_lane_reserve(lane, 1))
+    {
+        outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+    }
+    if (stage == CHECK_TIER1_COMPILED && wide.split)
+    {
+        IrSroaOptions options = ir_sroa_options();
+        options.scalar = scalar;
+        options.simd = true;
+        options.flagged = true;
+        IrSroaResult fields = { 0 };
+        IrCheck check = ir_optimize_sroa(&wide.function, &lane->steps[8], scratch, options, &fields);
+        IrFunction halves = { 0 };
+        if (check.error == IR_OK && fields.split_slots != 0)
+        {
+            check = ssa_ir_promote_verified_input(&fields.function, !scalar, promotion, scratch, &halves);
+            wide.function = check.error == IR_OK ? halves : wide.function;
+        }
+        // A refusal or a function past a pass's limits goes on as the split left it; any other error is the function's.
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        stage = outcome.stage;
+    }
     // The vectors wider than the target moves whole, as its widest vectors' pieces (#1624, ir_vector_split.c), in the same
     // step's arena, after the halves: a function without any is the halves' (or the promoted one) itself, borrowed.
     if (stage == CHECK_TIER1_COMPILED)
@@ -717,10 +748,36 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const IrFunction original = lowered;
     bool expanded_verified = true;
     bool vectorize_volatile = lane->vectorize_volatile != NULL && lane->vectorize_volatile[lane->emitting_body] != 0;
-    if (stage == CHECK_TIER1_COMPILED && !own && member && check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified, &vectorize_volatile))
+    // Whether the expansion ran, and with it SROA where the function has aggregates (check_tier1_inline_expand).
+    bool expanding = false;
+    if (stage == CHECK_TIER1_COMPILED && !own && member &&
+        check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified, &vectorize_volatile, &expanding))
     {
         lowered = expanded;
         lowered_verified = expanded_verified;
+    }
+    // #3311: a function that takes or returns an aggregate by value (its own ABI records) that no expansion took: SROA
+    // with its widening, in steps[5] (the expansion's SROA's, unused without one), so that its register-class
+    // aggregates' eightbytes stay out of memory. A body it refuses goes on as it was; any other error is the body's.
+    if (stage == CHECK_TIER1_COMPILED && !own && !expanding && !sroa && lowered.parameter_passed != 0)
+    {
+        IrSroaOptions options = ir_sroa_options();
+        options.scalar = scalar;
+        options.simd = true;
+        options.flagged = true;
+        options.widen = true;
+        IrSroaResult split = { 0 };
+        const IrCheck check = ir_optimize_sroa(&lowered, &lane->steps[5], scratch, options, &split);
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        if (check.error == IR_OK && (split.split_slots != 0 || split.assembled != 0 || split.widened_slots != 0))
+        {
+            // SROA verifies its input as it prepares and its output as it ends.
+            lowered = split.function;
+            lowered_verified = true;
+        }
     }
     // --tier1-passes=+sroa (#139's measurement): SROA on every body, the expansion where there is one, in steps[8], with
     // the inlining's options (#1282's simd and flagged), before the solver and promotion. A body it refuses
@@ -732,6 +789,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         options.scalar = scalar;
         options.simd = true;
         options.flagged = true;
+        options.widen = true;
         IrSroaResult split = { 0 };
         const IrCheck check = ir_optimize_sroa(&lowered, &lane->steps[8], scratch, options, &split);
         const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
@@ -744,6 +802,24 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             lowered = split.function;
             lowered_verified = true;
             sroa_split = split.split_slots;
+        }
+    }
+    // #3311: the function's own register-class aggregate parameters and its one-eightbyte result as the scalars the
+    // convention passes them as (ir_sroa_scalarize), after SROA left them only their eightbytes' loads and stores; in
+    // steps[5], after what SROA or the expansion put there. Never a candidate's summary, which its callers expand. The
+    // result is verified by promotion.
+    uint32_t scalar_parameters = 0;
+    uint32_t scalar_results = 0;
+    if (stage == CHECK_TIER1_COMPILED && !own && lowered.parameter_passed != 0)
+    {
+        IrFunction scalars = { 0 };
+        const IrError error = ir_sroa_scalarize(&lowered, &lane->steps[5], scratch, &scalars, &scalar_parameters, &scalar_results);
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+        if (error == IR_OK && (scalar_parameters != 0 || scalar_results != 0))
+        {
+            lowered = scalars;
+            lowered_verified = false;
         }
     }
     // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values

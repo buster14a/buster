@@ -36,6 +36,62 @@ static const char check_driver_format_plain_source[] =
     "void f(FILE*p,char*b){printf(\"%d\",\"str\");fprintf(p,\"%d\",\"str\");"
     "sprintf(b,\"%d\",\"str\");snprintf(b,16,\"%d\",\"str\");snprintf(b,16,\"%s.mo\\0\",\"x\");}\n";
 
+// Attributes a header chooses by feature tests (#3306): each __has_attribute answers 1 where the checker consumes the
+// attribute, so the unit gets clang's -Wformat, -Wunused-result, -Wdeprecated-declarations with the message, the const
+// and pure calls' -Wunused-value, no -Wreturn-type after a noreturn call and no -Wunused-variable for an unused static.
+static const char check_driver_feature_tested_attributes_source[] =
+    "#if __has_attribute(format)\n"
+    "#define PRINTF_LIKE(f, a) __attribute__((format(printf, f, a)))\n"
+    "#else\n"
+    "#define PRINTF_LIKE(f, a)\n"
+    "#endif\n"
+    "#if __has_attribute(__warn_unused_result__)\n"
+    "#define MUST_USE __attribute__((warn_unused_result))\n"
+    "#else\n"
+    "#define MUST_USE\n"
+    "#endif\n"
+    "#if __has_attribute(deprecated) && __has_extension(attribute_deprecated_with_message)\n"
+    "#define OLD(m) __attribute__((deprecated(m)))\n"
+    "#elif __has_attribute(deprecated)\n"
+    "#define OLD(m) __attribute__((deprecated))\n"
+    "#else\n"
+    "#define OLD(m)\n"
+    "#endif\n"
+    "#if __has_attribute(const) && __has_attribute(pure)\n"
+    "#define CONST __attribute__((const))\n"
+    "#define PURE __attribute__((pure))\n"
+    "#else\n"
+    "#define CONST\n"
+    "#define PURE\n"
+    "#endif\n"
+    "#if __has_attribute(noreturn)\n"
+    "#define NORETURN __attribute__((noreturn))\n"
+    "#else\n"
+    "#define NORETURN\n"
+    "#endif\n"
+    "#if __has_attribute(unused)\n"
+    "#define MAYBE __attribute__((unused))\n"
+    "#else\n"
+    "#define MAYBE\n"
+    "#endif\n"
+    "int log_line(const char*, ...) PRINTF_LIKE(1, 2);\n"
+    "MUST_USE int take(int);\n"
+    "OLD(\"use take\") int give(int);\n"
+    "CONST int square(int);\n"
+    "PURE int peek(const int*);\n"
+    "NORETURN void die(void);\n"
+    "static int helper MAYBE;\n"
+    "int f(int n, const int* p)\n"
+    "{\n"
+    "    log_line(\"%d\", 1.5);\n"
+    "    take(n);\n"
+    "    square(n);\n"
+    "    peek(p);\n"
+    "    if (n)\n"
+    "        return give(n);\n"
+    "    die();\n"
+    "}\n";
+
 // The first attribute survives a bare redeclaration; the second is attached after a bare declaration.
 // A non-library name with a different format index keeps its source contract under the same options.
 static const char check_driver_format_attributed_source[] =
@@ -93,6 +149,19 @@ static const char check_driver_atomic_access_valid_source[] =
 
 static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtures[] =
 {
+    {
+        .name = "attributes chosen by __has_attribute",
+        .source = check_driver_feature_tested_attributes_source,
+        .warnings = 5,
+        .notes = 2,
+    },
+    {
+        .name = "attributes chosen by __has_attribute under -Wall -Wextra",
+        .source = check_driver_feature_tested_attributes_source,
+        .options = { "-Wall", "-Wextra" },
+        .warnings = 5,
+        .notes = 2,
+    },
     {
         .name = "atomic record accesses default to errors after the body's structural errors",
         .source = check_driver_atomic_access_source,

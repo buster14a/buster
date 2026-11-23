@@ -904,7 +904,7 @@ the floating environment among the read/modify/writes; a math builtin's facts).
 | `fence` (thread, signal, `__sync_synchronize`) | orders, barrier | none | a constant order: the typed stream's `FENCE` |
 | `terminal` (`trap`, `unreachable`) | terminates | none | none |
 | `flt-rounds` | floating environment, barrier | none | none |
-| `math` (sqrt to rint, copysign) | floating environment, exceptions, errno (sqrt), barrier | none | none |
+| `math` (sqrt to rint; copysign's helper is no runtime's since #1373, which computes it in place) | floating environment, exceptions, errno (sqrt), barrier | none | none |
 | `x86-leaf` (`c_builtin_x86_helpers.c`) | memory, orders, floating environment, may not return, unmodeled, barrier | features, fixed registers | none |
 | `asm` (`c_check_program_asm.c`) | memory, orders, floating environment and exceptions, may not return, unmodeled, barrier | fixed registers (a template's instructions are its author's: the assembler takes every form whatever the target, as GNU as and clang's do, so no feature the compiler gates) | a statement of register, memory and constant operands whose records name no register but its operands' and whose forms a Tier 0 row takes: an `X86` entry in its caller (`check_asm_row`, [the inline assembly guide](c-inline-assembly.md)'s "Placed in the caller") |
 | `unmodeled` (a helper no other family names) | every one as a bound: memory, atomic, orders, floating environment and exceptions, errno, may not return, unmodeled, barrier | features, fixed registers | none |
@@ -3490,19 +3490,36 @@ at both tiers, as clang -O0's code computes `llvm.memcpy`, `llvm.memmove`,
 function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
 `-ffreestanding` and `no_builtin` keep it a call:
 
-- `memcpy`, `memmove` and `memset` of a constant size of at most 32 bytes
-  (`BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES`): `memcpy` by a `COPY` of the size,
-  as `__builtin_memcpy`'s recipe copies; `memmove` by pieces of 8 bytes, the
-  last ending at the size (below 8 bytes, the widest that fits and one ending
-  at the size), all loaded before any is stored, so that ranges that overlap
-  in either direction move right; `memset` by stores of those pieces of its
-  value's byte repeated, a constant value's computed by the compiler. The
-  value is the destination. A larger size, or one that is no constant, calls
-  the library's function, as clang's code calls `memcpy` past 32 bytes.
-  clang's `memmove` stores up to 8 of its widest vectors inline (128 bytes at
-  x86-64, 256 at x86-64-v3) and its `memset` calls the library whatever the
-  size, so this code calls `memmove` of 33 to 128 bytes where clang's doesn't,
-  and stores a small `memset`'s bytes where clang's code calls it.
+- `memcpy` and `memset` of a constant size of at most 32 bytes
+  (`BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES`), and `memmove` of at most 128
+  (`BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES`, `cbuiltin_library_inline_bytes`):
+  `memcpy` by a `COPY` of the size, as `__builtin_memcpy`'s recipe copies;
+  `memmove` to 32 bytes by pieces of 8 bytes, the last ending at the size
+  (below 8 bytes, the widest that fits and one ending at the size), all loaded
+  before any is stored, so that ranges that overlap in either direction move
+  right, and from 33 bytes by `COPY`'s move form (below); `memset` by stores of
+  those pieces of its value's byte repeated, a constant value's computed by the
+  compiler. The value is the destination. A larger size, or one that is no
+  constant, calls the library's function, as clang's code calls `memcpy` past
+  32 bytes. clang's `memmove` stores up to 8 of its widest vectors inline (128
+  bytes at x86-64, 256 at x86-64-v3 and x86-64-v4, 512 at znver5, which prefers
+  512-bit vectors), so this code calls `memmove` of 129 to 512 bytes where
+  clang's doesn't at those targets; and clang's `memset` calls the library
+  whatever the size, so this code stores a small `memset`'s bytes where
+  clang's code calls it.
+- `COPY`'s move form (`tier0_copy_moves`, `BUSTER_TIER0_MOVE_VALUE`): a value
+  past `BUSTER_TIER0_MAX_COPY_BYTES`, to `BUSTER_TIER0_MAX_COPY_VALUE`, is a
+  move of 33 to 128 bytes whose ranges may overlap either way. Tier 0 loads its
+  16-byte pieces, the last ending at the end, into the floating stack's free XMM
+  registers from the first (`tier0_copy_move`: past the table, the deep
+  window's), then stores them, as clang -O0's code moves `llvm.memmove`'s bytes;
+  the IR loads them as `IR_V4I32`s before the first store (`ir_typed_move`), and
+  the typed interpreter moves the bytes and their definedness as `memmove`
+  does. Held in the stack's vector slots or in vector locals instead, Tier 0's
+  pieces each took a store and a load more, which made a chain of overlapping
+  moves 1.6 to 2.8 times as slow as the library's call on the 9700X, and eight
+  addresses on the integer stack spilled all fifteen registers
+  (buster-performance's `memmove-copysign-1373-2026-11-22`).
 - `abs`, `labs` and `llabs`, and their `__builtin_` forms, which were calls
   of the library's functions: the argument's sign spread by an arithmetic
   shift, s, then `(x ^ s) - s`, where clang's code has `neg` and `cmovns`.
@@ -3511,17 +3528,22 @@ function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
   its sign bit cleared or replaced by the second's, as `__builtin_fabs`'s
   recipe clears it; a `long double`'s sign is bit 15 of its exponent word,
   which no x87 operation reads, so that a signaling NaN stays one, as clang's
-  `fabs` and `fchs` leave it. `__builtin_copysign` and `__builtin_copysignf`
-  keep their math helper.
+  `fabs` and `fchs` leave it. `__builtin_copysign` and `__builtin_copysignf`,
+  which went through their math helper, are computed the same way at both
+  tiers: the helper planner checks their actions as the helper's and plans none
+  (`check_program_helpers`), and the lowering takes `check_lower_library_sign`.
 
 `memcmp` stays a call, as clang's code makes it. The node machine and its
 census leave a computed call to the pipeline, and take a marked one that stays a
 call as any call (`check_program_call_library`). `test-checker
 --program-library`'s `library-computed-inline` program runs each size to 33,
-overlapping both ways, and the signs of the harness's special values against
-clang -O0's build, and `test-checker-driver`'s library runs define `memcpy`,
-`memmove`, `abs`, `labs`, `fabs` and `copysign` in the unit, counting their
-calls, which must be clang's under each option.
+overlapping both ways, `memmove` of each size from 34 to 129 between unaligned
+ranges that overlap by up to 65 bytes both ways, and the signs of the harness's
+special values, through the plain names and `__builtin_copysign`,
+`__builtin_copysignf` and `__builtin_copysignl`, against clang -O0's build; and
+`test-checker-driver`'s library runs define `memcpy`, `memmove`, `abs`, `labs`,
+`fabs` and `copysign` in the unit, counting their calls (`memmove` of 64, 128
+and 129 bytes among them), which must be clang's under each option.
 
 **Folds.** The rows with attribute `E` that clang's constant evaluator folds,
 this folds too, in constant contexts (static initializers, `_Static_assert`,

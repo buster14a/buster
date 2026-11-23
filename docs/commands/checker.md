@@ -379,6 +379,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
+  `-Wsign-compare` skips comparisons that are themselves integer constant expressions (#3300). A comparison
+  containing an evaluated assignment or comma operator still gets the usual signedness checks.
   `-Wsign-compare` retains both operands' source signs and reads the checked comparison conversion, including
   narrow integers, bit-fields and `_BitInt` promotions (#1391). `c_check_sign_range.c` computes diagnostic ranges
   as a width and a nonnegative flag: constants, implicit conversions, assignment/comma results, ordinary
@@ -752,6 +754,10 @@ Its real-header overflows (a local array, an element's offset, a static array, a
 structure, `bzero`, `read`) must abort at `--tier1` too, as clang's build does where
 glibc's version lets it, since the lowering expands the wrappers with their
 callers' bounds ([the wrappers' bounds](../c-builtins-fortify.md#the-wrappers-bounds-2983), #2983).
+So must the longer wrappers' (`fgets`, `fread`, `wcscpy`, `wcsncat`, `strlcpy`,
+`recv`, `realpath`, `mbstowcs`), as GCC's build does; clang isn't run for them, whose
+result depends on glibc's version. One program runs those wrappers within their
+objects, against clang too.
 
 ## Runtime fixtures
 
@@ -846,6 +852,15 @@ for a condition on an lvalue at an absolute address (#3028).
 `initializer-comma` is: `buster-fixtures v1 checker-warnings`, then FILE,
 WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
 compared with clang's in every policy, mode, lane request and reader.
+
+`tests/checker/cfg-pruning` (#2990) is one too: conditions clang's CFG builder
+decides by its heuristics (`x * 0`, `x | 1`, `(x & 8) == 4`, `x == 1 && x == 2`,
+`x && !x`, `c_check_program_cfg.c`), whose pruned branches give no runtime
+warning and no `-Wreturn-type` fall-off, with the shapes the heuristics leave to
+the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
+builder's observer's `-Wtautological-bitwise-compare`,
+`-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
+order (`c_check_common_cfg.c`).
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they

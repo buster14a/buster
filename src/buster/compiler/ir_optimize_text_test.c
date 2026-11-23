@@ -24,6 +24,8 @@ typedef enum IrOptimizeTextPass
     IR_OPTIMIZE_TEXT_SROA,
     IR_OPTIMIZE_TEXT_MEMORY,
     IR_OPTIMIZE_TEXT_UNROLL,
+    // SROA with #3311's widening of a slot of mixed widths into its eightbytes (and `flagged`, which it needs).
+    IR_OPTIMIZE_TEXT_SROA_WIDEN,
 } IrOptimizeTextPass;
 
 typedef struct IrOptimizeTextFixture IrOptimizeTextFixture;
@@ -56,6 +58,7 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "memory-addresses", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-volatile", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "unroll-loops", .pass = IR_OPTIMIZE_TEXT_UNROLL, .effects = true },
+    { .name = "sroa-widen", .pass = IR_OPTIMIZE_TEXT_SROA_WIDEN, .effects = false },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
@@ -161,14 +164,16 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
         result = pass.function;
         changed = pass.copies;
     }
-    else if (fixture->pass == IR_OPTIMIZE_TEXT_SROA)
+    else if (fixture->pass == IR_OPTIMIZE_TEXT_SROA || fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN)
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
+        options.flagged = fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN;
+        options.widen = fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN;
         IrSroaResult pass = { 0 };
         check = ir_optimize_sroa(input, output, scratch, options, &pass);
         result = pass.function;
-        changed = pass.fields;
+        changed = pass.fields + pass.widened_slots;
     }
     else
     {

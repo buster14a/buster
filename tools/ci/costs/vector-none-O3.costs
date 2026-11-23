@@ -44,6 +44,7 @@
 #: unmeasured Test the assembly sink against GNU as
 #: unmeasured Compile the lexer's benchmark unit by Tier 1 on one lane and on four [4 CPUs]
 #: unmeasured Link Tier 1's literal pools with clang's and merge their equal entries
+#: unmeasured Test volatile accesses and compiler barriers through the IR and Tier 1's opt-in passes
 #: peak 8 Check unity fixture ownership without rebuilding
 #: peak 154 Test the foreign inputs [8 CPUs]
 #: peak 915 Check the no-recursion rule on the call graph [8 CPUs]
@@ -335,6 +336,7 @@
 0.4 Test dominators, frontiers and natural loops
 0.5 Test fences and atomic loads and stores through the IR's lowerings, promotion, text and interpreter against clang
 0.5 Test the overflow builtins through the IR's lowerings, promotion, text, interpreters and Tier 1 against clang
+8.6 Test volatile accesses and compiler barriers through the IR and Tier 1's opt-in passes
 0.4 Test deferred-body source-position environments
 0.6 Test experimental Tier 1 scheduling, model coverage and native execution
 0.8 Test verified Tier 1 optimization passes

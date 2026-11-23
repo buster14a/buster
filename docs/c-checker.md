@@ -225,9 +225,16 @@ Every body is parsed and checked by default. `-flazy-system-headers` optionally
 skips semantic checking of provably unreferenced static and nonemitting inline
 bodies defined in system headers, identified by `-isystem` or system-header
 pragmas. Declarations, ordinary-source bodies, referenced bodies and all syntax
-are still checked. This mode intentionally accepts a system header whose only
-semantic error is in a deferred body; it departs from standard C diagnostics
-and from Clang's default behavior, as authorized in
+are still checked, with one exception: where the tree planner proves that no
+token outside a deferred body names a deferred definition but its own
+declarator, and that definition's header declares no tag (no `struct`, `union`
+or `enum` keyword and no brace) and holds no assembly or static assertion, its
+whole header is skipped with its body (#3307). Its specifiers, declarator and
+attributes are then not read, so nothing is declared and no diagnostic is given
+for them; `<immintrin.h>`'s 4,806 intrinsics are such definitions. This mode
+intentionally accepts a system header whose only semantic error is in a
+deferred body or such a header; it departs from standard C diagnostics and from
+Clang's default behavior, as authorized in
 [#155](https://github.com/buster14a/buster/issues/155).
 The unit's end has its warnings in both modes: an internal function used and
 never defined is reported from the tokens that were read, so that a use only a
@@ -256,7 +263,7 @@ An allocation failure is a resource failure, not an admission failure.
 The ordinary eager path does not run either planner. The selected reader still
 checks headers and demanded bodies in original source order, and emission
 still follows the checked semantic references. With `--time-stages`, a
-`time-lazy` row reports the route (`eager`, `tree` or `bindings`), scalar-replay token count, body selection,
+`time-lazy` row reports the route (`eager`, `tree` or `bindings`), scalar-replay token count, body selection, skipped headers,
 references and retained bytes; planning remains charged to `check-input`.
 Use those counters to distinguish an admitted tree plan from a grammar fallback
 when measuring a workload. The new planner's performance requires the approved
@@ -770,7 +777,9 @@ of incompatible type '<overloaded function type>'" (or "assigning to") with a
 note at each candidate, and an operand is "reference to overloaded function
 could not be resolved; did you mean to call it?", " with no arguments" where
 one candidate takes none, with "possible target for call" at each
-(`check_driver_overload_unresolved`). Where clang then reads that operand as
+(`check_driver_overload_unresolved`). A `#pragma weak A = T` clone's lookup
+set is such a set as an operand too, its clone's note at the pragma's A (#2935).
+Where clang then reads that operand as
 the call, it goes on to the expression's next operand, a conditional's
 condition last, and so does the driver; it doesn't check what the call's type
 makes of the expression (`*f`). Initializers, casts, assignments,
@@ -2793,9 +2802,23 @@ What the lowering covers past scalars (#145's programs):
   slot of the union's size and alignment (`getIndirectResult`;
   `abi_finish_transparent` records the union in the ABI table's `transparent`
   column, which `abi_assign`'s vector path and `abi_assign_call` read), and `va_arg` reads
-  the member from a slot of the union's size and alignment. Such a union past
-  two eightbytes, or whose first member passes as an aggregate, a pair, a
-  vector or in memory, is refused by name. And a union made transparent, by a
+  the member from a slot of the union's size and alignment. Since #1844 the
+  member may be an aggregate, of eightbytes or in memory, and the union of any
+  size. An aggregate in memory passes as clang's `getIndirectResult` of the
+  member gives it: a byval slot of the union's bytes at the member's alignment,
+  or an integer of 8 bytes (a register LLVM has, else the low eightbyte alone
+  in an 8-byte slot, `LOW`) for a member of 8 bytes or less aligned to 8 or
+  less where clang has no general register left, and so does the union in the
+  same case. Past 16 bytes, the member's registers or eightbytes' slots carry
+  the union's first 16 bytes alone (`BUSTER_ABI_FLAG_FIRST`, which Tier 0's
+  location helpers, Tier 1's parts and `va_arg`'s register plan read; Tier 1
+  leaves a function with such a location on the stack whole to Tier 0). A
+  member's value converted to such a union, of a member passed by its bytes,
+  goes through a zeroed object of the union's size and alignment, as clang's
+  code's memset and memcpy make it (`check_lower_transparent_value`), so that
+  the union's slot is never copied from past the member. A first member that
+  passes as a pair, a vector or a scalar in memory is still refused by name,
+  and so is a printer's such union of `__builtin_dump_struct`. And a union made transparent, by a
   later declaration's attribute, after a function definition or a static
   object's initializer that names a function, whose first member passes
   otherwise than the union does (its registers, its stack or its extension):
@@ -2813,7 +2836,9 @@ What the lowering covers past scalars (#145's programs):
   another type, is refused so too, though clang's code would pass it as its
   member. `test-checker`'s programs
   (`c_check_program_transparent_test.c`) run each kind of member value, union
-  values, unnamed arguments and `va_arg`, in registers and on the stack,
+  values, unnamed arguments and `va_arg`, in registers and on the stack, and
+  unions of a slot of their own of each such member
+  (`BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS`),
   against clang -O0's build of the same source, calling the harness's clang
   functions and called by them through pointers, with the registers a
   `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
@@ -11812,6 +11837,36 @@ which can disable it (`<= 8`, `!= (size_t)-1`).
   isn't constant).
   `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
   a function without the warning.
+- **The CFG builder's heuristics** (#2990, `c_check_program_cfg.c`). Clang's
+  `tryEvaluateBool` also decides some conditions that aren't constants, from
+  the condition's top node: `x * 0` and `x & 0` (an integer constant 0
+  operand) are false; an equality of a bitwise `&` or `|` with an integer
+  literal it can't give (`(x & 8) == 4`), or of a boolean value with a literal
+  other than 0 and 1 (`(x < y) == 10`), and a relational comparison of a
+  boolean value with such a literal (`2 < (x == 1)`) are decided; a `|` with one
+  nonzero literal constant (`x | 1`) is true; and an `&&` or `||` of two
+  unknown operands that are a value and its negation (`x && !x`) or two
+  comparisons of one operand with constants that always give one value
+  (`x == 1 && x == 2`, `x < 5 || x > 3`, sampled at five values) is decided.
+  Parentheses, a `!` or a cast at the top stop them (`if ((x * 0))`), and a
+  literal with an implicit conversion is none to them; a logical condition's
+  operands are read past their parentheses (VisitLogicalOperator), and a do
+  statement's condition is read whole. `check_program_branch_truth` applies
+  them, so the runtime warnings, `-Wreturn-type` and the uninitialized flow
+  prune as clang does. The same rules' hits are clang's
+  `-Wtautological-bitwise-compare`, `-Wtautological-overlap-compare` and
+  `-Wtautological-negation-compare` (`-Wtautological-compare`'s, so `-Wmost`'s
+  and `-Wall`'s): `check_common_cfg_tautologies` (`c_check_common_cfg.c`) calls
+  the rules where the builder calls `tryEvaluateBool`, in its order (statements
+  last first, an operator's right operand first, a comparison's own call before
+  its operands'), with its cache (a logical operator's and an equality's once,
+  a `|`'s each time: `x | 1 || y` warns twice), drops a rule's warning whose
+  expression has a macro's token (`HasMacroID`), and publishes them at the
+  body's end before its deferred runtime warnings (`PP_DIAGNOSTIC_CFG`). A body
+  clang ends after the unit's first error gets none. Not yet modeled: a for
+  statement's increment, which the builder visits before the body, and a
+  statement expression's statements, which it visits where the expression
+  stands, take the order of their roots.
 - **Const assignment** (#1447). clang's `DiagnoseConstAssignment`
   (`check_semantic_const_assignment`) walks an assignment's lvalue through
   members, subscripts and vector elements to a variable or a direct call. It
@@ -12091,18 +12146,46 @@ type>'` (initializing, assigning or passing a function pointer), with the
 overload machinery's coverage and limits. A function clone's candidate note names the
 pragma, and two functions' notes are sorted by location as clang's overload
 candidates are, so a declaration written between the pragma and a later TARGET
-follows the pragma's note. An object's set lists every clone made before the
-reference, newest first (an object clone at TARGET's declaration, a function
-clone at the pragma), then the earlier declaration
-(`check_driver_weak_alias_candidates`). References before a later
+follows the pragma's note. An object's set is clang's identifier chain, newest
+first: every clone made before the reference (an object clone at TARGET's
+declaration, a function clone at the pragma), the earlier declaration, and
+every file-scope redeclaration of ALIAS that a redeclaration error made
+invalid. Clang's `LookupResult::resolveKind` then drops the invalid ones,
+marking each while more than one entry is unmarked and then filling the marked
+places from the list's end, the last marked first; so an invalid `extern int
+a;` after the clone puts the earlier declaration first, and two put the clone
+back first (#2934, `check_input_symbol_lookup_order`). The first of that list
+is also the "previous definition" a conflicting redeclaration's note names
+(`check_input_symbol_representative`), and all of it an ambiguous reference's
+candidates (`check_driver_weak_alias_candidates`). References before a later
 TARGET declaration keep their earlier lookup. Local parameters and block/loop
 declarations shadow the outer lookup set normally. Later declarations diagnose
-conflicting kind, type, definition or linkage against the clone and retain
+conflicting kind, type, definition or linkage against the clone, a declaration
+whose source writes an `alias` or `ifunc` attribute being a definition, as
+clang's clone is one (its "redefinition of 'A'", #2934), and retain
 later independent errors, including repeated invalid redeclarations. A
 `static` object redeclaring an object clone gives its error before the clone's
 "weak declaration cannot have internal linkage" at the pragma, as clang checks
 the merged weak attribute after the redeclaration. These
 paths share the existing declaration-recovery and overload machinery.
+
+Clones made before any declaration of ALIAS (#2934) are pushed unchecked, so
+ALIAS's first declaration looks the name up among them: only the newest is the
+one it merges with (or conflicts with, or redefines), and the older ones stay
+in its lookup (`check_input_symbol_clones_before`). Function clones with a
+function declaration form an overload set: a compatible declaration replaces
+the newest clone and heads the older ones as an overload candidate of its own
+(`CheckInputSymbolPragma.early`, `check_input_symbol_overload_use`), so calls
+select by argument type and a typed address is `'<overloaded function type>'`
+with the declaration's note first; a conflicting one drops out, leaving the
+clones. A set holding an object, or an object declaration against function
+clones, is ambiguous: the declaration is "redefinition of 'A' as different
+kind of symbol" against the lookup's representative, and each later reference
+to an object set is ambiguous, listing the clones and the invalid
+redeclarations without an earlier declaration. A reference to function clones
+after an object declaration, clang's `'<overloaded function type>'` operand,
+remains refused by name. Without a use, the declaration carries the first
+clone's alias and the later records attach nothing.
 
 Compatible declarations carry the weak alias through
 `check_input_symbol_alias`, which `check_input_symbol_finish` runs in the order
@@ -12119,7 +12202,8 @@ retain deferred checking; function clone overload sets use the existing
 source-ordered overload path. This remains separate from ordinary weak binding.
 The clone can supply an ELF symbol where the unit never declares ALIAS; this
 does not add a synthetic parser declaration for C expression references to
-such an otherwise undeclared name.
+such an otherwise undeclared name (#2934's first shape: clang accepts such a
+reference, which buster still reports as an undeclared function or identifier).
 
 A declared target without an emitted definition is accepted by syntax checking
 and diagnosed at object generation with "alias must point to a defined variable

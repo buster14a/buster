@@ -14697,9 +14697,18 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         // Only the deferred bodies' unit has them (-flazy-system-headers).
         if (__builtin_expect(reader->output->deferred_tokens != 0, 0) && reader->output->deferred_tokens[i] != 0)
         {
-            // The definition's declaration is visible at its ordinary source point. Only its selected-out
+            // A skipped definition's header (#3307), which nothing read names: past it to its body's opening, whose
+            // parameters, never declared, are not bound.
+            const uint8_t* const deferred_tokens = reader->output->deferred_tokens;
+            const bool skipped = deferred_tokens[i] == BUSTER_CHECK_LAZY_MASK_HEADER || (i != 0 && deferred_tokens[i - 1] == BUSTER_CHECK_LAZY_MASK_HEADER);
+            while (deferred_tokens[i] == BUSTER_CHECK_LAZY_MASK_HEADER)
+            {
+                i += 1;
+            }
+            // Otherwise the definition's declaration is visible at its ordinary source point. Only its selected-out
             // body is deferred; parameters and the full function declarator were checked before this opening.
-            for (uint32_t token = check_input_list_head(reader, reader->activate, i, BUSTER_CHECK_RESOLVE_ACTIVATE); token != BUSTER_CHECK_NONE; token = reader->activation_next[token])
+            for (uint32_t token = skipped ? BUSTER_CHECK_NONE : check_input_list_head(reader, reader->activate, i, BUSTER_CHECK_RESOLVE_ACTIVATE); token != BUSTER_CHECK_NONE;
+                 token = reader->activation_next[token])
             {
                 check_input_bind(reader, token, i);
             }

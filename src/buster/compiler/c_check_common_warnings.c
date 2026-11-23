@@ -2830,7 +2830,14 @@ static void check_common_sign_own(CheckCommonEmission* emission, uint32_t node)
                              (normalized == CHECK_OP_LESS || normalized == CHECK_OP_GREATER_EQUAL);
             }
         }
-        if (mixed && !suppressed)
+        bool warn = mixed && !suppressed;
+        if (warn && (check_stream_flags(stream, node) & BUSTER_CHECK_ICE) != 0)
+        {
+            // AnalyzeComparison exempts the comparison itself when it is a strict integer constant expression (#3300).
+            const CheckValue comparison = check_stream_value(stream, node);
+            warn = !check_action_integer_constant(&comparison, 0);
+        }
+        if (warn)
         {
             const String8 left_name = check_driver_warning_type(parser, emission->pp, emission->input, types, emission->spell, scratch,
                                                                 check_stream_type(stream, left),
@@ -13072,6 +13079,8 @@ static void check_common_rejected_initializer_commas(const Parser* parser, Prepr
     check_common_contexts = (CheckCommonContexts){ 0 };
 }
 
+#include "c_check_common_cfg.c"
+
 // `flushed`: the tokens of the bodies clang ends after the unit's first error (check_common_flush), or null in a unit
 // without one.
 static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -13135,6 +13144,7 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
         {
             check_common_atomic_flush(parser, pp, input, stream, types, program, &facts, scratch);
         }
+        check_common_cfg_tautologies(parser, pp, input, program, flushed, facts.parents, scratch);
         check_common_graph_warnings(parser, pp, input, stream, types, &spell, &facts, program, shifts, scratch);
         check_common_for_loops(parser, pp, input, stream, types, facts.parents, scratch);
         check_common_return_stack(parser, pp, input, stream, types, &candidates, scratch);
