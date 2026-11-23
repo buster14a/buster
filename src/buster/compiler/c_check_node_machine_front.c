@@ -1127,6 +1127,8 @@ static bool node_bodies_check_begin(const char* path);
 static void node_bodies_check_read(const CheckInput* input, const Parser* parser);
 static void node_bodies_check_token(uint32_t token, const char* what, const char* message);
 static void node_bodies_check_end(const Preprocessor* pp);
+// And a test's journal of the commands --node-bodies is forced on (BUSTER_TEST_NODE_BODIES_KEEP), for a replay of each.
+static void node_bodies_keep(const char* directory, int count, char** arguments, char** inputs, uint32_t input_count);
 // --node-bodies (BUSTER_NODE_READER_BODIES): the bodies the producer took, masked (c_check_node_bodies.c).
 static void node_bodies_mask(CheckInputReader* reader, NodeFrontShadow* shadow);
 // After the walk's last chunk: the roots it took against the tokens the walk's class actions left to its visit

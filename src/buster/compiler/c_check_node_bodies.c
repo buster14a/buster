@@ -1465,6 +1465,92 @@ struct NodeBodiesCheck
 
 static _Thread_local struct NodeBodiesCheck node_bodies_check;
 
+// BUSTER_TEST_NODE_BODIES_KEEP set to a directory: a test's journal of the commands --node-bodies is forced on
+// (BUSTER_TEST_NODE_BODIES), for a replay of each with the bodies taken and without that compares their objects, which
+// no test of a program's behaviour does (the tests' units are temporary files, so their bytes are kept). A command's
+// working directory and arguments, a NUL after each, are DIRECTORY/HASH.command; its inputs' paths the same in
+// HASH.inputs; and each input's bytes HASH.N.input. HASH is of all of them: each distinct command is kept once.
+static void node_bodies_keep(const char* directory, int count, char** arguments, char** inputs, uint32_t input_count)
+{
+    char cwd[4096];
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    const bool placed = getcwd(cwd, sizeof(cwd)) != NULL;
+    for (const char* c = cwd; placed && *c != 0; c += 1)
+    {
+        hash = (hash ^ (uint8_t)*c) * UINT64_C(0x100000001b3);
+    }
+    for (int a = 0; a < count; a += 1)
+    {
+        for (const char* c = arguments[a]; *c != 0; c += 1)
+        {
+            hash = (hash ^ (uint8_t)*c) * UINT64_C(0x100000001b3);
+        }
+        hash = (hash ^ 0xffu) * UINT64_C(0x100000001b3);
+    }
+    char block[4096];
+    bool read_all = placed;
+    for (uint32_t n = 0; n < input_count && read_all; n += 1)
+    {
+        FILE* source = fopen(inputs[n], "rb");
+        read_all = source != NULL;
+        for (size_t read = source != NULL ? fread(block, 1, sizeof(block), source) : 0; read != 0; read = fread(block, 1, sizeof(block), source))
+        {
+            for (size_t i = 0; i < read; i += 1)
+            {
+                hash = (hash ^ (uint8_t)block[i]) * UINT64_C(0x100000001b3);
+            }
+        }
+        if (source != NULL)
+        {
+            fclose(source);
+        }
+    }
+    char kept[4096 + 64];
+    int length = snprintf(kept, sizeof(kept), "%s/%016" PRIx64 ".command", directory, hash);
+    if (read_all && length > 0 && (size_t)length < sizeof(kept) && access(kept, F_OK) != 0)
+    {
+        // The inputs first, the command's file last: a replay reads a command whose file is there.
+        bool written = true;
+        for (uint32_t n = 0; n < input_count && written; n += 1)
+        {
+            length = snprintf(kept, sizeof(kept), "%s/%016" PRIx64 ".%u.input", directory, hash, n);
+            FILE* source = fopen(inputs[n], "rb");
+            FILE* copy = source != NULL && length > 0 && (size_t)length < sizeof(kept) ? fopen(kept, "wb") : NULL;
+            written = copy != NULL;
+            for (size_t read = copy != NULL ? fread(block, 1, sizeof(block), source) : 0; read != 0; read = fread(block, 1, sizeof(block), source))
+            {
+                written = written && fwrite(block, 1, read, copy) == read;
+            }
+            if (copy != NULL)
+            {
+                written = fclose(copy) == 0 && written;
+            }
+            if (source != NULL)
+            {
+                fclose(source);
+            }
+        }
+        length = snprintf(kept, sizeof(kept), "%s/%016" PRIx64 ".inputs", directory, hash);
+        FILE* list = written && length > 0 && (size_t)length < sizeof(kept) ? fopen(kept, "wb") : NULL;
+        for (uint32_t n = 0; list != NULL && n < input_count; n += 1)
+        {
+            (void)fwrite(inputs[n], 1, strlen(inputs[n]) + 1, list);
+        }
+        written = list != NULL && fclose(list) == 0;
+        length = snprintf(kept, sizeof(kept), "%s/%016" PRIx64 ".command", directory, hash);
+        FILE* command = written && length > 0 && (size_t)length < sizeof(kept) ? fopen(kept, "wb") : NULL;
+        if (command != NULL)
+        {
+            (void)fwrite(cwd, 1, strlen(cwd) + 1, command);
+            for (int a = 0; a < count; a += 1)
+            {
+                (void)fwrite(arguments[a], 1, strlen(arguments[a]) + 1, command);
+            }
+            fclose(command);
+        }
+    }
+}
+
 // Whether the unit is checked so: the variable's path, read once a unit.
 static bool node_bodies_check_begin(const char* path)
 {

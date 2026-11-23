@@ -15456,6 +15456,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             options.node_bodies_modulus = modulus;
             options.node_bodies_residue = residue % modulus;
         }
+        // (And a test's journal of the commands the switch forces it on, for a replay that compares their objects.)
+        const char* kept_commands = getenv("BUSTER_TEST_NODE_BODIES_KEEP");
+        if (forced && kept_commands != NULL && kept_commands[0] != 0)
+        {
+            node_bodies_keep(kept_commands, count, arguments, inputs, input_count);
+        }
         // The producer as a compile runs it, and the compile takes what it takes (BUSTER_NODE_READER_BODIES). Off with
         // more than one lane, with -g's rows, with Tier 1 (whose locals' lifetimes are the program's controls) and with
         // lazily deferred or #113's deferred bodies; a unit's read of a view, a prefix or a repaired parse runs no producer
