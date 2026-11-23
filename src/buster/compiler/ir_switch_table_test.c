@@ -238,7 +238,6 @@ static bool ir_switch_table_test_text(const IrSwitchTableTestCase* c, char* text
     if (elsewhere)
     {
         at += at < room ? (uint64_t)snprintf(text + at, room - at, "b%u:\n  %%%u = ret.void %%%u\n", other, row, arm_rows[1]) : 0;
-        row += 1;
     }
     at += at < room ? (uint64_t)snprintf(text + at, room - at, "}\n") : 0;
     return at < room;
