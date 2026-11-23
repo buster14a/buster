@@ -3,22 +3,23 @@
 `ssa.c` implements local promotion for [#134](https://github.com/buster14a/buster/issues/134).
 It takes a completed CFG and a view of the local accesses in its instruction
 columns. It returns read replacements and phis without prescribing the rest of
-the IR. `ssa_build` selects vector kernels where available; `ssa_build_scalar`
-is its scalar twin. Small functions retain the independent frontier-based and
-predecessor-reading constructors. Large functions use bounded predecessor
-reading with vector or scalar renaming kernels. All are included in the existing
-compiler executable.
+the IR. `ssa_build` has one dense constructor, which works a block's locals at a
+time ("Construction" below); since #2924 it is the only one, at every size the
+storage budget admits. Larger functions use bounded predecessor reading. Both
+are included in the existing compiler executable.
 `ssa_ir.c` connects the core to #131's `IrFunction`, including the all-memory
 functions produced by `ir_lower.c` from Tier 0's typed stream.
-Both constructors use #174's shared `dominators_analyze` interface; the vector
-constructor consumes its frontier rows and the IR adapter uses its subtree
-intervals directly.
+The constructors use #174's shared `dominators_analyze` interface for the tree
+alone; the dense constructor lists its frontiers sparsely, and the IR adapter
+uses the tree's subtree intervals directly.
 
-Both paths are checked on every function of the corpora and of random C
-programs, and the programs run in each of their three forms by the shared IR's
-interpreter ("Real and generated C" below). `test-ssa-source --tier1` adds
-strict native Tier 1 programs from both host paths to that comparison;
-`--typed` also runs the retained typed stream independently.
+Promotion is checked on every function of the corpora and of random C
+programs, by `ssa_verify` and by running the programs in each of their forms by
+the shared IR's interpreter ("Real and generated C" below). `test-ssa-source
+--tier1` adds strict native Tier 1 programs to that comparison; `--typed` also
+runs the retained typed stream independently. Until #2924 deleted it, Braun et
+al.'s scalar construction was the dense constructor's twin; the recorded
+digests in `test-ssa-ir` were taken where both printed the same IR.
 
 ## Input and handoff
 
@@ -87,51 +88,51 @@ exhaustion and ID-space exhaustion return errors instead of truncating data.
 
 ## Construction
 
-### Vector path
+### Dense construction
+
+The dense constructor (`ssa_construct_vector`, #2924) never walks one local over
+every block: each step works a block's row of locals at a time, or the accesses
+in instruction order.
 
 1. Classify promotion eligibility and discover addresses 64 entries at a time.
 2. Build a complete predecessor CSR, preserving duplicate edges, and run the
-   shared dominator analysis. Its SEMI-NCA solver supplies immediate
-   dominators, reachability, subtree intervals and dominance-frontier bitsets
+   shared dominator analysis for the tree alone: immediate dominators,
+   reachability, reverse postorder and subtree intervals
    ([why it is scalar](dominators.md#why-it-is-scalar)). Compact
    unreachable-source edges out of the SSA predecessor result afterward.
-3. Collect each block's final writes and upward-exposed reads. Reuse
-   `dataflow.c`'s AVX-512 liveness equations over dense promoted-local IDs.
-4. For each local, expand iterated dominance frontiers with 512-bit ORs,
-   intersect with live-on-entry blocks, and insert only the required phis.
-5. Find nearest dominating definitions by pointer jumping. Up to 64 blocks use
-   four in-register tables and permutes; larger functions use scalar indexed
-   loads instead of hardware gathers. Entry queries start at the strict
-   dominator so a later write in the same block cannot satisfy an earlier read.
-6. Stable counting-sort READ/WRITE accesses by `(block, local)`. Within each
-   segment, 16-wide prefix maxima find the most recent write, and a permute
-   produces the reaching value for every read. Fill phi operands from each
-   predecessor's exit value.
+3. Read each reachable block's accesses once, found 64 kinds at a time
+   (`ssa_vector_scan`). A write sets its local's entry in the block's row of
+   `last` and the def bit; a read takes the row's value, the write before it in
+   its block. A read with no such write is exposed: it sets the use bit and is
+   listed with its block's other exposed reads.
+4. Solve liveness with `dataflow.c`'s AVX-512 equations over the use and def
+   bit rows, and list the dominance frontiers sparsely (`ssa_frontiers`,
+   Cooper, Harvey and Kennedy's runners from each join's predecessors up to its
+   immediate dominator).
+5. Place the pruned phis of every local at once (`ssa_vector_place`): a FIFO of
+   blocks carries each block's pending row of locals (its writes, then its new
+   phis) across its frontier edges with 512-bit operations, keeping the locals live into each
+   join that has no phi for them yet. The least fixpoint doesn't depend on the
+   order. The entry's undefined values need no row: the entry dominates every
+   block, so its frontier is empty.
+6. Number the phis block by block, each block's in local order, and lay out
+   their columns with compress and multiply-add stores (`ssa_vector_phis`).
+7. In reverse postorder, form each block's entry row: its phis' IDs (expanded
+   into the placed lanes) and, in its other locals, its immediate dominator's
+   exit row; the entry block's row is the locals' undefined values. Its exposed
+   reads take the entry row, and its exit row, kept in `last`, is its last
+   writes over the entry row (`ssa_vector_rows`).
+8. Each phi's operand on an edge is the predecessor's exit row in the phis'
+   locals, compressed to the block's run of phis (`ssa_vector_operands`).
 
-The scalar operations here include CFG walks, bitset construction, stable-sort
-placement and indexed loads above the 64-block register-table limit. Their
-costs need measurement on the 9700X before claiming that any particular
-placement or batch size is optimal.
+Its tables are a row of u32 a block (`last`) and a few bit rows a block; no
+table holds a phi or an operand a `(block, local)` cell, and the phis' columns
+are allocated at their exact counts. Past `BUSTER_SSA_FRONTIER_PAIRS`
+(16 MiB of frontier pairs) the function takes the bounded construction instead.
 
-SSA reserves at most 16 MiB for the shared analysis' quadratic output, its
-frontier rows. With `row_bytes` rounded to a 512-bit boundary, the vector path
-requires `(2 * blocks + 1) * row_bytes <= 16 MiB`: the bound still counts the
-temporary dominator matrix and reachable row of the bit-matrix solver #2924
-deleted, so it is conservative by them. Above this bound, `ssa_build` uses
-predecessor reading and requests only the shared dominator tree. Its bounded path can still vectorize access renaming; neither
-predecessor-reading path requests frontier or loop matrices.
-This is a storage policy, **not a measured performance crossover**. The IR's
-promotion (`ssa_ir_promote`) adds one (#787): its vector path's phi placement,
-entry definitions and renaming each pass over every (block, slot) cell, where the
-scalar constructor's work follows the instructions, so a function of more than
-16,384 cells (`BUSTER_SSA_IR_VECTOR_CELLS`) takes the scalar constructor. On the
-9700X, timed per function on the frozen `sqlite3.c` (`benchmark-ir-source
---functions`), the vector path was up to 9% faster from 2^5 to 2^14 cells, even
-below them, and slower from 2^15, by 67% on `sqlite3VdbeExec`'s 763,840 cells.
-Every bound from 8,192 to 32,768 cells gave the corpus's promotion time within
-−0.28% to +0.26% of the 16,384-cell bound's; the power-of-two bounds 8,192 and
-32,768 were within 0.14%. See the
-[retained measurement record](https://github.com/buster14a/buster-performance/tree/11e845e033dc696b47969899e6837c1ed2e6218c/docs/measurements/ssa-vector-cutover-787-2026-10-29).
+On the 9700X, #2924's gate timed this constructor against Braun's scalar
+construction in Tier 1's pipeline (`--tier1 -c` of sqlite3.c, Lua and musl, one
+lane, per function, by cells): see the PR that deleted the twin for its record.
 
 The shared analyzer requires distinct output and temporary arenas. SSA carves
 two disjoint, bounded views from its existing scratch tail: a size-derived
@@ -139,23 +140,11 @@ span for retained analysis columns, followed by temporary storage. The views
 own no mappings, and only the completed analysis output remains after the
 call. This preserves the public SSA APIs without per-function memory mappings.
 Linear analysis columns and alignment remain bounded by scratch capacity.
-The dense constructor has a second, conservative 16 MiB bound for its complete
-workspace (`ssa_dense_fits`): definition/entry tables, provisional phi records
-and operands, aliases, renaming columns, padded liveness matrices, cleanup,
-emission and linear preparation columns. The estimate uses all input locals,
-so exclusions can only reduce it. Above this complete-workspace bound, no
-full `blocks × locals` or `edges × locals` workspace is reserved. The existing
-16,384-cell performance crossover remains separate from this storage policy.
-
-### Scalar path
-
-The scalar constructor reads a variable's reaching definition lazily through
-predecessors. It maintains separate entry, final-write and current-instruction
-definitions. Before following predecessors it installs a provisional phi;
-query frames live on an explicit stack. This handles loops without recursive
-calls, including single-predecessor chains. All predecessors are already known:
-the API accepts a filled, sealed function and does not expose incremental
-unsealed-block construction.
+The dense constructor has a conservative 16 MiB bound for its complete
+workspace (`ssa_dense_fits`), whose estimate (sized for the earlier tables of
+a u32 a cell) uses all input locals, so exclusions can only reduce it. Above
+this bound, no full `blocks × locals` or `edges × locals` workspace is
+reserved.
 
 ### Bounded construction (#1353)
 
@@ -222,8 +211,8 @@ changed by an inner component.
 
 ## Shared IR adapter
 
-`ssa_ir_promote` and `ssa_ir_promote_scalar` take an `IrFunction`, distinct
-output and scratch arenas, and a separate output `IrFunction`. They return an `IrCheck`
+`ssa_ir_promote` takes an `IrFunction`, distinct
+output and scratch arenas, and a separate output `IrFunction`. It returns an `IrCheck`
 and publish the result only on success. The input is immutable; scratch is
 restored and output allocation is rolled back on failure.
 
@@ -408,9 +397,7 @@ the core's view of the function and its result before the IR is built: every use
 dominated by its definition, a phi operand per predecessor, no trivial phi, and
 the independent reaching-definition equations. The core's result is the output's
 phis and replacements one for one (`ssa_ir_fill`), so these are the output's
-checks. There the vector path's constructor runs wherever its memory bound
-admits, past the 16,384 cells where `ssa_ir_promote` takes the scalar
-constructor (#787), so that it is checked on SQLite's largest functions too. The
+checks, on SQLite's largest functions too. The
 rebuilt IR then passes both IR verifiers with dominance, as every promotion's
 does, and `ssa_ir_phis` checks the IR itself: the lowering makes no phi, so a
 trivial phi there (of one value but itself, however many times) would be the
@@ -599,18 +586,15 @@ limitations. After 200 ms of scalar work before each pass, `promote` took
 
 ```sh
 ./build/compiler benchmark-ssa
-./build/compiler benchmark-ssa --only scalar
-./build/compiler benchmark-ssa --only vector
-./build/compiler benchmark-ssa --only vector --after-scalar 200
 ```
 
-The benchmark verifies both forms before timing, then reports 21 interleaved
+The benchmark verifies the construction before timing, then reports 21
 sample medians and ranges: nanoseconds per input instruction, actual perf CPU
 cycles when available, retained phis, operands and output bytes. Construction,
 analysis and arena allocation/reset are timed; input generation, arena reservation
 and verification are outside timing. Unavailable or multiplexed cycle counters
-are reported as unavailable. `--only` isolates a path, and `--after-scalar MS`
-conditions each vector sample with scalar work.
+are reported as unavailable. Until #2924 it timed the scalar twin too
+(`--only scalar|vector`, `--after-scalar MS`), as the records below did.
 
 The inputs are explicitly synthetic: small diamonds, natural loops, an
 irreducible CFG and a large random stress graph. The last can produce many more
@@ -622,13 +606,9 @@ benchmark.
 Run target measurements through the shared 9700X lock, pinned to one permitted
 CPU, with the ownership variables from AGENTS.md. CI includes `test-ssa`,
 `test-ssa-ir` and the synthetic benchmark in its existing 9700X job.
-The workflow runs the normal interleaved benchmark; on the daily and
-dispatched runs and on pull requests that change `ssa.c`, `ssa_program.c`,
-`ssa_benchmark.c` or `dominators.c`, it then runs three separate processes per
-mode: scalar alone, vector alone, and vector samples immediately after 200 ms
-of scalar work. This follows the coding style's requirement to
-measure both sustained execution and the transition from lighter work. Interpret
-the isolated and conditioned modes separately from the interleaved medians.
+The workflow runs the benchmark; on the daily and dispatched runs and on pull
+requests that change `ssa.c`, `ssa_program.c`, `ssa_benchmark.c` or
+`dominators.c`, it then runs it in three more separate processes.
 
 The construction core passed the complete protected
 [9700X workflow](https://github.com/buster14a/buster/actions/runs/39933567015)

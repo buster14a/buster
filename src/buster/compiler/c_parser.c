@@ -1923,11 +1923,27 @@ struct ParseFallback
     // identifier, or met a name only earlier file-scope declarations decide (ParseScalarResult.undecided): the whole unit
     // goes to the scalar parser.
     bool errors;
+    // The typedef declarations whose names the items saw as file-scope type names, which the fallback then made ordinary
+    // names again: those before the last item's first token.
+    uint32_t visible;
 };
 
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The kernels' scalar twins together
+
+// The tree's columns (parse_tree_columns) that parse_vector_tiles derives a tile at a time, the unit's, or all null for
+// none: `sizes` alone may be null among them.
+typedef struct ParseTileColumns ParseTileColumns;
+struct ParseTileColumns
+{
+    uint32_t* postorder;
+    uint32_t* positions;
+    uint32_t* ends;
+    uint32_t* first_children;
+    uint32_t* next_siblings;
+    uint32_t* sizes;
+};
 
 typedef struct ParseKernelResult ParseKernelResult;
 struct ParseKernelResult
@@ -1935,6 +1951,11 @@ struct ParseKernelResult
     ParseFallback fallback;
     uint64_t flagged_tokens;
     bool everything;
+    // parse_vector_tiles: the tiles it parsed, whether one of them sent the unit to parse_vector as one, and whether the
+    // kernels' arrays couldn't be had.
+    uint32_t tiles;
+    bool tiles_refused;
+    bool out_of_memory;
 };
 
 
@@ -2682,39 +2703,44 @@ static uint32_t parse_postorder(const uint32_t* parents, uint32_t count, uint32_
 // prefix sum in registers, the positions a vector store) and the counts kept in the positions column were each slower
 // on the 9700X, and so was one fused backward pass, which leaves each end at its parent through a select's address:
 // docs/c-parser.md's "The tree's columns" has the numbers.
-static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before, uint32_t* postorder, uint32_t* positions,
-                               uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* starts, uint32_t* sizes)
+//
+// parse_tree_columns_range is the passes over the tokens [begin, end), whole top-level declarations, of a unit's columns
+// (#2536, the parser's tiles): no subtree crosses a top-level declaration's end, so every token whose subtree ends
+// before `begin` is one before it, the prefix sum starts at `begin`, and the range's positions are the postorder's own
+// there. `last_children`, `before` and `starts` are read and written at [begin, end] alone, so a caller may give arrays
+// a tile long, placed so that those entries are theirs; the roots' writes go to the entry at `end`, the next range's
+// first, which that range clears, or the unit's sentinel. parse_tree_columns is the unit's range and the sentinel.
+static void parse_tree_columns_range(const uint32_t* parents, uint32_t begin, uint32_t end, uint32_t* last_children, uint32_t* before, uint32_t* postorder,
+                                     uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* starts, uint32_t* sizes)
 {
+    const uint64_t slots = (uint64_t)(end - begin) + 1;
     // 0: no child after the token, as a child at 0 comes after none.
-    memset(last_children, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-    memset(first_children, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-    memset(before, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
-    for (uint32_t i = 0; i < count; i += 1)
+    memset(last_children + begin, 0, slots * sizeof(uint32_t));
+    memset(first_children + begin, 0xff, slots * sizeof(uint32_t));
+    memset(before + begin, 0, slots * sizeof(uint32_t));
+    for (uint32_t i = begin; i < end; i += 1)
     {
-        last_children[parents[i] == BUSTER_PARSE_NONE ? count : parents[i]] = i;
+        last_children[parents[i] == BUSTER_PARSE_NONE ? end : parents[i]] = i;
     }
-    for (uint32_t v = count; v-- > 0;)
+    for (uint32_t v = end; v-- > begin;)
     {
         const uint32_t parent = parents[v];
-        const uint32_t slot = parent != BUSTER_PARSE_NONE ? parent : count;
+        const uint32_t slot = parent != BUSTER_PARSE_NONE ? parent : end;
         const uint32_t sibling = first_children[slot];
         next_siblings[v] = parent != BUSTER_PARSE_NONE ? sibling : BUSTER_PARSE_NONE;
         first_children[slot] = v;
         // ends[last] is v's end when last comes after v, and was written then; otherwise it is unused. Unpredictable,
         // so that Clang selects (cmov) rather than branching around the load.
         const uint32_t last = last_children[v];
-        const uint32_t end = ends[last];
-        const uint32_t own = __builtin_unpredictable(last > v) ? end : v;
+        const uint32_t last_end = ends[last];
+        const uint32_t own = __builtin_unpredictable(last > v) ? last_end : v;
         ends[v] = own;
         before[own] += 1;
     }
-    first_children[count] = BUSTER_PARSE_NONE;
-    next_siblings[count] = BUSTER_PARSE_NONE;
-    ends[count] = count;
-    uint32_t sum = 0;
+    uint32_t sum = begin;
     if (sizes == 0)
     {
-        for (uint32_t v = 0; v < count; v += 1)
+        for (uint32_t v = begin; v < end; v += 1)
         {
             const uint32_t position = sum + ends[v] - v;
             positions[v] = position;
@@ -2724,7 +2750,7 @@ static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t
     }
     else
     {
-        for (uint32_t v = 0; v < count; v += 1)
+        for (uint32_t v = begin; v < end; v += 1)
         {
             const uint32_t position = sum + ends[v] - v;
             positions[v] = position;
@@ -2738,7 +2764,22 @@ static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t
             sizes[position] = ends[v] - starts[v] + 1;
         }
     }
+}
+
+// The columns' sentinel, the entry past the unit's last token: its own end, no child, no sibling.
+static void parse_tree_columns_sentinel(uint32_t count, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings)
+{
+    first_children[count] = BUSTER_PARSE_NONE;
+    next_siblings[count] = BUSTER_PARSE_NONE;
+    ends[count] = count;
     positions[count] = count;
+}
+
+static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before, uint32_t* postorder, uint32_t* positions,
+                               uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* starts, uint32_t* sizes)
+{
+    parse_tree_columns_range(parents, 0, count, last_children, before, postorder, positions, ends, first_children, next_siblings, starts, sizes);
+    parse_tree_columns_sentinel(count, positions, ends, first_children, next_siblings);
 }
 
 // The tree's columns but the postorder, from the parents and their postorder, as the checker's reader derived them
@@ -2782,6 +2823,12 @@ static void parse_tree_links(const uint32_t* parents, const uint32_t* postorder,
 
 #include "buster/compiler/c_gnu.c"
 
+// The C driver's tile (ParseOptions.tile_tokens) without --parse-tile=N: a workspace of about 0.4 MB, inside the
+// second-level cache. On the 9700X, sqlite3.c's parse beside seven other compiles takes 8.7 ms by it and 22.0 ms as one
+// unit, tiles of 1,024 and of 16,384 tokens measure as it does, and a compile alone takes the same time either way
+// (docs/all-core-path.md, "The parser by tiles").
+#define BUSTER_PARSE_TILE_TOKENS 4096
+
 typedef struct ParseOptions ParseOptions;
 struct ParseOptions
 {
@@ -2794,6 +2841,9 @@ struct ParseOptions
     bool sizes;
     // Retain bounded GNU attribute and asm-label records for a semantic consumer; syntax-only callers leave it off.
     bool extension_metadata;
+    // The vector path by tiles of about this many tokens (#2536, parse_vector_tiles): 0 for the unit as one, the twin.
+    // The C driver's is --parse-tile=N, BUSTER_PARSE_TILE_TOKENS by default.
+    uint32_t tile_tokens;
     // Where a parse's temporaries go (the vector path's arrays, the scalar parser's stacks and the postorder's passes),
     // which it pops at its end: the caller's arena, whose pages its next stage then takes again (the C driver's checker
     // reads its scratch from where the parse's were), or null for the parser's own.
@@ -2812,6 +2862,10 @@ struct ParseStatistics
     // The whole unit went to the scalar parser: unbalanced brackets, a typedef the pass can't read, a do without its
     // while, or an error the fallback found (which the scalar parser then reports as it would alone).
     bool whole;
+    // The tiles the vector path parsed the unit by (ParseOptions.tile_tokens), 0 where it parsed it as one, and whether
+    // a tile it couldn't take sent the unit to be parsed as one after them.
+    uint32_t tiles;
+    bool tiles_refused;
 };
 
 // Why a specifier in a private diagnostic view can be read after its original parse failed.

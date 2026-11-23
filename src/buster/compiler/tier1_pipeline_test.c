@@ -734,7 +734,7 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
     }
     if (ok)
     {
-        const IrCheck check = test->vector ? ssa_ir_promote(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted) : ssa_ir_promote_scalar(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted);
+        const IrCheck check = ssa_ir_promote(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real shared-IR local promotion succeeds");
         if (ok)
         {
