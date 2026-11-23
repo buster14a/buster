@@ -417,6 +417,10 @@ static __attribute__((noinline)) bool node_machine_update_plan(const NodeMachine
     // Operand 1's type, which check_lower_count reads for a shift's count, is of such a class too.
     takes = takes && (increment || pointer || (node_machine_scalar_class((uint8_t)right_word) && ((right_word >> 8) & excluded) == 0));
     takes = takes && check_lower_segment_override(types, stored) == 0;
+    // A float's or a double's compound sum, where the unit's target fuses one with a product (NodeMachine.fuses): the
+    // lowering's may be the fused operation's, which no plan here is.
+    takes = takes && !(machine->fuses && (op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_SUBTRACT_ASSIGN) &&
+                       (calculated_class == BUSTER_TYPED_CLASS_F32 || calculated_class == BUSTER_TYPED_CLASS_F64));
     const uint64_t stride = takes && pointer ? check_action_pointer_stride(types, stored) : 0;
     takes = takes && (!pointer || stride != 0);
     const uint8_t computing = check_lower_computed(calculated_class);
@@ -587,8 +591,10 @@ static inline __attribute__((always_inline)) CheckLowerTemplate node_machine_cla
                     kind = CHECK_LOWER_TEMPLATE_POINTER;
                     node_machine_use_two(use, a, false, type_a, b, false, BUSTER_TYPE_LONG);
                 }
+                // (A float's or a double's sum has no template where the unit's target fuses one with a product: the
+                // lowering's may be the fused operation's, NodeMachine.fuses.)
                 else if (op != CHECK_OP_SUBSCRIPT && plain && !vector_element && !left_pointer && !right_pointer && node_machine_scalar_class((uint8_t)word_a) &&
-                         node_machine_scalar_class((uint8_t)word_b))
+                         node_machine_scalar_class((uint8_t)word_b) && !(machine->fuses && (class == BUSTER_TYPED_CLASS_F32 || class == BUSTER_TYPED_CLASS_F64)))
                 {
                     kind = CHECK_LOWER_TEMPLATE_BINARY;
                     node_machine_use_two(use, a, false, type_a, b, false, type_b);
