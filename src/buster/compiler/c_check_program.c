@@ -599,6 +599,12 @@ struct CheckProgram
     // Whether any declaration of a function has returns_twice. Whole-object call initializers (#1549) use this to
     // retain their separate result object in bodies that may reenter them. Null where no declaration has it.
     uint8_t* object_returns_twice;
+    // Per function object, what check_program_move_bytes reads of it (#1373), BUSTER_CHECK_PROGRAM_MOVE_*: a declaration's
+    // minsize attribute, not ignored, with which clang's code inlines a constant memmove in 4 stores of its pieces, not 8;
+    // and the instruction set and tuning of its first declaration's target attribute (AVX's pieces are 32 bytes, a slow
+    // unaligned 16-byte access's tuning's 8). Made before the references' pass (check_program_move_objects), in a unit that
+    // spells minsize or target alone; null where no declaration has either.
+    uint8_t* object_move;
     // Per object, whether a declaration of it has an asm label, not ignored: clang's code calls a library builtin's
     // declaration of one by its label rather than compute it (#1373, check_program_call_computed). Made before the
     // references' pass (check_program_labelled_objects); null where no declaration has one.
@@ -4039,6 +4045,77 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
     return constant;
 }
 
+// CheckProgram.object_move's bits.
+#define BUSTER_CHECK_PROGRAM_MOVE_MINSIZE 1u
+#define BUSTER_CHECK_PROGRAM_MOVE_TARGET 2u
+#define BUSTER_CHECK_PROGRAM_MOVE_AVX 4u
+#define BUSTER_CHECK_PROGRAM_MOVE_SLOW 8u
+
+// CheckProgram.object_move: each function's minsize attribute and its first declaration's target attribute's instruction
+// set and tuning (predefines_function_target's, as check_program_targets resolves its body's), by one scan of the tokens
+// with attributes, in a unit whose identifiers spell minsize or target alone; false where the column has no room.
+static bool check_program_move_objects(CheckProgram* program, const CheckProgramOptions* options, Arena* output)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    const InternTable* identifiers = program->identifiers;
+    const IdentId minsize = identifiers != NULL ? intern_find(identifiers, (const uint8_t*)"minsize", 7) : 0;
+    const IdentId target = identifiers != NULL ? intern_find(identifiers, (const uint8_t*)"target", 6) : 0;
+    bool room = true;
+    for (uint32_t first = minsize != 0 || target != 0 ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
+         first = check_input_attributed_next(input->attributes, first + 16, count))
+    {
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
+        for (uint32_t selected = lanes; room && selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            const uint32_t object = input->objects[token];
+            const bool function = object != 0 && object <= count && input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_FUNCTION;
+            const CheckInputAttributes* attributes = function ? check_input_attributes_at(input, token) : NULL;
+            uint8_t facts = 0;
+            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                const bool kept = !attribute->ignored && !attribute->subject_ignored;
+                facts |= kept && attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->name == minsize && minsize != 0 ?
+                             BUSTER_CHECK_PROGRAM_MOVE_MINSIZE : 0;
+                int32_t cpu = -1;
+                const bool version = kept && attribute->kind == CHECK_ATTRIBUTE_TARGET && options->predefines != NULL && attribute->text.length < UINT32_MAX &&
+                                     (facts & BUSTER_CHECK_PROGRAM_MOVE_TARGET) == 0 &&
+                                     (program->object_move == NULL || (program->object_move[object] & BUSTER_CHECK_PROGRAM_MOVE_TARGET) == 0) &&
+                                     predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+                if (version)
+                {
+                    if (!program->host_read)
+                    {
+                        program->host = predefines_host_of(options->predefines);
+                        program->host_read = true;
+                    }
+                    const X86Target own = predefines_function_target(options->predefines, &program->host, program->target, attribute->text.pointer,
+                                                                     (uint32_t)attribute->text.length, cpu);
+                    const bool slow = own.slow_unaligned_16 && (own.features & BUSTER_X86_FEATURE(SSE42)) == 0;
+                    facts |= BUSTER_CHECK_PROGRAM_MOVE_TARGET | ((own.features & BUSTER_X86_FEATURE(AVX)) != 0 ? BUSTER_CHECK_PROGRAM_MOVE_AVX : 0) |
+                             (slow ? BUSTER_CHECK_PROGRAM_MOVE_SLOW : 0);
+                }
+            }
+            if (facts != 0 && program->object_move == NULL)
+            {
+                program->object_move = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+                room = program->object_move != NULL;
+                if (room)
+                {
+                    memset(program->object_move, 0, (uint64_t)count + 1);
+                }
+            }
+            if (facts != 0 && room)
+            {
+                program->object_move[object] |= facts;
+            }
+        }
+    }
+    return room;
+}
+
 // Collect accepted asm labels from declaration attributes. Both an asm keyword and an applied
 // #pragma redefine_extname can supply one. Allocate the column on the first label.
 static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
@@ -4077,6 +4154,27 @@ static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
 
 static uint32_t check_program_token_body(const CheckProgram* program, uint32_t token);
 
+// The largest constant memmove that call `node` computes in place, as clang's code moves it inline at -O0 (#1373): 8
+// stores of its widest piece, 4 in a function with minsize (MaxStoresPerMemmove and its OptSize twin), the piece 32 bytes
+// with AVX, else 8 where the function's tuning has unaligned 16-byte accesses slow (X86Target.slow_unaligned_16) and its
+// instruction set has no SSE4.2 (with which LLVM takes them as fast: -march=x86-64-v2 -mtune=core2 inlines 128), else
+// 16; at most BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES, COPY's move form's. So 128 bytes at x86-64, 64 for core2's
+// tuning or with minsize, 32 for both. The function's facts are CheckProgram.object_move's, which the references' pass
+// and the lowering read alike; its target attribute's, else the unit's target.
+static uint64_t check_program_move_bytes(const CheckProgram* program, uint32_t node)
+{
+    const uint32_t body = check_program_token_body(program, program->input->graph.tokens[node]);
+    const uint32_t declaration = body != 0 ? program->bodies[body - 1].declaration : BUSTER_CHECK_NONE;
+    const uint32_t object = declaration < program->input->token_count ? program->input->objects[declaration] : 0;
+    const uint8_t facts = program->object_move != NULL && object != 0 && object <= program->input->token_count ? program->object_move[object] : 0;
+    const bool own = (facts & BUSTER_CHECK_PROGRAM_MOVE_TARGET) != 0;
+    const bool avx = own ? (facts & BUSTER_CHECK_PROGRAM_MOVE_AVX) != 0 : (program->target.features & BUSTER_X86_FEATURE(AVX)) != 0;
+    const bool slow = own ? (facts & BUSTER_CHECK_PROGRAM_MOVE_SLOW) != 0 : program->target.slow_unaligned_16 && (program->target.features & BUSTER_X86_FEATURE(SSE42)) == 0;
+    const uint64_t piece = avx ? 32 : slow ? 8 : 16;
+    const uint64_t bytes = piece * ((facts & BUSTER_CHECK_PROGRAM_MOVE_MINSIZE) != 0 ? 4 : 8);
+    return bytes < BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES ? bytes : BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES;
+}
+
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
 // cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
 // makes the builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL) whose row computes it (CBuiltinLibraryComputed), with
@@ -4101,6 +4199,8 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
     {
         const uint32_t size_node = graph->argument_nodes[graph->argument_offsets[node] + 2];
         marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= cbuiltin_library_inline_bytes(computed);
+        // A memmove past 32 bytes, as far as the function's tuning and minsize let clang's code inline it.
+        marked = marked && (computed != CBUILTIN_LIBRARY_COMPUTED_MOVE || size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES || size <= check_program_move_bytes(program, node));
     }
     const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
@@ -6799,6 +6899,8 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     valid = valid && program->status == CHECK_PROGRAM_OK;
     // The labelled library declarations, which a computed call's test reads in the references' pass below.
     valid = valid && check_program_labelled_objects(program, output);
+    // The functions' minsize and target attributes, which a computed memmove's test reads there too (#1373).
+    valid = valid && check_program_move_objects(program, &options, output);
     // The candidates as the pass before the bodies' controls finds them (#2536's step 2.2, census_pass): the constant ifs'
     // left-out tokens (check_program_constant_arms), then the pruned scan without them, timed together.
     if (valid && (options.selection_census || options.candidates) && program->status == CHECK_PROGRAM_OK)
