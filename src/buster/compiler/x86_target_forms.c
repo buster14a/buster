@@ -144,21 +144,6 @@ static uint64_t x86_target_requirement(uint32_t form)
     return result;
 }
 
-static void x86_target_forms_scalar(const X86Target* target, uint8_t* allowed)
-{
-    const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
-    // Capture features before the clear: target/output overlap is valid. Each classified form writes one byte.
-    memset(allowed, 0, X86_FORM_COUNT);
-    // The scalar oracle avoids widening indices only to extract them for byte stores. Production uses SIMD.
-    #pragma clang loop vectorize(disable)
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_target_classified_forms); i += 1)
-    {
-        const uint16_t form = x86_target_classified_forms[i];
-        const uint64_t required = x86_target_classified_requirements[i];
-        allowed[form] = (required & ~available) == 0;
-    }
-}
-
 // Sixteen contiguous 32-bit rows per iteration: no gathers, scratch allocation or speculative tail loads.
 // Unknown rows stay zero, so the nonzero test still distinguishes them from classified baseline rows. An extended
 // row's mark is in every target's unavailable bits, so the loop denies it, and the exact pass then decides it.

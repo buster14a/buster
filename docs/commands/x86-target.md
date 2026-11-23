@@ -9,7 +9,8 @@ requirements. [Command index](README.md).
 - `src/buster/compiler/x86_target.c` defines generated-code ISA profiles, with
   x86-64 baseline as the default, independently of the compiler host.
   `x86_target_forms.c` supplies explicit, fail-closed form eligibility and
-  scalar/vector table builders. `test-x86-target` checks the policy and Clang
+  its AVX-512 table builder, whose tests check it against the table's
+  definition (the full-width requirement map, `x86_target_requirement`). `test-x86-target` checks the policy and Clang
   predefines, and the feature macros against Clang and GCC 15 or later (16.2.1
   is the qualified 9700X version); GCC is probed once, and when it is missing
   or older the GCC checks print `skipped: needs gcc >= 15, found 13.3.0` and
@@ -17,7 +18,8 @@ requirements. [Command index](README.md).
   GNU as 2.46 or later is probed the same way for the GAS architecture gate,
   which is left out when it is missing or older (2.47 is the qualified 9700X
   version; both it and the hosted 2.46 pass this check);
-  `benchmark-x86-target` measures table construction.
+  `benchmark-x86-target [--after-predefines MS] [--iterations N]` measures
+  table construction.
   `docs/x86-target.md` records the API, current catalogue coverage and the
   selector/corpus acceptance still pending for #180. Its "A function's target
   attribute" has #772's per-function features and code generation's check of

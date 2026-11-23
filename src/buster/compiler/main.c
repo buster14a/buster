@@ -1294,7 +1294,6 @@ static __attribute__((unused)) void main_driver_test_interfaces(void)
 
 static __attribute__((unused)) void main_x86_test_interfaces(void)
 {
-    (void)&x86_target_forms_scalar;
     (void)&branch_sizing_generate;
     (void)&branch_sizing_chain;
     (void)&x86_zen5_case_find;

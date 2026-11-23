@@ -62,8 +62,8 @@ builtin lowering (#148).
 
 Include `x86_target_forms.c` after the encoder and build a byte table with
 `x86_target_forms(&target, allowed)`, where `allowed` has `X86_FORM_COUNT` bytes.
-It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on the host;
-`x86_target_forms_scalar` is its exact twin. There is no gather, allocation or
+It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on the host,
+its one implementation (its scalar twin went in #2924). There is no gather, allocation or
 change to the 16-byte `X86Instruction` or the encoder's templates. The rows that
 need a feature the 32-bit word doesn't project (AVX512BF16's, AVX512BITALG's,
 AVX512IFMA's, AVX512VBMI2's, AVX512VNNI's, AVX512VPOPCNTDQ's and AVX-VNNI's: 125,
@@ -73,11 +73,9 @@ and an exact pass over their full requirements then decides them.
 
 `x86_target_rows.c` is the single source for immutable policy data. The vector
 builder reads the compact32 table (33,408 bytes), and its exact pass the
-extended rows' full requirements and forms. The independent scalar
-reference keeps all 64 feature bits densely for 3,480 classified rows (27,840
-bytes), with their form indices (6,960 bytes). It clears all 8,352 output bytes
-then checks those complete requirements directly. Its loop stays scalar to
-avoid widening and extracting indices for byte stores.
+extended rows' full requirements and forms. The full requirements keep all 64
+feature bits densely for 3,480 classified rows (27,840 bytes), with their form
+indices (6,960 bytes).
 
 A uint16 inverse map (16,704 bytes) gives full-width metadata queries their
 canonical dense slot plus one. Zero means unknown, and the bounded query returns
@@ -182,7 +180,9 @@ taskset -c 2 ./build/compiler benchmark-x86-target
 Run each through `EXCLUSIVE_OWNER=... ~/buster-fast-bench/exclusive.sh` on the
 9700X. Tests cover synthetic CPUID/OS state, bounded target names, invalid
 options, all 65,536 encoded form values at six targets, random valid operands
-for every admitted form, scalar/vector table identity and protected page edges.
+for every admitted form, the table against its definition (each form allowed
+exactly when `x86_target_requirement` classifies it and the target covers that
+requirement) and protected page edges.
 They also cover every subset of each distinct requirement mask, each profile
 with each individual feature removed, and first-failure rejection for every
 form at all six profiles. Every raw feature bit alone, reserved target bits,
