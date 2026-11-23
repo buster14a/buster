@@ -11821,6 +11821,36 @@ which can disable it (`<= 8`, `!= (size_t)-1`).
   isn't constant).
   `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
   a function without the warning.
+- **The CFG builder's heuristics** (#2990, `c_check_program_cfg.c`). Clang's
+  `tryEvaluateBool` also decides some conditions that aren't constants, from
+  the condition's top node: `x * 0` and `x & 0` (an integer constant 0
+  operand) are false; an equality of a bitwise `&` or `|` with an integer
+  literal it can't give (`(x & 8) == 4`), or of a boolean value with a literal
+  other than 0 and 1 (`(x < y) == 10`), and a relational comparison of a
+  boolean value with such a literal (`2 < (x == 1)`) are decided; a `|` with one
+  nonzero literal constant (`x | 1`) is true; and an `&&` or `||` of two
+  unknown operands that are a value and its negation (`x && !x`) or two
+  comparisons of one operand with constants that always give one value
+  (`x == 1 && x == 2`, `x < 5 || x > 3`, sampled at five values) is decided.
+  Parentheses, a `!` or a cast at the top stop them (`if ((x * 0))`), and a
+  literal with an implicit conversion is none to them; a logical condition's
+  operands are read past their parentheses (VisitLogicalOperator), and a do
+  statement's condition is read whole. `check_program_branch_truth` applies
+  them, so the runtime warnings, `-Wreturn-type` and the uninitialized flow
+  prune as clang does. The same rules' hits are clang's
+  `-Wtautological-bitwise-compare`, `-Wtautological-overlap-compare` and
+  `-Wtautological-negation-compare` (`-Wtautological-compare`'s, so `-Wmost`'s
+  and `-Wall`'s): `check_common_cfg_tautologies` (`c_check_common_cfg.c`) calls
+  the rules where the builder calls `tryEvaluateBool`, in its order (statements
+  last first, an operator's right operand first, a comparison's own call before
+  its operands'), with its cache (a logical operator's and an equality's once,
+  a `|`'s each time: `x | 1 || y` warns twice), drops a rule's warning whose
+  expression has a macro's token (`HasMacroID`), and publishes them at the
+  body's end before its deferred runtime warnings (`PP_DIAGNOSTIC_CFG`). A body
+  clang ends after the unit's first error gets none. Not yet modeled: a for
+  statement's increment, which the builder visits before the body, and a
+  statement expression's statements, which it visits where the expression
+  stands, take the order of their roots.
 - **Const assignment** (#1447). clang's `DiagnoseConstAssignment`
   (`check_semantic_const_assignment`) walks an assignment's lvalue through
   members, subscripts and vector elements to a variable or a direct call. It

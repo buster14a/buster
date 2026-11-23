@@ -2470,7 +2470,9 @@ survey of those passes, what it measured and its gates.
   value's to answer, with nothing in the side record.
   `check_program_branch_truth` knows a branch's condition's truth where the
   condition's value has none when one operand decides a logical operator,
-  including under a cast or `!`. The turns list an `&&` or an `||` whose
+  including under a cast or `!`, and where clang's CFG heuristics decide it
+  (#2990: `x * 0`, `x | 1`, `(x & 8) == 4`, `x == 1 && x == 2`, `x && !x`),
+  which the window doesn't list yet. The turns list an `&&` or an `||` whose
   second operand has a known truth (`node_rows_window_decided`, reason
   `branches`). A cast with no known value can pass an inferred logical
   result of 0 or 1. It cannot inherit the truth of an address before
@@ -2594,6 +2596,16 @@ type.
   form's table sends `<`, `<=`, `>` and `>=` for an operand that converts
   to a pointer. The window's loop leaves out one whose two operands both
   do, a loop's `p < end`, where nothing else sends it.
+- **The CFG builder's observer's warnings** (#2990,
+  `-Wtautological-bitwise-compare`, `-Wtautological-overlap-compare` and
+  `-Wtautological-negation-compare`, `-Wall`'s) have a test of their own
+  (`cfg-tautology`, `node_census_tautology`): an equality of a bitwise `&`
+  or `|`, a `|` of one literal or enumerator, and an `&&` or `||` of a name,
+  a member or an element and its negation, or of two comparisons of such
+  an operand with constants whose five values decide it
+  (`node_census_overlap`, the program's `check_cfg_analyze`). Under those
+  warnings the own form's table sends `==`, `!=`, `|`, `&&` and `||`
+  always (`always`), as `-Wsign-compare` sends a comparison.
 - **What converts to a pointer** (`BUSTER_NODE_CENSUS_TYPE_CONVERTS`): a
   function's type's byte has the pointer's bit and the void pointee's, as
   `nullptr_t`'s has, so a cast of a function or of an array to an integer

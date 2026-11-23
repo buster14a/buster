@@ -853,6 +853,15 @@ for a condition on an lvalue at an absolute address (#3028).
 WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
 compared with clang's in every policy, mode, lane request and reader.
 
+`tests/checker/cfg-pruning` (#2990) is one too: conditions clang's CFG builder
+decides by its heuristics (`x * 0`, `x | 1`, `(x & 8) == 4`, `x == 1 && x == 2`,
+`x && !x`, `c_check_program_cfg.c`), whose pruned branches give no runtime
+warning and no `-Wreturn-type` fall-off, with the shapes the heuristics leave to
+the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
+builder's observer's `-Wtautological-bitwise-compare`,
+`-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
+order (`c_check_common_cfg.c`).
+
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
 run, pair each case with data of their own, or pick cases by index (#2053 lists
