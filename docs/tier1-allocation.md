@@ -2376,7 +2376,11 @@ coloring path, with and without a tie: an argument whose register a bound value
 holds takes neither its own nor the other argument's register, and a tied
 result takes its operand's. `tier1_cfg_test_avoided`'s reference recomputes the
 avoided registers and register hints of every interval by brute force over the
-uses and ties. Disabling the rule, or only its walk along ties, fails them.
+uses and ties. The argument-exclusions fixture, on both paths, holds a phi
+whose interval ends at a register argument, which avoids nothing, and a result
+tied to a phi, whose chain has no root, which keeps its operand's register.
+Disabling the rule, or only its walk along ties, fails them, as do counting a
+chain without a root as rooted (6 checks) and opening the rule to phis (4).
 
 ## Rematerialization
 

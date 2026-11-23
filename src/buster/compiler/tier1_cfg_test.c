@@ -2944,6 +2944,88 @@ static void tier1_cfg_test_call_arguments(Tier1CfgTestTally* tally, Arena* outpu
     arena_pop_to(output, saved);
 }
 
+// The call-arguments rule's exclusions (#2823). Block 0 defines y and x, bound to r2, and with `held` q, bound to r4;
+// block 1, block 0's successor, has phis l and m, whose only operand is undefined, so that nothing hints either. c is a
+// two-address result tied to l at block 1's instruction 1, l's last use, and a call at its instruction 2 reads x in r1, c
+// in r2 and m in r3; y and q live past it. m's interval ends at a register argument and nothing hints it, but a phi's
+// interval is placed by its edges: m avoids nothing. c's tie names l, which can't take the chain's register hint (a phi):
+// the chain has no root, so c keeps its tie, avoids nothing and takes l's register. tier1_cfg_test_avoided's reference
+// checks both, as it does every interval's avoided registers and register hint.
+static void tier1_cfg_test_argument_exclusions(Tier1CfgTestTally* tally, Arena* output, Arena* scratch, bool held)
+{
+    static Tier1CfgTestBuilder builder;
+    memset(&builder, 0, sizeof(builder));
+    builder.block_count = 2;
+    builder.instructions[0] = 1;
+    builder.instructions[1] = 4;
+    builder.registers[BUSTER_TIER1_ALLOCATE_GPR] = 0x003f;
+    builder.scratch[BUSTER_TIER1_ALLOCATE_GPR] = 11;
+    builder.use_registers = true;
+    tier1_cfg_test_edge(&builder, 0, 1);
+    const uint32_t all = builder.registers[BUSTER_TIER1_ALLOCATE_GPR];
+    const uint32_t y = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, all);
+    const uint32_t x = tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1u << 2);
+    const uint32_t q = held ? tier1_cfg_test_value(&builder, 0, 0, BUSTER_TIER1_ALLOCATE_GPR, 1u << 4) : BUSTER_TIER1_CFG_NONE;
+    const uint32_t undefined_operands[] = {
+        BUSTER_TIER1_CFG_NONE,
+    };
+    const uint32_t l = tier1_cfg_test_phi(&builder, 1, BUSTER_TIER1_ALLOCATE_GPR, undefined_operands);
+    const uint32_t m = tier1_cfg_test_phi(&builder, 1, BUSTER_TIER1_ALLOCATE_GPR, undefined_operands);
+    const uint32_t c = tier1_cfg_test_value(&builder, 1, 1, BUSTER_TIER1_ALLOCATE_GPR, all);
+    tier1_cfg_test_definition_use(&builder, y);
+    tier1_cfg_test_definition_use(&builder, x);
+    if (held)
+    {
+        tier1_cfg_test_definition_use(&builder, q);
+        tier1_cfg_test_use(&builder, q, 1, 3, true);
+    }
+    tier1_cfg_test_use(&builder, l, 1, 1, true);
+    tier1_cfg_test_definition_use(&builder, c);
+    tier1_cfg_test_use(&builder, x, 1, 2, true);
+    builder.use_register[builder.use_count - 1] = 1;
+    tier1_cfg_test_use(&builder, c, 1, 2, true);
+    builder.use_register[builder.use_count - 1] = 2;
+    tier1_cfg_test_use(&builder, m, 1, 2, true);
+    builder.use_register[builder.use_count - 1] = 3;
+    tier1_cfg_test_use(&builder, y, 1, 3, true);
+    const uint64_t saved = output->length;
+    Tier1CfgInput input = { 0 };
+    bool built = tier1_cfg_test_build(&builder, output, &input);
+    uint32_t* ties = built ? arena_push_array(output, 2 * (uint64_t)input.value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    built = built && ties != 0;
+    for (uint32_t k = 0; ties != 0 && k < 2 * input.value_count; k += 1)
+    {
+        ties[k] = k == 2 * c ? l : BUSTER_TIER1_CFG_NONE;
+    }
+    input.ties = ties;
+    tier1_cfg_test_expect(tally, built, "argument exclusions: built");
+    if (built)
+    {
+        const uint64_t mark = output->length;
+        Tier1CfgAllocation result = { 0 };
+        const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+        Tier1CfgCheck check;
+        const bool allocated = error == TIER1_CFG_OK && tier1_cfg_verify(&input, &result, scratch, &check);
+        tier1_cfg_test_expect(tally, allocated, "argument exclusions: allocated");
+        uint32_t locations[2] = { 0 };
+        uint8_t kinds[2] = { 0 };
+        const bool found = allocated && tier1_cfg_location(&result, l, input.block_starts[1] + 2 * 1, &locations[0], &kinds[0]) &&
+                           tier1_cfg_location(&result, c, input.block_starts[1] + 2 * 2, &locations[1], &kinds[1]);
+        const bool registers = found && kinds[0] == BUSTER_TIER1_ALLOCATE_REGISTER && kinds[1] == BUSTER_TIER1_ALLOCATE_REGISTER;
+        tier1_cfg_test_expect(tally, registers && locations[1] == locations[0], "argument exclusions: a tie whose chain has no root keeps its operand's register");
+        uint32_t avoided = 0;
+        for (uint32_t i = 0; allocated && i < result.intervals.count; i += 1)
+        {
+            const bool excluded = result.intervals.values[i] == c || result.intervals.values[i] == m;
+            avoided |= excluded && result.intervals.avoided_registers != 0 ? result.intervals.avoided_registers[i] : 0;
+        }
+        tier1_cfg_test_expect(tally, allocated && avoided == 0, "argument exclusions: a phi and an unrooted tie avoid no argument's register");
+        arena_pop_to(output, mark);
+        tier1_cfg_test_case(tally, &input, output, scratch, held ? "argument exclusions, held" : "argument exclusions", true, 0, 0, true);
+    }
+    arena_pop_to(output, saved);
+}
+
 static void tier1_cfg_test_fixtures(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     static Tier1CfgTestBuilder builders[11];
@@ -3410,6 +3492,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             {
                 tier1_cfg_test_call_arguments(&tally, &output, &scratch, (variant & 1) != 0, (variant & 2) != 0);
             }
+            tier1_cfg_test_argument_exclusions(&tally, &output, &scratch, false);
+            tier1_cfg_test_argument_exclusions(&tally, &output, &scratch, true);
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
