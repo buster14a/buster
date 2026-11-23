@@ -75,7 +75,8 @@ unchanged. `test-checker-driver`'s value tables unit runs a C fixture's
 
 ## Loop vectorization (#2743)
 
-`test-ir-vectorize [--seed N] [--print NAME]` (`ir_vectorize_loops_test.c`) runs
+`--tier1` runs the loop vectorizer by default (`--tier1-passes=-vectorize`
+turns it off). `test-ir-vectorize [--seed N] [--print NAME]` (`ir_vectorize_loops_test.c`) runs
 the loop vectorizer's text fixtures, `tests/ir/vectorize/*.ir`: element-wise
 operations of every lane width, fills, copies, sums with widening, a dot
 product, the four other integer reductions, an if-converted conditional sum
@@ -130,8 +131,10 @@ values, it runs value numbering before promotion and LICM after if-conversion,
 restricted to those values; `+gvn` and `+licm` still request the unrestricted
 passes, and `-vectors` disables both restricted forms. The LICM implementation
 walks each eligible loop's own blocks and skips loops with no safe vector or
-mask value. `test-ir-gvn` and `test-ir-licm` cover both host paths, the
-per-loop/whole-function LICM oracle, scalar neutrality and nested loops;
+mask value, and loops that hold a call (#2743: every vector register is
+caller-saved, so a value moved out of one is stored and reloaded around its
+calls). `test-ir-gvn` and `test-ir-licm` cover both host paths, the
+per-loop/whole-function LICM oracle, scalar neutrality, nested loops and calls;
 `test-checker-driver` checks the default and `-vectors` reports and native
 output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
 

@@ -558,8 +558,8 @@ struct CheckEmitGrowth
 // output and the steps' scratch, reserved at the
 // lane's first body and emptied for each, and the forms the lane's last target allows (X86_FORM_COUNT entries). Every
 // lane reserves the first BUSTER_CHECK_TIER1_STEPS_ALWAYS steps; the others are the optional passes' outputs, reserved
-// only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
-// and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
+// only where the pass runs: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's (on by
+// default) and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
 // the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither;
 // and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol. LICM's
 // pressure policy (--tier1-passes=+hoist, #2719) takes step 9 too, reserved at the lane's first function that has a loop,
@@ -636,7 +636,7 @@ struct CheckTier1Lane
     uint8_t* allowed;
     // The vector operations the target selects, for the loop vectorizer (ir_vectorize_target.c), in `forms` with `allowed`.
     struct IrVectorizeTarget* vectorize;
-    // The opt-in C vectorizer's source qualifier guard (#2805), indexed by body, including inline callees. Loop store
+    // The C loop vectorizer's source qualifier guard (#2805), indexed by body, including inline callees. Loop store
     // motion's too (#3309): a body with a volatile expression keeps every access.
     const uint8_t* vectorize_volatile;
     uint32_t emitting_body;
@@ -2110,7 +2110,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
 }
 
 // Indirect C accesses lose their volatile qualifier in the typed stream (docs/ir.md). Until the stream carries
-// per-access flags, the opt-in vectorizer can only widen reads in a body whose checked expressions are all clear.
+// per-access flags, the loop vectorizer can only widen reads in a body whose checked expressions are all clear.
 // Inspect the unit once. Only set bits need their source token mapped to a body. Qualifiers on a cast's result
 // matter at the dereference, just as they do on a parameter's pointee.
 static uint8_t* check_program_vectorize_volatile(const CheckProgram* program, Arena* arena)
