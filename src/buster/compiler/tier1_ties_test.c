@@ -13,7 +13,7 @@
 // whose operands both end at it. k(p0, p1), straight-line: x = p0 - p1, then the address x + 8, whose dying base it ties
 // (#2592: `lea 8(%r),%r` costs what a lea into another register does, and Lua's OP_LFALSESKIP's `pc + 1` keeps the
 // register its dispatch takes `pc` in), returned xored with 0x55, which folds no address. Each runs natively against its
-// oracle, by both paths.
+// oracle.
 
 // f(p0, p1), or with `branch` false g(p0, p1); with `returned`, h(p0, p1); with `address`, k(p0, p1).
 static bool tier1_ties_function(Arena* input, IrFunction* function, bool branch, bool returned, bool address)
@@ -121,7 +121,7 @@ static uint8_t tier1_ties_register(const Tier1EmitResult* emitted, uint32_t node
     return reg;
 }
 
-static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bool returned, bool address)
+static void tier1_ties_compile(Tier1EmitTest* test, bool branch, bool returned, bool address)
 {
     IrFunction function;
     const bool created = tier1_ties_function(&test->input, &function, branch, returned, address);
@@ -133,7 +133,7 @@ static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bo
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the ties' fixture selects");
-    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .rematerialize = true, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .rematerialize = true, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK && emitted.general == branch, "the ties' fixture emits through its consumer");
@@ -150,7 +150,7 @@ static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bo
             tier1_emit_test_expect(test, plan.patterns[5].rule == TIER1_RULE_ADDRESS && plan.patterns[5].values[0] == 2 && x != UINT8_MAX && moved == x, "an address takes its dying base's register");
             if (moved != x && test->failures < 20)
             {
-                fprintf(stderr, "  ties vector=%u address: rule %u, x r%u, address r%u\n", vector, plan.patterns[5].rule, x, moved);
+                fprintf(stderr, "  ties address: rule %u, x r%u, address r%u\n", plan.patterns[5].rule, x, moved);
             }
         }
         else if (returned)
@@ -164,14 +164,14 @@ static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bo
             tier1_emit_test_expect(test, x != UINT8_MAX && y == x, branch ? "the CFG consumer's xor takes the difference's register" : "the straight-line consumer's xor takes the difference's register");
             if ((x != p0 || y != x) && test->failures < 20)
             {
-                fprintf(stderr, "  ties vector=%u branch=%u: p0 r%u, x r%u, y r%u\n", vector, branch, p0, x, y);
+                fprintf(stderr, "  ties branch=%u: p0 r%u, x r%u, y r%u\n", branch, p0, x, y);
             }
         }
         void* executable = MAP_FAILED;
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x3c6ef372fe94f82b) ^ (vector ? 1 : 0) ^ (branch ? 2 : 0) ^ (returned ? 4 : 0) ^ (address ? 8 : 0);
+            uint64_t random = UINT64_C(0x3c6ef372fe94f82a) ^ (branch ? 2 : 0) ^ (returned ? 4 : 0) ^ (address ? 8 : 0);
             for (uint32_t sample = 0; sample < 32; sample += 1)
             {
                 const uint64_t a = tier1_emit_test_random(&random);
@@ -180,7 +180,7 @@ static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bo
                 const uint64_t expected = tier1_ties_oracle(a, b, branch, returned, address);
                 if (actual != expected && test->failures < 20)
                 {
-                    fprintf(stderr, "  ties vector=%u branch=%u returned=%u a=%016" PRIx64 " b=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", vector, branch, returned, a, b, actual, expected);
+                    fprintf(stderr, "  ties branch=%u returned=%u a=%016" PRIx64 " b=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", branch, returned, a, b, actual, expected);
                 }
                 tier1_emit_test_expect(test, actual == expected, "a result tied to its operand computes its value");
             }
@@ -197,11 +197,8 @@ static void tier1_ties_compile(Tier1EmitTest* test, bool vector, bool branch, bo
 
 static void tier1_ties_tests(Tier1EmitTest* test)
 {
-    for (uint32_t vector = 0; vector < 2; vector += 1)
-    {
-        tier1_ties_compile(test, vector != 0, true, false, false);
-        tier1_ties_compile(test, vector != 0, false, false, false);
-        tier1_ties_compile(test, vector != 0, false, true, false);
-        tier1_ties_compile(test, vector != 0, false, false, true);
-    }
+    tier1_ties_compile(test, true, false, false);
+    tier1_ties_compile(test, false, false, false);
+    tier1_ties_compile(test, false, true, false);
+    tier1_ties_compile(test, false, false, true);
 }

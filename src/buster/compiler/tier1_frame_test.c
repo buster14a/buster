@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Included after tier1_frame.c. Independent pairwise overlap/alignment and pressure checks validate both colorings;
-// a sparse abstract stack executes the planned prologue/epilogue and checks register restoration, including dynamic
-// realigned frames. This checks plans, not generated code, unwind PCs, Clang frame sizes or Tier 1 cross-linking.
+// Included after tier1_frame.c. Independent pairwise overlap/alignment and pressure checks validate each plan,
+// preparation's order is checked by its definition, the colors against pointer jumping's and the default run's plans
+// against a frozen digest; a sparse abstract stack executes the planned prologue/epilogue and checks register
+// restoration, including dynamic realigned frames. This checks plans, not generated code, unwind PCs, Clang frame sizes or Tier 1 cross-linking.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -549,58 +550,49 @@ static void tier1_frame_test_fold(Tier1FrameTest* test, const Tier1Frame* frame)
     }
 }
 
-// Both paths' preparations, colored by the planner's pass and by the oracle.
+// The preparation, checked by its definition, then colored by the planner's pass and by the oracle.
 static void tier1_frame_test_colors_agree(Tier1FrameTest* test, const Tier1FrameRequest* request, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    Tier1FrameWork work;
+    const bool prepared = tier1_frame_prepare(request, scratch, &work) == TIER1_FRAME_OK;
+    uint32_t* const expected = prepared ? arena_push_array(scratch, (uint64_t)work.count + 1, 4, 4) : 0;
+    tier1_frame_test_expect(test, expected != 0, "prepared for the coloring oracle");
+    if (expected != 0)
     {
-        Tier1FrameWork work;
-        const bool prepared = tier1_frame_prepare(request, scratch, scalar != 0, &work) == TIER1_FRAME_OK;
-        uint32_t* const expected = prepared ? arena_push_array(scratch, (uint64_t)work.count + 1, 4, 4) : 0;
-        tier1_frame_test_expect(test, expected != 0, "prepared for the coloring oracle");
-        if (expected != 0)
-        {
-            tier1_frame_test_order(test, request, &work);
-            tier1_frame_color(&work);
-            const bool jumped = tier1_frame_test_color_jumping(&work, scratch, expected);
-            tier1_frame_test_expect(test, jumped && (work.count == 0 || memcmp(work.color, expected, (uint64_t)work.count * 4) == 0), "the ordered pass's colors are the pointer-jumping oracle's");
-        }
-        arena_pop_to(scratch, mark);
+        tier1_frame_test_order(test, request, &work);
+        tier1_frame_color(&work);
+        const bool jumped = tier1_frame_test_color_jumping(&work, scratch, expected);
+        tier1_frame_test_expect(test, jumped && (work.count == 0 || memcmp(work.color, expected, (uint64_t)work.count * 4) == 0), "the ordered pass's colors are the pointer-jumping oracle's");
     }
+    arena_pop_to(scratch, mark);
 }
 
 static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest* request, Arena* output, Arena* scratch, bool execute)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
-    Tier1Frame frame[2];
-    const Tier1FrameError vector_error = tier1_frame_plan(request, output, scratch, &frame[0]);
-    const Tier1FrameError scalar_error = tier1_frame_plan_scalar(request, output, scratch, &frame[1]);
-    tier1_frame_test_expect(test, vector_error == TIER1_FRAME_OK && scalar_error == TIER1_FRAME_OK, "both paths accept valid frame");
+    Tier1Frame frame;
+    const Tier1FrameError error = tier1_frame_plan(request, output, scratch, &frame);
+    tier1_frame_test_expect(test, error == TIER1_FRAME_OK, "valid frame accepted");
     tier1_frame_test_expect(test, scratch->length == scratch_mark, "scratch restored on success");
-    if (vector_error == TIER1_FRAME_OK && scalar_error == TIER1_FRAME_OK)
+    if (error == TIER1_FRAME_OK)
     {
-        tier1_frame_test_expect(test, tier1_frame_test_same_metadata(&frame[0], &frame[1]), "scalar and vector frame sizes and plans agree");
-        // The twins color alike, so a Tier 1 object doesn't depend on the host (#2606).
-        tier1_frame_test_expect(test, request->slots.count == 0 || (memcmp(frame[0].slot, frame[1].slot, request->slots.count * 4) == 0 &&
-            memcmp(frame[0].offset, frame[1].offset, request->slots.count * 4) == 0), "scalar and vector slot identities and offsets agree");
-        tier1_frame_test_valid(test, request, &frame[0]);
-        tier1_frame_test_valid(test, request, &frame[1]);
-        tier1_frame_test_fold(test, &frame[0]);
+        tier1_frame_test_valid(test, request, &frame);
+        tier1_frame_test_fold(test, &frame);
         tier1_frame_test_colors_agree(test, request, scratch);
         if (execute)
         {
-            tier1_frame_test_steps(test, request, &frame[0], 0);
-            tier1_frame_test_steps(test, request, &frame[1], 8);
+            tier1_frame_test_steps(test, request, &frame, 0);
+            tier1_frame_test_steps(test, request, &frame, 8);
         }
         Tier1Frame repeated;
         const Tier1FrameError repeated_error = tier1_frame_plan(request, output, scratch, &repeated);
-        tier1_frame_test_expect(test, repeated_error == TIER1_FRAME_OK && tier1_frame_test_same_metadata(&frame[0], &repeated), "repeatable plan metadata");
+        tier1_frame_test_expect(test, repeated_error == TIER1_FRAME_OK && tier1_frame_test_same_metadata(&frame, &repeated), "repeatable plan metadata");
         if (repeated_error == TIER1_FRAME_OK && request->slots.count != 0)
         {
-            tier1_frame_test_expect(test, memcmp(frame[0].slot, repeated.slot, request->slots.count * 4) == 0 &&
-                memcmp(frame[0].offset, repeated.offset, request->slots.count * 4) == 0, "repeatable slot identities and offsets");
+            tier1_frame_test_expect(test, memcmp(frame.slot, repeated.slot, request->slots.count * 4) == 0 &&
+                memcmp(frame.offset, repeated.offset, request->slots.count * 4) == 0, "repeatable slot identities and offsets");
         }
         if (request->slots.indices != 0 && request->slots.count == request->slots.column_count)
         {
@@ -608,7 +600,7 @@ static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest*
             identity.slots.indices = 0;
             Tier1Frame reordered;
             const Tier1FrameError reordered_error = tier1_frame_plan(&identity, output, scratch, &reordered);
-            tier1_frame_test_expect(test, reordered_error == TIER1_FRAME_OK && tier1_frame_test_same_metadata(&frame[0], &reordered),
+            tier1_frame_test_expect(test, reordered_error == TIER1_FRAME_OK && tier1_frame_test_same_metadata(&frame, &reordered),
                 "legal input permutation preserves optimal frame extent");
         }
     }
@@ -617,18 +609,15 @@ static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest*
 
 static void tier1_frame_test_refusal(Tier1FrameTest* test, const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1FrameError expected)
 {
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-    {
-        Tier1Frame before;
-        memset(&before, 0xa5, sizeof(before));
-        Tier1Frame result = before;
-        const uint64_t output_mark = output->length;
-        const uint64_t scratch_mark = scratch->length;
-        const Tier1FrameError error = scalar ? tier1_frame_plan_scalar(request, output, scratch, &result) : tier1_frame_plan(request, output, scratch, &result);
-        tier1_frame_test_expect(test, error == expected, "expected refusal status");
-        tier1_frame_test_expect(test, memcmp(&before, &result, sizeof(result)) == 0, "refusal preserves result");
-        tier1_frame_test_expect(test, output_mark == output->length && scratch_mark == scratch->length, "refusal restores both arenas");
-    }
+    Tier1Frame before;
+    memset(&before, 0xa5, sizeof(before));
+    Tier1Frame result = before;
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const Tier1FrameError error = tier1_frame_plan(request, output, scratch, &result);
+    tier1_frame_test_expect(test, error == expected, "expected refusal status");
+    tier1_frame_test_expect(test, memcmp(&before, &result, sizeof(result)) == 0, "refusal preserves result");
+    tier1_frame_test_expect(test, output_mark == output->length && scratch_mark == scratch->length, "refusal restores both arenas");
 }
 
 static void tier1_frame_test_limits(Tier1FrameTest* test, Arena* output, Arena* scratch)
@@ -897,15 +886,12 @@ static void tier1_frame_test_colors(Tier1FrameTest* test, Arena* output, Arena* 
     test->count = 4;
     test->shape = 0;
     tier1_frame_test_case(test, &request, output, scratch, true);
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-    {
-        const uint64_t mark = output->length;
-        Tier1Frame frame;
-        const Tier1FrameError error = scalar ? tier1_frame_plan_scalar(&request, output, scratch, &frame) : tier1_frame_plan(&request, output, scratch, &frame);
-        tier1_frame_test_expect(test, error == TIER1_FRAME_OK && frame.slot_count == 3 && frame.slot[0] == 0 && frame.slot[1] == 1 && frame.slot[2] == 2 && frame.slot[3] == 2,
-                                "a start takes the slot freed last at its pressure");
-        arena_pop_to(output, mark);
-    }
+    const uint64_t mark = output->length;
+    Tier1Frame frame;
+    const Tier1FrameError error = tier1_frame_plan(&request, output, scratch, &frame);
+    tier1_frame_test_expect(test, error == TIER1_FRAME_OK && frame.slot_count == 3 && frame.slot[0] == 0 && frame.slot[1] == 1 && frame.slot[2] == 2 && frame.slot[3] == 2,
+                            "a start takes the slot freed last at its pressure");
+    arena_pop_to(output, mark);
 }
 
 static void tier1_frame_test_boundaries(Tier1FrameTest* test, Arena* output, Arena* scratch)

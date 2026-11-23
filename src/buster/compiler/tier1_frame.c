@@ -6,8 +6,7 @@
 // column lets #140's spill_values name those value columns directly. Lifetimes are half-open, nonempty intervals;
 // address-taken objects must supply their conservative scope lifetime, including every possible escaped use.
 //
-// tier1_frame_requirements runs before allocation: reserve its register mask. tier1_frame_plan and its scalar twin
-// return object-to-slot and object-to-byte-offset columns plus an explicit SysV prologue/epilogue plan. Nothing here
+// tier1_frame_requirements runs before allocation: reserve its register mask. tier1_frame_plan returns object-to-slot and object-to-byte-offset columns plus an explicit SysV prologue/epilogue plan. Nothing here
 // emits instructions or unwind tables. The plan is Tier 0's frame protocol, which unwind_tier0_frame_tails and unwind.c
 // describe (#88, #177): rbp pushed and pointed at its push when the frame keeps a pointer, then the callee-saved
 // registers pushed in RBX, RBP, R12, R13, R14, R15 order, then one subtraction, then a realignment's `and` and its
@@ -16,13 +15,14 @@
 //
 // Preparation sorts every item's end and start by (rounded size, alignment) class and position, ends before starts at
 // an equal position. A function's frames are small (half of sqlite3.c's 1,368 have two objects or fewer, 98% at most
-// 32, and all but one at most eight classes; #2699), so the vector path classes items against a register of up to
-// eight distinct class keys (tier1_frame_classes) and sorts up to BUSTER_TIER1_FRAME_RANK_EVENTS events by rank, every
-// key compared with eight others at a time (tier1_frame_rank). The scalar twin, and larger inputs on either path, sort
-// by stable radix passes over the key bytes that differ (tier1_frame_sort); both sorts give one order. One ordered,
-// branch-free pass then colors on both paths (tier1_frame_color): a class's free colors are a stack, so each class uses
-// exactly its maximum live pressure. Both paths give identical slots and offsets, so a Tier 1 object doesn't depend on
-// the compiler's host (#2606); the tests check each plan independently, and the colors against pointer jumping's.
+// 32, and all but one at most eight classes; #2699), so preparation classes items against a register of up to eight
+// distinct class keys (tier1_frame_classes) and sorts up to BUSTER_TIER1_FRAME_RANK_EVENTS events by rank, every key
+// compared with eight others at a time (tier1_frame_rank). Larger inputs (a ninth class, more events) sort by stable
+// radix passes over the key bytes that differ (tier1_frame_sort); both sorts give one order. One ordered, branch-free
+// pass then colors (tier1_frame_color): a class's free colors are a stack, so each class uses exactly its maximum live
+// pressure. The scalar twin went in #2924, after the vector path read 0.33 to 0.92 of its time at every frame size of
+// sqlite3.c's, Lua's and musl's real frames on the 9700X. The tests check each plan independently, preparation's order
+// by its definition, the colors against pointer jumping's, and the default run's plans against a frozen digest.
 // Preparation, sorting, coloring and layout are all charged to the benchmark. There is no claim that a synthetic
 // planner timing is a compiler or generated-program speedup.
 //
@@ -50,7 +50,7 @@
 #define BUSTER_TIER1_FRAME_PAGE_BYTES 4096u
 #define BUSTER_TIER1_FRAME_STEP_CAPACITY 32u
 #define BUSTER_TIER1_FRAME_REALIGN_BASE BUSTER_ABI_R15
-// The most events the vector path sorts by rank (tier1_frame_rank), a multiple of 8 and at most 64.
+// The most events preparation sorts by rank (tier1_frame_rank), a multiple of 8 and at most 64.
 #define BUSTER_TIER1_FRAME_RANK_EVENTS 64u
 
 #define BUSTER_TIER1_FRAME_VARIADIC (1u << 0)
@@ -195,7 +195,6 @@ struct Tier1FrameWork
 
 static __attribute__((unused)) Tier1FrameError tier1_frame_requirements(const Tier1FrameRequest* request, Tier1FrameRequirements* result);
 static __attribute__((unused)) Tier1FrameError tier1_frame_plan(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result);
-static __attribute__((unused)) Tier1FrameError tier1_frame_plan_scalar(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result);
 
 static uint32_t tier1_frame_row(const Tier1FrameSlots* slots, uint32_t item)
 {
@@ -264,7 +263,7 @@ static bool tier1_frame_sort(uint64_t* key, uint32_t* id, uint64_t* temporary_ke
     return swapped;
 }
 
-// The vector path's sort of up to BUSTER_TIER1_FRAME_RANK_EVENTS events (#2699): an event's rank is the count of keys
+// Preparation's sort of up to BUSTER_TIER1_FRAME_RANK_EVENTS events (#2699): an event's rank is the count of keys
 // below its own, and every key is compared with eight others at a time. The keys are distinct, each event's class,
 // position and input place (tier1_frame_prepare), so the ranks are the stable radix sort's order. `vectors` is a
 // constant at each call, which keeps the keys and the ranks in registers; the lanes past `events` hold key 0, below
@@ -322,7 +321,7 @@ static void tier1_frame_rank(const uint64_t* key, uint32_t count, uint32_t* even
     }
 }
 
-// The vector path's classes while a function has at most eight (all but one of sqlite3.c's 1,034 frames with objects,
+// Preparation's classes while a function has at most eight (all but one of sqlite3.c's 1,034 frames with objects,
 // #2699): the distinct class keys stay in one register, each item's key is compared with all of them at once, and a
 // key's class is the count of distinct keys below it, its place in the sorted order. Each item takes its key's lane,
 // which `remap` turns into its class. False at a ninth distinct key: the caller sorts instead, and keeps nothing of this.
@@ -391,102 +390,68 @@ static Tier1FrameError tier1_frame_header(const Tier1FrameRequest* request)
 
 // Validation and class-key production share the scan. Eight rows are converted to qwords so rounding cannot wrap.
 // Indexed inputs use scalar loads into a bounded staging block instead of Zen 5's expensive gathers.
-static Tier1FrameError tier1_frame_rows(const Tier1FrameSlots* slots, bool scalar, uint64_t* keys, uint32_t* maximum_alignment)
+static Tier1FrameError tier1_frame_rows(const Tier1FrameSlots* slots, uint64_t* keys, uint32_t* maximum_alignment)
 {
-    (void)scalar;
-
     Tier1FrameError error = TIER1_FRAME_OK;
     uint32_t largest = 1;
-    if (BUSTER_SCALAR_PATH(scalar))
+    for (uint32_t i = 0; error == TIER1_FRAME_OK && i < slots->count; i += 8)
     {
-        for (uint32_t i = 0; error == TIER1_FRAME_OK && i < slots->count; i += 1)
+        const uint32_t live = slots->count - i < 8 ? slots->count - i : 8;
+        const __mmask8 mask = (__mmask8)((1u << live) - 1);
+        uint32_t staged[4][8];
+        const uint32_t* starts;
+        const uint32_t* ends;
+        const uint32_t* sizes;
+        const uint32_t* alignments;
+        if (slots->indices != 0)
         {
-            const uint32_t row = tier1_frame_row(slots, i);
-            const uint32_t alignment = slots->alignment[row];
-            if (slots->start[row] >= slots->end[row] || slots->size[row] == 0 || alignment == 0 ||
-                (alignment & (alignment - 1)) != 0 || alignment > BUSTER_TIER1_FRAME_MAX_ALIGNMENT)
+            for (uint32_t lane = 0; lane < live; lane += 1)
             {
-                error = TIER1_FRAME_INVALID;
+                const uint32_t row = slots->indices[i + lane];
+                staged[0][lane] = slots->start[row];
+                staged[1][lane] = slots->end[row];
+                staged[2][lane] = slots->size[row];
+                staged[3][lane] = slots->alignment[row];
             }
-            else
-            {
-                const uint64_t stride = tier1_frame_align(slots->size[row], alignment);
-                if (stride > INT32_MAX)
-                {
-                    error = TIER1_FRAME_OVERFLOW;
-                }
-                else
-                {
-                    largest = largest > alignment ? largest : alignment;
-                    if (keys != 0)
-                    {
-                        keys[i] = (uint64_t)(UINT32_MAX - alignment) << 32 | stride;
-                    }
-                }
-            }
+            starts = staged[0];
+            ends = staged[1];
+            sizes = staged[2];
+            alignments = staged[3];
         }
-    }
-    else
-    {
-        for (uint32_t i = 0; error == TIER1_FRAME_OK && i < slots->count; i += 8)
+        else
         {
-            const uint32_t live = slots->count - i < 8 ? slots->count - i : 8;
-            const __mmask8 mask = (__mmask8)((1u << live) - 1);
-            uint32_t staged[4][8];
-            const uint32_t* starts;
-            const uint32_t* ends;
-            const uint32_t* sizes;
-            const uint32_t* alignments;
-            if (slots->indices != 0)
+            starts = slots->start + i;
+            ends = slots->end + i;
+            sizes = slots->size + i;
+            alignments = slots->alignment + i;
+        }
+        const __m512i start = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, starts));
+        const __m512i end = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, ends));
+        const __m512i size = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, sizes));
+        const __m512i alignment = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, alignments));
+        const __m512i minus_one = _mm512_sub_epi64(alignment, _mm512_set1_epi64(1));
+        const __m512i stride = _mm512_andnot_si512(minus_one, _mm512_add_epi64(size, minus_one));
+        __mmask8 valid = _mm512_cmplt_epu64_mask(start, end);
+        valid &= _mm512_cmpneq_epi64_mask(size, _mm512_setzero_si512());
+        valid &= _mm512_cmpneq_epi64_mask(alignment, _mm512_setzero_si512());
+        valid &= _mm512_cmpeq_epi64_mask(_mm512_and_si512(alignment, minus_one), _mm512_setzero_si512());
+        valid &= _mm512_cmple_epu64_mask(alignment, _mm512_set1_epi64(BUSTER_TIER1_FRAME_MAX_ALIGNMENT));
+        if ((valid & mask) != mask)
+        {
+            error = TIER1_FRAME_INVALID;
+        }
+        else if ((_mm512_cmpgt_epu64_mask(stride, _mm512_set1_epi64(INT32_MAX)) & mask) != 0)
+        {
+            error = TIER1_FRAME_OVERFLOW;
+        }
+        else
+        {
+            const uint32_t current = (uint32_t)_mm512_reduce_max_epu64(alignment);
+            largest = largest > current ? largest : current;
+            if (keys != 0)
             {
-                for (uint32_t lane = 0; lane < live; lane += 1)
-                {
-                    const uint32_t row = slots->indices[i + lane];
-                    staged[0][lane] = slots->start[row];
-                    staged[1][lane] = slots->end[row];
-                    staged[2][lane] = slots->size[row];
-                    staged[3][lane] = slots->alignment[row];
-                }
-                starts = staged[0];
-                ends = staged[1];
-                sizes = staged[2];
-                alignments = staged[3];
-            }
-            else
-            {
-                starts = slots->start + i;
-                ends = slots->end + i;
-                sizes = slots->size + i;
-                alignments = slots->alignment + i;
-            }
-            const __m512i start = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, starts));
-            const __m512i end = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, ends));
-            const __m512i size = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, sizes));
-            const __m512i alignment = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, alignments));
-            const __m512i minus_one = _mm512_sub_epi64(alignment, _mm512_set1_epi64(1));
-            const __m512i stride = _mm512_andnot_si512(minus_one, _mm512_add_epi64(size, minus_one));
-            __mmask8 valid = _mm512_cmplt_epu64_mask(start, end);
-            valid &= _mm512_cmpneq_epi64_mask(size, _mm512_setzero_si512());
-            valid &= _mm512_cmpneq_epi64_mask(alignment, _mm512_setzero_si512());
-            valid &= _mm512_cmpeq_epi64_mask(_mm512_and_si512(alignment, minus_one), _mm512_setzero_si512());
-            valid &= _mm512_cmple_epu64_mask(alignment, _mm512_set1_epi64(BUSTER_TIER1_FRAME_MAX_ALIGNMENT));
-            if ((valid & mask) != mask)
-            {
-                error = TIER1_FRAME_INVALID;
-            }
-            else if ((_mm512_cmpgt_epu64_mask(stride, _mm512_set1_epi64(INT32_MAX)) & mask) != 0)
-            {
-                error = TIER1_FRAME_OVERFLOW;
-            }
-            else
-            {
-                const uint32_t current = (uint32_t)_mm512_reduce_max_epu64(alignment);
-                largest = largest > current ? largest : current;
-                if (keys != 0)
-                {
-                    const __m512i high = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(UINT32_MAX), alignment), 32);
-                    _mm512_mask_storeu_epi64(keys + i, mask, _mm512_or_si512(high, stride));
-                }
+                const __m512i high = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(UINT32_MAX), alignment), 32);
+                _mm512_mask_storeu_epi64(keys + i, mask, _mm512_or_si512(high, stride));
             }
         }
     }
@@ -547,7 +512,7 @@ static Tier1FrameError tier1_frame_requirements(const Tier1FrameRequest* request
     uint32_t alignment = 1;
     if (error == TIER1_FRAME_OK)
     {
-        error = tier1_frame_rows(&request->slots, false, 0, &alignment);
+        error = tier1_frame_rows(&request->slots, 0, &alignment);
     }
     if (error == TIER1_FRAME_OK)
     {
@@ -556,10 +521,8 @@ static Tier1FrameError tier1_frame_requirements(const Tier1FrameRequest* request
     return error;
 }
 
-static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Arena* scratch, bool scalar, Tier1FrameWork* result)
+static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Arena* scratch, Tier1FrameWork* result)
 {
-    (void)scalar;
-
     const uint64_t mark = scratch->length;
     Tier1FrameError error = tier1_frame_header(request);
     Tier1FrameWork candidate = {
@@ -635,7 +598,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
     uint32_t alignment = 1;
     if (error == TIER1_FRAME_OK)
     {
-        error = tier1_frame_rows(&request->slots, BUSTER_SCALAR_PATH(scalar), key, &alignment);
+        error = tier1_frame_rows(&request->slots, key, &alignment);
     }
     if (error == TIER1_FRAME_OK)
     {
@@ -649,7 +612,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
     {
         uint32_t lanes[8];
         const uint32_t* remap = 0;
-        if (!BUSTER_SCALAR_PATH(scalar) && tier1_frame_classes(&candidate, key, lanes))
+        if (tier1_frame_classes(&candidate, key, lanes))
         {
             remap = lanes;
         }
@@ -676,7 +639,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
         }
         // Either sort keeps all ends before starts at an equal position, allowing adjacent lifetimes to share, and
         // equal events in item order.
-        if (!BUSTER_SCALAR_PATH(scalar) && events <= BUSTER_TIER1_FRAME_RANK_EVENTS)
+        if (events <= BUSTER_TIER1_FRAME_RANK_EVENTS)
         {
             // Distinct keys: under 64 events' places in 6 bits, a position in 32, and a class under 32.
             for (uint32_t i = 0; i < count; i += 1)
@@ -724,7 +687,7 @@ static Tier1FrameError tier1_frame_prepare(const Tier1FrameRequest* request, Are
 // holds is the last item that ended there, whose color the start reads; a class's levels are written by its own ends
 // before its starts read them, since its pressure rose to the level before and has fallen below it since.
 //
-// This is one ordered pass on both paths, with no branch on the event's kind: a start stores its color and an end its
+// This is one ordered pass, with no branch on the event's kind: a start stores its color and an end its
 // item through one selected address. The pass is the part that stays scalar (#2699). Its chain is the stack: a color
 // goes from an item to the next item of its slot, so pointer jumping, the data-parallel form (test-tier1-frame's
 // oracle, tier1_frame_test_color_jumping), does the pass's work once per round.
@@ -862,10 +825,8 @@ static void tier1_frame_steps(const Tier1FrameRequest* request, const Tier1Frame
     }
 }
 
-static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier1FrameWork* work, Arena* output, bool scalar, Tier1Frame* result)
+static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier1FrameWork* work, Arena* output, Tier1Frame* result)
 {
-    (void)scalar;
-
     const uint64_t mark = output->length;
     const Tier1FrameRequirements requirements = work->requirements;
     Tier1Frame candidate = {
@@ -888,34 +849,21 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
     const uint64_t object_begin = work->count == 0 ? outgoing : tier1_frame_align(outgoing, requirements.object_alignment);
     uint64_t object_bytes = 0;
     uint32_t slots = 0;
-    if (BUSTER_SCALAR_PATH(scalar))
+    for (uint32_t group = 0; group < work->class_count; group += 8)
     {
-        for (uint32_t group = 0; group < work->class_count; group += 1)
-        {
-            work->class_offset[group] = object_begin + object_bytes;
-            work->class_slot[group] = slots;
-            object_bytes += (uint64_t)work->class_stride[group] * work->class_colors[group];
-            slots += work->class_colors[group];
-        }
-    }
-    else
-    {
-        for (uint32_t group = 0; group < work->class_count; group += 8)
-        {
-            const uint32_t live = work->class_count - group < 8 ? work->class_count - group : 8;
-            const __mmask8 mask = (__mmask8)((1u << live) - 1);
-            const __m512i size = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, work->class_stride + group));
-            const __m512i colors = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, work->class_colors + group));
-            const __m512i bytes = _mm512_mullo_epi64(size, colors);
-            const __m512i ends = tier1_frame_scan64(bytes);
-            const __m512i begins = _mm512_add_epi64(_mm512_sub_epi64(ends, bytes), _mm512_set1_epi64(object_begin + object_bytes));
-            _mm512_mask_storeu_epi64(work->class_offset + group, mask, begins);
-            const __m512i slot_ends = tier1_frame_scan64(colors);
-            const __m512i slot_begins = _mm512_add_epi64(_mm512_sub_epi64(slot_ends, colors), _mm512_set1_epi64(slots));
-            _mm256_mask_storeu_epi32(work->class_slot + group, mask, _mm512_cvtepi64_epi32(slot_begins));
-            object_bytes += (uint64_t)_mm512_reduce_add_epi64(bytes);
-            slots += (uint32_t)_mm512_reduce_add_epi64(colors);
-        }
+        const uint32_t live = work->class_count - group < 8 ? work->class_count - group : 8;
+        const __mmask8 mask = (__mmask8)((1u << live) - 1);
+        const __m512i size = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, work->class_stride + group));
+        const __m512i colors = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(mask, work->class_colors + group));
+        const __m512i bytes = _mm512_mullo_epi64(size, colors);
+        const __m512i ends = tier1_frame_scan64(bytes);
+        const __m512i begins = _mm512_add_epi64(_mm512_sub_epi64(ends, bytes), _mm512_set1_epi64(object_begin + object_bytes));
+        _mm512_mask_storeu_epi64(work->class_offset + group, mask, begins);
+        const __m512i slot_ends = tier1_frame_scan64(colors);
+        const __m512i slot_begins = _mm512_add_epi64(_mm512_sub_epi64(slot_ends, colors), _mm512_set1_epi64(slots));
+        _mm256_mask_storeu_epi32(work->class_slot + group, mask, _mm512_cvtepi64_epi32(slot_begins));
+        object_bytes += (uint64_t)_mm512_reduce_add_epi64(bytes);
+        slots += (uint32_t)_mm512_reduce_add_epi64(colors);
     }
     uint64_t position = object_begin + object_bytes;
     const uint64_t variadic_begin = candidate.variadic ? tier1_frame_align(position, 16) : 0;
@@ -994,22 +942,20 @@ static Tier1FrameError tier1_frame_layout(const Tier1FrameRequest* request, Tier
     return error;
 }
 
-static Tier1FrameError tier1_frame_plan_path(const Tier1FrameRequest* request, Arena* output, Arena* scratch, bool scalar, Tier1Frame* result)
+static Tier1FrameError tier1_frame_plan(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result)
 {
-    (void)scalar;
-
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     Tier1FrameError error = output == scratch ? TIER1_FRAME_INVALID : TIER1_FRAME_OK;
     Tier1FrameWork work;
     if (error == TIER1_FRAME_OK)
     {
-        error = tier1_frame_prepare(request, scratch, BUSTER_SCALAR_PATH(scalar), &work);
+        error = tier1_frame_prepare(request, scratch, &work);
     }
     if (error == TIER1_FRAME_OK)
     {
         tier1_frame_color(&work);
-        error = tier1_frame_layout(request, &work, output, BUSTER_SCALAR_PATH(scalar), result);
+        error = tier1_frame_layout(request, &work, output, result);
     }
     arena_pop_to(scratch, scratch_mark);
     if (error != TIER1_FRAME_OK)
@@ -1017,16 +963,4 @@ static Tier1FrameError tier1_frame_plan_path(const Tier1FrameRequest* request, A
         arena_pop_to(output, output_mark);
     }
     return error;
-}
-
-static Tier1FrameError tier1_frame_plan_scalar(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result);
-
-static Tier1FrameError tier1_frame_plan(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result)
-{
-    return tier1_frame_plan_path(request, output, scratch, false, result);
-}
-
-static Tier1FrameError tier1_frame_plan_scalar(const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1Frame* result)
-{
-    return tier1_frame_plan_path(request, output, scratch, true, result);
 }

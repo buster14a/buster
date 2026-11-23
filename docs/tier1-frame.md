@@ -5,9 +5,8 @@
 sharing, fixed areas, stack alignment, register preservation and explicit
 prologue/epilogue steps. It emits no machine instructions or unwind tables
 itself, but its steps are Tier 0's frame protocol, which the C driver's unwind
-tables describe ("Unwind tables" below). The scalar and vector paths produce
-valid frames with identical class counts, storage sizes and prologue plans; the
-physical color assigned to an individual object can differ.
+tables describe ("Unwind tables" below). It has one implementation, the vector
+one: its scalar twin went in #2924 (see "Interval coloring").
 
 ## Producer and consumer contract
 
@@ -21,8 +20,7 @@ pointers or alignment beyond 16 bytes; dynamic stacks with such realignment
 also reserve R15 as a stable base (Tier 0's realigned base too, which the unwind
 tables' reader checks). It does not silently repair an allocation.
 
-After allocation, `tier1_frame_plan` and `tier1_frame_plan_scalar` take the
-actual memory objects. They reject conflicting allocated registers and check
+After allocation, `tier1_frame_plan` takes the actual memory objects. They reject conflicting allocated registers and check
 the final frame extent, which can grow after spilling. An underestimated
 pre-allocation requirement therefore requires an explicit allocation retry.
 
@@ -111,25 +109,34 @@ that:
    and an item whose row holds another's stamp shares it; only stamped rows are
    read, so nothing is cleared. Without scratch for a stamp a row the indices
    are sorted instead.
-2. The vector path keeps up to eight distinct class keys in one register,
+2. Preparation keeps up to eight distinct class keys in one register,
    compares each item's key with all of them at once, and numbers a key by the
    count of distinct keys below it, its place in the sorted order. A ninth
    distinct key falls back to the sort.
-3. The vector path sorts up to 64 events by rank. Each event's key is distinct
+3. It sorts up to 64 events by rank. Each event's key is distinct
    (class, position, place in the input), every key is compared with eight
    others at a time, and an event's rank is the count of keys below its own:
    the stable sort's order.
-4. The scalar twin, and larger inputs on either path, sort by stable eight-bit
+4. Larger inputs (a ninth class, more than 64 events) sort by stable eight-bit
    radix passes over the key bytes that differ between keys, so small positions
    and few classes take two or three passes of the eight.
 
-One ordered pass then colors, on both paths (`tier1_frame_color`). A class's
+The scalar twin (eight-lane rows, the class register and the rank sort replaced
+by scalar loops and the radix sort, and a scalar layout scan) went in #2924. On
+the 9700X, replaying every real frame of `--tier1 -c` of sqlite3.c, Lua and
+musl once a pass through both paths (21 passes, CPU 2), the vector path took
+@@REPLAY@@ of the twin's ticks in every bin of frame sizes from 0 to over 128
+objects; the record is buster-performance's
+`docs/measurements/scalar-paths-removal-2924-2026-11-17/tier1-frame/`. The
+objects of all three corpora were identical on both paths.
+
+One ordered pass then colors (`tier1_frame_color`). A class's
 free colors are a stack: an end pushes its item's color, and a start pops the
 last one pushed, or takes a new color, its pressure less one, at a new pressure
 maximum of its class. The stack's place is the pressure level, and what it
 holds is the last item that ended there, whose color the start reads. A class
-uses exactly its maximum simultaneous live count. Neither path claims globally
-optimal packing across different storage classes.
+uses exactly its maximum simultaneous live count. The planner doesn't claim
+globally optimal packing across different storage classes.
 
 The pass is the part of the planner that stays scalar, and it has no branch on
 an event's kind: it selects, and each event makes both stores, a start's color
@@ -149,7 +156,7 @@ a compile's frames never repeat.
 Classes are laid out by descending alignment. Each class stride is a multiple
 of that alignment, so a prefix sum after the first class's aligned start
 preserves all later class alignments. The radix scatter, the coloring pass and
-the small per-function policy decisions are scalar in both paths. Indexed row
+the small per-function policy decisions are scalar. Indexed row
 loads use bounded scalar staging rather than Zen 5's expensive wide gathers.
 
 ## Frame and prologue rules
@@ -425,7 +432,7 @@ they feed, they are scalar.
 `--tier1-no-lifetimes` compiles without lifetimes, every object a slot of its
 own. On `test-checker-driver`'s lifetime fixture (`check_test_driver_tier1_lifetimes`),
 which has the cases above, Tier 1's frames take 1,480 bytes with lifetimes
-against 2,064 without, by both paths. Every build prints clang's output. That
+against 2,064 without. Every build prints clang's output. That
 was measured in a cloud container: frame sizes against `clang -O2` on the
 corpora and the run time on the 9700X are still to be measured.
 
@@ -577,7 +584,7 @@ another CFA exactly for the open frames (no epilogue's rows), the CFA rbp's in
 some row exactly for the frame pointers, and the leaf's one row.
 By each path and through GNU ld and lld, `backtrace()` walks through every frame
 to `main` (and without unwind tables stops at the first), `--lanes 1` and 8 make
-the vector path's bytes, and gdb's backtrace at every instruction of each
+the same bytes, and gdb's backtrace at every instruction of each
 function, both returns and the loops' iterations among them, gives the function
 and `main`. Tier 1 doesn't make the other
 shapes the planner can: its allocator gives a leaf no callee-saved register (they
@@ -595,9 +602,13 @@ compiles c-testsuite's subset with the tables and `--verify`.
 
 ## Checking and measurement
 
-`test-tier1-frame [--seed N] [--count N]` checks both paths against independent
+`test-tier1-frame [--seed N] [--count N]` checks each plan against independent
 pairwise byte-overlap and alignment rules and an interval-pressure lower
-bound. Cases cover simultaneous starts/ends, nesting, chained reuse, sparse
+bound, each preparation's class numbers and event order against their
+definition (by quadratic scans, not the planner's sorts), the colors against a
+pointer-jumping oracle, and the default run's (seed 177, eight rounds) plans
+against a digest frozen while the scalar twin still agreed (#2924). Cases
+cover simultaneous starts/ends, nesting, chained reuse, sparse
 positions near `UINT32_MAX`, many classes, legal index permutations, every
 frame-policy combination, variadic saves, call maxima and all callee saves.
 A sparse abstract stack executes the prologue and epilogue, including dynamic
@@ -614,7 +625,7 @@ cloud container passed 2,277,543 checks with seed 177 and eight rounds and
 8,802,059 with seed 177177 and 32 rounds (the earlier store-based planner's
 were 2,273,931 and an ASan/UBSan 8,793,497). These are local correctness
 diagnostics, not 9700X or emitted-code acceptance evidence. A local benchmark smoke exercised all four
-phases and both paths at 65 objects; assembly inspection confirmed bounded
+phases at 65 objects; assembly inspection confirmed bounded
 masked vector loads/stores and the pressure-scan vector additions.
 
 `test-tier1-frame-execution` executes the native companion in an isolated
@@ -636,8 +647,8 @@ push-based emitter's optimized run passed the same 14,619. These are native
 helper correctness diagnostics; they do not substitute for the
 source-to-program ABI/corpus qualification or controlled 9700X measurements.
 
-`benchmark-tier1-frame [--only scalar|vector] [--phase prepare|color|layout|total]
-[--count N] [--seed N] [--after-scalar MS]` uses original generated lifetime
+`benchmark-tier1-frame [--phase prepare|color|layout|total] [--count N]
+[--seed N]` uses original generated lifetime
 columns frozen before timing. The default leaf, calling, variadic and dynamic
 realigned cases contain 16, 256, 4096 and 32768 objects. The indexed cases
 include the compact-index validation and sorting cost. It reports 21-sample
@@ -654,11 +665,11 @@ Run every build, test and benchmark separately through the shared 9700X lock:
 EXCLUSIVE_OWNER=codex-138-frame EXCLUSIVE_TITLE='Tier 1 issue 138' \
 EXCLUSIVE_LINK=https://github.com/buster14a/buster/issues/177 \
 ~/buster-fast-bench/exclusive.sh taskset -c 2 \
-./build/compiler benchmark-tier1-frame --only vector --phase total
+./build/compiler benchmark-tier1-frame --phase total
 ```
 
-Repeat frozen inputs in separate processes, alternate scalar/vector order and
-also measure `--after-scalar 100` through `300`. The total row includes
+Repeat frozen inputs in separate processes. The benchmark repeats one frame,
+which the predictor learns; a compile's frames never repeat. The total row includes
 validation, copies/staging, sorting, scratch setup, coloring, layout and all
 output stores; isolated rows cannot establish a total improvement. Synthetic
 generation precedes timing. Source-level interval construction, allocation,
@@ -706,10 +717,11 @@ prefixes may hold inputs. Failure preserves result and arena lengths.
 One function is the semantic batch: independent chunks would miss cross-chunk
 interference. Internal class/event sorting puts ends before starts at ties,
 then color/layout phases produce object-to-slot/offset columns and explicit
-steps. Both paths color in one ordered pass, each level's last ended item's
-color, over one event order, so they give identical slots and offsets (#2606),
-which `test-tier1-frame` requires besides its independent interference, class
-slot count and frame size checks and its pointer-jumping oracle for the colors
+steps. One ordered pass colors, each level's last ended item's color, over one
+event order, so a Tier 1 object doesn't depend on the compiler's host (#2606);
+`test-tier1-frame` freezes the default run's slots and offsets, besides its
+independent interference, class slot count and frame size checks, its
+definition of preparation's order and its pointer-jumping oracle for the colors
 (#2699). Register/stack limits and all displacement bounds
 are checked; partial-vector tails never create objects.
 

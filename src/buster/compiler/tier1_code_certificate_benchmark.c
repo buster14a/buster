@@ -95,7 +95,6 @@ static Tier1EmitOptions tier1_code_cert_bench_options(bool certify)
 {
     const Tier1EmitOptions options = {
         .register_mask = tier1_liveness_register_mask(),
-        .vector = true,
         .rematerialize = true,
         .certify = certify,
     };

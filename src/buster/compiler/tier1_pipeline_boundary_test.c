@@ -322,7 +322,6 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
             .certify = true,
             .register_mask = tier1_liveness_register_mask(),
             .frame_flags = test->rematerialize ? BUSTER_TIER1_FRAME_KEEP_POINTER | BUSTER_TIER1_FRAME_NO_RED_ZONE : 0,
-            .vector = test->vector,
             .rematerialize = test->rematerialize,
             .symbol_count = source->symbol_count,
         };

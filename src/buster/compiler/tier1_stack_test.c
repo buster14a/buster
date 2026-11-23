@@ -3,7 +3,7 @@
 //
 // Independent native fixtures for arguments and parameters past the registers (#141), included after
 // tier1_dropped_test.c: two functions of original IR through tier1_emit_function, which gives them to the CFG consumer,
-// by both paths, with constants rematerialized and not, with every register and with four, and with and without a kept
+// with constants rematerialized and not, with every register and with four, and with and without a kept
 // frame pointer.
 //
 // - tier1_stack_parameters_function takes twelve parameters of every type an IR parameter may have, six of them on the
@@ -318,8 +318,8 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_stack_call_calls(
 }
 
 // One compile of fixture 0 (the parameters), 1 (the parameters in a realigned frame), 2 (the calls) or 3 (the
-// parameters with a call), by one path and one set of options, run on the samples.
-static void tier1_stack_compile(Tier1EmitTest* test, uint32_t fixture, bool vector, bool rematerialize, uint32_t register_mask, bool keep_pointer)
+// parameters with a call), by one set of options, run on the samples.
+static void tier1_stack_compile(Tier1EmitTest* test, uint32_t fixture, bool rematerialize, uint32_t register_mask, bool keep_pointer)
 {
     IrFunction function;
     const bool parameters = fixture != 2;
@@ -330,7 +330,6 @@ static void tier1_stack_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     tier1_emit_test_expect(test, planned, "the stack arguments' fixture selects");
     const Tier1EmitOptions options = {
         .register_mask = register_mask,
-        .vector = vector,
         .rematerialize = rematerialize,
         .frame_flags = keep_pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
         .symbol_count = function.symbol_count,
@@ -341,7 +340,7 @@ static void tier1_stack_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK && test->scratch.length == scratch_mark, "the stack arguments' fixture emits through the CFG consumer");
     if (error != TIER1_EMIT_OK && planned && test->failures < 20)
     {
-        fprintf(stderr, "  stack emission error=%u node=%u fixture=%u vector=%u remat=%u mask=%x pointer=%u\n", error, node, fixture, vector, rematerialize, register_mask, keep_pointer);
+        fprintf(stderr, "  stack emission error=%u node=%u fixture=%u remat=%u mask=%x pointer=%u\n", error, node, fixture, rematerialize, register_mask, keep_pointer);
     }
     if (error == TIER1_EMIT_OK)
     {
@@ -354,7 +353,7 @@ static void tier1_stack_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
         tier1_stack_misaligned = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x3a1f72c9e05b6d84) ^ ((uint64_t)register_mask << 8) ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0) ^ (keep_pointer ? 4 : 0) ^ ((uint64_t)fixture << 40);
+            uint64_t random = UINT64_C(0x3a1f72c9e05b6d85) ^ ((uint64_t)register_mask << 8) ^ (rematerialize ? 2 : 0) ^ (keep_pointer ? 4 : 0) ^ ((uint64_t)fixture << 40);
             for (uint32_t sample = 0; sample < BUSTER_TIER1_STACK_SAMPLES; sample += 1)
             {
                 uint64_t expected = 0;
@@ -379,7 +378,7 @@ static void tier1_stack_compile(Tier1EmitTest* test, uint32_t fixture, bool vect
                 }
                 if (actual != expected && test->failures < 20)
                 {
-                    fprintf(stderr, "  stack fixture=%u vector=%u remat=%u mask=%x pointer=%u actual=%016" PRIx64 " expected=%016" PRIx64 "\n", fixture, vector, rematerialize, register_mask, keep_pointer, actual, expected);
+                    fprintf(stderr, "  stack fixture=%u remat=%u mask=%x pointer=%u actual=%016" PRIx64 " expected=%016" PRIx64 "\n", fixture, rematerialize, register_mask, keep_pointer, actual, expected);
                 }
                 tier1_emit_test_expect(test, actual == expected, "arguments and parameters past the registers reach their stack slots natively");
             }
@@ -410,9 +409,9 @@ static void tier1_stack_cases(Tier1EmitTest* test)
     test->selects = false;
     for (uint32_t fixture = 0; fixture < 4; fixture += 1)
     {
-        for (uint32_t variant = 0; variant < 16; variant += 1)
+        for (uint32_t variant = 0; variant < 8; variant += 1)
         {
-            tier1_stack_compile(test, fixture, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : all, (variant & 8) != 0);
+            tier1_stack_compile(test, fixture, (variant & 1) != 0, (variant & 2) != 0 ? few : all, (variant & 4) != 0);
         }
     }
 }
