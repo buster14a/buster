@@ -4214,8 +4214,11 @@ static CheckInitStatus check_initializer_live(const TypeTable* types, const Chec
 
 // Public object-ID slices retain source order and duplicate IDs from distinct surviving fields. The emitter
 // uses the same live-part classification, so discarded literals and foreign symbols need no shared symbol.
-static __attribute__((unused)) CheckInitStatus check_initializer_references(const TypeTable* types, const CheckInitializer* initializer,
-                                                                          Arena* output, Arena* scratch, uint32_t** objects, uint32_t* count)
+// With `live`, the live parts' marks too (check_initializer_live's, a byte a part, or null for none), in `output` after the
+// objects: what the static data's plan reads again (CheckDataObject.live_parts, #3393).
+static __attribute__((unused)) CheckInitStatus check_initializer_references_live(const TypeTable* types, const CheckInitializer* initializer,
+                                                                               Arena* output, Arena* scratch, uint32_t** objects, uint32_t* count,
+                                                                               const uint8_t** live)
 {
     *objects = 0;
     *count = 0;
@@ -4247,6 +4250,16 @@ static __attribute__((unused)) CheckInitStatus check_initializer_references(cons
             assert(at == used);
         }
     }
+    uint8_t* kept = status == CHECK_INIT_OK && live != NULL && selected != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, initializer->count) : 0;
+    status = status == CHECK_INIT_OK && live != NULL && selected != 0 && kept == 0 ? CHECK_INIT_RESOURCE : status;
+    if (kept != 0)
+    {
+        memcpy(kept, selected, initializer->count);
+    }
+    if (live != NULL)
+    {
+        *live = status == CHECK_INIT_OK ? kept : NULL;
+    }
     if (status == CHECK_INIT_OK)
     {
         *objects = result;
@@ -4261,6 +4274,12 @@ static __attribute__((unused)) CheckInitStatus check_initializer_references(cons
         arena_pop_to(scratch, scratch_mark);
     }
     return status;
+}
+
+static __attribute__((unused)) CheckInitStatus check_initializer_references(const TypeTable* types, const CheckInitializer* initializer,
+                                                                          Arena* output, Arena* scratch, uint32_t** objects, uint32_t* count)
+{
+    return check_initializer_references_live(types, initializer, output, scratch, objects, count, NULL);
 }
 #endif
 

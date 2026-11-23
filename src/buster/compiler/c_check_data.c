@@ -61,6 +61,11 @@ struct CheckDataObject
     bool optional;
     // Declaration alignment is separate from the ordinary compatible type. Zero keeps its natural alignment.
     uint8_t alignment_log2;
+    // Its initializer's live parts (check_initializer_live's marks, a byte a part, null for none, and how many), which the
+    // preparation found (check_initializer_references_live) and the plan reads (#3393), where `live_kept`.
+    bool live_kept;
+    const uint8_t* live_parts;
+    uint32_t live_count;
 };
 
 typedef enum CheckDataStatus
@@ -824,7 +829,9 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
         }
         else if (initializer->count != 0)
         {
-            const CheckInitStatus references = check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
+            const CheckInitStatus references = object->live_kept ? CHECK_INIT_OK : check_initializer_live(types, initializer, scratch, &live_parts, &live_count);
+            live_parts = object->live_kept ? (uint8_t*)(uintptr_t)object->live_parts : live_parts;
+            live_count = object->live_kept ? object->live_count : live_count;
             status = references == CHECK_INIT_OK ? CHECK_DATA_OK : references == CHECK_INIT_RESOURCE ? CHECK_DATA_RESOURCE : CHECK_DATA_INVALID;
             plan->fixups = status == CHECK_DATA_OK && live_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, CheckDataFixup, live_count) : 0;
             // arena_push is capacity-only and leaves the arena unchanged on failure. Admit direct construction
