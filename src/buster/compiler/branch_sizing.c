@@ -492,7 +492,7 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
     // An emission without instructions has no records (null); the gathers then take no lanes.
     const uint8_t* forms = records != 0 ? (const uint8_t*)records + __builtin_offsetof(X86Instruction, form) : 0;
     uint32_t* prefix = columns->prefix[0];
-    __m512i carry = _mm512_setzero_si512();
+    __m512i carry = zero;
     __mmask16 grown = 0;
     prefix[0] = 0;
     for (uint64_t k = 0; k < branch_count; k += BUSTER_BRANCH_SIZING_LANES)
@@ -508,7 +508,13 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
         const __m512i grow = _mm512_maskz_mov_epi32(lanes, _mm512_mask_blend_epi32(jump, condition_growth, jump_growth));
         const __m512i displacement = _mm512_maskz_sub_epi32(lanes, end, _mm512_add_epi32(start, short_bytes));
         // Lanes past the branches have no growth to take (their grow is 0).
+        const __m512i growth = _mm512_maskz_mov_epi32(branch_sizing_out_of_range_vector(displacement), grow);
+        const __m512i sums = _mm512_add_epi32(branch_sizing_scan(growth), carry);
+        _mm512_store_si512(columns->grow + k, grow);
         _mm512_store_si512(columns->displacement0 + k, displacement);
+        _mm512_store_si512(columns->growth + k, growth);
+        _mm512_storeu_si512(prefix + k + 1, sums);
+        carry = branch_sizing_last(sums);
         grown |= _mm512_test_epi32_mask(growth, growth);
     }
     return grown != 0;
