@@ -4041,7 +4041,7 @@ static bool check_program_emit_literals(CheckEmitLiterals* literals, const Emitt
 
 // -S's copy of a body's records and branch columns (#1362), in `output`, which outlives the lanes' arenas the code is
 // in: what the assembly sink prints the body's atom from. Returns false if `output` can't hold them.
-static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, Arena* output)
+static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, uint32_t sled, Arena* output)
 {
     const uint32_t count = code->count;
     const uint32_t branch_count = code->branch_count;
@@ -4067,6 +4067,7 @@ static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCod
             .targets = targets,
             .count = count,
             .branch_count = branch_count,
+            .sled = sled,
         };
     }
     return valid;
@@ -5948,11 +5949,10 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
             }
-            // -S's copy of the records the atom's bytes are (#1362): a template's code and a NOP sled's aren't records the
-            // sink prints, which it refuses by name.
-            if (valid && keep_records && !assembly && body->sled == 0 && !body->windowed && atom < result->assembly_code_count)
+            // -S prints the sled's bytes before the body's instruction records. Templates have no records here.
+            if (valid && keep_records && !assembly && !body->windowed && atom < result->assembly_code_count)
             {
-                valid = check_program_emit_keep_records(&result->assembly_code[atom], code, output);
+                valid = check_program_emit_keep_records(&result->assembly_code[atom], code, body->sled, output);
                 result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
             }
             // The labels its templates define, each at its record's offset (its lane's, for a naked function): the

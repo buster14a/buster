@@ -10121,8 +10121,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
     const CheckProgramAsms* asms = &code->lowered.asms;
     const bool inline_assembly = asms->plan_count != 0 || asms->naked != 0 || asms->file_assembled || code->asm_atom_count != 0 || code->unit_atom_count != 0;
     const bool multiversioned = program->cpu_group_count != 0 || program->target_group_count != 0;
-    const char* refusal = inline_assembly ? "inline assembly" : code->patchable_count != 0 ? "patchable function entries" :
-                          multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
+    const char* refusal = inline_assembly ? "inline assembly" : multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
     uint8_t* temporary = 0;
     const bool linked = refusal == 0 && link_check(&code->link) == LINK_ERROR_NONE && check_driver_temporaries(code, scratch, &temporary);
     AssemblyResult printed = { .error = ASSEMBLY_FULL };

@@ -3171,20 +3171,52 @@ static uint64_t object_test_section_named(const ObjectView* view, const char* na
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
+// An ordered data section or its relocation section, or zero for an ordinary section.
+static uint64_t object_test_ordered_section(const ObjectView* view, uint64_t index)
+{
+    const Elf64_Shdr* section = &view->sections[index];
+    const uint64_t data = section->sh_type == SHT_RELA ? section->sh_info : index;
+    return data < view->section_count && (view->sections[data].sh_flags & SHF_LINK_ORDER) != 0 ? data : 0;
+}
+
 static bool object_test_same_section_identity(const ObjectView* a, uint64_t i, const ObjectView* b, uint64_t j)
 {
-    return a->sections[i].sh_type == b->sections[j].sh_type &&
-           object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
-           object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j));
+    const uint64_t a_ordered = object_test_ordered_section(a, i);
+    const uint64_t b_ordered = object_test_ordered_section(b, j);
+    bool same = a->sections[i].sh_type == b->sections[j].sh_type &&
+                object_test_same_string(object_view_section_name(a, i), object_view_section_name(b, j)) &&
+                object_test_same_string(object_test_section_group(a, i), object_test_section_group(b, j)) &&
+                ((a_ordered == 0) == (b_ordered == 0));
+    if (same && a_ordered != 0)
+    {
+        const uint32_t a_link = a->sections[a_ordered].sh_link;
+        const uint32_t b_link = b->sections[b_ordered].sh_link;
+        same = a_link != 0 && b_link != 0 && a_link < a->section_count && b_link < b->section_count &&
+               a->sections[a_link].sh_type == b->sections[b_link].sh_type &&
+               object_test_same_string(object_view_section_name(a, a_link), object_view_section_name(b, b_link)) &&
+               object_test_same_string(object_test_section_group(a, a_link), object_test_section_group(b, b_link));
+    }
+    return same;
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_ASSEMBLER || BUSTER_UNIT == BUSTER_UNIT_LINK
 static uint64_t object_test_matching_section(const ObjectView* view, const ObjectView* source, uint64_t index)
 {
+    // Repeated linked-order names can even refer to the same code section. Pair their occurrences in object order.
+    const bool ordered = object_test_ordered_section(source, index) != 0;
+    uint64_t occurrence = 0;
+    for (uint64_t i = 1; ordered && i < index; i += 1)
+    {
+        occurrence += object_test_same_section_identity(source, i, source, index);
+    }
     uint64_t result = 0;
     for (uint64_t i = 1; result == 0 && i < view->section_count; i += 1)
     {
-        result = object_test_same_section_identity(view, i, source, index) ? i : 0;
+        if (object_test_same_section_identity(view, i, source, index))
+        {
+            result = occurrence == 0 ? i : 0;
+            occurrence -= occurrence != 0;
+        }
     }
     return result;
 }
