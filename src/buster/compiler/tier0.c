@@ -14707,6 +14707,8 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     frame->calls = calls;
     tier0_frame_registers(frame, moves, kept, depth_count);
     *error = *error == TIER0_OK && function->returns_twice && frame->based ? TIER0_ERROR_UNSUPPORTED : *error;
+    // The list's count, which measuring takes as it is in a function without deep entries (#2874).
+    entries->deferred_count = deferred_count;
     return unsupported;
 }
 
@@ -14968,20 +14970,47 @@ static void tier0_call_memo_write(const Tier0Function* function, const Tier0Fram
     writer->count += count;
 }
 
-// Measuring for the vector path, from the prologue's length on, in three loops (#2874):
+// Measuring for the vector path, from the prologue's length on (#2874), in two loops for a function without deep
+// entries:
+// - the deferred entries selection listed (Tier0Entries.deferred_entries), in order: each one's length from the thread's
+//   table of calls (tier0_call_memo_find) or from tier0_count_deferred (tier0_measure_listed);
 // - 8 words at a time: a home-dependent entry's word is resolved to its homes' case (for a uniform slot, the case added
-//   to the template; otherwise, the case's word gathered), a template's length is its word's, and the deferred entries
-//   are listed (Tier0Entries.deferred_entries); the branch records', references' and choice requests' counts come from
-//   popcounts;
-// - the listed entries, in order: each one's length from the thread's table of calls (tier0_call_memo_find) or from
-//   tier0_count_deferred;
-// - the positions, the lengths' prefix sums, 8 at a time in registers.
-// The first loop has no branch on its words and the second none on the blocks, so that neither the gathers nor the
-// calls' table lookups wait for each other's guards (a loop over the deferred lanes of each block mispredicted at its
-// end). The last block's words and positions are stored whole, past the entries: emission expands every lane of a block,
+//   to the template; otherwise, the case's word gathered), a template's length is its word's and a deferred entry's the
+//   first loop's, and the positions are the lengths' prefix sums in registers; the branch records', references' and
+//   choice requests' counts come from popcounts.
+// A deep entry is deferred after selection (tier0_select_deep), so a function with them lists its deferred entries in
+// the words' loop again, then counts them, then sums the lengths in a third loop. The words' loop has no branch on its
+// words and the list's none on the blocks, so that neither the gathers nor the calls' table lookups wait for each
+// other's guards (a loop over the deferred lanes of each block mispredicted at its end). The last block's words and positions are stored whole, past the entries: emission expands every lane of a block,
 // and a lane past the entries has template 0 and the end's position, which the epilogue overwrites. `memory` is
 // Tier0Frame.memory and `deep` whether the function has deep entries (tier0_select_deep's): constants at each of
 // tier0_measure_vector's four uses, as tier0_select_entries's are.
+// The lengths of measuring's listed deferred entries (tier0_measure_vector_entries), in order: a call the thread's table
+// gives (tier0_call_memo_find) its records' count, and its entry for emission; another its count's.
+static inline __attribute__((always_inline)) void tier0_measure_listed(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes,
+                                                                       const uint32_t* listed, uint32_t deferred_count, bool memory, bool deep,
+                                                                       Tier0Counts* counts)
+{
+    for (uint32_t k = 0; k < deferred_count; k += 1)
+    {
+        const uint32_t i = listed[k];
+        uint32_t records = 0;
+        const uint32_t found = entries->call_slots != 0 && entries->key_kinds[i] == BUSTER_TYPED_CALL ?
+                                   tier0_call_memo_find(function, entries, homes, i, &records, &counts->references) :
+                                   BUSTER_TIER0_CALL_MEMO_NONE;
+        if (entries->call_slots != 0)
+        {
+            entries->call_slots[i] = found;
+        }
+        if (found == BUSTER_TIER0_CALL_MEMO_NONE)
+        {
+            records = deep && entries->deep[i] != 0 ? tier0_count_deep(function, entries, homes, i, counts)
+                                                    : tier0_count_deferred(function, entries, i, memory, &counts->references, &counts->branches);
+        }
+        entries->lengths[i] = records;
+    }
+}
+
 static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_entries(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes,
                                                                                       uint32_t prologue, bool memory, bool deep)
 {
@@ -15007,7 +15036,13 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
     const __m512i register_bits = _mm512_set1_epi64((int64_t)registers);
     const __m512i one = _mm512_set1_epi64(1);
     const __m256i lane_numbers = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
-    uint32_t deferred_count = 0;
+    // Without deep entries, selection's list is the deferred entries': their lengths first.
+    uint32_t deferred_count = deep ? 0 : entries->deferred_count;
+    if (!deep)
+    {
+        tier0_measure_listed(function, entries, homes, listed, deferred_count, memory, deep, &counts);
+    }
+    __m512i carry = _mm512_set1_epi64(prologue);
     __m512i previous = zero;
     for (uint32_t first = 0; first < count; first += 8)
     {
@@ -15051,36 +15086,33 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
         const __mmask8 deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
         const __mmask8 template = lanes & _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ABSORBED)));
         const __m512i length = _mm512_maskz_and_epi64(template, _mm512_srli_epi64(word, BUSTER_TIER0_WORD_LENGTH_SHIFT), seven);
-        _mm256_storeu_si256((__m256i*)(lengths + first), _mm512_cvtepi64_epi32(length));
-        // The list has room for 8 past its last entry: the compressed store writes 8.
-        _mm256_storeu_si256((__m256i*)(listed + deferred_count), _mm256_maskz_compress_epi32(deferred, _mm256_add_epi32(_mm256_set1_epi32((int32_t)first), lane_numbers)));
-        deferred_count += (uint32_t)__builtin_popcount(deferred);
+        if (deep)
+        {
+            _mm256_storeu_si256((__m256i*)(lengths + first), _mm512_cvtepi64_epi32(length));
+            // The list has room for 8 past its last entry: the compressed store writes 8.
+            _mm256_storeu_si256((__m256i*)(listed + deferred_count), _mm256_maskz_compress_epi32(deferred, _mm256_add_epi32(_mm256_set1_epi32((int32_t)first), lane_numbers)));
+            deferred_count += (uint32_t)__builtin_popcount(deferred);
+        }
+        else
+        {
+            // A deferred lane's length is the list's loop's; the block's positions its lengths' prefix sums from the carry.
+            const __m512i all = _mm512_or_si512(length, _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(deferred, lengths + first)));
+            __m512i sum = _mm512_add_epi64(all, _mm512_alignr_epi64(all, zero, 7));
+            sum = _mm512_add_epi64(sum, _mm512_alignr_epi64(sum, zero, 6));
+            sum = _mm512_add_epi64(sum, _mm512_alignr_epi64(sum, zero, 4));
+            _mm256_storeu_si256((__m256i*)(positions + first), _mm512_cvtepi64_epi32(_mm512_add_epi64(carry, _mm512_sub_epi64(sum, all))));
+            carry = _mm512_add_epi64(carry, _mm512_permutexvar_epi64(seven, sum));
+        }
         counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
         counts.references += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_FIXUP)));
         counts.choices += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE)));
         previous = current;
     }
-    for (uint32_t k = 0; k < deferred_count; k += 1)
+    if (deep)
     {
-        const uint32_t i = listed[k];
-        // A call the thread's table gives (tier0_call_memo_find): its records' count, and its entry for emission.
-        uint32_t records = 0;
-        const uint32_t found = entries->call_slots != 0 && entries->key_kinds[i] == BUSTER_TYPED_CALL ?
-                                   tier0_call_memo_find(function, entries, homes, i, &records, &counts.references) :
-                                   BUSTER_TIER0_CALL_MEMO_NONE;
-        if (entries->call_slots != 0)
-        {
-            entries->call_slots[i] = found;
-        }
-        if (found == BUSTER_TIER0_CALL_MEMO_NONE)
-        {
-            records = deep && entries->deep[i] != 0 ? tier0_count_deep(function, entries, homes, i, &counts)
-                                                    : tier0_count_deferred(function, entries, i, memory, &counts.references, &counts.branches);
-        }
-        lengths[i] = records;
+        tier0_measure_listed(function, entries, homes, listed, deferred_count, memory, deep, &counts);
     }
-    __m512i carry = _mm512_set1_epi64(prologue);
-    for (uint32_t first = 0; first < count; first += 8)
+    for (uint32_t first = 0; deep && first < count; first += 8)
     {
         const __mmask8 lanes = (__mmask8)tier0_lanes(first, count);
         const __m512i length = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, lengths + first));
@@ -15316,7 +15348,7 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
         }
         previous = current;
     }
-    // A function without deep entries: its deferred entries in order (measuring's list, Tier0Entries.deferred_entries),
+    // A function without deep entries: its deferred entries in order (selection's list, Tier0Entries.deferred_entries),
     // each over what the lanes stored at its place, in a loop of their own (#2874), as selection's and measuring's are.
     // Their references go to a column of their own, then into the templates' by instruction from the end: their records
     // are each an entry's, so that the order is the entries' as it was. A probed ALLOCA's loop's branches (#177) and an
