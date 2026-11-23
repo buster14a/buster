@@ -159,19 +159,19 @@ static void ir_sroa_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
             if (sc.error == IR_OK)
             {
                 const IrOptimizeExecution after = ir_optimize_test_execute(&ssa, scratch, parameter, 0);
-                ir_optimize_test_expect(test, before.status == after.status && before.value == after.value, "SROA plus upstream vector SSA preserves independently interpreted value");
+                ir_optimize_test_expect(test, before.status == after.status && before.value == after.value, "SROA plus upstream SSA preserves independently interpreted value");
             }
         }
         arena_pop_to(promoted, pm);
-        const IrCheck scalar_ssa = ssa_ir_promote_scalar(&b.function, promoted, scratch, &ssa);
-        ir_optimize_test_expect(test, scalar_ssa.error == IR_OK, "SROA output accepted by independent upstream scalar SSA promoter");
+        const IrCheck scalar_ssa = ssa_ir_promote(&b.function, promoted, scratch, &ssa);
+        ir_optimize_test_expect(test, scalar_ssa.error == IR_OK, "SROA's scalar output accepted by upstream SSA promotion");
         if (scalar_ssa.error == IR_OK)
         {
             for (uint32_t trial = 0; trial < 9; trial += 1)
             {
                 const IrOptimizeExecution before = ir_optimize_test_execute(f, scratch, trial, 0);
                 const IrOptimizeExecution after = ir_optimize_test_execute(&ssa, scratch, trial, 0);
-                ir_optimize_test_expect(test, before.status == after.status && before.value == after.value, "SROA plus upstream scalar SSA preserves independently interpreted value");
+                ir_optimize_test_expect(test, before.status == after.status && before.value == after.value, "SROA's scalar output plus upstream SSA preserves independently interpreted value");
             }
         }
     }

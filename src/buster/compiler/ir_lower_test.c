@@ -794,33 +794,23 @@ static bool ir_lower_test_objects_kept(const IrFunction* lowered, const IrFuncti
     return same;
 }
 
-// #134's promotion of a lowered function, by both paths, which may order their output differently (test-ssa-ir checks
-// their semantics): each must accept it with real dominance, pass the verifier and keep every object's slot.
-static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* lowered, Arena* output, Arena* twin_output, Arena* scratch, uint64_t seed, uint32_t index)
+// #134's promotion of a lowered function (test-ssa-ir checks its semantics): it must accept it with real dominance,
+// pass the verifier and keep every object's slot.
+static void ir_lower_test_promote(IrLowerTestTally* tally, const IrFunction* lowered, Arena* output, Arena* scratch, uint64_t seed, uint32_t index)
 {
     const uint64_t output_mark = output->length;
-    const uint64_t twin_mark = twin_output->length;
-    IrFunction vector =
+    IrFunction promoted =
     {
         0
     };
-    IrFunction scalar =
-    {
-        0
-    };
-    const IrCheck vector_check = ssa_ir_promote(lowered, output, scratch, &vector);
-    const IrCheck scalar_check = ssa_ir_promote_scalar(lowered, twin_output, scratch, &scalar);
-    bool ok = ir_lower_test_expect(tally, vector_check.error == IR_OK && scalar_check.error == IR_OK && vector_check.dominance_checked && scalar_check.dominance_checked,
-                                   "both SSA promotion paths accept the lowering", seed, index);
-    ok = ok && ir_lower_test_expect(tally, ir_verify(&vector, scratch, 0).error == IR_OK &&
-                                               ir_verify(&scalar, scratch, 0).error == IR_OK,
-                                    "the verifier accepts both promotions", seed, index);
+    const IrCheck check = ssa_ir_promote(lowered, output, scratch, &promoted);
+    bool ok = ir_lower_test_expect(tally, check.error == IR_OK && check.dominance_checked, "SSA promotion accepts the lowering", seed, index);
+    ok = ok && ir_lower_test_expect(tally, ir_verify(&promoted, scratch, 0).error == IR_OK, "the verifier accepts the promotion", seed, index);
     if (ok)
     {
-        ir_lower_test_expect(tally, ir_lower_test_objects_kept(lowered, &vector) && ir_lower_test_objects_kept(lowered, &scalar), "promotion keeps every object's slot", seed, index);
+        ir_lower_test_expect(tally, ir_lower_test_objects_kept(lowered, &promoted), "promotion keeps every object's slot", seed, index);
     }
     arena_pop_to(output, output_mark);
-    arena_pop_to(twin_output, twin_mark);
 }
 
 // Generated programs, lowered and executed as IR, against the typed-stream interpreter and Tier 0's
@@ -915,12 +905,11 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     Arena scratch = arena_reserve(1ull << 30);
     Arena execution = arena_reserve(1ull << 30);
     Arena promoted = arena_reserve(1ull << 30);
-    Arena twin_promoted = arena_reserve(1ull << 30);
     Arena native = arena_reserve(1ull << 32);
     Tier0TestCode* code = native.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&native, Tier0TestCode, 1) : 0;
     uint8_t* code_bytes = native.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&native, uint8_t, BUSTER_TIER0_TEST_CODE_BYTES) : 0;
     bool ready = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0 && promoted.base != 0 &&
-                 twin_promoted.base != 0 && code != 0 && code_bytes != 0 && tier0_tables_open(&tables);
+                 code != 0 && code_bytes != 0 && tier0_tables_open(&tables);
     ready = ir_lower_test_expect(tally, ready, "program arenas and ABI tables", seed, 0);
     options.records = records && ready ? &tables.records : 0;
     const uint64_t native_mark = native.length;
@@ -980,7 +969,7 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
                 }
                 register_results += functions[f].result_size != 0;
                 hidden_results += functions[f].parameter_passed != 0 && functions[f].result_abi.kind == BUSTER_ABI_RESULT_MEMORY;
-                ir_lower_test_promote(tally, &functions[f], &promoted, &twin_promoted, &scratch, program_seed, f);
+                ir_lower_test_promote(tally, &functions[f], &promoted, &scratch, program_seed, f);
             }
             arena_pop_to(&twin_output, 0);
         }
@@ -1063,7 +1052,6 @@ static void ir_lower_test_programs(IrLowerTestTally* tally, uint64_t seed, uint3
     tier0_tables_close(&tables);
     arena_release(&native);
     arena_release(&promoted);
-    arena_release(&twin_promoted);
     arena_release(&input);
     arena_release(&output);
     arena_release(&twin_output);
@@ -1140,10 +1128,9 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
     Arena output = arena_reserve(1ull << 26);
     Arena twin_output = arena_reserve(1ull << 26);
     Arena promoted = arena_reserve(1ull << 26);
-    Arena twin_promoted = arena_reserve(1ull << 26);
     Arena scratch = arena_reserve(1ull << 26);
     Arena execution = arena_reserve(1ull << 26);
-    const bool ready = wide != 0 && x87 != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 &&
+    const bool ready = wide != 0 && x87 != 0 && output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0 &&
                        execution.base != 0 && tier0_tables_open(&tables) && tier0_test_int128_abi(&tables, &int128_abi) && tier0_test_x87_abi(&tables, &x87_abi);
     ir_lower_test_expect(tally, ready, "wide program arenas and signatures", seed, 0);
     uint64_t checked[2] = { 0 };
@@ -1158,7 +1145,7 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
         };
         if (!wide->overflow && ir_lower_test_lower(tally, &source, IR_VOID, 1, &output, &scratch, &function, seed, p))
         {
-            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, seed, p);
+            ir_lower_test_promote(tally, &function, &promoted, &scratch, seed, p);
             Tier0TestWide in[BUSTER_TIER0_TEST_INT128_IN];
             uint64_t ints[BUSTER_TIER0_TEST_INT128_INTS];
             uint8_t out[BUSTER_TIER0_TEST_INT128_OUTPUTS * 16];
@@ -1201,7 +1188,7 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
         const Tier0Function long_double = tier0_test_x87_function(x87, &x87_abi);
         if (!x87->overflow && ir_lower_test_lower_unfolded(tally, &long_double, IR_VOID, 1, &output, &scratch, &function, seed, p))
         {
-            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, seed, p);
+            ir_lower_test_promote(tally, &function, &promoted, &scratch, seed, p);
             long double in[BUSTER_TIER0_TEST_X87_IN];
             uint64_t ints[BUSTER_TIER0_TEST_X87_INTS];
             uint64_t floats[BUSTER_TIER0_TEST_X87_FLOATS];
@@ -1257,7 +1244,6 @@ static void ir_lower_test_wide(IrLowerTestTally* tally, uint64_t seed, uint32_t 
     arena_release(&output);
     arena_release(&twin_output);
     arena_release(&promoted);
-    arena_release(&twin_promoted);
     arena_release(&scratch);
     arena_release(&execution);
     free(x87);
@@ -3308,11 +3294,10 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     Arena output = arena_reserve(1ull << 20);
     Arena twin_output = arena_reserve(1ull << 20);
     Arena promoted = arena_reserve(1ull << 20);
-    Arena twin_promoted = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
     // Both executors' frames, the shared IR interpreter's as the wide programs' check reserves them.
     Arena execution = arena_reserve(1ull << 26);
-    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0 && execution.base != 0;
     ir_lower_test_expect(tally, ready, "indirect jump arenas", 0, 0);
     const Tier0Function source =
     {
@@ -3384,7 +3369,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
             const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
             ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "a computed goto goes to the label whose address it takes", 0, (uint32_t)p);
         }
-        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 1);
+        ir_lower_test_promote(tally, &function, &promoted, &scratch, 0, 1);
         IrFunction promoted_function =
         {
             0
@@ -3411,7 +3396,6 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_pop_to(&output, 0);
     arena_pop_to(&twin_output, 0);
     arena_pop_to(&promoted, 0);
-    arena_pop_to(&twin_promoted, 0);
     if (ready && ir_lower_test_lower(tally, &twice, IR_I32, 4, &output, &scratch, &function, 0, 2))
     {
         // The dispatch block is the last: each jump's block branches to it, and its br_indirect goes to the two labels.
@@ -3433,7 +3417,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
             const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
             ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "two computed gotos go to the labels whose addresses they take", 0, (uint32_t)p);
         }
-        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 2);
+        ir_lower_test_promote(tally, &function, &promoted, &scratch, 0, 2);
         IrFunction promoted_function =
         {
             0
@@ -3466,7 +3450,6 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_pop_to(&output, 0);
     arena_pop_to(&twin_output, 0);
     arena_pop_to(&promoted, 0);
-    arena_pop_to(&twin_promoted, 0);
     // The same two jumps as jump tables' (#785): each a br_indirect of its own table's label, without a dispatch block;
     // and the first a goto * with the second a table's, the dispatch block's br_indirect listing only the label of no
     // table. Each runs as before, and promoted needs no phi for the jumps' addresses.
@@ -3535,7 +3518,7 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
                 const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
                 ir_lower_test_expect(tally, !fault && actual == (p != 0 ? 10 : 20), "jump tables' jumps go to their labels", 0, 3 + variant);
             }
-            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 3 + variant);
+            ir_lower_test_promote(tally, &function, &promoted, &scratch, 0, 3 + variant);
             IrFunction promoted_function =
             {
                 0
@@ -3551,7 +3534,6 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
         arena_pop_to(&promoted, 0);
-        arena_pop_to(&twin_promoted, 0);
     }
     // #1217: the first table is unreachable, the second jumps back to source entry zero. The preheader must run once,
     // retain both tables' distinct symbols, and dominate the loop without reinitializing its parameter on a backedge.
@@ -3607,12 +3589,11 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
             const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &p, 1, &execution, &fault);
             ir_lower_test_expect(tally, !fault && actual == 0, "a table backedge to source entry zero preserves the decremented parameter", 0, (uint32_t)p);
         }
-        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, 7);
+        ir_lower_test_promote(tally, &function, &promoted, &scratch, 0, 7);
     }
     arena_pop_to(&output, 0);
     arena_pop_to(&twin_output, 0);
     arena_pop_to(&promoted, 0);
-    arena_pop_to(&twin_promoted, 0);
     // #148's frame address, which both paths lower to a save of BUSTER_IR_STACK_SAVE_FRAME (#1847), its function's frame
     // pointer, of the class's U64, which the verifier takes.
     static const uint8_t frame_kinds[3] =
@@ -3722,7 +3703,6 @@ static void ir_lower_test_indirect_jump(IrLowerTestTally* tally)
     arena_release(&output);
     arena_release(&twin_output);
     arena_release(&promoted);
-    arena_release(&twin_promoted);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -3949,10 +3929,9 @@ static void ir_lower_test_hoisted_places(IrLowerTestTally* tally)
     Arena output = arena_reserve(1ull << 24);
     Arena twin_output = arena_reserve(1ull << 24);
     Arena promoted = arena_reserve(1ull << 24);
-    Arena twin_promoted = arena_reserve(1ull << 24);
     Arena scratch = arena_reserve(1ull << 24);
     Arena execution = arena_reserve(1ull << 24);
-    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0 && execution.base != 0;
     ir_lower_test_expect(tally, ready, "hoisted places' arenas", 0, 0);
     // Symbol k's global is data.offsets[k - 1]'s.
     Tier0TestData data = { 0 };
@@ -4003,19 +3982,17 @@ static void ir_lower_test_hoisted_places(IrLowerTestTally* tally)
                     ir_lower_test_expect(tally, !fault && actual == g_expected[k], "g's placed addresses compute its results", g_arguments[k], 1);
                 }
             }
-            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, which);
+            ir_lower_test_promote(tally, &function, &promoted, &scratch, 0, which);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
         arena_pop_to(&promoted, 0);
-        arena_pop_to(&twin_promoted, 0);
         arena_pop_to(&scratch, 0);
         arena_pop_to(&execution, 0);
     }
     arena_release(&output);
     arena_release(&twin_output);
     arena_release(&promoted);
-    arena_release(&twin_promoted);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -4170,10 +4147,9 @@ static void ir_lower_test_hoisted_loops(IrLowerTestTally* tally)
     Arena output = arena_reserve(1ull << 24);
     Arena twin_output = arena_reserve(1ull << 24);
     Arena promoted = arena_reserve(1ull << 24);
-    Arena twin_promoted = arena_reserve(1ull << 24);
     Arena scratch = arena_reserve(1ull << 24);
     Arena execution = arena_reserve(1ull << 24);
-    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0 && execution.base != 0;
     ir_lower_test_expect(tally, ready, "hoisted loops' arenas", 0, 0);
     Tier0TestData data = { 0 };
     data.offsets[1] = 8;
@@ -4197,19 +4173,17 @@ static void ir_lower_test_hoisted_loops(IrLowerTestTally* tally)
             bool fault = false;
             const uint64_t actual = ir_lower_test_interpret(functions, 2, 0, 3, &data, globals, &p, 1, &execution, &fault);
             ir_lower_test_expect(tally, !fault && actual == expected_results[which], "the hoisted loops' functions compute their results", p, which);
-            ir_lower_test_promote(tally, &functions[0], &promoted, &twin_promoted, &scratch, 0, which);
+            ir_lower_test_promote(tally, &functions[0], &promoted, &scratch, 0, which);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
         arena_pop_to(&promoted, 0);
-        arena_pop_to(&twin_promoted, 0);
         arena_pop_to(&scratch, 0);
         arena_pop_to(&execution, 0);
     }
     arena_release(&output);
     arena_release(&twin_output);
     arena_release(&promoted);
-    arena_release(&twin_promoted);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -4308,10 +4282,9 @@ static void ir_lower_test_hoisted_folds(IrLowerTestTally* tally)
     Arena output = arena_reserve(1ull << 24);
     Arena twin_output = arena_reserve(1ull << 24);
     Arena promoted = arena_reserve(1ull << 24);
-    Arena twin_promoted = arena_reserve(1ull << 24);
     Arena scratch = arena_reserve(1ull << 24);
     Arena execution = arena_reserve(1ull << 24);
-    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0 && execution.base != 0;
     ir_lower_test_expect(tally, ready, "folded takes' arenas", 0, 0);
     Tier0TestData data = { 0 };
     data.offsets[1] = 0;
@@ -4339,19 +4312,17 @@ static void ir_lower_test_hoisted_folds(IrLowerTestTally* tally)
             bool fault = false;
             const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 4, &data, globals, &arguments[which], 1, &execution, &fault);
             ir_lower_test_expect(tally, !fault && actual == expected_results[which], "the folded takes' functions compute their results", arguments[which], which);
-            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, which);
+            ir_lower_test_promote(tally, &function, &promoted, &scratch, 0, which);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
         arena_pop_to(&promoted, 0);
-        arena_pop_to(&twin_promoted, 0);
         arena_pop_to(&scratch, 0);
         arena_pop_to(&execution, 0);
     }
     arena_release(&output);
     arena_release(&twin_output);
     arena_release(&promoted);
-    arena_release(&twin_promoted);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -4598,10 +4569,9 @@ static void ir_lower_test_hoisted_split(IrLowerTestTally* tally)
     Arena output = arena_reserve(1ull << 24);
     Arena twin_output = arena_reserve(1ull << 24);
     Arena promoted = arena_reserve(1ull << 24);
-    Arena twin_promoted = arena_reserve(1ull << 24);
     Arena scratch = arena_reserve(1ull << 24);
     Arena execution = arena_reserve(1ull << 24);
-    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0 && execution.base != 0;
     ir_lower_test_expect(tally, ready, "hoisted splits' arenas", 0, 0);
     Tier0TestData data = { 0 };
     data.offsets[1] = 8;
@@ -4626,19 +4596,17 @@ static void ir_lower_test_hoisted_split(IrLowerTestTally* tally)
                 const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 3, &data, globals, &arguments[a], 1, &execution, &fault);
                 ir_lower_test_expect(tally, !fault && actual == expected_results[which][a], "the hoisted splits' functions compute their results", arguments[a], which);
             }
-            ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, which);
+            ir_lower_test_promote(tally, &function, &promoted, &scratch, 0, which);
         }
         arena_pop_to(&output, 0);
         arena_pop_to(&twin_output, 0);
         arena_pop_to(&promoted, 0);
-        arena_pop_to(&twin_promoted, 0);
         arena_pop_to(&scratch, 0);
         arena_pop_to(&execution, 0);
     }
     arena_release(&output);
     arena_release(&twin_output);
     arena_release(&promoted);
-    arena_release(&twin_promoted);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -4673,10 +4641,9 @@ static void ir_lower_test_depth_check(IrLowerTestTally* tally, const Tier0Functi
     Arena output = arena_reserve(1ull << 20);
     Arena twin_output = arena_reserve(1ull << 20);
     Arena promoted = arena_reserve(1ull << 20);
-    Arena twin_promoted = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
     Arena execution = arena_reserve(1ull << 26);
-    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && twin_promoted.base != 0 && scratch.base != 0 && execution.base != 0;
+    const bool ready = output.base != 0 && twin_output.base != 0 && promoted.base != 0 && scratch.base != 0 && execution.base != 0;
     ir_lower_test_expect(tally, ready, "depth-type arenas", 0, index);
     IrFunction function =
     {
@@ -4730,7 +4697,7 @@ static void ir_lower_test_depth_check(IrLowerTestTally* tally, const Tier0Functi
             const uint64_t actual = ir_lower_test_interpret(&function, 1, 0, 0, &data, globals, &arguments[k], 1, &execution, &fault);
             ir_lower_test_expect(tally, !fault && actual == ir_lower_test_depth_types_expected(arguments[k], pending), "the depth slots' values reach their joins across the loop", 0, index);
         }
-        ir_lower_test_promote(tally, &function, &promoted, &twin_promoted, &scratch, 0, index);
+        ir_lower_test_promote(tally, &function, &promoted, &scratch, 0, index);
         IrFunction promoted_function =
         {
             0
@@ -4756,7 +4723,6 @@ static void ir_lower_test_depth_check(IrLowerTestTally* tally, const Tier0Functi
     arena_release(&output);
     arena_release(&twin_output);
     arena_release(&promoted);
-    arena_release(&twin_promoted);
     arena_release(&scratch);
     arena_release(&execution);
 }

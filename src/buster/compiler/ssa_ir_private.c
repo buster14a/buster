@@ -89,72 +89,6 @@ static bool ssa_ir_reserve_operands(SsaIrPlacement* plan, uint32_t additional)
     return plan->error == SSA_OK;
 }
 
-// A sparse frontier maps each defining block to the joins on the edge of its
-// dominance subtree. Visit each (defining block, join) only once per sweep.
-static bool ssa_ir_frontiers(SsaWork* work, uint32_t** offsets_out, uint32_t** targets_out)
-{
-    const uint32_t blocks = work->input->block_count;
-    const SsaResult* view = &work->result;
-    uint32_t* offsets = ssa_allocate(work->scratch, (uint64_t)blocks + 1, sizeof(*offsets));
-    uint32_t* seen = ssa_allocate(work->scratch, blocks, sizeof(*seen));
-    uint32_t* cursor = ssa_allocate(work->scratch, blocks, sizeof(*cursor));
-    uint32_t* targets = NULL;
-    uint32_t pairs = 0;
-    bool ok = offsets != NULL && seen != NULL && cursor != NULL;
-    if (ok)
-    {
-        memset(offsets, 0, ((size_t)blocks + 1) * sizeof(*offsets));
-    }
-    for (uint32_t sweep = 0; ok && sweep < 2; sweep += 1)
-    {
-        memset(seen, 0, (size_t)blocks * sizeof(*seen));
-        for (uint32_t b = 0; ok && b < blocks; b += 1)
-        {
-            const uint32_t begin = view->predecessor_offsets[b];
-            const uint32_t end = view->predecessor_offsets[b + 1];
-            if (end - begin > 1 && view->reachable[b])
-            {
-                for (uint32_t p = begin; ok && p < end; p += 1)
-                {
-                    uint32_t x = view->predecessors[p];
-                    while (x != work->dominators.idom[b] && seen[x] != b + 1)
-                    {
-                        seen[x] = b + 1;
-                        if (sweep == 0)
-                        {
-                            offsets[x + 1] += 1;
-                            pairs += 1;
-                            if (pairs > BUSTER_SSA_DOMINANCE_BYTES / sizeof(*targets))
-                            {
-                                ok = false;
-                                break;
-                            }
-                        }
-                        else
-                        {
-                            targets[cursor[x]++] = b;
-                        }
-                        x = work->dominators.idom[x];
-                    }
-                }
-            }
-        }
-        if (ok && sweep == 0)
-        {
-            for (uint32_t b = 0; b < blocks; b += 1)
-            {
-                offsets[b + 1] += offsets[b];
-                cursor[b] = offsets[b];
-            }
-            targets = ssa_allocate(work->scratch, pairs, sizeof(*targets));
-            ok = targets != NULL;
-        }
-    }
-    *offsets_out = offsets;
-    *targets_out = targets;
-    return ok;
-}
-
 // Only a defining block's exit or an already placed phi can change the
 // current value on the dominator-tree path. Cache entry and exit separately:
 // a block can use its entry value before its first local assignment.
@@ -234,7 +168,7 @@ static void ssa_ir_place_local(SsaIrPlacement* plan, const SsaBounded* tape, uin
             needs_joins = use == definition || !ssa_dominates(work, definition, use);
         }
     }
-    if (needs_joins && plan->frontier_offsets == NULL && !ssa_ir_frontiers(work, &plan->frontier_offsets, &plan->frontier_targets))
+    if (needs_joins && plan->frontier_offsets == NULL && ssa_frontiers(work, BUSTER_SSA_FRONTIER_PAIRS, &plan->frontier_offsets, &plan->frontier_targets) != SSA_OK)
     {
         plan->error = SSA_ERROR_MEMORY;
     }
@@ -381,7 +315,7 @@ static SsaError ssa_ir_place_live(SsaWork* work)
 
 // A frontier can be quadratic in the CFG size. The existing bounded constructor
 // handles an over-budget frontier or scratch exhaustion using the original arenas.
-static SsaError ssa_ir_construct_frontier(SsaWork* work, bool rename_vector)
+static SsaError ssa_ir_construct_frontier(SsaWork* work)
 {
     const uint64_t mark = work->scratch->length;
     SsaWork candidate = *work;
@@ -389,7 +323,7 @@ static SsaError ssa_ir_construct_frontier(SsaWork* work, bool rename_vector)
     if (error == SSA_ERROR_MEMORY || error == SSA_ERROR_LIMIT)
     {
         arena_pop_to(work->scratch, mark);
-        error = ssa_construct_bounded(work, rename_vector);
+        error = ssa_construct_bounded(work);
     }
     else if (error == SSA_OK)
     {

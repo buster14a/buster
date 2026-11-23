@@ -976,17 +976,14 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ssa
 
-      - name: Benchmark local SSA construction in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the module's sources). Compare isolated execution and vector samples
-        # after warm scalar work across separate processes.
+      - name: Benchmark local SSA construction three times
+        # Where `changes` doesn't rule it out (the module's sources): three separate processes.
         if: needs.changes.outputs.ssa != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           for repetition in 1 2 3; do
               echo "SSA repetition $repetition"
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only scalar
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector --after-scalar 200
+              taskset -c "$cpu" ./build/compiler benchmark-ssa
           done
 
       - name: Benchmark dominator analysis on synthetic and exported source CFGs
