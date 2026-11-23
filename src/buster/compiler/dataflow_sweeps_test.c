@@ -13,21 +13,15 @@
 // is first set in sweep D(b, v) + 1. A sweep reads only what the previous one left, so the first sweep that changes
 // nothing is a fixpoint, and the solver's count, which includes that last sweep, is 2 plus the largest D over the live
 // pairs, or 1 when nothing is live. A 0-1 breadth-first search per value, backwards from its uses, finds every D: the
-// search's level d is sweep d + 1, whose order decides which edges it crosses within the level. The search builds the
-// backward order itself (dataflow_backward, as the solver would), whether or not the solve needed it.
+// search's level d is sweep d + 1, whose order decides which edges it crosses within the level. The caller builds the
+// backward order first (dataflow_backward, as the solver would), whether or not the solve needed it.
 
 #ifndef BUSTER_DATAFLOW_SWEEPS_TEST_C
 #define BUSTER_DATAFLOW_SWEEPS_TEST_C
 
-// Whether sweep t, from 1, visits the backward order.
-static bool dataflow_test_backward_sweep(uint64_t sweep)
-{
-    return sweep > BUSTER_DATAFLOW_POSTORDER_SWEEPS && ((sweep - BUSTER_DATAFLOW_POSTORDER_SWEEPS) & 1) != 0;
-}
-
 // Whether graph's in rows hold exactly the live pairs. *sweeps is the solver's count for graph's schedule, or 0 when
-// scratch can't hold the search; scratch returns to its length. It builds graph's backward order.
-static __attribute__((unused)) bool dataflow_test_sweeps(Dataflow* graph, Arena* scratch, uint64_t* sweeps)
+// scratch can't hold the search; scratch returns to its length. graph's backward order must be built.
+static __attribute__((unused)) bool dataflow_test_sweeps(const Dataflow* graph, Arena* scratch, uint64_t* sweeps)
 {
     const uint64_t mark = scratch->length;
     const uint32_t blocks = graph->block_count;
@@ -46,10 +40,6 @@ static __attribute__((unused)) bool dataflow_test_sweeps(Dataflow* graph, Arena*
     bool live = false;
     if (result)
     {
-        if (blocks != 0)
-        {
-            dataflow_backward(graph);
-        }
         // Predecessor columns, each edge marked stale where the solver reads its target's previous sweep: bit 0 in the
         // postorder's sweeps, bit 1 in the backward order's.
         for (uint32_t order = 0; order < blocks; order += 1)
@@ -107,7 +97,10 @@ static __attribute__((unused)) bool dataflow_test_sweeps(Dataflow* graph, Arena*
                 for (uint32_t edge = offsets[block]; edge < offsets[(uint64_t)block + 1]; edge += 1)
                 {
                     const uint32_t predecessor = predecessors[edge];
-                    const uint32_t late = (stale[edge] >> dataflow_test_backward_sweep((uint64_t)level + 1)) & 1;
+                    // Sweep level + 1 visits the backward order past the postorder's sweeps, every other sweep.
+                    const uint32_t sweep = level + 1;
+                    const bool backward = sweep > BUSTER_DATAFLOW_POSTORDER_SWEEPS && ((sweep - BUSTER_DATAFLOW_POSTORDER_SWEEPS) & 1) != 0;
+                    const uint32_t late = (stale[edge] >> backward) & 1;
                     const uint32_t reached = level + late;
                     const bool defines = (graph->def[(uint64_t)predecessor * graph->row_words + word] & bit) != 0;
                     if (!defines && distance[predecessor] > reached)
