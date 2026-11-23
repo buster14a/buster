@@ -1329,7 +1329,7 @@ allocation fragments, frame, records and spill/reload/rematerialization counts.
 All failure paths restore both arenas and preserve the result object. Transition
 events use count/prefix/fill CSR over bounded machine positions. Their ordered
 stores and copies are scalar emission work; the existing liveness, allocation,
-frame and rematerialization producers retain their vector/scalar paths. No
+frame and rematerialization producers are unchanged. No
 compile-time speedup is claimed for adding this consumer.
 
 ## AVX-512's masks (#179)
@@ -1433,7 +1433,7 @@ And the refusals: a vector result at selection, a mask's `select` at
 selection, and at emission the baseline target (no opmask form) and AVX512F alone
 for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
 masks alone is taken; and each width's `kmov` forms, none for a width no mask
-has. `--print` prints each fixture's records by the vector path, as GNU as reads
+has. `--print` prints each fixture's records, as GNU as reads
 them.
 
 
@@ -1937,7 +1937,7 @@ complete function's records the same way.
 `test-tier1-emit` executes real pressure plans through liveness, allocation,
 frame planning, fragment emission, branch sizing and encoding. Original
 32/64-bit fixtures keep up to 600 values live with only three allocatable
-registers. Both paths run against an independent integer oracle with stored
+registers. They run against an independent integer oracle with stored
 values and with rematerialized constants, fixed/red-zone/frame-pointer frames,
 and stack probes. Independent allocation verification checks the produced
 fragments. Failures cover target denial, scratch-register conflicts, capacity

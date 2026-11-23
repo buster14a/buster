@@ -20,8 +20,8 @@ pointers or alignment beyond 16 bytes; dynamic stacks with such realignment
 also reserve R15 as a stable base (Tier 0's realigned base too, which the unwind
 tables' reader checks). It does not silently repair an allocation.
 
-After allocation, `tier1_frame_plan` takes the actual memory objects. They reject conflicting allocated registers and check
-the final frame extent, which can grow after spilling. An underestimated
+After allocation, `tier1_frame_plan` takes the actual memory objects. It rejects
+conflicting allocated registers and checks the final frame extent, which can grow after spilling. An underestimated
 pre-allocation requirement therefore requires an explicit allocation retry.
 
 `Tier1FrameSlots` borrows four `uint32_t` columns: `start`, `end`, `size` and

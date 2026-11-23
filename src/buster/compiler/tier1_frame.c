@@ -6,8 +6,9 @@
 // column lets #140's spill_values name those value columns directly. Lifetimes are half-open, nonempty intervals;
 // address-taken objects must supply their conservative scope lifetime, including every possible escaped use.
 //
-// tier1_frame_requirements runs before allocation: reserve its register mask. tier1_frame_plan returns object-to-slot and object-to-byte-offset columns plus an explicit SysV prologue/epilogue plan. Nothing here
-// emits instructions or unwind tables. The plan is Tier 0's frame protocol, which unwind_tier0_frame_tails and unwind.c
+// tier1_frame_requirements runs before allocation: reserve its register mask. tier1_frame_plan returns object-to-slot
+// and object-to-byte-offset columns plus an explicit SysV prologue/epilogue plan. Nothing here emits instructions or
+// unwind tables. The plan is Tier 0's frame protocol, which unwind_tier0_frame_tails and unwind.c
 // describe (#88, #177): rbp pushed and pointed at its push when the frame keeps a pointer, then the callee-saved
 // registers pushed in RBX, RBP, R12, R13, R14, R15 order, then one subtraction, then a realignment's `and` and its
 // base's copy (R15, one of the pushes). The epilogue releases the subtraction (or resets rsp from rbp, past the pushes)
