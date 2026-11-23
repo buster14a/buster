@@ -379,6 +379,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   macro-produced parentheses or declarations alone do not suppress an ordinary source assignment. Original
   fixtures compare independent counts, severity and complete diagnostic lines with Clang through default,
   scalar and deferred reader routes, including warning flags and source diagnostic pragmas.
+  `-Wsign-compare` skips comparisons that are themselves integer constant expressions (#3300). A comparison
+  containing an evaluated assignment or comma operator still gets the usual signedness checks.
   `-Wsign-compare` retains both operands' source signs and reads the checked comparison conversion, including
   narrow integers, bit-fields and `_BitInt` promotions (#1391). `c_check_sign_range.c` computes diagnostic ranges
   as a width and a nonnegative flag: constants, implicit conversions, assignment/comma results, ordinary

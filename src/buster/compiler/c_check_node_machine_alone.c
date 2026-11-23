@@ -232,7 +232,8 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     alone->view.availability_contexts = unit->availability_contexts;
     alone->view.ns_constant_string = unit->ns_constant_string;
     alone->view.cfstring_class = unit->cfstring_class;
-    alone->view.const_values = unit->const_values;
+    // The receipts as the reading has them so far, as the reader's own chunk graph takes them (#2987).
+    alone->view.const_values = &reader->output->const_values;
     alone->view.const_warnings = unit->const_warnings;
     alone->view.const_warning_count = unit->const_warning_count;
     alone->view.fp_contract_default = unit->fp_contract_default;
@@ -327,6 +328,20 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
                                   (flags & BUSTER_NODE_FRONT_TYPED_TESTED) == 0 || results->tests[root] != 0 ? BUSTER_NODE_ALONE_BODY_TESTS :
                                   (flags & BUSTER_NODE_FRONT_TYPED_SWEPT) == 0 || results->sweep_refusals[root] != NODE_MACHINE_TAKEN ? BUSTER_NODE_ALONE_BODY_SWEEP :
                                                                                                                                        BUSTER_NODE_ALONE_BODY_WHOLE;
+                    }
+                    if (root < alone->view.count && alone->shadow->alone_root_tokens != NULL)
+                    {
+                        // Its control's token, as the tokens alone give it: an initialization's is its declaration's.
+                        const uint32_t own = front->tokens[record];
+                        const bool initialization = front->ops[record] == CHECK_OP_INITIALIZE && own < reader->parser->tokens.count;
+                        const uint32_t control = initialization ? reader->initializer_declarations[own] : own;
+                        alone->shadow->alone_root_tokens[root] = control;
+                        if (control < reader->parser->tokens.count && !node_machine_reader_discard(reader, front, record, operand))
+                        {
+                            // The control's token's one root; a second one of the same control's is several.
+                            uint32_t* slot = &alone->shadow->alone_control_roots[control];
+                            *slot = *slot == 0 || *slot == root + 1 ? root + 1 : UINT32_MAX;
+                        }
                     }
                     if (root < alone->view.count && alone->view.tokens[root] < reader->parser->tokens.count)
                     {
@@ -476,7 +491,21 @@ static NodeFrontTypes* node_alone_results(CheckInputReader* reader, const NodeFr
         types->kinds = arena_push_array(arena, capacity, sizeof(uint8_t), 1);
         types->declared = arena_push_array(arena, capacity, sizeof(TypeId), _Alignof(TypeId));
         types->declarations = arena_push_array(arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
-        room = types->digests != NULL && types->firsts != NULL && types->counts != NULL && types->refusals != NULL && types->library != NULL &&
+        // What a splice reads beside a tape: a root's, and the stores, a place a node at most.
+        uint32_t** sides[] = { &types->side_label_firsts, &types->side_label_counts, &types->side_call_firsts, &types->side_call_counts, &types->side_temporaries,
+                               &types->side_labels,       &types->side_call_targets, &types->side_call_argument_counts, &types->side_call_argument_firsts };
+        bool sided = true;
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sides); c += 1)
+        {
+            *sides[c] = arena_push_array(arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+            sided = sided && *sides[c] != NULL;
+        }
+        types->side_facts = arena_push_array(arena, capacity, sizeof(uint8_t), 1);
+        types->side_call_variadic = arena_push_array(arena, capacity, sizeof(uint8_t), 1);
+        types->side_argument_classes = arena_push_array(arena, capacity, sizeof(uint8_t), 1);
+        types->side_capacity = capacity;
+        sided = sided && types->side_facts != NULL && types->side_call_variadic != NULL && types->side_argument_classes != NULL;
+        room = sided && types->digests != NULL && types->firsts != NULL && types->counts != NULL && types->refusals != NULL && types->library != NULL &&
                types->sweep_refusals != NULL && types->targets != NULL && types->objects != NULL && types->tape_firsts != NULL && types->tape_counts != NULL &&
                types->side_digests != NULL && types->tape_kinds != NULL && types->tape_classes != NULL && types->tape_values != NULL && types->tests != NULL &&
                types->kinds != NULL && types->declared != NULL && types->declarations != NULL;
@@ -514,6 +543,8 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint64_t* past = arena_push_array(reader->scratch, words, sizeof(uint64_t), _Alignof(uint64_t));
     uint32_t* roots = arena_push_array(reader->arena, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* chains = arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* root_tokens = arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* control_roots = arena_push_array(reader->arena, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
     // A body an opening brace at most: the room for every one.
     uint32_t bodies = 0;
     for (uint32_t token = 0; token < count; token += 1)
@@ -527,7 +558,7 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint8_t* verdicts = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
     uint64_t* body_ticks = arena_push_array(reader->arena, 3 * ((uint64_t)bodies + 1), sizeof(uint64_t), _Alignof(uint64_t));
     uint8_t* body_scanned = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
-    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL && body_ticks != NULL && body_scanned != NULL &&
+    bool room = alone != NULL && own != NULL && report != NULL && bits != NULL && past != NULL && roots != NULL && chains != NULL && root_tokens != NULL && control_roots != NULL && firsts != NULL && ends != NULL && openings != NULL && verdict_openings != NULL && verdicts != NULL && body_ticks != NULL && body_scanned != NULL &&
                 typer != NULL && typer->types != NULL && typer->tests != NULL && typer->types->sweep_refusals != NULL && typer->facts == NULL &&
                 reader->postorder != NULL && reader->postorder_positions != NULL;
     if (room)
@@ -553,6 +584,8 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         memset(past, 0, (uint64_t)words * sizeof(uint64_t));
         memset(roots, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         memset(chains, 0, (uint64_t)capacity * sizeof(uint32_t));
+        memset(root_tokens, 0xff, (uint64_t)capacity * sizeof(uint32_t));
+        memset(control_roots, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
         report->nodes = bits;
         report->past = past;
         // The front marks a node's context unknown where a left token takes its value: in the graph's own column.
@@ -634,6 +667,8 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         shadow->alone_types = types;
         shadow->alone_roots = roots;
         shadow->alone_chains = chains;
+        shadow->alone_root_tokens = root_tokens;
+        shadow->alone_control_roots = control_roots;
     }
     return room ? alone : NULL;
 }

@@ -621,6 +621,13 @@ static uint8_t lower_source_node_front;
 // PPOptions.node_reader for them (measure-node-machine --shadow --front-tests); 0 for none.
 static uint16_t lower_source_node_reader;
 
+// Whether the program's return flow runs for them (measure-node-machine --shadow --bodies reads each body's verdict of
+// it, CheckProgramBody.return_warning; nothing is reported).
+static bool lower_source_return_flow;
+// Whether they are read as -c reads a unit: with the statement controls' path (PPOptions.statement_controls, which the
+// driver sets for a compile), where an expression statement's value has no cast to void for a root.
+static bool lower_source_statement_controls;
+
 #define BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS 4u
 #define BUSTER_LOWER_SOURCE_WINDOW_CONSTANTS 8u
 
@@ -650,9 +657,13 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
     pp_options.node_window_assignments = (window & BUSTER_LOWER_SOURCE_WINDOW_ASSIGNMENTS) != 0;
     pp_options.node_front = lower_source_node_front;
     pp_options.node_reader = lower_source_node_reader;
+    pp_options.statement_controls = lower_source_statement_controls;
+    pp_options.statement_controls_anywhere = lower_source_statement_controls;
     // The machine with no node of the walk's is checked against the tokens the walk's actions leave to its visit, which
     // the walk marks where its numbering is asked for.
-    pp_options.expression_numbering = pp_options.expression_numbering || (lower_source_node_reader & BUSTER_NODE_READER_ALONE) != 0;
+    // (Not where the unit is read with the statement controls' path: the numbering's check counts a node a discarded
+    // value, which that path does not make, and the marks are not read there.)
+    pp_options.expression_numbering = pp_options.expression_numbering || ((lower_source_node_reader & BUSTER_NODE_READER_ALONE) != 0 && !lower_source_statement_controls);
     source->path = (CheckCorpusPath){ 0 };
     source->data = (CheckDataPrepared){ 0 };
     source->program = (CheckProgram){ 0 };
@@ -672,6 +683,8 @@ static bool lower_source_open(LowerSource* source, const char* file, char** opti
         .initializer_reference_count = source->data.reference_count,
         .target = source->pp.options.target,
         .predefines = &source->pp.options.predefines,
+        .return_warnings = lower_source_return_flow,
+        .noreturn_warnings = lower_source_return_flow,
     };
     prepared = prepared && check_program(&source->program, &source->parser, &path->input, &path->stream, &path->types, program_options, &path->output_arena, &path->scratch);
     prepared = prepared && check_program_select_mode(&source->selected, &source->program, &source->data, C_LOWERING_REACHABLE, false, false, &path->output_arena, &path->scratch);

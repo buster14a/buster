@@ -67,8 +67,10 @@ facts say otherwise:
   tell `volatile int leaf = x; return leaf;` from any frame object
   (`test-check-debug`'s GDB read of `leaf` found the load gone).
 - **Writes of general memory.** A call (and a row call and an asm body's), a
-  fence, an atomic read/modify/write, a masked, compressing or scattering
-  store, `alloca` and `stack_restore`, every observable load or store, a store
+  fence (an empty asm statement's `"memory"` clobber is a signal fence, #3310),
+  an atomic read/modify/write, a masked, compressing or scattering
+  store, `alloca` and `stack_restore`, every observable load or store (a volatile
+  lvalue's access is `BUSTER_IR_VOLATILE`, #3310), a store
   of general memory and the `lifetime` marker of a slot that isn't private.
 
 Under these facts an access A is a load L's source when it has L's key and
