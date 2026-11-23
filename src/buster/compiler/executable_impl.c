@@ -2175,7 +2175,9 @@ static uint32_t executable_eh_frame_fdes(const Link* link, AtomId atom)
         // The heads, gathered from the candidates inside the atom: a group's few loads don't wait on stores to the stack
         // and a vector load of them that can't forward.
         const __m512i heads_low = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)inside, _mm512_castsi512_si256(starts), bytes, 1);
-        const __m512i heads_high = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)(inside >> 8), _mm512_extracti64x4_epi64(starts, 1), bytes, 1);
+        // A group of eight or fewer gathers no second half: a gather issues its loads' work whatever its mask.
+        const __m512i heads_high = inside >> 8 != 0 ? _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)(inside >> 8), _mm512_extracti64x4_epi64(starts, 1), bytes, 1)
+                                                    : _mm512_setzero_si512();
         // The lengths are the heads' low halves, the CIE pointers their high ones.
         const __m512i lengths = _mm512_permutex2var_epi32(heads_low, evens, heads_high);
         const __m512i pointers = _mm512_permutex2var_epi32(heads_low, odds, heads_high);
