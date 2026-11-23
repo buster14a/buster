@@ -667,7 +667,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
                         result->status = CHECK_DATA_INPUT_RESOURCE;
                         result->token = selected;
                     }
-                    if (!valid)
+                    else if (!valid)
                     {
                         result->status = status == CHECK_INIT_RESOURCE ? CHECK_DATA_INPUT_RESOURCE : CHECK_DATA_INPUT_INVALID;
                         result->token = selected;
