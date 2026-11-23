@@ -8,9 +8,10 @@
 // or at an external-input boundary. Neither the trusted encoder nor branch sizing does these checks in its loop.
 #include "buster/compiler/x86_target.c"
 
-// Bit 63 denotes a classified row; absent initializers remain unavailable. The maps and both kernels come from the same
-// canonical rows. The exact scalar reference keeps all 64 feature bits; the vector table projects the currently
-// used feature bits to 32 bits, halving its read working set. No run-time initialization or allocation is needed.
+// Bit 63 denotes a classified row; absent initializers remain unavailable. The maps and the builder come from the same
+// canonical rows. The full-width requirements keep all 64 feature bits (x86_target_requirement's metadata and the
+// extended rows' exact pass); the vector table projects the currently used feature bits to 32 bits, halving its read
+// working set. No run-time initialization or allocation is needed.
 // The rows that need a feature past the projection (BUSTER_X86_TARGET_EXTENDED's, last in x86_target_rows.c) are
 // the vector builder's rare case: their compact words carry BUSTER_X86_TARGET_COMPACT_EXTENDED, which no target
 // has, and an exact pass over their full requirements decides them after the vector loop.
@@ -34,7 +35,7 @@ _Static_assert(X86_FEATURE_AES + 6 < 30 && X86_FEATURE_PCLMUL > X86_FEATURE_AES 
                    X86_FEATURE_GFNI > X86_FEATURE_AES && X86_FEATURE_VAES > X86_FEATURE_AES && X86_FEATURE_PREFETCHI > X86_FEATURE_AES,
                "compact target feature positions must be disjoint");
 
-// The scalar reference keeps full-width requirements densely; the inverse map returns zero for unknown forms.
+// The full-width requirements are kept densely; the inverse map returns zero for unknown forms.
 // Slot zero is reserved in the inverse map, so each explicit canonical row stores its ordinal plus one.
 // Readers need the two bounds, not every row's slot and policy assertions. The data owner and standalone
 // inclusions derive both counts from the canonical rows below and reject a stale interface at compile time.

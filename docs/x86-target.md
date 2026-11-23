@@ -270,8 +270,8 @@ Each cell is **ns/table (core cycles/table)**.
 
 In the qword-expansion build, the scalar source took 441 ns for one table and
 435.9–438.9 ns/table for 10,000 tables after lighter work.
-The scalar source is a correctness oracle, not a claim of scalar machine code:
-Clang vectorized it with AVX-512 in both builds. Disassembly of the measured
+The scalar source was then the correctness oracle (its twin went in #2924), not
+a claim of scalar machine code: Clang vectorized it with AVX-512 in both builds. Disassembly of the measured
 binary confirms that direct byte packing removes `vpmovm2q`, `vpsrlq` and
 `vpmovqb`, using masked byte moves instead. It wins in sustained repetition and
 avoids the previous loss against optimized C after lighter work. These timings
@@ -282,7 +282,7 @@ Reproduce each command in a separate process under the shared lock, repeating
 the set across processes:
 
 ```sh
-taskset -c 2 ./build/compiler benchmark-x86-target --only avx512
+taskset -c 2 ./build/compiler benchmark-x86-target
 taskset -c 2 ./build/compiler benchmark-x86-target --after-predefines 100 --iterations 1
 taskset -c 2 ./build/compiler benchmark-x86-target --after-predefines 100
 ```
