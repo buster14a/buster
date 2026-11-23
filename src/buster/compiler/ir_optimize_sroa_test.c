@@ -378,6 +378,76 @@ static void ir_sroa_test_ir(IrOptimizeTest* test)
     arena_release(&input);
 }
 
+// The uses scan's lanes (#2924, its scalar twin gone): a slot read by `loads` loads of its address, whose last use is
+// `escape` (0: a load as the rest, 1: an escaping ptrtoint, 2: the escaping ptrtoint in a block nothing reaches), so
+// that the escape falls on every lane of the 16-use packets and on each partial packet's last lane.
+static bool ir_sroa_test_lane(Arena* arena, IrFunction* f, uint32_t loads, uint32_t escape)
+{
+    const uint32_t unreachable = escape == 2 ? 2 : 0;
+    const IrSizes sizes = { .instruction_count = loads + 3 + unreachable, .block_count = escape == 2 ? 2 : 1, .slot_count = 1 };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->result_type = IR_I64;
+        f->slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_VOID };
+        f->block_offsets[1] = loads + 3;
+        ir_optimize_test_instruction(f, 0, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t i = 1; i <= loads; i += 1)
+        {
+            ir_optimize_test_instruction(f, i, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        const uint32_t last = loads + 1;
+        if (escape == 1)
+        {
+            ir_optimize_test_instruction(f, last, IR_PTRTOINT, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        else
+        {
+            ir_optimize_test_instruction(f, last, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        ir_optimize_test_instruction(f, last + 1, IR_RET, IR_VOID, last, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        if (escape == 2)
+        {
+            f->block_offsets[2] = loads + 5;
+            ir_optimize_test_instruction(f, last + 2, IR_PTRTOINT, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            ir_optimize_test_instruction(f, last + 3, IR_RET, IR_VOID, last + 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+    }
+    return created;
+}
+
+static void ir_sroa_test_lanes(IrOptimizeTest* test)
+{
+    Arena input = arena_reserve(16ull << 20);
+    Arena output = arena_reserve(16ull << 20);
+    Arena scratch = arena_reserve(32ull << 20);
+    const bool ready = input.base != 0 && output.base != 0 && scratch.base != 0;
+    ir_optimize_test_expect(test, ready, "SROA lane fixture arenas");
+    for (uint32_t loads = 0; ready && loads < 34; loads += 1)
+    {
+        for (uint32_t escape = 0; escape < 3; escape += 1)
+        {
+            IrFunction f = { 0 };
+            const bool created = ir_sroa_test_lane(&input, &f, loads, escape);
+            ir_optimize_test_expect(test, created && ir_verify(&f, &scratch, 0).error == IR_OK, "SROA lane fixture allocation and verification");
+            if (created)
+            {
+                IrSroaResult result = { 0 };
+                const IrCheck check = ir_optimize_sroa(&f, &output, &scratch, ir_sroa_options(), &result);
+                // The escape refuses the slot wherever it falls; one in a block nothing reaches doesn't.
+                const uint32_t split = escape == 1 ? 0 : 1;
+                ir_optimize_test_expect(test, check.error == IR_OK && result.split_slots == split && result.refused_slots == 1 - split,
+                                        "SROA's uses scan refuses an escape on every packet lane, and only a reachable one");
+            }
+            arena_pop_to(&output, 0);
+            arena_pop_to(&input, 0);
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static __attribute__((unused)) int run_ir_sroa_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -401,6 +471,7 @@ static __attribute__((unused)) int run_ir_sroa_tests(int argc, char** argv)
     {
         ir_sroa_test_guards(&test);
         ir_sroa_test_ir(&test);
+        ir_sroa_test_lanes(&test);
         printf("ir-sroa: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

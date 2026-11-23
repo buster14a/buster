@@ -227,6 +227,9 @@ test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" --tier1 --tier1-strict --verify -S -o build/register-aggregates.s tests/ir-source/register-aggregates.c
 if awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'rsp'; then exit 1; fi
 if awk '/^add_l2:/,/^\tret/' build/register-aggregates.s | grep -q -- '-8(%rsp)'; then exit 1; fi
+# #2924: and its result's slot, returned whole and written at one width, is widened for the return alone (SROA's uses
+# scan marks it returned): its eightbytes aren't zeroed first.
+if awk '/^add_l2:/,/^\tret/' build/register-aggregates.s | grep -q 'movq \$0'; then exit 1; fi
 awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'ret'
 # Exact-width call-site parts: small_args's 4- and 12-byte objects stay in registers; its stack holds only n's spill.
 test "$(awk '/^small_args:/,/^\tret/' build/register-aggregates.s | grep -c '(%rsp)')" -le 2
