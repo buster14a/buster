@@ -563,9 +563,9 @@ struct CheckEmitGrowth
 // The unroller's outcomes, IrUnrollRefusal's (the unrolled loops', then each refusal's), which --tier1-report prints.
 #define BUSTER_CHECK_TIER1_UNROLL_OUTCOMES 15
 // Loop store motion's counts (#3309, --tier1-report), IrStoreMotionResult's: the loops by IrStoreMotionOutcome, their
-// stored keys by IrStoreMotionKeyRefusal, then the loads that read a slot, the stores a slot takes too and the
-// instructions added.
-#define BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS 17
+// stored keys by IrStoreMotionKeyRefusal, then the loads that read a slot, the stores a slot takes and the
+// instructions added, then the moved keys by IrStoreMotionSink (#3346) and the sunk keys' write-backs.
+#define BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS 22
 
 typedef struct CheckTier1Lane CheckTier1Lane;
 struct CheckTier1Lane

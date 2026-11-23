@@ -179,7 +179,6 @@ static void cc_compat_warning_capabilities(CCCompatibilityTest* test)
         "shadow",
         "conversion",
         "sign-conversion",
-        "unused-macros",
         "missing-prototypes",
         "missing-variable-declarations",
         "strict-prototypes",

@@ -3272,7 +3272,7 @@ static __attribute__((no_sanitize("function"))) bool tier1_masks_test_call_seede
     return (state[2] & 0x3fu) == 0;
 }
 
-// #2830: the upper state at the function's exits. Code that names ymm0 to ymm15 or zmm0 to zmm15 (tier1_emit_upper_dirty)
+// #2830: the upper state at the function's exits. Code that names ymm0 to ymm15 or zmm0 to zmm15 (x86_upper_dirty)
 // has a vzeroupper right before each call, where no call passes a ymm or zmm argument (tier1_select_call_wide), and
 // before each ret's epilogue (its pops, rsp's add and the frame pointer's reset), where the result isn't a ymm or zmm
 // register's (tier1_select_result_wide); code that doesn't has none, but a machine row's own. No legacy SSE record is
@@ -3281,7 +3281,7 @@ static void tier1_masks_test_upper(Tier1MasksTest* test, const Tier1SelectPlan* 
 {
     const IrFunction* function = plan->function;
     const Tier1SelectCode* code = &emitted->code;
-    const bool dirty = tier1_emit_upper_dirty(code->records, code->count);
+    const bool dirty = x86_upper_dirty(code->records, code->count);
     bool wide_calls = false;
     bool rows = false;
     bool body = false;
@@ -3300,7 +3300,7 @@ static void tier1_masks_test_upper(Tier1MasksTest* test, const Tier1SelectPlan* 
     {
         const uint32_t form = code->records[r].form & BUSTER_X86_FORM_NUMBER;
         zeroes += form == X86_FORM_VZEROUPPER;
-        legacy += avx && !body && tier1_emit_vex_forms[form % X86_FORM_COUNT] != 0;
+        legacy += avx && !body && x86_vex_forms[form % X86_FORM_COUNT] != 0;
         const bool call = form == X86_FORM_CALL_REL32 || form == X86_FORM_CALL_RM64;
         cleared = cleared && (!call || !emitted->zero_upper || wide_calls || (r != 0 && code->records[r - 1].form == X86_FORM_VZEROUPPER));
         uint32_t before = r;

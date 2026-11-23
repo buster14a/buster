@@ -388,6 +388,14 @@ has a throughput of one per cycle and one macro-op. The same process printed eve
 218 IDs. [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-upper-state-2830-2026-11-23)
 has the process's output.
 
+[#3335](https://github.com/buster14a/buster/issues/3335) added `vmovhps`'s two rows (`VMOVHPS_X_X_M64`,
+memory and indexed memory), Tier 0's VEX twin of the `movhps` its halves copies load
+(`tier0_vex`). One `--missing --table` process on the 9700X (CPU 2, under the lock, a
+Release build at the change) measured them: the same values as the legacy `movhps` rows,
+one macro-op at half a cycle's throughput, a chain through VEX.vvvv of 2 cycles. The 2,087
+rows share 219 IDs. [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-upper-state-3335-2026-11-23)
+has the process's output.
+
 ## Consumers
 
 - **Tier 0** asks the form choice for `inc` and `dec` where they cost no more

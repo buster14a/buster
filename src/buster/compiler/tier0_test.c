@@ -1048,6 +1048,14 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             const uint32_t unbroken = tier0_test_unbroken_conversion(scalar.records, scalar.count, &conversions);
             result = result && tier0_test_expect(tally, unbroken == scalar.count, "conversions",
                                                  "seed %" PRIu64 " function %u: record %u converts into a register it doesn't zero first (#3308)", seed, f, unbroken);
+            // #3335: at a target with AVX, no legacy SSE record that has a VEX twin is left, but an asm body's.
+            uint32_t legacy = scalar.count;
+            for (uint32_t r = 0; function->avx && function->asm_body_count == 0 && r < scalar.count; r += 1)
+            {
+                legacy = legacy == scalar.count && x86_vex_forms_tier0[(scalar.records[r].form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT] != 0 ? r : legacy;
+            }
+            result = result && tier0_test_expect(tally, legacy == scalar.count, "VEX twins",
+                                                 "seed %" PRIu64 " function %u: record %u is a legacy SSE record at a target with AVX (#3335)", seed, f, legacy);
         }
         if (result)
         {
@@ -1392,10 +1400,19 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             // -fstack-clash-protection): ALLOCA's loop runs natively against the same oracle, and its branches and the
             // prologue's are both paths' twins.
             const bool probe_stack = (program_seed / 4) % 2 == 1;
+            // Half the programs, in each of those eighths, at a target with AVX (#3335) where the host has it: their legacy
+            // SSE records' VEX twins (tier0_vex) run natively against the same oracle.
+            // Half of those clear the upper state as a dirty function does (Tier0Function.zero_upper, which a scalar program
+            // never is on its own): a vzeroupper before each call, each musttail call's teardown and the epilogue's, which
+            // the frame's and the branches' columns and the native runs take.
+            const bool avx = (program_seed / 8) % 2 == 1 && __builtin_cpu_supports("avx");
+            const bool zero_upper = avx && (program_seed / 16) % 2 == 1;
             for (uint32_t f = 0; ok && f < functions->count; f += 1)
             {
                 functions->functions[f].frame_pointer = frame_pointer;
                 functions->functions[f].probe_stack = probe_stack;
+                functions->functions[f].avx = avx;
+                functions->functions[f].zero_upper = zero_upper;
             }
             code->records = 0;
             code->entries = 0;

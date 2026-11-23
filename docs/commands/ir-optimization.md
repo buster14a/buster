@@ -158,14 +158,17 @@ short output arena are covered. `test-ir-optimize` runs its text pair
 on c-testsuite's subset, the frozen `sqlite3.c` and musl, where each unrolled
 function must verify with dominance.
 
-## Loop store motion (#3309)
+## Loop store motion (#3309, #3346)
 
 `ir_store_motion.c` is the pass `--tier1-passes=+storemotion` runs on the
 lowered function, before promotion (off by default): a loop's loads of one of the unit's own
-globals read a private slot that the preheader fills and each of the loop's
-stores of the global also writes, and promotion makes the slot a register's
-value. Every store stays where it was. [The design](../tier1-store-motion.md)
-has its rules, the symbols it trusts and the 9700X's record.
+globals read a private slot that the preheader fills, and promotion makes the
+slot a register's value. Where every read of memory in the loop is a load the
+pass places, the loop's stores of the global write the slot alone and each exit
+writes it back once (#3346), through the global's address where its bits
+changed and a dummy slot's where they didn't; otherwise each store stays and
+writes the slot too. [The design](../tier1-store-motion.md) has its rules, the
+symbols it trusts and the 9700X's records.
 
 `./build/compiler test-ir-store-motion [--seed N] [--print NAME]`
 (`ir_store_motion_test.c`) runs its text fixtures,
@@ -179,27 +182,45 @@ symbols, and loads that overlap a key; and one fixture per refusal (a call, a
 volatile access, a fence, a store through a pointer, an indexed store, an
 overlapping store, a key past its object, no preheader, an irreducible region,
 a type no register holds, a symbol that isn't listed, more keys than the
-analysis follows, an address past the walk's steps). Each is read by both
+analysis follows, an address past the walk's steps). #3346's add exits by a
+break, a return and a store after the loop, an exit block other paths reach
+(split edges), two loops in a row (one's write-back before the other's load), a
+double's and a float's keys, and refusals of sinking for a switch's exit to a
+shared block and for a stored-only key beside a load through a pointer. Each is read by both
 parser paths and expects its moved loops and keys, the loads and stores given a
 slot, and its outcome or refusal; results and counts fold into a frozen
 digest. A changed result must verify, promote and pass the optimizer, and runs
 in the shared interpreter as it is, promoted and optimized against the input,
 on equal memory, a pointer parameter at a key's own bytes among its places: the
-same bytes, value and status. Six faults (`BUSTER_IR_STORE_MOTION_MUTATE_*`)
-must each be rejected on some fixture. The symbols' filter and the
+same bytes, value and status. A quarter of the trials bind the symbols
+read-only, so a store the source didn't make, the value it held included,
+faults. Nine faults (`BUSTER_IR_STORE_MOTION_MUTATE_*`; #3346's a key sunk past
+a load it can't place, an exit with no write-back and a write-back to a key its
+loop didn't change) must each be rejected on some fixture. The symbols' filter and the
 classification are checked against their definitions on random columns at
 every length, and the entry point with arenas of every short size. `--print
 NAME` prints a fixture's result.
 
-`tests/driver/tier1_store_motion.c` is the C driver's test: 21 functions of
+`tests/driver/tier1_store_motion.c` is the C driver's test: 26 functions of
 loops over globals compiled strictly at Tier 1 with the pass and without it on both host
-paths, each program's lines clang -O0's; the report's counts; the issue's
-kernel's references to its globals in `objdump`'s text; and 29 declarations
-whose objects the emission's list must take or leave:
+paths, each program's lines clang -O0's (#3346's: a loop left by a break, a
+return and a goto, the issue's `double` kernel, an `mprotect`ed page a loop that
+stores nothing must not write, a `volatile sig_atomic_t` flag a signal handler
+sets, and an address that escapes to a pointer the loop reads); the report's
+counts; the issue's kernel's references to its globals in `objdump`'s text (six with the pass, all outside the loop); a
+program whose loop's write-backs come before a callee's `longjmp`, built
+without `--tier1-strict` (Tier 1 doesn't admit the function that calls
+`setjmp`); and 29 declarations whose objects the emission's list must take or
+leave:
 
 ```sh
 clang -std=c17 -O2 -Wall -Wextra -Werror -fno-strict-aliasing tests/driver/tier1_store_motion.c -o build/test-driver-tier1-store-motion && ./build/test-driver-tier1-store-motion build/compiler "$(command -v clang)"
 ```
+
+Each write-back is a load of the slot and of the key, a compare of their bits,
+the dummy slot's address, a select and a store: the key is read again at the
+exit rather than the preheader's value held across the loop, which cost a spill
+an iteration in a loop that needs its registers.
 
 `test-ir-source --passes` runs the pass on every function of its files with
 every symbol listed, and `benchmark-ir-source --passes --only store-motion`
