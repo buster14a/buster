@@ -43,6 +43,10 @@ static const char node_census_test_warnings[] =
     "    e = eb; // refuse: enum-mix\n"
     "    x = (char)p; // refuse: pointer-cast-or-void-dereference\n"
     "    s = \"abc\" + i; // refuse: string-plus-int\n"
+    "    x = (i & 8) == 4; // refuse: cfg-tautology\n"
+    "    x = !(i | 1); // refuse: cfg-tautology\n"
+    "    x = i == 1 && i == 2; // refuse: cfg-tautology\n"
+    "    x = i && !i; // refuse: cfg-tautology\n"
     "    x = sizeof(x++); // refuse: unevaluated-operand\n"
     "    unsigned char c = 300; // refuse: constant\n"
     "    x = arr[5]; // refuse: constant\n"
@@ -6968,22 +6972,22 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census takes a system header's macros in a user's expression and counts them apart");
     // What the tests on the window count on each of the eight fixtures, which no verdict shows.
     static const NodeTestsWindowed windowed_warnings = {
-        .expressions = 45,
+        .expressions = 49,
         .trees = 4,
-        .operators = 56,
-        .sent = 22,
+        .operators = 66,
+        .sent = 25,
         .walks = 4,
-        .quiet = 6,
+        .quiet = 7,
         .calls = 1,
         .calls_checked = 1,
         .casts = 1,
         .casts_left = 4,
         .asks = 1,
-        .values = 45,
-        .spared = 34,
+        .values = 50,
+        .spared = 43,
         .direct = 2,
         .apart = 3,
-        .decided = 42,
+        .decided = 46,
         .decided_refused = 1,
     };
     static const NodeTestsWindowed windowed_clean = {
@@ -7176,7 +7180,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
     check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud),
-                                                             BUSTER_NODE_FRONT_AFTER, 40, 3, windowed_warnings),
+                                                             BUSTER_NODE_FRONT_AFTER, 44, 3, windowed_warnings),
                       "node-tests: at reader time the tests refuse each expression the compiler warns of, as the census does after the pipeline");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud),
                                                              BUSTER_NODE_FRONT_BEFORE, 0, 6, windowed_clean),

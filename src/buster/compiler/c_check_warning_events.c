@@ -259,8 +259,16 @@ enum
     // Zero-size records and constant arrays (#2409), both ignored by default. Only the array warning is pedantic's.
     CHECK_WARNING_ID_CXX_ZERO_SIZE_RECORD = 164,
     CHECK_WARNING_ID_ZERO_LENGTH_ARRAY = 165,
+    // clang's CFG builder's observer (#2990, AnalysisBasedWarnings' LogicalErrorHandler, c_check_program_cfg.c): an
+    // equality of a bitwise operator with a literal it can't give and a `|` of a nonzero literal
+    // (-Wtautological-bitwise-compare), a logical operator of two comparisons of one operand that is always one value
+    // (-Wtautological-overlap-compare) and of a value and its negation (-Wtautological-negation-compare). All three are
+    // -Wtautological-compare's, so -Wmost's and -Wall's, off by default.
+    CHECK_WARNING_ID_TAUTOLOGICAL_BITWISE_COMPARE = 166,
+    CHECK_WARNING_ID_TAUTOLOGICAL_OVERLAP_COMPARE = 167,
+    CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE = 168,
     // An integer logical operator with a non-boolean constant right operand (#2900), on by default, no parent group.
-    CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND = 166,
+    CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND = 169,
     CHECK_WARNING_ID_COUNT,
 };
 

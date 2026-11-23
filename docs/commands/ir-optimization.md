@@ -176,6 +176,54 @@ What it leaves are true constants that Tier 1's constant rule still builds
 below `rsp` (#2744), but for those whose quadwords are one value, which are a
 `mov` and a `vpbroadcastq` at EVEX targets (13.46 instructions per byte).
 
+## Register-class aggregates in registers (#3311)
+
+The typed stream copies a by-value aggregate's bytes by eightbytes (a
+parameter's from its `param ptr` into its object, a register-class result's
+out of the object its `ret` returns), while the source reads and writes the
+fields, an `int`'s four bytes at a time. SROA refused such a slot (its
+accesses overlap) and a result's slot escaped through its `ret`, so a struct
+passed and returned in registers went through three stack copies, and its
+`int` fields' narrow stores were read back as eightbytes, failing store
+forwarding. Tier 1 now takes them in three steps, all in
+`ir_optimize_sroa.c`:
+
+- **Widening** (`IrSroaOptions.widen`, `ir_sroa_widen`): a slot of at most 64
+  bytes, not refused but for its overlaps or a `ret` (offset 0), all of whose
+  accesses are scalars (integers, `f32`, `f64`, `ptr`) inside one aligned
+  eightbyte, has each access made one of its eightbyte's `i64` (a narrower
+  load shifted and truncated, a narrower store or'ed into the eightbyte with
+  its bits cleared). A reachable `ret` of it, where the result is one or two
+  general or xmm eightbytes of at most 16 bytes, loads its eightbytes and
+  returns them through a new slot of its own. The split then makes each
+  eightbyte a field that promotion makes a value. The insertion reuses the
+  unroller's remapping; a function with debug information is left as it is.
+  `test-ir-optimize`'s `sroa-widen` pair runs it through the interpreter.
+- **Scalars** (`ir_sroa_scalarize`), for a function's own code alone, never
+  an inline summary its callers expand: a parameter in one or two eightbyte
+  registers whose `ptr` only block 0's loads of a part read becomes a scalar
+  parameter a part (`i64` in its general register, `f64` in its xmm one), and
+  a result of one eightbyte in `rax` or `xmm0` that every `ret` returns from a
+  slot one `i64` store filled becomes that value. A function left with no
+  aggregate whose parameters are where their types put them drops its records,
+  and with them its parameters' frame rows.
+- **The optimizer's identities** take what the eightbytes leave: an `and` of a
+  zero extension and a mask that keeps its bits, a bitcast of a bitcast and a
+  truncation of an extension back to the first value's type, and an `undef`
+  as zero (an `and` absorbed by it, an `or`, `xor` or `add` of it the other
+  operand), as Tier 1 selects it.
+
+Tier 1 runs the widening SROA on every function with its own ABI records
+(`check_tier1_compile`, and `check_tier1_inline_expand` where the expansion
+runs), and a two-eightbyte result is loaded straight from its slot into `rax`
+and `rdx` (or `xmm0` and `xmm1`) rather than staged in the red zone (#3299's
+`tier1_select_part_direct`).
+`tests/ir-source/register-aggregates.c` checks the shapes (mixed widths,
+floats, padding, nesting, arrays, 9 to 16 bytes, fields left unread, an
+escaping parameter, several returns, unions) by both strict native paths
+against clang's output, and the code of `{int, int}` and `{long, long}`. A
+call site's copies of its aggregate arguments and result are still memory.
+
 ## Verification work and retained analyses (#1379)
 
 Every first validity boundary remains enabled. `ir_verify_cfg` checks shape,

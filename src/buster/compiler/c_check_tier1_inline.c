@@ -751,15 +751,18 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     // source's or an expanded callee's (*vectors): a COPY's 16-byte pieces (#2693, ir_typed_copy_pointers) are vectors in
     // the IR but give SROA nothing of theirs to split, and on sqlite3.c they made it split sqlite3VdbeExec (+141 M
     // instructions).
-    if (aggregates || (*vectors && ir_function_has_vectors(&current)))
+    // And a function that takes or returns an aggregate by value (#3311, its own ABI records): SROA's widening keeps its
+    // register-class aggregates' eightbytes out of memory.
+    if (aggregates || (*vectors && ir_function_has_vectors(&current)) || current.parameter_passed != 0)
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
         options.simd = true;
         options.flagged = true;
+        options.widen = true;
         IrSroaResult split = { 0 };
         const IrCheck check = ir_optimize_sroa(&current, &lane->steps[5], scratch, options, &split);
-        if (check.error == IR_OK && (split.split_slots != 0 || split.assembled != 0))
+        if (check.error == IR_OK && (split.split_slots != 0 || split.assembled != 0 || split.widened_slots != 0))
         {
             current = split.function;
             changed = true;
@@ -967,7 +970,7 @@ static bool check_tier1_inline_summary(CheckTier1Lane* lane, const CheckTier1Inl
 // steps[4] and steps[5], verified where *verified; or false, and `lowered` stays the body's. The unit stage runs first,
 // once.
 static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar, bool certify, IrFunction* result,
-                               uint32_t* inlined, bool* verified, bool* vectorize_volatile)
+                               uint32_t* inlined, bool* verified, bool* vectorize_volatile, bool* expanding)
 {
     const CheckTier1Inline* inlining = lane->inlining;
     const Tier0Function* function = &inlining->lowered->functions[caller];
@@ -975,7 +978,8 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
     *verified = true;
     *result = *lowered;
     bool changed = false;
-    if (inlining->stage != 0 && check_tier1_inline_stage(&lane->scratch, inlining))
+    *expanding = inlining->stage != 0 && check_tier1_inline_stage(&lane->scratch, inlining);
+    if (*expanding)
     {
         for (uint32_t c = 0; c < function->call_count; c += 1)
         {

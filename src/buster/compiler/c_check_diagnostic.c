@@ -216,6 +216,12 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_ATOMIC_ACCESS] = { "-Watomic-access", NULL, "accessing a member of an atomic structure or union is undefined behavior" },
     [CHECK_WARNING_ID_CXX_ZERO_SIZE_RECORD] = { "-Wc++-compat", NULL, "empty struct has size 0 in C, size 1 in C++" },
     [CHECK_WARNING_ID_ZERO_LENGTH_ARRAY] = { "-Wzero-length-array", "-Wgnu", "zero size arrays are an extension" },
+    [CHECK_WARNING_ID_TAUTOLOGICAL_BITWISE_COMPARE] = { "-Wtautological-bitwise-compare", "-Wtautological-compare",
+                                                        "bitwise comparison always evaluates to false" },
+    [CHECK_WARNING_ID_TAUTOLOGICAL_OVERLAP_COMPARE] = { "-Wtautological-overlap-compare", "-Wtautological-compare",
+                                                        "non-overlapping comparisons always evaluate to false" },
+    [CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE] = { "-Wtautological-negation-compare", "-Wtautological-compare",
+                                                         "'&&' of a value and its negation always evaluates to false" },
     [CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND] = { "-Wconstant-logical-operand", NULL, "use of logical operator with constant operand" },
 };
 

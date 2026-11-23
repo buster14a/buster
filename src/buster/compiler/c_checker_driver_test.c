@@ -11572,6 +11572,12 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/asm-label-after-definition");
             }
+            // Conditions clang's CFG builder decides by its heuristics (#2990): the runtime warnings and -Wreturn-type fall-offs
+            // it prunes, and its observer's tautological warnings, whole, in each policy, mode, lane request and reader.
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/cfg-pruning");
+            }
             // Functions and variables an attribute uses (#3300): a constructor's or destructor's definition, and an alias's
             // or ifunc's target declared before it, which clang's -Wunused-function and -Wunused-variable never name.
             if (!lazy && check_test_driver_takes())
