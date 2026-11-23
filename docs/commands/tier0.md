@@ -112,7 +112,12 @@ half of all of them are tested against zero before their branch, once or
 twice (`CONST 0` and `NE` or `EQ`, the branch `BRANCH_TRUE` after an odd
 number of `EQ`s). Its programs must run at least 50 conditions that are
 their compare's jump for each way a compare takes its operands, behind one
-test and behind two. Their calls pass up to 12
+test and behind two. Every program's records must zero (`xorps`) a legacy
+conversion's destination before `cvtsi2ss`/`cvtsi2sd`, and before
+`cvtss2sd`/`cvtsd2ss` but in place, which would otherwise wait on the
+register's last value (#3308); `conversion zeroes` checks the same of every
+class's conversion to `float` and `double`, of a home and of a register.
+Their calls pass up to 12
 arguments (32 in the deep shape), past the argument registers, a third of them (in the shapes with
 calls) through pointers to functions, and their pointer arithmetic has
 element sizes for each of its templates, past imul's imm32 too. Their objects

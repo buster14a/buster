@@ -1211,6 +1211,43 @@ static void tier1_select_test_fma(Tier1SelectTest* test)
     }
 }
 
+// #3308: legacy cvtss2sd and cvtsd2ss write their destination's low lane alone, so a resize into another register than its
+// operand's zeroes that register first (xorps), which breaks its dependence on the value it held; in place it doesn't,
+// since the zero would clobber the operand. Every pair of registers, both precisions.
+static void tier1_select_test_resize_zero(Tier1SelectTest* test)
+{
+    static const uint16_t forms[2] = { X86_FORM_CVTSS2SD_X_XM32, X86_FORM_CVTSD2SS_X_XM64 };
+    bool exact = true;
+    for (uint32_t d = 0; d < 2; d += 1)
+    {
+        for (uint8_t x = 0; x < 16; x += 1)
+        {
+            for (uint8_t left = 0; left < 16; left += 1)
+            {
+                const Tier1SelectHoles holes = {
+                    .rule = TIER1_RULE_FLOAT_CONVERT,
+                    .width = (uint8_t)(d == 0 ? 8 : 4),
+                    .source_width = (uint8_t)(d == 0 ? 4 : 8),
+                    .destination = x,
+                    .left = left,
+                    .scale = BUSTER_TIER1_FLOAT_RESIZE,
+                };
+                const Tier1SelectRecords records = tier1_select_expand(&holes);
+                const uint32_t at = x != left ? 1 : 0;
+                const X86Instruction* record = &records.records[at];
+                bool right = records.count == at + 1 && record->form == forms[d] && record->reg == x && record->rm == left && record->mode == BUSTER_X86_REGISTER_DIRECT;
+                if (x != left)
+                {
+                    const X86Instruction* zero = &records.records[0];
+                    right = right && zero->form == X86_FORM_XORPS_X_XM128 && zero->reg == x && zero->rm == x && zero->mode == BUSTER_X86_REGISTER_DIRECT;
+                }
+                exact = exact && right;
+            }
+        }
+    }
+    tier1_select_test_expect(test, exact, "a float resize into another register zeroes it first, and in place doesn't (#3308)");
+}
+
 static void tier1_select_test_intrinsics(Tier1SelectTest* test)
 {
     Arena input = arena_reserve(1u << 20);
@@ -5515,6 +5552,7 @@ static int run_tier1_select_tests(int argc, char** argv)
             tier1_select_test_branches(&test);
             tier1_select_test_plans(&test);
             tier1_select_test_fma(&test);
+            tier1_select_test_resize_zero(&test);
             tier1_select_test_intrinsics(&test);
             tier1_select_test_lane_forms(&test);
             tier1_select_test_sse_vectors(&test);

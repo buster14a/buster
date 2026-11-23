@@ -406,7 +406,12 @@ struct PPOptions
     // c_check_node_machine_reader.c): 1, the census's set and silence tests after T; 2, T's rows and rules checked against
     // the action there. Off in every compile; measure-node-machine --shadow sets it for --front-tests and, with --verify,
     // for the check.
-    uint16_t node_reader;
+    uint32_t node_reader;
+    // --node-bodies under a test's switch (BUSTER_TEST_NODE_BODIES=N:K): of the bodies the producer takes, the compile
+    // takes those whose place among them, modulo `node_bodies_modulus`, is `node_bodies_residue`; every one where the
+    // modulus is 0.
+    uint32_t node_bodies_modulus;
+    uint32_t node_bodies_residue;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;
@@ -1951,6 +1956,9 @@ typedef enum PPSeverity
 typedef enum PPDiagnosticPhase
 {
     PP_DIAGNOSTIC_LEXICAL,
+    // A function's CFG observer's warnings (#2990, check_common_cfg_tautologies): clang builds the CFG at the body's end
+    // before it gives the body's queued runtime warnings.
+    PP_DIAGNOSTIC_CFG,
     PP_DIAGNOSTIC_DEFERRED,
     PP_DIAGNOSTIC_RETURN,
     // A declarator's completed type precedes declaration-attribute checks at the same parser boundary.
@@ -5990,34 +5998,45 @@ static const PPFeature pp_features_constexpr_builtin[] = {
 static const PPFeature pp_implemented_attribute[] = {
     { "alias", 1 },
     { "aligned", 1 },
+    { "always_inline", 1 },
     { "cleanup", 1 },
     { "common", 1 },
+    { "const", 1 },
     { "constructor", 1 },
     { "counted_by", 1 },
     { "counted_by_or_null", 1 },
+    { "deprecated", 1 },
     { "destructor", 1 },
     { "ext_vector_type", 1 },
     { "fallthrough", 1 },
+    { "format", 1 },
     { "gnu_inline", 1 },
     { "ifunc", 1 },
     { "mode", 1 },
     { "naked", 1 },
     { "nocommon", 1 },
+    { "noinline", 1 },
+    { "noreturn", 1 },
     { "overloadable", 1 },
     { "packed", 1 },
+    { "pure", 1 },
     { "retain", 1 },
     { "section", 1 },
     { "sized_by", 1 },
     { "sized_by_or_null", 1 },
     { "target", 1 },
     { "transparent_union", 1 },
+    { "unavailable", 1 },
+    { "unused", 1 },
     { "used", 1 },
     { "vector_size", 1 },
     { "visibility", 1 },
+    { "warn_unused_result", 1 },
     { "weak", 1 },
     { "weakref", 1 },
 };
 static const PPFeature pp_implemented_c_attribute[] = {
+    { "_Noreturn", 202202 },
     { "clang::counted_by", 1 },
     { "clang::counted_by_or_null", 1 },
     { "clang::ext_vector_type", 1 },
@@ -6028,30 +6047,42 @@ static const PPFeature pp_implemented_c_attribute[] = {
     { "fallthrough", 201910 },
     { "gnu::alias", 1 },
     { "gnu::aligned", 1 },
+    { "gnu::always_inline", 1 },
     { "gnu::cleanup", 1 },
     { "gnu::common", 1 },
+    { "gnu::const", 1 },
     { "gnu::constructor", 1 },
+    { "gnu::deprecated", 1 },
     { "gnu::destructor", 1 },
     { "gnu::fallthrough", 1 },
+    { "gnu::format", 1 },
     { "gnu::gnu_inline", 1 },
     { "gnu::ifunc", 1 },
     { "gnu::mode", 1 },
     { "gnu::naked", 1 },
     { "gnu::nocommon", 1 },
+    { "gnu::noinline", 1 },
+    { "gnu::noreturn", 1 },
     { "gnu::packed", 1 },
+    { "gnu::pure", 1 },
     { "gnu::retain", 1 },
     { "gnu::section", 1 },
     { "gnu::target", 1 },
     { "gnu::transparent_union", 1 },
+    { "gnu::unused", 1 },
     { "gnu::used", 1 },
     { "gnu::vector_size", 1 },
     { "gnu::visibility", 1 },
+    { "gnu::warn_unused_result", 1 },
     { "gnu::weak", 1 },
     { "gnu::weakref", 1 },
     { "maybe_unused", 202106 },
     { "nodiscard", 202003 },
+    { "noreturn", 202202 },
 };
 static const PPFeature pp_implemented_feature[] = {
+    { "attribute_deprecated_with_message", 1 },
+    { "attribute_unavailable_with_message", 1 },
     { "c_alignas", 1, 2011 },
     { "c_alignof", 1, 2011 },
     { "c_atomic", 1, 2011 },

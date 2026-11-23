@@ -31,6 +31,31 @@ static bool check_input_vla_runtime_size(const TypeTable* types, TypeId type)
 
 // A known non-ICE value still denotes a VLA in block/prototype/type-name contexts. File declarations and
 // record members instead use Clang's constant-array folding extension, with its default-on context warning.
+// The `(` of the compound literal whose type name holds the declarator `open` opens, or BUSTER_CHECK_NONE: a compound literal
+// can't have a variable array's type, so clang folds its bound, as a file-scope declarator's (#2252: `(int[(1, 2)]){ 3 }`
+// in a body), its warning at that `(`.
+static uint32_t check_input_vla_compound(const CheckInputReader* reader, uint32_t open)
+{
+    const Parser* parser = reader->parser;
+    uint32_t compound = BUSTER_CHECK_NONE;
+    for (uint32_t token = open, steps = 0; token < parser->tokens.count && steps < parser->tokens.count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[token];
+        const bool other = role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_SIZEOF || role == PARSE_ROLE_CLOSE_CAST ||
+                           role == PARSE_ROLE_CLOSE_SPECIFIER || role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_BODY ||
+                           role == PARSE_ROLE_CLOSE_BLOCK;
+        compound = role == PARSE_ROLE_CLOSE_COMPOUND ? token : compound;
+        token = other || role == PARSE_ROLE_CLOSE_COMPOUND ? parser->tokens.count : parser->tree.parents[token];
+    }
+    // Its `(`, the opener before `open` whose closer it is.
+    uint32_t opener = BUSTER_CHECK_NONE;
+    for (uint32_t t = open; compound < parser->tokens.count && opener == BUSTER_CHECK_NONE && t-- > 0;)
+    {
+        opener = parser->tokens.kinds[t] == PARSE_KIND_L_PAREN && parser->tree.parents[t] == compound ? t : BUSTER_CHECK_NONE;
+    }
+    return opener;
+}
+
 static bool check_input_vla_force_constant(const CheckInputReader* reader, uint32_t open, bool parameter)
 {
     const Parser* parser = reader->parser;
@@ -40,7 +65,7 @@ static bool check_input_vla_force_constant(const CheckInputReader* reader, uint3
     for (uint32_t token = open, steps = 0; !parameter && token < parser->tokens.count && steps < parser->tokens.count; steps += 1)
     {
         const uint8_t role = parser->tree.roles[token];
-        if (role == PARSE_ROLE_CLOSE_STRUCT)
+        if (role == PARSE_ROLE_CLOSE_STRUCT || role == PARSE_ROLE_CLOSE_COMPOUND)
         {
             force = true;
             break;
@@ -254,6 +279,17 @@ static void check_input_vla_place(CheckInputReader* reader, uint32_t open, uint3
     if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource)
     {
         check_input_report(reader, at, message);
+        if (message != CHECK_INPUT_CONSTANT_INITIALIZER && reader->output->report_count == 1)
+        {
+            // clang's once the declarator is read (#2252): after its bounds' commas' -Wunused-value, the following
+            // bounds' too, and before its initializer's. The token after its last `]`.
+            uint32_t after = parser->tree.parents[open] + 1;
+            while (after < parser->tokens.count && parser->tokens.kinds[after] == PARSE_KIND_L_SQUARE && parser->tree.parents[after] > after)
+            {
+                after = parser->tree.parents[after] + 1;
+            }
+            reader->output->reports[0].sort = after < parser->tokens.count ? after : 0;
+        }
     }
 }
 
@@ -341,7 +377,8 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
                 // clang's constant-evaluated bound gives as it builds them, before the fold's warning (#2202).
                 check_input_attribute_unused(reader, first, end, true);
                 const uint32_t warnings = reader->warning_events.count;
-                check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : open, true);
+                const uint32_t compound = name < parser->tokens.count ? BUSTER_CHECK_NONE : check_input_vla_compound(reader, open);
+                check_input_constant_bound_warning(reader, first, end, &value, name < parser->tokens.count ? name : compound < parser->tokens.count ? compound : open, true);
                 *fold_warning = reader->warning_events.count > warnings && check_input_integer_ice(reader, &value) ? warnings : BUSTER_CHECK_NONE;
             }
         }
@@ -356,6 +393,10 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
                 // parameter's, which its definition's walk reads.)
                 check_input_attribute_unused(reader, first, end, true);
             }
+            // Clang reads a bound constant-evaluated, where its runtime warnings are dropped (DiagRuntimeBehavior), and a
+            // variable one's fold failed, which checks no overflow (#2264: `(1 << 44, 3)`, `(2147483647 + 1, 3)`,
+            // `(2147483647 + 1) * n`).
+            check_input_constant_warning_clear(reader, first, end, check_constant_unevaluated_warnings());
         }
         // A failure before the first undeclared name the reading reported is clang's error too, which its parser gives first
         // (#1447): `sizeof(struct Missing) - sizeof(missing)`'s.

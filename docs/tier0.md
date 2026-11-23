@@ -201,6 +201,14 @@ table. The kinds are:
   read from its local's home, a register or a frame slot, into a register). `ir_lower`
   refuses a function with the flag (`IR_ERROR_UNSUPPORTED`), so that Tier 1 falls back to Tier 0, and the typed
   interpreter refuses it.
+- A `LOAD`, `STORE` or `SET` of any class (#3329: a vector's and a mask's too, whose bytes stay in the value's low
+  bits) may also carry `BUSTER_TYPED_ACCESS_VOLATILE` (#3310, bit 61, below the segment's bits), and so may a `COPY` of
+  a volatile aggregate (past its bytes, on each of the copy's pieces): an access of a volatile-qualified lvalue, which the C lowering marks where it marks a segment's override
+  (`check_lower_access`, and a bit-field unit's loads and stores, `check_lower_bit_override`), sending a volatile
+  global through its address and a `LOAD` or `STORE` rather than `GLOBAL` and `STORE_GLOBAL`. A function with one says
+  so (`Tier0Function.volatiles`, which the inliner propagates); validation and both compile paths strip the bit out of
+  line with the segment overrides (`tier0_segments_strip`), and Tier 0, which emits every access anyway, needs nothing
+  more. `ir_lower` makes it `BUSTER_IR_VOLATILE`, which no pass removes, merges or forwards.
 - `ATOMIC_RMW` (#1059), an atomic read/modify/write, pops an address (U64) and an operand of an integer `class` and
   pushes the object's old value of `class`: `value` its operation (`BUSTER_TYPED_RMW_ADD` for an addition, an exchange
   without it) and a C memory order, any of the six. Tier 0 defers it and emits `xchg` (an exchange) or `lock xadd` (an
