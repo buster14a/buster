@@ -2925,6 +2925,75 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .errors = 4,
     },
     {
+        // An initializer list's diagnostics in clang's InitListChecker order (#2914): its subobjects' conversion errors,
+        // excess elements and overrides as the walk meets them, then the completed initializer's -Wliteral-conversion;
+        // a default error's conversion (-Wint-conversion) leaves the list valid, and its excess elements warned, where a
+        // hard one's (double to a pointer) doesn't; at file scope, in a body, in arrays.
+        .name = "initializer list diagnostics in walk order",
+        .source = "struct S { int n; int *p; };\n"
+                  "struct S c[2] = { { 1, 2.5 }, { .n = 1, .n = 2 } };\nstruct S d = { 2.5, { 0, 3 } };\nstruct S e = { 1, { 2, 3 } };\n"
+                  "struct S g = { 1, 2, 3 };\nint *q = { 2, 3 };\nint *r[2] = { 1, 2, 3 };\nstruct S h = { 1, { 2.5, 3 } };\n"
+                  "void f(void) { struct S i = { 2.5, { 0, 3 } }; int x = 1.5; struct S j = { 3.5, 0, 1 }; struct S k = { 1, { 2, 3 } };\n"
+                  "int *m = { 2, 3 }; (void)i; (void)x; (void)j; (void)k; (void)m; }\nint t[2] = { 1.5, 2, 3 };\n",
+        .warnings = 16,
+        .errors = 9,
+        .notes = 1,
+    },
+    {
+        // A builtin's call is made after its argument's failed conversion that clang only warns of by default as an error
+        // (#2914): its result's own conversion is checked, as an ordinary call's is.
+        .name = "builtin results after a failed argument",
+        .source = "long g(long);\n"
+                  "void f(int *p) { long *l = g(p); long *m = __builtin_expect(p, 0); (void)l; (void)m; }\n",
+        .errors = 4,
+        .notes = 1,
+    },
+    {
+        // A discarded comparison's -Wunused-comparison follows the comparison's own warnings (#2914): clang's
+        // DiagnoseUnusedExprResult runs at the full expression's end.
+        .name = "unused comparisons after the comparison's warnings",
+        .source = "void f(int *p, char *c) { p < 1; p == 1; p > c; p != c; }\n",
+        .warnings = 8,
+        .notes = 2,
+    },
+    {
+        // -Wcompare-distinct-pointer-types and -Wpointer-integer-compare name both operands' types (#2914): each after its
+        // lvalue conversion (an array's decay, a const's dropped), not the comparison's to their common type, a typedef's
+        // sugar kept; ordered and equality comparisons, function pointers, a conditional's condition.
+        .name = "comparisons' operand types",
+        .source = "typedef int *P; typedef char C; typedef long L;\n"
+                  "void f(int *p, P q, C *c, const int *k, int a[2], void (*g)(void), long *l, L n, const int x) {\n"
+                  "(void)(p < (char *)0); (void)(q == c); (void)(c != p); (void)(k > (long*)0); (void)(a <= l); (void)(g == (void(*)(int))0);\n"
+                  "(void)(p == l ? 1 : 0); (void)(p == 1); (void)(q != n); (void)(x == a); (void)(1 == q); (void)(p == 1 ? 1 : 0); }\n",
+        .warnings = 12,
+    },
+    {
+        // A cast between a pointer and a floating or complex type (#2914, clang's CheckCStyleCast), at the operand's first
+        // token: "pointer cannot be cast to type 'T'", the target as written (an _Atomic one's value type), from a pointer,
+        // an array's or a function's decay; "operand of type 'T' cannot be cast to a pointer type", the operand's type after
+        // its lvalue conversion (a typedef's sugar kept, a const's dropped).
+        .name = "casts between pointers and floating types",
+        .source = "typedef float F; typedef int *P; typedef double D; struct S { int *m; }; int *h(void);\n"
+                  "void f(int *p, double d, P q, _Complex float z, const int *cp, int a[2], struct S s, D e, const double cd, _Complex int ci) {\n"
+                  "(void)(float)p; (void)(F)q; (void)(double)(p + 1); (void)(int *)d; (void)(P)1.5f; (void)(_Complex double)p; (void)(int*)z;\n"
+                  "(void)(long double)cp; (void)(float)(void*)0; (void)(_Float16)p; (void)(float)f; (void)(float)\"x\"; (void)(float)a;\n"
+                  "(void)(float)p++; (void)(float)s.m; (void)(float)h(); (void)(float)(d ? p : p); (void)(int*)e; (void)(int*)cd;\n"
+                  "(void)(_Atomic float)p; (void)(_Complex int)p; (void)(int*)ci; (void)(char*)(float)p; }\n",
+        .errors = 20,
+    },
+    {
+        // A _Generic selection that matches no association and has no default (#2914): clang's "controlling expression
+        // type 'T' not compatible with any generic association type" at the controlling expression's first token, its
+        // type after the lvalue conversion (a typedef's sugar kept, a const typedef's dropped, an array's decay), at file
+        // scope too.
+        .name = "generic selections that match no association",
+        .source = "typedef int *P; typedef const int CI;\n"
+                  "void f(P q, CI c, int a[2], int *p, int x) { (void)_Generic(q, char: 1); (void)_Generic(c, char: 1); (void)_Generic(a, char: 1);\n"
+                  "(void)_Generic((P)0, char: 1); (void)_Generic(x + 1.0, char: 1); (void)_Generic((p), char: 1, short: 2); int y = _Generic(p, char: 1) + 1; (void)y; }\n"
+                  "int g = _Generic(1.0, char: 1);\n",
+        .errors = 8,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },

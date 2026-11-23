@@ -2,20 +2,19 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // GNU's cleanup attribute's errors (#147) by the driver against clang's, on original fixtures: every error, its place and
-// its message, in order, by both paths of -fsyntax-only. test-checker's fixtures (c_check_cleanup_test.c) compare where
-// each source is first rejected; these tell the messages apart. Two differences are taken: clang names the two types of
-// its parameter's error, where the driver says what clang's other spelling of the message does ("parameter has
-// incompatible type"); and after a syntax error in a declaration (a type's name as the argument), clang's later errors
-// in it, which the parser skips with the rest of the declaration. A cleanup's error, as the reader's errors but an
-// undeclared name's, ends the unit's checking (check_input_diagnostic_recover), so each fixture has one, or undeclared
-// names. The notes clang attaches to the jumps' errors aren't compared. Include after c_checker_driver_recovery_test.c.
+// its message, in order, by both paths of -fsyntax-only, the parameter's error with both of clang's types, their
+// typedefs and qualifiers as written (#1844). test-checker's fixtures (c_check_cleanup_test.c) compare where each source
+// is first rejected; these tell the messages apart. One difference is taken: after a syntax error in a declaration (a
+// type's name as the argument), clang's later errors in it, which the parser skips with the rest of the declaration. A
+// cleanup's error, as the reader's errors but an undeclared name's, ends the unit's checking
+// (check_input_diagnostic_recover), so each fixture has one, or undeclared names. The notes clang attaches to the jumps'
+// errors aren't compared; -Walign-mismatch's warnings are, whole, by check_test_driver_cleanup_alignment. Include after
+// c_checker_driver_recovery_test.c.
 
 // The errors of a diagnostic text, each "file:line:column: error: message" and a newline, at most `limit` of them (all for
-// 0), with clang's "parameter has type 'P' which is incompatible with type 'V'" as "parameter has incompatible type".
+// 0).
 static bool check_test_cleanup_errors(const char* text, uint32_t limit, char* errors, uint64_t capacity)
 {
-    static const char typed[] = " parameter has type '";
-    static const char untyped[] = " parameter has incompatible type";
     uint64_t used = 0;
     uint32_t taken = 0;
     bool valid = text != NULL && capacity != 0;
@@ -25,15 +24,11 @@ static bool check_test_cleanup_errors(const char* text, uint32_t limit, char* er
         const uint64_t length = end != NULL ? (uint64_t)(end - at) : strlen(at);
         if (memmem(at, length, ": error: ", 9) != NULL)
         {
-            const char* type = memmem(at, length, typed, sizeof(typed) - 1);
-            const uint64_t kept = type != NULL ? (uint64_t)(type - at) : length;
-            const uint64_t added = type != NULL ? sizeof(untyped) - 1 : 0;
-            valid = kept + added + 1 < capacity - used;
+            valid = length + 1 < capacity - used;
             if (valid)
             {
-                memcpy(errors + used, at, kept);
-                memcpy(errors + used + kept, untyped, added);
-                used += kept + added;
+                memcpy(errors + used, at, length);
+                used += length;
                 errors[used++] = '\n';
             }
             taken += 1;
@@ -94,6 +89,15 @@ static void check_test_driver_cleanup_errors(CheckTest* test, const char* clang,
         { "an integer parameter", "void f(int p);\nvoid g(void) {\nint a __attribute__((cleanup(f)));\n}\n", 0 },
         { "an element's pointer", "void f(int *p);\nvoid g(int n) {\nint a[n] __attribute__((cleanup(f)));\n}\n", 0 },
         { "another struct", "struct S { int x; };\nstruct T { int x; };\nvoid f(struct T *p);\nvoid g(void) {\nstruct S s __attribute__((cleanup(f)));\n}\n", 0 },
+        // The types as clang prints them (#1844): typedefs with their a.k.a., the parameter's own qualifiers, which its
+        // function's type drops, a pointer typedef, an array's and a function pointer's.
+        { "typedefs of both types", "typedef long L;\ntypedef int I;\nvoid f(const L *p);\nvoid g(void) {\nconst I a __attribute__((cleanup(f))) = 1;\n}\n", 0 },
+        { "a pointer typedef's parameter", "typedef long *LP;\ntypedef int I;\nvoid f(LP p) { }\nvoid g(void) {\nI a __attribute__((cleanup(f))) = 1;\n}\n", 0 },
+        { "a pointer typedef's variable", "typedef int *IP;\nvoid f(long **p) { }\nvoid g(void) {\nIP a __attribute__((cleanup(f))) = 0;\n}\n", 0 },
+        { "a const parameter", "typedef long L;\nvoid f(L *const p) { }\nvoid g(void) {\nint a __attribute__((cleanup(f))) = 0;\n}\n", 0 },
+        { "an array's pointer", "void f(int (*p)[3]);\nvoid g(void) {\nint a[4] __attribute__((cleanup(f)));\n}\n", 0 },
+        { "a function pointer's pointer", "void f(void (**p)(int));\nvoid g(void) {\nvoid (*a)(void) __attribute__((cleanup(f))) = 0;\n}\n", 0 },
+        { "a volatile pointee", "void f(unsigned *p);\nvoid g(void) {\nvolatile int a __attribute__((cleanup(f))) = 0;\n}\n", 0 },
         // An __auto_type variable's, against the deduced type (#745's review), reported where the attribute names the
         // function.
         { "an __auto_type double by an int pointer", "void f(int *p);\nvoid g(void) {\n__auto_type a __attribute__((cleanup(f))) =\n    1.0;\n}\n", 0 },
@@ -134,6 +138,92 @@ static void check_test_driver_cleanup_errors(CheckTest* test, const char* clang,
             const bool actual_valid = check_test_cleanup_errors(text, fixtures[i].limit, actual, sizeof(actual));
             free(text);
             snprintf(description, sizeof(description), "cleanup errors, %s, by the %s path: clang's\n%sagainst\n%s", fixtures[i].name,
+                     scalar != 0 ? "scalar" : "vector", expected, actual);
+            check_test_expect(test, status == oracle && expected_valid && actual_valid && strcmp(expected, actual) == 0, description);
+        }
+    }
+    unlink(source);
+}
+
+// The warnings and errors of a diagnostic text, each "file:line:column: warning: message" or "...: error: ..." and a
+// newline, in order.
+static bool check_test_cleanup_diagnostics(const char* text, char* lines, uint64_t capacity)
+{
+    uint64_t used = 0;
+    bool valid = text != NULL && capacity != 0;
+    for (const char* at = text; valid && at != NULL && *at != 0;)
+    {
+        const char* end = strchr(at, '\n');
+        const uint64_t length = end != NULL ? (uint64_t)(end - at) : strlen(at);
+        if (memmem(at, length, ": error: ", 9) != NULL || memmem(at, length, ": warning: ", 11) != NULL)
+        {
+            valid = length + 1 < capacity - used;
+            if (valid)
+            {
+                memcpy(lines + used, at, length);
+                used += length;
+                lines[used++] = '\n';
+            }
+        }
+        at = end != NULL ? end + 1 : NULL;
+    }
+    if (capacity != 0)
+    {
+        lines[used] = 0;
+    }
+    return valid;
+}
+
+// clang's -Walign-mismatch of a cleanup's call (#1844): a pointer parameter more aligned than the variable's type, an
+// aligned(1) typedef's among them, before the parameter's type's error at the same place, and under its options; whole
+// diagnostics against clang's, with the exit status, by both paths of -fsyntax-only. (After a unit's first error, the
+// driver's later rounds give its errors without the warnings beside them, which these leave out.)
+static void check_test_driver_cleanup_alignment(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* name;
+        const char* source;
+        const char* option;
+        // Whether clang gives a diagnostic of it.
+        bool diagnosed;
+    } fixtures[] = {
+        { "an aligned(1) typedef's variable", "typedef int ui __attribute__((aligned(1)));\nvoid f(int *p);\nvoid g(int *p);\n"
+                                               "void h(void) {\nui a __attribute__((cleanup(f))) = 1;\nui b __attribute__((cleanup(g))) = 2;\nint c __attribute__((cleanup(f))) = 3;\n}\n", NULL, true },
+        { "an aligned(1) typedef's variable, ignored", "typedef int ui __attribute__((aligned(1)));\nvoid f(int *p);\nvoid h(void) {\nui a __attribute__((cleanup(f))) = 1;\n}\n",
+          "-Wno-align-mismatch", false },
+        { "an aligned(1) typedef's variable, an error", "typedef int ui __attribute__((aligned(1)));\nvoid f(int *p);\nvoid h(void) {\nui a __attribute__((cleanup(f))) = 1;\n}\n",
+          "-Werror=align-mismatch", true },
+        { "a void pointer and a less aligned pointee", "typedef short us __attribute__((aligned(1)));\nvoid f(void *p);\nvoid g(char *p);\nvoid h(void) {\n"
+                                                      "us a __attribute__((cleanup(f))) = 1;\nchar b __attribute__((cleanup(g))) = 2;\n}\n", NULL, false },
+        { "a more aligned pointee of another type", "void f(long *p);\nvoid h(void) {\nint a __attribute__((cleanup(f))) = 1;\n}\n", NULL, true },
+        { "a more aligned pointee of another typedef", "typedef double D;\nvoid f(D *p);\nvoid h(void) {\nchar a __attribute__((cleanup(f))) = 1;\n}\n", NULL, true },
+    };
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/cleanup-alignment.c", directory);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    {
+        const bool made = parse_test_write(source, fixtures[i].source, strlen(fixtures[i].source));
+        const char* option = fixtures[i].option != NULL ? fixtures[i].option : "-Wno-unused-variable";
+        char* arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-fno-color-diagnostics", "-fno-caret-diagnostics", (char*)option, source, NULL };
+        char* reference = NULL;
+        const int oracle = made ? check_test_driver_spawn(arguments, &reference) : -1;
+        char expected[8192];
+        const bool expected_valid = check_test_cleanup_diagnostics(reference, expected, sizeof(expected));
+        free(reference);
+        char description[512];
+        snprintf(description, sizeof(description), "cleanup alignment, %s: clang warns or is silent as expected", fixtures[i].name);
+        check_test_expect(test, made && oracle >= 0 && expected_valid && (expected[0] != 0) == fixtures[i].diagnosed, description);
+        for (uint32_t scalar = 0; made && scalar < 2; scalar += 1)
+        {
+            char* checked[] = { (char*)(executable != NULL ? executable : "/proc/self/exe"), "-std=gnu17", "-fsyntax-only", "-fno-caret-diagnostics", (char*)option,
+                                scalar != 0 ? "--scalar" : source, scalar != 0 ? source : NULL, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(checked, &text);
+            char actual[8192];
+            const bool actual_valid = check_test_cleanup_diagnostics(text, actual, sizeof(actual));
+            free(text);
+            snprintf(description, sizeof(description), "cleanup alignment, %s, by the %s path: clang's\n%sagainst\n%s", fixtures[i].name,
                      scalar != 0 ? "scalar" : "vector", expected, actual);
             check_test_expect(test, status == oracle && expected_valid && actual_valid && strcmp(expected, actual) == 0, description);
         }

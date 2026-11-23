@@ -12,10 +12,10 @@ requirements. [Command index](README.md).
   four at a time in vectors with no memory but the stack (#2957); arguments'
   and results' registers and stack
   slots as clang and LLVM's `CC_X86_64_C` give them, by prefix sums 16
-  arguments at a time, with a per-call vector kernel (`abi_assign_lanes`,
-  eight calls at a time) for the calls the sums can't place; and `va_arg`'s plan. The scalar twins went in
-  #2924, the scalar classification in #2957 and the per-call assignment in
-  #2958.
+  arguments at a time, with a per-call vector kernel (`abi_assign_lanes`, a
+  call's arguments 16 at a time, #3375) for the calls the sums can't place;
+  and `va_arg`'s plan. The scalar twins went in #2924, the scalar
+  classification in #2957 and the per-call assignment in #2958.
   `calling_convention_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-calling-convention` runs them) and
   `calling_convention_benchmark.c` provides `benchmark-calling-convention`.

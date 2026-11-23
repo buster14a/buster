@@ -22,11 +22,12 @@
 //     don't spell it), and an unnamed or temporary one, and each branch's target, under a local `.Lbuster.` name of
 //     its own, which no object keeps.
 //   - Data: rows of `.byte` (sixteen bytes a row, formatted by an AVX-512 kernel: assembly_byte_row), `.zero` for runs
-//     of zeros and for zero-fill sections, `.string` and `.ascii` in string pools.
+//     of zeros and for zero-fill sections, `.string` and `.ascii` in string pools. A common symbol is a `.comm`
+//     with its size and byte alignment. Its atom occupies no space in a section.
 //   - Sections: each atom's (its descriptor's, or its class's object section), in atom order, aligned by `.p2align`
 //     with int3 in code and zeros elsewhere, as the object writer fills its gaps.
 // What the sink doesn't print yet it refuses (ASSEMBLY_UNSUPPORTED, `reason` naming it): thread-local storage, section
-// groups, linked-order sections, common and unique symbols, code without records (inline assembly's), and fixup kinds
+// groups, linked-order sections, unique symbols, code without records (inline assembly's), and fixup kinds
 // that GNU as can't spell where they are. A view that contradicts itself (records that don't encode to their atom's
 // bytes, a fixup off every field) is ASSEMBLY_INVALID: an internal error, never printed around.
 //
@@ -765,7 +766,7 @@ static bool assembly_instruction(AssemblyText* text, const Link* link, const Ass
         assembly_append(text, assembly_evex_needed(record, form) ? "{evex} " : "");
         assembly_append(text, form->family == BUSTER_X86_FAMILY_VEX && x86_match_yields((uint32_t)(form - x86_form_descriptions)) ? "{vex} " : "");
         const bool near = form->syntax == X86_SYNTAX_REL && form->relative_bytes >= 2 && assembly_opcode(form) != 0xe8 && target != UINT32_MAX;
-        assembly_append(text, near ? "{disp32} " : "");
+        assembly_append(text, near || (record->mode & BUSTER_X86_MODE_DISP32) ? "{disp32} " : "");
         bool suffixed = false;
         assembly_mnemonic(text, form, record, &suffixed);
         const char* suffix = suffixed ? assembly_suffix(record, form, widths) : 0;
@@ -1555,9 +1556,13 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
     {
         const uint8_t flags = link->symbols.flags[s];
         const uint8_t type = flags & BUSTER_LINK_SYMBOL_TYPE;
-        const char* reason = used[s] == 0 ? 0 : type == BUSTER_LINK_SYMBOL_TLS ? "thread-local storage" : type == BUSTER_LINK_SYMBOL_COMMON ? "common symbols" :
+        const AtomId atom = link->symbols.atom[s];
+        const bool common = type == BUSTER_LINK_SYMBOL_COMMON && (used[s] & 1) != 0;
+        const char* reason = used[s] == 0 ? 0 : type == BUSTER_LINK_SYMBOL_TLS ? "thread-local storage" :
+                             common && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_GLOBAL ? "a non-global common definition" :
+                             common && defined_begin[atom + 1] - defined_begin[atom] != 1 ? "a common definition sharing an atom with another symbol" :
                              (flags & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_UNIQUE ? "unique symbols (STB_GNU_UNIQUE)" :
-                             link->symbols.atom[s] == 0 && link->symbols.name[s] == 0 ? "a reference to an undefined symbol without a name" : 0;
+                             atom == 0 && link->symbols.name[s] == 0 ? "a reference to an undefined symbol without a name" : 0;
         if (reason != 0)
         {
             result.error = ASSEMBLY_UNSUPPORTED;
@@ -1587,6 +1592,22 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
     {
         if (link->atoms.unit[a] == unit)
         {
+            const uint32_t begin = defined_begin[a];
+            const uint32_t end = defined_begin[a + 1];
+            if (begin < end && (link->symbols.flags[defined[begin]] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_COMMON)
+            {
+                const SymbolId symbol = defined[begin];
+                // .comm supplies global binding and object type. Keep its visibility, and leave the current section alone.
+                assembly_attributes(&text, link, &names, symbol, false);
+                assembly_append(&text, "\t.comm ");
+                assembly_name(&text, link, &names, symbol);
+                assembly_append(&text, ", ");
+                assembly_unsigned(&text, link->symbols.size[symbol]);
+                assembly_append(&text, ", ");
+                assembly_unsigned(&text, UINT64_C(1) << link->atoms.alignment_log2[a]);
+                assembly_append(&text, "\n");
+                continue;
+            }
             const AssemblySection section = assembly_section(view, a);
             const uint8_t class = link->atoms.class[a];
             if (!assembly_same_section(section, current))
@@ -1605,15 +1626,15 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
             const char* reason = 0;
             if (result.error == ASSEMBLY_OK && class == BUSTER_LINK_CLASS_TEXT && link->atoms.size[a] != 0)
             {
-                result.error = assembly_code(&text, link, &names, a, &view->code[a], defined, defined_begin[a], defined_begin[a + 1], scratch, &reason);
+                result.error = assembly_code(&text, link, &names, a, &view->code[a], defined, begin, end, scratch, &reason);
             }
             else if (result.error == ASSEMBLY_OK)
             {
-                result.error = assembly_data(&text, link, &names, a, defined, defined_begin[a], defined_begin[a + 1], &reason);
+                result.error = assembly_data(&text, link, &names, a, defined, begin, end, &reason);
             }
             if (result.error == ASSEMBLY_OK)
             {
-                assembly_sizes(&text, link, &names, defined, defined_begin[a], defined_begin[a + 1]);
+                assembly_sizes(&text, link, &names, defined, begin, end);
             }
             else
             {

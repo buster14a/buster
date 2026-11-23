@@ -48,8 +48,15 @@ static void check_test_driver_suppress_recovery(CheckTest* test, const char* cla
         rows += 1;
         const bool available = access(source, R_OK) == 0;
         check_test_expect(test, available, "suppress recovery runtime fixture is available and bounded");
-        for (uint32_t c = 0; available && c < cases; c += 1)
+        for (uint32_t c = 0; c < cases; c += 1)
         {
+            // Each case is a unit of test-checker-driver's deal (check_test_driver_takes): whole, the sweep took 60 s
+            // on a 4-CPU Xeon VM (#3399). It is dealt whatever the fixture's availability, so that every part deals the
+            // same units.
+            if (!check_test_driver_takes() || !available)
+            {
+                continue;
+            }
             const bool accepted = ((accepted_cases >> c) & 1) != 0;
             const bool runs = ((executable_cases >> c) & 1) != 0;
             char define[64];

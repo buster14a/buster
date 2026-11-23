@@ -52,6 +52,7 @@ static const char node_census_test_warnings[] =
     "    x = arr[5]; // refuse: constant\n"
     "    x = *(int*)0; // refuse: constant\n"
     "    x = 3.7; // refuse: constant\n"
+    "    x = (double)(float)i == 0.1; // refuse: constant\n"
     "    q = (0 + 0); // refuse: constant\n"
     "    x = i ? 1.5f : 16777217; // refuse: constant\n"
     "    narrow(300); // refuse: constant\n"
@@ -7064,6 +7065,30 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census refuses atomic record accesses by type without refusing ordinary members or the whole unit");
     check_test_expect(test, ready && node_census_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses what warns without an option, by its test, with the default warnings alone");
+    CheckTestFixtures character_storage = { .storage = arena_reserve(UINT64_C(1) << 20) };
+    char character_path[PATH_MAX];
+    snprintf(character_path, sizeof(character_path), "%s/checker/string-plus-char/census.c", check_test_fixture_root);
+    uint64_t character_length = 0;
+    const char* characters = check_test_fixture_read(&character_storage, character_path, &character_length);
+    const bool character_ready = ready && characters != NULL && character_length != 0;
+    char* character_options[] = { "-nostdinc", "-Wno-string-plus-int" };
+    check_test_expect(test, character_ready && node_census_test_fixture(directory, "characters.c", characters, character_options, BUSTER_ARRAY_LENGTH(character_options), &system),
+                      "node-census refuses character pointer additions while string-plus-int is disabled");
+    static const NodeTestsWindowed windowed_characters = {
+        .expressions = 8,
+        .operators = 7,
+        .quiet = 1,
+        .casts_left = 8,
+        .values = 8,
+        .spared = 7,
+        .direct = 1,
+        .decided = 8,
+        .decided_refused = 1,
+    };
+    check_test_expect(test, character_ready && node_tests_test_fixture(directory, "characters.c", characters, character_options, BUSTER_ARRAY_LENGTH(character_options),
+                                                                     BUSTER_NODE_FRONT_AFTER, 5, 0, windowed_characters),
+                      "node-tests: character pointer additions have the same refusals in both forms at reader time");
+    arena_release(&character_storage.storage);
     check_test_expect(test, ready && node_census_test_fixture(directory, "holes.c", node_census_test_holes, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses a pointer's ordered comparison with an integer, a converted pointer's cast, a redeclared condition's call, a declarator's "
                       "warning's initializer and a cleanup's return, and takes what stands beside each");
@@ -7125,10 +7150,10 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census takes a system header's macros in a user's expression and counts them apart");
     // What the tests on the window count on each of the eight fixtures, which no verdict shows.
     static const NodeTestsWindowed windowed_warnings = {
-        .expressions = 49,
+        .expressions = 50,
         .trees = 4,
-        .operators = 66,
-        .sent = 25,
+        .operators = 68,
+        .sent = 26,
         .walks = 4,
         .quiet = 7,
         .calls = 1,
@@ -7137,10 +7162,10 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .casts_left = 4,
         .asks = 1,
         .values = 50,
-        .spared = 43,
+        .spared = 45,
         .direct = 2,
         .apart = 3,
-        .decided = 46,
+        .decided = 47,
         .decided_refused = 1,
     };
     static const NodeTestsWindowed windowed_clean = {
@@ -7191,14 +7216,16 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     // (Three of its operators are dereferences of a function, `(*k0)(a, b)` and `(**k0)(a, b)`: a function's type's
     // byte has the void pointee's bit, so each is listed and sent to the census's code, which finds no pointer to void.)
+    // (-Wstring-plus-char, on by default, sends an addition with an operand that is a pointer once converted to its
+    // test, so one such as `p + 1` is a listed operator rather than one left out for its constant.)
     static const NodeTestsWindowed windowed_defaults = {
         .expressions = 475,
         .trees = 29,
-        .operators = 130,
+        .operators = 135,
         .sent = 51,
         .walks = 11,
         .far = 37,
-        .quiet = 77,
+        .quiet = 73,
         .calls = 179,
         .calls_checked = 179,
         .casts = 163,
@@ -7207,7 +7234,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .nulls = 8,
         .values = 254,
         .spared = 263,
-        .direct = 211,
+        .direct = 207,
         .apart = 22,
         .decided = 457,
         .decided_refused = 10,
@@ -7231,12 +7258,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     static const NodeTestsWindowed windowed_segments = {
         .expressions = 11,
-        .operators = 1,
-        .quiet = 2,
+        .operators = 2,
+        .quiet = 1,
         .casts_left = 1,
         .values = 2,
         .spared = 9,
-        .direct = 9,
+        .direct = 8,
         .decided = 11,
     };
     static const NodeTestsWindowed windowed_interrupt = {
@@ -7333,7 +7360,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
     check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud),
-                                                             BUSTER_NODE_FRONT_AFTER, 44, 3, windowed_warnings),
+                                                             BUSTER_NODE_FRONT_AFTER, 45, 3, windowed_warnings),
                       "node-tests: at reader time the tests refuse each expression the compiler warns of, as the census does after the pipeline");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "clean.c", node_census_test_clean, loud, BUSTER_ARRAY_LENGTH(loud),
                                                              BUSTER_NODE_FRONT_BEFORE, 0, 6, windowed_clean),

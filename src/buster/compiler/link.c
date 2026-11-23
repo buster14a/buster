@@ -1267,9 +1267,8 @@ static bool link_add_priority(Link* link, AtomId atom, uint32_t priority)
 // Code
 
 // What field `field` of an instruction is (LinkField), from its form and operands. A memory operand's displacement is
-// 32-bit when it is RIP-relative, absolute or index-only; after a base, only when it doesn't fit in 8 bits in units of
-// an EVEX form's N, since the encoder makes small ones 8-bit or leaves them out, as GNU as does with numbers. So a
-// symbolic one there needs a placeholder that doesn't fit, such as INT32_MIN (x86_fixup_distance says the same).
+// 32-bit when it is RIP-relative, absolute or index-only. After a base it is 32-bit when explicitly requested or
+// when it doesn't fit in a scaled byte (symbolic operands normally use INT32_MIN as their placeholder).
 static LinkField link_instruction_field(const X86Instruction* instruction, const X86FormDescription* form, X86FixupField field)
 {
     const uint8_t mode = instruction->mode;
@@ -1279,7 +1278,7 @@ static LinkField link_instruction_field(const X86Instruction* instruction, const
     const bool based = field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 0 && memory && (mode & BUSTER_X86_MODE_RIP) == 0 && (mode & BUSTER_X86_MODE_BASE) != 0;
     const int32_t scale = based ? form->disp8_scale : 1;
     const int32_t scaled = based ? instruction->displacement / scale : 0;
-    const bool short_displacement = based && instruction->displacement % scale == 0 && scaled >= -128 && scaled <= 127;
+    const bool short_displacement = based && !(mode & BUSTER_X86_MODE_DISP32) && instruction->displacement % scale == 0 && scaled >= -128 && scaled <= 127;
     LinkField result = LINK_FIELD_NONE;
     if (field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 4)
     {

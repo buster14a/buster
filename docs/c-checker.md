@@ -122,7 +122,9 @@ Later compatible declarations share the entity; an incompatible library
 prototype warns under `-Wincompatible-library-redeclaration`. Static linkage
 conflicts and malformed calls remain errors. Header-dependent descriptors such
 as `FILE *` do not become invented types: a direct pre-C23 call falls back to
-the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`.
+the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`,
+naming `<stdio.h>` as clang does. Only `FILE` rows reach it: every `jmp_buf` or
+`ucontext_t` library row has attribute `T`, which clang declares without it.
 
 An implicit library declaration warns by default even in C89. The ordinary
 implicit-declaration warning switches, promotion/demotion and source pragmas
@@ -2339,30 +2341,41 @@ one after the last. `check_literal_table_rows` checks this grammar. Its vector
 path classifies the same 64-token blocks into number, comma, minus and brace
 masks and takes brace depth from a prefix XOR of the brace mask, carried across
 blocks. A `{` must be at depth 0 and a `}` at depth 1, so the parity is the
-depth. Each `}` compares the numbers before it, counted from the table's start
-by `popcnt`, with its rows times `M`. The payload is the row-major values. The
-type of an incomplete array is completed to the row count. A short row, an
-elided or excess one, a deeper array and a designator at either level all keep
-the ordinary path.
+depth. Each `}`'s numbers before it are counted from the table's start by
+`popcnt`; numbers appear only inside rows, so that count less the previous
+`}`'s, kept across blocks, is the row's. A row may be short: from one to `M` items, the rest of the row zero. A
+table of full rows is the row-major values. Short rows convert densely into
+scratch, as a full table would, and one pass over the braces copies each row to
+its start in a zeroed payload, so the tails are zero. Rows at most a quarter
+full on average keep the ordinary path, which bounds the payload at four times
+the values. The type of an incomplete array is completed to the row count. An
+empty, elided or excess row, a deeper array and a designator at either level
+all keep the ordinary path.
 
-Arrays of integer structs (#1383), such as `struct R { int a; char b; long c; }`,
+Arrays of structs (#1383), such as `struct R { int a; char b; double c; }`,
 also use the rows grammar when each brace supplies exactly one literal per
 member in declaration order. Every member must be a non-bit-field, nonvolatile
-8-, 16-, 32- or 64-bit integer other than `_Bool`. The producer gathers literal
-tokens once, converts each member's column with the existing scalar/vector
-batches, and places the results at that member's byte offset in a zeroed record
-payload. Type-table member offsets are in bits and are converted to bytes
+8-, 16-, 32- or 64-bit integer other than `_Bool`, or a `float`, `double` or
+`long double`. The producer gathers literal tokens once, converts each member's
+column with the existing scalar/vector batches, and places the results at that
+member's byte offset in a zeroed record payload. A `float` or `double` column
+converts sixteen spellings at a time as a floating table does (rounding as the
+ordinary initializer rounds, refusing an integer that the format can't hold
+exactly). A `long double` column converts each value through the same literal
+and initialization actions and stores its x87 bytes with the static writer's
+`check_data_float_bytes`, leaving the six padding bytes zero, so zero signs,
+subnormals and extremes match the ordinary path's bytes. Type-table member offsets are in bits and are converted to bytes
 before checking the store bounds. This preserves packed layouts, padding,
 record alignment and omitted outer-array tails. Incomplete outer bounds finish
 at the record count. The source-order reader also accepts block-scope static
-tables; deferred function bodies retain ordinary checking. Floating, atomic,
+tables; deferred function bodies retain ordinary checking. Atomic, complex,
 aggregate and bit-field members, partial records, designators, nonliteral
 expressions and conversions needing warnings retain the ordinary path for the
 whole table. Tests require compact selection, compare its bytes and completed
 types with the full graph, and cover guarded stores, scratch refusal and replay.
 
 Automatic arrays, volatile and atomic elements, 128-bit elements, designators,
-short or elided rows, deeper nesting and nonliteral expressions retain ordinary
+elided or mostly empty rows, deeper nesting and nonliteral expressions retain ordinary
 checking and planning. `check_input_tables_reference` provides that exact
 source path for tests. Permanent tests compare complete bytes and array bounds
 between it and both compact paths, exercise protected syntax/output tails,
@@ -4435,8 +4448,19 @@ What the lowering covers past scalars (#145's programs):
   `_Bool`, or a pointer to a compatible type whatever either's qualifiers, or
   an `_Atomic` one of those, which clang's `CheckAssignmentConstraints` checks
   as its value's type (`_Atomic(int *)`, `_Atomic(void *)`, `_Atomic _Bool`:
-  #1844) ("'cleanup' function 'f' parameter has incompatible type", the spelling of
-  clang's message without its two types). A pointer of another signedness or
+  #1844) ("'cleanup' function 'f' parameter has type 'long *' which is
+  incompatible with type 'int *'", both types as clang prints them: the
+  parameter's typedef and its own qualifiers, which its function's type drops,
+  read back from its declarator, and a pointer to the variable's type with the
+  variable's typedef, each with its a.k.a., #1844's
+  `check_input_cleanup_type_error`). Where the parameter is a pointer to a
+  complete type more aligned than the variable's type (an `aligned(1)`
+  typedef's variable, or another type's), clang's `-Walign-mismatch` comes
+  first, from its `CheckArgAlignment` ("passing 4-byte aligned argument to
+  8-byte aligned parameter 1 of 'f' may result in an unaligned pointer
+  access", `check_input_cleanup_alignment`), and on its own where the types
+  are compatible; after the unit's first error, the driver's later rounds give
+  the errors without it. A pointer of another signedness or
   to a pointer of other qualifiers, which an assignment only warns about, is
   an error here. An `__auto_type` variable's parameter type is checked once
   its initializer gives the type (`check_input_cleanup_deduced`, from the
@@ -5268,9 +5292,9 @@ survive for later statements. A silent invalid-use report then cuts the
 synthetic call before expression checking, so it cannot invent an arity,
 noncallable or deprecation diagnostic. The view retains preprocessor source
 indices across recovery rounds and repeated macro expansions. It applies only
-to a balanced call followed by a semicolon; catalog-recognized builtin spellings
-(including library names) and a semicolon within the outer argument list keep
-the existing recovery.
+to a balanced call followed by a semicolon, including catalog-recognized builtin
+and library names. A semicolon within an attribute-led call's outer argument
+list keeps the existing recovery.
 
 `c_check_attribute_call_recovery_driver_test.c` reads the original runtime
 fixtures in `tests/checker/parse-recovery/attributed-call*.c`. It compares the
@@ -5278,7 +5302,8 @@ whole diagnostic stream and status with Clang in GNU89 and GNU17, through both
 readers, syntax-only and object output, and one/three requested lanes with
 deferred bodies. The cases cover ordinary prototypes, noncallable and annotated
 callees, preserved implicit declarations, repeated macros, prior recovery
-rounds, deeply nested unread arguments, and builtin exclusion. Warning
+rounds and deeply nested unread arguments. The malformed-call suite below also
+covers catalog-recognized callees in this classification-only view. Warning
 promotion/suppression and the error limit are checked; rejected compilations
 preserve an existing output, while accepted controls replace it with an ELF
 object. A separate control keeps C23's declaration grammar.
@@ -5302,9 +5327,25 @@ call's recovery. Callee source/use records are sorted together and deduplicated
 after all rounds, independently of the parse errors' token order, so an outer
 callee revisited after a nested one remains searchable. The invalid callee
 suppresses synthetic arity, conversion and noncallable errors.
-Empty arguments, member callees, catalog-recognized builtin/library
-names (also with `-fno-builtin`), mismatched delimiters and semicolon-crossing
-calls retain the existing recovery.
+Catalog-recognized builtin and library names use the same lookup recovery,
+including under `-fno-builtin`. The builtin adapter classifies their declarations
+without constructing an intrinsic call from the surviving arguments: it does not
+apply argument counts, conversions or integer-constant constraints to that
+synthetic call. Before C23, a missing `FILE` context keeps Clang's unknown-builtin
+and `<stdio.h>` diagnostics and the implicit declaration for later calls. C23
+keeps the undeclared-identifier error.
+
+A type-first error in a call that is itself a block expression statement may
+also stop at its first outer semicolon. The parser proves that statement context;
+the private view closes the call at the semicolon's source and keeps the original
+semicolon and following tokens. In `foo(int i = 0; i < n; i++) s += i;`, the
+following clauses are then checked as statements. Before C23, lookup errors in
+the increment suppress the cascading orphan-parenthesis errors; a valid
+increment retains those parse errors. C23's successful `foo` to `for` correction
+reparses the original tokens as a loop. Orphan closers discard only through the
+next proven statement semicolon, so later statements remain checked. Empty
+arguments, member callees, mismatched delimiters, and semicolon crossings in
+nested calls, initializers or return expressions retain the existing recovery.
 
 `test-checker-driver --malformed-calls-only` reads the original runtime source
 and case catalog in `tests/checker/parse-recovery/malformed-calls.*`. It compares
@@ -5314,8 +5355,11 @@ readers and syntax/object output with one/three requested lanes and deferred
 bodies. Mixed ordinary and attribute-led calls run before C23, including repeated
 macro expansions, multiple recovery rounds and rejected/repaired views. Contract
 checks verify paired metadata, nested callee ordering, repeated-callee
-deduplication and the excluded boundaries. Earlier and later arguments retain
-lookup, member, availability and warning diagnostics exactly once. Rejected compilations
+deduplication, synthetic closer sources and the excluded boundaries. Earlier and
+later arguments retain lookup, member, availability and warning diagnostics
+exactly once. Builtin controls retain independent arguments without synthetic
+arity/constant constraints, and semicolon controls distinguish invalid name
+expressions from valid increments and known calls with invalid arguments. Rejected compilations
 preserve existing output; valid cast and `sizeof` calls produce an ELF object.
 
 Phase 2 covers redeclarations that conflict with a declaration of the same
@@ -6105,12 +6149,9 @@ Left as they were:
   list (`int b(voi);`, clang's "a parameter list without types is only
   allowed in a function definition"), which ends the reading before a later
   parameter's search (#2498).
-- A statement start's correction whose statement then fails to parse in a way
-  no recovery view reads past (`whil;`'s "expected '(' after 'while'", `myint
-  & 1`) ends the checking of its body there, as other such parse errors do;
-  so does a parse error within a call's parentheses (`foo (int i = 0; ...)`,
-  C23's `for`, and `sizeo (int)`). A statement whose undeclared name ends
-  before a `}` without a `;` keeps the parser's error.
+- A statement whose undeclared name ends before a `}` without a `;` keeps
+  the parser's error. Recovery for `whil;`, `myint & 1`, `sizeo(int)` and
+  malformed calls is described under semantic error recovery above (#2406).
 - A name before an operand that is declared, or that a correction takes as a
   value (`a 5`, `nosuch 5` near a variable `nosuce`), keeps the parser's
   error, which ends the checking of its body or the unit's file scope after
@@ -6119,16 +6160,13 @@ Left as they were:
   missing `;` after `return 0`): its name's error is the parser's.
 - After a block item's GNU attributes, a builtin's name without a call
   (`__builtin_abs;`, clang's "expected identifier or '('") is still an
-  implicit int's declarator. A catalog-recognized builtin spelling's call there still keeps
-  the existing parse error and may end the body's checking. The bounded
-  pre-C23 recovery for ordinary calls is described under semantic error
-  recovery above (#2406).
-- A declaration's type name outside a statement's start is clang's parser's
-  to correct (`DiagnoseUnknownTypeName`): a parameter's `myin v` keeps
-  buster's "unknown type name" with no suggestion, and its prefix view
-  recovers it as `int`. Neither does an implicit declaration's diagnostic
-  that `-Werror` makes an error before C99. A cast to one (`(myin)x`) is
-  still buster's parse error.
+  implicit int's declarator. The bounded pre-C23 recovery for ordinary and
+  catalog-recognized calls is described under semantic error recovery above
+  (#2406).
+- An implicit declaration's diagnostic that `-Werror` makes an error before
+  C99 still does not trigger a correction. Parameter type-name and cast
+  corrections, including the corrected typedef's type in prefix views, are
+  described above.
 - A function designator's comparison statement keeps its `-Wunused` and
   `-Wparentheses` notes after a correction.
 - A name the walk itself reads is searched in the walk's order
@@ -6934,7 +6972,16 @@ default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
 boolean or enumeration type in either order, "adding 'T' to a string does not
 append to the string" at the `+` with its note, T the operand's type as
 written (a typedef's, `__size_t`'s sugar), given as the `+` is built; a `+`
-whose neighbor is no string literal is passed at once.
+whose neighbor is no string literal is passed at once for this warning. The same
+scan gives `-Wstring-plus-char` (#2406, also on by default): a character pointer
+or array added to a directly unparenthesized character literal, in either order,
+warns "adding 'char' to a string pointer does not append to the string" and gives
+the array-indexing note. The pointer may be a variable or a parenthesized string;
+its pointee must be `char`, `signed char` or `unsigned char`. The literal's type
+name follows Clang's byte-value rule, including UTF-8 and multicharacter literals.
+The two warnings have independent controls. Where both apply, the integer
+warning and its note precede the character warning and its note. Parenthesizing
+or casting the character literal suppresses the character warning.
 `-Wtautological-constant-out-of-range-compare` (#2218, on by default, in
 `-Wtautological-constant-compare` and `-Wtautological-compare`,
 `check_common_out_of_range`) is clang's `CheckTautologicalComparison`'s out-of-range
@@ -7056,9 +7103,17 @@ assignment writes and no read uses.
 
 Each uses the shared warning policy, so a default or group option, a
 `#pragma clang diagnostic` change and `-Werror` promotion behave as the other
-sparse warnings do. A token from a system-header macro is suppressed by its
-spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
-for it. The `-Wswitch` check needs a named enum's source definition and literal
+sparse warnings do. A warning in a system header is suppressed, unless
+`-Wsystem-headers` asks for it, by its token's expansion location, as clang's
+DiagnosticsEngine does: a system header's macro expanded in user code warns
+there, with its "expanded from macro" note (#3338). The checks whose clang code
+tests `isInSystemMacro` itself test the token's spelling: a value conversion's
+context (CheckImplicitConversion's CC: the assignment's operator, the
+declarator's name, the `return`, the call, the brace), a discarded value's
+expression, which a macro's body silences too (DiagnoseUnusedExprResult), a
+format call's extra argument, and an array index whose `]` and index a system
+header spells; `assert`'s empty `if` is quiet because its `;` is on another
+line. The `-Wswitch` check needs a named enum's source definition and literal
 enumerator `case` labels; it compares the enumerators' checked values, so
 aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
 computed case leaves the switch to a full constant evaluator.
@@ -7238,7 +7293,14 @@ arm a `_Generic` or `__builtin_choose_expr` selects. A dereference, a
 comparison, a comma's left operand, a `?:` condition (a GNU `?:` included), a
 selection's controlling expression and its other arms consume it or don't
 return it. `-Wempty-body` leaves an `if` that has an
-`else` alone. A loop and its following statement use their outer macro
+`else` alone. A statement a recovery view deleted whole keeps its `;` marked
+`BUSTER_PARSE_DROPPED_STATEMENT` (#2406): one that starts at an orphan `)`, a
+stray `else`, a control keyword without its `(`, a declaration before its first
+declarator. That was clang's StmtError, and so is a `for`, `while`, `switch` or
+`do` whose body is one, and an `if` without an `else` whose then-branch is one:
+none is an empty body or a loop's following statement, and such a `for` gets no
+`-Wfor-loop-analysis`. A repair that keeps the statement (an extraneous `)`
+before its `;`) leaves it an ordinary statement. A loop and its following statement use their outer macro
 invocations' columns, including an argument-first or nested expansion (#1339).
 Only an enabled candidate whose position comes from a macro requests deferred
 expansion history; file-spelled positions and units without empty-body candidates keep
@@ -7589,6 +7651,80 @@ each common-warning scratch allocation in turn and requires the capacity error,
 then the unconstrained output once the index passes the last. The semantics are also covered by
 `test-checker`'s existing warning and constraint fixtures, and by
 `test-diagnostics` for their ordering.
+
+### Floating precision and floating comparisons (#1875)
+
+`-Wimplicit-float-conversion` (off by default, under `-Wconversion`) is the
+floating case of clang's `CheckImplicitConversion`: an implicit conversion of a
+floating value to a floating type of lower rank (`getFloatingTypeSemanticOrder`:
+`__bf16`, `_Float16` and `__fp16` alike, `float`, `double`, `long double`,
+`__float128`; complex types by their elements, complex to complex alone) warns
+"implicit conversion loses floating-point precision: 'double' to 'float'", at the
+converted expression past its implicit conversions (`check_common_float_location`:
+an operator's at its operator, a call's at its callee's name, a builtin's too),
+its type as written, an lvalue's qualifiers included (`'const double'`), to the
+target's, its typedef spelled as clang does (`'F' (aka 'float')`). It follows
+the enumerations' carriers (`check_common_float_precision`, as
+`check_common_enum_cast`): initializations, brace initializers' parts
+(designated, nested, file scope), assignments, returns, a prototype's
+arguments (including builtin parameters, #3371), a conditional's arms (both,
+the true one first) and a root comma's result. A constant that converts exactly is exempt, as clang's
+`IsSameFloatAfterCast` decides: a folded value or a read of a const object
+whose initializer completed (`CheckInput.const_values`), whose significant bits
+fit the target's precision at its exponent and range (`check_float_fits`,
+subnormals too; a quiet NaN whose payload fits; never a signaling one); an
+assignment's or an increment's value is no constant, nor is one computed from
+it (`-(d = 0.5)`, BUSTER_CHECK_MODIFICATION) or a comma's whose right operand is
+one (the evaluator ignores a comma's left operand). A compound
+assignment whose computation's type has a higher rank than its left operand's
+warns, whatever its value, "implicit conversion when assigning computation
+result loses floating-point precision", from the computation's type (the right
+operand's own, sugar too, an `_Atomic` one's value type's, where it isn't
+converted) to the left one's, at the
+right operand (`check_common_float_result_precision`, clang's
+`AnalyzeCompoundAssignment`). The computation is clang's, not the checker's own
+(`check_common_float_computation`): the left operand unpromoted, the right one
+after its unary promotion (`__fp16` to `float`) and `#pragma clang fp
+eval_method`'s widening, by `getFloatingRank` (where `__fp16` ranks above
+`_Float16`), and an `__fp16` left operand against an integer as `float`; so
+`h *= f16` doesn't warn and `h += 1` warns "'float' to '__fp16'". Both are plain Diags, published as the full
+expression completes, in unreachable code and short-circuited operands too,
+but not in `sizeof`'s operand; an `_Atomic` target takes neither. Only a unit
+where the warning may report pays for its candidates
+(`CheckCommonEnabled.float_precision`): the compound assignments join the
+walk's reach operators then. Not given: its child
+`-Wimplicit-int-float-conversion`'s integer conversions, which need clang's
+approximate expression ranges, and `-Wdouble-promotion`, its opposite (#3339);
+`-Wconversion` itself stays refused (#1365).
+
+`-Wliteral-range`'s floating comparison (on by default) is clang's
+`CheckFloatComparison`: an `==` or `!=` whose left operand, past parentheses
+and static selections, is a floating literal its comparison doesn't convert and
+whose right one is a cast (an implicit conversion, an lvalue's read or an
+explicit cast), or else the other way round, warns where the cast's operand's
+real floating type (an `_Atomic` one's value type) can't hold the literal exactly: "floating-point comparison
+is always false" for `==`, "true" for `!=`, "constant cannot be represented
+exactly in type 'float'", that type's canonical name, at the operator
+(`check_common_float_comparisons`). A sign, an integer operand, an ordering, a
+complex type or a literal converted to a wider type (by the other operand, or by
+`#pragma clang fp eval_method`, which the constant reader reads from its
+action's FP environment) is none of these. It is a
+plain Diag Sema gives as it builds the comparison, so it reports in
+unevaluated operands (`sizeof`, `typeof`, `_Generic`'s controlling
+expression) and unreachable code too. The constant reader's comparisons that
+no graph node holds (an array bound's, an enumerator's, a bit-field width's)
+are kept as `CHECK_WARNING_EVENT_FLOAT_COMPARE` events
+(`check_constant_float_compare`) and reported among them.
+
+The original driver fixtures (`c_check_float_precision_driver_test.c`,
+`test-checker-driver --float-precision-only`) compare clang's complete output
+at the default flags, `-Wall`, `-Wimplicit-float-conversion`, `-Weverything`,
+`-Wno-`, `-Werror=`, `-Werror`, `-w` and diagnostic pragmas, in gnu17 and C23,
+through both readers and one and three lanes, at `-fsyntax-only` and `-c`,
+with controls that must not warn. A system header's macro's literal (`M_PI`) is
+still suppressed by the common warnings' system-token test, which reads the
+token's spelling place where clang reads its expansion's; `-Wliteral-conversion`
+shares that gap (#3338).
 
 ## The constraint catalogue
 

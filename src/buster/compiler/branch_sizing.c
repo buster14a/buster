@@ -49,10 +49,10 @@
 //     branch_sizing_growth and the rel8 range.
 //   - Columns: BranchSizingColumns and branch_sizing_allocate.
 //   - Validation: branch_sizing_validate_branches and branch_sizing_validate.
-//   - The phases: lengths (x86_measure's offsets: the first round), setup (D0, each branch's growth if it's long, and
-//     the first round's growths), ranks (only when a branch grew), round, prefix, the worklist's marks
-//     (branch_sizing_mark_vector) and offsets; then branch_sizing_worklist (the rare cases) and branch_sizing_write
-//     (the records).
+//   - The phases: lengths (x86_measure's offsets: the first round), setup (D0 and the jmps), and only when a branch
+//     grew, ranks (in registers below 512 records, or from the byte map), round, prefix, the worklist's marks
+//     (branch_sizing_mark_vector) and offsets; then
+//     branch_sizing_worklist (the rare cases) and the records (branch_sizing_write).
 //   - The driver: branch_sizing_run.
 
 #include <stdint.h>
@@ -156,6 +156,11 @@ static __attribute__((unused)) BranchSizingCheck branch_sizing_validate_branches
 #define BUSTER_BRANCH_SIZING_RANK_RECORDS 32
 // The vector path's map of branch records has a byte per record, read 64 at a time.
 #define BUSTER_BRANCH_SIZING_MAP_RECORDS 64
+// Functions of fewer records have at most 16 entries in the ranks' table, a register's dwords: their ranks phase builds
+// it in registers (branch_sizing_ranks_direct and branch_sizing_ranks_register), BUSTER_BRANCH_SIZING_REGISTER_BRANCHES
+// branches a pass (#2946).
+#define BUSTER_BRANCH_SIZING_REGISTER_RECORDS (BUSTER_BRANCH_SIZING_LANES * BUSTER_BRANCH_SIZING_RANK_RECORDS)
+#define BUSTER_BRANCH_SIZING_REGISTER_BRANCHES 8
 
 // The branches' rel8 forms, the jmp and the 16 jcc, whose rel32 forms follow them in the form table.
 static const uint16_t branch_sizing_forms[] = {
@@ -341,7 +346,9 @@ static BranchSizingColumns branch_sizing_allocate(Arena* arena, uint64_t count, 
     const uint64_t padded = ((branch_count + BUSTER_BRANCH_SIZING_LANES - 1) & ~(uint64_t)(BUSTER_BRANCH_SIZING_LANES - 1)) + BUSTER_BRANCH_SIZING_LANES;
     const uint64_t units = count / BUSTER_BRANCH_SIZING_MAP_RECORDS + 1;
     const uint64_t map_bytes = branch_sizing_lines(units * BUSTER_BRANCH_SIZING_MAP_RECORDS, 1);
-    const uint64_t ranks_bytes = branch_sizing_lines(units * (BUSTER_BRANCH_SIZING_MAP_RECORDS / BUSTER_BRANCH_SIZING_RANK_RECORDS), sizeof(uint64_t));
+    // branch_sizing_ranks_register stores 16 entries whatever the count.
+    const uint64_t entries = units * (BUSTER_BRANCH_SIZING_MAP_RECORDS / BUSTER_BRANCH_SIZING_RANK_RECORDS);
+    const uint64_t ranks_bytes = branch_sizing_lines(entries > BUSTER_BRANCH_SIZING_LANES ? entries : BUSTER_BRANCH_SIZING_LANES, sizeof(uint64_t));
     const uint64_t column_bytes = branch_sizing_lines(padded, sizeof(uint32_t));
     const uint64_t prefix_bytes = branch_sizing_lines(padded + BUSTER_BRANCH_SIZING_LANES, sizeof(uint32_t));
     const uint64_t dirty_bytes = branch_sizing_lines(branch_count / 64 + 2, sizeof(uint64_t));
@@ -459,9 +466,11 @@ static bool branch_sizing_too_large(uint64_t length, uint64_t branch_count)
 // ---------------------------------------------------------------------------------------------------------------------
 // Setup: each branch's growth if it's long, from its record's form, and its displacement with every branch short,
 // D0 = offset(t) - offset(r) - 2 (the function's length for a target at its end), which is the first round's: the
-// branches out of range grow, the prefix sums are theirs, and the prefix sums of no growth, the round before's, are
-// zero. Returns whether any branch grew. 16 branches at a time, with the records' and the targets' offsets gathered,
-// and the records' forms (as their fourth dwords).
+// branches out of range grow. Returns whether any branch grew. 16 branches at a time, with the records' and the targets'
+// offsets gathered, and the records' forms (as their fourth dwords). It no longer copies D0 into the displacement
+// column, which the rounds write and which the write reads only after a round, or zeroes the round before's prefix
+// sums, which only branch_sizing_worklist reads: the write after setup pays for every store of setup's that hasn't
+// reached the cache, and those two cost the 40-record functions, most of which settle in this round (#2946).
 static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count,
                                        const uint32_t* offsets, uint32_t length, BranchSizingColumns* columns)
 {
@@ -479,7 +488,6 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
     __m512i carry = zero;
     __mmask16 grown = 0;
     prefix[0] = 0;
-    columns->prefix[1][0] = 0;
     for (uint64_t k = 0; k < branch_count; k += BUSTER_BRANCH_SIZING_LANES)
     {
         const __mmask16 lanes = branch_sizing_lanes(k, branch_count);
@@ -497,10 +505,8 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
         const __m512i sums = _mm512_add_epi32(branch_sizing_scan(growth), carry);
         _mm512_store_si512(columns->grow + k, grow);
         _mm512_store_si512(columns->displacement0 + k, displacement);
-        _mm512_store_si512(columns->displacement + k, displacement);
         _mm512_store_si512(columns->growth + k, growth);
         _mm512_storeu_si512(prefix + k + 1, sums);
-        _mm512_storeu_si512(columns->prefix[1] + k + 1, zero);
         carry = branch_sizing_last(sums);
         grown |= _mm512_test_epi32_mask(growth, growth);
     }
@@ -512,10 +518,108 @@ static bool branch_sizing_setup_vector(const X86Instruction* records, uint64_t c
 // branch has grown. The table has an entry per 32 records, their branch bits and the branches before them; a rank is
 // the entry's count plus the bits below the target's.
 
-// The table, by setting each branch's byte in the map, whose 64 bytes at a time become two entries' bits, and summing
-// the bits of each entry before it; then each target's rank, 16 at a time, with each target's entry gathered (8 at a
-// time, as 64-bit elements) and the bits below it counted.
-static void branch_sizing_ranks_vector(uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count, BranchSizingColumns* columns)
+// A function of fewer than BUSTER_BRANCH_SIZING_REGISTER_RECORDS records has at most 16 entries, so the table is two
+// registers, a lane per entry: its branch bits, and the branches before them. They are built without memory, 8 branches
+// at a time: each branch, broadcast, less each entry's first record is its bit's position in its own entry and 32 or
+// more (unsigned) in every other, where vpsllvd gives 0, so ORing the shifts sets its bit alone. A loop over the branches
+// (each one's byte, as the table's path sets them) ends at a branch the predictor can't learn, since a function's branch
+// count varies; 8 at a time with the lanes past the last as a record no entry holds, most small functions take one pass
+// (#2946). The counts are the bits' exclusive prefix sums, and the table goes to memory once, for the offsets phase.
+
+// Sets the bit of the branch in lane `l` of `record` in `bits`: `starts` holds each entry's first record, negated.
+BUSTER_INLINE __m512i branch_sizing_entry_bit(__m512i bits, __m512i starts, __m512i record, int32_t l)
+{
+    const __m512i position = _mm512_add_epi32(starts, _mm512_permutexvar_epi32(_mm512_set1_epi32(l), record));
+    return _mm512_or_si512(bits, _mm512_sllv_epi32(_mm512_set1_epi32(1), position));
+}
+
+// Stores the table of the entries' bits, and returns each entry's count, the branches before it.
+static __m512i branch_sizing_register_table(__m512i bits, BranchSizingColumns* columns)
+{
+    const __m512i first_half = _mm512_setr_epi32(0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
+    const __m512i second_half = _mm512_setr_epi32(8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
+    const __m512i population = _mm512_popcnt_epi32(bits);
+    const __m512i before = _mm512_sub_epi32(branch_sizing_scan(population), population);
+    _mm512_store_si512(columns->ranks, _mm512_permutex2var_epi32(bits, first_half, before));
+    _mm512_store_si512(columns->ranks + 8, _mm512_permutex2var_epi32(bits, second_half, before));
+    return before;
+}
+
+// Each entry's first record, negated.
+BUSTER_INLINE __m512i branch_sizing_entry_starts(void)
+{
+    return _mm512_setr_epi32(0, -32, -64, -96, -128, -160, -192, -224, -256, -288, -320, -352, -384, -416, -448, -480);
+}
+
+// Up to 16 branches: each target's rank counted directly from the branches as the table's bits are set, a compare and a
+// subtraction per branch, so the ranks the rounds wait for don't wait for the table's prefix sums and lookups: on the
+// 9700X, the 40-record functions' rounds took 40% to 45% fewer cycles after it than after the lookups (#2946).
+static void branch_sizing_ranks_direct(const uint32_t* branches, const uint32_t* targets, uint64_t branch_count, BranchSizingColumns* columns)
+{
+    const __m512i minus_one = _mm512_set1_epi32(-1);
+    const __m512i starts = branch_sizing_entry_starts();
+    const __mmask16 lanes = branch_sizing_lanes(0, branch_count);
+    // Past the last branch, a record past every target, which no entry holds.
+    const __m512i record = _mm512_mask_loadu_epi32(minus_one, lanes, branches);
+    const __m512i target = _mm512_maskz_loadu_epi32(lanes, targets);
+    // Two chains of each, a lane's into one of them, so no step waits for the one before.
+    __m512i even_rank = _mm512_setzero_si512();
+    __m512i odd_rank = _mm512_setzero_si512();
+    __m512i even_bits = _mm512_setzero_si512();
+    __m512i odd_bits = _mm512_setzero_si512();
+    for (int32_t k = 0; (uint64_t)k < branch_count; k += BUSTER_BRANCH_SIZING_REGISTER_BRANCHES)
+    {
+        for (int32_t l = k; l < k + BUSTER_BRANCH_SIZING_REGISTER_BRANCHES; l += 2)
+        {
+            const __m512i first = _mm512_permutexvar_epi32(_mm512_set1_epi32(l), record);
+            const __m512i second = _mm512_permutexvar_epi32(_mm512_set1_epi32(l + 1), record);
+            even_rank = _mm512_mask_sub_epi32(even_rank, _mm512_cmplt_epu32_mask(first, target), even_rank, minus_one);
+            odd_rank = _mm512_mask_sub_epi32(odd_rank, _mm512_cmplt_epu32_mask(second, target), odd_rank, minus_one);
+            even_bits = branch_sizing_entry_bit(even_bits, starts, record, l);
+            odd_bits = branch_sizing_entry_bit(odd_bits, starts, record, l + 1);
+        }
+    }
+    _mm512_store_si512(columns->rank, _mm512_add_epi32(even_rank, odd_rank));
+    branch_sizing_register_table(_mm512_or_si512(even_bits, odd_bits), columns);
+}
+
+// More branches: each target's rank from the table in registers, the count of its entry and the bits below it there.
+static void branch_sizing_ranks_register(const uint32_t* branches, const uint32_t* targets, uint64_t branch_count, BranchSizingColumns* columns)
+{
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i low_bits = _mm512_set1_epi32(BUSTER_BRANCH_SIZING_RANK_RECORDS - 1);
+    const __m512i starts = branch_sizing_entry_starts();
+    __m512i even = _mm512_setzero_si512();
+    __m512i odd = _mm512_setzero_si512();
+    for (uint64_t k = 0; k < branch_count; k += BUSTER_BRANCH_SIZING_REGISTER_BRANCHES)
+    {
+        const __mmask16 lanes = (__mmask16)(branch_sizing_lanes(k, branch_count) & 0xff);
+        // Past the last branch, a record no entry holds.
+        const __m512i record = _mm512_mask_loadu_epi32(_mm512_set1_epi32(-1), lanes, branches + k);
+        for (int32_t l = 0; l < BUSTER_BRANCH_SIZING_REGISTER_BRANCHES; l += 2)
+        {
+            even = branch_sizing_entry_bit(even, starts, record, l);
+            odd = branch_sizing_entry_bit(odd, starts, record, l + 1);
+        }
+    }
+    const __m512i bits = _mm512_or_si512(even, odd);
+    const __m512i before = branch_sizing_register_table(bits, columns);
+    for (uint64_t k = 0; k < branch_count; k += BUSTER_BRANCH_SIZING_LANES)
+    {
+        const __mmask16 lanes = branch_sizing_lanes(k, branch_count);
+        const __m512i target = _mm512_maskz_loadu_epi32(lanes, targets + k);
+        const __m512i entry = _mm512_srli_epi32(target, 5);
+        const __m512i below = _mm512_sub_epi32(_mm512_sllv_epi32(one, _mm512_and_si512(target, low_bits)), one);
+        const __m512i marks = _mm512_and_si512(_mm512_permutexvar_epi32(entry, bits), below);
+        const __m512i rank = _mm512_add_epi32(_mm512_permutexvar_epi32(entry, before), _mm512_popcnt_epi32(marks));
+        _mm512_store_si512(columns->rank + k, rank);
+    }
+}
+
+// Any other function's table, by setting each branch's byte in the map, whose 64 bytes at a time become two entries'
+// bits, and summing the bits of each entry before it; then each target's rank, 16 at a time, with each target's entry
+// gathered (8 at a time, as 64-bit elements) and the bits below it counted.
+static void branch_sizing_ranks_table(uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count, BranchSizingColumns* columns)
 {
     const uint64_t units = count / BUSTER_BRANCH_SIZING_MAP_RECORDS + 1;
     uint8_t* map = columns->map;
@@ -552,6 +656,22 @@ static void branch_sizing_ranks_vector(uint64_t count, const uint32_t* branches,
         const __m512i below = _mm512_sub_epi32(_mm512_sllv_epi32(one, _mm512_and_si512(target, low_bits)), one);
         const __m512i rank = _mm512_add_epi32(counts, _mm512_popcnt_epi32(_mm512_and_si512(bits, below)));
         _mm512_store_si512(columns->rank + k, rank);
+    }
+}
+
+static void branch_sizing_ranks_vector(uint64_t count, const uint32_t* branches, const uint32_t* targets, uint64_t branch_count, BranchSizingColumns* columns)
+{
+    if (count < BUSTER_BRANCH_SIZING_REGISTER_RECORDS && branch_count <= BUSTER_BRANCH_SIZING_LANES)
+    {
+        branch_sizing_ranks_direct(branches, targets, branch_count, columns);
+    }
+    else if (count < BUSTER_BRANCH_SIZING_REGISTER_RECORDS)
+    {
+        branch_sizing_ranks_register(branches, targets, branch_count, columns);
+    }
+    else
+    {
+        branch_sizing_ranks_table(count, branches, targets, branch_count, columns);
     }
 }
 
@@ -751,17 +871,24 @@ static void branch_sizing_offsets_vector(uint64_t count, const uint32_t* branche
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The records: each branch's displacement, and the rel32 form for a long one. The records are 16 bytes apart at the
-// branches' indices, so these are scalar stores (a scatter would cost more: see the coding style). Returns how many
-// branches are long.
+// branches' indices, so these are scalar stores (a scatter would cost more: see the coding style).
+// `displacements` is the last round's column, or D0's when no round ran. Returns how many branches are long.
+//
+// Every branch's form is stored, as form + 0 where it stays short: leaving those stores out, so that the write of a
+// function with no long branch touched the displacements alone, made sizing 1.5% faster and the caller's sizing and
+// encoding together 4 to 6% slower on the 40-record rows, since the encode reads every record's form straight after
+// (#2946, docs/branch-sizing.md). A pass of 8 branches, with the lanes past the last storing to sink records so that
+// the loop's exit costs nothing, is not here either, for the same reason.
 
-static uint64_t branch_sizing_write(X86Instruction* records, const uint32_t* branches, uint64_t branch_count, const BranchSizingColumns* columns)
+static uint64_t branch_sizing_write(X86Instruction* records, const uint32_t* branches, uint64_t branch_count, const BranchSizingColumns* columns,
+                                    const int32_t* displacements)
 {
     uint64_t result = 0;
     for (uint64_t k = 0; k < branch_count; k += 1)
     {
         X86Instruction* record = &records[branches[k]];
         const bool grown = columns->growth[k] != 0;
-        record->displacement = columns->displacement[k];
+        record->displacement = displacements[k];
         record->form = (uint16_t)(record->form + grown);
         result += grown;
     }
@@ -811,6 +938,11 @@ static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, c
             {
                 if (result.rounds >= round_limit && !listed)
                 {
+                    // After setup alone (a round limit of 1, the tests'), the growths before setup's were none.
+                    if (result.rounds == 1)
+                    {
+                        memset(columns.prefix[1], 0, (branch_count + 1) * sizeof(uint32_t));
+                    }
                     result.evaluations = branch_sizing_worklist(branch_count, &columns, current);
                     branch_sizing_prefix_vector(branch_count, &columns, current ^ 1);
                     current ^= 1;
@@ -820,9 +952,19 @@ static BranchSizing branch_sizing_run(X86Instruction* records, uint64_t count, c
                 current ^= 1;
                 result.rounds += 1;
             }
-            branch_sizing_offsets_vector(count, branches, branch_count, offsets, &columns, current);
-            result.length = length + columns.prefix[current][branch_count];
-            result.long_branches = branch_sizing_write(records, branches, branch_count, &columns);
+            // With no round, no branch grew: the offsets, the length and the forms are x86_measure's and the records', and
+            // setup left the growths and their prefix sums alone.
+            if (result.rounds > 1)
+            {
+                branch_sizing_offsets_vector(count, branches, branch_count, offsets, &columns, current);
+                result.length = length + columns.prefix[current][branch_count];
+                result.long_branches = branch_sizing_write(records, branches, branch_count, &columns, columns.displacement);
+            }
+            else
+            {
+                result.length = length;
+                result.long_branches = branch_sizing_write(records, branches, branch_count, &columns, columns.displacement0);
+            }
         }
         scratch_end(scratch);
     }

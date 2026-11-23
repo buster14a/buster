@@ -2937,9 +2937,29 @@ own source, which takes none for its diagnostic pragma, was 18.5 ms slower
 with the option on the 9700X, and `sqlite3.c` with `-Wall -Wextra` 5.8 ms; they
 are -0.67 ms and +0.29 ms now, paired, five rounds each.
 
+**A unit pays for the bodies its producer reads, not for its size.** The
+producer has reasons against a body before it reads any of it (something said
+of it already, the scan, a token's kind, the gates, its function's form), and
+a compile reads only the bodies it has none against. So it asks those of every
+body first (`node_alone_begin`; the questions, their order and their answers
+are the same), and the machine's graph, its results by node, the tapes' store
+and the tests' columns are made for the positions of the bodies that are left
+and `BUSTER_NODE_ALONE_SLACK` more, where they were made for the unit's nodes: a
+record a position at most, and a body the graph has no room for is refused. A
+compile also makes nothing that only the shadow reads after the pipeline: no
+results by node and no tests' state for the walk's nodes (no machine runs on
+them), no digests, no roots by token and their chains. On `sqlite3.c` the
+option's state was 367 MB reserved and 157 resident for 780 thousand nodes of
+capacity, where the bodies it reads have 258 thousand positions; it is 106 MB
+reserved now, and the reader's peak grows by 60 MB with the option where it
+grew by 146.
+
 With `--time-stages` the unit prints `node-bodies: bodies=N taken=M tokens=T
-graph-nodes=G`: the bodies the producer decided, those the compile took, their
-tokens, and the nodes the walk made of what is left.
+graph-nodes=G swept=P room=R made=B`: the bodies the producer decided, those
+the compile took, their tokens, and the nodes the walk made of what is left;
+then the positions of the bodies the producer read or began to, the nodes its
+machine's columns were made for, and the bytes all the machine's state took of
+the reader's two arenas.
 
 `BUSTER_TEST_NODE_BODIES` is the tests' switch: any value forces the option on
 every command that can have it, on any number of lanes, a link's units and a

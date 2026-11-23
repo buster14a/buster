@@ -269,6 +269,17 @@ enum
     CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE = 168,
     // An integer logical operator with a non-boolean constant right operand (#2900), on by default, no parent group.
     CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND = 169,
+    // A floating value converted implicitly to a floating type of lower rank (#1875, clang's CheckImplicitConversion and
+    // AnalyzeCompoundAssignment): "implicit conversion loses floating-point precision", and a compound assignment's
+    // computation stored back, -Wimplicit-float-conversion's, off by default, under -Wconversion. (-Wliteral-range's
+    // floating comparison with a literal its other operand's type can't hold is CHECK_WARNING_ID_LITERAL_RANGE's.)
+    CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION = 170,
+    // A character literal added to a character pointer (#2406, clang's diagnoseStringPlusChar): on by default,
+    // independently of -Wstring-plus-int, which can also diagnose the same addition.
+    CHECK_WARNING_ID_STRING_PLUS_CHAR = 171,
+    // A cleanup function's pointer parameter more aligned than its variable's type (#1844, clang's CheckArgAlignment in
+    // handleCleanupAttr): -Walign-mismatch, on by default.
+    CHECK_WARNING_ID_ALIGN_MISMATCH = 172,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -528,6 +539,11 @@ typedef enum CheckWarningEventKind
     // payload.data and token its left operand's low and high 32 bits, payload.name that operand's typedef spelling (0 for
     // none). check_common_shift_sign_overflow reports it as the graph's shifts.
     CHECK_WARNING_EVENT_SHIFT_SIGN,
+    // No message: a floating comparison the constant reader's `==` or `!=` makes with a literal its other operand's type
+    // can't hold exactly (#1875, -Wliteral-range), an array bound's, an enumerator value's or a bit-field width's, which no
+    // graph node holds. token the operator, payload.first_type that type. check_common_float_comparisons reports it as the
+    // graph's comparisons.
+    CHECK_WARNING_EVENT_FLOAT_COMPARE,
     // No message: a full conditional's boolean conversion from the constant/type reader (#2899). token is the
     // conditional's `:`, for ownership and graph deduplication; completion is its construction's end. payload.token
     // is the warning's location and payload.data its BUSTER_CHECK_BOOL_* fact. A floating fact also keeps its source
@@ -634,6 +650,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION,
     // payload.data is 0 for &&, 1 for ||. The source adapter retains the operator's construction boundary.
     CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND,
+    // payload.data the argument's alignment's log2 in its low byte and the parameter's above it; payload.name the cleanup
+    // function's name.
+    CHECK_WARNING_EVENT_ALIGN_MISMATCH,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

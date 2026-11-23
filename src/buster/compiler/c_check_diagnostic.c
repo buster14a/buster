@@ -188,6 +188,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_GNU_DESIGNATOR] = { "-Wgnu-designator", "-Wgnu", "use of GNU 'missing =' extension in designator" },
     [CHECK_WARNING_ID_GNU_ARRAY_RANGE] = { "-Wgnu-designator", "-Wgnu", "use of GNU array range extension" },
     [CHECK_WARNING_ID_STRING_PLUS_INT] = { "-Wstring-plus-int", NULL, "adding an integer to a string does not append to the string" },
+    [CHECK_WARNING_ID_STRING_PLUS_CHAR] = { "-Wstring-plus-char", NULL, "adding a character to a string pointer does not append to the string" },
     [CHECK_WARNING_ID_SHIFT_OP_PARENTHESES] = { "-Wshift-op-parentheses", "-Wparentheses", "operator has lower precedence than its operand's" },
     [CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY] = { "-Wsizeof-array-decay", NULL, "sizeof on pointer operation will return size of a pointer" },
     [CHECK_WARNING_ID_CHAINED_COMPARISON] = { "-Wparentheses", NULL, "chained comparison does not behave the same as a mathematical expression" },
@@ -223,6 +224,8 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE] = { "-Wtautological-negation-compare", "-Wtautological-compare",
                                                          "'&&' of a value and its negation always evaluates to false" },
     [CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND] = { "-Wconstant-logical-operand", NULL, "use of logical operator with constant operand" },
+    [CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION] = { "-Wimplicit-float-conversion", "-Wconversion", "implicit conversion loses floating-point precision" },
+    [CHECK_WARNING_ID_ALIGN_MISMATCH] = { "-Walign-mismatch", NULL, "passing argument may result in an unaligned pointer access" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

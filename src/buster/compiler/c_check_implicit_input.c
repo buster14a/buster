@@ -55,7 +55,13 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
         const BuiltinIntrinsicInfo* info = check_input_implicit_info(reader, name);
         const bool library_name = !explicit_builtin && info != NULL && memchr(info->attributes, 'f', info->attributes_length) != NULL;
         const bool eligible = library_name && check_input_library_enabled(info, &reader->pp->options);
-        const bool unknown = explicit_builtin && (info == NULL || !check_input_builtin_language(info, &reader->pp->options));
+        // A malformed explicit FILE builtin still performs callee lookup before its parser error (#2406). Without
+        // the header's FILE typedef, that lookup introduces an ordinary implicit declaration before C23. The intrinsic
+        // adapter leaves this case here instead of checking a synthetic call or stopping the source-order reader.
+        const bool missing_header = explicit_builtin && info != NULL && __builtin_expect(parser->invalid_call_count != 0, 0) &&
+                                    check_input_invalid_call_index(parser, token) < parser->invalid_call_count &&
+                                    memchr(info->encoding, 'P', info->encoding_length) != NULL && check_input_file_type(reader, "FILE") == 0;
+        const bool unknown = explicit_builtin && (info == NULL || !check_input_builtin_language(info, &reader->pp->options) || missing_header);
         const bool ordinary = ((!explicit_builtin && info == NULL) || library_name || unknown) && parser->language.standard < 2023 &&
                               check_input_intrinsic_call_shape(parser, token);
         check_input_lane_refuse(reader, reader->lane && (eligible || ordinary), "an implicit function declaration needs source-order linkage");
@@ -72,11 +78,12 @@ static inline __attribute__((always_inline)) void check_input_implicit_function(
             // function, without the header's warning (Sema's allowTypeMismatch).
             const bool mismatch = eligible && memchr(info->attributes, 'T', info->attributes_length) != NULL;
             const bool library = eligible && decoded.types.status == BUILTIN_INTRINSIC_TYPES_SUCCESS;
-            const bool header = eligible && ordinary && !mismatch && decoded.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
-                                (decoded.types.unsupported & BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT) != 0 &&
-                                decoded.types.error_offset < info->encoding_length &&
-                                (info->encoding[decoded.types.error_offset] == 'P' || info->encoding[decoded.types.error_offset] == 'J' ||
-                                 info->encoding[decoded.types.error_offset] == 'K');
+            const bool header = (eligible && ordinary && !mismatch && decoded.types.status == BUILTIN_INTRINSIC_TYPES_UNSUPPORTED &&
+                                 (decoded.types.unsupported & BUSTER_INTRINSIC_TYPE_UNSUPPORTED_CONTEXT) != 0 &&
+                                 decoded.types.error_offset < info->encoding_length &&
+                                 (info->encoding[decoded.types.error_offset] == 'P' || info->encoding[decoded.types.error_offset] == 'J' ||
+                                  info->encoding[decoded.types.error_offset] == 'K')) ||
+                                (missing_header && ordinary && reader->linked_declarations[name] == 0);
             if (header && !reader->output->resource)
             {
                 const CheckWarningEvent event =

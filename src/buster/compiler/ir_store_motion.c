@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Loop store motion (#3309). Include after ir.c, dominators.c and ir_optimize_unroll.c.
+// Loop store motion (#3309, #3346). Include after ir.c, dominators.c and ir_optimize_unroll.c.
 //
 // A loop that updates a global keeps it in memory: each iteration loads what the last one stored. Where the processor
 // doesn't forward that store for nothing, the loop runs at the forwarding's latency whatever its arithmetic costs: a
@@ -13,10 +13,10 @@
 // - each of the loop's loads of the key reads the slot instead;
 // - each of the loop's stores of the key stays as it is, and the value is stored in the slot too.
 // Promotion (ssa_ir.c) then makes the slot values and phis, as it does a local's: the loop's loads are gone and its
-// stores write a register's value. Memory holds the key's value after every store, as before: no store is added,
-// delayed or removed, so no other thread, signal handler or load through another address sees a difference, and the
-// function leaves no store that the source didn't make (a loop of no iteration stores nothing). The one access added
-// is the preheader's load, of bytes the options say are an object's of the unit (IrStoreMotionOptions.symbol_bytes).
+// stores write a register's value. Where the stores stay, memory holds the key's value after every store, as before:
+// no store is added, delayed or removed, so no other thread, signal handler or load through another address sees a
+// difference. The one access added is the preheader's load, of bytes the options say are an object's of the unit
+// (IrStoreMotionOptions.symbol_bytes). Where they sink, below, memory holds the key's value at every exit.
 //
 // A loop takes a key where all of these hold:
 // - the loop is reducible, has a preheader (one predecessor outside it, which ends in `br` to its header) and no
@@ -35,11 +35,17 @@
 // The outermost such loop takes the key, with every access of it in the loops inside; at most
 // IrStoreMotionOptions.key_limit keys a loop, since each holds a register across it (#2719's lesson of LICM).
 //
-// Loads through other addresses need no rule: memory is always current. That is why the stores stay. Sinking them to
-// the loop's exits would also need every load in the loop to be of a known object, an exit block for each edge and a
-// flag for the paths that stored nothing (a store the source didn't make is a data race the compiler added). It is a
-// follow-up for the loops whose every access is known: docs/tier1-store-motion.md's MEASUREMENTS has what the stores
-// cost on the 9700X, and why the pass is off by default.
+// Loads through other addresses need no rule while the stores stay: memory is always current. #3346 sinks a key's
+// stores to the loop's exits where that rule isn't needed: every read of memory in the loop is a plain load the pass
+// places (a stack slot's, or a symbol's), and none but the key's own meets its bytes. Then the loop's stores of the
+// key write the slot alone, and each exit writes the slot's value back once (IrStoreMotionMove.sink): through the
+// key's address where its bits differ from the preheader's load, and through a dummy frame slot where they don't, so
+// that a loop of no iteration, or one that changed nothing, stores nothing to the object (a store the source didn't
+// make would be a data race the compiler added; skipping one of the bits memory holds isn't, since nothing in the loop
+// synchronizes). An exit block whose every predecessor is in the loop gets the write-back first; an exit edge by a
+// `cbr` to a block that other paths reach too is split through a block of its own, after the function's last. A loop
+// with another exit to such a block (a switch's, an indirect branch's) keeps its stores. docs/tier1-store-motion.md's
+// MEASUREMENTS has what the stores cost on the 9700X, and why the pass is off by default.
 //
 // The scans over every instruction are vector code: the symbols' filter, which lets a function that names no listed
 // symbol go after one pass over its opcodes, and the classification, which compresses the loads, stores and barriers
@@ -66,11 +72,17 @@
 #define BUSTER_IR_STORE_MOTION_STEPS 24u
 // The instructions a chain's walk visits at most: each step's, and an address's or an addition's constant.
 #define BUSTER_IR_STORE_MOTION_VISITS (2u * BUSTER_IR_STORE_MOTION_STEPS)
+// The exits of a loop whose keys sink (#3346); a loop with more keeps its stores.
+#define BUSTER_IR_STORE_MOTION_EXITS 16u
+// A sunk move's exit that is a split edge's block: the bit, and the split's index below it.
+#define BUSTER_IR_STORE_MOTION_SPLIT 0x80000000u
 
 #define BUSTER_IR_STORE_MOTION_NONE 0u
 #define BUSTER_IR_STORE_MOTION_LOAD 1u
 #define BUSTER_IR_STORE_MOTION_STORE 2u
 #define BUSTER_IR_STORE_MOTION_BARRIER 3u
+// A read of memory that isn't a plain load (a masked load, a gather): the loop's memory must be current for it (#3346).
+#define BUSTER_IR_STORE_MOTION_OPAQUE 4u
 
 // The kinds by opcode, before the flags that make an observable load or store a barrier.
 static const uint8_t ir_store_motion_kinds[BUSTER_IR_OP_TABLE] = {
@@ -85,6 +97,8 @@ static const uint8_t ir_store_motion_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_SCATTER] = BUSTER_IR_STORE_MOTION_BARRIER,
     [IR_ALLOCA] = BUSTER_IR_STORE_MOTION_BARRIER,
     [IR_STACK_RESTORE] = BUSTER_IR_STORE_MOTION_BARRIER,
+    [IR_MASKED_LOAD] = BUSTER_IR_STORE_MOTION_OPAQUE,
+    [IR_GATHER] = BUSTER_IR_STORE_MOTION_OPAQUE,
 };
 
 // What an address is based on: a symbol's object, a stack slot, or anything else (a loaded pointer, a parameter, a phi).
@@ -105,6 +119,11 @@ static const uint8_t ir_store_motion_kinds[BUSTER_IR_OP_TABLE] = {
 #define BUSTER_IR_STORE_MOTION_MUTATE_OVERLAP 8u
 #define BUSTER_IR_STORE_MOTION_MUTATE_STORE 16u
 #define BUSTER_IR_STORE_MOTION_MUTATE_BOUNDS 32u
+// #3346's: a key sunk past a load the pass can't place, an exit given no write-back, and a write-back to the key on a
+// path that didn't change it (the store the source didn't make).
+#define BUSTER_IR_STORE_MOTION_MUTATE_SINK_LOAD 64u
+#define BUSTER_IR_STORE_MOTION_MUTATE_SINK_EXIT 128u
+#define BUSTER_IR_STORE_MOTION_MUTATE_SINK_ALWAYS 256u
 
 // What became of a loop that stores to a listed symbol (the others aren't looked at), by its first failing rule.
 typedef enum IrStoreMotionOutcome
@@ -153,6 +172,26 @@ static const char* const ir_store_motion_key_names[IR_STORE_MOTION_KEY_COUNT] = 
     [IR_STORE_MOTION_KEY_CHAIN] = "chain",
 };
 
+// Whether a moved key's stores sank to the loop's exits (#3346), or why they stayed, by the first failing rule: the loop
+// reads memory it can't place (a load through an unknown address, a masked load or a gather), a load in it meets the
+// key's bytes, or an exit block has a predecessor outside the loop (or the loop has more than
+// BUSTER_IR_STORE_MOTION_EXITS exit blocks).
+typedef enum IrStoreMotionSink
+{
+    IR_STORE_MOTION_SINK_SUNK,
+    IR_STORE_MOTION_SINK_LOAD,
+    IR_STORE_MOTION_SINK_MET,
+    IR_STORE_MOTION_SINK_EXIT,
+    IR_STORE_MOTION_SINK_COUNT,
+} IrStoreMotionSink;
+
+static const char* const ir_store_motion_sink_names[IR_STORE_MOTION_SINK_COUNT] = {
+    [IR_STORE_MOTION_SINK_SUNK] = "sunk",
+    [IR_STORE_MOTION_SINK_LOAD] = "load",
+    [IR_STORE_MOTION_SINK_MET] = "met",
+    [IR_STORE_MOTION_SINK_EXIT] = "exit",
+};
+
 typedef struct IrStoreMotionOptions IrStoreMotionOptions;
 struct IrStoreMotionOptions
 {
@@ -173,10 +212,17 @@ struct IrStoreMotionResult
     // The loops that store to a listed symbol, by outcome, and their stored keys that passed the loop's rules, by refusal.
     uint32_t outcomes[IR_STORE_MOTION_OUTCOME_COUNT];
     uint32_t keys[IR_STORE_MOTION_KEY_COUNT];
-    // The loads that read a slot, the stores whose value a slot takes too, and the instructions added.
+    // The moved keys by whether their stores sank, the write-backs on the exits of those that did, and the blocks added
+    // for the exit edges they split.
+    uint32_t sinks[IR_STORE_MOTION_SINK_COUNT];
+    uint32_t write_backs;
+    uint32_t blocks;
+    // The loads that read a slot, the stores whose value a slot takes (too, where the key's stores stay), the
+    // instructions added and the slots.
     uint32_t loads;
     uint32_t stores;
     uint32_t added;
+    uint32_t slots;
     uint64_t scratch_bytes;
 };
 
@@ -198,6 +244,8 @@ struct IrStoreMotionKey
     uint32_t first;
     // The move it became, plus one, or 0.
     uint32_t move;
+    // A load of the loop that isn't the key's meets its bytes: its stores can't sink.
+    bool read;
 };
 
 // A key a loop takes: its slot, and the preheader's instructions for it. The chain is the part of the first access's
@@ -215,6 +263,14 @@ struct IrStoreMotionMove
     uint32_t position;
     uint8_t type;
     uint8_t alignment_log2;
+    // The stores sink (#3346): the loop's stores of the key write the slot alone, and each of its exit blocks writes the
+    // slot's value back first, before its first instruction that isn't a phi (`exits[exit_first..+exit_count)`, those
+    // instructions), through a selected address: the key's where the value differs from the preheader's load, the dummy
+    // slot's where it doesn't. `address` is the key's address in the new function.
+    bool sink;
+    uint32_t exit_first;
+    uint32_t exit_count;
+    uint32_t key_address;
 };
 
 typedef struct IrStoreMotionWork IrStoreMotionWork;
@@ -246,6 +302,19 @@ struct IrStoreMotionWork
     uint32_t move_capacity;
     uint32_t* chains;
     uint32_t chain_count;
+    // The reads that aren't plain loads, in instruction order, and their blocks' bits (#3346).
+    uint32_t* opaque;
+    uint32_t opaque_count;
+    uint64_t* opaque_blocks;
+    // The sunk moves' exits (an exit block's first instruction that isn't a phi, or BUSTER_IR_STORE_MOTION_SPLIT and a
+    // split edge's index), and the new index of each one's write-back.
+    uint32_t* exits;
+    uint32_t* exit_positions;
+    uint32_t exit_count;
+    // The edges the write-backs split, each one's loop block and exit block: block `block_count + k` is edge k's.
+    uint32_t* split_from;
+    uint32_t* split_to;
+    uint32_t split_count;
     IrStoreMotionResult statistics;
 };
 
@@ -302,6 +371,7 @@ static void ir_store_motion_classify(IrStoreMotionWork* work)
         const __mmask64 access = valid & (_mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_IR_STORE_MOTION_LOAD)) | _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_IR_STORE_MOTION_STORE)));
         const __mmask64 observable = access & _mm512_test_epi8_mask(flags, _mm512_set1_epi8(BUSTER_IR_OBSERVABLE));
         const __mmask64 barrier = (valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_IR_STORE_MOTION_BARRIER))) | observable;
+        const __mmask64 opaque = valid & _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_IR_STORE_MOTION_OPAQUE));
         const __mmask64 plain = access & ~observable;
         for (uint32_t group = 0; group < 4; group += 1)
         {
@@ -312,6 +382,9 @@ static void ir_store_motion_classify(IrStoreMotionWork* work)
             work->access_count += (uint32_t)__builtin_popcount(accessed);
             _mm512_mask_compressstoreu_epi32(work->barriers + work->barrier_count, stopped, index);
             work->barrier_count += (uint32_t)__builtin_popcount(stopped);
+            const __mmask16 read = (__mmask16)(opaque >> (group * 16));
+            _mm512_mask_compressstoreu_epi32(work->opaque + work->opaque_count, read, index);
+            work->opaque_count += (uint32_t)__builtin_popcount(read);
         }
     }
 }
@@ -472,6 +545,81 @@ static uint32_t ir_store_motion_preheader(const IrStoreMotionWork* work, uint32_
     return alone ? preheader : BUSTER_IR_NONE;
 }
 
+// Block `block`'s first instruction that isn't a phi: where a write-back goes.
+static uint32_t ir_store_motion_entry(const IrFunction* f, uint32_t block)
+{
+    uint32_t i = f->block_offsets[block];
+    while (i + 1 < f->block_offsets[(uint64_t)block + 1] && f->op[i] == IR_PHI)
+    {
+        i += 1;
+    }
+    return i;
+}
+
+// The loop's exits, where its sunk keys' write-backs go: an exit block whose every predecessor is in the loop gets them
+// before its first instruction that isn't a phi (`from` BUSTER_IR_NONE, `to` the block); an exit edge to a block that
+// other paths reach too (the block after a loop that a `break`'s block also branches to) gets a block of its own, which
+// the edge is split through (`from` the loop's block, `to` the exit block). A return, a break and a goto out of the
+// loop are exits alike: each leaves by an edge to a block outside it. Returns false where an edge to split leaves by a
+// terminator other than a `cbr` to two blocks (a switch's or an indirect branch's: its other cases may go to the same
+// block), or where there are more than BUSTER_IR_STORE_MOTION_EXITS: then the loop's stores stay.
+static bool ir_store_motion_exits(const IrStoreMotionWork* work, uint32_t loop, uint32_t* from, uint32_t* to, uint32_t* exit_count)
+{
+    const IrFunction* f = work->function;
+    const IrCfg* cfg = &work->cfg;
+    const Dominators* loops = &work->loops;
+    const uint64_t words = loops->row_words;
+    const uint64_t* body = loops->loop_bodies + (uint64_t)loop * words;
+    uint32_t count = 0;
+    bool taken = true;
+    for (uint64_t word = 0; taken && word < words; word += 1)
+    {
+        for (uint64_t bits = body[word]; taken && bits != 0; bits &= bits - 1)
+        {
+            const uint32_t block = (uint32_t)(word * 64) + (uint32_t)__builtin_ctzll(bits);
+            for (uint32_t edge = cfg->successor_offsets[block]; taken && edge < cfg->successor_offsets[(uint64_t)block + 1]; edge += 1)
+            {
+                const uint32_t exit = cfg->successors[edge];
+                bool dedicated = !dominators_loop_contains(loops, loop, exit);
+                for (uint32_t back = cfg->predecessor_offsets[exit]; dedicated && back < cfg->predecessor_offsets[(uint64_t)exit + 1]; back += 1)
+                {
+                    dedicated = dominators_loop_contains(loops, loop, cfg->predecessors[back]);
+                }
+                const uint32_t terminator = f->block_offsets[(uint64_t)block + 1] - 1;
+                const uint32_t source = dedicated ? BUSTER_IR_NONE : block;
+                uint32_t at = 0;
+                while (at < count && !(to[at] == exit && from[at] == source))
+                {
+                    at += 1;
+                }
+                if (at == count && !dominators_loop_contains(loops, loop, exit))
+                {
+                    taken = count < BUSTER_IR_STORE_MOTION_EXITS && (dedicated || (f->op[terminator] == IR_CBR && f->b[terminator] != f->c[terminator]));
+                    from[count] = source;
+                    to[count] = exit;
+                    count += taken;
+                }
+            }
+        }
+    }
+    *exit_count = count;
+    return taken;
+}
+
+// The type a key of `type` is compared in at a write-back: its bits as an integer for a float's, widened to an i32 for an
+// i8's or an i16's (Tier 1 selects compares of i32s, i64s and pointers); IR_VOID where it is compared as it is.
+static uint8_t ir_store_motion_compared(uint32_t type)
+{
+    return type == IR_F64 ? IR_I64 : type == IR_F32 || type == IR_I8 || type == IR_I16 ? IR_I32 : IR_VOID;
+}
+
+// The instructions of one write-back of a key of `type`: the slot's load, the key's, the compare of the two (after their
+// conversions where ir_store_motion_compared has one), the dummy slot's address, the select and the store.
+static uint32_t ir_store_motion_write_back_size(uint32_t type)
+{
+    return ir_store_motion_compared(type) != IR_VOID ? 8u : 6u;
+}
+
 // Whether two keys of one symbol meet: one of them is every byte of it, or their byte ranges do.
 static bool ir_store_motion_meet(const IrStoreMotionKey* a, const IrStoreMotionKey* b)
 {
@@ -482,7 +630,7 @@ static bool ir_store_motion_meet(const IrStoreMotionKey* a, const IrStoreMotionK
 
 // Key `key`'s move: its slot, and the part of its first access's address inside the loop, which the preheader repeats.
 // Returns false where the chain has no room.
-static bool ir_store_motion_take(IrStoreMotionWork* work, uint32_t loop, uint32_t preheader, const IrStoreMotionKey* key)
+static bool ir_store_motion_take(IrStoreMotionWork* work, uint32_t loop, uint32_t preheader, const IrStoreMotionKey* key, bool sink, const uint32_t* from, const uint32_t* to, uint32_t exit_count)
 {
     const IrFunction* f = work->function;
     const uint32_t address = f->a[work->accesses[key->first]];
@@ -498,6 +646,8 @@ static bool ir_store_motion_take(IrStoreMotionWork* work, uint32_t loop, uint32_
         .chain_first = work->chain_count,
         .type = key->type,
         .alignment_log2 = key->alignment_log2,
+        .sink = sink,
+        .exit_first = work->exit_count,
     };
     // The walk went from the address to its root; the preheader's copy is made from the root's side.
     for (uint32_t k = count; k != 0; k -= 1)
@@ -510,8 +660,29 @@ static bool ir_store_motion_take(IrStoreMotionWork* work, uint32_t loop, uint32_
         }
     }
     const bool room = work->move_count < work->move_capacity;
+    // The fault of an exit given no write-back drops the first.
+    const uint32_t dropped = sink && exit_count != 0 && (work->options->mutate & BUSTER_IR_STORE_MOTION_MUTATE_SINK_EXIT) != 0;
+    for (uint32_t e = dropped; room && sink && e < exit_count; e += 1)
+    {
+        // An edge to split is one block of the function's however many loops' keys it writes back.
+        uint32_t split = 0;
+        while (from[e] != BUSTER_IR_NONE && split < work->split_count && !(work->split_from[split] == from[e] && work->split_to[split] == to[e]))
+        {
+            split += 1;
+        }
+        if (from[e] != BUSTER_IR_NONE && split == work->split_count)
+        {
+            work->split_from[split] = from[e];
+            work->split_to[split] = to[e];
+            work->split_count += 1;
+        }
+        work->exits[work->exit_count + move.exit_count] = from[e] == BUSTER_IR_NONE ? ir_store_motion_entry(work->function, to[e]) : BUSTER_IR_STORE_MOTION_SPLIT | split;
+        move.exit_count += 1;
+    }
     if (room)
     {
+        work->exit_count += move.exit_count;
+        work->statistics.write_backs += move.exit_count;
         work->chain_count += move.chain_count;
         work->moves[work->move_count] = move;
         work->move_count += 1;
@@ -539,6 +710,8 @@ static IrStoreMotionOutcome ir_store_motion_loop(IrStoreMotionWork* work, uint32
                                                                                                           IR_STORE_MOTION_MOVED;
     IrStoreMotionKey keys[BUSTER_IR_STORE_MOTION_KEYS];
     uint32_t key_count = 0;
+    // A load the pass can't place, in the loop: then no key's stores sink.
+    bool unknown_load = false;
     // The loop's keys: its accesses of listed symbols that no outer loop took, each one's key found among the few so far.
     for (uint64_t word = 0; outcome == IR_STORE_MOTION_MOVED && word < words; word += 1)
     {
@@ -557,6 +730,10 @@ static IrStoreMotionOutcome ir_store_motion_loop(IrStoreMotionWork* work, uint32
                 else if ((state & BUSTER_IR_STORE_MOTION_ROOT) == BUSTER_IR_STORE_MOTION_ROOT_UNKNOWN && store && (options->mutate & BUSTER_IR_STORE_MOTION_MUTATE_UNKNOWN) == 0)
                 {
                     outcome = IR_STORE_MOTION_UNKNOWN_STORE;
+                }
+                else if ((state & BUSTER_IR_STORE_MOTION_ROOT) == BUSTER_IR_STORE_MOTION_ROOT_UNKNOWN && !store)
+                {
+                    unknown_load = true;
                 }
                 else if (ir_store_motion_listed(work, k))
                 {
@@ -606,24 +783,46 @@ static IrStoreMotionOutcome ir_store_motion_loop(IrStoreMotionWork* work, uint32
                 keys[a].met = keys[a].met || keys[b].stores != 0;
                 keys[b].met = keys[b].met || keys[a].stores != 0;
             }
+            if (keys[a].symbol == keys[b].symbol && ir_store_motion_meet(&keys[a], &keys[b]))
+            {
+                keys[a].read = keys[a].read || keys[b].loads != 0;
+                keys[b].read = keys[b].read || keys[a].loads != 0;
+            }
         }
     }
+    // Whether the loop's stores can sink (#3346): every read of memory in it is a plain load the pass places (a stack
+    // slot's, or a symbol's, which a listed key's bytes meet only where it is that symbol's), and each exit has a place
+    // for the write-back (ir_store_motion_exits).
+    bool opaque = false;
+    for (uint64_t word = 0; word < words; word += 1)
+    {
+        opaque = opaque || (body[word] & work->opaque_blocks[word]) != 0;
+    }
+    const bool blind = (options->mutate & BUSTER_IR_STORE_MOTION_MUTATE_SINK_LOAD) != 0;
+    uint32_t exit_from[BUSTER_IR_STORE_MOTION_EXITS];
+    uint32_t exit_to[BUSTER_IR_STORE_MOTION_EXITS];
+    uint32_t exit_count = 0;
+    const IrStoreMotionSink sinking = outcome != IR_STORE_MOTION_MOVED || key_count == 0 ? IR_STORE_MOTION_SINK_COUNT :
+                                      (unknown_load || opaque) && !blind                   ? IR_STORE_MOTION_SINK_LOAD :
+                                      !ir_store_motion_exits(work, loop, exit_from, exit_to, &exit_count) ? IR_STORE_MOTION_SINK_EXIT :
+                                                                                             IR_STORE_MOTION_SINK_SUNK;
     uint32_t taken = 0;
     for (uint32_t a = 0; outcome == IR_STORE_MOTION_MOVED && a < key_count; a += 1)
     {
         IrStoreMotionKey* key = &keys[a];
         if (!key->indexed && key->stores != 0)
         {
+            const IrStoreMotionSink sink = sinking == IR_STORE_MOTION_SINK_SUNK && key->read && !blind ? IR_STORE_MOTION_SINK_MET : sinking;
             const uint32_t bytes = ir_store_motion_bytes(key->type);
             const uint32_t object = ir_store_motion_symbol_bytes(options, key->symbol);
             const bool inside = (key->offset >= 0 && (uint64_t)key->offset <= object && bytes <= object - (uint64_t)key->offset) || (options->mutate & BUSTER_IR_STORE_MOTION_MUTATE_BOUNDS) != 0;
             IrStoreMotionKeyRefusal refusal = key->met                                ? IR_STORE_MOTION_KEY_MET :
                                               !inside                                 ? IR_STORE_MOTION_KEY_BOUNDS :
                                               !ir_store_motion_scalar(key->type)      ? IR_STORE_MOTION_KEY_TYPE :
-                                              key->loads == 0                         ? IR_STORE_MOTION_KEY_UNREAD :
+                                              key->loads == 0 && sink != IR_STORE_MOTION_SINK_SUNK ? IR_STORE_MOTION_KEY_UNREAD :
                                               taken >= options->key_limit             ? IR_STORE_MOTION_KEY_LIMIT :
                                                                                         IR_STORE_MOTION_KEY_MOVED;
-            if (refusal == IR_STORE_MOTION_KEY_MOVED && !ir_store_motion_take(work, loop, preheader, key))
+            if (refusal == IR_STORE_MOTION_KEY_MOVED && !ir_store_motion_take(work, loop, preheader, key, sink == IR_STORE_MOTION_SINK_SUNK, exit_from, exit_to, exit_count))
             {
                 refusal = IR_STORE_MOTION_KEY_CHAIN;
             }
@@ -631,6 +830,7 @@ static IrStoreMotionOutcome ir_store_motion_loop(IrStoreMotionWork* work, uint32
             {
                 key->move = work->move_count;
                 taken += 1;
+                work->statistics.sinks[sink] += 1;
             }
             work->statistics.keys[refusal] += 1;
         }
@@ -758,6 +958,10 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
     uint32_t* map = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
     uint32_t* copies = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
     uint64_t* marks = ir_allocate(scratch, words, sizeof(uint64_t), &ok);
+    // By split edge: its block's write-backs' instructions, how many of them are placed, and its first new index.
+    uint32_t* split_size = ir_allocate(scratch, work->split_count, sizeof(uint32_t), &ok);
+    uint32_t* split_used = ir_allocate(scratch, work->split_count, sizeof(uint32_t), &ok);
+    uint32_t* split_base = ir_allocate(scratch, work->split_count, sizeof(uint32_t), &ok);
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
     uint64_t extras = 0;
     uint64_t calls = 0;
@@ -771,10 +975,28 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
             before[i] += work->moves[m].chain_count + 3;
             marks[i / 64] |= UINT64_C(1) << (i % 64);
         }
+        for (uint32_t m = 0; m < work->move_count; m += 1)
+        {
+            const IrStoreMotionMove* move = &work->moves[m];
+            for (uint32_t e = move->exit_first; e < move->exit_first + move->exit_count; e += 1)
+            {
+                const uint32_t i = work->exits[e];
+                if ((i & BUSTER_IR_STORE_MOTION_SPLIT) != 0)
+                {
+                    split_size[i & ~BUSTER_IR_STORE_MOTION_SPLIT] += ir_store_motion_write_back_size(move->type);
+                }
+                else
+                {
+                    before[i] += ir_store_motion_write_back_size(move->type);
+                    marks[i / 64] |= UINT64_C(1) << (i % 64);
+                }
+            }
+        }
+        // A kept store's value goes to the slot too, after it; a sunk one's store writes the slot instead.
         for (uint32_t k = 0; k < work->access_count; k += 1)
         {
             const uint32_t i = work->accesses[k];
-            if (work->owners[k] != 0 && f->op[i] == IR_STORE)
+            if (work->owners[k] != 0 && f->op[i] == IR_STORE && !work->moves[work->owners[k] - 1].sink)
             {
                 after[i] = 1;
                 marks[i / 64] |= UINT64_C(1) << (i % 64);
@@ -794,18 +1016,27 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
             }
         }
         ir_store_motion_run(map, first, n, (uint32_t)(total - n));
+        // The split edges' blocks after the input's last: each one's write-backs, then its `br` to the exit block.
+        for (uint32_t k = 0; k < work->split_count; k += 1)
+        {
+            split_base[k] = (uint32_t)total;
+            total += (uint64_t)split_size[k] + 1;
+        }
         extras = (uint64_t)f->extra_count + ir_unroll_extra_words(f, 0, n);
         calls = ir_store_motion_calls(f);
-        if (total > UINT32_MAX || extras > UINT32_MAX || (uint64_t)f->slot_count + work->move_count > UINT32_MAX)
+        if (total > UINT32_MAX || extras > UINT32_MAX || (uint64_t)f->slot_count + work->move_count + 1 > UINT32_MAX || (uint64_t)f->block_count + work->split_count > UINT32_MAX)
         {
             error = IR_ERROR_LIMIT;
         }
     }
+    // The dummy slot the sunk moves' write-backs select where the key's value didn't change: the last.
+    const uint32_t dummy = f->slot_count + work->move_count;
+    const uint32_t slots = work->move_count + (work->exit_count != 0);
     IrFunction view = *f;
     if (error == IR_OK)
     {
         view.instruction_count = (uint32_t)total;
-        view.slot_count = f->slot_count + work->move_count;
+        view.slot_count = f->slot_count + slots;
         view.op = ir_allocate(output, total, 1, &ok);
         view.type = ir_allocate(output, total, 1, &ok);
         view.flags = ir_allocate(output, total, 1, &ok);
@@ -813,7 +1044,8 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
         view.a = ir_allocate(output, total, 4, &ok);
         view.b = ir_allocate(output, total, 4, &ok);
         view.c = ir_allocate(output, total, 4, &ok);
-        view.block_offsets = ir_allocate(output, (uint64_t)f->block_count + 1, 4, &ok);
+        view.block_count = f->block_count + work->split_count;
+        view.block_offsets = ir_allocate(output, (uint64_t)view.block_count + 1, 4, &ok);
         view.extra = ir_allocate(output, extras, 4, &ok);
         view.calls = ir_allocate(output, calls, sizeof(IrCall), &ok);
         view.slots = ir_allocate(output, view.slot_count, sizeof(IrSlot), &ok);
@@ -843,7 +1075,11 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
             const uint32_t first = f->block_offsets[b];
             view.block_offsets[b] = map[first] - before[first];
         }
-        view.block_offsets[f->block_count] = (uint32_t)total;
+        for (uint32_t k = 0; k < work->split_count; k += 1)
+        {
+            view.block_offsets[f->block_count + k] = split_base[k];
+        }
+        view.block_offsets[view.block_count] = (uint32_t)total;
         // The input's instructions, a run at a time: one ends before an instruction that others are put before, and with
         // one that another is put after.
         IrUnrollEmit emit = { .view = &view, .extra = f->extra_count };
@@ -866,6 +1102,32 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
             }
         }
         ir_store_motion_copy(&emit, f, first, n, map);
+        if (work->exit_count != 0)
+        {
+            view.slots[dummy] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_VOID, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        }
+        // The write-backs' places first: before an instruction that both a write-back and a preheader's instructions
+        // come before (an exit block that is another loop's preheader), the write-back goes first.
+        for (uint32_t m = 0; m < work->move_count; m += 1)
+        {
+            const IrStoreMotionMove* move = &work->moves[m];
+            for (uint32_t e = move->exit_first; e < move->exit_first + move->exit_count; e += 1)
+            {
+                const uint32_t i = work->exits[e];
+                const uint32_t split = i & ~BUSTER_IR_STORE_MOTION_SPLIT;
+                const uint32_t size = ir_store_motion_write_back_size(move->type);
+                if ((i & BUSTER_IR_STORE_MOTION_SPLIT) != 0)
+                {
+                    work->exit_positions[e] = split_base[split] + split_used[split];
+                    split_used[split] += size;
+                }
+                else
+                {
+                    work->exit_positions[e] = map[i] - before[i] + used[i];
+                    used[i] += size;
+                }
+            }
+        }
         // Each move's preheader instructions: the chain's copies, the load, the slot's address and the slot's store.
         for (uint32_t m = 0; m < work->move_count; m += 1)
         {
@@ -892,6 +1154,7 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
                 copies[i] = out;
             }
             const uint32_t address = copies[move->address] != BUSTER_IR_NONE ? copies[move->address] : map[move->address];
+            move->key_address = address;
             for (uint32_t k = 0; k < move->chain_count; k += 1)
             {
                 copies[work->chains[move->chain_first + k]] = BUSTER_IR_NONE;
@@ -910,8 +1173,91 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
             view.a[load + 2] = load + 1;
             view.b[load + 2] = load;
         }
+        // Each sunk move's write-backs: the slot's value, stored through the key's address where its bits differ from
+        // the key's own bytes, which the loop no longer wrote, and through the dummy slot's where they don't, so that a
+        // path that changed nothing stores nothing to the key. (The bits: a float's -0.0 isn't 0.0 here, and a NaN is
+        // itself.) The key is read again at the exit rather than the preheader's value held in a register across the
+        // loop, which costs a spill in a loop that needs its registers; memory holds that value, since nothing in the
+        // loop stores to the key and another thread's write in that time would race with the write-back itself.
+        const bool always = (work->options->mutate & BUSTER_IR_STORE_MOTION_MUTATE_SINK_ALWAYS) != 0;
+        for (uint32_t m = 0; m < work->move_count; m += 1)
+        {
+            const IrStoreMotionMove* move = &work->moves[m];
+            const uint8_t compared = ir_store_motion_compared(move->type);
+            const uint8_t conversion = move->type == IR_F32 || move->type == IR_F64 ? IR_BITCAST : IR_ZEXT;
+            const uint32_t slot_address = move->position + move->chain_count + 1;
+            for (uint32_t e = move->exit_first; e < move->exit_first + move->exit_count; e += 1)
+            {
+                const uint32_t at = work->exit_positions[e];
+                view.op[at] = IR_LOAD;
+                view.type[at] = move->type;
+                view.alignment_log2[at] = (uint8_t)__builtin_ctz(ir_store_motion_bytes(move->type));
+                view.a[at] = slot_address;
+                view.op[at + 1] = IR_LOAD;
+                view.type[at + 1] = move->type;
+                view.alignment_log2[at + 1] = move->alignment_log2;
+                view.a[at + 1] = move->key_address;
+                uint32_t next = at + 2;
+                uint32_t left = at;
+                uint32_t right = at + 1;
+                if (compared != IR_VOID)
+                {
+                    view.op[next] = conversion;
+                    view.type[next] = compared;
+                    view.a[next] = at;
+                    view.op[next + 1] = conversion;
+                    view.type[next + 1] = compared;
+                    view.a[next + 1] = at + 1;
+                    left = next;
+                    right = next + 1;
+                    next += 2;
+                }
+                view.op[next] = IR_ICMP;
+                view.type[next] = IR_I1;
+                view.a[next] = left;
+                view.b[next] = right;
+                view.c[next] = IR_NE;
+                view.op[next + 1] = IR_STACK_ADDR;
+                view.type[next + 1] = IR_PTR;
+                view.a[next + 1] = dummy;
+                view.op[next + 2] = IR_SELECT;
+                view.type[next + 2] = IR_PTR;
+                view.a[next + 2] = next;
+                view.b[next + 2] = move->key_address;
+                view.c[next + 2] = always ? move->key_address : next + 1;
+                view.op[next + 3] = IR_STORE;
+                view.type[next + 3] = IR_VOID;
+                view.alignment_log2[next + 3] = move->alignment_log2;
+                view.a[next + 3] = next + 2;
+                view.b[next + 3] = at;
+            }
+        }
+        // Each split edge's block ends in a `br` to the exit block; the loop block's `cbr` goes to it instead, and the exit
+        // block's phis take the loop block's value from it.
+        for (uint32_t k = 0; k < work->split_count; k += 1)
+        {
+            const uint32_t block = f->block_count + k;
+            const uint32_t from = work->split_from[k];
+            const uint32_t to = work->split_to[k];
+            const uint32_t branch = split_base[k] + split_size[k];
+            view.op[branch] = IR_BR;
+            view.type[branch] = IR_VOID;
+            view.a[branch] = to;
+            const uint32_t terminator = map[f->block_offsets[(uint64_t)from + 1] - 1];
+            view.b[terminator] = view.b[terminator] == to ? block : view.b[terminator];
+            view.c[terminator] = view.c[terminator] == to ? block : view.c[terminator];
+            for (uint32_t phi = view.block_offsets[to]; view.op[phi] == IR_PHI; phi += 1)
+            {
+                for (uint32_t p = 0; p < view.b[phi]; p += 1)
+                {
+                    const uint32_t at = view.a[phi] + p * 2;
+                    view.extra[at] = view.extra[at] == from ? block : view.extra[at];
+                }
+            }
+        }
         ir_debug_remap(f, &view, map, NULL, NULL);
-        // The taken keys' accesses: a load reads the slot; a store's value goes to the slot too, after it.
+        // The taken keys' accesses: a load reads the slot; a kept store's value goes to the slot too, after it, and a
+        // sunk one's store writes the slot instead of the key.
         for (uint32_t k = 0; k < work->access_count; k += 1)
         {
             if (work->owners[k] != 0)
@@ -921,7 +1267,7 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
                 const IrStoreMotionMove* move = &work->moves[work->owners[k] - 1];
                 const uint32_t slot_address = move->position + move->chain_count + 1;
                 const uint8_t slot_alignment = (uint8_t)__builtin_ctz(ir_store_motion_bytes(move->type));
-                if (f->op[i] == IR_LOAD)
+                if (f->op[i] == IR_LOAD || move->sink)
                 {
                     view.a[out] = slot_address;
                     view.alignment_log2[out] = slot_alignment;
@@ -939,6 +1285,8 @@ static IrError ir_store_motion_rewrite(IrStoreMotionWork* work, Arena* output, A
         }
         view.arena_bytes = output->length - mark;
         work->statistics.added = (uint32_t)(total - n);
+        work->statistics.slots = slots;
+        work->statistics.blocks = work->split_count;
         *result = view;
     }
     else
@@ -963,6 +1311,7 @@ static __attribute__((unused)) IrCheck ir_store_motion(const IrFunction* functio
     {
         work.accesses = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
         work.barriers = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
+        work.opaque = ir_allocate(scratch, n, sizeof(uint32_t), &ok);
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
     if (named && check.error == IR_OK)
@@ -1013,9 +1362,14 @@ static __attribute__((unused)) IrCheck ir_store_motion(const IrFunction* functio
         work.access_first = ir_allocate(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), &ok);
         work.barrier_blocks = ir_allocate(scratch, words, sizeof(uint64_t), &ok);
         work.candidate_blocks = ir_allocate(scratch, words, sizeof(uint64_t), &ok);
+        work.opaque_blocks = ir_allocate(scratch, words, sizeof(uint64_t), &ok);
         work.move_capacity = candidates;
         work.moves = ir_allocate(scratch, work.move_capacity, sizeof(IrStoreMotionMove), &ok);
         work.chains = ir_allocate(scratch, (uint64_t)work.move_capacity * BUSTER_IR_STORE_MOTION_VISITS, sizeof(uint32_t), &ok);
+        work.exits = ir_allocate(scratch, (uint64_t)work.move_capacity * BUSTER_IR_STORE_MOTION_EXITS, sizeof(uint32_t), &ok);
+        work.exit_positions = ir_allocate(scratch, (uint64_t)work.move_capacity * BUSTER_IR_STORE_MOTION_EXITS, sizeof(uint32_t), &ok);
+        work.split_from = ir_allocate(scratch, (uint64_t)work.move_capacity * BUSTER_IR_STORE_MOTION_EXITS, sizeof(uint32_t), &ok);
+        work.split_to = ir_allocate(scratch, (uint64_t)work.move_capacity * BUSTER_IR_STORE_MOTION_EXITS, sizeof(uint32_t), &ok);
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
     if (looped && check.error == IR_OK)
@@ -1035,6 +1389,11 @@ static __attribute__((unused)) IrCheck ir_store_motion(const IrFunction* functio
         {
             const uint32_t block = work.cfg.instruction_blocks[work.barriers[e]];
             work.barrier_blocks[block / 64] |= UINT64_C(1) << (block % 64);
+        }
+        for (uint32_t e = 0; e < work.opaque_count; e += 1)
+        {
+            const uint32_t block = work.cfg.instruction_blocks[work.opaque[e]];
+            work.opaque_blocks[block / 64] |= UINT64_C(1) << (block % 64);
         }
         for (k = 0; k < work.access_count; k += 1)
         {

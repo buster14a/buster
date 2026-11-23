@@ -83,7 +83,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
+  --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
+  --float-precision-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
@@ -96,8 +97,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--lazy-system-headers`, only the checks that pass the driver
   `-flazy-system-headers`, including the real system-header lazy-policy
   fixtures and eager/lazy object comparisons, since the others run the same either way, and
-  `--part K/N` runs the K-th of N parts its checks are dealt to in turn,
-  `CheckDriverPart`; #2071's run modes, for every run of buster and of the
+  `--part K/N` runs the K-th of N parts its checks are dealt to, each unit
+  to the part that weighs the least so far (`CheckDriverPart`, #3399): a unit
+  weighs what it takes in hundredths of a second of one CPU on a 4-CPU Xeon
+  VM, the usual `BUSTER_CHECK_DRIVER_UNIT_WEIGHT` or, for one that takes 2 s
+  or more, its own (`check_test_driver_takes_weighing`), and a sweep that
+  would take more than about 20 s deals each of its cases, since a long unit
+  late in the order makes its part the longest whatever the weights;
+  #2071's run modes, for every run of buster and of the
   oracle clang that goes through the shared helpers
   (`check_test_driver_spawn_stream`, `check_test_driver_run_with`):
   `--in-process` runs buster's source commands as this process's
@@ -148,6 +155,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--float-precision-only` runs `c_check_float_precision_driver_test.c` (#1875):
+  `-Wimplicit-float-conversion`'s and `-Wliteral-range`'s floating comparisons
+  against clang's complete output, with their controls and policies
+  ([the c-checker section](../c-checker.md#floating-precision-and-floating-comparisons-1875)).
   `--unused-comparison-only` runs `c_check_unused_comparison_driver_test.c`
   and the original `tests/driver/unused_comparison*.c` sources (#2906).
   It compares complete Clang diagnostics for discarded comparisons, eligible
@@ -290,7 +301,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   in C99–C23, the call portion before C23, and the label portion in every
   tested standard. This focused section supports sanitizer and in-process/child
   differential checks without running the unrelated recovery fixtures.
-  `--malformed-calls-only` runs the ordinary balanced type-first call recovery
+  `--malformed-calls-only` runs the ordinary and builtin type-first call recovery
   cases in `tests/checker/parse-recovery/malformed-calls.*` (#2406), comparing
   complete GNU89/GNU17/C23 diagnostics and status, both readers, syntax/object
   output, warning policies, `-fno-builtin` and error limits. Mixed ordinary and
@@ -302,10 +313,20 @@ unused-warning fixtures also check exact scope-completion tokens.
   prevents artificial arity, argument-conversion and noncallable diagnostics while
   keeping independent argument checks and warnings. Type-first repairs after valid
   arguments and nested calls retain their original parse errors through successive
-  rounds, without duplicating earlier arguments' diagnostics.
-  Boundary controls exclude empty later arguments, semicolon crossings, mismatched
-  delimiters, member callees and catalog names. Rejected output is preserved and valid
+  rounds, without duplicating earlier arguments' diagnostics. Block expression
+  calls also recover at their first outer semicolon, checking subsequent clauses
+  as statements and preserving Clang's C23 loop-typo correction. The keyword-typo
+  cases check warnings before, inside and after a corrected loop, plus independent
+  errors in the same body and at the corrected keyword (#3369). Builtin controls
+  keep lookup/header diagnostics and independent arguments without imposing
+  intrinsic constraints on the synthetic call. Boundary controls exclude empty
+  later arguments, mismatched delimiters, member callees and semicolon crossings
+  in nested calls, initializers or returns. Rejected output is preserved and valid
   cast/`sizeof` controls must produce an ELF object.
+  `--string-plus-only` runs both string-addition warning suites, including the
+  runtime sources in `tests/checker/string-plus-char/`: character and integer
+  warnings with their notes, their independent option controls and ordering,
+  character-pointer and literal variants, rejected units and both readers.
   `--type-sugar-only` runs
   `c_check_type_sugar_driver_test.c` alone, the typedef sugar diagnostics keep
   through typedef chains, members and qualified arrays, and const assignment's
@@ -928,6 +949,14 @@ the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
 builder's observer's `-Wtautological-bitwise-compare`,
 `-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
 order (`c_check_common_cfg.c`).
+
+`tests/checker/system-macros` (#3338) is one too: common warnings at a system
+header's macro expanded in user code, which the expansion location decides as
+clang's DiagnosticsEngine does (`check_common_severity`), and the checks whose
+clang code tests `isInSystemMacro` itself: a conversion's context
+(`check_common_conversion_context`), a discarded value's macro
+(`check_common_unused_quiet`), a format call's extra argument and an array
+index both a system header spells.
 
 `tests/checker/return-calls` (#1393) is one too: `-Wreturn-type` past calls
 (`c_check_return_flow.c`), a direct call's by its declaration, a call through
