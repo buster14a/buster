@@ -349,19 +349,20 @@ static bool node_machine_root_converts(NodeMachine* machine, TypeId target)
     return taken;
 }
 
-// The enumeration that record `r` of the machine's current expression is of, as the enumerations' warnings read an
-// operand (check_common_enum_coerced, check_common_enum_cast): its value's type where that is one; an enumerator's
-// leaf's own enumeration (its type is int); a comma's second operand's; a conditional's arms', where they agree or one
-// has none. 0 for none, and UINT32_MAX for arms of two enumerations or a nesting past `depth`.
-static TypeId node_machine_record_enumeration(const NodeMachine* machine, uint32_t r, uint32_t depth)
+// The most records of a conditional's or a comma's arms that wait to be asked at once, where each arm's own are asked
+// before the other's and a nesting stops at 8: one a level, and the one at hand.
+#define BUSTER_NODE_MACHINE_ARMS 16u
+
+// The enumeration that record `r` itself is of, its arms aside: its value's type where that is one; an enumerator's leaf's
+// own enumeration (its type is int), UINT32_MAX where its definition is not found. 0 for none.
+static TypeId node_machine_record_enumeration_own(const NodeMachine* machine, uint32_t r)
 {
     const TypeTable* types = machine->types;
     const CheckInput* input = machine->input;
     const CheckGraph* graph = machine->graph;
-    const CheckOp op = node_machine_record_op(machine, r);
     const TypeId own = type_unqualified(type_strip_aligned(types, node_machine_record_type(machine, r)));
     TypeId result = own != 0 && type_kind(types, own) == BUSTER_TYPE_KIND_ENUM ? own : 0;
-    if (op == CHECK_OP_VALUE && result == 0)
+    if (node_machine_record_op(machine, r) == CHECK_OP_VALUE && result == 0)
     {
         const uint32_t node = r + 1 == machine->count ? machine->root : machine->first + r;
         const uint32_t token = node < graph->count ? graph->tokens[node] : BUSTER_CHECK_NONE;
@@ -382,56 +383,127 @@ static TypeId node_machine_record_enumeration(const NodeMachine* machine, uint32
             result = selected != 0 ? type_unqualified(type_strip_aligned(types, machine->reader_enums[selected - 1].type)) : UINT32_MAX;
         }
     }
-    else if ((op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA) && result == 0)
+    return result;
+}
+
+// The enumeration that record `r` of the machine's current expression is of, as the enumerations' warnings read an
+// operand (check_common_enum_coerced, check_common_enum_cast): its own (node_machine_record_enumeration_own); a comma's
+// second operand's; a conditional's arms', where they agree or one has none. 0 for none, and UINT32_MAX for arms of two
+// enumerations or a nesting past `depth`. The arms are asked from a list, with no call of itself (the call graph's
+// rule): a record that is a conditional or a comma with no enumeration of its own puts its arms there, each with the
+// nesting left to it, and every other one's enumeration joins the answer.
+static TypeId node_machine_record_enumeration(const NodeMachine* machine, uint32_t r, uint32_t depth)
+{
+    uint32_t pending[BUSTER_NODE_MACHINE_ARMS];
+    uint32_t nesting[BUSTER_NODE_MACHINE_ARMS];
+    uint32_t count = 1;
+    TypeId result = 0;
+    pending[0] = r;
+    nesting[0] = depth;
+    while (count != 0)
     {
-        const uint32_t second = node_machine_record_right(machine, r);
-        const uint32_t third = op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, r) : UINT32_MAX;
-        const TypeId a = depth == 0 ? UINT32_MAX : second != UINT32_MAX ? node_machine_record_enumeration(machine, second, depth - 1) : 0;
-        const TypeId b = depth == 0 ? UINT32_MAX : third != UINT32_MAX ? node_machine_record_enumeration(machine, third, depth - 1) : 0;
-        result = a != 0 && b != 0 && a != b ? UINT32_MAX : a != 0 ? a : b;
+        count -= 1;
+        const uint32_t at = pending[count];
+        const uint32_t left = nesting[count];
+        const CheckOp op = node_machine_record_op(machine, at);
+        TypeId found = node_machine_record_enumeration_own(machine, at);
+        if ((op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA) && found == 0)
+        {
+            const uint32_t second = node_machine_record_right(machine, at);
+            const uint32_t third = op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, at) : UINT32_MAX;
+            const bool room = left != 0 && count + 2 <= BUSTER_NODE_MACHINE_ARMS;
+            found = room ? 0 : UINT32_MAX;
+            if (room && third != UINT32_MAX)
+            {
+                pending[count] = third;
+                nesting[count] = left - 1;
+                count += 1;
+            }
+            if (room && second != UINT32_MAX)
+            {
+                pending[count] = second;
+                nesting[count] = left - 1;
+                count += 1;
+            }
+        }
+        // Two arms of one enumeration are of it, and so is one beside an arm of none; two of different ones are of two.
+        result = found != 0 && result != 0 && found != result ? UINT32_MAX : found != 0 ? found : result;
     }
     return result;
 }
 
-// Whether the conversion of record `r`'s value to `target` may be warned of for a constant it changes, where the record
-// is a conditional (or a comma, by its second operand) and its arms carry the conversion (clang's
-// CheckConditionalOperator; check_common_conversion_arms): an integer constant arm, but to a floating target that holds
-// it exactly whatever its type (under 2^24); a floating constant arm to what is no floating type at least as large; a
-// constant the columns do not hold whole; a nesting past `depth`. (T takes a conditional's conversion to a floating
-// target alone so far: an integer constant arm to an integer target is refused here whatever its value.)
-static bool node_machine_arm_changes(const NodeMachine* machine, uint32_t r, TypeId target, uint32_t depth)
+// Whether the conversion of record `r`'s own value to `target` may be warned of for a constant it changes, its arms
+// aside: an integer constant, but to a floating target that holds it exactly whatever its type (under 2^24); a floating
+// constant to what is no floating type at least as large; a constant the columns do not hold whole.
+static bool node_machine_arm_changes_own(const NodeMachine* machine, uint32_t r, TypeId target)
 {
     const TypeTable* types = machine->types;
-    const CheckOp op = node_machine_record_op(machine, r);
+    const CheckConstantKind kind = node_machine_record_constant_kind(machine, r);
+    const TypeId source = node_machine_record_type(machine, r);
+    const bool target_floating = check_action_kind(types, target) == BUSTER_TYPE_KIND_FLOATING;
     bool changes = false;
-    if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA)
+    if (kind == CHECK_CONSTANT_INTEGER)
     {
-        const uint32_t second = node_machine_record_right(machine, r);
-        const uint32_t third = op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, r) : UINT32_MAX;
-        changes = depth == 0 || (second != UINT32_MAX && node_machine_arm_changes(machine, second, target, depth - 1)) ||
-                  (third != UINT32_MAX && node_machine_arm_changes(machine, third, target, depth - 1));
+        uint32_t width = 0;
+        bool is_signed = false;
+        const bool whole = node_machine_record_wide(machine, r) == NULL && (machine->columns->standings[r] & BUSTER_NODE_MACHINE_FIELD) == 0 &&
+                           check_action_integer_type(types, source, &width, &is_signed) && width != 0 && width <= 64;
+        const uint64_t raw = whole ? machine->columns->payloads[r] : 0;
+        const uint32_t shift = whole ? 64 - width : 0;
+        const int64_t value = is_signed ? (int64_t)(raw << shift) >> shift : (int64_t)((raw << shift) >> shift);
+        const bool huge = whole && !is_signed && width == 64 && (raw >> 63) != 0;
+        const bool exact = whole && target_floating && !huge && value > -(INT64_C(1) << 24) && value < (INT64_C(1) << 24);
+        changes = !exact;
     }
-    else
+    else if (kind == CHECK_CONSTANT_FLOATING)
     {
-        const CheckConstantKind kind = node_machine_record_constant_kind(machine, r);
-        const TypeId source = node_machine_record_type(machine, r);
-        const bool target_floating = check_action_kind(types, target) == BUSTER_TYPE_KIND_FLOATING;
-        if (kind == CHECK_CONSTANT_INTEGER)
+        changes = !(target_floating && check_action_kind(types, source) == BUSTER_TYPE_KIND_FLOATING && type_size(types, target) >= type_size(types, source));
+    }
+    return changes;
+}
+
+// Whether the conversion of record `r`'s value to `target` may be warned of for a constant it changes, where the record
+// is a conditional (or a comma, by its second operand) and its arms carry the conversion (clang's
+// CheckConditionalOperator; check_common_conversion_arms): an arm that is such a constant
+// (node_machine_arm_changes_own), or a nesting past `depth`. (T takes a conditional's conversion to a floating target
+// alone so far: an integer constant arm to an integer target is refused here whatever its value.) The arms are asked
+// from a list, as node_machine_record_enumeration asks them.
+static bool node_machine_arm_changes(const NodeMachine* machine, uint32_t r, TypeId target, uint32_t depth)
+{
+    uint32_t pending[BUSTER_NODE_MACHINE_ARMS];
+    uint32_t nesting[BUSTER_NODE_MACHINE_ARMS];
+    uint32_t count = 1;
+    bool changes = false;
+    pending[0] = r;
+    nesting[0] = depth;
+    while (count != 0 && !changes)
+    {
+        count -= 1;
+        const uint32_t at = pending[count];
+        const uint32_t left = nesting[count];
+        const CheckOp op = node_machine_record_op(machine, at);
+        if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA)
         {
-            uint32_t width = 0;
-            bool is_signed = false;
-            const bool whole = node_machine_record_wide(machine, r) == NULL && (machine->columns->standings[r] & BUSTER_NODE_MACHINE_FIELD) == 0 &&
-                               check_action_integer_type(types, source, &width, &is_signed) && width != 0 && width <= 64;
-            const uint64_t raw = whole ? machine->columns->payloads[r] : 0;
-            const uint32_t shift = whole ? 64 - width : 0;
-            const int64_t value = is_signed ? (int64_t)(raw << shift) >> shift : (int64_t)((raw << shift) >> shift);
-            const bool huge = whole && !is_signed && width == 64 && (raw >> 63) != 0;
-            const bool exact = whole && target_floating && !huge && value > -(INT64_C(1) << 24) && value < (INT64_C(1) << 24);
-            changes = !exact;
+            const uint32_t second = node_machine_record_right(machine, at);
+            const uint32_t third = op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, at) : UINT32_MAX;
+            const bool room = left != 0 && count + 2 <= BUSTER_NODE_MACHINE_ARMS;
+            changes = !room;
+            if (room && third != UINT32_MAX)
+            {
+                pending[count] = third;
+                nesting[count] = left - 1;
+                count += 1;
+            }
+            if (room && second != UINT32_MAX)
+            {
+                pending[count] = second;
+                nesting[count] = left - 1;
+                count += 1;
+            }
         }
-        else if (kind == CHECK_CONSTANT_FLOATING)
+        else
         {
-            changes = !(target_floating && check_action_kind(types, source) == BUSTER_TYPE_KIND_FLOATING && type_size(types, target) >= type_size(types, source));
+            changes = node_machine_arm_changes_own(machine, at, target);
         }
     }
     return changes;

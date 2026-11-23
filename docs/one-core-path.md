@@ -3642,8 +3642,8 @@ which the producer's own passes are 7.56 M before any reading and 7.43 M after i
   a compile would run the producer: every body it takes is in the comparisons' set and its kept controls are the
   program's (twenty runs, each status 0); with `-Wall -Wextra` it takes none.
 - **P1, sound against the diagnostics: met for what a log by location can see.** With the producer run beside every
-  unit's ordinary read and nothing masked: 111,723 units of the checker's and the driver's tests, 74,314 of them
-  with the producer run, 36,386 of 1,954,846 bodies taken, 1,184,166 diagnostics looked at, none at a token of a
+  unit's ordinary read and nothing masked: 111,906 units of the checker's and the driver's tests, 74,783 of them
+  with the producer run, 36,393 of 1,956,140 bodies taken, 1,191,188 diagnostics looked at, none at a token of a
   taken body; and none on the corpora (1,753, 545, 0 and 4,442 bodies taken). What it cannot see (a
   diagnostic reported outside the body that causes it, the object, a body another function's lowering reads) the next
   piece found three cases of by compiling small units with the bodies taken and without, and main's merge a fourth; each

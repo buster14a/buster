@@ -8137,9 +8137,9 @@ and without.
 
 On the units of the checker's and the driver's tests (34 blocks of the
 correctness inventory: those that compile a unit and read its diagnostics or
-its object): 111,723 units, the producer ran in 74,314 of them (the
-others are read with a view, a prefix or a repaired parse, on several lanes
-or with `-g`), 1,954,846 bodies, 36,386 taken; 1,184,166 diagnostics
+its object): 111,906 units, the producer ran in 74,783 of them (in the
+others the unit's read does not reach the walk, or is of a view, a prefix or
+a repaired parse, and the log looks at nothing), 1,956,140 bodies, 36,393 taken; 1,191,188 diagnostics
 looked at, **none at a token of a taken body**. On the corpora, each unit
 compiled with `-c`: `sqlite3.c` 1,753 of 2,674 bodies taken, Lua
 545 of 1,096, musl 4,442 of 18,584 over 1,336 units, the compiler's own
