@@ -5441,6 +5441,9 @@ static void parse_scalar_resume_block_item(ParseScalar* parser)
         parser->error_resume_delete = true;
         parser->error_resume_begin = repair;
         parser->error_resume_end = end;
+        // A stray else, a missing control head and a declaration before its first declarator are deleted whole: clang's
+        // StmtError (ParseDiagnostic.resume_statement). An attribute-led repair keeps its prefix's statement.
+        parser->error_resume_statement = stray_else || missing_head || (declarator && !attributed && !extra && repair == begin);
         // A malformed GNU suppress already leaves a closing delimiter for its declaration error. Any later C23
         // list belongs to the tail clang discards; the retained attribute reader owns this scaffold's diagnostic.
         const ParseScalarBlockAttributes spelling = extra && parse_scalar_standard_attribute(parser, at) ?

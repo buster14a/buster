@@ -604,6 +604,126 @@ void later(void)
     after_dropped_loop;
 }
 #elif BUSTER_CASE == 78
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) if (d) for (; d;) ) ;
+}
+void later(void)
+{
+    after_dropped_if;
+}
+#elif BUSTER_CASE == 79
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        do ) ; while (d);
+    (void)d;
+}
+void later(void)
+{
+    after_dropped_do;
+}
+#elif BUSTER_CASE == 80
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) switch (d) for (; d;) ) ;
+}
+void later(void)
+{
+    after_dropped_switch;
+}
+#elif BUSTER_CASE == 81
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) do ) ; while (d);
+}
+void later(void)
+{
+    after_dropped_do_body;
+}
+#elif BUSTER_CASE == 82
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) if (d) for (; d;) ) ; else (void)d;
+}
+void later(void)
+{
+    after_kept_if_else;
+}
+#elif BUSTER_CASE == 83
+typedef int myint;
+void check(int c, int d)
+{
+    if (c) else ;
+}
+void later(void)
+{
+    after_stray_else_body;
+}
+#elif BUSTER_CASE == 84
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) if ;
+}
+void later(void)
+{
+    after_missing_head_body;
+}
+#elif BUSTER_CASE == 85
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        else ;
+    (void)c;
+}
+void later(void)
+{
+    after_stray_else_following;
+}
+#elif BUSTER_CASE == 86
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        while ;
+    (void)c;
+}
+void later(void)
+{
+    after_missing_head_following;
+}
+#elif BUSTER_CASE == 87
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        int 1;
+    (void)c;
+}
+void later(void)
+{
+    after_missing_declarator;
+}
+#elif BUSTER_CASE == 88
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        myint & 1;
+    (void)c;
+}
+void later(void)
+{
+    after_typedef_declarator;
+}
+#elif BUSTER_CASE == 89
 int check(int n)
 {
     int s = 0;
@@ -617,7 +737,7 @@ int later(void)
     "later" + 1;
     return 0;
 }
-#elif BUSTER_CASE == 79
+#elif BUSTER_CASE == 90
 int check(int n)
 {
     "before" + n;
@@ -626,12 +746,12 @@ int check(int n)
     "after" + n;
     return n;
 }
-#elif BUSTER_CASE == 80
+#elif BUSTER_CASE == 91
 void check(int n)
 {
     whil ("condition" + n != (void*)0) n--;
 }
-#elif BUSTER_CASE == 81
+#elif BUSTER_CASE == 92
 int check(void)
 {
     retrn;

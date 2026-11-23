@@ -5804,26 +5804,31 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
 }
 
 // Whether the statement that starts at `token` was clang's StmtError: a recovery view's `;` that ends a statement the
-// repair deleted whole (BUSTER_PARSE_DROPPED_STATEMENT, #2406), or a for or while loop whose body is one, as clang's
-// ParseForStatement and ParseWhileStatement drop a loop whose body is invalid. Such a statement is neither an empty
-// body nor the statement after a loop, and ActOnForStmt never sees its loop.
+// repair deleted whole (BUSTER_PARSE_DROPPED_STATEMENT, #2406), or a statement whose body is one, which clang drops with
+// it: a for, while or switch (ParseForStatement, ParseWhileStatement, ParseSwitchStatement), a do (ParseDoStatement) and
+// an if without an else (ParseIfStatement; an else makes the then-branch a null statement instead). Such a statement is
+// neither an empty body nor the statement after a loop, and ActOnForStmt never sees its loop.
 static bool check_common_dropped_statement(const Parser* parser, uint32_t token)
 {
     const uint32_t count = parser->tokens.count;
     bool result = false;
     bool walking = true;
+    bool conditional = false;
     uint32_t at = token;
     while (walking && at < count)
     {
         const uint8_t kind = parser->tokens.kinds[at];
         result = kind == PARSE_KIND_SEMI && parser->tree.roles[at] == PARSE_ROLE_TERMINATOR &&
                  (parser->tokens.flags[at] & BUSTER_PARSE_DROPPED_STATEMENT) != 0;
-        // A loop's head: step past its parenthesized group to its body.
-        const bool loop = !result && (kind == PARSE_KIND_FOR || kind == PARSE_KIND_WHILE) && at + 1 < count &&
-                          parser->tokens.kinds[at + 1] == PARSE_KIND_L_PAREN;
+        // An else after the dropped body belongs to the innermost if, which keeps every statement around it.
+        result = result && !(conditional && at + 1 < count && parser->tokens.kinds[at + 1] == PARSE_KIND_ELSE);
+        // A head: step past its parenthesized group to its body; a do's body follows it directly.
+        const bool headed = !result && (kind == PARSE_KIND_FOR || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_IF) &&
+                            at + 1 < count && parser->tokens.kinds[at + 1] == PARSE_KIND_L_PAREN;
+        conditional |= headed && kind == PARSE_KIND_IF;
         uint32_t depth = 0;
         uint32_t close = at + 1;
-        bool scanning = loop;
+        bool scanning = headed;
         while (scanning && close < count)
         {
             const uint8_t inner = parser->tokens.kinds[close];
@@ -5832,8 +5837,11 @@ static bool check_common_dropped_statement(const Parser* parser, uint32_t token)
             scanning = depth != 0;
             close += scanning ? 1u : 0u;
         }
-        walking = loop && close < count && (parser->tree.roles[close] == PARSE_ROLE_CLOSE_FOR || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CONDITION);
-        at = close + 1;
+        const bool body = headed && close < count &&
+                          (parser->tree.roles[close] == PARSE_ROLE_CLOSE_FOR || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CONDITION);
+        const bool repeat = !result && kind == PARSE_KIND_DO;
+        walking = body || repeat;
+        at = repeat ? at + 1 : close + 1;
     }
     return result;
 }
