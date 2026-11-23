@@ -154,8 +154,12 @@ lists for a function without an undef (`IrOptimizeWork.without_uses`).
 every LICM and value-numbering pair with and without the verified input's
 preparation, which must give the same function; `test-ir-licm`'s budget on
 random invariant chains, its screen fixtures and the undef taint under the
-policy check the rest. `test-checker-driver`'s passes fixture checks that the
-default hoists, that `-hoist` doesn't, and that `+numbering` reaches its pass.
+policy check the rest. On real C, `test-ir-source --passes`' `hoist` and
+`numbering` rows run each as Tier 1 does against the verifying preparation (the
+same function; where the screen passes a function over, the verifying LICM
+moves nothing), and `benchmark-ir-source --passes` times each once, as Tier 1
+runs it. `test-checker-driver`'s passes fixture checks that the default
+hoists, that `-hoist` doesn't, and that `+numbering` reaches its pass.
 The rules and their measurements are in [the loop motion guide](../../docs/ir-loop-motion.md#the-pressure-policy-2719)
 and [the value numbering guide](../../docs/ir-value-numbering.md#the-pressure-policy-2719).
 

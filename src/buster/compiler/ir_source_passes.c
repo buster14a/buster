@@ -26,6 +26,10 @@
 // - #3309's loop store motion on L, with every symbol listed as an object of a megabyte (the files have no emission to
 //   say which are the unit's own, and this run executes nothing): a changed function must promote, and its promotion go
 //   through the optimizer, whose final verification checks dominance.
+// - #2719's pressure policies on P as Tier 1 runs them, with the preparation of a verified input (IrLicmOptions and
+//   IrGvnOptions.validated), against the preparation that verifies it: the same function. LICM's (`hoist`) runs where
+//   Tier 1 runs it, in a function without vector or mask values that its screen (ir_licm_pressure_screen) takes; where
+//   the screen passes a function over, the verifying run must move nothing.
 // For each caller among them, the inliner on a unit of it and its direct callees among the file's functions, as the C
 // driver's expansion takes one (every function of internal linkage and #2541's general splice on, so that every such call is
 // a candidate), by both forms of the caller's runs (IrInlineOptions.add_sites: masked adds, or gathers; #2924: its scalar
@@ -55,6 +59,9 @@ typedef enum IrSourcePass
     IR_SOURCE_PASS_UNROLL,
     IR_SOURCE_PASS_STORE_MOTION,
     IR_SOURCE_PASS_INLINE,
+    // #2719's pressure policies as Tier 1 runs them: LICM (Tier 1's default `hoist`) and value numbering (`+numbering`).
+    IR_SOURCE_PASS_HOIST,
+    IR_SOURCE_PASS_NUMBERING,
     IR_SOURCE_PASS_COUNT,
 } IrSourcePass;
 
@@ -74,6 +81,8 @@ static const char* const ir_source_pass_names[IR_SOURCE_PASS_COUNT] = {
     "unroll",
     "store-motion",
     "inline",
+    "hoist",
+    "numbering",
 };
 
 // The optimizer's pass bits of each of its rows (IR_SOURCE_PASS_SCCP to IR_SOURCE_PASS_TIER1_MEMORY): value numbering
@@ -230,6 +239,42 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         const IrCheck scalar_check = ir_optimize_licm(promoted, twin, scratch, options, &scalar);
         const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function);
         ir_source_passes_record(totals, IR_SOURCE_PASS_LICM, file, name, vector_check, scalar_check, same, true, vector.moved != 0, vector.moved);
+        arena_pop_to(output, output_mark);
+        arena_pop_to(twin, twin_mark);
+    }
+    // #2719's LICM under the pressure policy, as Tier 1 runs it (the screen, then the verified input's preparation), against
+    // the verifying preparation on every function without vector or mask values: the same function, and nothing moved
+    // where the screen passes the function over.
+    if (!ir_function_has_simd(promoted))
+    {
+        IrLicmOptions options = ir_licm_options();
+        options.pressure = true;
+        IrLicmResult checked = { 0 };
+        const IrCheck checked_check = ir_optimize_licm(promoted, twin, scratch, options, &checked);
+        const bool screened = ir_licm_pressure_screen(promoted, scratch);
+        options.validated = true;
+        IrLicmResult trusted = { 0 };
+        const IrCheck trusted_check = screened ? ir_optimize_licm(promoted, output, scratch, options, &trusted) : checked_check;
+        const bool same = screened ? trusted_check.error == IR_OK && checked_check.error == IR_OK && trusted.moved == checked.moved &&
+                                         ir_source_passes_equal(&trusted.function, &checked.function) :
+                                     checked_check.error != IR_OK || checked.moved == 0;
+        ir_source_passes_record(totals, IR_SOURCE_PASS_HOIST, file, name, trusted_check, checked_check, same, true, screened && trusted.moved != 0, screened ? trusted.moved : 0);
+        arena_pop_to(output, output_mark);
+        arena_pop_to(twin, twin_mark);
+    }
+    // #2719's value numbering under the pressure policy on the promoted function, with the verified input's preparation
+    // and with the verifying one: the same function.
+    {
+        IrGvnOptions options = ir_gvn_options();
+        options.pressure = true;
+        IrGvnResult checked = { 0 };
+        const IrCheck checked_check = ir_optimize_gvn(promoted, twin, scratch, options, &checked);
+        options.validated = true;
+        IrGvnResult trusted = { 0 };
+        const IrCheck trusted_check = ir_optimize_gvn(promoted, output, scratch, options, &trusted);
+        const bool same = trusted_check.error == IR_OK && checked_check.error == IR_OK && trusted.removed == checked.removed &&
+                          ir_source_passes_equal(&trusted.function, &checked.function);
+        ir_source_passes_record(totals, IR_SOURCE_PASS_NUMBERING, file, name, trusted_check, checked_check, same, true, trusted.removed != 0, trusted.removed);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
     }
@@ -565,7 +610,8 @@ static int run_ir_source_passes_tests(int count, char** arguments)
 // #139's compile time per pass for both versions (benchmark-ir-source --passes): the files' functions prepared as
 // test-ir-source --passes prepares them, each lowered (L) and promoted (P) once outside the time, and each caller's
 // inlining unit built once; then each pass by its vector and its scalar version over the whole corpus (by its one version,
-// where #2924 left one: the inliner, the unroller, the loop vectorizer and value numbering with memory alone), in
+// where #2924 left one: the inliner, the unroller, the loop vectorizer and value numbering with memory alone; and #2719's
+// pressure policies once each, as Tier 1 runs them: `hoist` with its screen, both with a verified input's preparation), in
 // BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of the pair runs first, after a warm-up of each. The passes
 // take the inputs --tier1's pipeline gives them: SROA (Tier 1's options), #866's solver and the inliner the lowered form,
 // the optimizer's rows and LICM the promoted one (the driver's optimizer and LICM take it after the wide integers' halves,
@@ -658,6 +704,25 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
             options.symbol_count = corpus->symbol_count;
             IrStoreMotionResult result = { 0 };
             check = ir_store_motion(&corpus->lowered[f], &options, output, scratch, &result);
+        }
+        else if (pass == IR_SOURCE_PASS_HOIST)
+        {
+            // As Tier 1 runs it (#2719): in a function without vector or mask values that its screen takes, with the
+            // verified input's preparation.
+            IrLicmOptions options = ir_licm_options();
+            options.pressure = true;
+            options.validated = true;
+            IrLicmResult result = { 0 };
+            const IrFunction* function = &corpus->promoted[f];
+            check = !ir_function_has_simd(function) && ir_licm_pressure_screen(function, scratch) ? ir_optimize_licm(function, output, scratch, options, &result) : check;
+        }
+        else if (pass == IR_SOURCE_PASS_NUMBERING)
+        {
+            IrGvnOptions options = ir_gvn_options();
+            options.pressure = true;
+            options.validated = true;
+            IrGvnResult result = { 0 };
+            check = ir_optimize_gvn(&corpus->promoted[f], output, scratch, options, &result);
         }
         else if (pass == IR_SOURCE_PASS_INLINE)
         {
@@ -881,9 +946,11 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
             memset(values, 0, sizeof(values));
             // The inliner, the unroller, the loop vectorizer and value numbering with memory alone have one path (#2924):
-            // timed once.
+            // timed once; #2719's pressure policies are timed once too, as Tier 1 runs them.
             const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_STORE_MOTION || pass == IR_SOURCE_PASS_INLINE ||
-                                              pass == IR_SOURCE_PASS_MEMORY ? 1 : 2;
+                                              pass == IR_SOURCE_PASS_MEMORY || pass == IR_SOURCE_PASS_HOIST || pass == IR_SOURCE_PASS_NUMBERING ?
+                                          1 :
+                                          2;
             for (uint32_t version = 0; version < versions; version += 1)
             {
                 failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;
@@ -930,7 +997,7 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline|memory|tier1-memory|vectorize|unroll|store-motion] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-ir-source --passes [--only sroa|gvn|sccp|dce|cfg|merge|optimizer|tier1|licm|inline|memory|tier1-memory|vectorize|unroll|store-motion|hoist|numbering] [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);
