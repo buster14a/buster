@@ -486,7 +486,7 @@ instruction. The TLS models' modifiers (#1115), in either case (clang writes
 - The same in 64 bits: `.quad x@tpoff` and `.quad x@dtpoff` (GCC's and Clang's
   `-g` DWARF of a TLS variable) and a 64-bit immediate (`movabsq $x@tpoff,
   %rax`), as TPOFF64 and DTPOFF64. Inline assembly's templates take only the
-  code generators' kinds (`link_add_code_fixups`' fit), which these aren't.
+  code generators' kinds (`link_kind_fits`), which these aren't.
 - `@GOTTPOFF` (initial-exec), `@TLSGD` (general-dynamic) and `@TLSLD`
   (local-dynamic) on a RIP-relative displacement, as GOTTPOFF, TLSGD and TLSLD.
 
