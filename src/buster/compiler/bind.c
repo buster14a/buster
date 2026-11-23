@@ -369,29 +369,35 @@ static void bind_take_name(Bind* bind, const Link* link, SymbolId symbol)
     }
 }
 
-// The link's global symbols from `first` to `end`, eight at a time: those whose binding isn't local and that have a
+// The link's global symbols from `first` to `end`, 16 at a time: those whose binding isn't local and that have a
 // name, their names' hashes gathered by name, and their words of the runtime's names' filter gathered by the hashes'
-// top bits. Only a symbol whose two bits are both set, about one in a hundred of those the runtime doesn't have, goes
-// on to the index (bind_take_name). Gathers win here where the patch kernel's didn't: the alternative is two dependent
-// scalar loads a symbol, and the filter's words stay in L1.
+// top bits, in two independent chains of eight. Only a symbol whose two bits are both set, about one in a hundred of
+// those the runtime doesn't have, goes on to the index (bind_take_name). Gathers win here where the patch kernel's
+// didn't: the alternative is two dependent scalar loads a symbol, and the filter's words stay in L1.
+static __mmask8 bind_match_filter(const RuntimeNames* names, const Link* link, __mmask8 kept, __m256i name)
+{
+    const __m512i ones = _mm512_set1_epi64(1);
+    const __m512i low6 = _mm512_set1_epi64(63);
+    const __m512i hash = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), kept, name, link->names.hash, 8);
+    const __m512i word_index = _mm512_srli_epi64(hash, 64 - names->filter_bits);
+    const __m512i word = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), kept, word_index, names->filter, 8);
+    const __m512i bits = _mm512_or_si512(_mm512_sllv_epi64(ones, _mm512_and_si512(hash, low6)), _mm512_sllv_epi64(ones, _mm512_and_si512(_mm512_srli_epi64(hash, 6), low6)));
+    return _mm512_mask_cmpeq_epi64_mask(kept, _mm512_and_si512(word, bits), bits);
+}
+
 static void bind_match_vector(Bind* bind, const Link* link, SymbolId first, SymbolId end)
 {
     const LinkSymbols* symbols = &link->symbols;
     const RuntimeNames* names = &bind->runtime->global_names;
-    const __m512i ones = _mm512_set1_epi64(1);
-    const __m512i low6 = _mm512_set1_epi64(63);
-    for (SymbolId batch = first; batch < end; batch += BUSTER_BIND_BATCH)
+    for (SymbolId batch = first; batch < end; batch += 16)
     {
-        const uint32_t n = end - batch < BUSTER_BIND_BATCH ? end - batch : BUSTER_BIND_BATCH;
-        const __mmask8 loaded = (__mmask8)bind_lane_mask(n);
-        const __m512i flags = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->flags + batch));
-        const __m256i name = _mm256_maskz_loadu_epi32(loaded, symbols->name + batch);
-        const __mmask8 kept = (__mmask8)(_mm512_test_epi64_mask(flags, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_BINDING)) & _mm256_test_epi32_mask(name, name) & loaded);
-        const __m512i hash = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), kept, name, link->names.hash, 8);
-        const __m512i word_index = _mm512_srli_epi64(hash, 64 - names->filter_bits);
-        const __m512i word = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), kept, word_index, names->filter, 8);
-        const __m512i bits = _mm512_or_si512(_mm512_sllv_epi64(ones, _mm512_and_si512(hash, low6)), _mm512_sllv_epi64(ones, _mm512_and_si512(_mm512_srli_epi64(hash, 6), low6)));
-        uint32_t maybe = _mm512_mask_cmpeq_epi64_mask(kept, _mm512_and_si512(word, bits), bits);
+        const __mmask16 loaded = (__mmask16)_bzhi_u32(0xffff, end - batch < 16 ? end - batch : 16);
+        const __m128i flags = _mm_maskz_loadu_epi8(loaded, symbols->flags + batch);
+        const __m512i name = _mm512_maskz_loadu_epi32(loaded, symbols->name + batch);
+        const __mmask16 kept = _mm_test_epi8_mask(flags, _mm_set1_epi8(BUSTER_LINK_SYMBOL_BINDING)) & _mm512_test_epi32_mask(name, name);
+        const __mmask8 low = bind_match_filter(names, link, (__mmask8)kept, _mm512_castsi512_si256(name));
+        const __mmask8 high = bind_match_filter(names, link, (__mmask8)(kept >> 8), _mm512_extracti64x4_epi64(name, 1));
+        uint32_t maybe = (uint32_t)low | (uint32_t)high << 8;
         while (maybe != 0)
         {
             bind_take_name(bind, link, batch + (SymbolId)__builtin_ctz(maybe));
@@ -1101,28 +1107,34 @@ static void bind_resolve_symbol(Bind* bind, Link* link, SymbolId symbol, BindMem
 }
 
 // The symbols from `first` to `end` that nothing defines (no atom, a name, and a source that isn't the program's, the
-// linker's or absolute), selected eight at a time by a compress, then bound in symbol order.
+// linker's or absolute), 64 at a time: their sources compared as bytes in one vector, their atoms and names in four
+// parts of 16, and the selected ones bound in symbol order from the mask's set bits. Binding a symbol changes only its
+// own columns, so the mask of a block taken before binding its first symbol stays the block's.
 static void bind_resolve_vector(Bind* bind, Link* link, SymbolId first, SymbolId end, BindMemberWords* members)
 {
     const LinkSymbols* symbols = &link->symbols;
-    const __m512i lane_index = _mm512_set_epi64(7, 6, 5, 4, 3, 2, 1, 0);
-    for (SymbolId batch = first; batch < end; batch += BUSTER_BIND_BATCH)
+    for (SymbolId block = first; block < end; block += 64)
     {
-        const uint32_t n = end - batch < BUSTER_BIND_BATCH ? end - batch : BUSTER_BIND_BATCH;
-        const __mmask8 loaded = (__mmask8)bind_lane_mask(n);
-        const __m512i atoms = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->atom + batch));
-        const __m512i names = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(loaded, symbols->name + batch));
-        const __m512i sources = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(loaded, symbols->source + batch));
-        const uint32_t undefined = _mm512_testn_epi64_mask(atoms, atoms) & _mm512_test_epi64_mask(names, names) &
-                                   _mm512_cmpneq_epi64_mask(sources, _mm512_set1_epi64(BUSTER_LINK_SOURCE_PROGRAM)) &
-                                   _mm512_cmpneq_epi64_mask(sources, _mm512_set1_epi64(BUSTER_LINK_SOURCE_LINKER)) &
-                                   _mm512_cmpneq_epi64_mask(sources, _mm512_set1_epi64(BUSTER_LINK_SOURCE_ABSOLUTE)) & loaded;
-        SymbolId candidates[BUSTER_BIND_BATCH];
-        _mm256_mask_storeu_epi32(candidates, (__mmask8)bind_lane_mask((uint32_t)__builtin_popcount(undefined)),
-                                 _mm512_cvtepi64_epi32(_mm512_maskz_compress_epi64((__mmask8)undefined, _mm512_add_epi64(lane_index, _mm512_set1_epi64(batch)))));
-        for (uint32_t i = 0; i < (uint32_t)__builtin_popcount(undefined); i += 1)
+        const uint32_t n = end - block < 64 ? end - block : 64;
+        const __mmask64 loaded = _bzhi_u64(UINT64_MAX, n);
+        const __m512i sources = _mm512_maskz_loadu_epi8(loaded, symbols->source + block);
+        const __mmask64 bound = _mm512_cmpeq_epi8_mask(sources, _mm512_set1_epi8(BUSTER_LINK_SOURCE_PROGRAM)) |
+                                _mm512_cmpeq_epi8_mask(sources, _mm512_set1_epi8(BUSTER_LINK_SOURCE_LINKER)) |
+                                _mm512_cmpeq_epi8_mask(sources, _mm512_set1_epi8(BUSTER_LINK_SOURCE_ABSOLUTE));
+        uint64_t undefined = 0;
+        for (uint32_t part = 0; part < 4; part += 1)
         {
-            bind_resolve_symbol(bind, link, candidates[i], members);
+            const __mmask16 lanes = (__mmask16)(loaded >> (16 * part));
+            const __m512i atoms = _mm512_maskz_loadu_epi32(lanes, symbols->atom + block + 16 * part);
+            const __m512i names = _mm512_maskz_loadu_epi32(lanes, symbols->name + block + 16 * part);
+            const __mmask16 selected = _mm512_mask_testn_epi32_mask(lanes, atoms, atoms) & _mm512_test_epi32_mask(names, names);
+            undefined |= (uint64_t)selected << (16 * part);
+        }
+        undefined &= ~(uint64_t)bound;
+        while (undefined != 0)
+        {
+            bind_resolve_symbol(bind, link, block + (SymbolId)__builtin_ctzll(undefined), members);
+            undefined &= undefined - 1;
         }
     }
 }
