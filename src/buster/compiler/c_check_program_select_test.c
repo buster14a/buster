@@ -520,6 +520,17 @@ static void check_test_program_unreachable_statements(CheckTest* test, const cha
 
 static void check_test_program_selection(CheckTest* test, const char* clang)
 {
+    CheckTestFixtures fixture = { .storage = arena_reserve(UINT64_C(1) << 20) };
+    char path[PATH_MAX + 128];
+    snprintf(path, sizeof(path), "%s/checker/const-selection.c", check_test_fixture_root);
+    uint64_t length = 0;
+    const char* source = fixture.storage.base != NULL ? check_test_fixture_read(&fixture, path, &length) : NULL;
+    check_test_expect(test, source != NULL && length != 0, "read the const initializer selection fixture");
+    if (source != NULL && length != 0)
+    {
+        check_test_program_selection_case(test, source, "const-initializer-selection", 7, 5, clang, true);
+    }
+    arena_release(&fixture.storage);
     check_test_program_unreachable_statements(test, clang);
     check_test_program_selection_case(test, "", "empty-selected-unit", 0, 0, clang, false);
     check_test_program_selection_case(test, "static int dead=3;int kept=9;", "selected-data-only-unit", 0, 1, clang, false);

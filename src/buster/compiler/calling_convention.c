@@ -47,10 +47,10 @@
 // Entry points: abi_initialize (the table, with the builtin types classified), abi_classify_all (every complete type
 // not yet classified, in levels whose types depend only on earlier ones) and abi_classify (one such level: the vector
 // path); abi_assign (many calls' arguments and results: the vector path, 16 arguments at a time across calls);
-// abi_classes and abi_va_arg (va_arg's plan for a type). The vector paths keep scalar fallbacks until they are
-// vectorized (#2924's phase D), which give the same results: abi_classify_scalar, the scalar classification, for a
-// level whose fold has no room in scratch, and abi_classify_levels' scan when its columns have none; abi_assign_scalar,
-// the per-call assignment (abi_assign_call), for the calls the vector path leaves and when its columns have no room.
+// abi_classes and abi_va_arg (va_arg's plan for a type). The classification has one implementation, the vector fold,
+// which needs no memory but the stack, as do abi_classify_levels' scans (#2957). The assignment keeps a fallback until
+// it is vectorized (#2924's phase D, #2958), which gives the same results: abi_assign_scalar, the per-call assignment
+// (abi_assign_call), for the calls the vector path leaves and when its columns have no room.
 //
 // Who writes what: the table is the code generator's, which classifies after the front end has made the types (the
 // type table's columns never change once written, but a tag's at its completion, after which abi_classify_all
@@ -61,11 +61,9 @@
 //   - API: the classes (BUSTER_ABI_INTEGER ...) and AbiClasses, the registers (BUSTER_ABI_RAX ...), the convention's
 //     constants, the pass bits (BUSTER_ABI_PASS_*), AbiReturn, AbiLocation, AbiCall, AbiSignatures, AbiVaArg, AbiVaList,
 //     AbiTable and the prototypes.
-//   - Classes: abi_merge_class, abi_merge, abi_canonical and abi_post_merge.
+//   - Classes: abi_merge_class (the merge table's definition) and abi_canonical.
 //   - Simple types (everything but records and arrays): AbiSimple, abi_simple_fixed, abi_simple_current,
-//     abi_resolved_index, abi_simple_floating, abi_simple, abi_simple_entry and abi_simple_row.
-//   - Entries, the scalar classification: abi_row_at, abi_alignment_bytes_log2, abi_array_entry, abi_bit_field_classes,
-//     abi_member_row_at, abi_record_entry and abi_row_entry.
+//     abi_resolved_index, abi_simple_floating, abi_simple, abi_simple_row and abi_alignment_bytes_log2.
 //   - Finishing a type: abi_atomic_alignment_log2, abi_canonical_alignment_log2; clang's LLVM types
 //     (abi_member_storage, a struct's bit-fields' access units (abi_integer_bytes, abi_unit_limit, AbiUnit,
 //     abi_bit_field_unit), a large record's storage for an array of no elements of it (abi_wide_record, AbiWideFrame,
@@ -76,13 +74,14 @@
 //     abi_value_result, abi_result); abi_end_memory, abi_copy_bytes; the rare path (AbiRare, abi_demoted_result,
 //     abi_registers_result, abi_vector_llvm, abi_single_member, abi_finish_rare); abi_finish_passing, abi_finish and
 //     abi_copy.
-//   - The vector classification: AbiFold, AbiFoldGroup, the members' and elements' parts (AbiPart, AbiPartState,
-//     abi_member_part, abi_element_part, abi_finish_parts), abi_lane_offsets, abi_aligned_lanes, abi_possible_lanes,
-//     abi_shifted_row, abi_member_entry, abi_write_entries, abi_merge_vector, abi_post_merge_vector, abi_store_rows,
-//     abi_fold_groups, abi_store_row and abi_classify_vector.
-//   - The drivers: abi_capacity_bytes, abi_initialize, abi_classify_scalar, abi_classify, abi_classifiable,
-//     abi_is_classified, abi_wide_classified, abi_members_classified, abi_dependencies_classified, abi_is_larger_root,
-//     abi_schedule_wide, abi_classify_pending, abi_classify_levels, abi_classify_all and abi_classes.
+//   - The vector classification: AbiFold, the members' and elements' parts (AbiPart, AbiPartState, abi_member_part,
+//     abi_element_part, abi_finish_parts), abi_lane_offsets, abi_aligned_lanes, abi_possible_lanes, abi_shifted_row,
+//     abi_member_entry, AbiFoldLane, abi_fold_lane, abi_fold_lane_empty, abi_fold_entry, abi_merge_vector,
+//     abi_post_merge_vector, abi_fold_group, abi_fold_window, abi_store_row and abi_classify.
+//   - The drivers: abi_capacity_bytes, abi_initialize, abi_classifiable, abi_is_classified, abi_wide_classified,
+//     abi_members_classified, abi_dependencies_classified, abi_is_larger_root, abi_schedule_wide, abi_unclassified,
+//     AbiCensus, abi_census, AbiScanned, abi_classify_scan, abi_classify_pending, abi_classify_levels, abi_classify_all
+//     and abi_classes.
 //   - Assignment: abi_stack_place, abi_assign_call (the fallback, one call), abi_assign_scalar, the vector path's AbiScan,
 //     abi_scan, abi_scan_add, abi_scan_or and abi_assign.
 //   - va_arg: abi_va_arg.
@@ -314,7 +313,9 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 // that LLVM hasn't, rather than a copy of the whole value, which takes a slot of its size), and PAYLOAD (a STACK
 // location of a VECTOR value that LLVM puts on the stack as its vector, of a record whose C size runs past its payload,
 // abi_vector_payload_bytes: the slot, its vector register's width and aligned to it, holds the payload alone, the C
-// type's bytes past it lost as they are in the register, #2113).
+// type's bytes past it lost as they are in the register, #2113), and FIRST (the parts, or a STACK location's slots, are
+// those of the value's first 16 bytes alone, as a value of 16 bytes would have them: a transparent union of a slot of its
+// own past 16 bytes, its member's eightbytes, AbiTable.transparent, #1844; the union's bytes past them are padding).
 #define BUSTER_ABI_LOCATION_IGNORE 0
 #define BUSTER_ABI_LOCATION_REGISTERS 1
 #define BUSTER_ABI_LOCATION_STACK 2
@@ -325,6 +326,7 @@ _Static_assert(sizeof(AbiReturn) == 8, "a result is 8 bytes");
 #define BUSTER_ABI_FLAG_DEMOTED 0x08
 #define BUSTER_ABI_FLAG_LOW 0x10
 #define BUSTER_ABI_FLAG_PAYLOAD 0x20
+#define BUSTER_ABI_FLAG_FIRST 0x40
 
 typedef struct AbiLocation AbiLocation;
 struct AbiLocation
@@ -462,13 +464,13 @@ static __attribute__((unused)) bool abi_initialize(AbiTable* abi, Arena* arena, 
 // made after it unclassified; abi_classify, abi_classes and the rest must be given types below `types` alone.
 static __attribute__((unused)) bool abi_initialize_types(AbiTable* abi, Arena* arena, const TypeTable* table, uint32_t vector_bytes, uint32_t types);
 // Classifies every complete type the table has that isn't yet, a level at a time (each level's types depend only on
-// types classified before it): with the vector path, or its fallback. Returns how many types it classified.
+// types classified before it). Returns how many types it classified. It needs no scratch memory: with too little, a
+// deep table takes a scan per level.
 static __attribute__((unused)) uint32_t abi_classify_all(AbiTable* abi, const TypeTable* table);
-// Classifies `count` types, every one of whose members, elements or bases is classified: the vector path (records and
-// arrays folded four at a time, one per 128-bit lane) and its fallback (an offset of a type at a time). A type classified
-// already is classified again, to the same result.
+// Classifies `count` types, every one of whose members, elements or bases is classified: records and arrays folded four
+// at a time, one per 128-bit lane, with no memory but the stack. A type classified already is classified again, to the
+// same result.
 static __attribute__((unused)) void abi_classify(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count);
-static __attribute__((unused)) void abi_classify_scalar(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count);
 // A classified type's classes, as a named argument, a result and a member see them, or as an unnamed (variadic) one.
 static __attribute__((unused)) AbiClasses abi_classes(const AbiTable* abi, TypeId type, bool named);
 // Each call's arguments' locations (`locations`, as `arguments` is indexed) and its totals and result (`calls`). Every
@@ -501,8 +503,9 @@ static __attribute__((unused)) uint32_t abi_vector_register_bytes(uint32_t paylo
 // ---------------------------------------------------------------------------------------------------------------------
 // Classes
 
-// clang's merge (the psABI's 3.2.3 rule 4), with MEMORY absorbing on either side, as clang's loops stop at it.
-static uint8_t abi_merge_class(uint8_t accumulated, uint8_t field)
+// clang's merge (the psABI's 3.2.3 rule 4), with MEMORY absorbing on either side, as clang's loops stop at it: what
+// tools/generate_builtin_abi.c bakes into the merge table (AbiTable.merge) that the fold's vpermb reads.
+static __attribute__((unused)) uint8_t abi_merge_class(uint8_t accumulated, uint8_t field)
 {
     uint8_t result = BUSTER_ABI_SSE;
     if (accumulated == BUSTER_ABI_MEMORY || field == BUSTER_ABI_MEMORY)
@@ -529,42 +532,10 @@ static uint8_t abi_merge_class(uint8_t accumulated, uint8_t field)
     return result;
 }
 
-static AbiClasses abi_merge(AbiClasses accumulated, AbiClasses field)
-{
-    const uint8_t low = abi_merge_class(BUSTER_ABI_LOW(accumulated), BUSTER_ABI_LOW(field));
-    const uint8_t high = abi_merge_class(BUSTER_ABI_HIGH(accumulated), BUSTER_ABI_HIGH(field));
-    return BUSTER_ABI_CLASSES(low, high);
-}
-
 // MEMORY in either half is MEMORY in both.
 static AbiClasses abi_canonical(uint8_t low, uint8_t high)
 {
     return low == BUSTER_ABI_MEMORY || high == BUSTER_ABI_MEMORY ? BUSTER_ABI_IN_MEMORY : BUSTER_ABI_CLASSES(low, high);
-}
-
-// clang's postMerge (the psABI's 3.2.3 rule 5) for an aggregate of `size` bytes, as Linux has it (revision 0.98's X87UP
-// rule).
-static AbiClasses abi_post_merge(uint64_t size, AbiClasses classes)
-{
-    uint8_t low = BUSTER_ABI_LOW(classes);
-    uint8_t high = BUSTER_ABI_HIGH(classes);
-    if (high == BUSTER_ABI_MEMORY)
-    {
-        low = BUSTER_ABI_MEMORY;
-    }
-    if (high == BUSTER_ABI_X87UP && low != BUSTER_ABI_X87)
-    {
-        low = BUSTER_ABI_MEMORY;
-    }
-    if (size > BUSTER_ABI_REGISTER_BYTES && (low != BUSTER_ABI_SSE || high != BUSTER_ABI_SSEUP))
-    {
-        low = BUSTER_ABI_MEMORY;
-    }
-    if (high == BUSTER_ABI_SSEUP && low != BUSTER_ABI_SSE)
-    {
-        high = BUSTER_ABI_SSE;
-    }
-    return abi_canonical(low, high);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -740,30 +711,8 @@ static AbiSimple abi_simple(const AbiTable* abi, const TypeTable* table, uint32_
     return result;
 }
 
-// A simple type's classes at byte `offset` of an enclosing aggregate (MEMORY where it can't be: past offset 0, the
+// A simple type's classes at the 16 offsets of an enclosing aggregate (MEMORY where it can't be: past offset 0, the
 // aggregate would be larger than 16 bytes).
-static AbiClasses abi_simple_entry(AbiSimple simple, uint32_t offset)
-{
-    AbiClasses result = BUSTER_ABI_IN_MEMORY;
-    if (offset == 0 || offset + simple.size <= BUSTER_ABI_ROW_BYTES)
-    {
-        if (simple.rule == BUSTER_ABI_RULE_FIXED)
-        {
-            result = abi_canonical(simple.low, simple.high);
-        }
-        else if (offset < 8)
-        {
-            result = abi_canonical(simple.low, offset + simple.span > 8 ? simple.low : BUSTER_ABI_NO_CLASS);
-        }
-        else
-        {
-            result = abi_canonical(BUSTER_ABI_NO_CLASS, simple.low);
-        }
-    }
-    return result;
-}
-
-// The same for the 16 offsets at once.
 static __m128i abi_simple_row(AbiSimple simple)
 {
     const __m128i lanes = _mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
@@ -783,153 +732,9 @@ static __m128i abi_simple_row(AbiSimple simple)
     return _mm_mask_blend_epi8(possible, _mm_set1_epi8((char)BUSTER_ABI_IN_MEMORY), classes);
 }
 
-// ---------------------------------------------------------------------------------------------------------------------
-// Entries: a record's or an array's classes at one offset, from its members' rows, as clang's classify gives them.
-// This is the scalar classification, the vector fold's fallback.
-
-static AbiClasses abi_row_at(const AbiTable* abi, uint32_t index, uint32_t offset)
-{
-    return abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES + offset];
-}
-
 static uint32_t abi_alignment_bytes_log2(const TypeTable* table, TypeId type)
 {
     return table->types.alignment_log2[type >> BUSTER_TYPE_INDEX_SHIFT];
-}
-
-// An array at byte `offset`: MEMORY beyond 64 bytes or where its elements would be misaligned (its element's alignment
-// as written, ALIGNED included); NO_CLASS for one beyond 16 bytes that isn't a single vector the target passes (clang
-// returns before merging, and before post-merging); otherwise its elements' classes merged, then post-merged.
-static AbiClasses abi_array_entry(const AbiTable* abi, const TypeTable* table, uint32_t index, uint32_t offset)
-{
-    const uint64_t size = table->types.size[index];
-    const uint64_t count = table->types.extent[index];
-    const TypeId element = table->types.base[index];
-    const uint32_t element_index = element >> BUSTER_TYPE_INDEX_SHIFT;
-    const uint64_t element_size = table->types.size[abi_resolved_index(table, element)];
-    const uint64_t alignment = 1ull << abi_alignment_bytes_log2(table, element);
-    AbiClasses result = BUSTER_ABI_IN_MEMORY;
-    if (offset != 0 && offset + size > BUSTER_ABI_ROW_BYTES)
-    {
-    }
-    else if (size > BUSTER_ABI_MAX_CLASSIFIED_BYTES || offset % alignment != 0)
-    {
-    }
-    else if (size > BUSTER_ABI_REGISTER_BYTES && (size != element_size || size > abi->vector_bytes))
-    {
-        result = BUSTER_ABI_NOTHING;
-    }
-    else
-    {
-        AbiClasses accumulated = BUSTER_ABI_NOTHING;
-        for (uint64_t i = 0; i < count && accumulated != BUSTER_ABI_IN_MEMORY; i += 1)
-        {
-            accumulated = abi_merge(accumulated, abi_row_at(abi, element_index, (uint32_t)((offset + i * element_size) % BUSTER_ABI_ROW_BYTES)));
-        }
-        result = abi_post_merge(size, accumulated);
-    }
-    return result;
-}
-
-// A bit-field of `width` bits at bit `start` of the enclosing aggregate: INTEGER in each eightbyte it touches, which
-// may be both (bit-fields straddle, and never force memory).
-static AbiClasses abi_bit_field_classes(uint64_t start, uint64_t width)
-{
-    const uint64_t last = start + width - 1;
-    AbiClasses result = BUSTER_ABI_CLASSES(BUSTER_ABI_INTEGER, last >= 64 ? BUSTER_ABI_INTEGER : BUSTER_ABI_NO_CLASS);
-    if (start >= 64)
-    {
-        result = BUSTER_ABI_CLASSES(BUSTER_ABI_NO_CLASS, BUSTER_ABI_INTEGER);
-    }
-    return result;
-}
-
-// A member's classes at byte `position` of the enclosing aggregate, for the positions it can be at: below 16, or 16 for
-// a member of no size ending it, where it has its classes at 0 unless it is END_MEMORY: an array of no size whose
-// elements' aligned typedef asks for more than 16 bytes (clang checks an array's offset against its elements'
-// alignment as written, while the enclosing record checks the canonical type's), or a record with such a member.
-static AbiClasses abi_member_row_at(const AbiTable* abi, uint32_t index, uint64_t position)
-{
-    AbiClasses result = abi_row_at(abi, index, (uint32_t)(position % BUSTER_ABI_ROW_BYTES));
-    if (position == BUSTER_ABI_ROW_BYTES && (abi->pass[index] & BUSTER_ABI_PASS_END_MEMORY) != 0)
-    {
-        result = BUSTER_ABI_IN_MEMORY;
-    }
-    return result;
-}
-
-// A record at byte `offset`: MEMORY beyond 64 bytes or with a flexible array member; otherwise its members merged in
-// order (unnamed bit-fields skipped), each at its offset: MEMORY for a member that isn't at a multiple of its canonical
-// alignment (bit-fields excepted), and beyond 16 bytes for a member that isn't the size of a struct, or a record wider
-// than the target's vectors; then post-merged.
-static AbiClasses abi_record_entry(const AbiTable* abi, const TypeTable* table, uint32_t index, uint32_t offset)
-{
-    const uint64_t size = table->types.size[index];
-    const bool is_union = table->types.kind[index] == BUSTER_TYPE_KIND_UNION;
-    const uint32_t tag = table->types.index[index];
-    AbiClasses result = BUSTER_ABI_IN_MEMORY;
-    if (offset != 0 && offset + size > BUSTER_ABI_ROW_BYTES)
-    {
-    }
-    else if (size > BUSTER_ABI_MAX_CLASSIFIED_BYTES || (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0)
-    {
-    }
-    else
-    {
-        AbiClasses accumulated = BUSTER_ABI_NOTHING;
-        const uint32_t begin = table->tags.member_begin[tag];
-        const uint32_t end = begin + table->tags.member_count[tag];
-        for (uint32_t member = begin; member < end && accumulated != BUSTER_ABI_IN_MEMORY; member += 1)
-        {
-            const TypeId type = table->members.type[member];
-            const bool bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
-            const uint64_t member_size = table->types.size[abi_resolved_index(table, type)];
-            const uint64_t start = (uint64_t)offset * 8 + table->members.offset[member];
-            AbiClasses field = BUSTER_ABI_NOTHING;
-            if (bit_field && table->members.name[member] == 0)
-            {
-            }
-            else if (size > BUSTER_ABI_REGISTER_BYTES && ((!is_union && size != member_size) || size > abi->vector_bytes))
-            {
-                field = BUSTER_ABI_IN_MEMORY;
-            }
-            else if (bit_field)
-            {
-                field = abi_bit_field_classes(start, table->members.bit_width[member]);
-            }
-            else if (start % (8ull << abi->alignment_log2[type >> BUSTER_TYPE_INDEX_SHIFT]) != 0)
-            {
-                field = BUSTER_ABI_IN_MEMORY;
-            }
-            else
-            {
-                field = abi_member_row_at(abi, type >> BUSTER_TYPE_INDEX_SHIFT, start / 8);
-            }
-            accumulated = abi_merge(accumulated, field);
-        }
-        result = abi_post_merge(size, accumulated);
-    }
-    return result;
-}
-
-// Any classifiable type's classes at an offset (an ALIGNED type's are its base's, copied when it is classified).
-static AbiClasses abi_row_entry(const AbiTable* abi, const TypeTable* table, uint32_t index, uint32_t offset)
-{
-    const uint8_t kind = table->types.kind[index];
-    AbiClasses result = BUSTER_ABI_IN_MEMORY;
-    if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
-    {
-        result = abi_record_entry(abi, table, index, offset);
-    }
-    else if (kind == BUSTER_TYPE_KIND_ARRAY)
-    {
-        result = abi_array_entry(abi, table, index, offset);
-    }
-    else
-    {
-        result = abi_simple_entry(abi_simple(abi, table, index), offset);
-    }
-    return result;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2372,10 +2177,12 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
 }
 
 // A transparent union's first member's index where the union's stack slot differs from the member's (#1844,
-// AbiTable.transparent), or 0: a union whose own attribute aligns or packs it otherwise, of a member that passes as one
-// value in its registers' eightbytes (a scalar, not an aggregate, a pair, a vector, or a value in memory), the union of
-// 16 bytes at most, which clang's classification of the member puts in a register, or else gives the union's bytes their
-// own byval slot. Another member keeps its refusal (check_lower_transparent_passed).
+// AbiTable.transparent), or 0: a union whose own attribute aligns or packs it otherwise, of a member that passes in its
+// registers' eightbytes (a scalar or an aggregate, not a pair, a vector, or a value of another kind), which clang's
+// classification of the member puts in registers, or else gives the union's bytes their own byval slot; or of an
+// aggregate member in memory, which clang passes as the member (getIndirectResult of it: byval at its alignment, the
+// union's bytes, or as an integer of its size where it has 8 bytes or less, aligned to 8 or less, and clang no general
+// register left). Another member keeps its refusal (check_lower_transparent_passed).
 static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     uint32_t result = 0;
@@ -2383,12 +2190,12 @@ static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* tab
     {
         const uint32_t tag = table->types.index[index];
         const uint32_t member = table->tags.member_count[tag] != 0 ? table->members.type[table->tags.member_begin[tag]] >> BUSTER_TYPE_INDEX_SHIFT : 0;
-        const uint32_t refused = BUSTER_ABI_PASS_AGGREGATE | BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_MEMORY |
-                                 BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY;
-        const bool simple = member != 0 && member < abi->capacity && (abi->pass[member] & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (abi->pass[member] & refused) == 0;
-        // Of 16 bytes at most, whose register parts a parameter's object of the union's size takes.
-        const bool differs = simple && table->types.size[index] <= BUSTER_ABI_REGISTER_BYTES &&
-                             (abi->stack_bytes[index] != abi->stack_bytes[member] || abi->alignment_log2[index] != abi->alignment_log2[member]);
+        const uint32_t refused = BUSTER_ABI_PASS_PAIR | BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE |
+                                 BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_END_MEMORY;
+        const uint32_t pass = member != 0 && member < abi->capacity ? abi->pass[member] : 0;
+        const bool in_memory = (pass & BUSTER_ABI_PASS_MEMORY) != 0;
+        const bool simple = (pass & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (pass & refused) == 0 && (!in_memory || (pass & BUSTER_ABI_PASS_AGGREGATE) != 0);
+        const bool differs = simple && (abi->stack_bytes[index] != abi->stack_bytes[member] || abi->alignment_log2[index] != abi->alignment_log2[member]);
         result = differs ? member : 0;
     }
     return result;
@@ -2477,8 +2284,8 @@ static void abi_finish_passing(AbiTable* abi, const TypeTable* table, uint32_t i
     abi->transparent[index] = kind == BUSTER_TYPE_KIND_UNION ? abi_finish_transparent(abi, table, index) : 0;
 }
 
-// What follows from a type's row and what it is (the fallback's finishing step, and the vector path's for the types it
-// doesn't fold or whose members' parts it doesn't reduce): its storage and layout from its members', elements' or
+// What follows from a type's row and what it is (the fold's finishing step for the types it doesn't fold or whose
+// members' parts it doesn't reduce): its storage and layout from its members', elements' or
 // base's, then the rest.
 static void abi_finish(AbiTable* abi, const TypeTable* table, uint32_t index)
 {
@@ -2508,21 +2315,21 @@ static void abi_copy(AbiTable* abi, const TypeTable* table, uint32_t index)
 // The vector classification: records and arrays folded four at a time, one per 128-bit lane of a ZMM register (the
 // lane's 16 bytes are the type's 16 offsets), a member of each per step.
 //
-// A pre-pass writes each member's entry (its classes at each offset of the type: its own type's row shifted by its
-// offset, MEMORY where it would be misaligned; a bit-field's from where it starts and ends, NOTHING for an unnamed one;
-// abi_record_entry's and abi_array_entry's rules, 16 offsets at once) into blocks of 64 bytes, one per step of a group
-// of four types, sorted by how many entries they fold so that a group's lanes end together; a lane that ends earlier
-// merges NOTHING, which changes nothing. For a type of 16 bytes or less, the only kind whose storage and layout passing
-// reads, the pre-pass also reduces each member's or element's part, what it adds to the type's LLVM type
-// (abi_member_part, abi_element_part: an OR, and for a union's storage member an unsigned max), as it writes the
-// entries, and makes the type's storage and layout from them (abi_finish_parts). The kernel then merges each group's
-// steps (two vpermb of the merge table each), post-merges every lane, and stores the four rows. Records and arrays
-// whose rows need no fold (larger than 64 bytes, with a flexible array member, wider than the target's vectors) get
-// theirs directly.
+// Each step of a group of four types builds each lane's entry for its member or element (its classes at each offset of
+// the type: its own type's row shifted by its offset, MEMORY where it would be misaligned; a bit-field's from where it
+// starts and ends, NOTHING for an unnamed one; clang's rules for a record or an array, 16 offsets at once) into its
+// 128-bit lane of a ZMM register. The types of a window are sorted by how many entries they fold so that a group's
+// lanes end together; a lane that ends earlier merges NOTHING, which changes nothing. For a type of 16 bytes or less,
+// the only kind whose storage and layout passing reads, the lane's walk also reduces each member's or element's part,
+// what it adds to the type's LLVM type (abi_member_part, abi_element_part: an OR, and for a union's storage member an
+// unsigned max), as it makes the entries, and makes the type's storage and layout from them (abi_finish_parts). The
+// kernel merges each step (two vpermb of the merge table), post-merges every lane, and stores the four rows. Records
+// and arrays whose rows need no fold (larger than 64 bytes, with a flexible array member, wider than the target's
+// vectors) get theirs directly. Nothing takes memory but the stack.
 
 // A type the kernel folds: its index, how many entries it folds (members, or elements), the offsets it can't be at (a
 // bit per offset: past offset 0 the enclosing aggregate would pass 16 bytes, and an array's misaligned ones), whether
-// it is larger than 16 bytes (post-merge then wants SSE, SSEUP at offset 0), and whether the pre-pass reduces its parts.
+// it is larger than 16 bytes (post-merge then wants SSE, SSEUP at offset 0), and whether the fold reduces its parts.
 typedef struct AbiFold AbiFold;
 struct AbiFold
 {
@@ -2535,24 +2342,13 @@ struct AbiFold
 
 #define BUSTER_ABI_FOLD_LANES 4
 #define BUSTER_ABI_FOLD_EMPTY UINT32_MAX
-#define BUSTER_ABI_FOLD_BLOCK_BYTES 64
 // The counting sort's buckets: types folding more entries than this share the last one.
 #define BUSTER_ABI_FOLD_BUCKETS 64
-
-// Four types folded together: their indices (EMPTY in an unused lane), their first block and how many steps they take,
-// and their lanes' offsets forced to MEMORY and big types' offset 0, a bit per byte of the ZMM register.
-typedef struct AbiFoldGroup AbiFoldGroup;
-struct AbiFoldGroup
-{
-    uint32_t items[BUSTER_ABI_FOLD_LANES];
-    uint64_t block;
-    uint32_t steps;
-    uint64_t memory;
-    uint64_t big;
-};
+// The types abi_classify sorts and folds at a time, on its stack.
+#define BUSTER_ABI_FOLD_WINDOW 256
 
 // A member's or an element's part: what it adds to its type's LLVM type (AbiTable.storage and .layout), two words that
-// the pre-pass reduces along the type's members or elements and abi_finish_parts makes the type's storage and layout:
+// the fold reduces along the type's members or elements and abi_finish_parts makes the type's storage and layout:
 //   - layout: in a struct or an array, the scalars it puts at the even offsets (bits 0 to 31, as AbiTable.layout has
 //     them: a member's type's where the member is, an element's where the element is, a bit-field's access unit's
 //     integer at the unit's offset, which the unit's every bit-field puts), and in a struct the bytes its storage
@@ -2591,7 +2387,7 @@ struct AbiPart
 #define BUSTER_ABI_PART_STEPS 0x3fffffu
 #define BUSTER_ABI_PART_LEAVES 0xffffffffull
 
-// A struct's state along its members, which the pre-pass keeps: the access unit its bit-fields are in
+// A struct's state along its members, which the fold keeps: the access unit its bit-fields are in
 // (abi_bit_field_unit's, whose end is the struct's first member until there is one), from its size and members' end,
 // and whether a member at offset 0 with bytes came (only the first's i128 counts).
 typedef struct AbiPartState AbiPartState;
@@ -2773,69 +2569,94 @@ static __m128i abi_member_entry(const AbiTable* abi, const TypeTable* table, uin
     return result;
 }
 
-// Writes a type's entries into its lane (16 bytes of each step's block, `lane` the first), then NOTHING after them up
-// to `steps`; with parts, reduces its members' or elements' parts and makes its storage and layout from them.
-static void abi_write_entries(AbiTable* abi, const TypeTable* table, uint32_t index, uint8_t* lane, uint32_t steps, bool parts)
+// A folded type's walk along its steps, a step at a time in its lane of the group: where its entries come from (a
+// record's members from `first`, or an array's element, its layout and size) and, for a type whose parts the fold
+// reduces, the parts so far and a struct's state along its members. An unused lane takes no steps.
+typedef struct AbiFoldLane AbiFoldLane;
+struct AbiFoldLane
 {
+    AbiPartState state;
+    uint64_t layout_part;
+    uint64_t storage_part;
+    uint64_t element_layout;
+    uint64_t element_size;
+    uint32_t index;
+    uint32_t steps;
+    uint32_t first;
+    uint32_t element;
+    bool array;
+    bool is_union;
+    bool parts;
+};
+
+static AbiFoldLane abi_fold_lane(const AbiTable* abi, const TypeTable* table, const AbiFold* fold)
+{
+    const uint32_t index = fold->index;
     const uint8_t kind = table->types.kind[index];
-    // The reduced parts: ORed, but a union's storage word, whose largest key is its storage member's.
-    uint64_t layout_part = 0;
-    uint64_t storage_part = 0;
-    uint32_t step = 0;
-    if (kind == BUSTER_TYPE_KIND_ARRAY)
-    {
-        const uint32_t element = table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT;
-        const uint64_t element_size = table->types.size[abi_resolved_index(table, table->types.base[index])];
-        const uint64_t count = table->types.extent[index];
-        const uint64_t layout = abi->layout[element];
-        for (uint64_t i = 0; i < count; i += 1)
-        {
-            _mm_store_si128((__m128i*)(lane + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES), abi_shifted_row(abi, element, i * element_size));
-            layout_part |= parts ? abi_element_part(layout, element_size, i).layout : 0;
-            step += 1;
-        }
-    }
-    else
-    {
-        const uint64_t size = table->types.size[index];
-        const bool is_union = kind == BUSTER_TYPE_KIND_UNION;
-        const uint32_t tag = table->types.index[index];
-        const uint32_t begin = table->tags.member_begin[tag];
-        const uint32_t end = begin + table->tags.member_count[tag];
-        AbiPartState state = {
+    const bool array = kind == BUSTER_TYPE_KIND_ARRAY;
+    const uint32_t tag = table->types.index[index];
+    const uint32_t first = array ? 0 : table->tags.member_begin[tag];
+    const uint32_t element = array ? table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT : 0;
+    const AbiFoldLane result = {
+        .state = {
             .unit = {
                 .offset = 0,
                 .bytes = 0,
-                .end = begin,
+                .end = first,
                 .storage = 0,
                 .clipped = false,
             },
-            .size = size,
-            .end = end,
+            .size = table->types.size[index],
+            .end = first + fold->steps,
             .found = false,
-        };
-        for (uint32_t member = begin; member < end; member += 1)
+        },
+        .layout_part = 0,
+        .storage_part = 0,
+        .element_layout = array ? abi->layout[element] : 0,
+        .element_size = array ? table->types.size[abi_resolved_index(table, table->types.base[index])] : 0,
+        .index = index,
+        .steps = fold->steps,
+        .first = first,
+        .element = element,
+        .array = array,
+        .is_union = kind == BUSTER_TYPE_KIND_UNION,
+        .parts = fold->parts,
+    };
+    return result;
+}
+
+static AbiFoldLane abi_fold_lane_empty(void)
+{
+    AbiFoldLane result;
+    memset(&result, 0, sizeof(result));
+    result.index = BUSTER_ABI_FOLD_EMPTY;
+    return result;
+}
+
+// A lane's entry at `step` (its classes at each offset of the type: an element's row shifted by where it is, or a
+// member's entry, NOTHING for an unnamed bit-field and past the lane's steps), reducing its part as it goes.
+static __m128i abi_fold_entry(const AbiTable* abi, const TypeTable* table, AbiFoldLane* lane, uint32_t step)
+{
+    __m128i result = _mm_set1_epi8((char)BUSTER_ABI_NOTHING);
+    if (step < lane->steps && lane->array)
+    {
+        result = abi_shifted_row(abi, lane->element, step * lane->element_size);
+        lane->layout_part |= lane->parts ? abi_element_part(lane->element_layout, lane->element_size, step).layout : 0;
+    }
+    else if (step < lane->steps)
+    {
+        const uint32_t member = lane->first + step;
+        const bool unnamed_bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && table->members.name[member] == 0;
+        const __m128i entry = abi_member_entry(abi, table, lane->state.size, lane->is_union, member);
+        result = _mm_mask_mov_epi8(entry, unnamed_bit_field ? (__mmask16)0xffff : 0, result);
+        if (lane->parts)
         {
-            const bool unnamed_bit_field = (table->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0 && table->members.name[member] == 0;
-            const __m128i entry = abi_member_entry(abi, table, size, is_union, member);
-            _mm_store_si128((__m128i*)(lane + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES), _mm_mask_mov_epi8(entry, unnamed_bit_field ? (__mmask16)0xffff : 0, _mm_set1_epi8((char)BUSTER_ABI_NOTHING)));
-            if (parts)
-            {
-                const AbiPart part = abi_member_part(abi, table, member, step, is_union, &state);
-                layout_part |= part.layout;
-                storage_part = !is_union ? storage_part | part.storage : part.storage > storage_part ? part.storage : storage_part;
-            }
-            step += 1;
+            const AbiPart part = abi_member_part(abi, table, member, step, lane->is_union, &lane->state);
+            lane->layout_part |= part.layout;
+            lane->storage_part = !lane->is_union ? lane->storage_part | part.storage : part.storage > lane->storage_part ? part.storage : lane->storage_part;
         }
     }
-    for (; step < steps; step += 1)
-    {
-        _mm_store_si128((__m128i*)(lane + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES), _mm_set1_epi8((char)BUSTER_ABI_NOTHING));
-    }
-    if (parts)
-    {
-        abi_finish_parts(abi, table, index, layout_part, storage_part);
-    }
+    return result;
 }
 
 // clang's merge in every byte: the merge table indexed by the accumulated class in bits 3 to 5 and the field's in bits 0
@@ -2866,34 +2687,77 @@ static __m512i abi_post_merge_vector(__m512i classes, __mmask64 big, __mmask64 m
     return _mm512_mask_mov_epi8(lone_sseup, in_memory, _mm512_set1_epi8((char)BUSTER_ABI_IN_MEMORY));
 }
 
-// Stores a group's rows, as post-merged from `accumulated`.
-static void abi_store_rows(AbiTable* abi, const AbiFoldGroup* group, __m512i accumulated)
+// Folds a group of `used` types (up to four, from `folds`): each step's four entries, built in their lanes of a ZMM
+// register, merged into the accumulated classes; then the rows post-merged and stored, and each type finished.
+static void abi_fold_group(AbiTable* abi, const TypeTable* table, __m512i merge, const AbiFold* folds, uint32_t used)
 {
-    _Alignas(64) uint8_t rows[BUSTER_ABI_FOLD_LANES * BUSTER_ABI_ROW_BYTES];
-    _mm512_store_si512((void*)rows, abi_post_merge_vector(accumulated, group->big, group->memory));
+    AbiFoldLane lanes[BUSTER_ABI_FOLD_LANES];
+    uint32_t steps = 0;
+    uint64_t memory = 0;
+    uint64_t big = 0;
     for (uint32_t lane = 0; lane < BUSTER_ABI_FOLD_LANES; lane += 1)
     {
-        if (group->items[lane] != BUSTER_ABI_FOLD_EMPTY)
+        lanes[lane] = lane < used ? abi_fold_lane(abi, table, &folds[lane]) : abi_fold_lane_empty();
+        steps = lanes[lane].steps > steps ? lanes[lane].steps : steps;
+        memory |= lane < used ? (uint64_t)folds[lane].memory << (lane * BUSTER_ABI_ROW_BYTES) : 0;
+        big |= lane < used ? (uint64_t)folds[lane].big << (lane * BUSTER_ABI_ROW_BYTES) : 0;
+    }
+    __m512i accumulated = _mm512_set1_epi8((char)BUSTER_ABI_NOTHING);
+    for (uint32_t step = 0; step < steps; step += 1)
+    {
+        __m512i block = _mm512_castsi128_si512(abi_fold_entry(abi, table, &lanes[0], step));
+        block = _mm512_inserti32x4(block, abi_fold_entry(abi, table, &lanes[1], step), 1);
+        block = _mm512_inserti32x4(block, abi_fold_entry(abi, table, &lanes[2], step), 2);
+        block = _mm512_inserti32x4(block, abi_fold_entry(abi, table, &lanes[3], step), 3);
+        accumulated = abi_merge_vector(merge, accumulated, block);
+    }
+    _Alignas(64) uint8_t rows[BUSTER_ABI_FOLD_LANES * BUSTER_ABI_ROW_BYTES];
+    _mm512_store_si512((void*)rows, abi_post_merge_vector(accumulated, big, memory));
+    for (uint32_t lane = 0; lane < used; lane += 1)
+    {
+        const AbiFoldLane* done = &lanes[lane];
+        memcpy(abi->rows + (uint64_t)done->index * BUSTER_ABI_ROW_BYTES, rows + lane * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES);
+        if (done->parts)
         {
-            memcpy(abi->rows + (uint64_t)group->items[lane] * BUSTER_ABI_ROW_BYTES, rows + lane * BUSTER_ABI_ROW_BYTES, BUSTER_ABI_ROW_BYTES);
+            abi_finish_parts(abi, table, done->index, done->layout_part, done->storage_part);
+            abi_finish_passing(abi, table, done->index);
+        }
+        else
+        {
+            abi_finish(abi, table, done->index);
         }
     }
 }
 
-// Folds each group's blocks and stores its rows.
-static void abi_fold_groups(AbiTable* abi, const uint8_t* blocks, const AbiFoldGroup* groups, uint32_t group_count)
+// Folds a window of types: sorted by their steps (a counting sort), so that a group's lanes end together, and folded
+// four at a time.
+static void abi_fold_window(AbiTable* abi, const TypeTable* table, const AbiFold* folds, uint32_t count)
 {
-    const __m512i merge = _mm512_load_si512((const void*)abi->merge);
-    for (uint32_t g = 0; g < group_count; g += 1)
+    AbiFold sorted[BUSTER_ABI_FOLD_WINDOW];
+    // The prefix sums only up to the last bucket in use.
+    uint32_t starts[BUSTER_ABI_FOLD_BUCKETS + 1] = { 0 };
+    uint32_t used = 0;
+    for (uint32_t f = 0; f < count; f += 1)
     {
-        const AbiFoldGroup group = groups[g];
-        const uint8_t* block = blocks + group.block * BUSTER_ABI_FOLD_BLOCK_BYTES;
-        __m512i accumulated = _mm512_set1_epi8((char)BUSTER_ABI_NOTHING);
-        for (uint32_t step = 0; step < group.steps; step += 1)
-        {
-            accumulated = abi_merge_vector(merge, accumulated, _mm512_load_si512((const void*)(block + (uint64_t)step * BUSTER_ABI_FOLD_BLOCK_BYTES)));
-        }
-        abi_store_rows(abi, &group, accumulated);
+        const uint32_t bucket = folds[f].steps < BUSTER_ABI_FOLD_BUCKETS ? folds[f].steps : BUSTER_ABI_FOLD_BUCKETS - 1;
+        starts[bucket + 1] += 1;
+        used = bucket + 1 > used ? bucket + 1 : used;
+    }
+    for (uint32_t b = 0; b < used; b += 1)
+    {
+        starts[b + 1] += starts[b];
+    }
+    for (uint32_t f = 0; f < count; f += 1)
+    {
+        const uint32_t bucket = folds[f].steps < BUSTER_ABI_FOLD_BUCKETS ? folds[f].steps : BUSTER_ABI_FOLD_BUCKETS - 1;
+        sorted[starts[bucket]] = folds[f];
+        starts[bucket] += 1;
+    }
+    const __m512i merge = _mm512_load_si512((const void*)abi->merge);
+    for (uint32_t first = 0; first < count; first += BUSTER_ABI_FOLD_LANES)
+    {
+        const uint32_t left = count - first;
+        abi_fold_group(abi, table, merge, sorted + first, left < BUSTER_ABI_FOLD_LANES ? left : BUSTER_ABI_FOLD_LANES);
     }
 }
 
@@ -2902,15 +2766,14 @@ static void abi_store_row(AbiTable* abi, uint32_t index, __m128i row)
     _mm_store_si128((__m128i*)(abi->rows + (uint64_t)index * BUSTER_ABI_ROW_BYTES), row);
 }
 
-// The vector classification of a level (see abi_classify). Returns false, having classified only some of the types, if
-// the scratch memory can't hold the fold; the caller then classifies them all with the fallback.
-static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
+// Classifies a level of types, whose members, elements and bases are classified (see abi_classify_all): an ALIGNED
+// one copied from its base, a simple one from what it is, a record or an array whose row needs no fold directly, and
+// the rest folded, a window of them at a time. It needs no memory but its stack.
+static void abi_classify(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
 {
-    Scratch scratch = scratch_begin(0);
-    AbiFold* folds = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AbiFold, count);
+    AbiFold folds[BUSTER_ABI_FOLD_WINDOW];
     uint32_t fold_count = 0;
-    bool result = folds != 0;
-    for (uint32_t i = 0; result && i < count; i += 1)
+    for (uint32_t i = 0; i < count; i += 1)
     {
         const uint32_t index = types[i] >> BUSTER_TYPE_INDEX_SHIFT;
         const uint8_t kind = table->types.kind[index];
@@ -2989,98 +2852,13 @@ static bool abi_classify_vector(AbiTable* abi, const TypeTable* table, const Typ
             abi_store_row(abi, index, abi_simple_row(abi_simple(abi, table, index)));
             abi_finish(abi, table, index);
         }
-    }
-    // The folds sorted by their steps (a counting sort), grouped four at a time.
-    const uint32_t group_count = (fold_count + BUSTER_ABI_FOLD_LANES - 1) / BUSTER_ABI_FOLD_LANES;
-    AbiFold* sorted = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AbiFold, fold_count) : 0;
-    AbiFoldGroup* groups = result ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, AbiFoldGroup, group_count) : 0;
-    result = result && (fold_count == 0 || (sorted != 0 && groups != 0));
-    if (result && fold_count != 0)
-    {
-        // The prefix sums only up to the last bucket in use.
-        uint32_t starts[BUSTER_ABI_FOLD_BUCKETS + 1] = { 0 };
-        uint32_t used = 0;
-        for (uint32_t f = 0; f < fold_count; f += 1)
+        if (fold_count == BUSTER_ABI_FOLD_WINDOW)
         {
-            const uint32_t bucket = folds[f].steps < BUSTER_ABI_FOLD_BUCKETS ? folds[f].steps : BUSTER_ABI_FOLD_BUCKETS - 1;
-            starts[bucket + 1] += 1;
-            used = bucket + 1 > used ? bucket + 1 : used;
-        }
-        for (uint32_t b = 0; b < used; b += 1)
-        {
-            starts[b + 1] += starts[b];
-        }
-        for (uint32_t f = 0; f < fold_count; f += 1)
-        {
-            const uint32_t bucket = folds[f].steps < BUSTER_ABI_FOLD_BUCKETS ? folds[f].steps : BUSTER_ABI_FOLD_BUCKETS - 1;
-            sorted[starts[bucket]] = folds[f];
-            starts[bucket] += 1;
-        }
-        uint64_t blocks_total = 0;
-        for (uint32_t g = 0; g < group_count; g += 1)
-        {
-            AbiFoldGroup group = {
-                .items = {
-                    BUSTER_ABI_FOLD_EMPTY,
-                    BUSTER_ABI_FOLD_EMPTY,
-                    BUSTER_ABI_FOLD_EMPTY,
-                    BUSTER_ABI_FOLD_EMPTY,
-                },
-                .block = blocks_total,
-                .steps = 0,
-                .memory = 0,
-                .big = 0,
-            };
-            for (uint32_t lane = 0; lane < BUSTER_ABI_FOLD_LANES && g * BUSTER_ABI_FOLD_LANES + lane < fold_count; lane += 1)
-            {
-                const AbiFold fold = sorted[g * BUSTER_ABI_FOLD_LANES + lane];
-                group.items[lane] = fold.index;
-                group.steps = fold.steps > group.steps ? fold.steps : group.steps;
-                group.memory |= (uint64_t)fold.memory << (lane * BUSTER_ABI_ROW_BYTES);
-                group.big |= (uint64_t)fold.big << (lane * BUSTER_ABI_ROW_BYTES);
-            }
-            groups[g] = group;
-            blocks_total += group.steps;
-        }
-        uint8_t* blocks = arena_push(scratch.arena, blocks_total * BUSTER_ABI_FOLD_BLOCK_BYTES + BUSTER_ABI_FOLD_BLOCK_BYTES, BUSTER_ABI_FOLD_BLOCK_BYTES);
-        result = blocks != 0;
-        for (uint32_t g = 0; result && g < group_count; g += 1)
-        {
-            for (uint32_t lane = 0; lane < BUSTER_ABI_FOLD_LANES; lane += 1)
-            {
-                uint8_t* destination = blocks + groups[g].block * BUSTER_ABI_FOLD_BLOCK_BYTES + lane * BUSTER_ABI_ROW_BYTES;
-                const uint32_t f = g * BUSTER_ABI_FOLD_LANES + lane;
-                if (groups[g].items[lane] != BUSTER_ABI_FOLD_EMPTY)
-                {
-                    abi_write_entries(abi, table, groups[g].items[lane], destination, groups[g].steps, sorted[f].parts);
-                }
-                else
-                {
-                    for (uint32_t step = 0; step < groups[g].steps; step += 1)
-                    {
-                        _mm_store_si128((__m128i*)(destination + step * BUSTER_ABI_FOLD_BLOCK_BYTES), _mm_set1_epi8((char)BUSTER_ABI_NOTHING));
-                    }
-                }
-            }
-        }
-        if (result)
-        {
-            abi_fold_groups(abi, blocks, groups, group_count);
-            for (uint32_t f = 0; f < fold_count; f += 1)
-            {
-                if (sorted[f].parts)
-                {
-                    abi_finish_passing(abi, table, sorted[f].index);
-                }
-                else
-                {
-                    abi_finish(abi, table, sorted[f].index);
-                }
-            }
+            abi_fold_window(abi, table, folds, fold_count);
+            fold_count = 0;
         }
     }
-    scratch_end(scratch);
-    return result;
+    abi_fold_window(abi, table, folds, fold_count);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3149,34 +2927,6 @@ static bool abi_initialize(AbiTable* abi, Arena* arena, const TypeTable* table, 
     return abi_initialize_types(abi, arena, table, vector_bytes, table->types.capacity);
 }
 
-static void abi_classify_scalar(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
-{
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        const uint32_t index = types[i] >> BUSTER_TYPE_INDEX_SHIFT;
-        if (table->types.kind[index] == BUSTER_TYPE_KIND_ALIGNED || table->types.kind[index] == BUSTER_TYPE_KIND_QUALIFIED)
-        {
-            abi_copy(abi, table, index);
-        }
-        else
-        {
-            for (uint32_t offset = 0; offset < BUSTER_ABI_ROW_BYTES; offset += 1)
-            {
-                abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES + offset] = abi_row_entry(abi, table, index, offset);
-            }
-            abi_finish(abi, table, index);
-        }
-    }
-}
-
-static void abi_classify(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
-{
-    if (!abi_classify_vector(abi, table, types, count))
-    {
-        abi_classify_scalar(abi, table, types, count);
-    }
-}
-
 // The kind of a type that can be classified (a complete object type, or void), ALIGNED looked through; NONE for another.
 static uint8_t abi_classifiable_kind(const TypeTable* table, uint32_t index)
 {
@@ -3236,7 +2986,7 @@ __attribute__((cold, noinline)) static bool abi_members_classified(const AbiTabl
 // type of no size, the root of every LARGER type, has one (abi_classify_levels), and waiting would add a level for
 // every nesting of records; but a flexible one of no size always waits, as an _Atomic of it takes its alignment as its
 // size. Each is complete when the type is, so no type waits forever. The rare cases are out of line, which keeps this
-// small enough for clang to inline into abi_classify_levels' scalar scan fallback.
+// small enough for clang to inline into abi_classify_scan.
 static bool abi_dependencies_classified(const AbiTable* abi, const TypeTable* table, uint32_t index, bool all)
 {
     const uint8_t kind = table->types.kind[index];
@@ -3290,95 +3040,202 @@ static bool abi_schedule_wide(const TypeTable* table, TypeId type)
     return wrapper || abi_is_wide(table, index);
 }
 
-// Topological levels for pending types after the bounded scan prefix. Unlike ABI pass bits, these levels include
-// every by-value dependency, even for wide records classified early. Thus a pending zero-length array cannot read
-// storage through an already-classified wide record before that record's descendants have finished. The graph is
-// walked once on an explicit stack, then pending types are counting-sorted into vector frontiers.
-// A level of 0 is unseen, the high bit is a live DFS frame with its longest child level, and UINT32_MAX is blocked.
-// Type indices have 29 bits, so a valid longest path cannot reach the high bit.
-static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, const uint32_t* pending, uint32_t pending_count, TypeId* ready,
-                                     uint32_t count, Arena* arena)
+// The types abi_classify_levels' scan hands abi_classify at a time, on its stack.
+#define BUSTER_ABI_SCAN_WINDOW 1024
+
+// The types of the 16 indices from `base` that aren't classified, below `count` and but for the null type, a bit each:
+// a compare of 16 pass words.
+static __mmask16 abi_unclassified(const AbiTable* abi, uint32_t base, uint32_t count)
+{
+    const uint32_t left = count - base;
+    const __mmask16 inside = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+    const __m512i pass = _mm512_maskz_loadu_epi32(inside, abi->pass + base);
+    const __mmask16 open = _mm512_mask_testn_epi32_mask(inside, pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_CLASSIFIED));
+    return (__mmask16)(open & (base == 0 ? 0xfffe : 0xffff));
+}
+
+// What the scan's census found among the types left: whether one is a LARGER root (every record then waits for its
+// members, abi_dependencies_classified's `all`) and whether one is an array of no elements whose elements' storage
+// abi_wide_alignment reads, which only the levels order (abi_schedule_wide).
+typedef struct AbiCensus AbiCensus;
+struct AbiCensus
+{
+    bool all;
+    bool wide;
+};
+
+static AbiCensus abi_census(const AbiTable* abi, const TypeTable* table, uint32_t count)
+{
+    AbiCensus result = {
+        .all = abi->larger != 0,
+        .wide = false,
+    };
+    for (uint32_t base = 0; base < count; base += 16)
+    {
+        for (__mmask16 open = abi_unclassified(abi, base, count); open != 0; open &= (__mmask16)(open - 1))
+        {
+            const uint32_t index = base + (uint32_t)__builtin_ctz(open);
+            const uint8_t kind = abi_classifiable_kind(table, index);
+            result.all = result.all || (kind == BUSTER_TYPE_KIND_ATOMIC && abi_is_larger_root(table, index));
+            if (kind != BUSTER_TYPE_KIND_NONE && !result.wide && table->types.size[index] == 0)
+            {
+                const uint8_t original = table->types.kind[index];
+                if (original == BUSTER_TYPE_KIND_ARRAY)
+                {
+                    result.wide = abi_schedule_wide(table, table->types.base[index]);
+                }
+                else if ((original == BUSTER_TYPE_KIND_STRUCT || original == BUSTER_TYPE_KIND_UNION) && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0)
+                {
+                    const uint32_t tag = table->types.index[index];
+                    const uint32_t last = table->tags.member_begin[tag] + table->tags.member_count[tag] - 1;
+                    const uint32_t array = abi_resolved_index(table, table->members.type[last]);
+                    result.wide = abi_schedule_wide(table, table->types.base[array]);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// A scan's outcome: the types it classified, and those it left waiting.
+typedef struct AbiScanned AbiScanned;
+struct AbiScanned
+{
+    uint32_t classified;
+    uint32_t waiting;
+};
+
+// One scan of the table: each classifiable type left whose dependencies are classified goes to a window of ready types,
+// which abi_classify takes when it fills and at the end. A type a window classified is classified for the types the
+// scan reaches after it, so that a table in order (dependencies first) takes a scan or two.
+static AbiScanned abi_classify_scan(AbiTable* abi, const TypeTable* table, uint32_t count, bool all)
+{
+    TypeId ready[BUSTER_ABI_SCAN_WINDOW];
+    uint32_t ready_count = 0;
+    AbiScanned result = {
+        .classified = 0,
+        .waiting = 0,
+    };
+    for (uint32_t base = 0; base < count; base += 16)
+    {
+        for (__mmask16 open = abi_unclassified(abi, base, count); open != 0; open &= (__mmask16)(open - 1))
+        {
+            const uint32_t index = base + (uint32_t)__builtin_ctz(open);
+            // What it reads first, which a type that can't be classified (incomplete, or a function) has classified or
+            // has none of: whether it can be classified only for a type that is ready, so that a type left waiting costs
+            // a scan one check (a type that can't be classified and reads one that can't either waits for nothing).
+            const bool read = abi_dependencies_classified(abi, table, index, all);
+            const bool now = read && abi_classifiable(table, index);
+            ready[ready_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+            ready_count += now ? 1 : 0;
+            result.waiting += read ? 0 : 1;
+            if (ready_count == BUSTER_ABI_SCAN_WINDOW)
+            {
+                abi_classify(abi, table, ready, ready_count);
+                result.classified += ready_count;
+                ready_count = 0;
+            }
+        }
+    }
+    abi_classify(abi, table, ready, ready_count);
+    result.classified += ready_count;
+    return result;
+}
+
+// Topological levels for the types left after the scans, from scratch's columns (12 bytes a type). Unlike ABI pass bits,
+// these levels include every by-value dependency, even for wide records classified early. Thus a pending zero-length
+// array cannot read storage through an already-classified wide record before that record's descendants have finished.
+// The graph is walked once on an explicit stack, then the types left are counting-sorted into vector frontiers, in the
+// stack's column. A level of 0 is unseen, the high bit is a live DFS frame with its longest child level, and
+// UINT32_MAX is blocked. Type indices have 29 bits, so a valid longest path cannot reach the high bit. Returns the
+// types classified, or UINT32_MAX, having classified none, if scratch can't hold the columns.
+static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, uint32_t count)
 {
     const uint32_t live = 1u << 31;
-    uint32_t* levels = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count);
-    uint32_t* cursors = levels != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
-    uint32_t* stack = cursors != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, count) : 0;
+    Scratch scratch = scratch_begin(0);
+    uint32_t* levels = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
+    uint32_t* cursors = levels != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, (uint64_t)count + 1) : 0;
+    uint32_t* stack = cursors != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count) : 0;
     uint32_t result = UINT32_MAX;
     if (stack != 0)
     {
         memset(levels, 0, (uint64_t)count * sizeof(uint32_t));
         uint32_t largest = 0;
-        for (uint32_t i = 0; i < pending_count; i += 1)
+        for (uint32_t base = 0; base < count; base += 16)
         {
-            const uint32_t root = pending[i];
-            uint32_t depth = 0;
-            if (levels[root] == 0)
+            for (__mmask16 open = abi_unclassified(abi, base, count); open != 0; open &= (__mmask16)(open - 1))
             {
-                stack[depth] = root;
-                depth += 1;
-            }
-            while (depth != 0)
-            {
-                const uint32_t index = stack[depth - 1];
-                const uint8_t kind = table->types.kind[index];
-                const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
-                if (levels[index] == 0)
+                const uint32_t root = base + (uint32_t)__builtin_ctz(open);
+                uint32_t depth = 0;
+                if (levels[root] == 0 && abi_classifiable(table, root))
                 {
-                    levels[index] = live;
-                    cursors[index] = record ? table->tags.member_begin[table->types.index[index]] : 0;
-                }
-                uint32_t dependency = UINT32_MAX;
-                if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
-                {
-                    dependency = cursors[index] == 0 ? table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT : UINT32_MAX;
-                }
-                else if (record)
-                {
-                    const uint32_t tag = table->types.index[index];
-                    const uint32_t end = table->tags.member_begin[tag] + table->tags.member_count[tag];
-                    if (cursors[index] < end)
-                    {
-                        TypeId type = table->members.type[cursors[index]];
-                        if (cursors[index] == end - 1 && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0)
-                        {
-                            type = table->types.base[abi_resolved_index(table, type)];
-                        }
-                        dependency = type >> BUSTER_TYPE_INDEX_SHIFT;
-                    }
-                }
-                if (dependency == UINT32_MAX)
-                {
-                    levels[index] = (levels[index] & ~live) + 1;
-                    largest = levels[index] > largest ? levels[index] : largest;
-                    depth -= 1;
-                }
-                else if (dependency >= count || !abi_classifiable(table, dependency) || (levels[dependency] & live) != 0)
-                {
-                    levels[index] = UINT32_MAX;
-                    depth -= 1;
-                }
-                else if (levels[dependency] == 0)
-                {
-                    stack[depth] = dependency;
+                    stack[depth] = root;
                     depth += 1;
                 }
-                else
+                while (depth != 0)
                 {
-                    const uint32_t longest = levels[index] & ~live;
-                    levels[index] = live | (levels[dependency] > longest ? levels[dependency] : longest);
-                    cursors[index] += 1;
+                    const uint32_t index = stack[depth - 1];
+                    const uint8_t kind = table->types.kind[index];
+                    const bool record = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
+                    if (levels[index] == 0)
+                    {
+                        levels[index] = live;
+                        cursors[index] = record ? table->tags.member_begin[table->types.index[index]] : 0;
+                    }
+                    uint32_t dependency = UINT32_MAX;
+                    if (kind == BUSTER_TYPE_KIND_ALIGNED || kind == BUSTER_TYPE_KIND_QUALIFIED || kind == BUSTER_TYPE_KIND_ARRAY || kind == BUSTER_TYPE_KIND_ATOMIC)
+                    {
+                        dependency = cursors[index] == 0 ? table->types.base[index] >> BUSTER_TYPE_INDEX_SHIFT : UINT32_MAX;
+                    }
+                    else if (record)
+                    {
+                        const uint32_t tag = table->types.index[index];
+                        const uint32_t end = table->tags.member_begin[tag] + table->tags.member_count[tag];
+                        if (cursors[index] < end)
+                        {
+                            TypeId type = table->members.type[cursors[index]];
+                            if (cursors[index] == end - 1 && (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0)
+                            {
+                                type = table->types.base[abi_resolved_index(table, type)];
+                            }
+                            dependency = type >> BUSTER_TYPE_INDEX_SHIFT;
+                        }
+                    }
+                    if (dependency == UINT32_MAX)
+                    {
+                        levels[index] = (levels[index] & ~live) + 1;
+                        largest = levels[index] > largest ? levels[index] : largest;
+                        depth -= 1;
+                    }
+                    else if (dependency >= count || !abi_classifiable(table, dependency) || (levels[dependency] & live) != 0)
+                    {
+                        levels[index] = UINT32_MAX;
+                        depth -= 1;
+                    }
+                    else if (levels[dependency] == 0)
+                    {
+                        stack[depth] = dependency;
+                        depth += 1;
+                    }
+                    else
+                    {
+                        const uint32_t longest = levels[index] & ~live;
+                        levels[index] = live | (levels[dependency] > longest ? levels[dependency] : longest);
+                        cursors[index] += 1;
+                    }
                 }
             }
         }
-        // Reuse cursors for bucket ends after the graph walk. Only unclassified pending types are emitted; existing
-        // ABI rows participated in readiness without being rewritten or counted a second time.
+        // Reuse cursors for bucket ends and the stack for the frontiers after the graph walk. Only the unclassified types
+        // are emitted; existing ABI rows participated in readiness without being rewritten or counted a second time.
         memset(cursors, 0, ((uint64_t)largest + 1) * sizeof(uint32_t));
-        for (uint32_t i = 0; i < pending_count; i += 1)
+        for (uint32_t base = 0; base < count; base += 16)
         {
-            const uint32_t level = levels[pending[i]];
-            if (level != UINT32_MAX)
+            for (__mmask16 open = abi_unclassified(abi, base, count); open != 0; open &= (__mmask16)(open - 1))
             {
-                cursors[level] += 1;
+                const uint32_t index = base + (uint32_t)__builtin_ctz(open);
+                const uint32_t level = levels[index];
+                cursors[level] += level != 0 && level != UINT32_MAX ? 1 : 0;
             }
         }
         uint32_t offset = 0;
@@ -3388,14 +3245,18 @@ static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, cons
             cursors[level] = offset;
             offset += size;
         }
-        for (uint32_t i = 0; i < pending_count; i += 1)
+        TypeId* ready = stack;
+        for (uint32_t base = 0; base < count; base += 16)
         {
-            const uint32_t index = pending[i];
-            const uint32_t level = levels[index];
-            if (level != UINT32_MAX)
+            for (__mmask16 open = abi_unclassified(abi, base, count); open != 0; open &= (__mmask16)(open - 1))
             {
-                ready[cursors[level]] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-                cursors[level] += 1;
+                const uint32_t index = base + (uint32_t)__builtin_ctz(open);
+                const uint32_t level = levels[index];
+                if (level != 0 && level != UINT32_MAX)
+                {
+                    ready[cursors[level]] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+                    cursors[level] += 1;
+                }
             }
         }
         result = 0;
@@ -3409,111 +3270,45 @@ static uint32_t abi_classify_pending(AbiTable* abi, const TypeTable* table, cons
             }
         }
     }
+    scratch_end(scratch);
     return result;
 }
 
-// Common shallow tables keep the measured scan/frontier path. After a fixed number of scans, classify the remainder
-// topologically: at most 16 visits per type/member plus one graph walk, so deep chains cannot make scheduling
-// quadratic. Wide records retain their early-classification shortcut. Without scratch, keep the original scalar scan.
+// Every type left, in scans of the table (abi_classify_scan) while they make progress. Common shallow tables take a few;
+// after BUSTER_ABI_SCAN_LEVELS of them, or at once for a table whose arrays of no elements read a wide record's storage
+// (AbiCensus.wide), the levels take the rest (abi_classify_pending), at most 16 visits per type or member plus one graph
+// walk, so that deep chains can't make scheduling quadratic. Scratch that can't hold the levels' columns leaves the
+// rest to the scans, a scan per level. Nothing else takes memory but the stack.
 static uint32_t abi_classify_levels(AbiTable* abi, const TypeTable* table)
 {
-    Scratch scratch = scratch_begin(0);
     const uint32_t count = table->types.count < abi->capacity ? table->types.count : abi->capacity;
-    uint32_t* pending = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, count);
-    TypeId* ready = pending != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, TypeId, count) : 0;
+    const AbiCensus census = abi_census(abi, table, count);
+    AbiScanned scanned = {
+        .classified = 0,
+        .waiting = 1,
+    };
     uint32_t classified = 0;
-    bool all = abi->larger != 0;
-    bool fallback = ready == 0;
-    if (ready != 0)
+    uint32_t scans = 0;
+    bool progress = true;
+    bool tried = false;
+    bool levels = false;
+    while (scanned.waiting != 0 && progress && !levels)
     {
-        uint32_t pending_count = 0;
-        bool atomics = false;
-        bool wide = false;
-        for (uint32_t index = 1; index < count; index += 1)
+        if (!tried && (census.wide || scans == BUSTER_ABI_SCAN_LEVELS))
         {
-            const uint8_t kind = (abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 ? abi_classifiable_kind(table, index) : BUSTER_TYPE_KIND_NONE;
-            if (kind != BUSTER_TYPE_KIND_NONE)
-            {
-                pending[pending_count] = index;
-                pending_count += 1;
-                atomics |= kind == BUSTER_TYPE_KIND_ATOMIC;
-                if (!wide && table->types.size[index] == 0)
-                {
-                    const uint8_t original = table->types.kind[index];
-                    if (original == BUSTER_TYPE_KIND_ARRAY)
-                    {
-                        wide = abi_schedule_wide(table, table->types.base[index]);
-                    }
-                    else if ((original == BUSTER_TYPE_KIND_STRUCT || original == BUSTER_TYPE_KIND_UNION) &&
-                             (table->types.flags[index] & BUSTER_TYPE_FLAG_FLEXIBLE) != 0)
-                    {
-                        const uint32_t tag = table->types.index[index];
-                        const uint32_t last = table->tags.member_begin[tag] + table->tags.member_count[tag] - 1;
-                        const uint32_t array = abi_resolved_index(table, table->members.type[last]);
-                        wide = abi_schedule_wide(table, table->types.base[array]);
-                    }
-                }
-            }
+            tried = true;
+            const uint32_t pending = abi_classify_pending(abi, table, count);
+            levels = pending != UINT32_MAX;
+            classified += levels ? pending : 0;
         }
-        for (uint32_t i = 0; atomics && i < pending_count; i += 1)
+        if (!levels)
         {
-            all = all || abi_is_larger_root(table, pending[i]);
-        }
-        bool progress = true;
-        uint32_t scans = 0;
-        while (pending_count != 0 && progress && scans < BUSTER_ABI_SCAN_LEVELS && !wide)
-        {
-            uint32_t ready_count = 0;
-            uint32_t kept = 0;
-            for (uint32_t i = 0; i < pending_count; i += 1)
-            {
-                if (abi_dependencies_classified(abi, table, pending[i], all))
-                {
-                    ready[ready_count] = (TypeId)pending[i] << BUSTER_TYPE_INDEX_SHIFT;
-                    ready_count += 1;
-                }
-                else
-                {
-                    pending[kept] = pending[i];
-                    kept += 1;
-                }
-            }
-            pending_count = kept;
-            progress = ready_count != 0;
-            abi_classify(abi, table, ready, ready_count);
-            classified += ready_count;
+            scanned = abi_classify_scan(abi, table, count, census.all);
+            classified += scanned.classified;
+            progress = scanned.classified != 0;
             scans += 1;
         }
-        if (pending_count != 0 && progress)
-        {
-            const uint32_t extra = abi_classify_pending(abi, table, pending, pending_count, ready, count, scratch.arena);
-            fallback = extra == UINT32_MAX;
-            classified += fallback ? 0 : extra;
-        }
     }
-    if (fallback)
-    {
-        for (uint32_t index = 1; index < count; index += 1)
-        {
-            all = all || ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_is_larger_root(table, index));
-        }
-        bool progress = true;
-        while (progress)
-        {
-            progress = false;
-            for (uint32_t index = 1; index < count; index += 1)
-            {
-                const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-                if ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_dependencies_classified(abi, table, index, all))
-                {
-                    abi_classify_scalar(abi, table, &type, 1);
-                    classified += 1;
-                    progress = true;
-                }
-            }
-        }
-    }
-    scratch_end(scratch);
     return classified;
 }
 
@@ -3582,6 +3377,7 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
         const uint32_t own = arguments[i] >> BUSTER_TYPE_INDEX_SHIFT;
         const uint32_t member = abi->transparent[own];
         const uint32_t index = member != 0 ? member : own;
+        bool eightbytes = false;
         const uint32_t pass = abi->pass[index];
         const uint32_t bytes = abi->stack_bytes[index];
         const uint32_t alignment_log2 = (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
@@ -3666,18 +3462,26 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
             // left (after a count of clang's that LLVM's runs behind), else 8 bytes of the stack, as a copy would take
             // (a GROWN one's copy takes more: MEMORY, 8 bytes or less in C and aligned to 8 or less, it is never of no
             // size); one of no size is an i0, which takes none (EMPTY).
+            // A transparent union of a slot of its own (AbiTable.transparent) is the union to getIndirectResult where clang
+            // has no register for its member (its own bytes and alignment), and the member where the member is in memory
+            // (the member's size and alignment, the union's bytes); an integer of 8 bytes is the low eightbyte alone of
+            // a union larger than it (LOW).
             const bool grown = (pass & BUSTER_ABI_PASS_GROWN) != 0;
-            const bool integer = grown ? clang_integers == 0
-                                       : (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 && bytes == BUSTER_ABI_SLOT_BYTES && alignment_log2 == BUSTER_ABI_SLOT_LOG2 &&
-                                             clang_integers == 0;
+            const bool own_union = member != 0 && !in_memory;
+            const uint32_t own_log2 = abi->alignment_log2[own] > BUSTER_ABI_SLOT_LOG2 ? abi->alignment_log2[own] : BUSTER_ABI_SLOT_LOG2;
+            const uint32_t slot_log2 = own_union ? own_log2 : alignment_log2;
+            const uint32_t indirect_bytes = own_union ? abi->stack_bytes[own] : bytes;
+            const bool aggregate = member != 0 || (pass & BUSTER_ABI_PASS_AGGREGATE) != 0;
+            const bool integer = grown && member == 0 ? clang_integers == 0
+                                                      : aggregate && indirect_bytes == BUSTER_ABI_SLOT_BYTES && slot_log2 == BUSTER_ABI_SLOT_LOG2 && clang_integers == 0;
             const bool vanishes = integer && (pass & BUSTER_ABI_PASS_EMPTY) != 0;
             const bool in_register = integer && !vanishes && integers < BUSTER_ABI_INTEGER_ARGUMENTS;
+            const uint32_t slot_bytes = integer ? BUSTER_ABI_SLOT_BYTES : member != 0 ? abi->stack_bytes[own] : bytes;
             location.kind = vanishes ? BUSTER_ABI_LOCATION_IGNORE : in_register ? BUSTER_ABI_LOCATION_REGISTERS : BUSTER_ABI_LOCATION_STACK;
             location.registers[0] = in_register ? abi_integer_arguments[integers] : BUSTER_ABI_REGISTER_NONE;
+            location.flags |= integer && !in_register && member != 0 && abi->stack_bytes[own] > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
             integers += in_register ? 1 : 0;
-            const uint32_t own_log2 = abi->alignment_log2[own] > BUSTER_ABI_SLOT_LOG2 ? abi->alignment_log2[own] : BUSTER_ABI_SLOT_LOG2;
-            const uint32_t slot_bytes = member != 0 ? abi->stack_bytes[own] : integer ? BUSTER_ABI_SLOT_BYTES : bytes;
-            location.stack_offset = vanishes || in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, slot_bytes, member != 0 ? own_log2 : alignment_log2);
+            location.stack_offset = vanishes || in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, slot_bytes, slot_log2);
         }
         else if ((pass & (BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_PAIR)) != 0)
         {
@@ -3755,10 +3559,17 @@ static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uin
                 parts += classes[half] != 0 ? 1 : 0;
             }
             location.flags |= classes[0] == 0 ? BUSTER_ABI_FLAG_HIGH : 0;
-            // The low eightbyte alone in its slot, of a value larger than it: 8 bytes, the next argument's slot after them.
-            location.flags |= classes[1] == 0 && stacked != 0 && bytes > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
+            // The low eightbyte alone in its slot, of a value larger than it: 8 bytes, the next argument's slot after them
+            // (a transparent union's, of its own size, AbiTable.transparent).
+            const uint32_t value_bytes = member != 0 ? abi->stack_bytes[own] : bytes;
+            location.flags |= classes[1] == 0 && stacked != 0 && value_bytes > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
             location.kind = stacked == 0 ? BUSTER_ABI_LOCATION_REGISTERS : stacked == parts ? BUSTER_ABI_LOCATION_STACK : BUSTER_ABI_LOCATION_SPLIT;
+            eightbytes = true;
         }
+        // A transparent union past 16 bytes in its member's registers or eightbytes' slots: those of its first 16 bytes.
+        const bool member_parts = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT ||
+                                  (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0 || eightbytes;
+        location.flags |= member != 0 && abi->stack_bytes[own] > BUSTER_ABI_REGISTER_BYTES && member_parts ? BUSTER_ABI_FLAG_FIRST : 0;
         locations[i] = location;
     }
     call.stack_bytes = (uint32_t)stack;

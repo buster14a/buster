@@ -161,6 +161,9 @@
 //   - COPY: copies `value` bytes (1 to BUSTER_TIER0_MAX_COPY_BYTES) to the address the first operand (U64) holds from
 //     the one the last (U64) holds, and pushes nothing (`class` VOID): a struct's assignment. The two ranges are the
 //     same or apart. A front end copies more through a runtime call (the C producer uses memmove for self-assignment).
+//     A `value` past BUSTER_TIER0_MAX_COPY_BYTES, to BUSTER_TIER0_MAX_COPY_VALUE, is a move instead (#1373,
+//     tier0_copy_moves): of BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES bytes (tier0_copy_bytes),
+//     whose ranges may overlap either way, as memmove's: every byte is read before any is written.
 //   - ALLOCA: reserves as many bytes as the operand (U64) says, rounded up to a multiple of 16 (of the frame's alignment
 //     in a realigned frame, which so stays aligned), on the stack, and pushes their address (`class` U64, a multiple of
 //     16; `value` 0): a variable-length array's storage. The bytes stay until a STACK_RESTORE releases them or the
@@ -319,6 +322,12 @@
 // takes it (another kind's value is its own whole: a constant's top bits are its own).
 #define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
 #define BUSTER_TYPED_ACCESS_SEGMENT (UINT64_C(3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT)
+// A LOAD's, STORE's or SET's volatile access (#3310): one of a volatile-qualified lvalue, below the segment's bits, on a
+// scalar class's (an integer's, a floating value's or a 128-bit integer's, whose `value` holds nothing else but an atomic
+// marker and the segment). A function with one says so (Tier0Function.volatiles). Tier 0 emits every access anyway and
+// strips the bit out of line (tier0_segments_strip); the IR keeps it as BUSTER_IR_VOLATILE, which no pass removes,
+// merges or forwards (BUSTER_IR_OBSERVABLE).
+#define BUSTER_TYPED_ACCESS_VOLATILE (UINT64_C(1) << 61)
 #define BUSTER_TYPED_SEGMENT_FS 1
 #define BUSTER_TYPED_SEGMENT_GS 2
 #define BUSTER_TYPED_SEGMENT_SS 3
@@ -464,13 +473,16 @@ struct Tier0AsmBody
     const uint32_t* label_records;
     const uint32_t* label_names;
     uint32_t label_count;
-    // An asm goto's body whose exits fall straight into the exit's move into eax, with no store between (#2351): the
-    // record its exits start at, past the template's; 0 for any other body. Its call row's class is I32, and the
-    // statement's dispatch on the exit follows it: SET_LOCAL of a temporary, then for each label l a LOCAL of it, a CONST
-    // of l + 1, an EQ and a BRANCH_TRUE to the label. Where nothing runs after the row (tier0_asm_direct), Tier 0 drops
-    // the exits and the dispatch, and the template's jump to label l (a branch to the exit's record, exits + 2 + 2l)
-    // branches to the label's entry, as clang's callbr does.
+    // An asm goto's body (#2351): the record its exits start at, past the template's; 0 for any other body. Its
+    // `goto_labels` labels' exits are a move of the exit's number and a jump each (the fall-through's first, the last
+    // label's without its jump), then the outputs' stores (and the x87 inputs' pops), then the exit's move into eax, its
+    // last record. Its call row's class is I32, and the statement's dispatch on the exit follows it: SET_LOCAL of a
+    // temporary, then for each label l a LOCAL of it, a CONST of l + 1, an EQ and a BRANCH_TRUE to the label. Where
+    // nothing runs after the row (tier0_asm_direct), Tier 0 drops the exits and the dispatch, and the template's jump to
+    // label l (a branch to the exit's record, exits + 2 + 2l) branches to the label's entry, as clang's callbr does,
+    // through a copy of the stores of its own where the body has stores (tier0_emit_call_record).
     uint32_t exits;
+    uint32_t goto_labels;
     // Whether the template returns (#1839): its `ret`, and the records on the straight way to it (`leave`, `pop`), leave
     // the function as clang's object does, past the epilogue. Its function keeps no local and no value in a
     // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
@@ -694,6 +706,9 @@ struct Tier0Function
     // their paths never see one, and the compilation adds each to its entry's records after (tier0_apply_segments).
     // ir_lower refuses such a function, which Tier 0 compiles.
     bool segments;
+    // Whether a LOAD, STORE or SET is a volatile access (#3310, BUSTER_TYPED_ACCESS_VOLATILE), which validation and
+    // compilation strip as they strip the segment overrides.
+    bool volatiles;
     // Vector transport: 0 preserves the EVEX path; 16 uses SSE2 and 32 uses AVX.
     // This is the generated function's target, never the compiler host's ISA.
     uint8_t vector_bytes;
@@ -1422,17 +1437,28 @@ static bool tier0_aggregate_whole(AbiLocation location)
     return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
 }
 
+// The bytes of an aggregate of `size` bytes that `location` carries: its size, or at a FIRST location its first 16 bytes
+// alone (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's registers or eightbytes'
+// slots, whose bytes past them are padding).
+static uint32_t tier0_location_size(AbiLocation location, uint32_t size)
+{
+    return (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : size;
+}
+
 // The bytes a copy of an aggregate of `size` bytes on the stack whole at `location` moves: its size, or at a PAYLOAD
-// location its vector payload alone (#2113, a record's <size / 8 x double> that LLVM put on the stack).
+// location its vector payload alone (#2113, a record's <size / 8 x double> that LLVM put on the stack), or at a FIRST one
+// its first 16 bytes (tier0_location_size).
 static uint32_t tier0_whole_bytes(AbiLocation location, uint32_t size)
 {
+    size = tier0_location_size(location, size);
     return (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0 ? abi_vector_payload_bytes(size) : size;
 }
 
 // The bytes of the stack an aggregate of `size` bytes on the stack whole at `location` takes: its size rounded up to 8,
-// or at a PAYLOAD location its vector register's width (#2113).
+// or at a PAYLOAD location its vector register's width (#2113), or at a FIRST one its first 16 bytes'.
 static uint64_t tier0_whole_slot(AbiLocation location, uint32_t size)
 {
+    size = tier0_location_size(location, size);
     const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
     return payload ? abi_vector_register_bytes(abi_vector_payload_bytes(size)) : ((uint64_t)size + 7) & ~UINT64_C(7);
 }
@@ -1440,6 +1466,7 @@ static uint64_t tier0_whole_slot(AbiLocation location, uint32_t size)
 // The parts of an aggregate argument or parameter of `size` bytes at `location` (none on the stack whole or ignored).
 static uint32_t tier0_location_parts(AbiLocation location, uint32_t size, Tier0Part* parts)
 {
+    size = tier0_location_size(location, size);
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT;
@@ -1459,7 +1486,8 @@ static bool tier0_parameter_in_place(const Tier0Function* function, uint32_t p)
     const uint32_t alignment_log2 = tier0_is_object(function, p) ? function->local_alignments[p] : 0;
     const bool aligned = alignment_log2 <= BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 && location.stack_offset % (1u << alignment_log2) == 0;
     // A PAYLOAD slot (#2113) holds the payload alone, which may end before the object's size: its bytes are copied.
-    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    // So does a FIRST one (#1844), of the object's first 16 bytes alone.
+    const bool payload = (location.flags & (BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) != 0;
     return tier0_is_object(function, p) ? tier0_aggregate_whole(location) && aligned && !payload : location.kind == BUSTER_ABI_LOCATION_STACK;
 }
 
@@ -1570,6 +1598,10 @@ static bool tier0_parts_valid(const uint8_t* registers, bool high, bool split, u
 // an 8-byte slot, as is the high or the low eightbyte alone on the stack, with no register.
 static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, uint64_t stack_bytes)
 {
+    // FIRST, of a value past 16 bytes, isn't PAYLOAD's.
+    const bool first = (location.flags & BUSTER_ABI_FLAG_FIRST) != 0;
+    const bool first_valid = !first || (size > BUSTER_ABI_REGISTER_BYTES && (location.flags & BUSTER_ABI_FLAG_PAYLOAD) == 0 && location.kind != BUSTER_ABI_LOCATION_IGNORE);
+    size = tier0_location_size(location, size);
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool whole = tier0_aggregate_whole(location);
@@ -1590,7 +1622,7 @@ static bool tier0_aggregate_location_valid(AbiLocation location, uint32_t size, 
     // LOW is a STACK location's alone, and PAYLOAD a whole one's, of a record past its payload (#2113).
     valid = valid && (!low || location.kind == BUSTER_ABI_LOCATION_STACK);
     valid = valid && (!payload || (whole && size > abi_vector_payload_bytes(size) && size <= 64));
-    return valid;
+    return valid && first_valid;
 }
 
 // How many x87 registers a result comes back in: st0, or st0 and st1 (a COMPLEX_X87 one), each part 16 bytes after the
@@ -2875,6 +2907,9 @@ static bool tier0_convert_records(uint32_t to, uint32_t from, uint8_t to_registe
         const bool wide = tier0_class_bytes(as) == 8;
         const uint32_t form = to == BUSTER_TYPED_CLASS_F32 ? (wide ? X86_FORM_CVTSI2SS_X_RM64 : X86_FORM_CVTSI2SS_X_RM32)
                                                            : (wide ? X86_FORM_CVTSI2SD_X_RM64 : X86_FORM_CVTSI2SD_X_RM32);
+        // Legacy cvtsi2ss/sd write the low lane alone and keep the rest, so they wait on the register's last value: its
+        // zero (xorps) breaks that dependency (#3308), as tier0_emit_u64_convert's and Tier 1's do.
+        tier0_add(tier0_rr(X86_FORM_XORPS_X_XM128, to_register, to_register));
         source.form = (uint16_t)form;
         tier0_add(source);
     }
@@ -2889,6 +2924,13 @@ static bool tier0_convert_records(uint32_t to, uint32_t from, uint8_t to_registe
     }
     else if (to != from)
     {
+        // cvtss2sd and cvtsd2ss merge into their destination as cvtsi2ss/sd do: a home's operand zeroes it first (#3308).
+        // In place (the operand's own register) the dependency is the operand's, so needs no break, and the zero would
+        // clobber it.
+        if (from_home || to_register != from_register)
+        {
+            tier0_add(tier0_rr(X86_FORM_XORPS_X_XM128, to_register, to_register));
+        }
         source.form = (uint16_t)(from == BUSTER_TYPED_CLASS_F32 ? X86_FORM_CVTSS2SD_X_XM32 : X86_FORM_CVTSD2SS_X_XM64);
         tier0_add(source);
     }
@@ -5827,6 +5869,34 @@ static void tier0_extend(Tier0Writer* writer, uint32_t class, uint32_t reg)
 // copy-shapes-2693-2026-11-15).
 #define BUSTER_TIER0_COPY_NARROW_BYTES 32
 
+// A COPY's move form (#1373): its `value` past BUSTER_TIER0_MAX_COPY_BYTES, BUSTER_TIER0_MOVE_VALUE of its bytes, from
+// BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES, so that every value to BUSTER_TIER0_MAX_COPY_VALUE
+// is a copy's or a move's: a plain memmove of such a constant size, which the lowering computes in place as clang's
+// code does. Its 16-byte pieces, at most 8, are all loaded, into the floating stack's free registers from its first
+// (tier0_copy_move), before any is stored.
+#define BUSTER_TIER0_MAX_MOVE_BYTES 128
+#define BUSTER_TIER0_MOVE_VALUE(bytes) ((uint64_t)(bytes) + BUSTER_TIER0_MAX_COPY_BYTES - BUSTER_TIER0_COPY_NARROW_BYTES)
+#define BUSTER_TIER0_MAX_COPY_VALUE BUSTER_TIER0_MOVE_VALUE(BUSTER_TIER0_MAX_MOVE_BYTES)
+
+// Whether a COPY's `value` is its move form's.
+static inline bool tier0_copy_moves(uint64_t value)
+{
+    return value > BUSTER_TIER0_MAX_COPY_BYTES;
+}
+
+// A COPY's bytes, its move form's too.
+static inline uint32_t tier0_copy_bytes(uint64_t value)
+{
+    return (uint32_t)(tier0_copy_moves(value) ? value - (BUSTER_TIER0_MAX_COPY_BYTES - BUSTER_TIER0_COPY_NARROW_BYTES) : value);
+}
+
+// The 16-byte pieces a move of `size` bytes (BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES) takes:
+// the floating registers it holds at once.
+static inline uint32_t tier0_move_pieces(uint32_t size)
+{
+    return (size + 15) / 16;
+}
+
 // The widest piece a copy of `size` bytes uses: 8 for a small aggregate, 16 for a larger one.
 static uint32_t tier0_copy_width(uint32_t size)
 {
@@ -5872,6 +5942,25 @@ static void tier0_copy(Tier0Writer* writer, uint8_t to, int32_t to_displacement,
             tier0_put(writer, tier0_instruction(load, general, from, BUSTER_X86_MEMORY_BASE, from_displacement + (int32_t)(size - piece), 0));
             tier0_put(writer, tier0_instruction(store, general, to, BUSTER_X86_MEMORY_BASE, to_displacement + (int32_t)(size - piece), 0));
         }
+    }
+}
+
+// A move of `size` bytes (COPY's move form) from [from] to [to], whose ranges may overlap: each 16-byte piece, the last
+// ending at the end, loaded into XMM register `xmm` and the ones after it, all before the first store, so that a store
+// overwrites no byte a later piece reads; then the stores, the last piece's first. clang's code moves llvm.memmove's
+// bytes so, in its widest vectors. A load and a store per piece (tier0_move_pieces).
+static void tier0_copy_move(Tier0Writer* writer, uint8_t to, uint8_t from, uint32_t size, uint8_t xmm)
+{
+    const uint32_t pieces = tier0_move_pieces(size);
+    for (uint32_t p = 0; p < pieces; p += 1)
+    {
+        const int32_t at = (int32_t)(p + 1 < pieces ? 16 * p : size - 16);
+        tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_X_XM, (uint8_t)(xmm + p), from, BUSTER_X86_MEMORY_BASE, at, 0));
+    }
+    for (uint32_t p = pieces; p-- > 0;)
+    {
+        const int32_t at = (int32_t)(p + 1 < pieces ? 16 * p : size - 16);
+        tier0_put(writer, tier0_instruction(X86_FORM_MOVUPS_XM_X, (uint8_t)(xmm + p), to, BUSTER_X86_MEMORY_BASE, at, 0));
     }
 }
 
@@ -6932,7 +7021,8 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
             valid = body->branches[b] < body->count && (b == 0 || body->branches[b - 1] < body->branches[b]) && body->targets[b] <= body->count;
         }
         valid = valid && (body->label_count == 0 || (body->label_records != 0 && body->label_names != 0)) &&
-                (body->exits == 0 || (body->exits < body->count && (body->count - body->exits) % 2 == 0 && body->count - body->exits >= 4));
+                (body->exits == 0 || (body->goto_labels != 0 && body->exits < body->count &&
+                                      (uint64_t)body->exits + 2 * (uint64_t)body->goto_labels + 2 <= body->count));
         for (uint32_t k = 0; valid && k < body->label_count; k += 1)
         {
             valid = body->label_records[k] <= body->count;
@@ -7058,15 +7148,40 @@ static bool tier0_direct(const Tier0Entries* entries, uint32_t i)
     return entries->direct != 0 && (entries->direct[i >> 6] >> (i & 63) & 1) != 0;
 }
 
-// The records an asm body's call row `i` writes: its own, or a direct one's up to its exits (#2351).
+// The stores of an asm goto's body (#2351, Tier0AsmBody.exits): its records between the last exit's move and the move
+// into eax.
+static uint32_t tier0_body_stores(const Tier0AsmBody* body)
+{
+    return body->count - body->exits - 2 * body->goto_labels - 2;
+}
+
+// The records an asm body's call row `i` writes: its own, or a direct one's up to its exits (#2351) and, where it has
+// stores, a copy of them and a jump per exit.
 static uint32_t tier0_body_records(const Tier0Entries* entries, const Tier0AsmBody* body, uint32_t i)
 {
-    return tier0_direct(entries, i) ? body->exits : body->count;
+    const uint32_t stores = tier0_direct(entries, i) ? tier0_body_stores(body) : 0;
+    return !tier0_direct(entries, i) ? body->count : body->exits + (stores != 0 ? (stores + 1) * (body->goto_labels + 1) : 0);
+}
+
+// Record r of an asm body, addressing the block's home if it addresses the block (BUSTER_TIER0_ASM_BLOCK).
+static X86Instruction tier0_body_record(const Tier0AsmBody* body, const Tier0Home* homes, uint32_t r)
+{
+    X86Instruction record = body->records[r];
+    if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK)
+    {
+        const Tier0Home block = homes[body->block];
+        record.rm = block.reg;
+        record.displacement += block.displacement;
+    }
+    return record;
 }
 
 // The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
 // each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home. A direct asm goto's body
 // (#2351) stops at its exits, and its jumps to its labels go to the labels' entries, the dispatch's BRANCH_TRUEs' targets.
+// One with stores writes a copy of them per exit instead, as clang's callbr's targets' blocks have: the fall-through's
+// after the template, jumping past the others, then each label's, which the template's jumps to it reach, jumping to
+// the label's entry.
 static void tier0_emit_call_record(const Tier0Function* function, const Tier0Entries* entries, const Tier0Home* homes, uint32_t i, Tier0Writer* writer)
 {
     const uint32_t call = (uint32_t)function->values[i];
@@ -7074,7 +7189,11 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Ent
     if (body != 0)
     {
         const uint32_t first = writer->count;
-        const uint32_t end = tier0_body_records(entries, body, i);
+        const bool direct = tier0_direct(entries, i);
+        const uint32_t end = direct ? body->exits : body->count;
+        const uint32_t stores = direct ? tier0_body_stores(body) : 0;
+        const uint32_t tail = body->exits + 2 * body->goto_labels + 1;
+        const uint32_t past = first + tier0_body_records(entries, body, i);
         // Its labels' records (#1839), past the labels of the bodies before it.
         uint32_t label_base = 0;
         for (uint32_t b = 0; writer->asm_labels != 0 && body->label_count != 0 && function->asm_bodies + b != body; b += 1)
@@ -7088,28 +7207,39 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Ent
         uint32_t branch = 0;
         for (uint32_t r = 0; r < end; r += 1)
         {
-            X86Instruction record = body->records[r];
-            if ((record.mode & BUSTER_X86_MODE_MEMORY) != 0 && (record.mode & BUSTER_X86_MODE_BASE) != 0 && record.rm == BUSTER_TIER0_ASM_BLOCK)
-            {
-                const Tier0Home block = homes[body->block];
-                record.rm = block.reg;
-                record.displacement += block.displacement;
-            }
+            const X86Instruction record = tier0_body_record(body, homes, r);
             if (branch < body->branch_count && body->branches[branch] == r)
             {
                 // The template's own branch, which branch sizing sizes as the function's: its target in the function's records.
                 if (writer->records != 0)
                 {
                     const uint32_t target = body->targets[branch];
-                    // A direct body's jump to label l: the l-th BRANCH_TRUE of the dispatch, 4 entries each past the SET_LOCAL.
-                    const bool label = end != body->count && target > end;
+                    // A direct body's jump to label l: the l-th BRANCH_TRUE of the dispatch, 4 entries each past the SET_LOCAL,
+                    // or the label's copy of the stores.
+                    const bool label = direct && target > end;
+                    const uint32_t l = label ? (target - end - 2) / 2 : 0;
                     writer->branches[writer->branch_count] = writer->count;
-                    writer->targets[writer->branch_count] = label ? entries->positions[function->values[i + 5 + 4 * ((target - end - 2) / 2)]] : first + target;
+                    writer->targets[writer->branch_count] = !label ? first + target : stores != 0 ? first + end + (stores + 1) * (l + 1) :
+                                                            entries->positions[function->values[i + 5 + 4 * l]];
                 }
                 writer->branch_count += 1;
                 branch += 1;
             }
             tier0_put(writer, record);
+        }
+        for (uint32_t e = 0; stores != 0 && e <= body->goto_labels; e += 1)
+        {
+            for (uint32_t r = tail; r < tail + stores; r += 1)
+            {
+                tier0_put(writer, tier0_body_record(body, homes, r));
+            }
+            if (writer->records != 0)
+            {
+                writer->branches[writer->branch_count] = writer->count;
+                writer->targets[writer->branch_count] = e == 0 ? past : entries->positions[function->values[i + 1 + 4 * e]];
+            }
+            writer->branch_count += 1;
+            tier0_put(writer, tier0_instruction(X86_FORM_JMP_REL8, 0, 0, 0, 0, 0));
         }
     }
     else if (function->call_targets[call] == 0)
@@ -7133,14 +7263,17 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Ent
     }
 }
 
-// How many branches tier0_emit_call_record writes for call entry i: an asm body's own, a direct one's before its exits.
+// How many branches tier0_emit_call_record writes for call entry i: an asm body's own, a direct one's before its exits
+// and its copies' jumps.
 static uint32_t tier0_count_call_branches(const Tier0Function* function, const Tier0Entries* entries, uint32_t i)
 {
     const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
-    uint32_t count = 0;
+    const bool direct = body != 0 && tier0_direct(entries, i);
+    const uint32_t end = body == 0 ? 0 : direct ? body->exits : body->count;
+    uint32_t count = direct && tier0_body_stores(body) != 0 ? body->goto_labels + 1 : 0;
     for (uint32_t b = 0; body != 0 && b < body->branch_count; b += 1)
     {
-        count += body->branches[b] < tier0_body_records(entries, body, i) ? 1 : 0;
+        count += body->branches[b] < end ? 1 : 0;
     }
     return count;
 }
@@ -7455,10 +7588,31 @@ static void tier0_emit_shift(const Tier0Entries* entries, const Tier0Frame* fram
 // whole). The ranges are the same or apart, so overlapping pieces copy what they would apart.
 static void tier0_emit_copy(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, Tier0Writer* writer)
 {
-    const uint32_t size = (uint32_t)function->values[i];
+    const uint32_t size = tier0_copy_bytes(function->values[i]);
     const uint32_t depth = entries->depths[i];
-    tier0_copy(writer, tier0_integer_depths[depth - 2], 0, tier0_integer_depths[depth - 1], 0, size,
-               size <= BUSTER_TIER0_COPY_NARROW_BYTES ? tier0_integer_depths[depth] : 0, entries->floating_depths[i], tier0_copy_local_source(function, i));
+    if (tier0_copy_moves(function->values[i]))
+    {
+        tier0_copy_move(writer, tier0_integer_depths[depth - 2], tier0_integer_depths[depth - 1], size, entries->floating_depths[i]);
+    }
+    else
+    {
+        tier0_copy(writer, tier0_integer_depths[depth - 2], 0, tier0_integer_depths[depth - 1], 0, size,
+                   size <= BUSTER_TIER0_COPY_NARROW_BYTES ? tier0_integer_depths[depth] : 0, entries->floating_depths[i], tier0_copy_local_source(function, i));
+    }
+}
+
+// How many records tier0_emit_copy writes for COPY entry `i`.
+static uint32_t tier0_count_copy(const Tier0Function* function, uint32_t i)
+{
+    const uint64_t value = function->values[i];
+    return tier0_copy_moves(value) ? 2 * tier0_move_pieces(tier0_copy_bytes(value)) : tier0_copy_records((uint32_t)value, tier0_copy_local_source(function, i));
+}
+
+// The floating registers past its first free one that COPY entry `i` writes: a move's pieces after the first.
+static uint32_t tier0_copy_reach(const Tier0Function* function, uint32_t i)
+{
+    const uint64_t value = function->values[i];
+    return tier0_copy_moves(value) ? tier0_move_pieces(tier0_copy_bytes(value)) - 1 : 0;
 }
 
 // ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's (#177)
@@ -9160,7 +9314,8 @@ static void tier0_select_u64_convert(bool to_u64, int32_t depth, int32_t floatin
 //     inexact one only where it has a fraction, as C's conversion does (#429's review): truncating both ways and choosing
 //     raised them for nothing. A value out of U64's range (C leaves it undefined) gives the signed truncation's result,
 //     its top bit flipped.
-// The red zone form keeps to the operand's and the result's registers, its scratch values in red zone temporaries 0 to 2
+// Both forms zero the result's register before the conversion, which breaks its dependence on the value the register
+// held (#3308). The red zone form keeps to the operand's and the result's registers, its scratch values in red zone temporaries 0 to 2
 // instead: from U64, x's copy in temporary 0 and the result's bits in temporary 1; to U64, 2^63 in temporary 0, setae's
 // byte in temporary 1 (shifted into the top bit in place) and the bias in temporary 2. It is as exact, and raises the
 // same exceptions, but its loads wait for the stores before them: as the only form, it took a conversion-heavy loop to
@@ -9200,8 +9355,9 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
     }
     else if (!to_u64)
     {
-        // x halved in its own register (x's copy in temporary 0), x's sign tested in its copy, and the exponent raised in
-        // the result's bits in temporary 1.
+        // x halved in its own register (x's copy in temporary 0), and the exponent raised in the result's bits in
+        // temporary 1. x's sign needs no test of its own: a shift by 1 sets OF to its operand's top bit, x's (the or kept
+        // it), and SF to 0, so ge (SF = OF) is x's sign clear; which leaves the record for the result's zero (#3308).
         const bool single = class == BUSTER_TYPED_CLASS_F32;
         const uint8_t x = tier0_integer_depths[depth - 1];
         const uint8_t result = (uint8_t)floating;
@@ -9210,8 +9366,8 @@ static void tier0_emit_u64_convert_form(const Tier0Entries* entries, bool regist
         tier0_put(writer, tier0_instruction(X86_FORM_ADD_R32_RM32, x, x, direct, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_OR_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 1));
-        tier0_put(writer, tier0_red_zone(writer, X86_FORM_CMP_RM64_IMM8, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_CMOVGE_R64_RM64, x, 0));
+        tier0_put(writer, tier0_instruction(X86_FORM_XORPS_X_XM128, result, result, direct, 0, 0));
         tier0_put(writer, tier0_instruction(single ? X86_FORM_CVTSI2SS_X_RM64 : X86_FORM_CVTSI2SD_X_RM64, result, x, direct, 0, 0));
         tier0_put(writer, tier0_red_zone(writer, X86_FORM_MOV_R64_RM64, x, 0));
         tier0_put(writer, tier0_instruction(X86_FORM_SHR_RM64_IMM8, 0, x, direct, 0, 63));
@@ -10004,7 +10160,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
-        count = tier0_copy_records((uint32_t)function->values[i], tier0_copy_local_source(function, i));
+        count = tier0_count_copy(function, i);
     }
     else if (tier0_moves_stack(kind))
     {
@@ -10535,10 +10691,11 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const
                 else if (function->kinds[i] == BUSTER_TYPED_COPY)
                 {
                     // A copy's scratch, its stacks' first free register: an XMM one above BUSTER_TIER0_COPY_NARROW_BYTES,
-                    // a general one below.
+                    // a general one below; a move's, its pieces' XMM registers from the first free one.
                     const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
+                    const int32_t reach = floating + (int32_t)tier0_copy_reach(function, i);
                     integer_top = !wide && depth > integer_top ? depth : integer_top;
-                    floating_top = wide && floating > floating_top ? floating : floating_top;
+                    floating_top = wide && reach > floating_top ? reach : floating_top;
                 }
                 else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
                 {
@@ -10715,13 +10872,14 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
     }
     else if (kind == BUSTER_TYPED_COPY)
     {
-        // Its two addresses, and its scratch at the depth (an XMM register's above BUSTER_TIER0_COPY_NARROW_BYTES).
+        // Its two addresses, and its scratch at the depth (an XMM register's above BUSTER_TIER0_COPY_NARROW_BYTES; a
+        // move's, its pieces' from it).
         const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
         uses[0] = true;
         window[0] = 2;
         touch[0] = wide ? (int32_t)before[0] - 1 : (int32_t)before[0];
         uses[1] = wide;
-        touch[1] = (int32_t)before[1];
+        touch[1] = (int32_t)before[1] + (int32_t)tier0_copy_reach(function, i);
     }
     else if (kind == BUSTER_TYPED_CONVERT)
     {
@@ -11525,7 +11683,7 @@ static bool tier0_asm_dispatch(const Tier0Function* function, const Tier0Entries
         integer += is_floating ? 0 : 1;
         floating += is_floating ? 1 : 0;
     }
-    const uint32_t labels = (body->count - body->exits - 2) / 2;
+    const uint32_t labels = body->goto_labels;
     const uint64_t last = (uint64_t)i + 1 + 4 * (uint64_t)labels;
     bool valid = function->classes[i] == BUSTER_TYPED_CLASS_I32 && entries->depths[i] == integer && entries->floating_depths[i] == floating &&
                  (entries->mask_depths == 0 || entries->mask_depths[i] == 0) && (entries->deep == 0 || entries->deep[i] == 0) && last < function->count &&
@@ -11574,7 +11732,7 @@ static __attribute__((noinline, cold)) Tier0Error tier0_asm_direct(const Tier0Fu
             if (error == TIER0_OK)
             {
                 entries->direct[i >> 6] |= 1ull << (i & 63);
-                const uint32_t last = i + 1 + 4 * ((body->count - body->exits - 2) / 2);
+                const uint32_t last = i + 1 + 4 * body->goto_labels;
                 for (uint32_t e = i + 1; e <= last; e += 1)
                 {
                     entries->absorbed[e] = 1;
@@ -11600,7 +11758,7 @@ static __attribute__((noinline, cold)) void tier0_direct_references(const Tier0F
         {
             const Tier0AsmBody* body = tier0_call_body(function, (uint32_t)function->values[i]);
             const uint64_t temporary = function->values[i + 1];
-            const uint32_t labels = (body->count - body->exits - 2) / 2;
+            const uint32_t labels = body->goto_labels;
             uint64_t weighted = weights != 0 ? weights[i + 1] : 1;
             for (uint32_t l = 0; l < labels; l += 1)
             {
@@ -13195,7 +13353,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar_entries(const 
                 const uint32_t source = tier0_pop(&validator, i);
                 const uint32_t destination = tier0_pop(&validator, i);
                 if (source != BUSTER_TYPED_CLASS_U64 || destination != BUSTER_TYPED_CLASS_U64 || class != BUSTER_TYPED_CLASS_VOID || value == 0 ||
-                    value > BUSTER_TIER0_MAX_COPY_BYTES)
+                    value > BUSTER_TIER0_MAX_COPY_VALUE)
                 {
                     tier0_reject(&validator, i, "a copy's addresses, class or size");
                 }
@@ -14297,8 +14455,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
             else if (function->kinds[i] == BUSTER_TYPED_COPY)
             {
                 const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
+                const int32_t reach = (int32_t)entry_floating + (int32_t)tier0_copy_reach(function, i);
                 deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
-                deferred_floating_top = wide && entry_floating > deferred_floating_top ? entry_floating : deferred_floating_top;
+                deferred_floating_top = wide && reach > deferred_floating_top ? reach : deferred_floating_top;
             }
             else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
             {
@@ -14790,10 +14949,10 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
     return code;
 }
 
-// A function with segment overrides (#1447, Tier0Function.segments), out of line: its values without them, in a copy of
-// its values column (`values`), and each entry's override (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or
-// ATOMIC_CAS's value. Another
-// kind's value is its own whole (a constant's top bits are its own).
+// A function with segment overrides (#1447, Tier0Function.segments) or volatile accesses (#3310, Tier0Function.volatiles),
+// out of line: its values without them, in a copy of its values column (`values`), and each entry's override
+// (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's value. Another kind's value is its own whole
+// (a constant's top bits are its own).
 static void tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
 {
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -14803,7 +14962,8 @@ static void tier0_segments_strip(const Tier0Function* function, uint64_t* values
         const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
         const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_ATOMIC_RMW ||
                             kind == BUSTER_TYPED_ATOMIC_CAS;
-        values[i] = access ? value & ~BUSTER_TYPED_ACCESS_SEGMENT : value;
+        const bool marked = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
+        values[i] = access ? value & ~(BUSTER_TYPED_ACCESS_SEGMENT | (marked ? BUSTER_TYPED_ACCESS_VOLATILE : 0)) : value;
         segments[i] = access ? (uint8_t)segment : 0;
     }
 }
@@ -14827,7 +14987,10 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
-        code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, segments, output) : tier0_compile_scalar_entries(&stripped, segments, output);
+        stripped.volatiles = false;
+        // A function with volatile accesses alone has no override to add.
+        const uint8_t* overrides = function->segments ? segments : 0;
+        code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, overrides, output) : tier0_compile_scalar_entries(&stripped, overrides, output);
     }
     scratch_end(scratch);
     return code;
@@ -14835,12 +14998,12 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
 
 static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, false) : tier0_compile_scalar_entries(function, 0, output);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_compile_segments(function, output, false) : tier0_compile_scalar_entries(function, 0, output);
 }
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -15572,7 +15735,7 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     const uint32_t x87_count = function->x87_constant_count;
     const uint32_t symbol_limit = function->symbol_access == 0 ? UINT32_MAX : function->symbol_count == 0 ? 0 : function->symbol_count - 1;
     const __m512i minimum = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, x87_count == 0 ? 1 : 0, 0, 1, 1, 0, call_count == 0 ? 1 : 0, local_count == 0 ? 1 : 0, 0);
-    const __m512i maximum = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, (int)(x87_count == 0 ? 0 : x87_count - 1), 0, BUSTER_TIER0_MAX_COPY_BYTES, (int)symbol_limit,
+    const __m512i maximum = _mm512_set_epi32(0, 0, 0, 0, 0, 0, 0, 0, (int)(x87_count == 0 ? 0 : x87_count - 1), 0, (int)BUSTER_TIER0_MAX_COPY_VALUE, (int)symbol_limit,
                                              (int)count, (int)(call_count == 0 ? 0 : call_count - 1), (int)(local_count == 0 ? 0 : local_count - 1), (int)UINT32_MAX);
     // Every kind's classes with the function's: long double's and the 128-bit integers' only where it has them; RETURN's
     // the address of an aggregate's bytes (U64) where the function returns one, no 128-bit integer, and F80 exactly where
@@ -15970,6 +16133,7 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
         Tier0Function stripped = *function;
         stripped.values = values;
         stripped.segments = false;
+        stripped.volatiles = false;
         check = vector ? tier0_validate_entries(&stripped) : tier0_validate_scalar_entries(&stripped);
     }
     scratch_end(scratch);
@@ -15978,10 +16142,10 @@ static __attribute__((noinline)) Tier0Check tier0_validate_segments(const Tier0F
 
 static Tier0Check tier0_validate(const Tier0Function* function)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, true) : tier0_validate_entries(function);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_validate_segments(function, true) : tier0_validate_entries(function);
 }
 
 static Tier0Check tier0_validate_scalar(const Tier0Function* function)
 {
-    return __builtin_expect(function->segments, 0) ? tier0_validate_segments(function, false) : tier0_validate_scalar_entries(function);
+    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_validate_segments(function, false) : tier0_validate_scalar_entries(function);
 }
