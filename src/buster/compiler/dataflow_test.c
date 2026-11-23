@@ -403,11 +403,13 @@ static bool dataflow_test_postorder_bound(Dataflow* graph, Arena* scratch)
     const uint64_t mark = scratch->length;
     const uint64_t bound = dataflow_postorder_scratch_bytes(graph->block_count, graph->edge_count);
     const uint64_t order_bytes = (uint64_t)graph->block_count * sizeof(uint32_t);
-    uint8_t* bytes = arena_push(scratch, bound + 2 * order_bytes, 64);
+    // The saved postorder after the bound, on the next 64-byte boundary.
+    const uint64_t saved = (bound + 63) & ~(uint64_t)63;
+    uint8_t* bytes = arena_push(scratch, saved + 2 * order_bytes, 64);
     bool result = bytes != 0;
     if (result)
     {
-        uint32_t* postorder = (uint32_t*)(bytes + bound);
+        uint32_t* postorder = (uint32_t*)(bytes + saved);
         uint32_t* backward = postorder + graph->block_count;
         if (order_bytes != 0)
         {
