@@ -1,0 +1,1 @@
+struct S{long outer;};int f(x)struct S{int inner;}x;{struct S s={3};return x.inner+(int)s.outer;}

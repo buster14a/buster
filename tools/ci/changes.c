@@ -1821,6 +1821,11 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "code",
     },
     {
+        .name = "the checker suites' runtime fixtures and catalogs are code",
+        .files = "tests/checker/source-extensions/catalog.tsv tests/checker/attributes/0001.c tests/checker/overload/catalog.tsv",
+        .outputs_true = "code",
+    },
+    {
         .name = "Tier 1's mask IR and the IR parser's runtime fixtures and catalogs are code",
         .files = "tests/tier1/masks/catalog.tsv tests/tier1/masks/0001.ir tests/ir/catalog.tsv",
         .outputs_true = "code",
