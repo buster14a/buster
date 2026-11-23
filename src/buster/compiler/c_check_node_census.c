@@ -364,6 +364,7 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_TAUTOLOGICAL_BITWISE_COMPARE] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_TAUTOLOGICAL_OVERLAP_COMPARE] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND] = NODE_CENSUS_WARNING_TESTED,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -387,6 +388,7 @@ struct NodeCensusPolicy
     bool alignof_expression;
     bool sizeof_decay;
     bool constant_conversion;
+    bool constant_logical;
     bool division;
     bool shifts;
     bool null_dereference;
@@ -636,6 +638,7 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
     policy.sizeof_decay = check_common_enabled(pp, input, CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY, false);
     policy.constant_conversion = check_common_enabled(pp, input, CHECK_WARNING_ID_CONSTANT_CONVERSION, false) ||
                                  check_common_enabled(pp, input, CHECK_WARNING_ID_LITERAL_CONVERSION, false);
+    policy.constant_logical = check_common_enabled(pp, input, CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND, false);
     policy.division = check_common_enabled(pp, input, CHECK_WARNING_ID_DIVISION_BY_ZERO, false);
     policy.shifts = check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE, false) ||
                     check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW, false) ||
@@ -1819,6 +1822,124 @@ static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
     return constant && node_census_constant_tests(s, node);
 }
 
+// A scalar's existing value with a completed const-object receipt read at the logical expression's source cut.
+// This is the lvalue conversion's proof alone: no folding, allocation or type interning. In particular a mutable
+// named object is not a constant merely because its designator has a known address.
+static CheckValue node_census_logical_value(const NodeCensusScratch* s, uint32_t node, uint32_t completion)
+{
+    const TypeTable* types = s->program->types;
+    CheckValue value = node_view_value(s, node);
+    if (value.category == CHECK_LVALUE)
+    {
+        CheckValue loaded = { 0 };
+        const bool volatile_read = (type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) != 0 || (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0;
+        const bool known = !volatile_read && value.fault == CHECK_FAULT_NONE &&
+                           (value.flags & (BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                           (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_BIT_FIELD) != 0) &&
+                           check_const_load(types, &s->program->input->const_values, value.object, value.offset, value.object_bit_offset,
+                                            value.bit_width, value.type, completion, &loaded);
+        if (known)
+        {
+            check_action_inherit(&loaded, &value);
+            value = loaded;
+        }
+        else if (volatile_read || value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_ICE) == 0)
+        {
+            value.constant_kind = CHECK_CONSTANT_NONE;
+        }
+    }
+    return value;
+}
+
+// A required runtime operand proves that this integer expression cannot be an independently evaluated constant.
+// Only ordinary calls, writes and scalar leaves prove that fact; arithmetic and casts require their operands, a
+// conditional requires its condition, and a comma requires its discarded value too. Never descend through an
+// address, sizeof or a short-circuit operator. Unknown shapes and a proof past this bounded frontier refuse below.
+static bool node_census_logical_runtime(const NodeCensusScratch* s, uint32_t root, uint32_t completion)
+{
+    const CheckGraph* graph = &s->program->input->graph;
+    uint32_t pending[BUSTER_NODE_CENSUS_FOLLOWED];
+    uint32_t count = 0;
+    uint32_t visited = 0;
+    bool result = false;
+    pending[count++] = root;
+    while (count != 0 && visited < BUSTER_NODE_CENSUS_FOLLOWED && !result)
+    {
+        const uint32_t node = pending[--count];
+        visited += 1;
+        const CheckOp op = graph->ops[node];
+        if (op == CHECK_OP_VALUE && check_action_is_scalar(s->program->types, node_view_type(s, node)))
+        {
+            const CheckValue value = node_census_logical_value(s, node, completion);
+            result = !check_value_evaluated_constant(&value) || (value.flags & BUSTER_CHECK_INVALID_CONSTANT) != 0;
+        }
+        else if (node_census_modifies(op) || (op == CHECK_OP_CALL &&
+                 (graph->members == NULL || (graph->members[node] & BUSTER_CHECK_LIBRARY_CALL) == 0)))
+        {
+            result = true;
+        }
+        else
+        {
+            const bool unary = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_NOT || op == CHECK_OP_BIT_NOT ||
+                               op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL ||
+                               op == CHECK_OP_DEREFERENCE || op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+            const bool binary = (op >= CHECK_OP_ADD && op <= CHECK_OP_BIT_XOR) || op == CHECK_OP_COMMA || op == CHECK_OP_SUBSCRIPT;
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node] };
+            for (uint32_t i = 0; i < (binary ? 2u : unary ? 1u : 0u) && count < BUSTER_NODE_CENSUS_FOLLOWED; i += 1)
+            {
+                if (operands[i] < node && node_view_has(s, operands[i]))
+                {
+                    pending[count++] = operands[i];
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// -Wconstant-logical-operand is produced after the reader-time census. Source exclusions and Boolean right operands
+// prove silence immediately; so does a required runtime operand. Other integer expressions may become constants
+// only when the warning pass replays const-object reads, and are conservatively refused by the constant test.
+// Both census forms call this one predicate, including when neither runtime operand has a constant payload.
+static bool node_census_constant_logical(const NodeCensusScratch* s, uint32_t node)
+{
+    const CheckInput* input = s->program->input;
+    const CheckGraph* graph = &input->graph;
+    const Parser* parser = s->program->parser;
+    const TypeTable* types = s->program->types;
+    const CheckOp op = graph->ops[node];
+    const uint32_t a = graph->operand0[node];
+    const uint32_t b = graph->operand1[node];
+    const uint32_t token = graph->tokens[node];
+    bool result = false;
+    if (s->policy.constant_logical && (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR) &&
+        a < graph->count && b < graph->count && node_view_has(s, a) && node_view_has(s, b) && token < parser->tokens.count)
+    {
+        const TypeId left = node_view_type(s, a);
+        const TypeId right = node_view_type(s, b);
+        const bool integers = check_action_is_integer(types, left) && check_action_is_integer(types, right);
+        const bool boolean_type = type_unqualified(type_strip_aligned(types, left)) == BUSTER_TYPE_BOOL ||
+                                  type_unqualified(type_strip_aligned(types, right)) == BUSTER_TYPE_BOOL;
+        const bool macro = parser->tokens.flags != NULL && (parser->tokens.flags[token] & BUSTER_PP_FROM_MACRO) != 0;
+        const bool enumerator = check_input_logical_enumerator(input, parser, token != 0 ? token - 1 : BUSTER_CHECK_NONE, token) ||
+                                check_input_logical_enumerator(input, parser, token + 1, token);
+        const CheckOp inner = graph->ops[b];
+        const bool boolean_op = node_census_comparison(inner) || inner == CHECK_OP_NOT || inner == CHECK_OP_LOGICAL_AND ||
+                                inner == CHECK_OP_LOGICAL_OR || inner == CHECK_OP_CONDITION;
+        if (integers && !boolean_type && !macro && !enumerator && !boolean_op)
+        {
+            const uint32_t completion = graph->source_positions != NULL && graph->source_positions[node] != 0 ? graph->source_positions[node] : token + 1;
+            const CheckValue value = node_census_logical_value(s, b, completion);
+            uint32_t width = 0;
+            bool sign = false;
+            const bool boolean_value = value.constant_kind == CHECK_CONSTANT_INTEGER && node_census_integer(types, right, &width, &sign) &&
+                                       (value.integer == 0 || value.integer == 1);
+            result = !boolean_value && !node_census_logical_runtime(s, b, completion);
+        }
+    }
+    return result;
+}
+
 // check_common_atomic_member's test of member access `node`, with its operand's type read through the view: whether
 // the operand is an atomic struct or union (an arrow's pointer after its lvalue conversion).
 static bool node_view_atomic_member(const NodeCensusScratch* s, uint32_t node)
@@ -1985,7 +2106,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         }
         tests |= effect || expression_alignof || decays ? UINT64_C(1) << NODE_CENSUS_UNEVALUATED : 0;
     }
-    tests |= op != CHECK_OP_VALUE && node_census_constants(s, node) ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+    tests |= op != CHECK_OP_VALUE && (node_census_constants(s, node) || node_census_constant_logical(s, node)) ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
     // The parser's tree: parentheses.
     const uint32_t count = parser->tokens.count;
     const uint8_t role = token < count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
@@ -2730,7 +2851,8 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
                                op == CHECK_OP_LOGICAL_OR;
         const bool always = op == CHECK_OP_CALL || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
                             !node_census_coded(op) || (types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)) ||
-                            (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN) || (policy->tautology && tautology);
+                            (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN) || (policy->tautology && tautology) ||
+                            (policy->constant_logical && (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR));
         s->own_classes[code] = (uint8_t)((!node_census_coded(op) ? BUSTER_NODE_TESTS_CLASS_UNCODED : 0) | (op == CHECK_OP_ADDRESS ? BUSTER_NODE_TESTS_CLASS_ADDRESS : 0) |
                                          (copies ? BUSTER_NODE_TESTS_CLASS_COPIES : 0) | (node_census_modifies(op) ? BUSTER_NODE_TESTS_CLASS_WRITE : 0) |
                                          (order && policy->ordered && !always ? BUSTER_NODE_TESTS_CLASS_QUIET_ORDER : 0) | (!leaf && always ? BUSTER_NODE_TESTS_CLASS_ALWAYS : 0));
@@ -2955,7 +3077,7 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
             trigger = node_tests_constants(s, r, node, op, o, &fires);
         }
     }
-    tests |= fires ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+    tests |= fires || node_census_constant_logical(s, node) ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
     if (trigger != NODE_TESTS_TRIGGERS)
     {
         node_tests_send(r, trigger, visit, visits, counts);

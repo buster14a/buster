@@ -58,7 +58,8 @@ static void check_common_exhausted(Preprocessor* pp)
 // body's that the parse error ended, after every diagnostic of the unit's. A rejected unit's reading of the view
 // (check_driver_rejected_read) edits its tokens: `to_unit` takes the reading's to the view's (BUSTER_CHECK_NONE at one the
 // reading adds), `count` tokens. Null `complete` for any other unit: the driver sets it around a repaired view's common
-// warnings alone.
+// warnings alone. A complete-declaration prefix also retains its original parser and count, so its final body's
+// lookahead maps to the next original token rather than the later whole-unit EOF; it needs no warning filter.
 typedef struct CheckCommonView CheckCommonView;
 struct CheckCommonView
 {
@@ -105,7 +106,10 @@ static uint32_t check_common_publication_source(const Parser* parser, const Prep
     // (A token a reading adds publishes as the reading's sources put it.)
     const bool own = view->complete == NULL || at < view->end || (at == BUSTER_CHECK_NONE && publication < parser->tokens.count);
     const bool synthetic = !own && at > view->closed;
-    const uint32_t result = own ? (publication < parser->tokens.count ? parse_source_index(&parser->tokens, publication) : pp->output.count) :
+    // An edited rejected reading has its own token count, but ends at the same original prefix boundary.
+    const uint32_t end = view->complete == NULL && view->original != NULL && publication == parser->tokens.count &&
+                         view->count < view->original->tokens.count ? parse_source_index(&view->original->tokens, view->count) : pp->output.count;
+    const uint32_t result = own ? (publication < parser->tokens.count ? parse_source_index(&parser->tokens, publication) : end) :
                             !synthetic && at < view->original->tokens.count ? parse_source_index(&view->original->tokens, at) : pp->output.count;
     return result;
 }

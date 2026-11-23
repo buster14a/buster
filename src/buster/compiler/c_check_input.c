@@ -2877,6 +2877,56 @@ static void check_input_warning_once(CheckInputReader* reader, const CheckWarnin
     }
 }
 
+// Clang excludes only a direct enumeration reference, not a parenthesized or otherwise wrapped one. The adjacent
+// identifier must be the operator's own parse child; graph nodes alone erase the parentheses that distinguish them.
+static bool check_input_logical_enumerator(const CheckInput* input, const Parser* parser, uint32_t token, uint32_t parent)
+{
+    const uint32_t declaration = token < input->token_count && input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const bool result = token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER &&
+                        parser->tree.parents[token] == parent && declaration < input->token_count && input->declaration_kinds != NULL &&
+                        input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+    return result;
+}
+
+// Both the constant/type-query reader and the checked graph retain this fact, once per operator. Query operands
+// need the former because their nodes may disappear; failed assertions need the latter before error recovery.
+static void check_input_constant_logical_warning(CheckInputReader* reader, const CheckAction* action, const CheckActionResult* checked, uint32_t completion)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t token = action->node;
+    const bool logical = action->op == CHECK_OP_LOGICAL_AND || action->op == CHECK_OP_LOGICAL_OR;
+    const bool macro = token < parser->tokens.count && parser->tokens.flags != NULL && (parser->tokens.flags[token] & BUSTER_PP_FROM_MACRO) != 0;
+    const bool enumerator = logical && (check_input_logical_enumerator(reader->output, parser, token != 0 ? token - 1 : BUSTER_CHECK_NONE, token) ||
+                                       check_input_logical_enumerator(reader->output, parser, token + 1, token));
+    const uint64_t key = (uint64_t)CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND << 32 | ((uint64_t)token + 1);
+    CheckWarningEvent event;
+    if (logical && token < parser->tokens.count && !macro && !enumerator &&
+        !check_warning_set_contains(&reader->source_warning_keys, key) &&
+        check_warning_constant_logical_event(reader->types, action, checked, token, completion, &event))
+    {
+        const CheckWarningNote notes[] =
+        {
+            {
+                .kind = CHECK_WARNING_NOTE_LOGICAL_BITWISE,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .data = event.payload.data },
+            },
+            {
+                .kind = CHECK_WARNING_NOTE_LOGICAL_REMOVE_CONSTANT,
+                .token = token,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            },
+        };
+        const bool retained = check_warning_set_add(&reader->source_warning_keys, key);
+        reader->output->resource |= !retained;
+        if (retained)
+        {
+            check_input_warning_event(reader, &event, notes, action->op == CHECK_OP_LOGICAL_AND ? 2 : 1);
+        }
+    }
+}
+
 // Emit only after the ordinary specifier state has proved a duplicate. The sparse key also suppresses a repeated
 // read when a typeof or a deferred attribute resumes this declaration. No additional token column or pass is needed.
 static __attribute__((noinline, cold)) void check_input_duplicate_specifier(CheckInputReader* reader, uint32_t token, uint32_t name)
