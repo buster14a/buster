@@ -877,6 +877,7 @@ static __attribute__((noinline)) bool check_action_convert_half(const TypeTable*
         const unsigned __int128 bits = value->integer & mask;
         const bool negative = source_signed && (bits >> (source_width - 1)) != 0;
         value->floating = check_action_half_value(half, check_action_half_round(half, negative, negative ? (0 - bits) & mask : bits, 0));
+        value->integer = 0;
         value->constant_kind = CHECK_CONSTANT_FLOATING;
     }
     else if (floating)
@@ -912,6 +913,8 @@ static __attribute__((noinline)) void check_action_convert_quad_integer(CheckVal
         value->integer = input < 0 ? (unsigned __int128)(__int128)input : (unsigned __int128)input;
         value->integer &= check_action_mask(width);
     }
+    value->floating_storage[0] = 0;
+    value->floating_storage[1] = 0;
     value->constant_kind = CHECK_CONSTANT_INTEGER;
 }
 
@@ -969,6 +972,8 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         const long double limit = (long double)high_bit * (target_signed ? 1.0L : 2.0L);
         const long double minimum = target_signed ? -limit : 0;
         const long double input = value->floating;
+        value->floating_storage[0] = 0;
+        value->floating_storage[1] = 0;
         // For 128-bit signed values the host x87 cannot distinguish minimum - 1 from minimum.
         const bool lower = target_signed && target_width == 128 ? input >= minimum : input > minimum - 1;
         if (!__builtin_isfinite(input) || !lower || input >= limit)
@@ -993,6 +998,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         if (value->object == 0 && pointer)
         {
             value->integer = (unsigned __int128)(uint64_t)value->offset & check_action_mask(target_width);
+            value->offset = 0;
             value->constant_kind = CHECK_CONSTANT_INTEGER;
         }
         else if (target_width != 64 || (!pointer && (!source_integer || source_width != 64)) || (value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0)
@@ -1068,6 +1074,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
                     number = (long double)magnitude;
                 }
                 number = negative ? -number : number;
+                value->integer = 0;
             }
             const TypeId to = type_unqualified(type_strip_aligned(table, destination));
             number = check_action_convert_nan(type_unqualified(type_strip_aligned(table, source)), to, number);
@@ -1080,6 +1087,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         value->constant_kind = CHECK_CONSTANT_ADDRESS;
         value->object = 0;
         value->offset = 0;
+        value->integer = 0;
     }
     else if (target_kind == BUSTER_TYPE_KIND_POINTER && source_integer && value->constant_kind == CHECK_CONSTANT_INTEGER)
     {
@@ -1094,6 +1102,7 @@ static void check_action_convert_plain(const TypeTable* table, CheckValue* value
         value->constant_kind = CHECK_CONSTANT_ADDRESS;
         value->object = 0;
         value->offset = (int64_t)(uint64_t)bits;
+        value->integer = 0;
     }
     else if (target_kind == BUSTER_TYPE_KIND_POINTER && value->constant_kind == CHECK_CONSTANT_ADDRESS)
     {

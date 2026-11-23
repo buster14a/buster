@@ -232,7 +232,8 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     alone->view.availability_contexts = unit->availability_contexts;
     alone->view.ns_constant_string = unit->ns_constant_string;
     alone->view.cfstring_class = unit->cfstring_class;
-    alone->view.const_values = unit->const_values;
+    // The receipts as the reading has them so far, as the reader's own chunk graph takes them (#2987).
+    alone->view.const_values = &reader->output->const_values;
     alone->view.const_warnings = unit->const_warnings;
     alone->view.const_warning_count = unit->const_warning_count;
     alone->view.fp_contract_default = unit->fp_contract_default;

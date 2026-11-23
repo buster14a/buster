@@ -196,8 +196,8 @@ static const char node_census_test_quiet[] =
 // beside a literal to a pointer's is quiet, and the other way round is not; past the parameters none is asked); an
 // initializer that starts with a parenthesis, whose warning's event is before its first node's token (#3017), beside
 // a for statement's clauses a line each, whose first one's event is no other's; an atomic pointer assigned, whose own
-// type is no pointer's where its conversion's is; and an integer constant folded from a floating one, whose record's
-// payload and exponent are the floating value's (#3014): it is no small divisor by that exponent.
+// type is no pointer's where its conversion's is; and an integer constant folded from a floating one: only the truncated
+// integer counts as the divisor (#3014, #3022).
 // Seventy of one name summed: 139 records, so that the other operand of what is above them is further back than the
 // block before.
 #define BUSTER_NODE_CENSUS_TEST_TEN(name) name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name " + " name
@@ -2973,10 +2973,8 @@ static const char node_contexts_test_source[] =
     // call is on the first pass's list and its other argument on the second's. The two lists are run in the window's
     // order, each argument's rule before the call's, which then makes the call from T's records of both.
     "    a = callee(callee(o->inner.bits, b), callee(1e100, b));\n"
-    // An integer constant folded from a floating one (#3014): its record's payload is the floating value's, its integer
-    // zero. As an argument its conversion is T's (the rule takes an integer's value from a payload that is the
-    // integer's), and so is a null pointer made of it, whose value keeps the floating storage: an assignment's, and
-    // what reads the assignment after.
+    // A zero folded from a floating constant as an argument, as a null pointer and as the value of an
+    // assignment. Each conversion reads the new kind's payload (#3014, #3022).
     "    fl((int)0.5);\n"
     "    fi((int)1e-4900L);\n"
     "    vf(a, (int)0.5);\n"
@@ -6983,7 +6981,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .spared = 34,
         .direct = 2,
         .apart = 3,
-        .decided = 41,
+        .decided = 42,
         .decided_refused = 1,
     };
     static const NodeTestsWindowed windowed_clean = {
@@ -7038,8 +7036,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .expressions = 475,
         .trees = 29,
         .operators = 130,
-        .sent = 55,
-        .walks = 12,
+        .sent = 51,
+        .walks = 11,
         .far = 37,
         .quiet = 77,
         .calls = 179,
@@ -7048,11 +7046,11 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .casts_left = 30,
         .asks = 9,
         .nulls = 8,
-        .values = 253,
+        .values = 254,
         .spared = 263,
         .direct = 211,
         .apart = 22,
-        .decided = 446,
+        .decided = 457,
         .decided_refused = 10,
     };
     // (The loop leaves three ordered comparisons of two pointers out: `p < e`, `ga < p` and the `while`'s.)
@@ -7153,17 +7151,19 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .direct = 2,
         .decided = 3,
     };
+    // T refuses the four expressions that read `k` or `one` under `&&` before any test runs (#2987's const conditions,
+    // node_machine_const_control): the window and the reader-time tests have the other 21.
     static const NodeTestsWindowed windowed_logical = {
-        .expressions = 25,
-        .operators = 22,
+        .expressions = 21,
+        .operators = 18,
         .walks = 1,
-        .quiet = 5,
+        .quiet = 4,
         .calls = 1,
         .calls_checked = 1,
-        .values = 25,
-        .spared = 22,
+        .values = 24,
+        .spared = 18,
         .direct = 1,
-        .decided = 23,
+        .decided = 19,
     };
     static const NodeTestsWindowed windowed_logical_quiet = {
         .expressions = 1,
@@ -7313,7 +7313,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                                                              0, 0, windowed_builtins),
                       "node-tests: at reader time a unit with no_builtin has its calls made, and each library call's semantics by its own function");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "logical.c", node_census_test_logical, quiet, BUSTER_ARRAY_LENGTH(quiet),
-                                                             BUSTER_NODE_FRONT_AFTER, 7, 3, windowed_logical),
+                                                             BUSTER_NODE_FRONT_AFTER, 4, 3, windowed_logical),
                       "node-tests: both reader-time forms refuse logical warnings before their graph events exist");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "logical-quiet.c", node_census_test_logical_quiet, logical_quiet,
                                                              BUSTER_ARRAY_LENGTH(logical_quiet), BUSTER_NODE_FRONT_AFTER, 0, 0, windowed_logical_quiet),
@@ -7324,7 +7324,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // C on the window: its own fixture's counts, each rule on both sides.
     static const NodeContextsExpected contexts_expected = {
         .expressions = 2536,
-        .decided = 2270,
+        .decided = 2276,
         .refused = 61,
         .strides = 241,
         .asked = 7,
@@ -7338,24 +7338,24 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .sunk = 18,
         .commas = 224,
         .listed = {
-            [BUSTER_NODE_CONTEXTS_REASON_CALL] = 43,
+            [BUSTER_NODE_CONTEXTS_REASON_CALL] = 44,
             [BUSTER_NODE_CONTEXTS_REASON_LOGICAL] = 183,
             [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 15,
             [BUSTER_NODE_CONTEXTS_REASON_COMMA] = 5,
             [BUSTER_NODE_CONTEXTS_REASON_DIVISION] = 2,
-            [BUSTER_NODE_CONTEXTS_REASON_WIDE] = 16,
+            [BUSTER_NODE_CONTEXTS_REASON_WIDE] = 9,
             [BUSTER_NODE_CONTEXTS_REASON_OPERATOR] = 2,
         },
         .calls = 362,
-        .calls_made = 336,
-        .calls_converted = 312,
-        .calls_plain = 303,
+        .calls_made = 339,
+        .calls_converted = 315,
+        .calls_plain = 306,
         .calls_left = 21,
-        .calls_compared = 309,
+        .calls_compared = 312,
         // Callee and argument checks run consecutively for each call. A shared
         // slot therefore sees a different sequence of conversion keys.
-        .single_answers = 2487,
-        .single_timed = 355,
+        .single_answers = 2515,
+        .single_timed = 359,
     };
     check_test_expect(test, ready && node_contexts_test_fixture(directory, "contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &contexts_expected),
                       "node-contexts: C on the window decides each expression of its rules as C does on T's columns, and lists the kinds it has no case for");
@@ -7375,13 +7375,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // rules' records.
     check_test_expect(test, node_rows_test_tables(), "node-rows: each shape's row has its length's entries, and no class's source where the rows' write resolves none");
     static const NodeRowsExpected rows_expected = {
-        .expressions = 1379,
-        .taken = 1233,
-        .entries = 10123,
+        .expressions = 1390,
+        .taken = 1240,
+        .entries = 10144,
         .listed_update = 133,
         .listed_branches = 1,
         .listed_conversion = 10,
-        .listed_floating = 2,
+        .listed_floating = 6,
         .written = 11143,
         .words = 405,
         .lines = 625,
@@ -7398,21 +7398,21 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         },
         .numbered = 68,
         .steps = 473,
-        .control_valued = 308,
+        .control_valued = 310,
         .chunks = 9,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows.c", node_rows_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_expected),
                       "node-rows: X's rows on the window make each shape's entries' kinds and classes as X does on T's columns, and list what they don't make");
     static const NodeRowsExpected rows_contexts_expected = {
-        .expressions = 2209,
-        .taken = 2188,
-        .entries = 20946,
+        .expressions = 2215,
+        .taken = 2194,
+        .entries = 20965,
         .listed_update = 0,
         .listed_branches = 5,
         .listed_conversion = 10,
         .listed_floating = 6,
-        .written = 23351,
-        .words = 536,
+        .written = 23354,
+        .words = 537,
         .lines = 501,
         .updates = 854,
         .branched = 1667,
@@ -7427,7 +7427,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         },
         .numbered = 223,
         .steps = 1895,
-        .control_valued = 547,
+        .control_valued = 548,
         .chunks = 23,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-contexts.c", node_contexts_test_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_contexts_expected),
@@ -7491,9 +7491,9 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-branch.c", node_rows_test_branch_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_branch_expected),
                       "node-rows: in a chunk with one condition evaluated as branches and no update, X's rows on the window make its tested values' tests");
     static const NodeRowsExpected rows_values_expected = {
-        .expressions = 1064,
-        .taken = 1058,
-        .entries = 9877,
+        .expressions = 1066,
+        .taken = 1060,
+        .entries = 9883,
         .listed_update = 3,
         .listed_branches = 0,
         .listed_conversion = 0,
@@ -7514,7 +7514,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         },
         .numbered = 244,
         .steps = 724,
-        .control_valued = 264,
+        .control_valued = 265,
         .chunks = 10,
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-values.c", node_rows_test_values_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_values_expected),
