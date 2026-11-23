@@ -790,14 +790,24 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const IrSwitchTable* tables = stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 ?
                                       check_tier1_switch_tables(lane->lowered, lane->emitting_body, function, scratch, &table_count, &table_first) :
                                       NULL;
-    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
-                     check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
+    const bool ready = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
+                       check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
     // A candidate whose callers should expand every call of it makes no code now (#2541 step 2, check_tier1_inline_held):
     // it waits for the emission's last pass, which makes it where some emitted code still refers to it.
-    if (own && check_tier1_inline_held(lane, (uint32_t)body, target))
+    if (ready && check_tier1_inline_held(lane, (uint32_t)body, target))
     {
         outcome = (CheckTier1Outcome){ .held = true };
         stage = CHECK_TIER1_STAGE_COUNT;
+    }
+    // But one that takes, returns or passes a by-value aggregate (#3311: its own ABI records, or its calls' aggregates'
+    // metadata) makes its code by the whole pipeline: its summary keeps those aggregates for its callers' expansions, and
+    // its own code passes them as scalars (ir_sroa_scalarize, ir_sroa_scalarize_calls), which only the own pipeline runs.
+    const bool aggregates = ir_typed_own_records(function) || function->argument_sizes != NULL || function->call_result_objects != NULL;
+    const bool own = ready && !aggregates;
+    if (ready && !own)
+    {
+        passes = (CheckTier1Passes){ 0 };
+        inlined_calls = 0;
     }
     if (stage == CHECK_TIER1_COMPILED && !own)
     {
