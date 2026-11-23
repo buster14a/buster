@@ -3609,6 +3609,173 @@ after the pipeline, 472 with their address taken), a volatile local's left to th
 - **What is still not a producer's:** the body's own reasons are read from the program's controls and plans, and the
   twin's gates from the reader's columns as they stand after the walk. A producer decides before the walk.
 
+## The redesign's sixth piece: the producer, deciding before the walk
+
+The fifth piece's two sets were the oracle's: read after the walk, from the program's controls and the lowered
+functions. A compile that takes a body has to decide before the walk reads it, and a taken body may have no diagnostic
+of any stage, since every phase after the mask would skip it. This piece is the producer that decides there
+([`node-machine.md`](node-machine.md), "The producer, deciding before the walk"), still in the shadow: no compile
+changes.
+
+### What it measured
+
+Develop builds on this session's machine (counts), Release on the 9700X (ticks, 3,792.9 MHz);
+[the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22):
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| lowered bodies | 2,668 | 1,096 | 1,516 | 2,756 |
+| the set the comparisons give: bodies; of the body tokens | 1,760; 30.89% | 547; 21.48% | 179; 2.32% | 1,176; 17.67% |
+| the producer takes, before the walk: bodies; of the body tokens | 1,747; 30.65% | 545; 21.42% | 0 | 1,096; 16.09% |
+| of them outside the set; whose kept controls differ from the program's | 0; 0 | 0; 0 | 0; 0 | 0; 0 |
+| bodies it does not read, as a compile would run it, of every body of the units | 610 of 2,674 | 354 of 1,096 | all 8,739 | 13,693 of 18,584 |
+
+As a compile would run it on `sqlite3.c` (three rounds, medians, at `00ef81d5f`: before main's merge and the rules
+added since, with 1,753 bodies taken): the bodies' reading 45.46 M ticks (11.99 ms), of
+which the producer's own passes are 7.56 M before any reading and 7.43 M after it, the compaction and the entries
+6.59 M, the front 10.28 M and its graph's writing 11.14 M; and the reference machine's one run 65.08 M (17.16 ms) for
+258,955 positions, 251 ticks each. **110.54 M ticks in all, 29.14 ms.**
+
+### Against its gates
+
+- **P1, sound against the oracle: met.** On the four corpora, read as the walk reads them, as `-c` reads a unit and as
+  a compile would run the producer: every body it takes is in the comparisons' set and its kept controls are the
+  program's (twenty runs, each status 0); with `-Wall -Wextra` it takes none.
+- **P1, sound against the diagnostics: met for what a log by location can see.** With the producer run beside every
+  unit's ordinary read and nothing masked: 111,906 units of the checker's and the driver's tests, 74,783 of them
+  with the producer run, 36,393 of 1,956,140 bodies taken, 1,191,188 diagnostics looked at, none at a token of a
+  taken body; and none on the corpora (1,753, 545, 0 and 4,442 bodies taken). What it cannot see (a
+  diagnostic reported outside the body that causes it, the object, a body another function's lowering reads) the next
+  piece found three cases of by compiling small units with the bodies taken and without, and main's merge a fourth; each
+  has a rule and a fixture here.
+- **P2, counted:** the table above, with what it leaves by its reason in [`node-machine.md`](node-machine.md).
+- **P3, its ticks:** above, three rounds on the 9700X at `00ef81d5f`, before main's merge and the rules added since,
+  which leave six more of `sqlite3.c`'s bodies (1,753 taken then, 1,747 now).
+- **P4, nothing else moves: not read.** No compile runs the piece. Its pair on the 9700X was queued with the next
+  piece's and never ran: this session's forty-one build trees had filled that machine's disk, the build of the commit
+  to time failed, and the job took the lock twelve times for runs that stopped at once. The trees are removed
+  (47 GB) and the pairs run again on the merged heads.
+- **P5, the next piece's price, said again:** about 16 ms slower than without the option, below.
+- **Single faults:** 55 of 56 fail a fixture; the one that does not is in a form no path of this piece runs
+  ([`node-machine.md`](node-machine.md), "Against the diagnostics").
+
+### What it means
+
+- **A producer can decide before the walk what the oracle decides after it.** It takes 1,747 of the 1,760 bodies of
+  `sqlite3.c`'s set, 545 of Lua's 547 and 1,096 of musl's 1,176; what it leaves is a rule's doing, each a refusal that
+  stands for a diagnostic of a later pass and refuses more than is warned of.
+- **Its price is the reference machine's.** When it was timed it read and swept 2,065 of `sqlite3.c`'s 2,674 bodies
+  to take 1,759; the program lowers 1,753 of those, with 175,797 tokens, which are worth 13.04 ms at the 74.2 ns a
+  taken token saves (the other six are static functions nothing names). Against 29.14 ms, the first compile
+  that takes its bodies is predicted about 16 ms slower than without them, where [the
+  specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7085227363) said 8 to 10 from the
+  oracle's sets. The whole bodies alone cost 334 ticks a token to read and sweep (88 ns) against the 74.2 ns one saves:
+  with the reference machine no coverage pays, and what pays first is its cost a position.
+- **The corpora and the tests' units were not enough to find what it must refuse.** The compile built on it found
+  three more things by compiling small units of one body each with the bodies taken and without, and this piece's
+  rules have them since: a target that fuses a product and a sum, a naked function, and an `always_inline` wrapper.
+  Main's merge brought a fourth, a volatile access, which the lowering's templates leave to its tasks since #3310.
+  The machine is the lowering's mirror, and each change of the lowering's is a change it owes: the oracle on the
+  corpora is what says so, and it has to be run on main's head before each piece lands.
+
+## The redesign's seventh piece: a compile that takes the producer's bodies
+
+`--node-bodies` on a compile to an object: the reader masks the bodies the producer takes before the walk reads any,
+and the lowering writes each one's function from its kept controls and tapes
+([`commands/lowering.md`](commands/lowering.md), "Compiling with the bodies taken"). It is the first piece in which a
+compile does less of the old work for a body, and it is off by default: it is exact and slower.
+
+### What it measured
+
+The 9700X, Release, CPU 2, each pair the same binary with the option and without, at `06681bbdb`
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)):
+
+| | without | with `--node-bodies` | paired; its least and most | bodies taken |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, seven rounds, ms | 117.382 | 140.247 | +23.064; +22.266, +23.419 | 1,753 of 2,674 |
+| Lua's 34 units, five rounds | 65.663 | 76.331 | +10.680; +10.403, +10.776 | 545 of 1,096 |
+| the compiler's own source | 617.975 | 636.013 | +18.549; +14.735, +21.119 | none of 8,739 |
+| musl's 1,336 units | 662.998 | 757.900 | +95.027; +94.254, +95.739 | 4,442 of 18,584 |
+
+On `sqlite3.c`: 95.7 M user cycles, 31.9 M kernel cycles and 207.8 M instructions more. Each pair has one set of
+objects and one of diagnostics.
+
+### Against its gates
+
+- **C1, exact: met, by its outputs.** The corpora's objects, diagnostics and statuses are the ordinary compile's, plain
+  and as position-independent code; so are 349 small units' and those units' under every option set that accepts one;
+  and so is every output of the 43,914 commands of the tests' 34 blocks, replayed with the bodies taken and without.
+  The tests pass with the option forced, with every body the producer takes and with each half of them. What found the
+  piece's errors was the outputs, never the tests' programs: `commands/lowering.md` has the list and the counts.
+- **C2, its price: 23.06 ms slower on `sqlite3.c`, and the prediction refuted.** The sixth piece said about 16, and
+  that a reading over 22 would refute it. The producer's path was timed in ticks of its own code (29.14 ms) against
+  what its tokens save (13.04 ms); the pair has 31.9 M kernel cycles more besides, some 6 ms, which a count of the
+  path's own ticks does not see.
+- **C3, the option off: nothing moves.** Against main's commit the branch stood on: -0.120 ms on `sqlite3.c`, -0.183
+  on Lua, -4.950 on the compiler's own source, -2.637 on musl.
+
+### What it means
+
+- **The harness exists.** A piece that makes a taken body cheaper, or takes more bodies, is now priced by one paired
+  reading with the option, and its exactness by the same nets.
+- **A taken body costs more than it saves, and a unit pays before it takes any.** The compiler's own source takes no
+  body and is 18.5 ms slower; musl's 1,336 small units are 71 µs slower each. What the producer sets up for a unit is
+  to be paid for only by a unit that takes bodies, and its memory is part of its price.
+- **The order of what follows is the cost's, not the coverage's:** the machine's run (251 ticks a position, 17 ms of
+  `sqlite3.c`'s 29) in the forms that were measured at a fraction of that on the window, with a volatile access's bit
+  first; the reading's two writes of the same positions; and the unit's fixed cost. Coverage (`sizeof`, a `switch`,
+  the bodies refused after their sweeps) pays only once a taken token costs less than it saves.
+- **A mirror is owed every change of what it mirrors.** Three things the lowering does and the machine did not were
+  found under this piece: a sum fused with a product and #2983's wrappers, which were there before it, and #3310's
+  volatile marks, which main merged during it. Each was a difference of an object with nothing said. The oracle on the
+  corpora and the units' sweep are run on main's head before a piece of this redesign lands.
+
+## The redesign's eighth piece: a unit that takes no body pays nothing
+
+The seventh piece's pair read a cost that no taken body explains: the compiler's own source takes none and was 18.5 ms
+slower with `--node-bodies`. The option began the reader's machine and the machine with no node of the walk's for
+every unit, and both make and clear columns by the unit's tokens, before the producer asked the unit's own reason. A
+compile asks that reason first now, and a unit with one has no front
+([`commands/lowering.md`](commands/lowering.md), "Compiling with the bodies taken").
+
+### What it measured
+
+The 9700X, Release, CPU 2, paired, five rounds a pair and seven on `sqlite3.c`
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)):
+
+| the option against without, ms | before, at `4fcadeb45` | after, at `b0ee1afaa` |
+| --- | ---: | ---: |
+| the compiler's own source (no body taken: a diagnostic pragma) | +18.549, at `06681bbdb` | -0.670; -2.062, +2.774 |
+| `sqlite3.c` with `-Wall -Wextra` (no body taken: a warning option) | +5.820; +5.270, +5.955 | +0.289; -0.467, +0.429 |
+| `sqlite3.c` (1,753 bodies taken) | +23.064, at `06681bbdb` | +23.659; +23.366, +24.051 |
+| Lua (545) | +10.680, at `06681bbdb` | +10.650; +10.594, +10.987 |
+| musl (4,442) | +95.027, at `06681bbdb` | +93.419; +92.641, +96.511 |
+
+With the option in both arms, the head before against this one on `sqlite3.c`: -0.205 ms (-0.483 to +0.040, six of
+seven rounds lower): the 0.6 ms between the two readings of `sqlite3.c` above is the two jobs', not the piece's. With
+the option off, head against head: `sqlite3.c` +0.025 ms, the compiler's own source -2.273, Lua +0.093, musl +0.655.
+
+### Against its gates
+
+- **U1, the same verdicts: met.** The producer against the oracle on the four corpora, twenty runs, each status 0, the
+  same bodies taken.
+- **U2, exact: met.** The corpora's objects plain, with `-fPIC` and with `-Wall -Wextra`; the 349 units; the option
+  sets' sweep (31,016 pairs); the driver's eight parts, with a unit that has a diagnostic pragma, whose line reads no
+  body decided.
+- **U3, its price: met.** The two units with a reason are within a millisecond of zero, and the three workloads that
+  take bodies are not slower.
+- **U4, the option off: nothing moves.**
+- Two single faults (a unit with a reason still given a front; a diagnostic pragma that is no reason) each fail the
+  option's test.
+
+### What it means
+
+- **A build with warning options no longer pays for the option at all.** Until the producer takes bodies under `-W`
+  options, that is every unit of most builds.
+- **What is left is a unit that takes bodies:** 23.7 ms on `sqlite3.c`. Its machine's columns are still by the unit's
+  tokens, not by the bodies it reads; that, the machine's run and the reading are the next cuts, in that order of
+  ease.
+
 ## Step 5's allocation, and its kept rows in the compile
 
 [#2873](https://github.com/buster14a/buster/issues/2873). After the census,

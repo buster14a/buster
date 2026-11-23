@@ -4587,10 +4587,11 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
 
 // Whether an aggregate argument's or parameter's `location` has it on the stack whole, its bytes in its slots from its
 // first: STACK, but for the high or the low eightbyte alone (HIGH, LOW, #141), each in one slot, and a record's vector
-// payload alone (PAYLOAD, #2798), whose slot is a part's (tier1_select_location_parts).
+// payload alone (PAYLOAD, #2798), whose slot is a part's (tier1_select_location_parts), and a FIRST location's (#1844), whose
+// slots are its first 16 bytes' alone.
 static bool tier1_select_location_whole(AbiLocation location)
 {
-    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0;
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0;
 }
 
 // The bytes of the vector register a part of `bytes` takes whole (#141, #2798): its own 16, 32 or 64, or a payload's
@@ -4616,6 +4617,9 @@ static bool tier1_select_part_payload(uint32_t bytes)
 // register; none on the stack whole or ignored.
 static uint32_t tier1_select_location_parts(AbiLocation location, uint32_t size, Tier1SelectPart* parts)
 {
+    // A FIRST location's (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's registers),
+    // of the value's first 16 bytes alone.
+    size = (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : size;
     const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
     const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
     const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
@@ -4680,11 +4684,14 @@ static uint16_t tier1_select_part_form(uint32_t bytes, bool load)
 
 // Whether a function's own result part is loaded straight from the result's address on the way out (#1847): a whole
 // vector register's, 16, 32 or 64 bytes of a split vector (tier1_select_result_parts), which no byte past the object's
-// widens and whose load can't overwrite the address, a general register; and a record's payload (#2798), in pieces that
-// stay inside it (tier0_payload_load). Any other part is staged in the red zone.
+// widens and whose load can't overwrite the address, a general register; a record's payload (#2798), in pieces that
+// stay inside it (tier0_payload_load); and since #3299 a whole eightbyte's, 8 bytes of the object into a general
+// register (an __int128's halves into rax and rdx) or an xmm one, whose load reads no byte past them either. A general
+// register's load may overwrite the address: tier1_select_result_order loads that part last. Any other part (an
+// eightbyte's tail of fewer bytes, which an 8-byte load would read past) is staged in the red zone.
 static bool tier1_select_part_direct(Tier1SelectPart part)
 {
-    return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16;
+    return ((part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && part.bytes >= 16) || part.bytes == 8;
 }
 
 // The parts of an aggregate result of `size` bytes in rax and rdx or xmm0 and xmm1 (#789), eightbyte 1 alone with HIGH
@@ -4716,6 +4723,45 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
     return count;
 }
 
+// Whether a part of `bytes` in a vector register is wider than its xmm register (#2830): a whole ymm or zmm register's,
+// whose bits above 127 a vzeroupper would zero.
+static bool tier1_select_part_wide(Tier1SelectPart part)
+{
+    return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && tier1_select_part_width(part.bytes) > 16;
+}
+
+// Whether a call passes an argument wider than 16 bytes in a vector register (#2830): an aggregate's whole ymm or zmm part
+// (#141), live in its register at the call, which no vzeroupper may then precede.
+static bool tier1_select_call_wide(const IrFunction* function, const IrCall* call)
+{
+    bool wide = false;
+    for (uint32_t argument = 0; call->abi != 0 && argument < call->argument_count; argument += 1)
+    {
+        const IrPassed* record = tier1_select_argument_record(function, call, argument);
+        Tier1SelectPart parts[2];
+        const uint32_t count = tier1_select_location_whole(record->location) ? 0 : tier1_select_location_parts(record->location, record->size, parts);
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            wide = wide || tier1_select_part_wide(parts[k]);
+        }
+    }
+    return wide;
+}
+
+// Whether the function returns a part wider than 16 bytes in a vector register (#2830): a vector's whole ymm or zmm register
+// (#141, #1624), live at each ret, which no vzeroupper may then precede.
+static bool tier1_select_result_wide(const IrFunction* function)
+{
+    Tier1SelectPart parts[BUSTER_TIER1_SELECT_RESULT_PARTS];
+    const uint32_t count = function->result_size != 0 ? tier1_select_result_parts(function->result_abi, function->result_size, parts) : 0;
+    bool wide = false;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        wide = wide || tier1_select_part_wide(parts[k]);
+    }
+    return wide;
+}
+
 // The first red-zone staging slot of result part k (#1624): the slots of the staged parts before it, each an eightbyte's
 // one (tier1_select_part_slots), past those loaded straight from the result's address (#1847, tier1_select_part_direct),
 // which take none. Of k = the part count, the slots they all take, which BUSTER_TIER1_SELECT_RED_ZONE_SLOTS bounds
@@ -4728,6 +4774,21 @@ static uint32_t tier1_select_result_slot(const Tier1SelectPart* parts, uint32_t 
         slot += tier1_select_part_direct(parts[j]) ? 0 : tier1_select_part_slots(parts[j].bytes);
     }
     return slot;
+}
+
+// The part a function's own result loads `k`th of its `count` parts on the way out (#3299), from the address in general
+// register `source`: the parts in order, but a general register's part loaded straight from the address
+// (tier1_select_part_direct) into `source` itself, which goes last, so that no load reads the address after another
+// overwrote it. Its registers differ, so one part at most is that.
+static uint32_t tier1_select_result_order(const Tier1SelectPart* parts, uint32_t count, uint8_t source, uint32_t k)
+{
+    uint32_t last = count;
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        const bool general = (parts[j].reg & 0xe0) != BUSTER_ABI_REGISTER_VECTOR;
+        last = general && tier1_select_part_direct(parts[j]) && parts[j].reg == source ? j : last;
+    }
+    return last == count ? k : k + 1 == count ? last : k < last ? k : k + 1;
 }
 
 // Whether a function's own result parts, `count` of them, fit the red zone's slots, as its return stages them all at
@@ -4779,7 +4840,9 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
             placed &= parts[k].reg != BUSTER_ABI_REGISTER_NONE || slotted;
         }
         // A PAYLOAD slot (#2798) is a part's, its payload alone (tier1_select_location_parts).
-        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD)) == 0 &&
+        // So is a FIRST location's (#1844), whose parts are its first 16 bytes' alone; a FIRST location on the stack whole
+        // isn't taken (tier1_select_location_whole).
+        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0 &&
                     (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
     }
     return supported;

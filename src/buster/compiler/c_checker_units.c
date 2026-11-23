@@ -1053,7 +1053,7 @@ static bool check_units_merge(Link* link, const CheckUnitsUnit* units, uint32_t 
     }
     const bool symbols_added = valid;
     // Every symbol of the program's exists: the runtime joins now, before the program's atoms.
-    if (valid && !bind_begin(binding->bind, link, binding->runtime, binding->path, bytes, count, binding->arena))
+    if (valid && !check_program_bind_begin(binding, link, bytes, count))
     {
         const NameId name = binding->bind->name;
         if (name != 0 && name < link->names.count)
@@ -1769,7 +1769,7 @@ static void check_units_merge_lane(void* argument)
         }
         merge->symbols_added = merge->valid;
         CheckProgramBinding* binding = merge->binding;
-        if (merge->valid && !bind_begin(binding->bind, link, binding->runtime, binding->path, merge->bytes, count, binding->arena))
+        if (merge->valid && !check_program_bind_begin(binding, link, merge->bytes, count))
         {
             const NameId name = binding->bind->name;
             if (name != 0 && name < link->names.count)
@@ -2418,6 +2418,7 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             __atomic_fetch_add(&report->licm_moved, unit_report->licm_moved, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->sroa_split, unit_report->sroa_split, __ATOMIC_RELAXED);
             __atomic_fetch_add(&report->gvn_removed, unit_report->gvn_removed, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&report->value_tables, unit_report->value_tables, __ATOMIC_RELAXED);
             for (uint32_t k = 0; k < BUSTER_CHECK_TIER1_VECTORIZE_COUNTS; k += 1)
             {
                 __atomic_fetch_add(&report->vectorize[k], unit_report->vectorize[k], __ATOMIC_RELAXED);

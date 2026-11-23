@@ -955,6 +955,82 @@ static uint32_t tier1_wide_test_generate(Tier1WideTest* test, char* text, uint32
     return length;
 }
 
+// Comparisons of two 128-bit extensions (#3035): every predicate of two sign extensions and of two zero extensions
+// from i64 and from i32, which the split compares as their sources, and of a sign and a zero extension, which keep the
+// halves' general comparison; each truth value stored as a byte. Each pair of operands is a loaded word xored with a
+// constant, so that the all-zero inputs compare the constants themselves: equal values, the extremes of the 64-bit
+// signed range on either side of its sign boundary, and the 32-bit ones. Through every stage as a fixture, against the
+// interpreter on the unsplit function; and the split must leave a select for the mixed pairs' ordered predicates alone.
+static void tier1_wide_test_extended_compares(Tier1WideTest* test, char* text)
+{
+    static const uint64_t pairs[][2] = {
+        { 0, 0 },
+        { UINT64_C(0x8000000000000000), UINT64_C(0x7fffffffffffffff) },
+        { UINT64_C(0xffffffffffffffff), 0 },
+        { UINT64_C(0x80000000), UINT64_C(0x7fffffff) },
+        { UINT64_C(0xffffffff80000000), UINT64_C(0x8000000000000000) },
+    };
+    static const char* const predicates[] = { "eq", "ne", "lt", "le", "gt", "ge", "ult", "ule", "ugt", "uge" };
+    // Each kind's extensions of its first and second operand, and the width they extend.
+    static const char* const kinds[][3] = {
+        { "sext", "sext", "i64" },
+        { "zext", "zext", "i64" },
+        { "sext", "sext", "i32" },
+        { "zext", "zext", "i32" },
+        { "sext", "zext", "i64" },
+    };
+    const uint32_t pair_count = BUSTER_ARRAY_LENGTH(pairs);
+    uint32_t length = (uint32_t)snprintf(text, BUSTER_TIER1_WIDE_TEST_TEXT, "function (ptr) -> void {\nb0:\n  %%0 = param.ptr 0\n");
+    uint32_t next = 1;
+    uint32_t stored = 0;
+    for (uint32_t p = 0; p < pair_count; p += 1)
+    {
+        length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length,
+                                     "  %%%u = address.ptr %%0 offset=%u\n  %%%u = load.i64 %%%u align=8\n  %%%u = address.ptr %%0 offset=%u\n  %%%u = load.i64 %%%u align=8\n"
+                                     "  %%%u = const.i64 0x%" PRIx64 "\n  %%%u = xor.i64 %%%u, %%%u\n  %%%u = const.i64 0x%" PRIx64 "\n  %%%u = xor.i64 %%%u, %%%u\n"
+                                     "  %%%u = trunc.i32 %%%u\n  %%%u = trunc.i32 %%%u\n",
+                                     next, 16 * p, next + 1, next, next + 2, 16 * p + 8, next + 3, next + 2, next + 4, pairs[p][0], next + 5, next + 1, next + 4, next + 6, pairs[p][1], next + 7,
+                                     next + 3, next + 6, next + 8, next + 5, next + 9, next + 7);
+        const uint32_t wide[2] = { next + 5, next + 7 };
+        const uint32_t narrow[2] = { next + 8, next + 9 };
+        next += 10;
+        for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(kinds); k += 1)
+        {
+            const bool word = strcmp(kinds[k][2], "i32") == 0;
+            const uint32_t a = word ? narrow[0] : wide[0];
+            const uint32_t b = word ? narrow[1] : wide[1];
+            length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "  %%%u = %s.i128 %%%u\n  %%%u = %s.i128 %%%u\n", next, kinds[k][0], a, next + 1, kinds[k][1], b);
+            const uint32_t x = next;
+            const uint32_t y = next + 1;
+            next += 2;
+            for (uint32_t q = 0; q < BUSTER_ARRAY_LENGTH(predicates); q += 1)
+            {
+                length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length,
+                                             "  %%%u = icmp.i1 %%%u, %%%u %s\n  %%%u = zext.i8 %%%u\n  %%%u = address.ptr %%0 offset=%u\n  %%%u = store.void %%%u, %%%u align=1\n", next, x, y,
+                                             predicates[q], next + 1, next, next + 2, BUSTER_TIER1_WIDE_TEST_HALF + stored, next + 3, next + 2, next + 1);
+                next += 4;
+                stored += 1;
+            }
+        }
+    }
+    length += (uint32_t)snprintf(text + length, BUSTER_TIER1_WIDE_TEST_TEXT - length, "  %%%u = ret.void\n}\n", next);
+    tier1_wide_test_expect(test, length < BUSTER_TIER1_WIDE_TEST_TEXT && stored <= BUSTER_TIER1_WIDE_TEST_HALF, "the extended comparisons' program fits");
+    tier1_wide_test_program(test, "comparisons of extensions", text, 0, UINT32_MAX, UINT32_MAX, false, true);
+    // The split's selects: the mixed pairs' eight ordered predicates' alone.
+    const uint64_t output_mark = test->output.length;
+    IrFunction function;
+    IrWideResult split = { 0 };
+    bool ok = tier1_wide_test_parse(test, "comparisons of extensions", text, &function);
+    ok = ok && ir_wide_split(&function, &test->output, &test->scratch, &split).error == IR_OK;
+    uint32_t selects = 0;
+    for (uint32_t i = 0; ok && i < split.function.instruction_count; i += 1)
+    {
+        selects += split.function.op[i] == IR_SELECT;
+    }
+    tier1_wide_test_expect(test, ok && selects == 8 * pair_count, "the split compares two extensions of one kind as their sources, and only mixed ones by halves");
+    arena_pop_to(&test->output, output_mark);
+}
+
 typedef void (*Tier1WideTestTyped)(const void*, const void*, void*);
 
 static __attribute__((no_sanitize("function"))) void tier1_wide_test_typed_call(const uint8_t* code, const void* in, const void* ints, void* out)
@@ -1807,6 +1883,7 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
             if (file == 0)
             {
                 tier1_wide_test_x87_phis(&test, text);
+                tier1_wide_test_extended_compares(&test, text);
             }
             for (uint32_t p = 0; file == 0 && p < programs; p += 1)
             {
@@ -1827,9 +1904,9 @@ static __attribute__((unused)) int run_tier1_wide_tests(int argc, char** argv)
                 printf("test-tier1-wide: Tier 0's long double programs: %u of %u through the optimizer and Tier 1 natively\n", x87, BUSTER_TIER1_WIDE_TEST_TYPED);
                 typed += x87;
             }
-            // The fixtures, the long double phis' two programs and the conversions' (tier1_wide_test_x87_phis) and the
-            // random programs.
-            const uint64_t expected_runs = 2u * (BUSTER_ARRAY_LENGTH(tier1_wide_test_fixtures) + 3 + programs) * BUSTER_TIER1_WIDE_TEST_INPUTS + typed;
+            // The fixtures, the long double phis' two programs and the conversions' (tier1_wide_test_x87_phis), the
+            // extended comparisons' (tier1_wide_test_extended_compares) and the random programs.
+            const uint64_t expected_runs = 2u * (BUSTER_ARRAY_LENGTH(tier1_wide_test_fixtures) + 4 + programs) * BUSTER_TIER1_WIDE_TEST_INPUTS + typed;
             tier1_wide_test_expect(&test, file != 0 || test.native_runs == expected_runs, "every program runs natively on every input, with rematerialization and without");
             tier1_wide_test_expect(&test, file != 0 || test.refused == BUSTER_ARRAY_LENGTH(tier1_wide_test_refusals), "every refusal");
         }

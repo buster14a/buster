@@ -419,7 +419,7 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         "#pragma weak a = t\n#pragma weak v = w_storage\n#pragma weak ps = s\n#pragma weak c = t\n#pragma weak b = later\n"
         "#pragma weak u1 = t\n#pragma weak u2 = w_storage\n#pragma weak k1 = w_storage\n#pragma weak k2 = w_storage\n#pragma weak k3 = w_storage\n"
         "#pragma weak k4 = tls_t\n#pragma weak u3 = st\n#pragma weak k5 = w_storage\n#pragma weak u4 = later2\n#pragma weak k6 = w_storage\n"
-        "extern long k6;\nlong get_k6(void) { return k6; }\n"
+        "extern long k6;\nlong get_k6(void) { return k6 + u1() + u2; }\n"
         "int later(void) { return 9; }\nint later2(void) { return 11; }\n";
     static const char* const names[] = {
         "t", "w_storage", "s", "a", "v", "ps", "b", "c", "later", "main", "u1", "u2", "u3", "u4", "k1", "k2", "k3", "k4", "k5", "k6", "st", "other", "tls_t",
@@ -430,8 +430,11 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
     char programs[BUSTER_ARRAY_LENGTH(modes)][512] = { { 0 } };
     char captured[BUSTER_ARRAY_LENGTH(modes)][256] = { { 0 } };
     snprintf(path, sizeof(path), "%s/weak-aliases.c", directory);
-    const bool written = parse_test_write(path, source, sizeof(source) - 1);
-    check_test_expect(test, written, "the weak alias pragmas' fixture is written");
+    char override[512];
+    snprintf(override, sizeof(override), "%s/weak-alias-overrides.c", directory);
+    static const char strong[] = "int u1(void) { return 17; } long u2 = 25;\n";
+    const bool written = parse_test_write(path, source, sizeof(source) - 1) && parse_test_write(override, strong, sizeof(strong) - 1);
+    check_test_expect(test, written, "the weak alias pragmas' fixtures are written");
     for (uint32_t p = 0; written && p < BUSTER_ARRAY_LENGTH(modes); p += 1)
     {
         snprintf(objects[p], sizeof(objects[p]), "%s/weak-aliases-%u.o", directory, p);
@@ -462,6 +465,13 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         const bool linked = compiled && check_test_driver_spawn(link, &text) == 0;
         free(text);
         check_test_expect(test, linked && check_test_driver_capture(programs[p], captured[p], sizeof(captured[p])), "weak alias pragmas' objects link and run");
+        char overridden[256] = { 0 };
+        char* const replace[] = { (char*)clang, objects[p], override, "-o", programs[p], NULL };
+        text = NULL;
+        const bool replaced = compiled && check_test_driver_spawn(replace, &text) == 0;
+        free(text);
+        check_test_expect(test, replaced && check_test_driver_capture(programs[p], overridden, sizeof(overridden)) &&
+                               strcmp(overridden, "1 5 4 9 3 8 47 3\n") == 0, "a strong function and object override the pragma-only references");
     }
     check_test_expect(test, written && check_test_driver_same_files(objects[1], objects[2]), "weak alias pragmas' scalar and vector objects match byte for byte");
     for (uint32_t p = 1; p < BUSTER_ARRAY_LENGTH(modes); p += 1)
@@ -473,6 +483,7 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
         unlink(objects[p]);
         unlink(programs[p]);
     }
+    unlink(override);
     // A target never declared: clang's warning at the alias's name, by both paths, at -fsyntax-only.
     static const char undeclared[] = "#pragma weak d = undeclared_target\nint x;\n";
     const bool shape = parse_test_write(path, undeclared, sizeof(undeclared) - 1);

@@ -549,17 +549,54 @@ The record is buster-performance's [`ssa-passes-139-2026-11-14`](https://github.
 SROA (`+sroa`); #866's solver (`+gvn`) or its vector/mask-only form
 (`vectors`); loop store motion (`+storemotion`, #3309: [its
 guide](tier1-store-motion.md)); promotion; the wide integers' halves and the wide vectors'
-pieces; truth simplification; threading; if-conversion; LICM (`+licm`) or its
+pieces; truth simplification; threading; if-conversion; the switches of
+constants (`tables`, #3298); LICM (`+licm`) or its
 vector/mask-only form; the unroller (`+unroll`, #2755); and the optimizer,
 which runs SCCP, the identities, value numbering with memory (`+memory`,
 #2718), dead-code removal, CFG cleanup and its merges and layout, then the
 final verification that selection reads. `--tier1-passes=` turns each pass on
 or off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
-cleanup, the merges, the inlining and the vector/mask-only passes run;
+cleanup, the merges, the inlining, the switches of constants and the
+vector/mask-only passes run;
 unrestricted LICM, SROA, the unroller, loop store motion, the solver and value
 numbering with memory don't, and none repeats. The measurements below decided this, and
 [#2718's](ir-memory-value-numbering.md#measurements) for value numbering with
 memory.
+
+### Switches of constants (#3298)
+
+`ir_switch_table.c` takes a dense switch whose every arm only gives one value a
+constant: `case 3: return 9;`, or `case 3: r = 9; break;` with the switch's end
+or default among the arms, and with every other value the join merges the same
+from all of them. The C lowering dispatches such a switch through a jump table
+of its labels' offsets (a bounds check, a 32-bit load, an addition and an
+indirect jump); the pass leaves the bounds check and the load where they are and
+makes the dispatch `br J` (or `ret`) with the loaded entry as the value, and the
+emission writes the constants into the table in place of the offsets
+(`EmittedCode.value_tables`, `check_program_emit`'s tables), as LLVM's
+SimplifyCFG switch-to-lookup-table does. An i8 or i16 value retypes the load to
+the entry's low bytes; an i64 value takes the lowering's sign extension, so only
+i64 constants that fit 32 signed bits convert. An arm with any row but a
+constant, a join whose two values vary by arm, an arm that branches elsewhere, a
+floating or pointer value and a table two dispatches load are refused. The arms,
+left without the dispatch's edges, are the optimizer's dead blocks. A body with
+jump tables takes its own pipeline rather than its inlining summary, which
+skips the pass (no caller expands a body with labels).
+
+On the issue's kernel (16 dense `return K` arms, 40 M calls with an LCG's
+selector) the dispatch becomes `cmp; ja; mov (%rax,%rcx,4), %eax; ret`, clang
+-O2's shape: on the 9700X, 269.30 ms became 36.94 ms (clang -O2: 29.75 ms) and
+37.5 M branch misses 13 K. sqlite3.c, none of whose switches qualifies, compiles
+by `--tier1 -c` in 604.61 ms with the pass and 604.08 ms without (11 runs
+each). The record is buster-performance's
+[`tier1-switch-value-tables-3298-2026-11-22`](https://github.com/buster14a/buster-performance/tree/ccf13245f4afac66b77f408e9fa8c72b4c68c7d3/docs/measurements/tier1-switch-value-tables-3298-2026-11-22).
+`test-ir-optimize` runs `ir_switch_table_test.c`'s generated fixtures (returns
+and phis of i8 to i64 from i32 and i64 selectors, negative lowest cases, holes,
+shared arms, the join among the arms, and the refusals) on the independent
+executor with the converted table's bytes, before and after the optimizer;
+`test-checker-driver`'s value tables unit compiles a C fixture by `--tier1` and
+`--tier1-passes=-tables` and runs it as clang -O0's build does, and checks which
+functions keep an indirect jump.
 
 ### Agreement of the twins
 

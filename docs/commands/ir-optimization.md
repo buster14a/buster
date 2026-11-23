@@ -55,6 +55,24 @@ requirements. [Command index](README.md).
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs,
   the pass order and #139's measurements.
 
+## Switches of constants (#3298)
+
+`ir_switch_table.c` turns a jump-table switch whose arms only give a constant to
+one value (returned, or one phi's) into a load of the jump table's values,
+which the emission writes in place of the labels' offsets; Tier 1's `tables`
+pass item, on by default (`--tier1-passes=-tables` turns it off), and
+`--tier1-report`'s `value_tables` counts them. `test-ir-optimize` runs
+`ir_switch_table_test.c`: generated text fixtures of the C lowering's dispatch
+(returns and phis of i8 to i64, i32 and i64 selectors, negative lowest cases,
+holes, the join among the arms) converted, verified, and run on the
+independent executor with the table's bytes at every selector around the table
+and the type's extremes, before and after the optimizer, against the value the
+fixture's description gives; and the refusals (a store in an arm, an i64 past
+32 bits, an arm's variable, a retyped load read twice, an arm branching
+elsewhere, two dispatches of one table), which must borrow the input
+unchanged. `test-checker-driver`'s value tables unit runs a C fixture's
+`--tier1` builds against clang -O0's. [The design](../ir-optimization.md#switches-of-constants-3298).
+
 ## Loop vectorization (#2743)
 
 `test-ir-vectorize [--seed N] [--print NAME]` (`ir_vectorize_loops_test.c`) runs
@@ -66,8 +84,12 @@ with its unreachable stub, an `int` induction's clamp, byte arithmetic through
 in-place `y[i] += k * x[i]`, an `fma`, an `sitofp` of `i32` to `f32`, an invariant start and index offset, a uniform load,
 a sum of a uniform (no vector load or store), two loops and a nested one; and one fixture per refusal (a prefix sum, a
 histogram, a strided store, the induction as data, a call, a volatile load, a
-division, FNV-1a's recurrence, a float sum, a width no vector holds, more guards
-than the limit, a reduction's partial value read, an early exit, a step of two).
+division, FNV-1a's recurrence, a float sum, bytes summed into a 64-bit total (a width no vector holds), more guards
+than the limit, a reduction's partial value read, an early exit, a step of two). #2808's fixtures, past the frozen
+digest's: counts of comparisons (`count-u8`, `count-i32`), strided loads (`aos-sum`, `rgb-gray` through 32-bit
+indices, `strided-pairs-i16`, `stride8-u8`, and `stride8-i64`, whose last element ends the interpreter's buffer, so a
+load past it faults) and a 32-bit index that wraps within a vector (`narrow-wrap`, whose input and result must fault
+alike).
 Each runs by both parser paths and the pass at six targets of every operation
 the IR has: at most 64, 32 and 16 bytes wide with masked moves, 64 bytes without
 them or masks from a general register, 64 bytes with them but no select of 32-
@@ -83,11 +105,12 @@ the ordinary optimizer (whose final verification checks dominance), runs in the
 shared interpreter against the input on one buffer, its pointers placed apart,
 at one address, a byte, an element and a vector apart either way, at lengths
 around the vectors' boundaries (signed bounds negative too): the same bytes,
-value and status. Five mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
+value and status. Seven mutants (`BUSTER_IR_VECTORIZE_MUTATE_*`: no overlap
 test, an unrounded tail, a wrong reduction identity, lanes of the wrong width, a
-masked tail's mask of one lane more) must each be rejected on some fixture. `--print NAME` prints a fixture's
+masked tail's mask of one lane more, no 32-bit index wrap test, a strided load's
+wrong lane) must each be rejected on some fixture. `--print NAME` prints a fixture's
 64-byte result. `test-checker-driver`'s inlining unit compiles a C fixture of
-loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 by
+loops by `--tier1 --tier1-passes=+vectorize --verify` at x86-64 to x86-64-v4 and znver5 by
 both paths, checks the loops each target vectorizes and that both paths give one
 object, and runs it as clang -O0's build does. [The design and its
 status](../tier1-loop-vectorization.md) has the rules and the measurements.
@@ -243,6 +266,67 @@ instruction counted; the record is
 What it leaves are true constants that Tier 1's constant rule still builds
 below `rsp` (#2744), but for those whose quadwords are one value, which are a
 `mov` and a `vpbroadcastq` at EVEX targets (13.46 instructions per byte).
+
+## Register-class aggregates in registers (#3311)
+
+The typed stream copies a by-value aggregate's bytes by eightbytes (a
+parameter's from its `param ptr` into its object, a register-class result's
+out of the object its `ret` returns), while the source reads and writes the
+fields, an `int`'s four bytes at a time. SROA refused such a slot (its
+accesses overlap) and a result's slot escaped through its `ret`, so a struct
+passed and returned in registers went through three stack copies, and its
+`int` fields' narrow stores were read back as eightbytes, failing store
+forwarding. Tier 1 now takes them in three steps, all in
+`ir_optimize_sroa.c`:
+
+- **Widening** (`IrSroaOptions.widen`, `ir_sroa_widen`): a slot of at most 64
+  bytes, not refused but for its overlaps or a `ret` (offset 0), all of whose
+  accesses are scalars (integers, `f32`, `f64`, `ptr`) inside one aligned
+  eightbyte, has each access made one of its eightbyte's `i64` (a narrower
+  load shifted and truncated, a narrower store or'ed into the eightbyte with
+  its bits cleared). A reachable `ret` of it, where the result is one or two
+  general or xmm eightbytes of at most 16 bytes, loads its eightbytes and
+  returns them through a new slot of its own. The split then makes each
+  eightbyte a field that promotion makes a value. The insertion reuses the
+  unroller's remapping; a function with debug information is left as it is.
+  `test-ir-optimize`'s `sroa-widen` pair runs it through the interpreter.
+- **Scalars** (`ir_sroa_scalarize`), for a function's own code alone, never
+  an inline summary its callers expand: a parameter in one or two eightbyte
+  registers whose `ptr` only block 0's loads of a part read becomes a scalar
+  parameter a part (`i64` in its general register, `f64` in its xmm one), and
+  a result of one eightbyte in `rax` or `xmm0` that every `ret` returns from a
+  slot one `i64` store filled becomes that value. A function left with no
+  aggregate whose parameters are where their types put them drops its records,
+  and with them its parameters' frame rows.
+- **The optimizer's identities** take what the eightbytes leave: an `and` of a
+  zero extension and a mask that keeps its bits, a bitcast of a bitcast and a
+  truncation of an extension back to the first value's type, and an `undef`
+  as zero (an `and` absorbed by it, an `or`, `xor` or `add` of it the other
+  operand), as Tier 1 selects it.
+
+Tier 1 runs the widening SROA on every function with its own ABI records
+(`check_tier1_compile`, and `check_tier1_inline_expand` where the expansion
+runs), and a two-eightbyte result is loaded straight from its slot into `rax`
+and `rdx` (or `xmm0` and `xmm1`) rather than staged in the red zone (#3299's
+`tier1_select_part_direct`).
+`tests/ir-source/register-aggregates.c` checks the shapes (mixed widths,
+floats, padding, nesting, arrays, 9 to 16 bytes, fields left unread, an
+escaping parameter, several returns, unions, and call sites in a loop) by
+both strict native paths against clang's output, and the code of `{int, int}`
+and `{long, long}`.
+
+At call sites (`ir_sroa_scalarize_calls`, the function's own code too, before
+SROA): a non-variadic call's argument in one or two eightbyte registers is
+passed as its parts, each loaded from the argument's ptr before the call at its
+own width (an i32 or i64, an f32 or f64: nothing past the object's end; a part
+of another size keeps the argument as its ptr), with records of no size in the
+parts' registers, and a result of one part (1, 2, 4
+or 8 bytes in `rax`, 4 or 8 in `xmm0`) comes back as the call's value, which a
+store after it puts where `into` pointed. The objects the call passed and
+filled are then private, so the widening SROA and promotion keep them in
+registers. A result of two eightbytes still comes back through its `into`
+slot. `tests/ir-source/register-aggregates-page-end.c` passes objects that end
+at an inaccessible page (native only).
 
 ## Verification work and retained analyses (#1379)
 

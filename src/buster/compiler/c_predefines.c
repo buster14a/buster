@@ -3587,6 +3587,28 @@ static void predefines_x86_bits(PredefinesFeatures features, X86Target* target)
 // ones have (predefines_x86_bits), with RDTSCP and CLFLUSH from x86_target_parse's profile where -march names one
 // (native's from CPUID), and that profile's architecture (X86_ARCH_OTHER for clang's other CPUs). `tune` gets -mtune's
 // architecture (the baseline's without one). Returns false if the options don't resolve (reported on stderr).
+// The tuning CPUs that have LLVM's TuningSlowUAMem16 (#1373, X86Target.slow_unaligned_16), of predefines_tunes: those
+// whose -mtune makes clang 23.1.4's -O0 code call memmove for a constant 65 bytes at -march=x86-64, where it otherwise
+// moves them inline (each name probed so: `clang -O0 -mtune=NAME -S` of `memmove(c + 3, c + 4, 65)`). generic, x86-64
+// and every CPU from nehalem, silvermont, amdfam10 and btver1 on are fast.
+static const char* const predefines_slow_unaligned_tunes[] = {
+    "i386", "i486", "winchip-c6", "winchip2", "c3", "i586", "pentium", "pentium-mmx", "pentiumpro", "i686", "pentium2", "pentium3", "pentium3m",
+    "pentium-m", "c3-2", "yonah", "pentium4", "pentium4m", "prescott", "nocona", "core2", "penryn", "bonnell", "atom", "lakemont", "k6", "k6-2",
+    "k6-3", "athlon", "athlon-tbird", "athlon-xp", "athlon-mp", "athlon-4", "k8", "athlon64", "athlon-fx", "opteron", "k8-sse3", "athlon64-sse3",
+    "opteron-sse3", "geode",
+};
+
+// Whether the tuning CPU [name, name + length) is one of predefines_slow_unaligned_tunes.
+static bool predefines_slow_unaligned(const char* name, uint32_t length)
+{
+    bool slow = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(predefines_slow_unaligned_tunes) && !slow; i += 1)
+    {
+        slow = strlen(predefines_slow_unaligned_tunes[i]) == length && memcmp(predefines_slow_unaligned_tunes[i], name, length) == 0;
+    }
+    return slow;
+}
+
 static bool predefines_target(const PredefinesOptions* options, X86Target* target, X86Architecture* tune)
 {
     PredefinesFeatures features;
@@ -3605,6 +3627,9 @@ static bool predefines_target(const PredefinesOptions* options, X86Target* targe
     };
     predefines_x86_bits(features, target);
     *tune = options->mtune != 0 ? predefines_x86_architecture(options->mtune) : X86_ARCH_BASELINE;
+    // The tuning CPU: -mtune's, else -march's (x86-64's generic tuning without one).
+    const char* tuning = options->mtune != 0 ? options->mtune : march;
+    target->slow_unaligned_16 = predefines_slow_unaligned(tuning, (uint32_t)strlen(tuning));
     return result;
 }
 
@@ -3706,6 +3731,34 @@ static __attribute__((unused)) X86Target predefines_function_target(const Predef
     result.features &= BUSTER_X86_FEATURE(RDTSCP) | BUSTER_X86_FEATURE(CLFLUSH);
     result.extensions = 0;
     predefines_x86_bits(features, &result);
+    // Its tuning CPU (X86Target.slow_unaligned_16): its tune='s, else its arch='s, else the unit's.
+    const char* names[2] = { 0, 0 };
+    uint32_t name_lengths[2] = { 0, 0 };
+    uint32_t cursor = 0;
+    const char* item = 0;
+    uint32_t item_length = 0;
+    while (predefines_attribute_item(text, length, &cursor, &item, &item_length))
+    {
+        const bool arch = predefines_item_starts(item, item_length, "arch=");
+        if (arch || predefines_item_starts(item, item_length, "tune="))
+        {
+            uint32_t first = 5;
+            uint32_t last = item_length;
+            while (first < last && predefines_space(item[first]))
+            {
+                first += 1;
+            }
+            while (last > first && predefines_space(item[last - 1]))
+            {
+                last -= 1;
+            }
+            const uint32_t which = arch ? 0 : 1;
+            names[which] = name_lengths[which] == 0 ? item + first : names[which];
+            name_lengths[which] = name_lengths[which] == 0 ? last - first : name_lengths[which];
+        }
+    }
+    const uint32_t tuning = name_lengths[1] != 0 ? 1 : 0;
+    result.slow_unaligned_16 = name_lengths[tuning] != 0 ? predefines_slow_unaligned(names[tuning], name_lengths[tuning]) : unit.slow_unaligned_16;
     return result;
 }
 

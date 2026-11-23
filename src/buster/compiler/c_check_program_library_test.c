@@ -418,9 +418,12 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
     // The plain library builtins the code computes in place of their calls (#1373), as clang -O0's code computes their
     // intrinsics: memcpy, memmove and memset of each constant size to one past BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES, whose
     // bytes and values must be the library's, memmove's ranges overlapping by up to 9 bytes in either direction and
-    // memset's values negative and wider than a byte, constant and not; a musttail return of a memcpy; abs, labs and
-    // llabs, plain and __builtin_, of their extremes but the undefined ones; and fabs, fabsf, fabsl, copysign, copysignf
-    // and copysignl, plain, and __builtin_copysignl, of the harness's special values, signaling NaNs among them, bit for bit.
+    // memset's values negative and wider than a byte, constant and not; memmove of each size from 34 to one past
+    // BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES, by COPY's move form, between unaligned ranges that overlap by up to 65 bytes,
+    // forward and backward; a musttail return of a memcpy; abs, labs and llabs, plain and __builtin_, of their extremes
+    // but the undefined ones; and fabs, fabsf, fabsl, copysign, copysignf and copysignl, plain, and __builtin_copysign,
+    // __builtin_copysignf and __builtin_copysignl, of the harness's special values, signaling NaNs among them, bit for
+    // bit.
     check_test_program_source(test,
         BUSTER_CHECK_TEST_LIBRARY_FOLD
         "typedef unsigned long size_t;void*memcpy(void*,const void*,size_t);void*memmove(void*,const void*,size_t);void*memset(void*,int,size_t);"
@@ -431,16 +434,21 @@ static __attribute__((noinline)) void check_test_library_programs(CheckTest* tes
         "static unsigned long at(const void*p,const char*a){return (unsigned long)((const char*)p-a);}\n"
         "#define M(k) h+=at(memmove(b+40+o,b+40,k),b);h+=at(memcpy(c+3,b+(o&7)+8,k),c);h+=at(memset(c+60+(o&7),v,k),c);memset(c+90,-2,k);"
         "h=hash(hash(h,b,128),c,128);\n"
+        "#define V(k) h+=at(memmove(e+136+w,e+136,k),e);h+=at(memmove(e+136,e+136+w,k),e);h=hash(h,e,400);\n"
+        "#define V4(k) V(k)V(k+1)V(k+2)V(k+3)\n#define V16(k) V4(k)V4(k+4)V4(k+8)V4(k+12)\n"
+        "static unsigned long moves(int n,unsigned long h){char e[400];int w=(int)((unsigned)n*7u%131u)-65;for(int i=0;i<400;i++)e[i]=(char)(i*11+n);"
+        "V16(34)V16(50)V16(66)V16(82)V16(98)V16(114)return h;}\n"
         "int tested(int n){unsigned long h=14695981039346656037UL;char b[128],c[128];int o=(int)((unsigned)n%19)-9;int v=n*37-200;"
         "for(int i=0;i<128;i++){b[i]=(char)(i*7+n);c[i]=(char)(i*5+1);}"
         "M(0)M(1)M(2)M(3)M(4)M(5)M(6)M(7)M(8)M(9)M(10)M(11)M(12)M(13)M(14)M(15)M(16)M(17)M(18)M(19)M(20)M(21)M(22)M(23)M(24)M(25)M(26)M(27)M(28)M(29)M(30)M(31)M(32)M(33)"
-        "h+=at(tail(c,b+(unsigned)n%5,0),c);h=hash(h,c,16);"
+        "h+=at(tail(c,b+(unsigned)n%5,0),c);h=hash(h,c,16);h=moves(n,h);"
         "int x=(int)((unsigned)n*123456789u);long l=(long)n*1099511627776L;long long q=-(long long)n*1000000007LL;"
         "h+=(unsigned long)abs(x)*3+(unsigned long)labs(l)*5+(unsigned long)llabs(q)*7+(unsigned long)__builtin_abs(-x)+(unsigned long)__builtin_labs(l-1)*11"
         "+(unsigned long)__builtin_llabs(q+3)*13+(unsigned long)abs(-2147483647+n%2)+(unsigned long)labs(-9223372036854775807L+n%2)*17+(unsigned long)llabs(n<0?-1:1);"
         "for(int i=0;i<9;i++){double a=fp_special(n),d=fp_special(i);float f=fp_specialf(n),g=fp_specialf(i);long double la=a,ld=-d;"
         "h=hd(h,fabs(a));h=hd(h,copysign(a,d));h=hd(h,copysign(d,-a));h=hf(h,fabsf(f));h=hf(h,copysignf(g,f));h=hl(h,fabsl(la));h=hl(h,copysignl(la,ld));"
-        "h=hl(h,__builtin_copysignl(ld,la));h=hd(h,fabs(a)+copysign(1.0,d));}"
+        "h=hl(h,__builtin_copysignl(ld,la));h=hd(h,fabs(a)+copysign(1.0,d));h=hd(h,__builtin_copysign(a,d));h=hd(h,__builtin_copysign(d,-a));"
+        "h=hf(h,__builtin_copysignf(g,f));h=hf(h,__builtin_copysignf(f,-g));}"
         "long double s=n%2?__builtin_nansl(\"\"):-__builtin_nansl(\"1\");h=hl(hl(hl(h,fabsl(s)),copysignl(s,-1.0L*n)),copysignl(2.5L,s));return out(h);}",
         "library-computed-inline", clang);
     // The folds in code: clang's -1, 0 or 1 of constant strings, where the library's functions return the differences

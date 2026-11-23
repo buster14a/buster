@@ -82,8 +82,11 @@ static bool check_warning_option(uint32_t id, String8 option)
     // -Wuser-defined-warnings (#1447) and -Wmultichar (#1970) are -Wmost's.
     // -Wtautological-constant-compare holds -Wtautological-constant-out-of-range-compare (#2218).
     matches |= id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE && check_diagnostic_option(option, "-Wtautological-compare");
+    // -Wtautological-compare holds the CFG builder's three (#2990), each its own group's.
+    const bool cfg = id == CHECK_WARNING_ID_TAUTOLOGICAL_BITWISE_COMPARE || id == CHECK_WARNING_ID_TAUTOLOGICAL_OVERLAP_COMPARE ||
+                     id == CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE;
     const bool most = id == CHECK_WARNING_ID_INT_IN_BOOL_CONTEXT || id == CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE ||
-                      id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE ||
+                      id == CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE || cfg ||
                       id == CHECK_WARNING_ID_FOR_LOOP_ANALYSIS || id == CHECK_WARNING_ID_USER_DEFINED_WARNINGS || id == CHECK_WARNING_ID_MULTICHAR;
     matches |= most && (check_diagnostic_option(option, "-Wmost") || check_diagnostic_option(option, "-Wall"));
     // -Wint-conversion is -Wconversion's, so -Wnon-gcc's; -Wreturn-mismatch -Wreturn-type's, so -Wmost's and -Wall's (#1963).

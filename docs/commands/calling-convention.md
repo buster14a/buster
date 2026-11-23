@@ -9,12 +9,13 @@ requirements. [Command index](README.md).
 - `src/buster/compiler/calling_convention.c` is the System V AMD64 calling
   convention (#137, contract 3 for #136): every `TypeId`'s classes as clang 23
   classifies them, a row of 16 offsets per type, records and arrays folded
-  four at a time in vectors, with the scalar classification as the fallback
-  for a fold without scratch room; arguments' and results' registers and stack
+  four at a time in vectors with no memory but the stack (#2957); arguments'
+  and results' registers and stack
   slots as clang and LLVM's `CC_X86_64_C` give them, by prefix sums 16
-  arguments at a time, with a per-call fallback (`abi_assign_call`) for the
-  calls the sums can't place; and `va_arg`'s plan. The scalar twins went in
-  #2924; the fallbacks stay until they are vectorized.
+  arguments at a time, with a per-call vector kernel (`abi_assign_lanes`,
+  eight calls at a time) for the calls the sums can't place; and `va_arg`'s plan. The scalar twins went in
+  #2924, the scalar classification in #2957 and the per-call assignment in
+  #2958.
   `calling_convention_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-calling-convention` runs them) and
   `calling_convention_benchmark.c` provides `benchmark-calling-convention`.
@@ -30,8 +31,8 @@ its compiled runs) checks
 own and never against the other, at 16-, 32- and 64-byte vectors:
 
 - merge: clang's merge and post-merge, written again as clang writes them,
-  against the module's 64-entry merge table and post-merge, on every pair of
-  classes;
+  against the module's merge, its 64-entry merge table and the fold's vector
+  merge and post-merge, on every pair of classes;
 - fixtures: types whose classes, pass bits and results clang's IR shows
   (scalars, vectors, complex types, `_BitInt`s, records with unaligned and
   zero-size members, bit-fields, flexible array members, `_Atomic` and
@@ -82,13 +83,15 @@ own and never against the other, at 16-, 32- and 64-byte vectors:
   hold a struct of 128 bytes by an array of none, which wait for what its
   alignment reads), the walk without scratch memory for its stack, after which
   every type must be classified and an `_Atomic` it aligns be right or
-  refused, a chain of 80 records against the table's order, by the levels
-  and by the scan they fall back to with 64 bytes of scratch, and the walk
+  refused, a chain of 80 records against the table's order, by the levels,
+  by the scans that take every level with 64 bytes of scratch, and by the
+  scan alone, and the walk
   over 64 unions of two members of the one before, 2^64
   paths, under an alarm;
 - worlds: random worlds of `--count` types (2,000 by default), classified by
-  the vector path into one table and by the fallback, the scalar
-  classification as `abi_classify_all`'s scan drives it, into another, each
+  `abi_classify_all` into one table and by its scan alone
+  (`abi_classify_scan`, the route without scratch for the levels) into
+  another, each
   checked alone: every classifiable type classified, every type at every
   offset it can be at compared with an oracle of the test's own, clang's
   `classify` transcribed with an explicit stack of frames, and seed 1's
@@ -104,8 +107,9 @@ own and never against the other, at 16-, 32- and 64-byte vectors:
   clang lay one out apart, and clang's worlds from the same seeds, which must
   hold some;
 - assignment: random calls over a world's types, named and variadic, by the
-  vector path and by its fallback (`abi_assign` with every scratch arena
-  exhausted, which assigns each call alone), each checked alone: seed 1's
+  vector path and by its per-call kernel over every call
+  (`abi_assign_lanes`, with every scratch arena exhausted), each checked
+  alone: seed 1's
   locations and totals against frozen digests, every call within the
   registers there are with its stack arguments in order, and a call assigned
   again alone as in its batch; the vector path with its columns ending at a
@@ -113,7 +117,7 @@ own and never against the other, at 16-, 32- and 64-byte vectors:
   65,542 `long`s and of 32,767 and 32,768 two-register arguments, around the
   most the vector path's 16-bit register sums count
   (`BUSTER_ABI_COUNTED_ARGUMENTS`), past which it leaves a call to
-  `abi_assign_call`.
+  `abi_assign_lanes`.
 
 With `--cross-check`, two fixtures first check #2113's SSE/SSEUP records of
 sizes no vector register has against clang in both directions, with Tier 0
@@ -237,11 +241,15 @@ gave it:
   typedefs their members have, classified from nothing by `abi_classify_all`
   at 16-, 32- and 64-byte vectors, per type and per record member; then by
   `abi_classify` on the batches a front end hands it: windows of the 1, 4 or
-  16 types made since its last call, a call per dependency level;
+  16 types made since its last call, a call per dependency level; then
+  `abi_classify_all` at 16 bytes with no scratch (`no-scratch`, its first
+  scratch arena of no room, which must classify as with scratch), and a chain
+  of 1,024 records against the table's order, with scratch (`chain`, by the
+  levels after 16 scans) and without (`chain-starved`, a scan per link);
 - assignment: `--count` calls over those types at 16 bytes, most of 0 to 6
   arguments, some of 4 to 14 and a few of 15 to 22, one in four variadic, by
   `abi_assign` per argument, with the share of arguments the vector path left
-  to `abi_assign_call` and why (from a mirror of its rules,
+  to the per-call kernel (`abi_assign_lanes`) and why (from a mirror of its rules,
   `abi_benchmark_deferred`, to keep in step with `abi_assign`); then the same
   shapes with integers, pointers and doubles alone (`assign-simple`).
 

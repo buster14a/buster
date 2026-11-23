@@ -28,7 +28,10 @@ requirements. [Command index](README.md).
   room for it (`link_program_generate_begin`, `_atoms` and `_end`), and the C
   driver's links take room for the crt objects and the members their names
   may make join (`bind_capacity_needed`), rather than for every member
-  (`bind_capacity`).
+  (`bind_capacity`). The driver binds with `bind_begin_borrowed`: a loaded
+  runtime's atoms keep their bytes in the snapshot's mapping instead of
+  copies, and the writer stages the chunks that hold them
+  (`ExecutableOptions.borrowed`), so that the mapping is only read (#2546).
   It binds against the static runtime too (step 6's second part): the
   archives' members the link needs, found as GNU ld's group finds them, joined
   in archive order with the COMDAT groups after the first of each signature

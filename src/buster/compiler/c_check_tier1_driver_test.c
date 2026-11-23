@@ -494,6 +494,119 @@ static const char check_test_tier1_labels_source[] =
     "    return 0;\n"
     "}\n";
 
+// #3298's switches of constants: each `vt_` function's switch has arms that only give one value a constant (returned,
+// or set and broken out of, the default's or the switch's end's among them), which Tier 1 makes a load of its jump
+// table's values; each `jt_` function's must stay a jump table (an arm with an effect, two values that vary by arm, an
+// i64 constant past 32 bits). Every selector's value around and past each switch's cases is printed folded, which
+// clang -O0's build prints too.
+static const char check_test_tier1_value_tables_source[] =
+    "#include <stdio.h>\n"
+    "static int vt_dense(int x)\n"
+    "{\n"
+    "    switch (x) { case 0: return 3; case 1: return 7; case 2: return 1; case 3: return 9; case 4: return 2; case 5: return 8; case 6: return 4; case 7: return 6;\n"
+    "                 case 8: return 5; case 9: return 0; case 10: return 11; case 11: return 13; case 12: return 17; case 13: return 19; case 14: return 23; case 15: return 29; default: return -1; }\n"
+    "}\n"
+    "static int vt_assign(int x)\n"
+    "{\n"
+    "    int r;\n"
+    "    switch (x) { case 0: r = 3; break; case 1: r = 7; break; case 2: r = 1; break; case 3: r = 9; break; case 4: r = 2; break; case 5: r = 8; break; default: r = -40; break; }\n"
+    "    return r * 3 + x;\n"
+    "}\n"
+    "static int vt_sparse(int x)\n"
+    "{\n"
+    "    switch (x) { case -7: return 100; case -3: return -100; case -1: return 5; case 2: return 77; case 5: return 77; case 9: return -2147483647 - 1; case 10: return 2147483647; default: return 12; }\n"
+    "}\n"
+    "static int vt_end(unsigned x, int seed)\n"
+    "{\n"
+    "    int r = 1000;\n"
+    "    switch (x) { case 1: r = 5; break; case 2: r = 6; break; case 4: r = -7; break; case 5: r = 8; break; case 7: r = 9; break; }\n"
+    "    return r + seed;\n"
+    "}\n"
+    "static signed char vt_char(unsigned char c)\n"
+    "{\n"
+    "    switch (c) { case 'a': return -1; case 'b': return -128; case 'c': return 127; case 'e': return 0; case 'f': return 33; case 'z': return 5; default: return -9; }\n"
+    "}\n"
+    "static unsigned short vt_short(short x)\n"
+    "{\n"
+    "    unsigned short r;\n"
+    "    switch (x) { case -2: r = 65535; break; case -1: r = 1; break; case 0: r = 30000; break; case 1: r = 40000; break; case 3: r = 7; break; default: r = 9; break; }\n"
+    "    return r;\n"
+    "}\n"
+    "static long long vt_long(unsigned long long x)\n"
+    "{\n"
+    "    switch (x) { case 3: return -5; case 4: return 2147483647; case 5: return -2147483647 - 1; case 6: return 0; case 8: return 1; default: return -77; }\n"
+    "}\n"
+    "static unsigned vt_unsigned(long long x)\n"
+    "{\n"
+    "    unsigned r = 4;\n"
+    "    switch (x) { case 100: r = 4294967295u; break; case 101: r = 2147483648u; break; case 102: r = 3; break; case 104: r = 1; break; default: break; }\n"
+    "    return r;\n"
+    "}\n"
+    "static int vt_two(int x, int y)\n"
+    "{\n"
+    "    int a;\n"
+    "    int b;\n"
+    "    switch (x & 7) { case 0: a = 10; break; case 1: a = 20; break; case 2: case 3: a = 30; break; case 4: a = 40; break; default: a = 50; break; }\n"
+    "    switch (y) { case 0: b = 1; break; case 1: b = 2; break; case 2: b = 4; break; case 3: b = 8; break; default: b = 16; break; }\n"
+    "    return a * 100 + b + y;\n"
+    "}\n"
+    "static _Bool vt_bool(int x)\n"
+    "{\n"
+    "    switch (x) { case 0: return 1; case 1: return 0; case 2: return 1; case 3: return 1; case 4: return 0; default: return 0; }\n"
+    "}\n"
+    "static int jt_effect_count;\n"
+    "static int jt_effect(int x)\n"
+    "{\n"
+    "    switch (x) { case 0: return 3; case 1: return 4; case 2: jt_effect_count += 1; return 5; case 3: return 6; default: return 7; }\n"
+    "}\n"
+    "static int jt_pair(int x)\n"
+    "{\n"
+    "    int a;\n"
+    "    int b;\n"
+    "    switch (x) { case 0: a = 1; b = 9; break; case 1: a = 2; b = 8; break; case 2: a = 3; b = 7; break; case 3: a = 4; b = 6; break; default: a = 5; b = 5; break; }\n"
+    "    return a * 10 + b;\n"
+    "}\n"
+    "static long long jt_wide(int x)\n"
+    "{\n"
+    "    switch (x) { case 0: return 1; case 1: return 1099511627776LL; case 2: return 3; case 3: return 4; default: return 5; }\n"
+    "}\n"
+    "static int jt_through(int x)\n"
+    "{\n"
+    "    int r = 0;\n"
+    "    switch (x) { case 0: r = 1; case 1: r += 2; break; case 2: r = 5; break; case 3: r = 6; break; default: r = 9; break; }\n"
+    "    return r;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    unsigned long long sum = 0;\n"
+    "    for (int i = -12; i <= 24; i += 1)\n"
+    "    {\n"
+    "        sum = sum * 31 + (unsigned)vt_dense(i);\n"
+    "        sum = sum * 31 + (unsigned)vt_assign(i);\n"
+    "        sum = sum * 31 + (unsigned)vt_sparse(i);\n"
+    "        sum = sum * 31 + (unsigned)vt_end((unsigned)i, i * 3);\n"
+    "        sum = sum * 31 + (unsigned)vt_char((unsigned char)(i + 'a' - 2));\n"
+    "        sum = sum * 31 + (unsigned)vt_char((unsigned char)(i * 11));\n"
+    "        sum = sum * 31 + vt_short((short)i);\n"
+    "        sum = sum * 31 + (unsigned long long)vt_long((unsigned long long)i);\n"
+    "        sum = sum * 31 + vt_unsigned(i + 100);\n"
+    "        sum = sum * 31 + (unsigned)vt_two(i, i - 2);\n"
+    "        sum = sum * 31 + vt_bool(i);\n"
+    "        sum = sum * 31 + (unsigned)jt_effect(i);\n"
+    "        sum = sum * 31 + (unsigned)jt_pair(i);\n"
+    "        sum = sum * 31 + (unsigned long long)jt_wide(i);\n"
+    "        sum = sum * 31 + (unsigned)jt_through(i);\n"
+    "    }\n"
+    "    static const long long extremes[] = { -2147483647LL - 1, 2147483647LL, -1, 4294967295LL, -4294967296LL, 9223372036854775807LL };\n"
+    "    for (int k = 0; k < 6; k += 1)\n"
+    "    {\n"
+    "        sum = sum * 31 + (unsigned)vt_dense((int)extremes[k]) + (unsigned)vt_sparse((int)extremes[k]) + (unsigned)vt_end((unsigned)extremes[k], 1);\n"
+    "        sum = sum * 31 + (unsigned long long)vt_long((unsigned long long)extremes[k]) + vt_unsigned(extremes[k]) + vt_short((short)extremes[k]);\n"
+    "    }\n"
+    "    printf(\"%llu %d\\n\", sum, jt_effect_count);\n"
+    "    return 0;\n"
+    "}\n";
+
 // The variadic definitions' fixture (#789): va_start, va_arg of integers, pointers and an int, va_copy, unnamed arguments
 // past the registers (in the overflow area), five named ones before them, a va_list handed to vsnprintf, a variadic
 // function that reads none, and one whose result crosses a call after it read its overflow area, which takes a
@@ -1479,6 +1592,8 @@ struct CheckTestTier1Build
     uint64_t code_uncertified;
     // The IR instructions #866's congruence solver removed (--tier1-gvn's), 0 without it.
     uint64_t gvn_removed;
+    // The switches whose jump tables hold their constants (#3298).
+    uint64_t value_tables;
     bool reported;
 };
 
@@ -1539,7 +1654,7 @@ static bool check_test_tier1_build_names(const char* executable, const char* sou
                       check_test_tier1_field(text, "call_stores", &build->call_stores) && check_test_tier1_field(text, "machine_rows", &build->machine_rows) &&
                       check_test_tier1_field(text, "row_moves", &build->row_moves) && check_test_tier1_field(text, "code_certified", &build->code_certified) &&
                       check_test_tier1_field(text, "code_uncertified", &build->code_uncertified) &&
-                      check_test_tier1_field(text, "gvn_removed", &build->gvn_removed);
+                      check_test_tier1_field(text, "gvn_removed", &build->gvn_removed) && check_test_tier1_field(text, "value_tables", &build->value_tables);
     const bool taken = check_test_tier1_taken(text, names, name_count);
     if (status != 0 && text != NULL)
     {
@@ -2901,6 +3016,89 @@ static void check_test_driver_tier1_labels(CheckTest* test, const char* clang, c
     unlink(source);
     unlink(reference);
     unlink(tier0);
+}
+
+// #3298's value tables' fixture: by --tier1, every function Tier 1's, by each path with and without rematerialization,
+// and with --tier1-passes=-tables, its program prints what clang -O0's build of it prints. The `vt_` functions'
+// switches load their tables' values, so that their code has no indirect jump, and the `jt_` functions' keep theirs;
+// --tier1-report counts the tables converted, and none without the pass.
+static void check_test_driver_tier1_value_tables(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_VALUE_TABLES_RECORDS = 4096,
+        // vt_dense, vt_assign, vt_sparse, vt_end, vt_char, vt_short, vt_long, vt_unsigned, vt_two's two and vt_bool.
+        CHECK_TEST_TIER1_VALUE_TABLES_CONVERTED = 11,
+    };
+    char source[512];
+    char reference[512];
+    snprintf(source, sizeof(source), "%s/tier1-value-tables.c", directory);
+    snprintf(reference, sizeof(reference), "%s/tier1-value-tables-clang", directory);
+    const bool written = parse_test_write(source, check_test_tier1_value_tables_source, sizeof(check_test_tier1_value_tables_source) - 1);
+    char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
+    char* text = NULL;
+    const bool referenced = written && check_test_driver_spawn(clang_arguments, &text) == 0;
+    free(text);
+    char expected[512] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "clang's build of the value tables fixture runs");
+    const bool ready = ran && (x86_semantics_initialized || x86_semantics_initialize()) && x86_disassembler_initialize();
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_VALUE_TABLES_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_VALUE_TABLES_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_VALUE_TABLES_RECORDS, sizeof(uint32_t));
+    static const char* const converted_names[] = { "vt_dense", "vt_assign", "vt_sparse", "vt_end", "vt_char", "vt_short", "vt_long", "vt_unsigned", "vt_two", "vt_bool" };
+    static const char* const kept_names[] = { "jt_effect", "jt_pair", "jt_wide", "jt_through" };
+    for (uint32_t variant = 0; ready && records != NULL && offsets != NULL && types != NULL && variant < 5; variant += 1)
+    {
+        // Each path with and without rematerialization, then the pass turned off.
+        const bool rematerialize = (variant & 1) != 0;
+        const bool scalar = variant == 2 || variant == 3;
+        const char* option = variant == 4 ? "--tier1-passes=-tables" : NULL;
+        char output[512];
+        char object[512];
+        snprintf(output, sizeof(output), "%s/tier1-value-tables-%u", directory, variant);
+        snprintf(object, sizeof(object), "%s/tier1-value-tables-%u.o", directory, variant);
+        CheckTestTier1Build build;
+        CheckTestTier1Build object_build;
+        const char* const everything = "";
+        const bool built = check_test_tier1_build_names(executable, source, &everything, 1, output, rematerialize, scalar, false, false, option, &build);
+        const bool compiled = check_test_tier1_build_names(executable, source, &everything, 1, object, rematerialize, scalar, true, false, option, &object_build);
+        check_test_expect(test, built && compiled, "the value tables fixture compiles by --tier1, every function Tier 1's");
+        char actual[512] = { 0 };
+        const bool same = built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0;
+        check_test_expect(test, same, "the value tables fixture prints clang's build's output");
+        if (!same)
+        {
+            fprintf(stderr, "test-checker: value tables variant %u: expected %s, got %s\n", variant, expected, actual);
+        }
+        check_test_expect(test, built && build.value_tables == (variant == 4 ? 0 : CHECK_TEST_TIER1_VALUE_TABLES_CONVERTED),
+                          "--tier1-report counts each switch of constants' table, and none without the pass");
+        if (built && build.value_tables != (variant == 4 ? 0 : CHECK_TEST_TIER1_VALUE_TABLES_CONVERTED))
+        {
+            fprintf(stderr, "test-checker: value tables variant %u: %" PRIu64 " tables converted\n", variant, build.value_tables);
+        }
+        for (uint32_t k = 0; compiled && k < BUSTER_ARRAY_LENGTH(converted_names) + BUSTER_ARRAY_LENGTH(kept_names); k += 1)
+        {
+            const bool kept = k >= BUSTER_ARRAY_LENGTH(converted_names);
+            const char* name = kept ? kept_names[k - BUSTER_ARRAY_LENGTH(converted_names)] : converted_names[k];
+            uint32_t registers = 0;
+            uint32_t memory = 0;
+            uint32_t trailing = 0;
+            bool one = true;
+            const bool decoded = check_test_tier1_jumps(object, name, records, CHECK_TEST_TIER1_VALUE_TABLES_RECORDS, offsets, types, &registers, &memory, &trailing, &one);
+            const bool indirect = registers != 0 || memory != 0;
+            char message[160];
+            snprintf(message, sizeof(message), "%s %s an indirect jump%s", name, kept || variant == 4 ? "keeps" : "has no", variant == 4 ? " without the pass" : "");
+            check_test_expect(test, decoded && indirect == (kept || variant == 4), message);
+        }
+        unlink(output);
+        unlink(object);
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(source);
+    unlink(reference);
 }
 
 // Whether the function `name` in `-c`'s object at `path` saves the argument registers in its prologue as a variadic
@@ -4299,6 +4497,183 @@ static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, con
 {
     check_test_driver_tier1_units(test, clang, executable, directory, "tier1-wide", "wide values'", check_test_tier1_wide_header, check_test_tier1_wide_source, check_test_tier1_wide_other_source,
                                   NULL, true, 12);
+}
+
+// The 128-bit integers' fixture (#3299): __int128 and unsigned __int128 values passed and returned in rdi:rsi and
+// rax:rdx, on the stack where one register is left, and kept in a loop's phis, through every operation Tier 1 splits
+// into halves (additions and subtractions whose carries and borrows cross the 64-bit boundary, products, shifts by
+// constants and variable counts, signed and unsigned comparisons, of two extensions of one kind among them (#3035),
+// negations, logic and extensions) and libgcc's divisions, remainders and conversions, signed and unsigned, over edge
+// values. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results.
+static const char check_test_tier1_int128_header[] =
+    "#include <stdio.h>\n"
+    "typedef unsigned __int128 U;\n"
+    "typedef __int128 S;\n"
+    "U b_mix(U a, unsigned long k, U b);\n"
+    "S b_smix(S a, S b, int k);\n"
+    "U b_stack(long r1, long r2, long r3, long r4, long r5, U a, U b);\n"
+    "unsigned long b_back(U a, S b);\n"
+    "U a_ops(U a, U b, unsigned k);\n"
+    "S a_sops(S a, S b, unsigned k);\n"
+    "U a_stack(long r1, long r2, long r3, long r4, long r5, U a, U b);\n"
+    "U a_chain(U t, unsigned long n);\n"
+    "unsigned long a_loop(unsigned long n);\n"
+    "unsigned long a_extended(long a, long b, int c, int d);\n";
+
+static const char check_test_tier1_int128_other_source[] =
+    "#include \"tier1-int128.h\"\n"
+    "U b_mix(U a, unsigned long k, U b) { return a * k + (b ^ (b >> 7)); }\n"
+    "S b_smix(S a, S b, int k) { return (S)((U)(a >> (k & 127)) - (U)b); }\n"
+    "U b_stack(long r1, long r2, long r3, long r4, long r5, U a, U b) { return a + b * (U)(r1 + r2 * 3 + r3 * 5 + r4 * 7 + r5 * 11); }\n"
+    "unsigned long b_back(U a, S b)\n"
+    "{\n"
+    "    U r = a_ops(a, (U)b, 7) ^ a_stack(1, 2, 3, 4, 5, a, (U)b) ^ (U)a_sops((S)a, b, 9) ^ a_chain(a, 5);\n"
+    "    return (unsigned long)r ^ (unsigned long)(r >> 64);\n"
+    "}\n";
+
+static const char check_test_tier1_int128_source[] =
+    "#include \"tier1-int128.h\"\n"
+    "#define H(x) (h = h * 0x9e3779b97f4a7c15ull + (U)(x) + (h >> 61))\n"
+    "U a_ops(U a, U b, unsigned k)\n"
+    "{\n"
+    "    U h = 1;\n"
+    "    H(a + b); H(a - b); H(b - a); H(a * b); H(-a); H(~a); H(a & b); H(a | b); H(a ^ b);\n"
+    "    H(a + 1); H(a - 1); H(a + 0xffffffffffffffffull); H(a * (((U)1 << 64) + 1));\n"
+    "    H(a << (k & 127)); H(a >> (k & 127)); H(a << 1); H(a >> 1); H(a << 63); H(a >> 63); H(a << 64); H(a >> 64);\n"
+    "    H(a << 65); H(a >> 65); H(a << 127); H(a >> 127); H(a >> 3); H((a << 3) | (b >> 125));\n"
+    "    H(a < b); H(a <= b); H(a > b); H(a >= b); H(a == b); H(a != b); H(a < ((U)1 << 64));\n"
+    "    H((U)(unsigned long)a * (unsigned long)b); H((U)(unsigned long)a * (unsigned long)(b >> 64));\n"
+    "    H((unsigned)a); H((unsigned long)(a >> 64)); H((U)(unsigned long)(a >> 32));\n"
+    "    if (b != 0) { H(a / b); H(a % b); }\n"
+    "    H(a / 10); H(a % 1000000007u);\n"
+    "    H((U)(double)(a >> 75)); H((unsigned long)((double)a / 1e30));\n"
+    "    H(b_mix(a, (unsigned long)b, b));\n"
+    "    return h;\n"
+    "}\n"
+    "S a_sops(S a, S b, unsigned k)\n"
+    "{\n"
+    "    U h = 2;\n"
+    "    const S min = (S)((U)1 << 127);\n"
+    "    H(a >> (k & 127)); H(a >> 1); H(a >> 63); H(a >> 64); H(a >> 65); H(a >> 127);\n"
+    "    H(a < b); H(a <= b); H(a > b); H(a >= b); H(a < 0); H(a > -1); H(a == b);\n"
+    "    H((S)(long)a * (long)b); H((S)(long)a * (S)(unsigned long)b); H((S)(int)a); H((S)(long)(a >> 64));\n"
+    "    if (b != 0 && !(a == min && b == -1)) { H(a / b); H(a % b); }\n"
+    "    H(a / 7); H(a % -9); H(a / -1000000000000000000l);\n"
+    "    H((S)(double)(a >> 70)); H((long)((double)a / 1e25));\n"
+    "    H(b_smix(a, b, (int)k));\n"
+    "    return (S)h;\n"
+    "}\n"
+    "U a_stack(long r1, long r2, long r3, long r4, long r5, U a, U b) { return b_stack(r1, r2, r3, r4, r5, a ^ b, b + (U)r5) * 3 + a - (U)r1; }\n"
+    "#define ALL(T, x, y) (((T)(x) < (T)(y)) | ((T)(x) <= (T)(y)) << 1 | ((T)(x) > (T)(y)) << 2 | ((T)(x) >= (T)(y)) << 3 | ((T)(x) == (T)(y)) << 4 | ((T)(x) != (T)(y)) << 5)\n"
+    "unsigned long a_extended(long a, long b, int c, int d)\n"
+    "{\n"
+    "    unsigned long m = 0;\n"
+    "    m = m << 6 | ALL(S, a, b); m = m << 6 | ALL(U, (S)a, (S)b);\n"
+    "    m = m << 6 | ALL(S, (unsigned long)a, (unsigned long)b); m = m << 6 | ALL(U, (unsigned long)a, (unsigned long)b);\n"
+    "    m = m << 6 | ALL(S, c, d); m = m << 6 | ALL(U, (S)c, (S)d);\n"
+    "    m = m << 6 | ALL(S, (unsigned)c, (unsigned)d); m = m << 6 | ALL(U, (unsigned)c, (unsigned)d);\n"
+    "    m = m << 6 | ALL(S, a, (unsigned long)b);\n"
+    "    return m;\n"
+    "}\n"
+    "__attribute__((noinline)) static U a_step(U a, unsigned long b) { return a * b + (a >> 3); }\n"
+    "U a_chain(U t, unsigned long n) { for (unsigned long i = 0; i < n; i += 1) t = a_step(t, i | 1); return t; }\n"
+    "unsigned long a_loop(unsigned long n)\n"
+    "{\n"
+    "    U t = 1;\n"
+    "    U s = 0;\n"
+    "    for (unsigned long i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        t = t + (t << 7) + (t >> 3) + i;\n"
+    "        s = (s ^ t) - (s >> 70);\n"
+    "    }\n"
+    "    return (unsigned long)(t ^ s) ^ (unsigned long)((t ^ s) >> 64);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    static const unsigned long halves[][2] = {\n"
+    "        { 0, 0 }, { 1, 0 }, { 2, 0 }, { 0xffffffffffffffffull, 0 }, { 0, 1 }, { 1, 1 }, { 0xffffffffffffffffull, 0xffffffffffffffffull },\n"
+    "        { 0xfffffffffffffffeull, 0xffffffffffffffffull }, { 0, 0x8000000000000000ull }, { 0xffffffffffffffffull, 0x7fffffffffffffffull },\n"
+    "        { 0xfedcba9876543210ull, 0x0123456789abcdefull }, { 0x8000000000000000ull, 0x8000000000000000ull }, { 7, 0xffffffffffffffffull },\n"
+    "    };\n"
+    "    static const unsigned counts[] = { 0, 1, 3, 63, 64, 65, 100, 127 };\n"
+    "    const unsigned n = sizeof(halves) / sizeof(halves[0]);\n"
+    "    U total = 0;\n"
+    "    for (unsigned i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        const U a = (U)halves[i][1] << 64 | halves[i][0];\n"
+    "        for (unsigned j = 0; j < n; j += 1)\n"
+    "        {\n"
+    "            const U b = (U)halves[j][1] << 64 | halves[j][0];\n"
+    "            for (unsigned c = 0; c < sizeof(counts) / sizeof(counts[0]); c += 1)\n"
+    "            {\n"
+    "                total = total * 31 + a_ops(a, b, counts[c]) + (U)a_sops((S)a, (S)b, counts[c]);\n"
+    "            }\n"
+    "            total ^= a_stack((long)i, (long)j, 3, 4, (long)(i * j), a, b) + b_back(a, (S)b);\n"
+    "        }\n"
+    "        printf(\"%u %016lx%016lx\\n\", i, (unsigned long)(total >> 64), (unsigned long)total);\n"
+    "    }\n"
+    "    static const long words[] = { 0, 1, -1, 2, -2, 0x7fffffffffffffffl, -0x7fffffffffffffffl - 1, 0x7fffffff, -0x80000000l, 0x80000000l, 0xffffffffl, -0x100000000l };\n"
+    "    unsigned long compared = 0;\n"
+    "    for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i += 1)\n"
+    "    {\n"
+    "        for (unsigned j = 0; j < sizeof(words) / sizeof(words[0]); j += 1)\n"
+    "        {\n"
+    "            compared = compared * 1000003 ^ a_extended(words[i], words[j], (int)words[i], (int)words[j]);\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%lx\\n\", compared);\n"
+    "    const U chain = a_chain(1, 1000);\n"
+    "    printf(\"%016lx%016lx %lx\\n\", (unsigned long)(chain >> 64), (unsigned long)chain, a_loop(1000));\n"
+    "    return 0;\n"
+    "}\n";
+
+// The 128-bit integers' fixture (#3299): both units' output is clang's, and a loop of 128-bit values computed within
+// one function keeps them in registers: a_loop (additions, subtractions, shifts and xors, no product, whose mul would
+// save rax and rdx in the red zone) addresses nothing from rsp, where each value's 16-byte frame object took stores and
+// loads around every operation before.
+static void check_test_driver_tier1_int128(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_INT128_RECORDS = 1024,
+    };
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-int128", "128-bit integers'", check_test_tier1_int128_header, check_test_tier1_int128_source,
+                                  check_test_tier1_int128_other_source, NULL, true, 0);
+    char header[512];
+    char source[512];
+    snprintf(header, sizeof(header), "%s/tier1-int128.h", directory);
+    snprintf(source, sizeof(source), "%s/tier1-int128-loop.c", directory);
+    const bool written = parse_test_write(header, check_test_tier1_int128_header, sizeof(check_test_tier1_int128_header) - 1) &&
+                         parse_test_write(source, check_test_tier1_int128_source, sizeof(check_test_tier1_int128_source) - 1);
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_INT128_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_INT128_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_INT128_RECORDS, sizeof(uint32_t));
+    const bool ready = written && records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
+    static const char* const names[] = { "a_loop" };
+    for (uint32_t path = 0; ready && path < 2; path += 1)
+    {
+        char object[512];
+        snprintf(object, sizeof(object), "%s/tier1-int128-loop-%u.o", directory, path);
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build_names(executable, source, names, 1, object, true, path != 0, true, false, NULL, &build);
+        uint32_t relocations = 0;
+        const uint32_t count = compiled ? check_test_tier1_function(object, "a_loop", records, CHECK_TEST_TIER1_INT128_RECORDS, offsets, types, &relocations) : 0;
+        uint32_t stacked = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const X86Instruction* instruction = &records[i].instruction;
+            const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+            stacked += instruction->mode != BUSTER_X86_REGISTER_DIRECT && instruction->rm == X86_REGISTER_RSP && form != X86_FORM_PUSH_R64 && form != X86_FORM_POP_R64;
+        }
+        check_test_expect(test, count != 0 && stacked == 0, "a_loop keeps its 128-bit values' halves in registers, addressing nothing from rsp");
+        printf("  Tier 1's 128-bit loop (#3299), %s path: %u instructions, %u of them addressing from rsp\n", path == 0 ? "vector" : "scalar", count, stacked);
+        unlink(object);
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(header);
+    unlink(source);
 }
 
 // Stack-passed vectors' alignment (#1204's review). A call whose 32- or 64-byte vector argument goes on the stack (its
@@ -6432,11 +6807,12 @@ static void check_test_driver_tier1_vector_copies(CheckTest* test, const char* c
 // #2743's loop vectorizer (--tier1-passes=+vectorize): loops over arrays as C programmers write them (element-wise
 // operations of each width, a fill, a copy, sums, a dot product, a conditional sum, a clamp of an int induction, byte
 // arithmetic through 32-bit lanes, population counts, a stencil, float and double operations without contraction, a
-// xor reduction, and a prefix sum the vectorizer must leave), called at lengths around the vectors' boundaries and on
-// overlapping arrays, a digest of every result and array printed. By each path at x86-64, x86-64-v2, x86-64-v3 and
-// x86-64-v4, with --verify's certificates: no fallback, the loops each target vectorizes (its 16- and 32-byte
-// element-wise loops; AVX-512's conversions, compares, selects and reductions too), the same object by both paths, and
-// clang -O0's output.
+// xor reduction, and a prefix sum the vectorizer must leave; #2808's counts of comparisons, a sum over an array of
+// structs and RGB to gray, whose loads are strided), called at lengths around the vectors' boundaries and on
+// overlapping arrays, a digest of every result and array printed. By each path at x86-64, x86-64-v2, x86-64-v3,
+// x86-64-v4 and znver5, with --verify's certificates: no fallback, the loops each target vectorizes (its 16- and 32-byte
+// element-wise loops; AVX-512's conversions, compares, selects, reductions, counts and de-interleaves too), the same
+// object by both paths, and clang -O0's output.
 static const char check_test_tier1_vectorize_source[] =
     "#include <stdint.h>\n"
     "#include <stdio.h>\n"
@@ -6456,7 +6832,13 @@ static const char check_test_tier1_vectorize_source[] =
     "__attribute__((noinline)) void add_f64(double* d, const double* a, const double* b, size_t n) { for (size_t i = 0; i < n; i += 1) d[i] = a[i] + b[i]; }\n"
     "__attribute__((noinline)) uint32_t xor_u32(const uint32_t* a, size_t n) { uint32_t s = 0x5a5a5a5au; for (size_t i = 0; i < n; i += 1) s ^= a[i]; return s; }\n"
     "__attribute__((noinline)) void prefix_i32(int32_t* a, size_t n) { for (size_t i = 1; i < n; i += 1) a[i] = (int32_t)((uint32_t)a[i] + (uint32_t)a[i - 1]); }\n"
+    "__attribute__((noinline)) size_t count_eq_u8(const uint8_t* a, size_t n, uint8_t v) { size_t c = 0; for (size_t i = 0; i < n; i += 1) c += a[i] == v; return c; }\n"
+    "__attribute__((noinline)) int count_gt_i32(const int32_t* a, size_t n, int32_t t) { int c = 0; for (size_t i = 0; i < n; i += 1) c += a[i] > t; return c; }\n"
+    "typedef struct { int32_t x, y, w, pad; } Particle;\n"
+    "__attribute__((noinline)) int64_t aos_sum(const Particle* p, size_t n) { int64_t s = 0; for (size_t i = 0; i < n; i += 1) s += (int64_t)p[i].x * p[i].w; return s; }\n"
+    "__attribute__((noinline)) void rgb_to_gray(uint8_t* g, const uint8_t* rgb, int n) { for (int i = 0; i < n; i += 1) g[i] = (uint8_t)((77 * rgb[3 * i] + 150 * rgb[3 * i + 1] + 29 * rgb[3 * i + 2]) >> 8); }\n"
     "static int32_t x[600], y[600], z[600];\n"
+    "static Particle particles[300];\n"
     "static uint8_t b8[1200], c8[1200];\n"
     "static int16_t h[600], g[600];\n"
     "static uint64_t q[600];\n"
@@ -6475,6 +6857,14 @@ static const char check_test_tier1_vectorize_source[] =
     "        const size_t n = lengths[l];\n"
     "        for (size_t i = 0; i < 600; i += 1) { x[i] = (int32_t)next(); y[i] = (int32_t)next(); h[i] = (int16_t)next(); g[i] = (int16_t)next(); q[i] = next(); f[i] = (float)(int32_t)next() / 65536.0f; u[i] = (double)(int64_t)next() / 3.0; v[i] = (double)(int32_t)next(); }\n"
     "        for (size_t i = 0; i < 1200; i += 1) { b8[i] = (uint8_t)next(); c8[i] = (uint8_t)next(); }\n"
+    "        for (size_t i = 0; i < 300; i += 1) { particles[i].x = (int32_t)next(); particles[i].y = (int32_t)next(); particles[i].w = (int32_t)next(); }\n"
+    "        mix64(count_eq_u8(b8, n, b8[n / 2]));\n"
+    "        mix64(count_eq_u8(b8, n, (uint8_t)(n & 3)));\n"
+    "        mix64((uint64_t)count_gt_i32(x, n, (int32_t)next()));\n"
+    "        mix64((uint64_t)aos_sum(particles, n));\n"
+    "        rgb_to_gray(c8, b8, (int)n);\n"
+    "        rgb_to_gray(b8 + 1, b8, (int)n);\n"
+    "        rgb_to_gray(b8 + 900, b8 + 899, (int)n / 4);\n"
     "        add_i32(z, x, y, n);\n"
     "        add_i32(x + 1, x, y, n);\n"
     "        add_i32(y, y + 3, x, n);\n"
@@ -6521,12 +6911,13 @@ static bool check_test_tier1_vectorize_field(const char* text, const char* name,
 
 static void check_test_driver_tier1_vectorize(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char* const targets[4] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4" };
+    static const char* const targets[5] = { "x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4", "znver5" };
     // The loops each target vectorizes: add_i32, copy_u8, fill_u32, scale_f32 and add_f64 at 16 or 32 bytes; at
-    // x86-64-v4 also the sums, the dot product, the conditional sum, the clamp, the bytes' scaling, the stencil and the xor
-    // reduction (its population count is VPOPCNTDQ's, which x86-64-v4 hasn't). main's loops call next(), and the prefix sum
+    // x86-64-v4 also the sums, the dot product, the conditional sum, the clamp, the bytes' scaling, the stencil, the xor
+    // reduction, the counts and the array of structs' sum (its population count is VPOPCNTDQ's and RGB to gray's byte
+    // permute VBMI's, which x86-64-v4 hasn't); at znver5 those two too. main's loops call next(), and the prefix sum
     // carries a dependence: none of theirs.
-    static const uint64_t vectorized[4] = { 5, 5, 5, 13 };
+    static const uint64_t vectorized[5] = { 5, 5, 5, 16, 18 };
     char unit[512];
     snprintf(unit, sizeof(unit), "%s/tier1-vectorize.c", directory);
     const bool written = parse_test_write(unit, check_test_tier1_vectorize_source, strlen(check_test_tier1_vectorize_source));

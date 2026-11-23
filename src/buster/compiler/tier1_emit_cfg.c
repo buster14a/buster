@@ -2237,8 +2237,11 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
         const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);
         error = tier1_select_part_direct(parts[k]) || tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, staged, source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;
     }
-    for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
+    // Then each part's register, a general register's loaded straight from `source` into `source` itself last
+    // (tier1_select_result_order).
+    for (uint32_t ordered = 0; error == TIER1_EMIT_OK && ordered < part_count; ordered += 1)
     {
+        const uint32_t k = tier1_select_result_order(parts, part_count, source, ordered);
         const bool vector_part = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const bool direct = tier1_select_part_direct(parts[k]);
         X86Instruction loads[3] = {
@@ -4456,6 +4459,12 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                         int32_t result_offset = 0;
                         error = tier1_emit_cfg_x87_offset(function, emitted, function->a[node], &result_offset) ? error : TIER1_EMIT_FRAME;
                         error = error != TIER1_EMIT_OK || tier1_emit_cfg_x87_append(emitted, &buffer, tier1_emit_cfg_x87_load(emitted, function->a[node], (uint8_t)emitted->frame.base_register, result_offset)) ? error : TIER1_EMIT_MEMORY;
+                    }
+                    // A dirty function's upper state cleared before its epilogue, one of its records (#2830), but where its
+                    // result is live in a ymm or zmm register.
+                    if (error == TIER1_EMIT_OK && returns_here && r + 1 == selected_records.count && emitted->zero_upper && !tier1_select_result_wide(function))
+                    {
+                        error = tier1_emit_append(&buffer, (X86Instruction){ .form = X86_FORM_VZEROUPPER }) ? error : TIER1_EMIT_MEMORY;
                     }
                     if (error == TIER1_EMIT_OK && returns_here && r + 1 == selected_records.count && tier1_frame_emit(&emitted->frame, true, &buffer) != TIER1_FRAME_EMIT_OK)
                     {

@@ -100,6 +100,16 @@ struct EmittedLiteral
 };
 #define BUSTER_EMITTED_LITERAL 0x80000000u
 
+// A jump table whose entries are values (#3298, Tier 1's ir_switch_table.c): the lowering's table `table` (an index of
+// CheckProgramLowered.tables), whose dispatch loads its entries as a switch's constants, which the emission writes in
+// place of its labels' offsets, one 32-bit value per entry.
+typedef struct EmittedValueTable EmittedValueTable;
+struct EmittedValueTable
+{
+    const int32_t* values;
+    uint32_t table;
+};
+
 typedef struct EmittedCode EmittedCode;
 struct EmittedCode
 {
@@ -113,6 +123,9 @@ struct EmittedCode
     // Its literals (EmittedLiteral, #2744): Tier 1's vector constants that its references name; none for Tier 0's.
     const EmittedLiteral* literals;
     uint32_t literal_count;
+    // Its jump tables of values (EmittedValueTable, #3298): Tier 1's; none for Tier 0's.
+    const EmittedValueTable* value_tables;
+    uint32_t value_table_count;
     // First records by label index; UINT32_MAX is an absent label, not an indirect control-flow target.
     uint32_t* label_records;
     uint32_t label_count;
