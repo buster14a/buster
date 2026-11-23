@@ -3776,6 +3776,93 @@ the option off, head against head: `sqlite3.c` +0.025 ms, the compiler's own sou
   tokens, not by the bodies it reads; that, the machine's run and the reading are the next cuts, in that order of
   ease.
 
+## The redesign's ninth piece: a unit pays for the bodies its producer reads
+
+The eighth piece left a unit that takes bodies paying for its size. Stage tables and profiles of the same binary with
+and without `--node-bodies` on `sqlite3.c` say where the option's 23.4 ms were: check-input +33.5 ms and the stages
+after it -9.8; of the 34.5 ms the option adds, 5.3 the kernel's clearing of pages and 2.6 the setup's own code. An
+experiment's patch (`mincore` on each range the setup pushes) read 367 MB reserved and 157 resident, 74.5 of them
+before the producer reads a body: every column was made for the unit's nodes (a capacity of 780,125) where the bodies
+the producer reads have 258,430 positions, and a second set of results and of the tests' state stood for the walk's
+nodes, which no machine runs on in a compile.
+
+The producer now asks what it asks before any reading of every body first, and the machine's columns are made for the
+positions of the bodies that are left; a compile makes nothing that only the shadow reads
+([`commands/lowering.md`](commands/lowering.md), "Compiling with the bodies taken"). The option's line under
+`--time-stages` says the positions, the room and the bytes made, and the driver's test holds them: a unit of 300
+thousand tokens outside its two small bodies takes 7.8 MB of the reader's arenas for the machine's state, where it
+took 135.
+
+### What it measured
+
+The 9700X, Release, CPU 2, paired, seven rounds on `sqlite3.c` and five on the others
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)).
+The option against without, before (`b0ee1afaa`) and after (`0f7795acd`), with what its specification predicted and
+the line it named as refuting it:
+
+| | before | predicted | refuted above | after; its least and most |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c`, the reader's peak added, MB | +145.6 | +55 | +75 | +60.2 |
+| `sqlite3.c`, kernel cycles added, M | +31.0 | +12 | +18 | +12.5; +11.2, +13.5 |
+| `sqlite3.c`, ms | +23.659 | +18.0 | +19.7 | +18.876; +18.291, +19.185 |
+| musl, ms | +93.419 | +65 | +78 | **+80.265; +79.432, +81.342** |
+| Lua, ms | +10.650 | +8.5 | +9.7 | +8.053; +7.969, +8.413 |
+
+With the option in both arms, the head before against this one: `sqlite3.c` -4.598 ms (-5.166 to -4.329, seven of
+seven lower), musl -12.794 (-13.396 to -12.056, five of five). The two units that take no body are unmoved: the
+compiler's own source -0.938 ms with the option, `sqlite3.c` with `-Wall -Wextra` +0.163.
+
+**musl's prediction is refuted:** 12.8 ms gained where 28 were predicted. Its profile at this head says why. Of the
+79.8 ms the option still adds there, the kernel is 30.3 (`clear_page_erms` 20.5): a unit of a few thousand tokens has
+3.3 MB of the machine's state whatever its bodies (two fronts' arrays, the machine's own columns, a tape's store), the
+scratch's pages past what the driver keeps go back to the kernel after each unit's reader, and the next unit's state
+takes them again, cleared. And the setup still reads the unit's tokens several times over (the bodies' list, the
+objects' columns, the functions the unit defines, its enumerations): `node_alone_begin` is 5.9 ms and
+`node_front_started` 2.7 over the 1,336 units, 1.7 and 0.5 on `sqlite3.c`. What the cut removed is what grew with
+the unit's nodes; what a small unit pays is fixed state and passes over its tokens, which it did not touch.
+
+With the option off, head against head: `sqlite3.c` +0.305 ms (two of seven lower), the compiler's own source -1.062,
+Lua +0.042, musl +1.996 (none of five lower). Each of the four runs the same instructions to within 0.004% (musl
+6,707.4 M and 6,707.1 M): the option's code is not on that path, and what differs between the two binaries is where
+the rest of the code is placed. Pairs of other heads on musl have read -2.6 and +0.7 ms the same way.
+
+### Against its gates
+
+- **Z1, the same decisions: met.** The producer against the oracle on the four corpora, twenty runs, each status 0, none
+  taken outside the set, every count the unit's cut read. Under the tests with the option forced the gate reads 36,510
+  bodies taken in 4,985 units of 112,860, none with a diagnostic in one: the 36,485 in 4,962 of the unit's cut, the
+  test's own two new compiles (4 bodies), and 88 more runs of the reservations' test (21 bodies), which fails each
+  reservation of two units' compile in turn and so runs as many compiles as the compile makes reservations. No body
+  is refused for room.
+- **Z2, exact by its outputs: met.** The corpora's objects, diagnostics and statuses plain, with `-fPIC`, with
+  `-Wall -Wextra` and with each half of the bodies; the 349 units; the option sets' 31,016 pairs; the driver's eight
+  parts and the producer's fixtures; the 34 blocks forced with every body and with each half, and their journal's
+  44,274 commands replayed, every output and status the same and 22 differing in `--time-stages`' text; the memory
+  and the address rows forced, 34 blocks each and no report, and the sanitized compiler on 418 of the corpora's units;
+  main.c compiled by itself; the no-recursion rule; the inventory, where no block fails that passes on main's own
+  build.
+- **Z3, its price:** `sqlite3.c` and Lua inside what was predicted, **musl refuted** (above).
+- **Z4, the option off: the same instructions,** and times within what two builds differ by (above).
+- **Z5, single faults:** seven single changes (a body's positions counted as one; a body's stored answer read for its
+  neighbour; every other body left out of the count; the room without its slack; the columns made for the unit's
+  nodes; the walk's report given the unit's nodes in a compile; the roots by token made in a compile), each built and
+  run against the driver's test: each fails it. The last passed under the first bound the test had on the large
+  unit's state (9,437,184 bytes, where the fault makes 9,046,976 of it); the bound is 8,912,896 now.
+
+### What it means
+
+- **The option is 4.6 ms cheaper on `sqlite3.c` and still 18.9 ms slower than without it.** What the producer adds is
+  about 30 ms at this head (the tests 7.0, the sweeps and their keeping 7.8, the loop that reads a body and writes
+  its graph 3.0, the front 3.3, the twin's controls 2.2, the kernel 2.2, the setup 2.2, what it asks before a reading
+  0.9, the splice 1.1) against 10 to 11 saved. **It stays off by default and moves nothing on #2850's acceptance.**
+- **What is left of the setup is small and named:** the passes over the unit's tokens, a small unit's fixed state on a
+  lane of many units, and the 60 MB the swept bodies' columns still touch, which a machine that kept one body's
+  records at a time would not.
+- **Three tenths of what it sweeps is for nothing:** 77,372 of the 258,430 positions are of bodies the machine
+  refuses after their sweeps, and a body of under 1,024 positions is swept to its end whichever root refuses it.
+- **Main itself is 5 ms slower than at `e9cbc3d72`** (buster14a/buster#3296 +0.87 ms, buster14a/buster#3324 +1.79, the
+  ten merges after it +2.42, paired), on the path every compile takes: that is the next piece, before more of this one.
+
 ## Step 5's allocation, and its kept rows in the compile
 
 [#2873](https://github.com/buster14a/buster/issues/2873). After the census,

@@ -155,6 +155,12 @@ static void check_test_driver_weak_alias_diagnostic_suite(CheckTest* test, const
     static const char sentinel[] = "preserve the existing weak alias object\n";
     for (uint32_t f = 0; loaded && f < fixtures.count; f += 1)
     {
+        // Each fixture is a unit of test-checker-driver's deal (check_test_driver_takes): run whole within
+        // check_test_driver_weak_aliases' unit, the two suites made it 57 s long on a 4-CPU Xeon VM (#3399).
+        if (!check_test_driver_takes())
+        {
+            continue;
+        }
         const CheckSourceFixture* fixture = fixtures.cases + f;
         const bool written = parse_test_write(source, fixture->source, strlen(fixture->source));
         check_test_expect(test, written, "weak alias diagnostic source written");
@@ -502,6 +508,4 @@ static void check_test_driver_weak_aliases(CheckTest* test, const char* clang, c
     }
     free(theirs);
     unlink(path);
-    check_test_driver_weak_alias_diagnostics(test, clang, executable, directory);
-    check_test_driver_weak_alias_common(test, clang, executable, directory);
 }

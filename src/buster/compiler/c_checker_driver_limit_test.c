@@ -827,7 +827,7 @@ static void check_test_driver_error_limits(CheckTest* test, const char* clang, c
     }
     unlink(source);
     unlink(object);
-    if (check_test_driver_takes())
+    if (check_test_driver_takes_weighing(740))
     {
         check_test_driver_fatal_errors(test, clang, executable, directory);
     }
