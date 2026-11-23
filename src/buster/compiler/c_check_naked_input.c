@@ -226,7 +226,7 @@ static void check_input_naked_finish(CheckInputReader* reader)
         const uint32_t declaration = check_sparse_get(input->body_declarations, body);
         if (parser->tree.roles[body] != PARSE_ROLE_OPEN_BODY || declaration == BUSTER_CHECK_NONE ||
             (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NAKED) == 0 ||
-            (input->deferred_tokens != NULL && input->deferred_tokens[body] != 0))
+            (input->deferred_tokens != NULL && !input->node_bodies && input->deferred_tokens[body] != 0))
         {
             continue;
         }

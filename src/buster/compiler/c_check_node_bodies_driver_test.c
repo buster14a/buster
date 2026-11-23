@@ -12,7 +12,8 @@
 // literals, a local whose address is taken, an array's element, a return with no value, and values of every class from
 // a byte to a double. Two bodies beside them are read as ever: a `switch`, and an initialization of an object aligned
 // past 8 bytes; and a third names a thread-local object, whose entry the lowering writes as a call in
-// position-independent code.
+// position-independent code. `floats` has a double's sum of a product, which the lowering fuses for a target with FMA:
+// the machine takes no floating sum there, and the body is read as ever.
 static const char check_driver_node_bodies_text[] =
     "struct P { int a; long c; char *s; };\n"
     "int g; long gl; static int sg; extern int ext;\n"
@@ -98,6 +99,11 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
     snprintf(plain, sizeof(plain), "%s/node-bodies-plain.o", directory);
     snprintf(taken, sizeof(taken), "%s/node-bodies-taken.o", directory);
     const bool written = parse_test_write(source, check_driver_node_bodies_text, sizeof(check_driver_node_bodies_text) - 1);
+    // The test's switch is the environment's. What it held, a run of every test with the option forced among them, is
+    // taken off for the compiles here, which give the option or a selection themselves, and put back at the end.
+    const char* outer = getenv("BUSTER_TEST_NODE_BODIES");
+    char* restored = outer != NULL ? strdup(outer) : NULL;
+    unsetenv("BUSTER_TEST_NODE_BODIES");
     char* plain_text = NULL;
     const int plain_status = written ? check_test_driver_node_bodies_compile(executable, source, plain, NULL, 0, &plain_text) : -1;
     check_test_expect(test, written && plain_status == 0 && plain_text != NULL, "node-bodies: the fixture compiles without the option");
@@ -126,9 +132,6 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
     }
     free(timed_text);
     // Some of the producer's bodies taken and the others read as ever, by a test's selection: each third of them.
-    // (The switch is the environment's: what it held, a run of every test with the option forced among it, is put back.)
-    const char* outer = getenv("BUSTER_TEST_NODE_BODIES");
-    char* restored = outer != NULL ? strdup(outer) : NULL;
     for (uint32_t residue = 0; residue < 3 && plain_status == 0; residue += 1)
     {
         char selection[16];
@@ -136,14 +139,7 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
         setenv("BUSTER_TEST_NODE_BODIES", selection, 1);
         char* selected_text = NULL;
         const int selected_status = check_test_driver_node_bodies_compile(executable, source, taken, NULL, 0, &selected_text);
-        if (restored != NULL)
-        {
-            setenv("BUSTER_TEST_NODE_BODIES", restored, 1);
-        }
-        else
-        {
-            unsetenv("BUSTER_TEST_NODE_BODIES");
-        }
+        unsetenv("BUSTER_TEST_NODE_BODIES");
         check_test_expect(test, selected_status == 0 && selected_text != NULL && plain_text != NULL && strcmp(plain_text, selected_text) == 0 &&
                                 check_test_driver_node_bodies_same(plain, taken),
                           "node-bodies: with a third of the producer's bodies taken the object is the ordinary compile's");
@@ -161,6 +157,36 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
                       "node-bodies: as position-independent code the object is the ordinary compile's");
     free(pic_text);
     free(pic_taken_text);
+    // And for a target that fuses a product and a sum, where the machine takes no floating sum (NodeMachine.fuses): the
+    // body with one is read as ever, and its function is the lowering's fused one.
+    static const char* const fused[] = { "-mfma" };
+    static const char* const fused_on[] = { "-mfma", "--node-bodies" };
+    static const char* const fused_timed[] = { "-mfma", "--node-bodies", "--time-stages" };
+    char* fused_text = NULL;
+    char* fused_taken_text = NULL;
+    char* fused_timed_text = NULL;
+    const int fused_status = plain_status == 0 ? check_test_driver_node_bodies_compile(executable, source, plain, fused, 1, &fused_text) : -1;
+    const int fused_taken_status = fused_status == 0 ? check_test_driver_node_bodies_compile(executable, source, taken, fused_on, 2, &fused_taken_text) : -1;
+    const bool fused_same = fused_taken_status == 0 && fused_text != NULL && fused_taken_text != NULL && strcmp(fused_text, fused_taken_text) == 0 &&
+                            check_test_driver_node_bodies_same(plain, taken);
+    const int fused_timed_status = fused_status == 0 ? check_test_driver_node_bodies_compile(executable, source, taken, fused_timed, 3, &fused_timed_text) : -1;
+    const char* fused_line = fused_timed_text != NULL ? strstr(fused_timed_text, "node-bodies: bodies=") : NULL;
+    unsigned fused_bodies = 0;
+    unsigned fused_took = 0;
+    const bool fused_counted = fused_line != NULL && sscanf(fused_line, "node-bodies: bodies=%u taken=%u", &fused_bodies, &fused_took) == 2;
+    check_test_expect(test, fused_same && fused_timed_status == 0 && fused_counted && fused_bodies == 18 && fused_took == 14 && check_test_driver_node_bodies_same(plain, taken),
+                      "node-bodies: for a target that fuses a product and a sum the body with a floating sum is left, and the object is the ordinary compile's");
+    if (fused_timed_status == 0 && !(fused_counted && fused_bodies == 18 && fused_took == 14))
+    {
+        fprintf(stderr, "test-checker-driver: node-bodies: -mfma: bodies %u, taken %u\n", fused_bodies, fused_took);
+    }
+    free(fused_text);
+    free(fused_taken_text);
+    free(fused_timed_text);
+    if (restored != NULL)
+    {
+        setenv("BUSTER_TEST_NODE_BODIES", restored, 1);
+    }
     free(restored);
     free(plain_text);
     unlink(source);

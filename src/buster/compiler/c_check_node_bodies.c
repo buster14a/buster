@@ -1387,10 +1387,11 @@ static void node_producer_keep(struct NodeProducer* producer, NodeFrontShadow* s
 }
 
 // --node-bodies (BUSTER_NODE_READER_BODIES): the bodies the producer took, masked before the walk's first chunk. Each
-// one's tokens, its braces among them, take the lazily deferred bodies' mask (CheckInput.deferred_tokens, which every
-// phase after the reader's walk skips), no class of the walk's (CheckInputReader.visits) and the reader's own mark
-// (CheckInputReader.ignored); and the input says whose mask it is (CheckInput.node_bodies). A unit with a mask already,
-// or without room, takes none: nothing is then masked, and every body is read as ever.
+// one's tokens, its braces among them, take the lazily deferred bodies' mask (CheckInput.deferred_tokens, which the
+// phases after the reader skip) and no class of the walk's (CheckInputReader.visits); and the input says whose mask it
+// is (CheckInput.node_bodies). The reader's own passes after the walk that read tokens, not nodes, read a taken body as
+// any body: its uses are uses (check_input_fp_types, check_input_naked_finish). A unit with a mask already, or without
+// room, takes none: nothing is then masked, and every body is read as ever.
 static void node_bodies_mask(CheckInputReader* reader, NodeFrontShadow* shadow)
 {
     CheckInput* input = reader->output;
@@ -1421,7 +1422,6 @@ static void node_bodies_mask(CheckInputReader* reader, NodeFrontShadow* shadow)
                 const uint64_t length = (uint64_t)closing - opening + 1;
                 memset(mask + opening, 1, length);
                 memset(reader->visits + opening, 0, length);
-                memset(reader->ignored + opening, 1, length);
             }
         }
         input->deferred_tokens = mask;
