@@ -723,4 +723,37 @@ void later(void)
 {
     after_typedef_declarator;
 }
+#elif BUSTER_CASE == 89
+int check(int n)
+{
+    int s = 0;
+    "before" + n;
+    foo (int i = 0; i < n; i++) s += i;
+    s == 1;
+    return s;
+}
+int later(void)
+{
+    "later" + 1;
+    return 0;
+}
+#elif BUSTER_CASE == 90
+int check(int n)
+{
+    "before" + n;
+    foo (int i = 0; i < n; i++) { "loop" + i; }
+    after_corrected_loop;
+    "after" + n;
+    return n;
+}
+#elif BUSTER_CASE == 91
+void check(int n)
+{
+    whil ("condition" + n != (void*)0) n--;
+}
+#elif BUSTER_CASE == 92
+int check(void)
+{
+    retrn;
+}
 #endif
