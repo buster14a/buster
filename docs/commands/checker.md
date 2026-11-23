@@ -942,6 +942,10 @@ builder's observer's `-Wtautological-bitwise-compare`,
 `-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
 order (`c_check_common_cfg.c`).
 
+`tests/checker/int-float-conversions` (#3339) is one too: `-Wimplicit-const-int-float-conversion`
+at the default flags, and `-Wimplicit-int-float-conversion` and `-Wdouble-promotion` under pragmas, whole
+([the c-checker section](../c-checker.md#integer-to-floating-conversions-and-floating-promotions-3339)).
+
 `tests/checker/system-macros` (#3338) is one too: common warnings at a system
 header's macro expanded in user code, which the expansion location decides as
 clang's DiagnosticsEngine does (`check_common_severity`), and the checks whose
