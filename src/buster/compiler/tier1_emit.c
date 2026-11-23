@@ -30,6 +30,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+// The dirty-state scan and the VEX twins (#2830), which Tier 0 shares (#3335).
+#include "x86_upper_state.c"
 
 _Static_assert(BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT == BUSTER_TIER1_FRAME_MAX_ALIGNMENT, "selector and frame alignment bounds agree");
 
@@ -329,7 +331,7 @@ struct Tier1EmitResult
     uint32_t row_moves;
     uint64_t retained_bytes;
     uint64_t transition_scratch_bytes;
-    // #2830: the code names ymm0 to ymm15 or zmm0 to zmm15 (tier1_emit_upper_dirty), so a vzeroupper precedes each call
+    // #2830: the code names ymm0 to ymm15 or zmm0 to zmm15 (x86_upper_dirty), so a vzeroupper precedes each call
     // and each return's epilogue, but a call's whose arguments or a return's whose result are live in such a register
     // (tier1_select_call_wide, tier1_select_result_wide). tier1_emit_function predicts it from the values' types and emits
     // the function again where its code says otherwise; the certificate regenerates the same records from it.
@@ -1982,157 +1984,6 @@ static __attribute__((unused)) bool tier1_emit_place_literals(const Tier1EmitRes
     return valid;
 }
 
-// The VEX twin of each legacy SSE form Tier 1's selection writes (#2830), for a target with AVX: the same operation on the
-// low 128 bits of its registers, zeroing the bits above them where the legacy form keeps them. A legacy write keeps its
-// destination's bits above 127, which the processor makes wait for the register's old value while the upper state is
-// dirty (6.0 cycles an element against 1.07 in #2755's saxpy body on the 9700X); the VEX one doesn't, and leaves the state
-// clean. With BUSTER_TIER1_VEX_THREE, its first source is VEX.vvvv, the legacy form's destination (addss x, y is vaddss x,
-// x, y); without it the twin has the legacy form's operands (vmovaps, vmovd, vucomiss, vcvttss2si, vpshufd). movss and
-// movsd, whose legacy form is a load or a register's merge by its mode, are tier1_emit_vex_record's.
-#define BUSTER_TIER1_VEX_THREE 0x8000u
-#define BUSTER_TIER1_VEX_FORM 0x7fffu
-// X(legacy form, its twin, BUSTER_TIER1_VEX_THREE or 0).
-#define BUSTER_TIER1_VEX_TWINS(X) \
-    X(ADDSS_X_XM32, VADDSS_X_X_XM32, BUSTER_TIER1_VEX_THREE) \
-    X(SUBSS_X_XM32, VSUBSS_X_X_XM32, BUSTER_TIER1_VEX_THREE) \
-    X(MULSS_X_XM32, VMULSS_X_X_XM32, BUSTER_TIER1_VEX_THREE) \
-    X(DIVSS_X_XM32, VDIVSS_X_X_XM32, BUSTER_TIER1_VEX_THREE) \
-    X(ADDSD_X_XM64, VADDSD_X_X_XM64, BUSTER_TIER1_VEX_THREE) \
-    X(SUBSD_X_XM64, VSUBSD_X_X_XM64, BUSTER_TIER1_VEX_THREE) \
-    X(MULSD_X_XM64, VMULSD_X_X_XM64, BUSTER_TIER1_VEX_THREE) \
-    X(DIVSD_X_XM64, VDIVSD_X_X_XM64, BUSTER_TIER1_VEX_THREE) \
-    X(CMPSS_X_XM32_IMM8, VCMPSS_X_X_XM32_IMM8, BUSTER_TIER1_VEX_THREE) \
-    X(CMPSD_X_XM64_IMM8, VCMPSD_X_X_XM64_IMM8, BUSTER_TIER1_VEX_THREE) \
-    X(CVTSS2SD_X_XM32, VCVTSS2SD_X_X_XM32, BUSTER_TIER1_VEX_THREE) \
-    X(CVTSD2SS_X_XM64, VCVTSD2SS_X_X_XM64, BUSTER_TIER1_VEX_THREE) \
-    X(CVTSI2SS_X_RM32, VCVTSI2SS_X_X_RM32, BUSTER_TIER1_VEX_THREE) \
-    X(CVTSI2SS_X_RM64, VCVTSI2SS_X_X_RM64, BUSTER_TIER1_VEX_THREE) \
-    X(CVTSI2SD_X_RM32, VCVTSI2SD_X_X_RM32, BUSTER_TIER1_VEX_THREE) \
-    X(CVTSI2SD_X_RM64, VCVTSI2SD_X_X_RM64, BUSTER_TIER1_VEX_THREE) \
-    X(XORPS_X_XM128, VXORPS_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PXOR_X_XM128, VPXOR_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PAND_X_XM128, VPAND_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(POR_X_XM128, VPOR_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PADDD_X_XM128, VPADDD_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PADDQ_X_XM128, VPADDQ_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PSUBD_X_XM128, VPSUBD_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PMULLD_X_XM128, VPMULLD_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PCMPEQD_X_XM128, VPCMPEQD_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PUNPCKLBW_X_XM128, VPUNPCKLBW_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(PUNPCKLWD_X_XM128, VPUNPCKLWD_X_X_XM128, BUSTER_TIER1_VEX_THREE) \
-    X(UCOMISS_X_XM32, VUCOMISS_X_XM32, 0) \
-    X(UCOMISD_X_XM64, VUCOMISD_X_XM64, 0) \
-    X(CVTTSS2SI_R32_XM32, VCVTTSS2SI_R32_XM32, 0) \
-    X(CVTTSS2SI_R64_XM32, VCVTTSS2SI_R64_XM32, 0) \
-    X(CVTTSD2SI_R32_XM64, VCVTTSD2SI_R32_XM64, 0) \
-    X(CVTTSD2SI_R64_XM64, VCVTTSD2SI_R64_XM64, 0) \
-    X(CVTDQ2PS_X_XM128, VCVTDQ2PS_X_XM128, 0) \
-    X(CVTTPS2DQ_X_XM128, VCVTTPS2DQ_X_XM128, 0) \
-    X(MOVD_X_RM32, VMOVD_X_RM32, 0) \
-    X(MOVD_RM32_X, VMOVD_RM32_X, 0) \
-    X(MOVQ_X_RM64, VMOVQ_X_RM64, 0) \
-    X(MOVQ_RM64_X, VMOVQ_RM64_X, 0) \
-    X(MOVAPS_X_XM, VMOVAPS_X_XM128, 0) \
-    X(MOVAPS_XM_X, VMOVAPS_XM128_X, 0) \
-    X(MOVUPS_X_XM, VMOVUPS_X_XM128, 0) \
-    X(MOVUPS_XM_X, VMOVUPS_XM128_X, 0) \
-    X(PSHUFD_X_XM128_IMM8, VPSHUFD_X_XM128_IMM8, 0) \
-    X(MOVSS_X_XM32, VMOVSS_X_M32, 0) \
-    X(MOVSS_XM32_X, VMOVSS_M32_X, 0) \
-    X(MOVSD_X_XM64, VMOVSD_X_M64, 0) \
-    X(MOVSD_XM64_X, VMOVSD_M64_X, 0)
-
-// One entry past the forms, so that a dword gather of the last form's entry stays inside the table.
-#define BUSTER_TIER1_VEX_FORWARD(legacy, twin, three) [X86_FORM_##legacy] = (uint16_t)(X86_FORM_##twin | (three)),
-static const uint16_t tier1_emit_vex_forms[X86_FORM_COUNT + 1] = { BUSTER_TIER1_VEX_TWINS(BUSTER_TIER1_VEX_FORWARD) };
-#undef BUSTER_TIER1_VEX_FORWARD
-// Each twin's legacy form, for the code's certificate (tier1_emit_vex_canonical).
-#define BUSTER_TIER1_VEX_BACKWARD(legacy, twin, three) [X86_FORM_##twin] = (uint16_t)(X86_FORM_##legacy | (three)),
-// A legacy movss's or movsd's store form is its own entry, which tier1_emit_vex_canonical takes between registers.
-static const uint16_t tier1_emit_vex_legacy[X86_FORM_COUNT + 1] = {
-    BUSTER_TIER1_VEX_TWINS(BUSTER_TIER1_VEX_BACKWARD)[X86_FORM_MOVSS_XM32_X] = X86_FORM_MOVSS_XM32_X,
-    [X86_FORM_MOVSD_XM64_X] = X86_FORM_MOVSD_XM64_X,
-    [X86_FORM_VMOVSS_X_X_X] = X86_FORM_MOVSS_X_XM32,
-    [X86_FORM_VMOVSD_X_X_X] = X86_FORM_MOVSD_X_XM64,
-};
-#undef BUSTER_TIER1_VEX_BACKWARD
-
-// A legacy SSE record's VEX twin (tier1_emit_vex_forms' entry `entry`, a segment override's rows `segment` past the form's
-// row). movss and movsd from memory and into it are vmovss's and vmovsd's loads and stores; between registers, their
-// merge of the source's low element into the destination's, vmovss's and vmovsd's of three registers with the
-// destination's other elements from VEX.vvvv: movss x, y is vmovss x, x, y, and its store form's movss y, x (into y's low
-// element) vmovss y, y, x.
-static X86Instruction tier1_emit_vex_record(X86Instruction record, uint32_t entry, uint32_t segment)
-{
-    const uint32_t legacy = record.form & BUSTER_X86_FORM_NUMBER;
-    const uint32_t row = legacy - segment;
-    const bool direct = record.mode == BUSTER_X86_REGISTER_DIRECT;
-    const bool single = row == X86_FORM_MOVSS_X_XM32 || row == X86_FORM_MOVSS_XM32_X;
-    const bool merge = direct && (single || row == X86_FORM_MOVSD_X_XM64 || row == X86_FORM_MOVSD_XM64_X);
-    const bool into_rm = row == X86_FORM_MOVSS_XM32_X || row == X86_FORM_MOVSD_XM64_X;
-    X86Instruction twin = record;
-    if (merge)
-    {
-        const uint8_t destination = into_rm ? record.rm : record.reg;
-        const uint8_t source = into_rm ? record.reg : record.rm;
-        twin.form = (uint16_t)((single ? X86_FORM_VMOVSS_X_X_X : X86_FORM_VMOVSD_X_X_X) + segment);
-        twin.reg = destination;
-        twin.vvvv = destination;
-        twin.rm = source;
-    }
-    else
-    {
-        twin.form = (uint16_t)((record.form & BUSTER_X86_FORM_FIXUP) | ((entry & BUSTER_TIER1_VEX_FORM) + segment));
-        twin.vvvv = (entry & BUSTER_TIER1_VEX_THREE) != 0 ? record.reg : 0;
-    }
-    return twin;
-}
-
-// The records of `records[0, count)`, at most 16, whose forms have an entry in `table` (tier1_emit_vex_forms or
-// tier1_emit_vex_legacy, one entry past the forms): their forms gathered, each one's entry gathered by its row (its number
-// less its segment override's rows, FS's and GS's, which every row has; an SS override, past them, has none).
-static __mmask16 tier1_emit_vex_lookup(const X86Instruction* records, uint32_t count, const uint16_t* table)
-{
-    const __m512i lanes = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-    const __m512i rows = _mm512_set1_epi32(X86_FORM_COUNT);
-    const __mmask16 live = count >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << count) - 1);
-    const __m512i forms = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), live, _mm512_slli_epi32(lanes, 4), (const uint8_t*)records + offsetof(X86Instruction, form), 1);
-    const __m512i number = _mm512_and_si512(forms, _mm512_set1_epi32(BUSTER_X86_FORM_NUMBER));
-    const __mmask16 plain = _mm512_cmplt_epu32_mask(number, _mm512_set1_epi32(BUSTER_X86_FORM_SS)) & live;
-    __m512i row = _mm512_mask_sub_epi32(number, _mm512_cmpge_epu32_mask(number, rows), number, rows);
-    row = _mm512_mask_sub_epi32(row, _mm512_cmpge_epu32_mask(row, rows), row, rows);
-    const __m512i entries = _mm512_and_si512(_mm512_mask_i32gather_epi32(_mm512_setzero_si512(), plain, row, table, 2), _mm512_set1_epi32(0xffff));
-    return _mm512_test_epi32_mask(entries, entries) & plain;
-}
-
-// A record's canonical form for the code's certificate (#2830), which decodes and compares Tier 1's legacy SSE records:
-// a VEX twin (tier1_emit_vex_record's, a three-operand one's VEX.vvvv its destination) as its legacy record, and a
-// legacy movss or movsd into its ModRM.rm register as the same merge into its ModRM.reg one. Two records of one canonical
-// form compute the same low 128 bits; the twin also zeroes the bits above them, which the certificate's register cells
-// (a location is a register's low bytes, its whole width or a scalar's) never read apart from those it writes.
-static X86Instruction tier1_emit_vex_canonical(X86Instruction record)
-{
-    const uint32_t number = record.form & BUSTER_X86_FORM_NUMBER;
-    const uint32_t segment = number < BUSTER_X86_FORM_SS ? number - number % X86_FORM_COUNT : 0;
-    const uint32_t row = number < BUSTER_X86_FORM_SS ? number - segment : 0;
-    const uint32_t entry = tier1_emit_vex_legacy[row];
-    const bool direct = record.mode == BUSTER_X86_REGISTER_DIRECT;
-    X86Instruction canonical = record;
-    const bool merge = row == X86_FORM_VMOVSS_X_X_X || row == X86_FORM_VMOVSD_X_X_X;
-    if (direct && (row == X86_FORM_MOVSS_XM32_X || row == X86_FORM_MOVSD_XM64_X))
-    {
-        canonical.form = (uint16_t)((row == X86_FORM_MOVSS_XM32_X ? X86_FORM_MOVSS_X_XM32 : X86_FORM_MOVSD_X_XM64) + segment);
-        canonical.reg = record.rm;
-        canonical.rm = record.reg;
-    }
-    else if (entry != 0 && ((entry & BUSTER_TIER1_VEX_THREE) == 0 || record.vvvv == record.reg) && (!merge || record.vvvv == record.reg))
-    {
-        canonical.form = (uint16_t)((record.form & BUSTER_X86_FORM_FIXUP) | ((entry & BUSTER_TIER1_VEX_FORM) + segment));
-        canonical.vvvv = 0;
-    }
-    return canonical;
-}
-
 #include "tier1_emit_cfg.c"
 #include "tier1_certificate_emitted.c"
 #include "tier1_debug_straight.c"
@@ -2321,60 +2172,7 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
     return error;
 }
 
-// Whether `records` name ymm0 to ymm15 or zmm0 to zmm15 (#2830): the upper state they leave dirty, which a legacy SSE
-// instruction after them (a caller's, glibc's, or another compiler's) then runs in, waiting for its destination's old
-// value. As clang's VZeroUpperInsertion counts it, a register operand of a form's ymm or zmm class (VEX.vvvv's, ModRM.reg's,
-// or ModRM.rm's where the record's mode is a register), read or written, below 16: vzeroupper clears theirs, and no legacy
-// instruction reaches zmm16 to zmm31. Sixteen records a step: their registers' and modes' dwords and their forms' gathered,
-// each form's row (its number less its segment override's rows, BUSTER_X86_FORM_FS's multiples) and its row's three
-// operands' classes gathered from the form table.
-static bool tier1_emit_upper_dirty(const X86Instruction* records, uint32_t count)
-{
-    _Static_assert(offsetof(X86FormDescription, rm) == offsetof(X86FormDescription, reg) + 2, "a dword gather reads a form's reg and rm operands");
-    _Static_assert(offsetof(X86Instruction, rm) == offsetof(X86Instruction, reg) + 1 && offsetof(X86Instruction, mode) == offsetof(X86Instruction, reg) + 3, "a record's reg, rm and mode bytes in one dword");
-    _Static_assert(offsetof(X86Instruction, vvvv) == offsetof(X86Instruction, form) + 2, "a record's form and vvvv in one dword");
-    const __m512i lanes = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
-    const __m512i strides = _mm512_slli_epi32(lanes, 4);
-    const __m512i rows = _mm512_set1_epi32(X86_FORM_COUNT);
-    const __m512i bytes = _mm512_set1_epi32(0xff);
-    const __m512i sixteen = _mm512_set1_epi32(16);
-    const __m512i classes = _mm512_set1_epi32(BUSTER_X86_OPERAND_CLASS & ~1);
-    const __m512i wide = _mm512_set1_epi32(BUSTER_X86_CLASS_YMM);
-    const __m512i registered = _mm512_set1_epi32(BUSTER_X86_OPERAND_REGISTER);
-    const __m512i size = _mm512_set1_epi32((int32_t)sizeof(X86FormDescription));
-    const uint8_t* table = (const uint8_t*)x86_form_descriptions;
-    __mmask16 dirty = 0;
-    for (uint32_t first = 0; first < count && dirty == 0; first += 16)
-    {
-        const uint32_t left = count - first;
-        const __mmask16 live = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
-        const uint8_t* base = (const uint8_t*)(records + first);
-        const __m512i operands = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), live, strides, base + offsetof(X86Instruction, reg), 1);
-        const __m512i forms = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), live, strides, base + offsetof(X86Instruction, form), 1);
-        __m512i row = _mm512_and_si512(forms, _mm512_set1_epi32(BUSTER_X86_FORM_NUMBER));
-        for (uint32_t segment = 0; segment < 3; segment += 1)
-        {
-            row = _mm512_mask_sub_epi32(row, _mm512_cmpge_epu32_mask(row, rows), row, rows);
-        }
-        const __m512i offsets = _mm512_mullo_epi32(row, size);
-        const __m512i reg_rm = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), live, offsets, table + offsetof(X86FormDescription, reg), 1);
-        const __m512i vvvv = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), live, offsets, table + offsetof(X86FormDescription, vvvv), 1);
-        const __m512i reg_operand = reg_rm;
-        const __m512i rm_operand = _mm512_srli_epi32(reg_rm, 16);
-        // Each operand of a ymm or zmm class (6 or 7) at a register below 16.
-        const __mmask16 reg_hit = _mm512_cmpeq_epi32_mask(_mm512_and_si512(reg_operand, classes), wide) &
-                                  _mm512_cmplt_epu32_mask(_mm512_and_si512(operands, bytes), sixteen);
-        const __mmask16 rm_hit = _mm512_cmpeq_epi32_mask(_mm512_and_si512(rm_operand, classes), wide) & _mm512_test_epi32_mask(rm_operand, registered) &
-                                 _mm512_cmplt_epu32_mask(_mm512_and_si512(_mm512_srli_epi32(operands, 8), bytes), sixteen) &
-                                 _mm512_cmpeq_epi32_mask(_mm512_srli_epi32(operands, 24), _mm512_set1_epi32(BUSTER_X86_REGISTER_DIRECT));
-        const __mmask16 vvvv_hit = _mm512_cmpeq_epi32_mask(_mm512_and_si512(vvvv, classes), wide) & _mm512_test_epi32_mask(vvvv, registered) &
-                                   _mm512_cmplt_epu32_mask(_mm512_and_si512(_mm512_srli_epi32(forms, 16), bytes), sixteen);
-        dirty = (__mmask16)((reg_hit | rm_hit | vvvv_hit) & live);
-    }
-    return dirty != 0;
-}
-
-// Rewrites a function's legacy SSE records as their VEX twins (tier1_emit_vex_forms, #2830), for a target that allows
+// Rewrites a function's legacy SSE records as their VEX twins (x86_vex_forms, #2830), for a target that allows
 // them, but in a function with an asm body, whose records are the program's own; each rewritten record's Zen 5 case
 // again. One record for one, so that every index into the records (branches, references, origins, the frame's events
 // and the debug definitions) stays. Sixteen records a step: their forms gathered, each one's entry gathered from the
@@ -2391,7 +2189,7 @@ static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_f
     }
     for (uint32_t first = 0; avx && !body && first < code->count; first += 16)
     {
-        uint32_t found = tier1_emit_vex_lookup(code->records + first, code->count - first, tier1_emit_vex_forms);
+        uint32_t found = x86_vex_lookup(code->records + first, code->count - first, x86_vex_forms);
         while (found != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(found);
@@ -2400,8 +2198,8 @@ static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_f
             const X86Instruction record = code->records[r];
             const uint32_t legacy = record.form & BUSTER_X86_FORM_NUMBER;
             const uint32_t segment = legacy - (legacy % X86_FORM_COUNT);
-            const uint32_t entry = tier1_emit_vex_forms[legacy - segment];
-            const X86Instruction twin = tier1_emit_vex_record(record, entry, segment);
+            const uint32_t entry = x86_vex_forms[legacy - segment];
+            const X86Instruction twin = x86_vex_record(record, entry, segment);
             if (x86_target_form_allowed(allowed_forms, twin.form))
             {
                 code->records[r] = twin;
@@ -2434,7 +2232,7 @@ static bool tier1_emit_upper_likely(const IrFunction* function)
 
 // Emits a function (#140) with a vzeroupper before each call and each return's epilogue where its code names a ymm or
 // zmm register below 16 (Tier1EmitResult.zero_upper, #2830), as clang's code has. Whether it will is predicted from its
-// values' types (tier1_emit_upper_likely) and checked on its code (tier1_emit_upper_dirty): a wrong prediction emits the
+// values' types (tier1_emit_upper_likely) and checked on its code (x86_upper_dirty): a wrong prediction emits the
 // function again, as the code says, so that only a mispredicted function pays a second emission (one emission of every
 // function that names such a register cost main.c's compile 5.7% at -march=znver5 on the 9700X). Then, at a target with
 // AVX, its legacy SSE records become their VEX twins (tier1_emit_vex).
@@ -2444,7 +2242,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     const bool clears = allowed_forms != 0 && x86_target_form_allowed(allowed_forms, X86_FORM_VZEROUPPER);
     const bool predicted = clears && plan != 0 && plan->function != 0 && tier1_emit_upper_likely(plan->function);
     Tier1EmitError error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, predicted);
-    const bool dirty = error == TIER1_EMIT_OK && clears && tier1_emit_upper_dirty(result->code.records, result->code.count);
+    const bool dirty = error == TIER1_EMIT_OK && clears && x86_upper_dirty(result->code.records, result->code.count);
     if (error == TIER1_EMIT_OK && dirty != predicted)
     {
         arena_pop_to(output, output_mark);

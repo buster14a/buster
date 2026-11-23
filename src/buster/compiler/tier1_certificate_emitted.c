@@ -75,7 +75,7 @@
 // allocation's own certificate (tier1_certificate_cfg.c) still covers them. Canonical 32-bit storage (a 4-byte value's upper half zero) is the selection's contract and isn't
 // checked: a 4-byte value is its low 4 bytes.
 //
-// Every record, emitted or regenerated, is read as its canonical form (tier1_emit_vex_canonical, #2830). At an AVX
+// Every record, emitted or regenerated, is read as its canonical form (x86_vex_canonical, #2830). At an AVX
 // target the final code holds the VEX twins of the selection's legacy SSE records (tier1_emit_vex), and each one is read
 // as its legacy record. A register location is always the register's low bytes, so the twin's zeroing of the bytes
 // above 127, which the legacy form keeps, is never what a read finds. A dirty function's vzeroupper (Tier1EmitResult.
@@ -2097,12 +2097,12 @@ static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, ui
 }
 
 // Whether `record` is exactly `expected`: a frame record's every field its decoding's, the rest zero.
-// Whether a record is exactly the one expected, as their canonical forms (tier1_emit_vex_canonical, #2830): a VEX twin of
+// Whether a record is exactly the one expected, as their canonical forms (x86_vex_canonical, #2830): a VEX twin of
 // a legacy SSE record is that record.
 static bool tier1_cert_emitted_exactly(X86Instruction record, X86Instruction expected)
 {
-    const X86Instruction a = tier1_emit_vex_canonical(record);
-    const X86Instruction b = tier1_emit_vex_canonical(expected);
+    const X86Instruction a = x86_vex_canonical(record);
+    const X86Instruction b = x86_vex_canonical(expected);
     return memcmp(&a, &b, sizeof(a)) == 0;
 }
 
@@ -4214,10 +4214,10 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
     return tally.reason;
 }
 
-// The code's certificate of `emitted`'s records as their canonical forms (tier1_emit_vex_canonical, #2830): a function's
+// The code's certificate of `emitted`'s records as their canonical forms (x86_vex_canonical, #2830): a function's
 // VEX twins of legacy SSE records (tier1_emit_vex) decoded as those records, on a copy of them on `scratch`, which the
 // comparisons with the records the certificate regenerates read canonical too (tier1_cert_emitted_exactly). Sixteen
-// records a step find those of a form with a canonical entry (tier1_emit_vex_lookup); a function without any is read as
+// records a step find those of a form with a canonical entry (x86_vex_lookup); a function without any is read as
 // it is.
 static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,
                                                             Tier1DebugDefinition* definitions, Tier1DebugPhi* phis, Tier1CertProgram* program, Tier1CertEmittedStats* stats)
@@ -4228,12 +4228,12 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
     bool room = true;
     for (uint32_t first = 0; room && first < code->count; first += 16)
     {
-        uint32_t found = tier1_emit_vex_lookup(code->records + first, code->count - first, tier1_emit_vex_legacy);
+        uint32_t found = x86_vex_lookup(code->records + first, code->count - first, x86_vex_legacy);
         while (room && found != 0)
         {
             const uint32_t r = first + (uint32_t)__builtin_ctz(found);
             found &= found - 1;
-            const X86Instruction record = tier1_emit_vex_canonical(code->records[r]);
+            const X86Instruction record = x86_vex_canonical(code->records[r]);
             if (canonical == 0 && memcmp(&record, &code->records[r], sizeof(record)) != 0)
             {
                 canonical = arena_push(scratch, (uint64_t)code->count * sizeof(X86Instruction), 64);
