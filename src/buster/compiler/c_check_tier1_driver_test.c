@@ -4502,9 +4502,9 @@ static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, con
 // The 128-bit integers' fixture (#3299): __int128 and unsigned __int128 values passed and returned in rdi:rsi and
 // rax:rdx, on the stack where one register is left, and kept in a loop's phis, through every operation Tier 1 splits
 // into halves (additions and subtractions whose carries and borrows cross the 64-bit boundary, products, shifts by
-// constants and variable counts, signed and unsigned comparisons, negations, logic and extensions) and libgcc's
-// divisions, remainders and conversions, signed and unsigned, over edge values. Each crosses between this unit (Tier
-// 1's) and the other (clang -O2's) both ways, as arguments and results.
+// constants and variable counts, signed and unsigned comparisons, of two extensions of one kind among them (#3035),
+// negations, logic and extensions) and libgcc's divisions, remainders and conversions, signed and unsigned, over edge
+// values. Each crosses between this unit (Tier 1's) and the other (clang -O2's) both ways, as arguments and results.
 static const char check_test_tier1_int128_header[] =
     "#include <stdio.h>\n"
     "typedef unsigned __int128 U;\n"
@@ -4517,7 +4517,8 @@ static const char check_test_tier1_int128_header[] =
     "S a_sops(S a, S b, unsigned k);\n"
     "U a_stack(long r1, long r2, long r3, long r4, long r5, U a, U b);\n"
     "U a_chain(U t, unsigned long n);\n"
-    "unsigned long a_loop(unsigned long n);\n";
+    "unsigned long a_loop(unsigned long n);\n"
+    "unsigned long a_extended(long a, long b, int c, int d);\n";
 
 static const char check_test_tier1_int128_other_source[] =
     "#include \"tier1-int128.h\"\n"
@@ -4563,6 +4564,17 @@ static const char check_test_tier1_int128_source[] =
     "    return (S)h;\n"
     "}\n"
     "U a_stack(long r1, long r2, long r3, long r4, long r5, U a, U b) { return b_stack(r1, r2, r3, r4, r5, a ^ b, b + (U)r5) * 3 + a - (U)r1; }\n"
+    "#define ALL(T, x, y) (((T)(x) < (T)(y)) | ((T)(x) <= (T)(y)) << 1 | ((T)(x) > (T)(y)) << 2 | ((T)(x) >= (T)(y)) << 3 | ((T)(x) == (T)(y)) << 4 | ((T)(x) != (T)(y)) << 5)\n"
+    "unsigned long a_extended(long a, long b, int c, int d)\n"
+    "{\n"
+    "    unsigned long m = 0;\n"
+    "    m = m << 6 | ALL(S, a, b); m = m << 6 | ALL(U, (S)a, (S)b);\n"
+    "    m = m << 6 | ALL(S, (unsigned long)a, (unsigned long)b); m = m << 6 | ALL(U, (unsigned long)a, (unsigned long)b);\n"
+    "    m = m << 6 | ALL(S, c, d); m = m << 6 | ALL(U, (S)c, (S)d);\n"
+    "    m = m << 6 | ALL(S, (unsigned)c, (unsigned)d); m = m << 6 | ALL(U, (unsigned)c, (unsigned)d);\n"
+    "    m = m << 6 | ALL(S, a, (unsigned long)b);\n"
+    "    return m;\n"
+    "}\n"
     "__attribute__((noinline)) static U a_step(U a, unsigned long b) { return a * b + (a >> 3); }\n"
     "U a_chain(U t, unsigned long n) { for (unsigned long i = 0; i < n; i += 1) t = a_step(t, i | 1); return t; }\n"
     "unsigned long a_loop(unsigned long n)\n"
@@ -4600,6 +4612,16 @@ static const char check_test_tier1_int128_source[] =
     "        }\n"
     "        printf(\"%u %016lx%016lx\\n\", i, (unsigned long)(total >> 64), (unsigned long)total);\n"
     "    }\n"
+    "    static const long words[] = { 0, 1, -1, 2, -2, 0x7fffffffffffffffl, -0x7fffffffffffffffl - 1, 0x7fffffff, -0x80000000l, 0x80000000l, 0xffffffffl, -0x100000000l };\n"
+    "    unsigned long compared = 0;\n"
+    "    for (unsigned i = 0; i < sizeof(words) / sizeof(words[0]); i += 1)\n"
+    "    {\n"
+    "        for (unsigned j = 0; j < sizeof(words) / sizeof(words[0]); j += 1)\n"
+    "        {\n"
+    "            compared = compared * 1000003 ^ a_extended(words[i], words[j], (int)words[i], (int)words[j]);\n"
+    "        }\n"
+    "    }\n"
+    "    printf(\"%lx\\n\", compared);\n"
     "    const U chain = a_chain(1, 1000);\n"
     "    printf(\"%016lx%016lx %lx\\n\", (unsigned long)(chain >> 64), (unsigned long)chain, a_loop(1000));\n"
     "    return 0;\n"
