@@ -53,6 +53,9 @@ static Preprocessor* check_repair_preprocessor(Preprocessor* original, Arena* ou
     // The view shares the original's expansion history, which its diagnostics read: recorded first, if the unit put it
     // off (PPOptions.defer_history), so that the view never records one of its own.
     pp_history_ensure(original);
+    // The view is a copy of the unit's preprocessor, arenas and counts with it: what it pushes and records, the unit's
+    // own counts don't cover, so a unit bound to a root image gives the root none of it back (#3070, PPRoot).
+    original->root_unrestorable = true;
     Preprocessor* view = BUSTER_ARENA_PUSH_ARRAY(output, Preprocessor, 1);
     if (view != 0)
     {
