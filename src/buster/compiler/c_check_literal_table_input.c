@@ -704,7 +704,21 @@ static bool check_literal_table_floating_batch(CheckInputReader* reader, const u
             arena_pop_to(reader->scratch, mark);
         }
     }
-    for (uint32_t at = 0; valid && at < count; at += 8)
+#if __has_feature(memory_sanitizer)
+    // As check_literal_table_batch's: MSan publishes no initialized shadow for AVX-512 masked narrowing stores, so the
+    // final bytes take ordinary stores under it.
+    const bool scalar_store = true;
+#else
+    const bool scalar_store = false;
+#endif
+#if __has_feature(memory_sanitizer)
+#pragma clang loop vectorize(disable) interleave(disable)
+#endif
+    for (uint32_t lane = 0; valid && scalar_store && lane < count; lane += 1)
+    {
+        memcpy(destination + (uint64_t)lane * unit, values + lane, unit);
+    }
+    for (uint32_t at = 0; valid && !scalar_store && at < count; at += 8)
     {
         const uint32_t left = count - at;
         const __mmask8 live = (__mmask8)((1u << (left < 8 ? left : 8)) - 1);
