@@ -1538,10 +1538,7 @@ static __attribute__((noinline)) bool check_program_emit_body_rows(CheckEmitBody
     const uint32_t closing = parser->tree.parents[program->bodies[b].opening];
     const uint32_t* records = code->source_records;
     const uint32_t* origins = code->source_origins;
-    body->row_count = BUSTER_SCALAR_PATH(scalar) ? check_debug_rows_scalar(records, origins, tokens, code->source_count, offsets, length, declaration, closing,
-                                                       body->row_offsets, body->row_tokens) :
-                               check_debug_rows(records, origins, tokens, code->source_count, offsets, length, declaration, closing, body->row_offsets,
-                                                body->row_tokens);
+    body->row_count = check_debug_rows(records, origins, tokens, code->source_count, offsets, length, declaration, closing, body->row_offsets, body->row_tokens);
     body->body_offset = offsets[records[0]];
     EmissionSourceEvent* events = BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionSourceEvent, (uint64_t)code->source_count + 1);
     EmissionSourceRow* resolved = BUSTER_ARENA_PUSH_ARRAY(scratch, EmissionSourceRow, (uint64_t)code->source_count + 1);

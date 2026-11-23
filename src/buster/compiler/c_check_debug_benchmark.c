@@ -97,8 +97,19 @@ static void check_debug_benchmark_lines(CheckDebugBenchmark* benchmark, uint32_t
     for (uint32_t b = 0; b < program->body_count; b += 1)
     {
         const uint32_t first = rows->first[b];
-        check_debug_lines(&benchmark->source, program->bodies[b].declaration, benchmark->closings[b], rows->tokens + first, rows->counts[b],
-                          benchmark->keys[path] + first, benchmark->lines[path] + first, path == 0);
+        if (path == 0)
+        {
+            // The exact path row by row, check_debug_line_scalar, which check_debug_lines leaves the rows past its span to.
+            for (uint32_t r = first; r < first + rows->counts[b]; r += 1)
+            {
+                check_debug_line_scalar(&benchmark->source, rows->tokens[r], benchmark->keys[0] + r, benchmark->lines[0] + r);
+            }
+        }
+        else
+        {
+            check_debug_lines(&benchmark->source, program->bodies[b].declaration, benchmark->closings[b], rows->tokens + first, rows->counts[b],
+                              benchmark->keys[1] + first, benchmark->lines[1] + first);
+        }
     }
 }
 
@@ -114,9 +125,7 @@ static uint64_t check_debug_benchmark_keep(CheckDebugBenchmark* benchmark, uint3
         uint32_t* offsets = benchmark->kept_offsets[path] + kept;
         uint32_t* lines = benchmark->kept_lines[path] + kept;
         uint32_t* keys = benchmark->kept_keys[path] + kept;
-        kept += path == 0 ? check_debug_keep_scalar(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], rows->bodies[b], offsets, lines,
-                                                    keys) :
-                            check_debug_keep(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], rows->bodies[b], offsets, lines, keys);
+        kept += check_debug_keep(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], rows->bodies[b], offsets, lines, keys);
     }
     return kept;
 }
@@ -126,8 +135,8 @@ static bool check_debug_benchmark_build(CheckDebugBenchmark* benchmark, uint32_t
 {
     Arena* output = &benchmark->unit.output;
     const uint64_t mark = output->length;
-    const bool made = check_debug_build(debug, &benchmark->unit.selected.program, &benchmark->unit.rows, benchmark->parser, benchmark->pp, path == 0, output,
-                                        &benchmark->unit.scratch);
+    (void)path;
+    const bool made = check_debug_build(debug, &benchmark->unit.selected.program, &benchmark->unit.rows, benchmark->parser, benchmark->pp, output, &benchmark->unit.scratch);
     arena_pop_to(output, mark);
     return made;
 }
@@ -387,7 +396,7 @@ static int run_check_debug_benchmark(int argc, char** argv)
         for (uint32_t side = 0; side < 2; side += 1)
         {
             // Made again without popping, so that both units' sections are there to compare.
-            built &= check_debug_build(&debugs[side], program, rows, &parser, &pp, side == 0, &benchmark.unit.output, &benchmark.unit.scratch);
+            built &= check_debug_build(&debugs[side], program, rows, &parser, &pp, &benchmark.unit.output, &benchmark.unit.scratch);
             for (uint32_t section = 0; built && section < BUSTER_DEBUG_SECTIONS; section += 1)
             {
                 sections[side][section] = debugs[side].output.sections[section].bytes;
@@ -470,8 +479,11 @@ static int run_check_debug_benchmark(int argc, char** argv)
                     {
                         snprintf(vector_text, sizeof(vector_text), "%.3f ns per %s (%.3f ms)", vector / denominator, unit, vector / 1e6);
                     }
-                    printf("  %s: vector %s, exact %s%s\n", check_debug_benchmark_names[pass], vector_text, scalar_text,
-                           after_scalar != 0 ? ", each vector sample after the exact path" : "");
+                    // Since #2924 only the rows (check_debug_rows_scalar, an origin column's) and the lines (check_debug_line_scalar,
+                    // the rows past a function's span) keep an exact path; keep and build time the vector path twice.
+                    const bool exact = pass == CHECK_DEBUG_BENCHMARK_ROWS || pass == CHECK_DEBUG_BENCHMARK_LINES;
+                    printf("  %s: vector %s%s%s%s\n", check_debug_benchmark_names[pass], vector_text, exact ? ", exact " : "", exact ? scalar_text : "",
+                           exact && after_scalar != 0 ? ", each vector sample after the exact path" : "");
                 }
             }
         }

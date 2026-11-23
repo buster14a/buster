@@ -11048,7 +11048,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
     if (valid && debug)
     {
-        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &state->output, scratch);
+        valid = check_debug_build(&dwarf, program, &rows, parser, pp, &state->output, scratch);
         if (!valid)
         {
             fprintf(errors, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
@@ -11741,7 +11741,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         // The units' DWARF is in the merge's (check_units_merge_debug).
         if (valid && debug && units == NULL)
         {
-            valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
+            valid = check_debug_build(&dwarf, program, &rows, parser, pp, &output, scratch);
             if (!valid)
             {
                 fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
