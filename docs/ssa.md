@@ -132,7 +132,9 @@ are allocated at their exact counts. Past `BUSTER_SSA_FRONTIER_PAIRS`
 
 On the 9700X, #2924's gate timed this constructor against Braun's scalar
 construction in Tier 1's pipeline (`--tier1 -c` of sqlite3.c, Lua and musl, one
-lane, per function, by cells): see the PR that deleted the twin for its record.
+lane, per function, by cells): 0.861 (default passes) and 0.840 (`+all`) of the
+twin's time, below it in every cell bin
+([record](https://github.com/buster14a/buster-performance/tree/ee10960bf/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-ssa-promotion-sroa-c9h)).
 
 The shared analyzer requires distinct output and temporary arenas. SSA carves
 two disjoint, bounded views from its existing scratch tail: a size-derived
@@ -606,9 +608,8 @@ benchmark.
 Run target measurements through the shared 9700X lock, pinned to one permitted
 CPU, with the ownership variables from AGENTS.md. CI includes `test-ssa`,
 `test-ssa-ir` and the synthetic benchmark in its existing 9700X job.
-The workflow runs the benchmark; on the daily and dispatched runs and on pull
-requests that change `ssa.c`, `ssa_program.c`, `ssa_benchmark.c` or
-`dominators.c`, it then runs it in three more separate processes.
+The workflow runs the benchmark once. Until #2924 it also ran each path in
+three more processes where the module changed.
 
 The construction core passed the complete protected
 [9700X workflow](https://github.com/buster14a/buster/actions/runs/39933567015)

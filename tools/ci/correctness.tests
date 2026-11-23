@@ -794,6 +794,10 @@ if "$BUSTER_COMPILER" test-preprocessor --compare-clang tests/preprocessor-oracl
 "$BUSTER_COMPILER" test-x86-target
 == Test local SSA construction and its memory interpreter
 "$BUSTER_COMPILER" test-ssa
+# #2924: a function of 2,200 nested goto loops (labels H0 to H2199, then their backward gotos in reverse) lists about
+# 4.8 M dominance-frontier pairs, past the dense constructor's budget: its promotion takes the bounded construction.
+awk 'BEGIN { print "int ladder(int lim)\n{\n    int n = 0;\n    int m = 0;"; for (j = 0; j < 2200; j += 1) printf "H%d:\n    n += 1;\n", j; for (j = 2199; j >= 0; j -= 1) printf "    if (n < lim)\n    {\n        m ^= n;\n        goto H%d;\n    }\n", j; print "    return m;\n}" }' > build/ssa-ladder.c
+"$BUSTER_COMPILER" -c --tier1 --tier1-strict --verify -o build/ssa-ladder.o build/ssa-ladder.c
 == Test the independent preprocessor fuzz harness in C23
 "$BUSTER_COMPILER" test-preprocessor-fuzz --std c23
 == Test the x86 semantics

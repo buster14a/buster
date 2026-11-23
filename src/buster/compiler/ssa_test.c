@@ -673,6 +673,23 @@ static void ssa_test_frontiers(SsaTestTally* tally, SsaTestSpace* space, const S
         ssa_test_expect(tally, ok && ssa_frontiers(&work, pairs - 1, &offsets, &targets) == SSA_ERROR_LIMIT, "frontiers one pair past their budget refuse");
     }
     arena_pop_to(&space->scratch, mark);
+    // The dense construction within a budget of exactly its pairs, and one pair short of them, where it takes the
+    // bounded construction instead: each result verified and run against the memory locals.
+    for (uint32_t over = 0; pairs != 0 && over < 2; over += 1)
+    {
+        const uint64_t output_mark = space->output.length;
+        SsaResult result = { 0 };
+        const SsaError error = ssa_build_frontier_budget(input, &space->output, &space->scratch, &result, pairs - over);
+        const bool built = ssa_test_expect(tally, error == SSA_OK && space->scratch.length == mark, over != 0 ? "past its frontier budget the dense construction takes the bounded one" : "the dense construction fits a frontier budget of its exact pairs");
+        if (built)
+        {
+            const SsaCheck check = ssa_verify(input, &result, &space->scratch);
+            const bool verified = ssa_test_expect(tally, check.error == SSA_OK, "the frontier budget's construction verifies");
+            ssa_test_expect(tally, verified && ssa_test_metadata(input, &result, &space->oracle) && ssa_test_interpret(input, &result, &space->oracle, tally->seed),
+                            "the frontier budget's construction runs as the memory locals do");
+        }
+        arena_pop_to(&space->output, output_mark);
+    }
 }
 
 static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_t count)
