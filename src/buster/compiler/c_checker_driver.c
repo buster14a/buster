@@ -195,6 +195,8 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_AUTO_TYPE_INITIALIZER: result = "declaration with deduced type '__auto_type' requires an initializer"; break;
         case CHECK_INPUT_AUTO_ATOMIC_POINTER: result = "variable with atomic deduced pointee has incompatible initializer"; break;
         case CHECK_INPUT_GENERIC_NO_MATCH: result = "controlling expression type not compatible with any generic association type"; break;
+        case CHECK_INPUT_GENERIC_COMPATIBLE: result = "type in generic association compatible with previously specified type"; break;
+        case CHECK_INPUT_GENERIC_DEFAULT: result = "duplicate default generic association"; break;
         case CHECK_INPUT_AUTO_TYPE_SELF: result = "variable declared with deduced type '__auto_type' cannot appear in its own initializer"; break;
         case CHECK_INPUT_AUTO_TYPE_CONTEXT: result = "'__auto_type' not allowed here"; break;
         case CHECK_INPUT_AUTO_TYPE_LIST: result = "cannot use '__auto_type' with initializer list in C"; break;
@@ -7039,6 +7041,23 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             {
                                 pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, x86_location), publication, "CFString literal is not a string constant");
                             }
+                        }
+                        else if (phase == 0 && (input->reports[index].note_kind == CHECK_INPUT_NOTE_GENERIC_COMPATIBLE ||
+                                                input->reports[index].note_kind == CHECK_INPUT_NOTE_GENERIC_DEFAULT) && input->reports[index].note_token < count)
+                        {
+                            // A _Generic association's duplicate (#2914): its note at the earlier association's type name,
+                            // or at the first default.
+                            const CheckInputReport* report = input->reports + index;
+                            const String8 earlier = report->note_kind == CHECK_INPUT_NOTE_GENERIC_COMPATIBLE ?
+                                                    check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, report->detail) :
+                                                    (String8){ 0 };
+                            const char* compatible = earlier.length != 0 ?
+                                                     check_warning_text(scratch, "compatible type %.*s specified here", (int)earlier.length, earlier.pointer) : NULL;
+                            const PPOutputDiagnosticNote note = {
+                                .token = parse_source_index(&parser->tokens, report->note_token),
+                                .message = report->note_kind == CHECK_INPUT_NOTE_GENERIC_DEFAULT ? "previous default generic association is here" : compatible,
+                            };
+                            pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, source, publication, &note, note.message != NULL ? 1u : 0u, "%s", message);
                         }
                         else if (phase == 0 && input->reports[index].note_kind == CHECK_INPUT_NOTE_ATTRIBUTE_HERE &&
                                  input->reports[index].note_token < count)
