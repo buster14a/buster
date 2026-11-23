@@ -161,7 +161,7 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
             marked = op != CHECK_OP_BUILTIN_QUERY && op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_INITIALIZE && node_machine_record_category(machine, size) == CHECK_RVALUE &&
                      node_machine_record_constant_kind(machine, size) == CHECK_CONSTANT_INTEGER && node_machine_record_fault(machine, size) == CHECK_FAULT_NONE &&
                      (node_machine_record_flags(machine, size) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
-                     node_machine_record_integer(machine, size) <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
+                     node_machine_record_integer(machine, size) <= cbuiltin_library_inline_bytes(computed);
         }
         const uint32_t callee = node_machine_record_left(machine, r);
         const uint32_t object = marked && callee < r ? node_machine_record_object(machine, callee) : 0;
@@ -590,6 +590,7 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
     if (!typer->alone)
     {
         typer->graph = reader->output->graph;
+        typer->graph.const_values = &reader->output->const_values;
         typer->graph.contexts = front->shadow->contexts;
     }
     node_machine_settle(machine);
