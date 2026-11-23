@@ -726,6 +726,61 @@ static void dataflow_test_loop_nest(DataflowTestTally* tally, Arena* memory, Are
     arena_pop_to(memory, mark);
 }
 
+// A graph on which the order of sweep 6, the first postorder sweep after the backward order's first, decides the
+// count: six nested loops, the outermost left from the innermost body and the fifth at its latch, the rest at their
+// headers, with one value used in the second loop's preheader alone (block 5). Level k has a preheader 2 + 3k, a header
+// 3 + 3k and a latch 4 + 3k; block 0 is the entry, 1 the exit and 20 the innermost body. It settles in nine sweeps;
+// the backward order in every sweep after the fourth takes eight and the postorder alone seven, so the count tells the
+// schedule apart from either.
+static void dataflow_test_late_sweep(DataflowTestTally* tally, Arena* memory, Arena* scratch)
+{
+    const uint64_t mark = memory->length;
+    static const uint32_t offsets[] = { 0, 1, 1, 2, 3, 4, 5, 7, 8, 9, 11, 12, 13, 15, 16, 17, 18, 20, 21, 23, 24, 26 };
+    static const uint32_t targets[] = {
+        2,      // 0: entry
+        3,      // 2: level 0's preheader
+        5,      // 3: level 0's header, into level 1
+        3,      // 4: level 0's latch
+        6,      // 5: level 1's preheader, which uses the value
+        8, 4,   // 6: level 1's header
+        6,      // 7: level 1's latch
+        9,      // 8
+        11, 7,  // 9: level 2's header
+        9,      // 10
+        12,     // 11
+        14, 10, // 12: level 3's header
+        12,     // 13
+        15,     // 14
+        17,     // 15: level 4's header, which never leaves
+        15, 13, // 16: level 4's latch, which leaves to level 3's
+        18,     // 17
+        20, 16, // 18: level 5's header
+        18,     // 19: level 5's latch
+        19, 1,  // 20: the innermost body, which leaves the whole nest
+    };
+    const uint32_t blocks = sizeof(offsets) / sizeof(offsets[0]) - 1;
+    const uint32_t edges = sizeof(targets) / sizeof(targets[0]);
+    tally->blocks = blocks;
+    tally->values = 1;
+    tally->shape = BUSTER_DATAFLOW_SHAPE_NESTED_LOOP;
+    Dataflow graph = { 0 };
+    bool valid = edges == offsets[blocks] && dataflow_create(memory, blocks, 1, edges, &graph);
+    if (valid)
+    {
+        memcpy(graph.successor_offsets, offsets, sizeof(offsets));
+        memcpy(graph.successors, targets, sizeof(targets));
+        graph.use[(uint64_t)5 * graph.row_words] = 1;
+        valid = dataflow_postorder(&graph, scratch);
+    }
+    dataflow_test_expect(tally, valid, "late-sweep graph setup failed");
+    if (valid)
+    {
+        const uint64_t iterations = dataflow_test_solve(tally, &graph, scratch, true);
+        dataflow_test_expect(tally, iterations == BUSTER_DATAFLOW_POSTORDER_SWEEPS + 5, "the late-sweep graph took another count");
+    }
+    arena_pop_to(memory, mark);
+}
+
 static void dataflow_test_repeated_edges(DataflowTestTally* tally, Arena* memory, Arena* scratch)
 {
     const uint64_t mark = memory->length;
@@ -1093,6 +1148,7 @@ static int run_dataflow_tests(int argc, char** argv)
             dataflow_test_loop_nest(&tally, &memory, &scratch, 5);
             dataflow_test_loop_nest(&tally, &memory, &scratch, 64);
             dataflow_test_loop_nest(&tally, &memory, &scratch, 700);
+            dataflow_test_late_sweep(&tally, &memory, &scratch);
             dataflow_test_repeated_edges(&tally, &memory, &scratch);
             dataflow_test_interference(&tally);
             dataflow_test_guards(&tally, &memory, &scratch);

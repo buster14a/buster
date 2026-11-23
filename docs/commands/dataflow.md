@@ -45,6 +45,11 @@ liveness and interference primitives in `dataflow.c`:
   variable live in the innermost blocks and a value used only there), at 0, 1,
   5, 64 and 700 levels: at most six sweeps, the innermost body holding every
   value ([the two orders](../dataflow.md#the-two-orders));
+- a six-loop nest left from its innermost body and at one latch, with a value
+  used in the second preheader: nine sweeps, where the sixth (a postorder
+  sweep after the backward order's first) still changes, so the count tells
+  the schedule from the backward order alone (eight) or the postorder alone
+  (seven);
 - handwritten graphs: disconnected cycles, a self-loop without a use, a value
   both used and defined in one block, every combination of the transfer
   function's three input bits, the exact postorder and backward order of a
