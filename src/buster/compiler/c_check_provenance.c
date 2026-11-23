@@ -147,8 +147,14 @@ static void check_action_comma_provenance(const TypeTable* table, CheckValue* va
     check_action_inherit(value, left);
     if (constant_evaluated)
     {
+        // A left operand that folded undefined behavior (a GNU constant that no const object's read gave: `(1 << 44, 3)`,
+        // `((void)(2147483647 + 1), 3)`) is one clang's evaluator fails on where it discards it, as it does on a division's
+        // overflow anywhere (#2264): an array bound that holds it is a variable one, which file scope refuses, and an
+        // `aligned` argument no constant. Its enumerator, case label, bit-field width and static initializer still fold.
+        const bool undefined = (left->flags & (BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_OBJECT_READ)) == BUSTER_CHECK_GNU_CONSTANT;
         value->flags = (value->flags & ~BUSTER_CHECK_MODIFICATION) | (right->flags & BUSTER_CHECK_MODIFICATION) |
-                       (check_action_discard_evaluable(table, left) ? 0 : BUSTER_CHECK_DISCARDED_UNEVALUABLE);
+                       (check_action_discard_evaluable(table, left) ? 0 : BUSTER_CHECK_DISCARDED_UNEVALUABLE) |
+                       (undefined ? BUSTER_CHECK_GNU_DIVISION : 0);
     }
 }
 

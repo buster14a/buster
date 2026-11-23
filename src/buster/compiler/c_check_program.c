@@ -1263,7 +1263,8 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     const bool known = candidate && available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    !(environment && check_action_floating_type(program->types, value->type)))) &&
                        value->fault == CHECK_FAULT_NONE &&
-                       check_action_truth(program->types, value, truth);
+                       check_action_truth(program->types, value, truth) &&
+                       ((value->flags & BUSTER_CHECK_MODIFICATION) == 0 || check_graph_evaluable(program->types, graph, program->stream, condition));
     return known;
 }
 

@@ -338,7 +338,9 @@ static inline __attribute__((always_inline)) bool check_constant_warning_unevalu
     const TypeId type = action->type != 0 ? action->type : action->operands[0].type;
     bool skip = action->op == CHECK_OP_ALIGNOF || (action->op == CHECK_OP_SIZEOF && !check_action_runtime_size(types, type));
     bool truth = false;
-    if (!skip && check_action_truth(types, &action->operands[0], &truth))
+    // A condition a modification gives, `(y = 0)`, is no constant to clang's CFG (#2264); a constant-evaluated comma's left
+    // operand passes none on (check_action_comma_provenance), so `(y = 0, 0)` still is one.
+    if (!skip && (action->operands[0].flags & BUSTER_CHECK_MODIFICATION) == 0 && check_action_truth(types, &action->operands[0], &truth))
     {
         skip = operand == 1 && ((action->op == CHECK_OP_LOGICAL_AND && !truth) || (action->op == CHECK_OP_LOGICAL_OR && truth));
         if (action->op == CHECK_OP_CONDITIONAL)
