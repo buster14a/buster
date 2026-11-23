@@ -5144,6 +5144,9 @@ struct NodeShadow
     uint64_t produced_after_ticks;
     uint64_t produced_unread;
     uint64_t produced_unread_tokens;
+    // The bodies it takes of every body of the unit, lowered or not: a body the program does not lower (an inline-only
+    // definition's, an unused static function's) has no comparison above, and its verdict is here alone.
+    uint64_t produced_taken_all;
     uint64_t produced_listed;
     uint64_t produced_missed_listed;
     // The units it ran in, by the unit's own reason not to take any body (0: none).
@@ -7793,10 +7796,10 @@ static void node_shadow_report(const NodeShadow* shadow, const uint64_t* action_
             {
                 const uint64_t made = shadow->produced_reasons[NODE_PRODUCER_TAKEN];
                 printf("node-shadow: the producer, before the walk: lowered-bodies=%" PRIu64 " it-takes=%" PRIu64 " (tokens %" PRIu64 ", %.2f%%) of-them-in-the-set-above=%" PRIu64
-                       " outside-it=%" PRIu64 " its-kept-controls-the-program's=%" PRIu64 " different=%" PRIu64 "\n",
+                       " outside-it=%" PRIu64 " its-kept-controls-the-program's=%" PRIu64 " different=%" PRIu64 " of-every-body-of-the-units-it-takes=%" PRIu64 "\n",
                        shadow->produced_bodies, made, shadow->produced_reason_tokens[NODE_PRODUCER_TAKEN],
                        node_census_share(shadow->produced_reason_tokens[NODE_PRODUCER_TAKEN], shadow->bodies_tokens[source]), shadow->produced_sound, shadow->produced_unsound,
-                       shadow->produced_controls_same, shadow->produced_controls_different);
+                       shadow->produced_controls_same, shadow->produced_controls_different, shadow->produced_taken_all);
                 printf("node-shadow: the producer leaves, by its first reason:");
                 for (uint32_t reason = NODE_PRODUCER_TAKEN + 1; reason < NODE_PRODUCER_REASONS; reason += 1)
                 {
@@ -8758,6 +8761,10 @@ static void node_shadow_alone(NodeShadow* shadow, const NodeFrontShadow* front, 
     shadow->produced_unread += front->produced_unread;
     shadow->produced_unread_tokens += front->produced_unread_tokens;
     shadow->produced_units[front->produced_unit < BUSTER_NODE_PRODUCER_UNITS ? front->produced_unit : 0] += front->produced_ran;
+    for (uint32_t b = 0; front->produced_reasons != NULL && b < front->alone_body_count; b += 1)
+    {
+        shadow->produced_taken_all += front->produced_reasons[b] == NODE_PRODUCER_TAKEN;
+    }
     shadow->alone_sweep_ticks += alone->ticks;
     for (uint32_t step = 0; step < 4; step += 1)
     {

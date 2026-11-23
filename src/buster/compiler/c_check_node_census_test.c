@@ -1965,6 +1965,8 @@ struct NodeProducerExpected
 {
     uint32_t reasons[NODE_PRODUCER_REASONS];
     uint32_t unread;
+    // The bodies it takes that the program does not lower, whose verdicts `reasons` does not count.
+    uint32_t unlowered;
     // The unit's own reason to take no body (BUSTER_NODE_PRODUCER_UNIT_*, 0 for none).
     uint8_t unit;
 };
@@ -2032,12 +2034,15 @@ static const char node_producer_test_fused_text[] = "double summed(double a, dou
                                                     "int stepped(int i, double a, double b) { i -= a * b; return i; }\n"
                                                     "double multiplied(double a, double b) { return a * b; }\n";
 // A function whose declaration gives it always_inline, an inline-only wrapper that the lowering expands at its direct
-// call (#2983): the body that calls it is left (the machine takes no such callee's call), the one beside it taken. And a
-// naked function, whose statements a pass after the walk reports: left by its function, the one beside it taken.
+// call (#2983): the body that calls it is left (the machine takes no such callee's call), the wrapper's own, which the
+// program does not lower and the expansion reads, is left by its function, and the one beside them is taken. A naked
+// function, whose statements a pass after the walk reports: left by its function, the one beside it taken. And a static
+// function nothing names, which the program does not lower: its body is taken all the same.
 static const char node_producer_test_inlined_text[] = "__attribute__((always_inline)) inline int wrap(int a) { return a + 1; }\n"
                                                       "int caller(int a) { return wrap(a); }\n"
                                                       "int beside(int a) { return a + 2; }\n";
 static const char node_producer_test_naked_text[] = "__attribute__((naked)) void bare(void) { }\nint beside(int a) { return a + 2; }\n";
+static const char node_producer_test_unlowered_text[] = "static int unnamed(int a) { return a + 1; }\nint beside(int a) { return a + 2; }\n";
 static const char node_producer_test_results_text[] = "typedef int W __attribute__((warn_unused_result));\nW w(void);\nint result(void) { return 1; }\n";
 
 static bool node_producer_test_fixture(const char* directory, const char* text, uint64_t length, char** options, uint32_t option_count, bool lean,
@@ -2059,7 +2064,7 @@ static bool node_producer_test_fixture(const char* directory, const char* text, 
     const uint64_t taken = shadow.produced_reasons[NODE_PRODUCER_TAKEN];
     bool same = valid && !node_shadow_differs(&shadow) && shadow.produced_bodies != 0 && shadow.produced_unsound == 0 && shadow.produced_controls_different == 0 &&
                 shadow.produced_sound == taken && shadow.produced_controls_same == taken && shadow.produced_unread == expected->unread &&
-                expected->unit < BUSTER_NODE_PRODUCER_UNITS && shadow.produced_units[expected->unit] == 1;
+                shadow.produced_taken_all == taken + expected->unlowered && expected->unit < BUSTER_NODE_PRODUCER_UNITS && shadow.produced_units[expected->unit] == 1;
     for (uint32_t reason = 0; reason < NODE_PRODUCER_REASONS; reason += 1)
     {
         same = same && shadow.produced_reasons[reason] == expected->reasons[reason];
@@ -2067,9 +2072,9 @@ static bool node_producer_test_fixture(const char* directory, const char* text, 
     if (!same)
     {
         fprintf(stderr, "test-checker: node-producer: valid %d, %" PRIu64 " bodies, in the set %" PRIu64 ", outside it %" PRIu64 ", controls the program's %" PRIu64 ", different %" PRIu64
-                ", unread %" PRIu64 " (%u), units of the reason %u expected: %" PRIu64 ";",
+                ", unread %" PRIu64 " (%u), taken of every body %" PRIu64 " (%u of them not lowered expected), units of the reason %u expected: %" PRIu64 ";",
                 valid, shadow.produced_bodies, shadow.produced_sound, shadow.produced_unsound, shadow.produced_controls_same, shadow.produced_controls_different, shadow.produced_unread,
-                expected->unread, expected->unit, expected->unit < BUSTER_NODE_PRODUCER_UNITS ? shadow.produced_units[expected->unit] : 0);
+                expected->unread, shadow.produced_taken_all, expected->unlowered, expected->unit, expected->unit < BUSTER_NODE_PRODUCER_UNITS ? shadow.produced_units[expected->unit] : 0);
         for (uint32_t reason = 0; reason < NODE_PRODUCER_REASONS; reason += 1)
         {
             fprintf(stderr, " %s %" PRIu64 " (%u)", node_producer_reason_names[reason], shadow.produced_reasons[reason], expected->reasons[reason]);
@@ -7875,10 +7880,14 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     const NodeProducerExpected produced_naked = { .reasons = { [NODE_PRODUCER_TAKEN] = 1, [NODE_PRODUCER_FUNCTION] = 1 } };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_inlined_text, sizeof(node_producer_test_inlined_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_inlined),
-                      "node-producer: a body that calls a function a declaration gives always_inline is left");
+                      "node-producer: a body that calls a function a declaration gives always_inline is left, and that function's own");
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_naked_text, sizeof(node_producer_test_naked_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_naked),
                       "node-producer: a naked function's body is left");
+    const NodeProducerExpected produced_unlowered = { .reasons = { [NODE_PRODUCER_TAKEN] = 1 }, .unlowered = 1 };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_unlowered_text, sizeof(node_producer_test_unlowered_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_unlowered),
+                      "node-producer: a body the program does not lower is taken as any other");
     const NodeProducerExpected produced_linkage = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_counted_text, sizeof(node_producer_test_counted_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_members),
