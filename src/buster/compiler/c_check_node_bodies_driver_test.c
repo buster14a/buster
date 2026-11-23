@@ -78,12 +78,12 @@ static const struct
 // The fixture's positions in the bodies the producer reads (check_test_driver_node_bodies' count of the option's line).
 #define BUSTER_TEST_NODE_BODIES_SWEPT 410ull
 // A unit that is large outside its bodies: a table of this many values at file scope beside two small functions (300
-// thousand tokens). And the most bytes the machine's state may take of the reader's arenas for it. It takes 7.8 MB: the
+// thousand tokens). And the most bytes the machine's state may take of the reader's arenas for it. It takes 7,846,892: the
 // columns a token of the unit (the objects', the controls' roots, the tests' own: 4.5 MB) and the machine's own fixed
-// state; one more column of four bytes a token or a node of the unit is 1.2 MB, and the unit's nodes' columns as they were
-// made before this bound were 135 MB.
+// state. One more column of four bytes a token or a node of the unit is 1,200,084 more, past this bound; the unit's
+// nodes' columns as they were made before it were 135 MB.
 #define BUSTER_TEST_NODE_BODIES_TABLE 150000u
-#define BUSTER_TEST_NODE_BODIES_MADE (9ull << 20)
+#define BUSTER_TEST_NODE_BODIES_MADE (17ull << 19)
 
 static bool check_test_driver_node_bodies_same(const char* left, const char* right)
 {
