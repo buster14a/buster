@@ -147,9 +147,6 @@ typedef enum CheckInputMessage
     // constant other than 1 (check_input_longjmp_argument).
     CHECK_INPUT_LONGJMP_INTEGER,
     CHECK_INPUT_LONGJMP_ONE,
-    // A FILE builtin's call (__builtin_fprintf and its kin, #148) in a unit without a file-scope FILE, which its prototype
-    // takes (check_input_file_type), at the name: clang's "use of unknown builtin".
-    CHECK_INPUT_UNKNOWN_BUILTIN,
     CHECK_INPUT_INVOKE_ARGUMENTS,
     // A unary, overflow or complex part builtin's call with another count of arguments (#1860), which the graph doesn't
     // take: clang's "too few/too many arguments to function call", the count it takes and the call's in the detail's low
@@ -521,7 +518,6 @@ static const char* const check_input_messages[] =
     "argument to __builtin_verbose_trap must not contain $",
     "argument to '__builtin_longjmp' must be a constant integer",
     "argument to __builtin_longjmp must be a constant 1",
-    "use of unknown builtin",
     "attribute multiversioning cannot be combined with another attribute",
     "multiversioning attributes are not compatible",
     "attribute cannot appear more than once on a declaration",

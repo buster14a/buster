@@ -39,6 +39,7 @@ static void check_test_driver_implicit_library(CheckTest* test, const char* clan
         { "int f(void){return sizeof(strdup(\"x\"));}", "-std=gnu89", NULL, NULL },
         { "int f(void){return sizeof(strdup);}", "-std=gnu89", NULL, NULL },
         { "int f(void){return sizeof(strdup);}", "-std=c89", NULL, NULL },
+        { "int f(void* p){return __builtin_fprintf(p, \"x\");}", "-std=gnu17", "-Wno-implicit-function-declaration", NULL },
         { "int f(void){return abs(-1);}", "-std=c99", NULL, NULL },
         { "int f(void){return abs(-1);}", "-std=c23", "-Wno-implicit-function-declaration", NULL },
         { "int f(void){return abs(-1);}", "-std=c89", "-Werror", NULL },

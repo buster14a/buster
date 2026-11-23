@@ -5803,10 +5803,8 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
     return result;
 }
 
-// Whether the statement that starts at `token` was clang's StmtError: a recovery view's `;` that ends a statement the
-// repair deleted whole (BUSTER_PARSE_DROPPED_STATEMENT, #2406), or a for or while loop whose body is one, as clang's
-// ParseForStatement and ParseWhileStatement drop a loop whose body is invalid. Such a statement is neither an empty
-// body nor the statement after a loop, and ActOnForStmt never sees its loop.
+// A discarded statement starts with a marked semicolon or replacement block. Clang also discards a for or while
+// whose body was invalid. These statements are absent when Clang looks for the next statement after a loop.
 static bool check_common_dropped_statement(const Parser* parser, uint32_t token)
 {
     const uint32_t count = parser->tokens.count;
@@ -5816,7 +5814,7 @@ static bool check_common_dropped_statement(const Parser* parser, uint32_t token)
     while (walking && at < count)
     {
         const uint8_t kind = parser->tokens.kinds[at];
-        result = kind == PARSE_KIND_SEMI && parser->tree.roles[at] == PARSE_ROLE_TERMINATOR &&
+        result = ((kind == PARSE_KIND_SEMI && parser->tree.roles[at] == PARSE_ROLE_TERMINATOR) || kind == PARSE_KIND_L_BRACE) &&
                  (parser->tokens.flags[at] & BUSTER_PARSE_DROPPED_STATEMENT) != 0;
         // A loop's head: step past its parenthesized group to its body.
         const bool loop = !result && (kind == PARSE_KIND_FOR || kind == PARSE_KIND_WHILE) && at + 1 < count &&
