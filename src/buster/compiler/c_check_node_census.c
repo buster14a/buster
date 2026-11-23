@@ -6177,8 +6177,8 @@ static void node_bodies_put(NodeBodies* built, uint8_t kind, uint8_t class, uint
     }
 }
 
-// Whether an INITIALIZE control's plan is one whole value of a scalar object, without a brace before it: the machine's
-// initializer root (node_census_root's).
+// Whether an INITIALIZE control's plan is one whole value of a scalar object whose local is a plain one, without a brace
+// before it: the machine's initializer root (node_census_root's).
 static bool node_bodies_initializer(const NodeCensusScratch* s, const CheckControl* control)
 {
     const CheckProgram* program = s->program;
@@ -6197,8 +6197,12 @@ static bool node_bodies_initializer(const NodeCensusScratch* s, const CheckContr
         {
             brace = parser->tokens.kinds[t] == PARSE_KIND_L_BRACE;
         }
-        plain = part != NULL && part->kind == CHECK_INIT_VALUE && part->bit_offset == 0 && part->bit_width == 0 && part->node < program->stream->count && scalar && !brace &&
-                !node_census_labelled(program->input, parser, control->token);
+        // (And of an object whose local is a plain one of its class: one aligned past 8 bytes, by its attribute or by its
+        // type, is a frame object, which the lowering's initialization writes through its address.)
+        const CheckInputAttributes* attributes = scalar ? check_input_attributes_at(program->input, control->token) : NULL;
+        const bool local = scalar && (attributes == NULL || attributes->alignment_log2 == 0) && type_alignment_log2(types, declared) <= 3;
+        plain = part != NULL && part->kind == CHECK_INIT_VALUE && part->bit_offset == 0 && part->bit_width == 0 && part->node < program->stream->count && scalar && local &&
+                !brace && !node_census_labelled(program->input, parser, control->token);
     }
     return plain;
 }

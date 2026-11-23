@@ -1978,7 +1978,9 @@ struct NodeProducerExpected
 // conditional's floating arms converted to an integer, by a return and by an initialization), `inexact` (an integer arm
 // a float does not hold). A token's kind: `pragmatic` (a pragma in the body), `undefined` (an internal function the
 // unit does not define, named). The machine's: `shifted` (a compound shift by its operand's own width, the census's
-// constants'). Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility).
+// constants'). Something said of it before the walk: `said` (a tag a prototype's list declares, -Wvisibility). An
+// initialization of another form: `aligned` and `typed` (an object aligned past 8 bytes, by its attribute and by its
+// type, whose local is a frame object).
 static const char node_producer_test_text[] =
     "enum A { A0, A1 };\nenum B { B0, B1 };\nstruct S { enum A a; enum B b; unsigned char c; int n; };\nvoid take(enum A);\n"
     "static int missing(void);\nstatic int present(void) { return 1; }\n"
@@ -1997,7 +1999,9 @@ static const char node_producer_test_text[] =
     "int started(int c) { int x = c ? 5.5 : 6.5; return x; }\n"
     "int pragmatic(int c) {\n#pragma omp parallel\n return c; }\n"
     "int undefined(void) { return missing(); }\n"
-    "int shifted(struct S *p) { p->c <<= 8; return p->c; }\n";
+    "int shifted(struct S *p) { p->c <<= 8; return p->c; }\n"
+    "int aligned(int c) { int x __attribute__((aligned(16))) = c; return x; }\n"
+    "typedef int wide_t __attribute__((aligned(32)));\nint typed(int c) { wide_t y = c; return y; }\n";
 // A unit with a member marked unavailable, one with a member of the counted_by family, one with a function declared with
 // internal linkage by its attribute, and one with a result's attribute on a type: none takes a body.
 static const char node_producer_test_members_text[] = "struct M { int n; int gone __attribute__((unavailable(\"gone\"))); };\nint member(struct M *p) { return p->n; }\n";
@@ -7790,7 +7794,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // The refusals that stand for a diagnostic of the walk's or of a pass after it, each beside a body that is taken; and
     // the two units that take no body for a member's mark and for a result's attribute on a type.
     NodeProducerExpected produced_silent = {
-        .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_MACHINE] = 1, [NODE_PRODUCER_LOUD] = 6 },
+        .reasons = { [NODE_PRODUCER_TAKEN] = 7, [NODE_PRODUCER_SAID] = 1, [NODE_PRODUCER_TOKEN] = 2, [NODE_PRODUCER_MACHINE] = 1, [NODE_PRODUCER_INITIALIZER] = 2,
+                     [NODE_PRODUCER_LOUD] = 6 },
     };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), false,
                                                                  &produced_silent),

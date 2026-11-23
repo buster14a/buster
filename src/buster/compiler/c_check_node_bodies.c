@@ -887,7 +887,8 @@ typedef enum NodeProducerReason
     NODE_PRODUCER_CONTROLS,
     // A control with an expression whose root the machine did not keep.
     NODE_PRODUCER_UNKEPT,
-    // An initialization that is not a scalar's of one value, or of a declaration with an assembler label.
+    // An initialization that is not a scalar's of one value, or of a declaration with an assembler label, or of an
+    // object aligned past 8 bytes.
     NODE_PRODUCER_INITIALIZER,
     // A return without a value in a function with a result, or with one in a function without.
     NODE_PRODUCER_RETURN,
@@ -1323,8 +1324,13 @@ static uint8_t node_producer_after(struct NodeProducer* producer, const struct N
             const bool scalar = declared != 0 && !node_census_aggregate(types, declared) && !type_kind_is_array(node_census_kind(types, declared));
             const uint32_t root = roots[entry->token] - 1;
             const bool converts = (kept->side_facts[root] & BUSTER_NODE_FRONT_SIDE_CONVERTS) != 0;
-            reason = scalar && converts && !node_census_labelled(input, parser, entry->token) ? reason : NODE_PRODUCER_INITIALIZER;
-            *detail = scalar && !converts ? 1 : 0;
+            // And of an object whose local the lowering makes a plain one of its class (check_lower_part_body's own test of a
+            // declaration): one aligned past 8 bytes, by its attribute or by its type, is a frame object, which its
+            // initialization writes through its address.
+            const CheckInputAttributes* attributes = scalar ? check_input_attributes_at(input, entry->token) : NULL;
+            const bool plain = scalar && (attributes == NULL || attributes->alignment_log2 == 0) && type_alignment_log2(types, declared) <= 3;
+            reason = scalar && converts && plain && !node_census_labelled(input, parser, entry->token) ? reason : NODE_PRODUCER_INITIALIZER;
+            *detail = scalar && !converts ? 1 : scalar && !plain ? 2 : 0;
         }
         if (reason == NODE_PRODUCER_TAKEN && entry->kind == CHECK_CONTROL_RETURN && entry->valued != valued)
         {
