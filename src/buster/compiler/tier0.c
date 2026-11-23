@@ -15123,6 +15123,25 @@ static Tier0Counts tier0_measure_vector(const Tier0Function* function, Tier0Entr
                                         : tier0_measure_vector_entries(function, entries, homes, prologue, false, false);
 }
 
+// A template branch's target as emission's blocks write it (tier0_emit_vector_entries): its entry with this bit, which no
+// record index has, until tier0_branch_targets puts the entry's position in its place.
+#define BUSTER_TIER0_TARGET_ENTRY 0x80000000u
+
+// The template branches' targets, entries (BUSTER_TIER0_TARGET_ENTRY) until every block is done, made their positions,
+// 16 targets a gather; the others (the prologue's, a deferred entry's) are record indices already, and kept.
+static void tier0_branch_targets(uint32_t* targets, uint32_t count, const uint32_t* positions)
+{
+    for (uint32_t first = 0; first < count; first += 16)
+    {
+        // (bzhi reads its index's low byte alone: a count of 256 or more left must not wrap.)
+        const __mmask16 lanes = count - first >= 16 ? (__mmask16)0xffff : (__mmask16)_bzhi_u32(0xffff, count - first);
+        const __m512i target = _mm512_maskz_loadu_epi32(lanes, targets + first);
+        const __mmask16 entries = lanes & _mm512_test_epi32_mask(target, _mm512_set1_epi32((int32_t)BUSTER_TIER0_TARGET_ENTRY));
+        const __m512i entry = _mm512_andnot_si512(_mm512_set1_epi32((int32_t)BUSTER_TIER0_TARGET_ENTRY), target);
+        _mm512_mask_storeu_epi32(targets + first, lanes, _mm512_mask_i32gather_epi32(target, entries, entry, positions, 4));
+    }
+}
+
 // One lane of emission: entry i's template expanded from `pair` (its hole block in the low 256 bits, or in the high ones
 // for an odd lane, whose indices take 32 more), stored at its position, and its choice record's reg, rm, index and mode
 // bytes put in dword `lane` of `fields`. A lane of an absorbed or deferred entry, or past the entries, expands its word's
@@ -15249,8 +15268,10 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
             requests += (uint32_t)__builtin_popcount(choice);
         }
         // #892: the branches' records and targets stored compressed, as the choices' columns are — each lane's
-        // (position + branch field) and its target's position, the targets gathered under the branch mask, rather than
-        // a lane-at-a-time loop whose exit mispredicts. Both columns have room for 8 past the last branch.
+        // (position + branch field) and its target's entry, rather than a lane-at-a-time loop whose exit mispredicts.
+        // Both columns have room for 8 past the last branch. A target entry carries BUSTER_TIER0_TARGET_ENTRY, and its
+        // position takes its place once every block is done (tier0_branch_targets, #2874): one gather a block (#975's,
+        // of the positions), with or without a branch in it, cost more than one a column of 16 targets.
         const __mmask8 branch = template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH));
         const __m512i branch_position = _mm512_cvtepu32_epi64(_mm256_loadu_si256((const __m256i*)(positions + first)));
         const __m512i branch_field = _mm512_and_si512(_mm512_srli_epi64(word, BUSTER_TIER0_WORD_BRANCH_SHIFT), _mm512_set1_epi64(3));
@@ -15258,12 +15279,8 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
                             _mm256_maskz_compress_epi32(branch, _mm512_cvtepi64_epi32(_mm512_add_epi64(branch_position, branch_field))));
         const __mmask8 branch_end = _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_END));
         const __m512i branch_target = _mm512_mask_mov_epi64(_mm512_and_si512(current, _mm512_set1_epi64(0xffffffff)), branch_end, _mm512_set1_epi64(count));
-        // #975: `_mm512_mask_i64gather_epi32` expands to `__builtin_ia32_gatherdiv16si`, which neither the checker's
-        // catalogue nor the backend's rows (there is no VPGATHERQD row) have, so the compiler could not check or lower
-        // this file. The 64-bit gather is the measure pass's, and a position's low half is the whole value.
-        const __m512i target_qwords = _mm512_mask_i64gather_epi64(_mm512_setzero_si512(), branch, branch_target, positions, 4);
-        const __m256i target_position = _mm512_cvtepi64_epi32(target_qwords);
-        _mm256_storeu_si256((__m256i*)(targets + branches), _mm256_maskz_compress_epi32(branch, target_position));
+        const __m512i target_entry = _mm512_or_si512(branch_target, _mm512_set1_epi64(BUSTER_TIER0_TARGET_ENTRY));
+        _mm256_storeu_si256((__m256i*)(targets + branches), _mm256_maskz_compress_epi32(branch, _mm512_cvtepi64_epi32(target_entry)));
         branches += (uint32_t)__builtin_popcount(branch);
         // The references and, in a function with deep entries, the deferred entries, in entry order: a call's references
         // come where its records do. Another function's deferred entries are written after the blocks.
@@ -15342,6 +15359,7 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
     }
     writer.count = positions[count];
     tier0_emit_epilogue(function, frame, &writer);
+    tier0_branch_targets(targets, branches, positions);
     // An asm body's own branches (#1839) are a deferred entry's, written after the branches of the entries after it.
     bool body_branches = false;
     for (uint32_t b = 0; b < function->asm_body_count && function->asm_bodies != 0; b += 1)
