@@ -3621,8 +3621,9 @@ static void check_test_program_return_marks(CheckTest* test)
     }
     if (ready)
     {
-        // An attested query runtime plan may evaluate its argument. That alone does not attest the source-warning
-        // CFG contract: its guaranteed terminating child must leave the query itself conservative.
+        // A query returns, as clang's CFG takes a builtin's call (#1393): __builtin_constant_p's operand is visited, so a
+        // terminating one ends the path whatever the runtime plan; the object size queries' operands are left out
+        // (VisitCallExpr's OmitArguments), so theirs doesn't.
         CheckOp ops[] = { CHECK_OP_BUILTIN_MISC, CHECK_OP_BUILTIN_QUERY };
         uint32_t absent[] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
         uint32_t members[] = { CBUILTIN_TRAP, CBUILTIN_CONSTANT_P };
@@ -3645,12 +3646,14 @@ static void check_test_program_return_marks(CheckTest* test)
                                             .argument_offsets = offsets, .argument_counts = counts, .argument_nodes = arguments } };
         const CheckStream stream = { .misc = &misc, .misc_count = 1, .queries = &query, .query_count = 1 };
         CheckProgram program = { .status = CHECK_PROGRAM_OK, .types = &types.table, .input = &input, .stream = &stream };
-        for (uint32_t path = 0; path < 2; path += 1)
+        for (uint32_t path = 0; path < 4; path += 1)
         {
-            const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL, path == 0);
+            const bool size = path >= 2;
+            members[1] = size ? CBUILTIN_OBJECT_SIZE : CBUILTIN_CONSTANT_P;
+            const uint8_t* query_facts = check_program_return_facts(&program, &scratch, NULL, (path & 1) == 0);
             check_test_expect(test, query_facts != NULL && query_facts[0] == BUSTER_CHECK_RETURN_STOPS &&
-                                   query_facts[1] == BUSTER_CHECK_RETURN_UNKNOWN,
-                              "an evaluated query operand never promotes its conservative warning contract to a guaranteed stop");
+                                   query_facts[1] == (size ? 0 : BUSTER_CHECK_RETURN_STOPS),
+                              "a query returns: constant_p's terminating operand ends the path, object_size's is left out");
         }
     }
     if (ready)

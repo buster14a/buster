@@ -4009,8 +4009,8 @@ static __attribute__((noinline)) uint8_t node_tests_window_line(NodeCensusScratc
 // The same line's two bits for the return flow (BUSTER_NODE_TESTS_LINE_PLAIN and _STOPS), of the declaration the
 // name's leaf at `token` names: check_program_return_call's own questions of a direct call's declaration, a
 // function's, in its order: declared noreturn (CHECK_INPUT_FUNCTION_NORETURN), which stops; or else a library's name
-// the catalogue marks (check_program_return_library_search), which has neither bit; or else plain. Another
-// declaration's line has neither.
+// the catalogue marks (check_program_return_library_search), which has neither bit; or else plain. An object's, a call
+// through it, by its function type (#1393). Another declaration's line has neither.
 static __attribute__((noinline)) uint8_t node_tests_window_returns(const NodeCensusScratch* s, uint32_t token)
 {
     const CheckProgram* program = s->program;
@@ -4018,6 +4018,10 @@ static __attribute__((noinline)) uint8_t node_tests_window_returns(const NodeCen
     const uint32_t declaration = node_census_declaration(program, token);
     const bool function = declaration != BUSTER_CHECK_NONE && declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
                           input->function_flags != NULL;
+    // An object's: a call through it stops where its function type is noreturn and returns otherwise
+    // (check_program_return_indirect's, #1393).
+    const bool object = declaration != BUSTER_CHECK_NONE && declaration < input->token_count && input->declaration_kinds != NULL &&
+                        input->declaration_kinds[declaration] == C_BINDING_OBJECT;
     uint8_t bits = 0;
     if (function && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0)
     {
@@ -4026,6 +4030,10 @@ static __attribute__((noinline)) uint8_t node_tests_window_returns(const NodeCen
     else if (function && check_program_return_library_search(s->pp->table, program->parser->tokens.names[declaration]) == 0)
     {
         bits = BUSTER_NODE_TESTS_LINE_PLAIN;
+    }
+    else if (object)
+    {
+        bits = check_input_fallthrough_noreturn_object(input, program->parser, declaration) ? BUSTER_NODE_TESTS_LINE_STOPS : BUSTER_NODE_TESTS_LINE_PLAIN;
     }
     return bits;
 }

@@ -748,11 +748,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
-  emission reachability is unchanged. Indirect calls (including GNU `noreturn` pointer/typedef contracts), overloads,
-  analyzer annotations, semantic queries, conditional classifier contracts and library-policy contracts remain
-  conservative until their retained facts are available here (#1393 remains open). Indirect calls in automatic
-  initializer value parts share that conservative boundary, including ordinary pointers whose Clang warning is
-  currently suppressed here; GNU noreturn pointer/typedef initializers need it until callable-type facts are retained.
+  emission reachability is unchanged. A call through a pointer object's name returns unless its type is noreturn, as
+  clang's CFG reads the callee's type (#1393, `check_program_return_indirect`: GNU `noreturn` on its declaration or the
+  typedefs and typeofs its specifiers name; the node machine's lines answer the same, `node_tests_window_returns`). The
+  query builtins return: `__builtin_constant_p`'s operand is visited, the object size queries' left out. Overloads,
+  analyzer annotations, conditional classifier contracts, library-policy contracts (`-ffreestanding`, `-fno-builtin`,
+  `jmp_buf`) and other indirect callees (a member, an element, a cast, a conditional, a comma, a call's result, whose
+  types the node machine's window can't answer yet) remain conservative.
   `c_check_return_call_driver_test.c` exercises direct-call fall-off,
   path-local termination, initializer/comma operands, warning flags and those conservative boundaries through the
   ordinary, scalar and deferred readers against Clang, with independent warning counts.
@@ -906,6 +908,13 @@ the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
 builder's observer's `-Wtautological-bitwise-compare`,
 `-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
 order (`c_check_common_cfg.c`).
+
+`tests/checker/return-calls` (#1393) is one too: `-Wreturn-type` past calls
+(`c_check_return_flow.c`), a direct call's by its declaration, a call through
+a pointer object's name by its type's noreturn (GNU's attribute through its
+declaration, typedefs and typeofs), and the query builtins, which return
+(`__builtin_constant_p`'s operand visited, the object size queries' left
+out).
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
