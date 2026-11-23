@@ -538,7 +538,7 @@ after `vzeroupper` ([the record](https://github.com/buster14a/buster-performance
   function's value types whether its code will name a ymm or zmm register below
   16 (`tier1_emit_upper_likely`: a 32- or 64-byte vector value), and emits it
   with `Tier1EmitResult.zero_upper` if so. It then checks the code
-  (`tier1_emit_upper_dirty`, sixteen records at a time, each form's operand
+  (`x86_upper_dirty`, sixteen records at a time, each form's operand
   classes gathered from the form table) and emits the function again only where
   the prediction was wrong. Emitting every such function twice instead cost
   `main.c`'s `--tier1 -march=znver5` compile 5.7% on the 9700X. A `vzeroupper` then goes right before each call,
@@ -552,7 +552,7 @@ after `vzeroupper` ([the record](https://github.com/buster14a/buster-performance
   function that is dirty anywhere clears the state at every exit.
 - **VEX forms.** At a target with AVX, `tier1_emit_vex` rewrites the finished
   code's legacy SSE records as their VEX twins, one record for one, so that no
-  index into the records changes. The pairs are the `BUSTER_TIER1_VEX_TWINS`
+  index into the records changes. The pairs are the `BUSTER_X86_VEX_TWINS`
   list: `addss x, y` becomes `vaddss x, x, y`, a register merge `movss x, y`
   becomes `vmovss x, x, y`, `movaps` becomes `vmovaps`, and so on. Each twin
   computes its legacy form's low 128 bits and zeroes the rest. `test-tier1-emit`
@@ -560,14 +560,16 @@ after `vzeroupper` ([the record](https://github.com/buster14a/buster-performance
   MXCSR and memory. A function with an asm body keeps its legacy records: the
   body's are the program's own.
   The certificate decodes and compares records through
-  `tier1_emit_vex_canonical`, which maps a twin back to its legacy record. That
+  `x86_vex_canonical`, which maps a twin back to its legacy record. That
   is sound because its register cells never read a register's upper bytes apart
   from its low ones.
 
 The per-unit helpers (`c_check_program_helpers.c`) write no ymm or zmm register,
 so they leave the state as they find it, and Tier 1 clears it before calling them.
 `test-tier1-masks` checks each compiled function's placement, and that no legacy
-SSE record is left at an AVX target. Tier 0 has neither change yet (#3335).
+SSE record is left at an AVX target. The scan and the twins live in
+`x86_upper_state.c`, which Tier 0 shares (#3335, docs/tier0.md's "The upper
+vector state").
 
 ### Inlining (#1282, #2541)
 
