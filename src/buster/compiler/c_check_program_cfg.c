@@ -678,7 +678,7 @@ static uint8_t check_cfg_logic(const CheckProgram* program, uint32_t node, Check
 // clang's checkIncorrectEqualityOperator: an integer literal (getIntegerLiteralSubexpressionValue's, with no implicit
 // conversion) compared with a bitwise `&` or `|` of another that can't give it (`(x & 8) == 4`, its event), or with a
 // boolean value it isn't (`(x < y) == 10`).
-static uint8_t check_cfg_equality(const CheckProgram* program, uint32_t node, CheckCfgObserver* observer)
+static uint8_t check_cfg_equality_checked(const CheckProgram* program, uint32_t node, CheckCfgObserver* observer)
 {
     const CheckGraph* graph = &program->input->graph;
     const bool equal = graph->ops[node] == CHECK_OP_EQUAL;
@@ -716,9 +716,45 @@ static uint8_t check_cfg_equality(const CheckProgram* program, uint32_t node, Ch
     return result;
 }
 
+// Whether check_cfg_equality_checked can answer with `literal` for its literal operand and `other` beside it: `literal`
+// is one (check_cfg_literal_value), and `other` is a `&` or a `|`, or is known to be 0 or 1 where the literal is over 1.
+// Of the operands alone, no type of theirs worked out but a known boolean's own.
+static bool check_cfg_equality_can(const CheckProgram* program, uint32_t literal, uint32_t other)
+{
+    const CheckGraph* graph = &program->input->graph;
+    unsigned __int128 bits = 0;
+    uint32_t width = 0;
+    const bool found = literal < graph->count && other < graph->count && check_cfg_literal_value(program, literal, &bits, &width);
+    return found && (graph->ops[other] == CHECK_OP_BIT_AND || graph->ops[other] == CHECK_OP_BIT_OR || (bits > 1 && check_cfg_known_boolean(program, other)));
+}
+
+// check_cfg_equality_checked's answer. It answers only where one operand is a literal and the other is a `&` or a `|`, or
+// is known to be 0 or 1 beside a literal over 1: questions of the operands alone, which are asked first (#2850). Most
+// equalities fail both, and their operands' common type is then never worked out. (With a test's switch the long way
+// runs all the same and the two are compared, CheckInput.default_path_counts.)
+static uint8_t check_cfg_equality(const CheckProgram* program, uint32_t node, CheckCfgObserver* observer)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    uint64_t* const counts = program->input->default_path_counts;
+    const bool can = check_cfg_equality_can(program, left, right) || check_cfg_equality_can(program, right, left);
+    uint8_t answer = BUSTER_CHECK_CFG_UNKNOWN;
+    if (can || __builtin_expect(counts != NULL, 0))
+    {
+        answer = check_cfg_equality_checked(program, node, observer);
+        if (!can)
+        {
+            check_default_path_count(counts, CHECK_DEFAULT_PATH_COMPARISONS_EARLY, 1);
+            check_default_path_count(counts, CHECK_DEFAULT_PATH_COMPARISONS_DIFFERENT, answer != BUSTER_CHECK_CFG_UNKNOWN);
+        }
+    }
+    return answer;
+}
+
 // clang's checkIncorrectRelationalOperator: a boolean value compared with an integer literal (no implicit conversion)
 // other than 0 and 1. A literal is never negative: `10 > b` and `b < 10` are true.
-static uint8_t check_cfg_relational(const CheckProgram* program, uint32_t node)
+static uint8_t check_cfg_relational_checked(const CheckProgram* program, uint32_t node)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckOp op = graph->ops[node];
@@ -739,6 +775,39 @@ static uint8_t check_cfg_relational(const CheckProgram* program, uint32_t node)
         result = greater ? (uint8_t)literal_first : (uint8_t)!literal_first;
     }
     return result;
+}
+
+// Whether check_cfg_relational_checked can answer with `literal` for its literal operand and `other` beside it: an
+// integer literal over 1 beside a value known to be 0 or 1.
+static bool check_cfg_relational_can(const CheckProgram* program, uint32_t literal, uint32_t other)
+{
+    const CheckGraph* graph = &program->input->graph;
+    unsigned __int128 bits = 0;
+    uint32_t width = 0;
+    bool is_signed = false;
+    const bool found = literal < graph->count && other < graph->count && check_cfg_integer_literal(program, literal, &bits, &width, &is_signed);
+    return found && bits > 1 && check_cfg_known_boolean(program, other);
+}
+
+// check_cfg_relational_checked's answer, its two questions of the operands alone asked first, as check_cfg_equality's are.
+static uint8_t check_cfg_relational(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    uint64_t* const counts = program->input->default_path_counts;
+    const bool can = check_cfg_relational_can(program, left, right) || check_cfg_relational_can(program, right, left);
+    uint8_t answer = BUSTER_CHECK_CFG_UNKNOWN;
+    if (can || __builtin_expect(counts != NULL, 0))
+    {
+        answer = check_cfg_relational_checked(program, node);
+        if (!can)
+        {
+            check_default_path_count(counts, CHECK_DEFAULT_PATH_COMPARISONS_EARLY, 1);
+            check_default_path_count(counts, CHECK_DEFAULT_PATH_COMPARISONS_DIFFERENT, answer != BUSTER_CHECK_CFG_UNKNOWN);
+        }
+    }
+    return answer;
 }
 
 // clang's checkIncorrectBitwiseOrOperator: a `|` of one literal constant (tryTransformToLiteralConstant's, past its
