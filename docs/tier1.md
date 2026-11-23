@@ -189,7 +189,7 @@ vector or mask value: [the loop motion guide](ir-loop-motion.md#the-pressure-pol
 policy: [the value numbering guide](ir-value-numbering.md#the-pressure-policy-2719)),
 `gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
 `all`. The default is SCCP, dead-code removal, CFG cleanup, its merges, the
-inlining, `vectors` and `tables`. The restricted
+inlining, `vectors`, `tables` and `hoist` (#2719). The restricted
 value numbering runs before promotion, `numbering` after the switches of
 constants; LICM runs after it, before the optimizer, which cleans up after it,
 then the loop vectorizer, then the unroller. Explicit `+gvn` or `+licm` runs

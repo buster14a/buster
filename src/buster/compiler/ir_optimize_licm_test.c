@@ -264,6 +264,15 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
             if (created)
             {
                 ir_licm_test_compare(test, &f, &vector, &scalar, &scratch, kind == 0 ? 2 : 0);
+                // #2719: the pressure policy moves the costly product and its sum, and nothing an undef reaches, which it
+                // taints through the use lists that a verified function without an undef doesn't build.
+                IrLicmOptions pressure = ir_licm_options();
+                pressure.pressure = true;
+                pressure.validated = true;
+                IrLicmResult pressured = { 0 };
+                const IrCheck pressure_check = ir_optimize_licm(&f, &vector, &scratch, pressure, &pressured);
+                ir_optimize_test_expect(test, pressure_check.error == IR_OK && pressured.moved == (kind == 0 ? 2u : 0u), "LICM's pressure policy moves the product, and nothing an undef reaches");
+                arena_pop_to(&vector, 0);
                 if (kind == 0)
                 {
                     IrLicmResult result = { 0 };
@@ -741,6 +750,124 @@ static void ir_licm_test_permute2(IrOptimizeTest* test)
     arena_release(&scratch);
 }
 
+// IrLicmOptions.pressure's screen (#2719, ir_licm_pressure_screen): a function whose only loop holds a call, in the block
+// its back edge leaves or the header it goes to, is passed over, though the loop has an invariant product that motion of
+// every value moves and the policy doesn't; a loop without a call whose header comes after its body in the blocks'
+// order (its back edge goes forward there) is found by the body's edge back to the header, and the policy moves its
+// product.
+static void ir_licm_test_screen(IrOptimizeTest* test)
+{
+    static const char called[] = "function (i64) -> i64 {\n"
+                                 "b0:\n"
+                                 "  %0 = param.i64 0\n"
+                                 "  %1 = const.i64 0x00000000000000000000000000000000\n"
+                                 "  %2 = const.i64 0x00000000000000000000000000000001\n"
+                                 "  %3 = const.i64 0x00000000000000000000000000000008\n"
+                                 "  %4 = br.void b1\n"
+                                 "b1:\n"
+                                 "  %5 = br.void b2\n"
+                                 "b2:\n"
+                                 "  %6 = phi.i64 [%1, b1], [%14, b3]\n"
+                                 "  %7 = phi.i64 [%1, b1], [%13, b3]\n"
+                                 "  %8 = icmp.i1 %6, %3 lt\n"
+                                 "  %9 = cbr.void %8, b3, b4\n"
+                                 "b3:\n"
+                                 "  %10 = mul.i64 %0, %0\n"
+                                 "  %11 = call.i64 @1(%6) fixed=(i64) variadic=0\n"
+                                 "  %12 = add.i64 %11, %10\n"
+                                 "  %13 = add.i64 %7, %12\n"
+                                 "  %14 = add.i64 %6, %2\n"
+                                 "  %15 = br.void b2\n"
+                                 "b4:\n"
+                                 "  %16 = ret.void %7\n"
+                                 "}\n";
+    static const char header[] = "function (i64) -> i64 {\n"
+                                 "b0:\n"
+                                 "  %0 = param.i64 0\n"
+                                 "  %1 = const.i64 0x00000000000000000000000000000000\n"
+                                 "  %2 = const.i64 0x00000000000000000000000000000001\n"
+                                 "  %3 = const.i64 0x00000000000000000000000000000008\n"
+                                 "  %4 = br.void b1\n"
+                                 "b1:\n"
+                                 "  %5 = br.void b2\n"
+                                 "b2:\n"
+                                 "  %6 = phi.i64 [%1, b1], [%14, b3]\n"
+                                 "  %7 = phi.i64 [%1, b1], [%13, b3]\n"
+                                 "  %8 = call.i64 @1(%6) fixed=(i64) variadic=0\n"
+                                 "  %9 = icmp.i1 %6, %3 lt\n"
+                                 "  %10 = cbr.void %9, b3, b4\n"
+                                 "b3:\n"
+                                 "  %11 = mul.i64 %0, %0\n"
+                                 "  %12 = add.i64 %8, %11\n"
+                                 "  %13 = add.i64 %7, %12\n"
+                                 "  %14 = add.i64 %6, %2\n"
+                                 "  %15 = br.void b2\n"
+                                 "b4:\n"
+                                 "  %16 = ret.void %7\n"
+                                 "}\n";
+    static const char forward[] = "function (i64) -> i64 {\n"
+                                  "b0:\n"
+                                  "  %0 = param.i64 0\n"
+                                  "  %1 = const.i64 0x00000000000000000000000000000000\n"
+                                  "  %2 = const.i64 0x00000000000000000000000000000001\n"
+                                  "  %3 = const.i64 0x00000000000000000000000000000008\n"
+                                  "  %4 = br.void b1\n"
+                                  "b1:\n"
+                                  "  %5 = br.void b3\n"
+                                  "b2:\n"
+                                  "  %6 = mul.i64 %0, %0\n"
+                                  "  %7 = add.i64 %11, %6\n"
+                                  "  %8 = add.i64 %10, %2\n"
+                                  "  %9 = br.void b3\n"
+                                  "b3:\n"
+                                  "  %10 = phi.i64 [%1, b1], [%8, b2]\n"
+                                  "  %11 = phi.i64 [%1, b1], [%7, b2]\n"
+                                  "  %12 = icmp.i1 %10, %3 lt\n"
+                                  "  %13 = cbr.void %12, b2, b4\n"
+                                  "b4:\n"
+                                  "  %14 = ret.void %11\n"
+                                  "}\n";
+    Arena input = arena_reserve(UINT64_C(16) << 20);
+    Arena output = arena_reserve(UINT64_C(16) << 20);
+    Arena scratch = arena_reserve(UINT64_C(16) << 20);
+    const bool ready = input.base != NULL && output.base != NULL && scratch.base != NULL;
+    IrFunction functions[3] = { 0 };
+    const char* const texts[3] = { called, header, forward };
+    const uint64_t lengths[3] = { sizeof(called) - 1, sizeof(header) - 1, sizeof(forward) - 1 };
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        // The third fixture's loop holds no call.
+        const uint32_t free = k == 2;
+        const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)texts[k], .length = lengths[k] }, &input, &scratch, functions + k) : (IrParseResult){ .error = IR_PARSE_END };
+        const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+        ir_optimize_test_expect(test, fixture, "the pressure screen's fixtures parse and verify");
+        const uint64_t tm = scratch.length;
+        const bool screened = fixture && ir_licm_pressure_screen(functions + k, &scratch);
+        ir_optimize_test_expect(test, scratch.length == tm && screened == (free != 0),
+                                free == 0 ? "the pressure screen passes over a function whose every loop holds a call" : "the pressure screen finds a loop without a call whose back edge goes forward");
+        IrLicmOptions options = ir_licm_options();
+        options.pressure = true;
+        IrLicmResult pressured = { 0 };
+        const IrCheck check = fixture ? ir_optimize_licm(functions + k, &output, &scratch, options, &pressured) : ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+        ir_optimize_test_expect(test, check.error == IR_OK && pressured.moved == free && pressured.eligible_loops == 1 && pressured.called_loops == 1 - free,
+                                free == 0 ? "the pressure policy moves nothing out of the screened function's loop" : "the pressure policy moves the forward loop's product");
+        options.pressure = false;
+        IrLicmResult every = { 0 };
+        const IrCheck all = fixture ? ir_optimize_licm(functions + k, &output, &scratch, options, &every) : ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+        ir_optimize_test_expect(test, all.error == IR_OK && every.moved != 0, "the screen's fixtures have an invariant value that motion of every value moves");
+        for (uint32_t trial = 0; check.error == IR_OK && trial < 6; trial += 1)
+        {
+            const uint64_t parameter = trial == 5 ? UINT64_MAX : trial;
+            const IrOptimizeExecution before = ir_optimize_test_execute(functions + k, &scratch, parameter, trial & 1);
+            const IrOptimizeExecution after = ir_optimize_test_execute(&pressured.function, &scratch, parameter, trial & 1);
+            ir_optimize_test_expect(test, before.status == after.status && before.value == after.value && before.effects == after.effects, "the pressure policy keeps the screen fixtures' returns and effects");
+        }
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&scratch);
+}
+
 static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -769,6 +896,7 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
         ir_licm_test_vector_nested(&test);
         ir_licm_test_widths(&test);
         ir_licm_test_permute2(&test);
+        ir_licm_test_screen(&test);
         printf("ir-licm: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

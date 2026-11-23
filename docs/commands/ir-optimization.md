@@ -137,18 +137,26 @@ output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
 
 ## Pressure-aware LICM and value numbering (#2719)
 
-`IrLicmOptions.pressure` (Tier 1's `+hoist` item, off by default, in functions
-with a loop and no vector or mask value) moves only what pays for the register it
-holds through the loop: nothing out of a loop that holds a call, free values
-(constants, addresses, casts of no bits) only as operands of a costly value
-that moves, no truth value, and at most a budget of costly general-register
-values. `IrGvnOptions.pressure` (`+numbering`, off by default, on the promoted
+`IrLicmOptions.pressure` (Tier 1's `hoist` item, on by default, in functions
+without a vector or mask value where `ir_licm_pressure_screen` finds a loop that
+may hold no call) moves only what pays for the register it holds through the
+loop: nothing out of a loop that holds a call, free values (constants,
+addresses, casts of no bits) only as operands of a costly value that moves, no
+truth value, and at most a budget of costly general-register values.
+`IrGvnOptions.pressure` (`+numbering`, off by default, on the promoted
 function) never merges a free value and merges a truth value only within its
-block. `test-ir-optimize`'s `licm-pressure`, `licm-pressure-call`,
-`licm-pressure-budget` and `gvn-pressure` pairs and `test-ir-licm`'s budget
-on random invariant chains check them; `test-checker-driver`'s passes fixture
-checks that `+hoist` and `+numbering` reach their passes. The rules and their
-measurements are in [the loop motion guide](../../docs/ir-loop-motion.md#the-pressure-policy-2719)
+block. Tier 1 runs both with `validated` (`IrOptimizeWork.validated`): their
+input comes verified from the passes before them, so their preparation builds
+its CFG without verifying it again, and LICM's under the policy builds no use
+lists for a function without an undef (`IrOptimizeWork.without_uses`).
+`test-ir-optimize`'s `licm-pressure`, `licm-pressure-call`,
+`licm-pressure-budget` and `gvn-pressure` pairs check the rules, and it runs
+every LICM and value-numbering pair with and without the verified input's
+preparation, which must give the same function; `test-ir-licm`'s budget on
+random invariant chains, its screen fixtures and the undef taint under the
+policy check the rest. `test-checker-driver`'s passes fixture checks that the
+default hoists, that `-hoist` doesn't, and that `+numbering` reaches its pass.
+The rules and their measurements are in [the loop motion guide](../../docs/ir-loop-motion.md#the-pressure-policy-2719)
 and [the value numbering guide](../../docs/ir-value-numbering.md#the-pressure-policy-2719).
 
 ## Loop unrolling (#2755)

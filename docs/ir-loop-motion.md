@@ -129,11 +129,11 @@ immediate.
 
 ## The pressure policy (#2719)
 
-`IrLicmOptions.pressure` is that model. `--tier1-passes=+hoist` runs it on
-every function that has a loop and no vector or mask value (those take #2781's
-`vectors` policy); it is off by default (below). A value it moves stays live
-from the preheader through the whole loop, so it moves only what pays for that
-register:
+`IrLicmOptions.pressure` is that model. Tier 1 runs it by default (`hoist`;
+`--tier1-passes=-hoist` turns it off) on every function without a vector or
+mask value (those take #2781's `vectors` policy) where its screen finds a loop
+that may hold no call (below). A value it moves stays live from the preheader
+through the whole loop, so it moves only what pays for that register:
 
 - **A loop that holds a call moves nothing.** Across a call a value needs one of
   the five callee-saved registers, and the values a loop already keeps across
@@ -159,14 +159,44 @@ register:
   were live through the loop only for it frees them, which the count doesn't
   credit.
 
-A function without a loop (no edge to a block at or before its source,
-`ir_function_cyclic`) skips the pass, and one where nothing moves is returned as
-it was given, unwritten. The natural loops come with the preparation's
-dominator tree (`IrOptimizeWork.dominator_outputs`), from one analysis, and a
-function past the loop analysis' matrix limit is refused (`IR_ERROR_UNSUPPORTED`)
-and goes on as it was. The rules are in `test-ir-optimize`'s text fixtures
-(`licm-pressure`, `licm-pressure-call`, `licm-pressure-budget`) and
-`test-ir-licm`'s budget on random invariant chains.
+Before any analysis, Tier 1 asks `ir_licm_pressure_screen` whether the
+function may have a loop without a call: an edge to a block at or before its
+source that joins two blocks without one. Every cycle has an edge back in the
+blocks' order, and a loop without a call has a cycle of blocks without one, so
+a function without such an edge (no loop, or a call in every loop) moves
+nothing and skips the pass. The blocks that hold a call come from the
+operations 64 at a time; the terminators of those that hold none are read one
+by one, as `ir_build_cfg` reads them, since a gather of them would cost more on
+Zen 5 than the loads. A function where nothing moves is returned as it was
+given, unwritten. The natural loops come with the preparation's dominator tree
+(`IrOptimizeWork.dominator_outputs`), from one analysis, and a function past
+the loop analysis' matrix limit is refused (`IR_ERROR_UNSUPPORTED`) and goes on
+as it was. The rules are in `test-ir-optimize`'s text fixtures
+(`licm-pressure`, `licm-pressure-call`, `licm-pressure-budget`),
+`test-ir-licm`'s budget on random invariant chains and its screen fixtures (a
+call in the loop's latch, a call in its header, and a loop without a call whose
+back edge goes forward in the blocks' order).
+
+### What it costs to compile
+
+In #2719's first measurement the pass cost 3.4% of `sqlite3.c`'s `--tier1`
+compile. A profile of it on the 9700X (perf's cycles, against the same build
+without the pass) put about half of that in verifying the promoted function
+again: the verifier's shape, row and graph checks and the operands' dominance
+check, though promotion verified it and the passes since (threading,
+if-conversion) take it as verified. The rest was the dominator tree and
+its natural loops, the use lists and the motion's own analysis. Tier 1 now
+runs the pass with `IrLicmOptions.validated`: its preparation builds the CFG
+with `ir_cfg_validated`, as if-conversion and threading build theirs, and
+leaves out the dominance check (`IrOptimizeWork.validated`). The optimizer
+after it verifies whatever reaches it, and the pass's own result is verified
+where it rewrites the function, as before. Under the policy the use lists only
+serve to taint what an undef reaches, so a verified function without an undef
+builds none (`IrOptimizeWork.without_uses`). The screen then leaves out the
+functions whose every loop holds a call. Each function's output is unchanged:
+`sqlite3.c`'s and Lua's 34 sources' `--tier1` objects are byte for byte those
+of main's `--tier1-passes=+hoist`, and `test-ir-optimize` runs every LICM and
+value-numbering fixture with and without the verified input's preparation.
 
 What each rule did, measured before the clean implementation by an
 experiment's switches (#2719's record), in instructions by callgrind against

@@ -33,6 +33,10 @@ struct IrLicmOptions
     // A function where nothing moves is returned as it was given, as with `vectors`. It has no whole-function form:
     // `whole` is ignored with it, and `vectors` takes precedence over it.
     bool pressure;
+    // The function is verified already (IrOptimizeWork.validated, #2719: Tier 1's): its preparation builds the CFG and
+    // the loops without verifying it again, and with `pressure` and no undef, no use lists. A function the pass rewrites
+    // is verified as ever.
+    bool validated;
 };
 
 // IrLicmOptions.pressure's register budget: the general registers Tier 1 allocates past rsp, rbp and its scratch ones,
@@ -86,6 +90,78 @@ static __attribute__((unused)) IrLicmOptions ir_licm_options(void)
 {
     const IrLicmOptions options = { .sweep_limit = 64 };
     return options;
+}
+
+// IrLicmOptions.pressure's screen (#2719), before any analysis: whether a verified function may have a loop that holds no
+// call, the only loop the policy moves values out of. Every cycle has an edge to a block at or before its source (the
+// edge that leaves its last block in the function's order), and a loop without a call has a cycle of blocks that hold
+// no call (an IR_CALL or IR_CALL_INDIRECT, as ir_licm_analyze's bitset finds them). So a function where no such edge
+// joins two blocks without a call moves nothing under the policy, and Tier 1 passes it over without the preparation's
+// CFG, loop analysis and use lists; one where some edge does may still hold a call in each loop, which ir_licm_analyze
+// then finds. The operations go 64 at a time, a call's block by a cursor over the blocks' offsets that only goes
+// forward; the terminators of the blocks without a call are read one at a time, as ir_build_cfg reads them: there is
+// one a block, and a gather of them (64 uops on Zen 5) would cost more than the loads. True where the bitset doesn't
+// fit in `scratch`, which it leaves as it was.
+static __attribute__((unused)) bool ir_licm_pressure_screen(const IrFunction* f, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    const uint64_t words = ((uint64_t)f->block_count + 63) / 64;
+    bool ok = true;
+    uint64_t* callers = ir_allocate(scratch, words, sizeof(uint64_t), &ok);
+    uint32_t block = 0;
+    for (uint64_t first = 0; ok && words != 0 && first < f->instruction_count; first += 64)
+    {
+        const uint64_t count = f->instruction_count - first < 64 ? f->instruction_count - first : 64;
+        const __mmask64 valid = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i operations = _mm512_maskz_loadu_epi8(valid, f->op + first);
+        __mmask64 calls = _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_CALL)) | _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_CALL_INDIRECT));
+        while (calls != 0)
+        {
+            const uint64_t call = first + (uint64_t)__builtin_ctzll(calls);
+            while (f->block_offsets[block + 1] <= call)
+            {
+                block += 1;
+            }
+            callers[block / 64] |= UINT64_C(1) << (block % 64);
+            calls &= calls - 1;
+        }
+    }
+    bool found = !ok;
+    for (uint64_t word = 0; !found && word < words; word += 1)
+    {
+        const uint64_t blocks = f->block_count - word * 64;
+        const uint64_t valid = blocks >= 64 ? UINT64_MAX : (UINT64_C(1) << blocks) - 1;
+        uint64_t sources = ~callers[word] & valid;
+        while (!found && sources != 0)
+        {
+            const uint32_t source = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(sources));
+            const uint32_t last = f->block_offsets[source + 1] - 1;
+            const uint32_t edges = ir_successor_count(f, last);
+            for (uint32_t edge = 0; !found && edge < edges; edge += 1)
+            {
+                const uint32_t target = ir_successor(f, last, edge);
+                found = target <= source && (callers[target / 64] >> (target % 64) & 1) == 0;
+            }
+            sources &= sources - 1;
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return found;
+}
+
+// Whether a function has an undef, whose users ir_licm_classify taints through the use lists: the operations 64 at a
+// time.
+static bool ir_licm_has_undef(const IrFunction* f)
+{
+    bool found = false;
+    for (uint64_t first = 0; !found && first < f->instruction_count; first += 64)
+    {
+        const uint64_t count = f->instruction_count - first < 64 ? f->instruction_count - first : 64;
+        const __mmask64 valid = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i operations = _mm512_maskz_loadu_epi8(valid, f->op + first);
+        found = _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_UNDEF)) != 0;
+    }
+    return found;
 }
 
 // IrLicmOptions.pressure's free kinds by operation (BUSTER_IR_LICM_FREE and _ARITHMETIC): a truncation and the pointer
@@ -839,6 +915,10 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
     // The natural loops come with the preparation's dominator tree, from one analysis (#2719). A function past the loop
     // analysis' limits is refused (IR_ERROR_UNSUPPORTED), and goes on as it was.
     work.ir.dominator_outputs = BUSTER_DOMINATOR_LOOPS;
+    work.ir.validated = options.validated;
+    // IrLicmOptions.pressure reads the use lists only to taint what an undef reaches (ir_licm_classify): a verified
+    // function without one builds none.
+    work.ir.without_uses = options.validated && options.pressure && !options.vectors && !ir_licm_has_undef(function);
     if (output != scratch)
     {
         check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
