@@ -113,14 +113,12 @@ static void check_test_driver_statement_recovery(CheckTest* test, const char* cl
     {
         check_test_driver_parse_statement_recovery(test, clang, executable, directory);
     }
-    if (check_test_driver_takes())
+    if (check_test_driver_takes_weighing(630))
     {
         check_test_driver_attribute_calls(test, clang, executable, directory);
     }
-    if (check_test_driver_takes())
-    {
-        check_test_driver_malformed_calls(test, clang, executable, directory);
-    }
+    // A long sweep that deals its own cases.
+    check_test_driver_malformed_calls(test, clang, executable, directory);
     static const char* const fixtures[] = {
         // #2438: a case operand's non-integer type is diagnosed before its constant value, on ordinary and wide
         // switches. Parentheses and range endpoints retain their own beginning; integer nonconstants and faults keep

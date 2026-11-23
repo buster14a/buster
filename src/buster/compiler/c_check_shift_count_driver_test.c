@@ -665,8 +665,9 @@ static const CheckDriverDefaultWarningFixture check_driver_shift_count_fixtures[
     },
 };
 
+// A long sweep (26 s on a 4-CPU Xeon VM, #3399): each fixture is a unit of test-checker-driver's deal.
 static void check_test_driver_shift_counts(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_shift_count_fixtures,
-                                      BUSTER_ARRAY_LENGTH(check_driver_shift_count_fixtures));
+    check_test_driver_warning_fixtures_dealt(test, clang, executable, directory, check_driver_shift_count_fixtures,
+                                             BUSTER_ARRAY_LENGTH(check_driver_shift_count_fixtures), true);
 }

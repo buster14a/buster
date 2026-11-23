@@ -1612,17 +1612,17 @@ static void check_test_driver_semantic_recovery(CheckTest* test, const char* cla
     unlink(object);
     free(expected_lines);
     free(actual_lines);
-    if (check_test_driver_takes())
+    if (check_test_driver_takes_weighing(1200))
     {
         check_test_driver_attribute_recovery(test, clang, executable, directory);
     }
     // A long sweep that deals its own cases.
     check_test_driver_suppress_recovery(test, clang, executable, directory);
-    if (check_test_driver_takes())
+    if (check_test_driver_takes_weighing(890))
     {
         check_test_driver_label_order(test, clang, executable, directory);
     }
-    if (check_test_driver_takes())
+    if (check_test_driver_takes_weighing(810))
     {
         check_test_driver_alias_redefinition(test, clang, executable, directory);
     }

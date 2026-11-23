@@ -34,7 +34,7 @@ struct CheckDriverFixture
 // once, as the whole run runs it: no check draws from CheckTest.random, which the driver leaves at 0, and those that
 // draw numbers seed their own. Without --part, the one part takes every unit.
 #define BUSTER_CHECK_DRIVER_MAX_PARTS 64
-#define BUSTER_CHECK_DRIVER_UNIT_WEIGHT 15
+#define BUSTER_CHECK_DRIVER_UNIT_WEIGHT 20
 typedef struct CheckDriverPart CheckDriverPart;
 struct CheckDriverPart
 {
@@ -11228,11 +11228,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_cleanup_errors(&test, clang, executable, directory);
             check_test_driver_cleanup_chains(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(610))
         {
             check_test_driver_fp_contract(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(280))
         {
             check_test_driver_imaginary_bit_int(&test, clang, executable, directory);
         }
@@ -11240,12 +11240,12 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_musttail_errors(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(1200))
         {
             check_test_driver_label_attributes(&test, clang, executable, directory);
             check_test_driver_unknown_attributes(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(1100))
         {
             check_test_driver_resumed_declarations(&test, clang, executable, directory);
             check_test_driver_empty_declarations(&test, clang, executable, directory);
@@ -11263,23 +11263,23 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_semantic_recovery(&test, clang, executable, directory);
             check_test_driver_statement_recovery(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(600))
         {
             check_test_driver_type_attribute_recovery(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(2800))
         {
             check_test_driver_attribute_declarations(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(240))
         {
             check_test_driver_structural_recovery(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(630))
         {
             check_test_driver_repaired_view(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(460))
         {
             check_test_driver_generic_builtins(&test, clang, executable, directory);
             check_test_driver_availability(&test, clang, executable, directory);
@@ -11287,11 +11287,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_builtin_declarations(&test, clang, executable, directory);
             check_test_driver_counted_by(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(210))
         {
             check_test_driver_const(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(470))
         {
             check_test_driver_initializer_warnings(&test, clang, executable, directory);
             check_test_driver_initializer_fields(&test, clang, executable, directory);
@@ -11308,17 +11308,19 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_redefinitions(&test, clang, executable, directory);
             }
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(840))
         {
             check_test_driver_logical_unused(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(660))
         {
             check_test_driver_format_bitints(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        // Long sweeps that deal their own fixtures.
+        if (!lazy)
         {
             check_test_driver_shift_counts(&test, clang, executable, directory);
+            check_test_driver_conditions(&test, clang, executable, directory);
         }
         // Each of these checks is a unit of its own, of the weight it took on a 4-CPU Xeon VM (#3399). Grouped in two units,
         // the warnings' sweeps (one added with each warning) made one part the driver's longest by far, past parallel's
@@ -11364,10 +11366,6 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 .check = check_test_driver_unsequenced,
                 .weight = 170,
-            },
-            {
-                .check = check_test_driver_conditions,
-                .weight = 2500,
             },
             {
                 .check = check_test_driver_unused_labels,
@@ -11529,11 +11527,11 @@ static int run_checker_driver_tests(int argc, char** argv)
                 sweeps[s].check(&test, clang, executable, directory);
             }
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(1500))
         {
             check_test_driver_type_sugar(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(290))
         {
             check_test_driver_call_counts(&test, clang, executable, directory);
         }
@@ -11546,12 +11544,12 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_reuse(&test, directory);
             check_test_preprocessor_failed_output(&test, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(580))
         {
             check_test_driver_large_function(&test, clang, executable, directory);
             check_test_driver_large_asm(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(220))
         {
             check_test_packed_members(&test, clang, executable, directory);
         }
@@ -11575,11 +11573,11 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_declspec_literals(&test, clang, executable, directory, lazy);
         }
-        if (check_test_driver_takes())
+        if (check_test_driver_takes_weighing(210))
         {
             check_test_driver_gnu_scopes(&test, clang, executable, directory, lazy);
         }
-        if (check_test_driver_takes())
+        if (check_test_driver_takes_weighing(340))
         {
             check_test_driver_section_pragmas(&test, clang, executable, directory, lazy);
         }
@@ -11587,7 +11585,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_quad_literals(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(1900))
         {
             check_test_driver_target_features(&test, clang, executable, directory);
         }
@@ -11595,7 +11593,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_target_feature_errors(&test, clang, executable, directory);
         }
-        if (!lazy && check_test_driver_takes())
+        if (!lazy && check_test_driver_takes_weighing(560))
         {
             check_test_driver_avx_abi(&test, clang, executable, directory);
         }
@@ -11618,7 +11616,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_x87(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(890))
             {
                 check_test_driver_ignored_pragmas(&test, clang, executable, directory);
                 check_test_driver_pack_includes(&test, clang, executable, directory);
@@ -11656,7 +11654,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_asm_object_symbols(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(450))
             {
                 check_test_driver_asm_definitions(&test, clang, executable, directory);
             }
@@ -11676,43 +11674,45 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_commons(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(1600))
             {
                 check_test_driver_attribute_effects(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            // A long sweep that deals its own units.
+            if (!lazy)
             {
                 check_test_driver_attribute_arguments(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(710))
             {
                 check_test_driver_unevaluated_strings(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            // A long sweep that deals its own units.
+            if (!lazy)
             {
                 check_test_driver_checks_attributes(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(490))
             {
                 check_test_driver_type_safety(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(270))
             {
                 check_test_driver_objc_bridge(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(220))
             {
                 check_test_driver_swift_attributes(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(410))
             {
                 check_test_driver_swift_names(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(250))
             {
                 check_test_driver_cfi_salt(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(250))
             {
                 check_test_driver_objc_c23(&test, clang, executable, directory);
             }
@@ -11720,11 +11720,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_patchable(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(470))
             {
                 check_test_driver_cpu_dispatch(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(1400))
             {
                 check_test_driver_target_versions(&test, clang, executable, directory);
             }
@@ -11732,14 +11732,14 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_parse_notes(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(550))
             {
                 check_test_driver_conventions(&test, clang, executable, directory);
                 check_test_driver_convention_diagnostics(&test, clang, executable, directory);
                 check_test_driver_preserving_frames(&test, clang, executable, directory);
                 check_test_driver_interrupt_handlers(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(1300))
             {
                 check_test_driver_interrupts(&test, clang, executable, directory);
             }
@@ -11760,7 +11760,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_register_variables(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(860))
             {
                 check_test_driver_implicit(&test, clang, executable, directory);
             }
@@ -11772,11 +11772,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_operand_errors(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(230))
             {
                 check_test_driver_conversion_errors(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(360))
             {
                 check_test_driver_common_warnings(&test, clang, executable, directory);
             }
@@ -11816,7 +11816,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/attribute-uses");
             }
-            if (check_test_driver_takes())
+            if (check_test_driver_takes_weighing(200))
             {
                 check_test_driver_kr_policy(&test, clang, executable, directory, lazy);
                 if (!lazy)
@@ -11840,7 +11840,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_uninitialized(&test, clang, executable, directory, false);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(1400))
             {
                 check_test_driver_fortify(&test, clang, executable, directory);
             }
@@ -11854,7 +11854,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_void_conditionals(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(970))
             {
                 check_test_driver_library(&test, clang, executable, directory);
             }
@@ -11947,7 +11947,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_tier1_leaf(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(380))
             {
                 check_test_driver_tier1_if_convert(&test, clang, executable, directory);
             }
@@ -11980,7 +11980,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                 check_test_driver_frame_pointer(&test, clang, executable, directory);
                 check_test_driver_asm_return(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(320))
             {
                 check_test_driver_stack_clash(&test, clang, executable, directory);
             }
@@ -12036,7 +12036,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_tier1_asm(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(250))
             {
                 check_test_driver_tier1_asm_masks(&test, clang, executable, directory);
             }
@@ -12044,7 +12044,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_tier1_bmi(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(250))
             {
                 check_test_driver_tier1_bits(&test, clang, executable, directory);
             }
@@ -12068,11 +12068,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_tier1_frame_address(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(500))
             {
                 check_test_driver_tier1_rows(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(310))
             {
                 check_test_driver_tier1_shared(&test, clang, executable, directory);
             }
@@ -12092,15 +12092,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_tier1_sse(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(340))
             {
                 check_test_driver_tier1_vex(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(280))
             {
                 check_test_driver_tier1_avx(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(280))
             {
                 check_test_driver_tier1_carriers(&test, clang, executable, directory);
             }
@@ -12108,7 +12108,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_tier1_half(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(800))
             {
                 check_test_driver_tier1_inline(&test, clang, executable, directory);
             }
@@ -12116,7 +12116,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_tier1_unit_inline(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(530))
             {
                 check_test_driver_tier0_inline(&test, clang, executable, directory);
             }
@@ -12124,7 +12124,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_tier0_inline_lanes(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(660))
             {
                 check_test_driver_fences(&test, executable, directory);
             }
@@ -12188,7 +12188,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_script_path(&test, clang, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(230))
             {
                 check_test_driver_versions(&test, clang, executable, directory);
                 check_test_driver_unversioned_libraries(&test, clang, executable, directory);
@@ -12205,15 +12205,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_identification(&test, executable, directory);
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(660))
             {
                 check_test_expect(&test, driver_compatibility_tests(executable, clang) == 0, "CC dependency, stdin, probe and link-mode compatibility");
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(230))
             {
                 check_test_expect(&test, driver_mixed_tests(executable, clang) == 0, "mixed C, assembly, object and archive driver");
             }
-            if (!lazy && check_test_driver_takes())
+            if (!lazy && check_test_driver_takes_weighing(320))
             {
                 check_test_driver_unsupported_codegen(&test, executable, directory);
             }
