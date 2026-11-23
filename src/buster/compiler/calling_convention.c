@@ -3711,7 +3711,24 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, cons
                                                  _mm512_slli_epi64(_mm512_or_si512(_mm512_or_si512(first_register, _mm512_slli_epi64(second_register, 8)),
                                                                                    _mm512_or_si512(_mm512_slli_epi64(kind, 16), _mm512_slli_epi64(flags, 24))),
                                                                    32));
+#if __has_feature(memory_sanitizer)
+        // MSan checks a masked scatter's operands' shadow but writes none at its destinations: the locations it writes
+        // keep their old poison, and a later read reports them uninitialized (tier1_select_burs.c does the same). Store
+        // the lanes scalar so each location's shadow lands with it.
+        uint64_t scattered_positions[8];
+        uint64_t scattered_locations[8];
+        _mm512_storeu_si512(scattered_positions, position);
+        _mm512_storeu_si512(scattered_locations, location);
+        for (uint32_t lane = 0; lane < 8; lane += 1)
+        {
+            if ((uint32_t)active >> lane & 1)
+            {
+                memcpy(locations + scattered_positions[lane], scattered_locations + lane, sizeof(AbiLocation));
+            }
+        }
+#else
         _mm512_mask_i64scatter_epi64((void*)locations, active, position, location, 8);
+#endif
     }
 #undef BUSTER_ABI_LANES_TEST
     _Alignas(64) uint64_t stack_lanes[8];

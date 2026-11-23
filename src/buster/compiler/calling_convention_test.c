@@ -2564,8 +2564,11 @@ static void abi_test_ordering(AbiTestTally* tally)
 // past the 24-byte struct at 0, and the long in r9; f(long x6, a transparent union of a long * aligned to 16, long) gives
 // the union its own 16-byte slot at 0, the long at 16; variadic f(float vector(32) x9, long, ...), all named, puts each
 // vector on the stack (32 apart), clang having counted eight registers that LLVM keeps from a variadic call, the long
-// in rdi; and variadic f(int, ...) with an unnamed _Atomic float vector(32) puts the vector on the stack at 0, no
-// vector register used. By abi_assign and by the kernel over every call (abi_test_assign_starved).
+// in rdi; variadic f(int, ...) with an unnamed _Atomic float vector(32) puts the vector on the stack at 0, no
+// vector register used; and f(_Atomic long, long x4, a transparent union of two __int128s aligned to 32, long double),
+// whose uncounted _Atomic long leaves clang two registers for the union's member and LLVM one, puts the member's i128 on
+// the stack at 0, the union's first 16 bytes alone (FIRST, #1844), and the long double at 16. By abi_assign and by the
+// kernel over every call (abi_test_assign_starved).
 static void abi_test_kernel_rules(AbiTestTally* tally)
 {
     AbiTestTables tables;
@@ -2593,7 +2596,12 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
         const TypeId atomic_int = type_atomic(table, BUSTER_TYPE_INT);
         const TypeId vector = abi_test_vector(&builder, BUSTER_TYPE_FLOAT, 32);
         const TypeId atomic_vector = type_atomic(table, vector);
-        const bool made = started && marked && packed != 0 && three != 0 && atomic_int != 0 && vector != 0 && atomic_vector != 0;
+        m[0] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+        m[1] = abi_test_member(&builder, BUSTER_TYPE_INT128);
+        const TypeId wide_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 2, false, 6);
+        const bool wide_marked = wide_union != 0 && type_mark_transparent_union(table, wide_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        const TypeId atomic_long = type_atomic(table, BUSTER_TYPE_LONG);
+        const bool made = started && marked && wide_marked && packed != 0 && three != 0 && atomic_int != 0 && vector != 0 && atomic_vector != 0 && atomic_long != 0;
         abi_test_expect(tally, made, "fixtures", "the kernel's fixtures can't be made");
         if (made)
         {
@@ -2603,17 +2611,18 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
                 BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, transparent, BUSTER_TYPE_LONG,
                 vector, vector, vector, vector, vector, vector, vector, vector, vector, BUSTER_TYPE_LONG,
                 BUSTER_TYPE_INT, atomic_vector,
+                atomic_long, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, wide_union, BUSTER_TYPE_LONG_DOUBLE,
             };
-            const TypeId results[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID };
-            const uint32_t counts[] = { 8, 8, 10, 2 };
-            const uint32_t named[] = { 8, 8, 10, 1 };
-            const uint8_t variadic[] = { 0, 0, 1, 1 };
+            const TypeId results[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID };
+            const uint32_t counts[] = { 8, 8, 10, 2, 7 };
+            const uint32_t named[] = { 8, 8, 10, 1, 7 };
+            const uint8_t variadic[] = { 0, 0, 1, 1, 0 };
             const AbiSignatures signatures = {
                 .results = results,
                 .counts = counts,
                 .named = named,
                 .variadic = variadic,
-                .count = 4,
+                .count = 5,
                 .arguments = arguments,
             };
             // Each checked argument: its index, kind, first register and stack offset.
@@ -2628,11 +2637,14 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
                 { 25, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, 0 },
                 { 26, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_RDI, 0 },
                 { 27, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 32, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R8, 0 },
+                { 33, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 34, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
             };
             for (uint32_t route = 0; route < 2; route += 1)
             {
                 AbiLocation locations[BUSTER_ARRAY_LENGTH(arguments)];
-                AbiCall calls[4];
+                AbiCall calls[5];
                 memset(locations, 0x5a, sizeof(locations));
                 if (route == 0)
                 {
@@ -2651,7 +2663,13 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
                              checked[k][3]);
                     abi_test_expect(tally, got.kind == checked[k][1] && got.registers[0] == checked[k][2] && got.stack_offset == checked[k][3], "fixtures", detail);
                 }
-                abi_test_expect(tally, calls[2].vector_registers == 0 && calls[3].vector_registers == 0 && calls[1].stack_bytes == 24 && calls[2].stack_bytes == 288,
+                const uint32_t wide_index = wide_union >> BUSTER_TYPE_INDEX_SHIFT;
+                char first_detail[192];
+                snprintf(first_detail, sizeof(first_detail), "the kernel's rules (%s): the transparent union's i128 slot has flags %02x, without FIRST (member %u, %u bytes)",
+                         route == 0 ? "abi_assign" : "the kernel alone", locations[33].flags, tables.abi.transparent[wide_index], tables.abi.stack_bytes[wide_index]);
+                abi_test_expect(tally, (locations[33].flags & BUSTER_ABI_FLAG_FIRST) != 0, "fixtures", first_detail);
+                abi_test_expect(tally, calls[2].vector_registers == 0 && calls[3].vector_registers == 0 && calls[1].stack_bytes == 24 && calls[2].stack_bytes == 288 &&
+                                       calls[4].stack_bytes == 32,
                                 "fixtures", route == 0 ? "the kernel's rules (abi_assign): the calls' totals" : "the kernel's rules (the kernel alone): the calls' totals");
             }
         }
