@@ -803,7 +803,7 @@ static bool x86_semantics_check_fixtures(void)
         const X86Instruction record = {
             .form = x86_semantics_uncovered[i],
         };
-        x86_instruction_effects_scalar(&record, &reads, &writes);
+        x86_instructions_effects(&record, 1, &reads, &writes);
         x86_semantics_expect(&tally,
                              effects->operation == X86_OPERATION_NONE && effects->implicit_writes == 0xffff && effects->flags_undefined == BUSTER_X86_FLAGS_ALL &&
                                  x86_effects_control(effects) == BUSTER_X86_CONTROL_UNKNOWN && reads == BUSTER_X86_RESOURCE_ALL && writes == BUSTER_X86_RESOURCE_ALL,
@@ -852,7 +852,7 @@ static bool x86_semantics_check_fixtures(void)
     return x86_semantics_report(&tally);
 }
 
-// Resolved effects with register and memory operands, a zero idiom and shift counts: x86_instruction_effects_scalar's.
+// Resolved effects with register and memory operands, a zero idiom and shift counts: x86_instructions_effects'.
 static bool x86_semantics_check_resolved(void)
 {
     X86SemanticsTally tally = {
@@ -1150,7 +1150,7 @@ static bool x86_semantics_check_resolved(void)
     {
         uint64_t reads = 0;
         uint64_t writes = 0;
-        x86_instruction_effects_scalar(&cases[i].record, &reads, &writes);
+        x86_instructions_effects(&cases[i].record, 1, &reads, &writes);
         x86_semantics_expect(&tally, reads == cases[i].reads && writes == cases[i].writes, "%s: reads %#llx and writes %#llx, not %#llx and %#llx", cases[i].what,
                              (unsigned long long)reads, (unsigned long long)writes, (unsigned long long)cases[i].reads, (unsigned long long)cases[i].writes);
     }
@@ -1575,7 +1575,7 @@ struct X86SemanticsChanges
     uint32_t implicit_changed;
 };
 
-// One run of a record from a random state, against x86_instruction_effects_scalar's and x86_instruction_flags's claims
+// One run of a record from a random state, against x86_instructions_effects_opmasks' and x86_instruction_flags's claims
 // (see the file's comment), then again from the state with everything the record doesn't read changed.
 static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachine* machine, uint64_t* state, const X86Instruction* record, X86SemanticsChanges* changes)
 {
@@ -1587,7 +1587,7 @@ static void x86_semantics_check_run(X86SemanticsTally* tally, X86SemanticsMachin
     uint64_t reads = 0;
     uint64_t writes = 0;
     uint16_t opmasks = 0;
-    x86_instruction_effects_opmasks_scalar(record, &reads, &writes, &opmasks);
+    x86_instructions_effects_opmasks(record, 1, &reads, &writes, &opmasks);
     const uint32_t vectors = x86_semantics_test_wide ? 32 : 16;
     const bool masked = (record->decorations & BUSTER_X86_DECORATION_MASK) != 0;
     const bool vsib = (x86_form_description(record->form)->rm & BUSTER_X86_OPERAND_VSIB) != 0;
@@ -2939,6 +2939,186 @@ static bool x86_semantics_check_choices(X86SemanticsMachine* machine, uint64_t s
 // ---------------------------------------------------------------------------------------------------------------------
 // The vector paths' twins
 
+// The vector paths' random columns: `count` requests of random rows, values (boundaries, small, any) and context words
+// (every bit, the unused ones too), and `count` records of covered and uncovered forms (with segment overrides and the
+// fixup flag) with random fields.
+static void x86_semantics_random_columns(uint64_t seed, uint32_t count, uint16_t* rows, int64_t* values, uint16_t* contexts, X86Instruction* records)
+{
+    uint64_t state = seed * 0x9E3779B97F4A7C15ull + 19;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        rows[i] = (uint16_t)x86_random_below(&state, x86_choice_row_count);
+        const uint32_t kind = x86_random_below(&state, 3);
+        values[i] = kind == 0 ? x86_semantics_values[x86_random_below(&state, BUSTER_ARRAY_LENGTH(x86_semantics_values))]
+                    : kind == 1 ? (int64_t)x86_random_below(&state, 512) - 256
+                                : (int64_t)x86_test_random(&state);
+        contexts[i] = (uint16_t)x86_test_random(&state);
+    }
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        uint32_t form = x86_random_below(&state, X86_FORM_COUNT);
+        for (uint32_t attempt = 0; attempt < 8 && x86_random_below(&state, 4) != 0 && x86_effects(form)->operation == X86_OPERATION_NONE; attempt += 1)
+        {
+            form = x86_random_below(&state, X86_FORM_COUNT);
+        }
+        const uint32_t extra = x86_random_below(&state, 8);
+        form += extra == 0 ? BUSTER_X86_FORM_FS : extra == 1 ? BUSTER_X86_FORM_GS : 0;
+        form |= x86_random_below(&state, 8) == 0 ? BUSTER_X86_FORM_FIXUP : 0;
+        const uint64_t a = x86_test_random(&state);
+        const uint64_t b = x86_test_random(&state);
+        memcpy(&records[i], &a, 8);
+        memcpy((uint8_t*)&records[i] + 8, &b, 8);
+        records[i].form = (uint16_t)form;
+        const uint32_t mode = x86_random_below(&state, 4);
+        records[i].mode = mode == 0 ? 0 : mode == 1 ? BUSTER_X86_MEMORY_BASE : mode == 2 ? (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(x86_random_below(&state, 4)) : records[i].mode;
+        // Registers 0 to 15 (AH to BH sometimes) half the time, and rm the same as reg a quarter of it (zero idioms,
+        // and a memory operand based on the register reg names).
+        if (x86_random_below(&state, 2) == 0)
+        {
+            records[i].reg = (uint8_t)x86_random_below(&state, 16);
+            records[i].rm = (uint8_t)x86_random_below(&state, 16);
+            records[i].reg |= x86_random_below(&state, 8) == 0 ? BUSTER_X86_REGISTER_HIGH_BYTE : 0;
+        }
+        records[i].rm = x86_random_below(&state, 4) == 0 ? records[i].reg : records[i].rm;
+        // An opmask only where x86_validate takes one, an EVEX form's: any other form's record has none.
+        const bool evex = x86_form_descriptions[x86_semantics_row(form)].family == BUSTER_X86_FAMILY_EVEX;
+        records[i].decorations = evex ? records[i].decorations : (uint8_t)(records[i].decorations & ~BUSTER_X86_DECORATION_MASK);
+    }
+}
+
+// The random columns' outputs at seed 1 and 20,000 items (x86_semantics_check_columns' digest), frozen on 2026-11-23
+// while the scalar twins (#2924) still agreed with the vector paths on every item.
+#define BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST UINT64_C(0x700e64f6f8320e55)
+
+static uint64_t x86_semantics_fold(uint64_t digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* data = bytes;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        digest = (digest ^ data[i]) * 0x100000001b3ull;
+    }
+    return digest;
+}
+
+// The vector paths on the random columns, with no second implementation: their outputs' digest at the default seed and
+// count (BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST), each item alone the same as in the batch (no lane reads another's
+// record), and every count to 100 with each column ending at a PROT_NONE page the same as the batch's first items. The
+// effects' claims themselves are checked against the host's execution (x86_semantics_check_table) and the fixtures.
+static bool x86_semantics_check_columns(uint64_t seed, uint32_t count)
+{
+    X86SemanticsTally tally = {
+        .check = "columns: the vector paths' digest, items alone and page edges",
+    };
+    uint16_t* rows = malloc(count * sizeof(uint16_t));
+    int64_t* values = malloc(count * sizeof(int64_t));
+    uint16_t* contexts = malloc(count * sizeof(uint16_t));
+    uint16_t* forms = malloc(count * sizeof(uint16_t));
+    X86Instruction* records = malloc(count * sizeof(X86Instruction));
+    uint64_t* reads = malloc(count * sizeof(uint64_t));
+    uint64_t* writes = malloc(count * sizeof(uint64_t));
+    uint64_t* opmask_reads = malloc(count * sizeof(uint64_t));
+    uint64_t* opmask_writes = malloc(count * sizeof(uint64_t));
+    // Zeroed: MSan doesn't model the vector path's down-converting masked store (vpmovqw) as writing it.
+    uint16_t* opmasks = calloc(count, sizeof(uint16_t));
+    const bool allocated = rows && values && contexts && forms && records && reads && writes && opmask_reads && opmask_writes && opmasks;
+    uint64_t digest = 0xcbf29ce484222325ull;
+    if (x86_semantics_expect(&tally, allocated, "the columns"))
+    {
+        x86_semantics_random_columns(seed, count, rows, values, contexts, records);
+        x86_choose_forms(rows, values, contexts, count, forms);
+        x86_instructions_effects(records, count, reads, writes);
+        x86_instructions_effects_opmasks(records, count, opmask_reads, opmask_writes, opmasks);
+        digest = x86_semantics_fold(digest, forms, count * sizeof(uint16_t));
+        digest = x86_semantics_fold(digest, reads, count * sizeof(uint64_t));
+        digest = x86_semantics_fold(digest, writes, count * sizeof(uint64_t));
+        digest = x86_semantics_fold(digest, opmask_reads, count * sizeof(uint64_t));
+        digest = x86_semantics_fold(digest, opmask_writes, count * sizeof(uint64_t));
+        digest = x86_semantics_fold(digest, opmasks, count * sizeof(uint16_t));
+        if (seed == 1 && count == 20000)
+        {
+            x86_semantics_expect(&tally, digest == BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST, "the outputs' digest %#llx, not the frozen %#llx", (unsigned long long)digest,
+                                 (unsigned long long)BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST);
+        }
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            uint16_t form = 0xffff;
+            uint64_t read = 0;
+            uint64_t written = 0;
+            uint64_t opmask_read = 0;
+            uint64_t opmask_written = 0;
+            uint16_t opmask = 0;
+            x86_choose_forms(&rows[i], &values[i], &contexts[i], 1, &form);
+            x86_instructions_effects(&records[i], 1, &read, &written);
+            x86_instructions_effects_opmasks(&records[i], 1, &opmask_read, &opmask_written, &opmask);
+            x86_semantics_expect(&tally,
+                                 form == forms[i] && read == reads[i] && written == writes[i] && opmask_read == opmask_reads[i] && opmask_written == opmask_writes[i] &&
+                                     opmask == opmasks[i],
+                                 "item %u alone (%s, reg %u, rm %u, mode %#x, decorations %#x): form %u, %#llx %#llx, %#llx %#llx %#x; in the batch %u, %#llx %#llx, %#llx %#llx %#x",
+                                 i, x86_semantics_test_name(records[i].form), records[i].reg, records[i].rm, records[i].mode, records[i].decorations, form,
+                                 (unsigned long long)read, (unsigned long long)written, (unsigned long long)opmask_read, (unsigned long long)opmask_written, opmask, forms[i],
+                                 (unsigned long long)reads[i], (unsigned long long)writes[i], (unsigned long long)opmask_reads[i], (unsigned long long)opmask_writes[i],
+                                 opmasks[i]);
+        }
+        // Page edges: every count to 100, each column ending at a PROT_NONE page (a read past it faults: the handler names
+        // the case), and the outputs too.
+        const uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+        uint64_t mapped[8] = { 0 };
+        uint8_t* ends[8];
+        bool mapped_all = true;
+        for (uint32_t i = 0; i < 8; i += 1)
+        {
+            ends[i] = x86_map_guarded(100 * sizeof(X86Instruction), page, &mapped[i]);
+            mapped_all &= ends[i] != 0;
+        }
+        if (x86_semantics_expect(&tally, mapped_all, "the guarded columns"))
+        {
+            for (uint32_t edge_count = 0; edge_count <= 100 && edge_count <= count; edge_count += 1)
+            {
+                snprintf(x86_semantics_test_case, sizeof(x86_semantics_test_case), "the vector paths on %u items at a page's end", edge_count);
+                uint16_t* edge_rows = (uint16_t*)(ends[0] - edge_count * sizeof(uint16_t));
+                int64_t* edge_values = (int64_t*)(ends[1] - edge_count * sizeof(int64_t));
+                uint16_t* edge_contexts = (uint16_t*)(ends[2] - edge_count * sizeof(uint16_t));
+                uint16_t* edge_forms = (uint16_t*)(ends[3] - edge_count * sizeof(uint16_t));
+                X86Instruction* edge_records = (X86Instruction*)(ends[4] - edge_count * sizeof(X86Instruction));
+                uint64_t* edge_reads = (uint64_t*)(ends[5] - edge_count * sizeof(uint64_t));
+                uint64_t* edge_writes = (uint64_t*)(ends[6] - edge_count * sizeof(uint64_t));
+                uint16_t* edge_opmasks = (uint16_t*)(ends[7] - edge_count * sizeof(uint16_t));
+                memcpy(edge_rows, rows, edge_count * sizeof(uint16_t));
+                memcpy(edge_values, values, edge_count * sizeof(int64_t));
+                memcpy(edge_contexts, contexts, edge_count * sizeof(uint16_t));
+                memcpy(edge_records, records, edge_count * sizeof(X86Instruction));
+                x86_choose_forms(edge_rows, edge_values, edge_contexts, edge_count, edge_forms);
+                x86_instructions_effects(edge_records, edge_count, edge_reads, edge_writes);
+                bool same = memcmp(edge_forms, forms, edge_count * sizeof(uint16_t)) == 0 && memcmp(edge_reads, reads, edge_count * sizeof(uint64_t)) == 0 &&
+                            memcmp(edge_writes, writes, edge_count * sizeof(uint64_t)) == 0;
+                x86_instructions_effects_opmasks(edge_records, edge_count, edge_reads, edge_writes, edge_opmasks);
+                same = same && memcmp(edge_reads, opmask_reads, edge_count * sizeof(uint64_t)) == 0 && memcmp(edge_writes, opmask_writes, edge_count * sizeof(uint64_t)) == 0 &&
+                       memcmp(edge_opmasks, opmasks, edge_count * sizeof(uint16_t)) == 0;
+                x86_semantics_expect(&tally, same, "%u items at a page's end", edge_count);
+            }
+        }
+        for (uint32_t i = 0; i < 8; i += 1)
+        {
+            if (ends[i] != 0)
+            {
+                munmap(ends[i] - (mapped[i] - 2 * page) - page, mapped[i]);
+            }
+        }
+    }
+    free(rows);
+    free(values);
+    free(contexts);
+    free(forms);
+    free(records);
+    free(reads);
+    free(writes);
+    free(opmask_reads);
+    free(opmask_writes);
+    free(opmasks);
+    printf("columns: %u requests and %u records, digest %#llx, each alone, and every count to 100 at a page's end\n", count, count, (unsigned long long)digest);
+    return x86_semantics_report(&tally);
+}
+
 // Maps `bytes` rounded up to whole pages before a PROT_NONE page, and returns the end of the readable part (as the
 // encoder's tests do, x86_map_guarded).
 static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
@@ -2946,7 +3126,6 @@ static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
     X86SemanticsTally tally = {
         .check = "twins: the vector paths against the scalar ones",
     };
-    uint64_t state = seed * 0x9E3779B97F4A7C15ull + 19;
     uint16_t* rows = malloc(count * sizeof(uint16_t));
     int64_t* values = malloc(count * sizeof(int64_t));
     uint16_t* contexts = malloc(count * sizeof(uint16_t));
@@ -2960,54 +3139,13 @@ static bool x86_semantics_check_twins(uint64_t seed, uint32_t count)
     const bool allocated = rows && values && contexts && scalar_forms && vector_forms && records && scalar_reads && scalar_writes && vector_reads && vector_writes;
     if (x86_semantics_expect(&tally, allocated, "the columns"))
     {
-        // Form choice: random rows, values (boundaries, small, any) and context words (every bit, the unused ones too).
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            rows[i] = (uint16_t)x86_random_below(&state, x86_choice_row_count);
-            const uint32_t kind = x86_random_below(&state, 3);
-            values[i] = kind == 0 ? x86_semantics_values[x86_random_below(&state, BUSTER_ARRAY_LENGTH(x86_semantics_values))]
-                        : kind == 1 ? (int64_t)x86_random_below(&state, 512) - 256
-                                    : (int64_t)x86_test_random(&state);
-            contexts[i] = (uint16_t)x86_test_random(&state);
-        }
+        x86_semantics_random_columns(seed, count, rows, values, contexts, records);
         x86_choose_forms_scalar(rows, values, contexts, count, scalar_forms);
         x86_choose_forms(rows, values, contexts, count, vector_forms);
         for (uint32_t i = 0; i < count; i += 1)
         {
             x86_semantics_expect(&tally, scalar_forms[i] == vector_forms[i], "request %u (row %u, %lld, context %#x): scalar %u, vector %u", i, rows[i], (long long)values[i],
                                  contexts[i], scalar_forms[i], vector_forms[i]);
-        }
-        // Resolved effects: random records of covered and uncovered forms (with segment overrides and the fixup flag), with
-        // random fields.
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            uint32_t form = x86_random_below(&state, X86_FORM_COUNT);
-            for (uint32_t attempt = 0; attempt < 8 && x86_random_below(&state, 4) != 0 && x86_effects(form)->operation == X86_OPERATION_NONE; attempt += 1)
-            {
-                form = x86_random_below(&state, X86_FORM_COUNT);
-            }
-            const uint32_t extra = x86_random_below(&state, 8);
-            form += extra == 0 ? BUSTER_X86_FORM_FS : extra == 1 ? BUSTER_X86_FORM_GS : 0;
-            form |= x86_random_below(&state, 8) == 0 ? BUSTER_X86_FORM_FIXUP : 0;
-            const uint64_t a = x86_test_random(&state);
-            const uint64_t b = x86_test_random(&state);
-            memcpy(&records[i], &a, 8);
-            memcpy((uint8_t*)&records[i] + 8, &b, 8);
-            records[i].form = (uint16_t)form;
-            const uint32_t mode = x86_random_below(&state, 4);
-            records[i].mode = mode == 0 ? 0 : mode == 1 ? BUSTER_X86_MEMORY_BASE : mode == 2 ? (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(x86_random_below(&state, 4)) : records[i].mode;
-            // Registers 0 to 15 (AH to BH sometimes) half the time, and rm the same as reg a quarter of it (zero idioms,
-            // and a memory operand based on the register reg names).
-            if (x86_random_below(&state, 2) == 0)
-            {
-                records[i].reg = (uint8_t)x86_random_below(&state, 16);
-                records[i].rm = (uint8_t)x86_random_below(&state, 16);
-                records[i].reg |= x86_random_below(&state, 8) == 0 ? BUSTER_X86_REGISTER_HIGH_BYTE : 0;
-            }
-            records[i].rm = x86_random_below(&state, 4) == 0 ? records[i].reg : records[i].rm;
-            // An opmask only where x86_validate takes one, an EVEX form's: any other form's record has none.
-            const bool evex = x86_form_descriptions[x86_semantics_row(form)].family == BUSTER_X86_FAMILY_EVEX;
-            records[i].decorations = evex ? records[i].decorations : (uint8_t)(records[i].decorations & ~BUSTER_X86_DECORATION_MASK);
         }
         x86_instructions_effects_scalar(records, count, scalar_reads, scalar_writes);
         x86_instructions_effects(records, count, vector_reads, vector_writes);
@@ -3440,6 +3578,7 @@ static int run_x86_semantics_tests(int argc, char** argv)
             result = x86_semantics_check_immediates() && result;
             result = x86_semantics_check_choice_fixtures() && result;
             result = x86_semantics_check_twins(seed, 20000) && result;
+            result = x86_semantics_check_columns(seed, 20000) && result;
             result = x86_semantics_check_target() && result;
             result = x86_semantics_check_match() && result;
             result = x86_semantics_check_table(&machine, seed, (uint32_t)runs) && result;

@@ -414,7 +414,7 @@ static bool tier0_test_deep_saved(const X86Instruction* records, uint32_t count,
         pushed |= records[first].form == X86_FORM_PUSH_R64 ? BUSTER_X86_RESOURCE_GPR(records[first].rm) : 0;
         first += 1;
     }
-    x86_instructions_effects_scalar(records, count, reads, writes);
+    x86_instructions_effects(records, count, reads, writes);
     uint64_t written = 0;
     for (uint32_t r = first; r < count; r += 1)
     {

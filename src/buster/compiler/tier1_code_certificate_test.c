@@ -744,7 +744,7 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool remateriali
             load = later.form == X86_FORM_MOV_R64_RM64 && later.mode == BUSTER_X86_MEMORY_BASE && later.reg == store.reg && later.rm == store.rm && later.displacement == store.displacement ? k : UINT32_MAX;
             uint64_t read = 0;
             uint64_t writes = 0;
-            x86_instruction_effects_scalar(&later, &read, &writes);
+            x86_instructions_effects(&later, 1, &read, &writes);
             calls |= (writes & BUSTER_X86_RESOURCE_CALL) != 0;
             written = load == UINT32_MAX && (writes & BUSTER_X86_RESOURCE_GPR(store.reg)) != 0;
         }
@@ -2221,7 +2221,7 @@ static void tier1_code_certificate_forwarded(Tier1EmitTest* test, uint32_t shape
         lea |= record.form == X86_FORM_LEA_R64_M && record.reg == X86_REGISTER_RDI;
         uint64_t read = 0;
         uint64_t written = 0;
-        x86_instruction_effects_scalar(&record, &read, &written);
+        x86_instructions_effects(&record, 1, &read, &written);
         into = call == UINT32_MAX && (written & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RDI)) != 0 ? r : into;
         call = call == UINT32_MAX && record.form == X86_FORM_CALL_RM64 ? r : call;
         called += record.form == X86_FORM_CALL_RM64;

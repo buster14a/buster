@@ -348,7 +348,7 @@ static void tier1_model_classify(Tier1ModelCase* entry)
     const X86FormDescription* form = x86_form_description(record.form);
     uint64_t reads;
     uint64_t writes;
-    x86_instruction_effects_scalar(&record, &reads, &writes);
+    x86_instructions_effects(&record, 1, &reads, &writes);
     const uint64_t prohibited = BUSTER_X86_RESOURCE_MEMORY | BUSTER_X86_RESOURCE_CONTROL | BUSTER_X86_RESOURCE_CALL | BUSTER_X86_RESOURCE_VECTORS | BUSTER_X86_RESOURCE_MXCSR;
     const bool lea = effects->operation == X86_OPERATION_LEA;
     bool operation = false;
@@ -399,7 +399,7 @@ static void tier1_model_classify(Tier1ModelCase* entry)
             const uint8_t destination = X86_REGISTER_RAX;
             const uint8_t source = destination_path ? X86_REGISTER_R11 : X86_REGISTER_RDX;
             const X86Instruction fixture = tier1_model_fixture(entry, destination, source, (Tier1ModelExperiment)experiment);
-            x86_instruction_effects_scalar(&fixture, &reads, &writes);
+            x86_instructions_effects(&fixture, 1, &reads, &writes);
             const uint8_t dependency = destination_path ? destination : source;
             const bool eligible = (experiment != TIER1_MODEL_INDEX || lea) && (!accumulator || destination_path) && (reads & (UINT64_C(1) << dependency)) != 0 && (writes & (UINT64_C(1) << destination)) != 0;
             entry->experiments |= eligible << experiment;
@@ -450,7 +450,7 @@ static bool tier1_model_program(const Tier1ModelCase* entry, Tier1ModelExperimen
             const X86Instruction key = tier1_model_key(fixture);
             uint64_t reads;
             uint64_t writes;
-            x86_instruction_effects_scalar(&fixture, &reads, &writes);
+            x86_instructions_effects(&fixture, 1, &reads, &writes);
             valid = memcmp(&key, &entry->key, sizeof(key)) == 0 && x86_validate(&fixture, 1) == 1;
             if (destination_path || source_path)
             {
