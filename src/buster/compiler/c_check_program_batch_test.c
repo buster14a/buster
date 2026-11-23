@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Entry-for-entry comparison with the original task loop, independently of the semantic scheduler. Every
+// Entry-for-entry comparison with the general expansion (the task loop as the source rows' lowering drains it,
+// check_lower_drain_sources), independently of the semantic scheduler. Every
 // input column ends at a protected page, including all partial operator batches and the 16-node window edges.
 
 #define BUSTER_CHECK_BATCH_TEST_NODES 321u
@@ -238,7 +239,7 @@ static void check_test_program_batch(CheckTest* test)
             .object_symbols = symbols,
         };
         // Plain postorder, promoted edges, folded subtrees (gaps), and repeated/reordered operands. Each mode
-        // still compares the actual scalar task output; fallback must not hide a stricter eligibility rule.
+        // still compares the general expansion's task output; fallback must not hide a stricter eligibility rule.
         for (uint32_t mode = 0; mode < 10; mode += 1)
         {
             memset(stream.dense_values, 0, (uint64_t)count * sizeof(CheckValue));
@@ -320,7 +321,7 @@ static void check_test_program_batch(CheckTest* test)
                         .indirect = indirect[path],
                         .local_flags = local_flags[path],
                         .capacity = limit == 0 ? BUSTER_CHECK_BATCH_TEST_ENTRIES : limit == 1 ? count : 1,
-                        .scalar = path == 0,
+                        .sources = path == 0,
                         .fragments = true,
                         .type_classes = type_classes,
                         .type_facts = type_facts,
@@ -345,7 +346,15 @@ static void check_test_program_batch(CheckTest* test)
                         check_test_expect(test, same_metadata, "every guarded classification lane agrees with the scalar type facts");
                     }
                     check_lower_expression(writers + path, count - 1, mode == 5 || mode == 6, 0);
-                    check_lower_drain(writers + path);
+                    // Writer 0 takes the general expansion alone, as the source rows' lowering does.
+                    if (path == 0)
+                    {
+                        check_lower_drain_sources(writers + path);
+                    }
+                    else
+                    {
+                        check_lower_drain(writers + path);
+                    }
                 }
                 const bool same = writers[0].count == writers[1].count && status[0].status == status[1].status && status[0].token == status[1].token &&
                                   check_lower_writer_token(&writers[0]) == check_lower_writer_token(&writers[1]) && memcmp(kinds[0], kinds[1], writers[0].count) == 0 &&
@@ -362,7 +371,8 @@ static void check_test_program_batch(CheckTest* test)
                 check_test_expect(test, fallback, "without the optional template type table, vector lowering retains the exact entries and failures");
                 if (limit == 0)
                 {
-                    check_test_expect(test, writers[0].expression_nodes == writers[1].expression_nodes && writers[1].batch_nodes <= writers[1].expression_nodes,
+                    check_test_expect(test, writers[0].batch_nodes == 0 && writers[0].expression_nodes == writers[1].expression_nodes &&
+                                           writers[1].batch_nodes <= writers[1].expression_nodes,
                                       "expression coverage counts evaluated occurrences and the batch path decides ordinary nodes itself");
                     if ((mode == 0 || mode == 1) && graph->ops[count - 1] != CHECK_OP_VALUE)
                     {

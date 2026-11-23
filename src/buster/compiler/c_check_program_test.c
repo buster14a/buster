@@ -720,8 +720,8 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
 
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang);
 static bool check_test_program_function(const Tier0Function* a, const Tier0Function* b);
-// The program fixtures whose lowering the source rows' lowering compared (0) and refused for room (1).
-static uint32_t check_test_program_expansions[2];
+// The program fixtures whose lowering the source rows' lowering compared.
+static uint32_t check_test_program_expansions;
 static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
                                                    Arena* scratch);
 static void check_test_branch_condition_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
@@ -2420,16 +2420,21 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                               "complete typed function and ABI locations agree across unit batches");
         }
         // The lowering's fast paths (the plain expressions, the batched fragments and the types' templates) against the
-        // general expansion, which the source rows' lowering (-g's) takes alone: every function's entries the same. A few
-        // large vector fixtures exceed the source rows' lowering's room (CHECK_PROGRAM_RESOURCE), and are counted apart.
+        // general expansion, which the source rows' lowering (-g's) takes alone: every function's entries the same. Its
+        // arenas are reservations of their own, large enough for the largest vector fixtures' expansion.
         CheckProgramLowered expanded = { 0 };
-        Arena expanded_output = arena_reserve(plan_room);
-        Arena expanded_scratch = arena_reserve(plan_room);
+        Arena expanded_output = arena_reserve(UINT64_C(1) << 34);
+        Arena expanded_scratch = arena_reserve(UINT64_C(1) << 34);
         const bool expansion = lowered && expanded_output.base != NULL && expanded_scratch.base != NULL &&
                                check_program_lower_sources(&expanded, &program, path == 0, &expanded_output, &expanded_scratch);
-        snprintf(description, sizeof(description), "%s: the source rows' lowering takes every body, or refuses it for room alone", name);
-        check_test_expect(test, !lowered || (expansion && expanded.count == lower[1].count) || (!expansion && expanded.status == CHECK_PROGRAM_RESOURCE), description);
-        check_test_program_expansions[expansion ? 0 : 1] += lowered && path == 1;
+        snprintf(description, sizeof(description), "%s: the source rows' lowering takes every body", name);
+        check_test_expect(test, !lowered || (expansion && expanded.count == lower[1].count), description);
+        if (lowered && !expansion)
+        {
+            fprintf(stderr, "test-checker: %s: the source rows' lowering status=%u token=%u reason=%s\n", name, expanded.status, expanded.token,
+                    expanded.reason != NULL ? expanded.reason : "");
+        }
+        check_test_program_expansions += lowered && expansion && path == 1;
         for (uint32_t b = 0; expansion && expanded.count == lower[1].count && b < program.body_count; b += 1)
         {
             snprintf(description, sizeof(description), "%s: function %u's entries by the fast paths are the general expansion's", name, b);
