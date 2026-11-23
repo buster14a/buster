@@ -60,6 +60,8 @@ set(BUSTER_PGO 0 CACHE STRING "1 builds Release with a profile of the compiler's
 set(BUSTER_PGO_TRAIN "" CACHE FILEPATH "A bash script that trains BUSTER_PGO's profile in place of the default compiles")
 set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: the two longest Release units' native code, and Develop's units, in parallel parts")
 set(BUSTER_RELEASE_PARTS 0 CACHE STRING "1 builds Release's main.c units in parts before the optimizer, as Develop's (a -parts tree)")
+set(BUSTER_SELF_BUILT "" CACHE STRING "The units Develop compiles with the previous stage: none, tests, or units' file names")
+set(BUSTER_SELF_COMPILER "" CACHE FILEPATH "The previous stage, an absolute path (the tree's Release executable when empty)")
 set(BUSTER_LEXER_VARIANTS "" CACHE STRING "NAME=SOURCE;... lexers compiled in for benchmark-lexer (build.sh lexer-variant)")
 set(BUSTER_SHIFT_SOURCE "" CACHE STRING "The source whose code the shifted links move (build.sh shifts)")
 set(BUSTER_SHIFTS "" CACHE STRING "The shifted links' padding sizes in bytes (build.sh shifts)")
@@ -170,8 +172,10 @@ if(lexer_variants)
         string(APPEND variant_list " BUSTER_LEXER_VARIANT(${name})")
     endforeach()
     buster_shell_group(defines_group "-DBUSTER_LEXER_VARIANTS=${variant_list}")
+    set(self_definitions "-DBUSTER_LEXER_VARIANTS=${variant_list}")
 else()
     buster_shell_group(defines_group ${buster_defines})
+    set(self_definitions ${buster_defines})
 endif()
 
 # The compile options of a unit of the executable: the Release configuration's debug information and optimization
@@ -259,6 +263,70 @@ elseif(buster_develop)
     set(absent_units ${BUSTER_DEVELOP_ON_DEMAND})
 endif()
 
+# The units Develop compiles with the previous stage (BUSTER_SELF_BUILT, #2630; docs/commands/build.md, "Self-built
+# units"): a clang-built executable, the tree's Release one unless BUSTER_SELF_COMPILER names another, compiles each
+# at Tier 1 into CONFIG/self/NAME.c.o, which Develop's link takes in place of the unit's clang object or parts (and
+# Release and Debug never). Develop's graph has no rule for the Release executable, a file it reads, which build.sh
+# builds first where it is missing: an edit's units are compiled by the stage built before it, not by the executable
+# the build makes, and a new previous stage compiles them again. Their flags are the units' less clang's warnings
+# (-Wall -Werror, clang's check, which Release and CI keep), the start order's -ffunction-sections and the debug
+# information, with absolute paths, which its dependency file then names (so __FILE__, assert's, is the absolute path
+# where clang's -fmacro-prefix-map makes it relative, an option the compiler doesn't follow). They read the headers
+# of the clang that builds the tree (BUSTER_CLANG_RESOURCE_DIR, its resource directory, where the compiler would take
+# the highest version /usr/lib/clang has), and its predefined macros for the units' flags and optimization
+# (CONFIG/self/predefines.h), which differ from the compiler's own in clang's patch release and in __BUSTER__
+# (#2630's step 1).
+set(self_compiler "")
+set(self_predefines "${CMAKE_BINARY_DIR}/$<CONFIG>/self/predefines.h")
+set(self_flags ${flags})
+list(REMOVE_ITEM self_flags -Wall -Werror -ffunction-sections)
+# As the parts' commands (BusterCodegen.cmake): each names every input it reads, so that it waits for those alone
+# rather than for every unit the link takes.
+set(self_explicit "")
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.27)
+    set(self_explicit DEPENDS_EXPLICIT_ONLY)
+endif()
+if(buster_self_built)
+    if(NOT "Develop" IN_LIST CMAKE_CONFIGURATION_TYPES)
+        message(FATAL_ERROR "buster: BUSTER_SELF_BUILT builds Develop's units, and this tree has no Develop")
+    endif()
+    set(self_compiler "${buster_self_compiler}")
+    if(self_compiler STREQUAL "")
+        if(NOT "Release" IN_LIST CMAKE_CONFIGURATION_TYPES)
+            message(FATAL_ERROR "buster: BUSTER_SELF_BUILT's previous stage is the tree's Release executable, and this tree has no Release; name one with BUSTER_SELF_COMPILER")
+        endif()
+        set(self_compiler "${CMAKE_BINARY_DIR}/Release/compiler")
+    endif()
+    execute_process(COMMAND "${CMAKE_C_COMPILER}" -print-resource-dir
+        OUTPUT_VARIABLE self_resources OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE status)
+    if(NOT status EQUAL 0 OR NOT IS_DIRECTORY "${self_resources}/include")
+        message(FATAL_ERROR "buster: BUSTER_SELF_BUILT: ${CMAKE_C_COMPILER} -print-resource-dir names no headers")
+    endif()
+    string(REPLACE ";" " " self_list "${buster_self_built}")
+    message(STATUS "buster: Develop's units by the previous stage (${self_compiler}): ${self_list}")
+    # The flags that decide clang's predefined macros: the units' but their definitions and include directories.
+    set(macro_flags ${self_flags})
+    list(FILTER macro_flags EXCLUDE REGEX "^-[DUI]")
+    add_custom_command(OUTPUT "${self_predefines}"
+        COMMAND "${CMAKE_C_COMPILER}" -dM -E ${macro_flags} ${buster_optimization} -x c /dev/null -o "${self_predefines}"
+        DEPENDS "${CMAKE_C_COMPILER}"
+        COMMENT "Writing clang's predefined macros for the previous stage's units"
+        ${self_explicit}
+        VERBATIM)
+endif()
+function(buster_self_unit name source)
+    set(object "${CMAKE_BINARY_DIR}/$<CONFIG>/self/${name}.c.o")
+    add_custom_command(OUTPUT "${object}"
+        COMMAND "${CMAKE_COMMAND}" -E env "BUSTER_CLANG_RESOURCE_DIR=${self_resources}"
+            "${self_compiler}" --tier1 -c "${CMAKE_SOURCE_DIR}/${source}" -o "${object}" ${self_flags} ${self_definitions}
+            --predefines "${self_predefines}" -MD -MF "${object}.d"
+        DEPFILE "${object}.d"
+        DEPENDS "${self_compiler}" "${self_predefines}"
+        COMMENT "Building ${source} with the previous stage"
+        ${self_explicit}
+        VERBATIM)
+endfunction()
+
 # Each source is an object library of its own, defined in the compile order, which is the order a clean build starts
 # them in; the executable links their objects in the sources' order.
 buster_compile_order(order)
@@ -278,12 +346,22 @@ foreach(index IN LISTS order)
         add_library(buster_${name} OBJECT "$<$<NOT:$<CONFIG:Develop>>:${CMAKE_SOURCE_DIR}/${source}>")
         set_target_properties(buster_${name} PROPERTIES LINKER_LANGUAGE C)
         list(APPEND develop_absent_sources "${CMAKE_SOURCE_DIR}/${source}")
+    elseif(file IN_LIST buster_self_built)
+        # No source in Develop, which compiles it with the previous stage (buster_self_unit, below), as for an absent
+        # unit: the link names this object library's objects in every configuration.
+        add_library(buster_${name} OBJECT "$<$<NOT:$<CONFIG:Develop>>:${CMAKE_SOURCE_DIR}/${source}>")
+        set_target_properties(buster_${name} PROPERTIES LINKER_LANGUAGE C)
+        buster_self_unit("${name}" "${source}")
     else()
         add_library(buster_${name} OBJECT "${source}")
     endif()
     buster_unit_options(buster_${name} "${defines_group}")
     buster_codegen_split_unit("${name}" split)
     buster_unit_partitions("${name}" partitions)
+    if(file IN_LIST buster_self_built AND NOT buster_release_parts)
+        # Develop takes the previous stage's object, and Release whole has no parts.
+        set(partitions 0)
+    endif()
     if(split)
         # This is the ordinary O3 pipeline through optimized IR, not LTO's pre-link pipeline. The source target
         # remains the dependency owner and the sole compile database entry for this C translation unit.
@@ -655,7 +733,9 @@ set(settings_environment
     "BUSTER_BAKE=${BUSTER_BAKE}"
     "BUSTER_PGO=${BUSTER_PGO}"
     "BUSTER_PGO_TRAIN=${BUSTER_PGO_TRAIN}"
-    "BUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN}")
+    "BUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN}"
+    "BUSTER_SELF_BUILT=${BUSTER_SELF_BUILT}"
+    "BUSTER_SELF_COMPILER=${BUSTER_SELF_COMPILER}")
 add_test(NAME baked-tables COMMAND "${compiler}" test-baked-tables)
 add_test(NAME parallel-runner COMMAND "${compiler}" test-parallel)
 set_tests_properties(baked-tables parallel-runner PROPERTIES LABELS build)

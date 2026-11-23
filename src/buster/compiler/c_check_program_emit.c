@@ -2376,103 +2376,171 @@ static void check_program_emit_lower_half(CheckEmitRun* run, CheckEmitLane* lane
     check_clock_lower(run->stage_clock, CHECK_CLOCK_LOWER_VALIDATE, part->lower.validate_ticks);
 }
 
+// A body between the steps of the code half (check_program_emit_code_half): its tier's outcome, and for one Tier 0
+// compiles the stream it compiles, the body's own or its splice's (`inlined`, #1398).
+typedef struct CheckEmitStep CheckEmitStep;
+struct CheckEmitStep
+{
+    const CheckProgramNaked* naked;
+    const Tier0Function* source;
+    Tier0Inlined inlined;
+    // Its place among the group's streams that Tier 0 compiles together (tier0_compile_batch), where it is one.
+    uint32_t slot;
+    bool unit_naked;
+    bool held;
+    bool tier1;
+    bool forbidden;
+    bool spliced;
+    bool batched;
+};
+
 // A lowered part's code on lane `lane`: each body's Tier 0 code, the lane's function access column given, and its code
-// after Tier 0 (check_program_emit_code) until one of them fails.
+// after Tier 0 (check_program_emit_code) until one of them fails. The bodies go a group at a time, in three steps (#2874):
+// each body's tier and the stream Tier 0 compiles for it, in order; Tier 0's code of the group's streams together, each
+// of its passes over every one of them before the next (tier0_compile_batch); then each body's code after Tier 0, in
+// order. With --tier1 a group is one body, so that a body's code is whole before the next one's tier
+// is decided, as it was. A group's later bodies are prepared, and compiled by Tier 0, before an earlier one's failure is
+// known: what they left is the failed part's, which a part that goes again makes anew.
 static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
 {
     const uint32_t end = part->lower.end;
     part->tier0_failed = end;
     part->code_failed = end;
-    for (uint32_t b = part->lower.first; part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed == end && b < end; b += 1)
+    const uint32_t group = lane->tier1 != NULL ? 1 : BUSTER_TIER0_BATCH_JOBS;
+    uint32_t first = part->lower.first;
+    while (part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed == end && first < end)
     {
-        Tier0Function* function = &run->lowered->functions[b];
-        // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's; one that takes
-        // directives is an assembled unit, which the merge publishes (check_program_emit_asm_unit).
-        const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
-        // With --tier1, Tier 1's code where its pipeline takes the body (check_program_emit_tier1). A naked function
-        // whose templates take directives is an assembled unit, which remains an explicit admission refusal here.
-        const bool unit_naked = naked != 0 && naked->unit_assembled;
-        CheckTier1Outcome outcome = (CheckTier1Outcome){ 0 };
-        if (unit_naked)
+        CheckEmitStep steps[BUSTER_TIER0_BATCH_JOBS];
+        const Tier0Function* sources[BUSTER_TIER0_BATCH_JOBS];
+        Tier0Code compiled[BUSTER_TIER0_BATCH_JOBS];
+        uint32_t taken = 0;
+        uint32_t source_count = 0;
+        bool stopped = false;
+        while (!stopped && taken < group && first + taken < end)
         {
-            if (lane->tier1 != NULL)
+            const uint32_t b = first + taken;
+            CheckEmitStep* step = &steps[taken];
+            Tier0Function* function = &run->lowered->functions[b];
+            // A naked function's code is its templates' (check_program_asm_plan_naked), not its function's; one that takes
+            // directives is an assembled unit, which the merge publishes (check_program_emit_asm_unit).
+            const CheckProgramNaked* naked = run->lowered->asms.naked != 0 && run->lowered->asms.naked[b].planned ? run->lowered->asms.naked + b : 0;
+            // With --tier1, Tier 1's code where its pipeline takes the body (check_program_emit_tier1). A naked function
+            // whose templates take directives is an assembled unit, which remains an explicit admission refusal here.
+            const bool unit_naked = naked != 0 && naked->unit_assembled;
+            CheckTier1Outcome outcome = (CheckTier1Outcome){ 0 };
+            if (unit_naked)
             {
-                outcome = check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0);
-                outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
-                run->tier1_outcomes[b] = outcome;
-            }
-        }
-        else
-        {
-            outcome = lane->tier1 != NULL ? check_program_emit_tier1(run, lane, b, naked != 0) : (CheckTier1Outcome){ 0 };
-        }
-        // A candidate whose code waits for the last pass (#2541 step 2, check_tier1_inline_held; without --tier1, Tier 0's
-        // callee, #1398 step 3, check_tier0_inline_held): none yet, which the last pass makes where emitted code still
-        // refers to it, and the merge leaves out where none does.
-        if (outcome.held || (lane->tier1 == NULL && naked == 0 && run->tier0_inline != NULL && check_tier0_inline_held(run, b)))
-        {
-            run->codes[b] = (EmittedCode){ 0 };
-            run->bodies[b] = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
-            if (run->tier1_counts != NULL)
-            {
-                run->tier1_counts[b] = (CheckTier1Counts){ 0 };
-            }
-            continue;
-        }
-        const bool tier1 = outcome.category == CHECK_TIER1_SUCCESS;
-        const bool forbidden = outcome.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN;
-        if (unit_naked)
-        {
-            if (!forbidden)
-            {
-                // Its code is its unit's entry atom, which the merge publishes; its length and start are known here for
-                // -g's rows, before the merge.
-                run->codes[b] = emitted_from_tier0(&naked->code, false, run->sources, true, lane->code);
-                CheckEmitBody* body = run->bodies + b;
-                *body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
-                body->length = naked->unit.entry_atom != 0 ? naked->unit.link.atoms.size[naked->unit.entry_atom] : 0;
+                if (lane->tier1 != NULL)
+                {
+                    outcome = check_tier1_failure(CHECK_TIER1_NAKED, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_NAKED, UINT32_MAX, 0);
+                    outcome = check_tier1_policy(outcome, run->lanes->tier1_strict);
+                    run->tier1_outcomes[b] = outcome;
+                }
             }
             else
             {
-                part->tier0_failed = b;
+                outcome = lane->tier1 != NULL ? check_program_emit_tier1(run, lane, b, naked != 0) : (CheckTier1Outcome){ 0 };
             }
-        }
-        else
-        {
-            if (!tier1 && !forbidden)
+            step->naked = naked;
+            step->unit_naked = unit_naked;
+            // A candidate whose code waits for the last pass (#2541 step 2, check_tier1_inline_held; without --tier1, Tier 0's
+            // callee, #1398 step 3, check_tier0_inline_held): none yet, which the last pass makes where emitted code still
+            // refers to it, and the merge leaves out where none does.
+            step->held = outcome.held || (lane->tier1 == NULL && naked == 0 && run->tier0_inline != NULL && check_tier0_inline_held(run, b));
+            step->tier1 = outcome.category == CHECK_TIER1_SUCCESS;
+            step->forbidden = outcome.fallback == CHECK_TIER1_FALLBACK_FORBIDDEN;
+            step->source = function;
+            step->spliced = false;
+            step->batched = false;
+            step->slot = 0;
+            if (!step->held && !unit_naked && !step->tier1 && !step->forbidden)
             {
-                // Tier 0's code as the emission takes it (emitted_from_tier0), with its frame's events where the tables
-                // are written: a naked function's templates have none.
                 // With Tier 0's inlining (#1398), the body's stream with its inline callees' calls spliced in, its code's
                 // entries and locals then put back in terms of its own (tier0_inline_code).
-                Tier0Inlined inlined;
-                const bool spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->code, &inlined);
-                const Tier0Function* source = spliced ? &inlined.function : function;
-                Tier0Code compiled = naked != 0 ? naked->code : tier0_compile(source, lane->code);
-                if (spliced)
+                step->spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->code, &step->inlined);
+                step->source = step->spliced ? &step->inlined.function : function;
+                step->batched = naked == 0;
+                if (step->batched)
                 {
-                    tier0_inline_code(&compiled, function, &inlined, lane->code);
+                    step->slot = source_count;
+                    sources[source_count] = step->source;
+                    source_count += 1;
                 }
-                // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
-                // read, as it doesn't a naked function's; and so does one that moves a value into rsp (#1846, tier0_asm_stack).
-                // A frame of the fixed shape alone has no events: its descriptor is made from the frame at its final offsets
-                // (check_program_emit_frame_checked).
-                const bool direct = naked == 0 && emitted_tier0_frame_direct(&compiled);
-                run->codes[b] = emitted_from_tier0(&compiled, run->unwind && naked == 0 && !direct, run->sources,
-                                                   naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source), lane->code);
-                run->codes[b].frame_direct = direct;
-                lane->frame_code = compiled;
             }
-            check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
-            if (forbidden || run->codes[b].error != TIER0_OK)
+            // A body the tier's policy forbids ends the part's code: none after it is prepared.
+            stopped = !step->held && step->forbidden;
+            taken += 1;
+        }
+        if (source_count != 0)
+        {
+            tier0_compile_batch(sources, source_count, lane->code, compiled);
+        }
+        check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
+        for (uint32_t k = 0; k < taken && part->tier0_failed == end; k += 1)
+        {
+            const uint32_t b = first + k;
+            const CheckEmitStep* step = &steps[k];
+            const CheckProgramNaked* naked = step->naked;
+            if (step->held)
             {
-                part->tier0_failed = b;
+                run->codes[b] = (EmittedCode){ 0 };
+                run->bodies[b] = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+                if (run->tier1_counts != NULL)
+                {
+                    run->tier1_counts[b] = (CheckTier1Counts){ 0 };
+                }
             }
-            else if (part->code_failed == end && !check_program_emit_code(run, lane, b))
+            else if (step->unit_naked)
             {
-                part->code_failed = b;
+                if (!step->forbidden)
+                {
+                    // Its code is its unit's entry atom, which the merge publishes; its length and start are known here for
+                    // -g's rows, before the merge.
+                    run->codes[b] = emitted_from_tier0(&naked->code, false, run->sources, true, lane->code);
+                    CheckEmitBody* body = run->bodies + b;
+                    *body = (CheckEmitBody){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
+                    body->length = naked->unit.entry_atom != 0 ? naked->unit.link.atoms.size[naked->unit.entry_atom] : 0;
+                }
+                else
+                {
+                    part->tier0_failed = b;
+                }
+            }
+            else
+            {
+                if (!step->tier1 && !step->forbidden)
+                {
+                    // Tier 0's code as the emission takes it (emitted_from_tier0), with its frame's events where the tables
+                    // are written: a naked function's templates have none.
+                    const Tier0Function* function = &run->lowered->functions[b];
+                    const Tier0Function* source = step->source;
+                    Tier0Code code = naked != 0 ? naked->code : compiled[step->slot];
+                    if (step->spliced)
+                    {
+                        tier0_inline_code(&code, function, &step->inlined, lane->code);
+                    }
+                    // A body whose asm template returns (#1839) leaves its frame as its template does, which the verifier doesn't
+                    // read, as it doesn't a naked function's; and so does one that moves a value into rsp (#1846, tier0_asm_stack).
+                    // A frame of the fixed shape alone has no events: its descriptor is made from the frame at its final offsets
+                    // (check_program_emit_frame_checked).
+                    const bool direct = naked == 0 && emitted_tier0_frame_direct(&code);
+                    run->codes[b] = emitted_from_tier0(&code, run->unwind && naked == 0 && !direct, run->sources,
+                                                       naked != 0 || tier0_asm_leaves(source) || tier0_asm_stack(source), lane->code);
+                    run->codes[b].frame_direct = direct;
+                    lane->frame_code = code;
+                }
+                check_clock_lap(run->stage_clock, CHECK_STAGE_TIER0);
+                if (step->forbidden || run->codes[b].error != TIER0_OK)
+                {
+                    part->tier0_failed = b;
+                }
+                else if (part->code_failed == end && !check_program_emit_code(run, lane, b))
+                {
+                    part->code_failed = b;
+                }
             }
         }
+        first += taken;
     }
 }
 

@@ -117,6 +117,10 @@ conversion's destination before `cvtsi2ss`/`cvtsi2sd`, and before
 `cvtss2sd`/`cvtsd2ss` but in place, which would otherwise wait on the
 register's last value (#3308); `conversion zeroes` checks the same of every
 class's conversion to `float` and `double`, of a home and of a register.
+Every program's functions are also compiled together, each pass over all of
+them before the next (`tier0_compile_batch`, #2874), the list taken again until
+it is past a batch's 32 functions: each one's code must be its own compile's
+(`batch`).
 Half the programs, on a host with AVX, compile at a target with AVX (#3335) and run natively
 through their VEX twins, no legacy SSE record with a twin left, and half of
 those clear the upper state at every exit (`Tier0Function.zero_upper`); the

@@ -1691,6 +1691,31 @@ the interpreter and, with `--cross-check`, against clang; the other checks valid
 gates and the deletion's measurements are in [the
 record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-tier0-compile-2972-deletion).
 
+**A batch of functions (#2874).** A function's compile is a job (`Tier0Job`): its entries' columns, its frame, its
+homes, its choice requests and its code, which its passes hand one another. After fusion's columns there are five
+passes, each a function of the job:
+
+1. the front, with selection (`tier0_job_front`, `tier0_job_select`);
+2. the homes and the frame (`tier0_job_homes`);
+3. measuring, and the room for the choice requests and the code's columns (`tier0_job_measure`);
+4. emission (`tier0_job_emit`);
+5. the immediates' forms, and what the code keeps (`tier0_job_finish`, `tier0_job_records`).
+
+`tier0_compile_batch` compiles several functions together: each pass runs over every function of a batch before the
+next pass (`tier0_run_jobs`). `tier0_compile` is a batch of one function, through the same passes. A batch is at most 32 functions, and takes no more once it holds
+2,048 entries, so that its columns stay in the first cache levels from one pass to the next. A function compiled
+twice over (`tier0_compile_upper`) or from a stripped copy (`tier0_compile_segments`) takes `tier0_compile`'s path
+alone, in its place among the others: those are rare. A function that fails in a batch leaves what it pushed to the
+output arena there, since the others' columns come after its own, where `tier0_compile` pops it.
+
+The order is for the processor's front end. A function's compile walks about 44 KB of code, where the first-level
+instruction cache holds 32 KB: a function at a time, each pass's code was fetched and decoded again for every
+function, and on the 9700X a third of Tier 0's dispatch slots on `sqlite3.c` had no uop to take ([the
+census](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-causes-2874-2026-11-23)).
+The C driver gives Tier 0 a window's bodies together (`check_program_emit_code_half`). `tier0` went from 3.97 to
+3.66 ms on `sqlite3.c`, every object the same; with the limit at one function, the same executable reads 3.99
+([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-batches-2874-2026-11-23)).
+
 ## Validation (#569)
 
 `tier0_validate` checks the stream's rules, the compile paths' precondition: the kinds, classes and values, the
