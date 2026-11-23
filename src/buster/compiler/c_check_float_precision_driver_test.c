@@ -256,7 +256,8 @@ static const char check_driver_float_everything_source[] =
 // constant reader; compound assignments' computation types, with the right operand after its own promotion and the
 // left one unpromoted (__fp16's against an integer as float), printed as converted (an __fp16 one with an __bf16 one is
 // left out: clang 23.1.4's backend can't lower it at -c); and commas whose right operand is an
-// assignment, which clang's evaluator doesn't fold, beside ones it does.
+// assignment or a value computed from one, which clang's evaluator doesn't fold, beside ones it does; and an _Atomic
+// typedef's right operand, spelled by its value type's sugar.
 static const char check_driver_float_review_source[] =
     "_Atomic float af;\n"
     "_Atomic double ad;\n"
@@ -283,6 +284,19 @@ static const char check_driver_float_review_source[] =
     "    f = i ? (0, d = 0.5) : 0.5;\n"
     "    f = (i, 0.5);\n"
     "    f = (0, (i, 0.25));\n"
+    "    f = -(d = 0.5);\n"
+    "    f = (i, -(d = 0.5));\n"
+    "    f = (double)(d = 0.5);\n"
+    "    f = (d = 0.5) * 1.0;\n"
+    "    f = -(i, 0.5);\n"
+    "    f = (d = 1, 0.5);\n"
+    "    return f;\n"
+    "}\n"
+    "typedef double D;\n"
+    "_Atomic D atomic_d;\n"
+    "float compound_sugar(float f)\n"
+    "{\n"
+    "    f += atomic_d;\n"
     "    return f;\n"
     "}\n";
 
@@ -423,13 +437,13 @@ static const CheckDriverDefaultWarningFixture check_driver_float_precision_fixtu
     {
         .name = "floating review cases, by default",
         .source = check_driver_float_review_source,
-        .warnings = 11,
+        .warnings = 13,
     },
     {
         .name = "floating review cases under -Wimplicit-float-conversion",
         .source = check_driver_float_review_source,
         .options = { "-Wimplicit-float-conversion" },
-        .warnings = 18,
+        .warnings = 25,
     },
     {
         .name = "floating comparisons under eval_method(extended)",

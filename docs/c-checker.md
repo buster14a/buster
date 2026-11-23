@@ -7554,12 +7554,14 @@ result. A constant that converts exactly is exempt, as clang's
 whose initializer completed (`CheckInput.const_values`), whose significant bits
 fit the target's precision at its exponent and range (`check_float_fits`,
 subnormals too; a quiet NaN whose payload fits; never a signaling one); an
-assignment's or an increment's value is no constant, nor is a comma's whose
-right operand is one (the evaluator ignores a comma's left operand). A compound
+assignment's or an increment's value is no constant, nor is one computed from
+it (`-(d = 0.5)`, BUSTER_CHECK_MODIFICATION) or a comma's whose right operand is
+one (the evaluator ignores a comma's left operand). A compound
 assignment whose computation's type has a higher rank than its left operand's
 warns, whatever its value, "implicit conversion when assigning computation
 result loses floating-point precision", from the computation's type (the right
-operand's own, sugar too, where it isn't converted) to the left one's, at the
+operand's own, sugar too, an `_Atomic` one's value type's, where it isn't
+converted) to the left one's, at the
 right operand (`check_common_float_result_precision`, clang's
 `AnalyzeCompoundAssignment`). The computation is clang's, not the checker's own
 (`check_common_float_computation`): the left operand unpromoted, the right one

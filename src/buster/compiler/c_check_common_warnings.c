@@ -3173,8 +3173,8 @@ static bool check_common_float_constant_fits(const TypeTable* types, const Check
 // The constant value clang's EvaluateAsRValue finds for the leaf `leaf` (#1875), into `value`: a constant the stream holds
 // (not an assignment's or an increment's, whose stored value is none to clang's evaluator), or a read of a const
 // non-volatile object whose completed initializer gives a floating value (CheckInput.const_values). A comma's is its
-// right operand's, past nested commas: the evaluator ignores its left operand's value and side effects, but an
-// assignment on its right fails it, as alone.
+// right operand's, past nested commas: the evaluator ignores its left operand's value and side effects (which a runtime
+// comma's value keeps), but an assignment on its right, or a value computed from one, fails it, as alone.
 static bool check_common_float_constant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t comma, CheckValue* value)
 {
     const CheckGraph* graph = &input->graph;
@@ -3187,12 +3187,14 @@ static bool check_common_float_constant(const CheckInput* input, const CheckStre
     const bool written = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
     const CheckValue own = check_stream_value(stream, leaf);
     bool result = false;
-    if (!written && (own.constant_kind == CHECK_CONSTANT_FLOATING || own.constant_kind == CHECK_CONSTANT_COMPLEX))
+    // (A value computed from an assignment's or an increment's, `-(d = 0.5)`, is none either: BUSTER_CHECK_MODIFICATION.)
+    const bool modified = written || (own.flags & BUSTER_CHECK_MODIFICATION) != 0;
+    if (!modified && (own.constant_kind == CHECK_CONSTANT_FLOATING || own.constant_kind == CHECK_CONSTANT_COMPLEX))
     {
         *value = own;
         result = true;
     }
-    else if (!written && own.category == CHECK_LVALUE && own.constant_kind == CHECK_CONSTANT_ADDRESS && own.fault == CHECK_FAULT_NONE &&
+    else if (!modified && own.category == CHECK_LVALUE && own.constant_kind == CHECK_CONSTANT_ADDRESS && own.fault == CHECK_FAULT_NONE &&
              (type_qualifiers(own.type) & BUSTER_TYPE_CONST) != 0 && (type_qualifiers(own.type) & BUSTER_TYPE_VOLATILE) == 0 &&
              (own.flags & (BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0)
     {
@@ -3340,8 +3342,12 @@ static void check_common_float_result_precision(const Parser* parser, Preprocess
     const TypeId computation = real ? check_common_float_computation(types, stream, graph, node, left_element) : 0;
     if (computation != 0 && check_float_narrows(types, computation, left_type) && check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION, true))
     {
-        const TypeId right_type = type_unqualified(check_stream_type(stream, right));
-        const bool own = check_float_value_type(types, right_type) == computation && type_kind(types, type_strip_aligned(types, right_type)) != BUSTER_TYPE_KIND_ATOMIC;
+        // (An _Atomic right operand's read is its value type, its sugar kept: `_Atomic D` reads as 'D' (aka 'double').)
+        const TypeId right_read = type_unqualified(check_stream_type(stream, right));
+        const TypeId right_bare = type_strip_aligned(types, right_read);
+        const bool atomic = type_kind(types, right_bare) == BUSTER_TYPE_KIND_ATOMIC;
+        const TypeId right_type = atomic ? type_unqualified(type_element(types, right_bare)) : right_read;
+        const bool own = check_float_value_type(types, right_type) == computation;
         const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, own ? right_type : computation,
                                                               own ? check_common_operand_spelling(parser, input, graph, stream, types, right) : 0);
         const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type,
