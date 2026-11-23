@@ -499,6 +499,70 @@ static bool snapshot_test_write_link(Link* link, const Bind* bind, const Runtime
     return written;
 }
 
+// A program bound against a loaded runtime by bind_begin_borrowed, as bind_test_program binds it by bind_begin: the
+// driver's binding, whose runtime atoms keep their bytes in the snapshot's mapping (#2546).
+static bool snapshot_test_borrowed_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path)
+{
+    uint64_t name_bytes = 0;
+    uint64_t atom_bytes = 0;
+    const LinkCapacity extra = bind_capacity(runtime, &name_bytes, &atom_bytes);
+    test->arena = arena_reserve(BUSTER_BIND_TEST_BIND_BYTES);
+    test->bind = (Bind){ 0 };
+    bool result = link_program_generate_begin(&test->program, options, extra, name_bytes, atom_bytes) && test->arena.base != 0;
+    result = result && bind_begin_borrowed(&test->bind, &test->program.link, runtime, path, &test->program.bytes, options.units, &test->arena);
+    result = result && link_program_generate_atoms(&test->program);
+    result = result && bind_end(&test->bind, &test->program.link);
+    result = result && link_program_generate_end(&test->program);
+    test->bound = result;
+    return result;
+}
+
+// Writes a borrowed binding's link with 8 lanes, as snapshot_test_write_link writes the others (a dynamic PIE, a shared
+// library, a static executable or a static PIE by the runtime's kind), with the runtime's mapping as
+// ExecutableOptions.borrowed, so that the chunks holding its bytes are staged.
+static bool snapshot_test_write_borrowed(Link* link, const Bind* bind, const Runtime* runtime, char* path, ExecutableResult* result)
+{
+    Scratch scratch = scratch_begin(0);
+    ExecutableDynamic dynamic = { 0 };
+    ExecutableRuntime inputs = { 0 };
+    const bool library = runtime->kind == RUNTIME_KIND_SHARED;
+    const bool is_static = runtime_kind_is_static(runtime->kind);
+    const bool pie = runtime->kind == RUNTIME_KIND_STATIC_PIE;
+    const String8 soname = {
+        .pointer = BUSTER_DYNAMIC_TEST_SONAME,
+        .length = sizeof(BUSTER_DYNAMIC_TEST_SONAME) - 1,
+    };
+    bool prepared = true;
+    if (is_static && pie)
+    {
+        dynamic_static_pie_inputs(&dynamic, &inputs, runtime, bind);
+    }
+    else if (is_static)
+    {
+        dynamic_static_inputs(&inputs, runtime, bind);
+    }
+    else
+    {
+        prepared = (library ? dynamic_shared_inputs(&dynamic, runtime, bind, soname, scratch.arena) : dynamic_inputs(&dynamic, runtime, bind, scratch.arena)) &&
+                   dynamic_test_gcc_s_inputs(&dynamic, link, bind, runtime);
+    }
+    DynamicTestWrite write = {
+        .link = link,
+        .options = {
+            .path = snapshot_test_string(path),
+            .entry = library ? 0 : dynamic_global(runtime, bind, "_start"),
+            .dynamic = !is_static || pie ? &dynamic : 0,
+            .runtime = is_static ? &inputs : 0,
+            .borrowed = runtime->snapshot,
+            .borrowed_bytes = runtime->snapshot_bytes,
+        },
+    };
+    const bool ran = prepared && lane_run(8, dynamic_test_lane_main, &write, 0);
+    *result = write.result;
+    scratch_end(scratch);
+    return ran && write.succeeded;
+}
+
 // Binds a program against each runtime by `path` and writes it with 1 and 8 lanes, as a dynamic PIE, a static
 // executable or a static PIE by the runtimes' kind: the same links, bindings and files.
 static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDirectory* directory, const Runtime* imported, const Runtime* loaded, LinkProgramOptions options,
@@ -521,6 +585,21 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
                                     bind_test_kept_pattern(&c.bind, loaded)),
                          "the loaded runtime's binding over a dirty arena the same", index);
     bind_test_release(&c);
+    // Against the loaded runtime with its atoms' bytes borrowed (bind_begin_borrowed, the driver's, #2546): the same
+    // link, with its runtime atoms in the snapshot's mapping; written below.
+    BindTestProgram d;
+    const bool bound_borrowed = snapshot_test_borrowed_program(&d, loaded, options, path);
+    uint64_t borrowed = 0;
+    uint64_t copied = 0;
+    for (AtomId atom = 1; bound && bound_borrowed && d.program.link.atoms.count == b.program.link.atoms.count && atom < d.program.link.atoms.count; atom += 1)
+    {
+        const uintptr_t mapped = (uintptr_t)loaded->snapshot;
+        borrowed += (uintptr_t)d.program.link.atoms.bytes[atom] - mapped < loaded->snapshot_bytes ? 1 : 0;
+        copied += (uintptr_t)b.program.link.atoms.bytes[atom] - mapped < loaded->snapshot_bytes ? 1 : 0;
+    }
+    snapshot_test_expect(tally, !bound || (bound_borrowed && d.bind.borrow && !b.bind.borrow && bind_test_same_links(&b.program.link, &d.program.link) &&
+                                           bind_test_same_binds(&b.bind, &d.bind) && borrowed != 0 && copied == 0),
+                         "the borrowed binding the same, its runtime atoms in the mapping", index);
     char path_a[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     char path_b[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     snapshot_test_path(path_a, directory->path, "imported");
@@ -547,6 +626,27 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
         scratch_end(scratch);
     }
     scratch_end(saved);
+    // The borrowed binding written once with 8 lanes, the chunks that hold borrowed bytes staged
+    // (ExecutableOptions.borrowed): the copies' executable, and the mapping as it was.
+    Scratch mapping = scratch_begin(0);
+    uint8_t* before = bound && bound_borrowed ? arena_push(mapping.arena, loaded->snapshot_bytes, 64) : 0;
+    if (before != 0)
+    {
+        memcpy(before, loaded->snapshot, loaded->snapshot_bytes);
+    }
+    ExecutableResult written_d;
+    // A file of its own, written afresh.
+    unlink(path_a);
+    const bool written_borrowed = before != 0 && snapshot_test_write_borrowed(&d.program.link, &d.bind, loaded, path_a, &written_d);
+    const String8 file_b = written_borrowed ? executable_test_read(mapping.arena, path_b) : (String8){ 0 };
+    const String8 file_d = written_borrowed ? executable_test_read(mapping.arena, path_a) : (String8){ 0 };
+    snapshot_test_expect(tally, !bound || (written_borrowed && file_d.pointer != 0 && file_b.pointer != 0 && file_d.length == file_b.length &&
+                                           memcmp(file_d.pointer, file_b.pointer, file_d.length) == 0),
+                         "the borrowed binding's executable the same", index);
+    snapshot_test_expect(tally, !bound || (before != 0 && memcmp(before, loaded->snapshot, loaded->snapshot_bytes) == 0), "the borrowed binding's write left the mapping",
+                         index);
+    scratch_end(mapping);
+    bind_test_release(&d);
     if (!directory->keep)
     {
         unlink(path_a);

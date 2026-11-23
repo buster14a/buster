@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
+  --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
@@ -224,6 +224,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   controls, direct and nested flexible members, macros, source pragmas and system headers.
   The shared harness checks suppression/promotion, scalar/default readers, one/three
   requested lanes, syntax/object modes, rejected-output preservation and accepted object twins.
+  `--initializer-diagnostics-only` runs the runtime `tests/checker/initializer-comma/`
+  catalogue alone in GNU17 and C23 (#2441). It compares complete Clang diagnostics
+  and exit status for multiple incompatible elements, independent nested excess
+  warnings, invalid compound-literal dependencies and atomic conditional deduction.
+  The cases retain comma-warning order, matching conditional-arm typedefs,
+  later independent errors and accepted sibling values. Command-line and scoped
+  warning policies, both readers, one/three requested lanes, syntax/object modes,
+  rejected-output preservation and accepted object twins use the shared warning
+  harness; `--in-process --differential` also compares the child route. Compound
+  dependency checks operate on the complete retained expression graph; they do
+  not extend the reader's recovery of malformed GNU syntax or failed deduction.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_attribute_call_recovery_driver_test.c`, `c_check_malformed_call_driver_test.c`,
@@ -240,8 +251,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   preserve rejected outputs, and require ELF output for accepted controls. The full
   weak-alias section additionally checks common-target refusal and defined alias
   symbols under `-fcommon`/`-fno-common`, plus linked programs on both readers and
-  requested deferred lanes. The initializer suite also preserves the separately frozen
-  compound-literal dependency boundary, which does not claim Clang parity. Its runtime `suppress_label_order.c`
+  requested deferred lanes. Its GNU17 initializer catalogue includes the
+  former compound-literal boundary as a complete Clang comparison; the focused
+  initializer option above also runs that catalogue in C23. Its runtime `suppress_label_order.c`
   cases compare parser errors before label-subject errors under both language
   modes, warning policies and a one-error limit, with macros, split lists,
   valid controls, later errors and old-output preservation. The adjacent
@@ -748,11 +760,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
-  emission reachability is unchanged. Indirect calls (including GNU `noreturn` pointer/typedef contracts), overloads,
-  analyzer annotations, semantic queries, conditional classifier contracts and library-policy contracts remain
-  conservative until their retained facts are available here (#1393 remains open). Indirect calls in automatic
-  initializer value parts share that conservative boundary, including ordinary pointers whose Clang warning is
-  currently suppressed here; GNU noreturn pointer/typedef initializers need it until callable-type facts are retained.
+  emission reachability is unchanged. A call through a pointer object's name returns unless its type is noreturn, as
+  clang's CFG reads the callee's type (#1393, `check_program_return_indirect`: GNU `noreturn` on its declaration or the
+  typedefs and typeofs its specifiers name; the node machine's lines answer the same, `node_tests_window_returns`). The
+  query builtins return: `__builtin_constant_p`'s operand is visited, the object size queries' left out. Overloads,
+  analyzer annotations, conditional classifier contracts, library-policy contracts (`-ffreestanding`, `-fno-builtin`,
+  `jmp_buf`) and other indirect callees (a member, an element, a cast, a conditional, a comma, a call's result, whose
+  types the node machine's window can't answer yet) remain conservative.
   `c_check_return_call_driver_test.c` exercises direct-call fall-off,
   path-local termination, initializer/comma operands, warning flags and those conservative boundaries through the
   ordinary, scalar and deferred readers against Clang, with independent warning counts.
@@ -906,6 +920,13 @@ the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
 builder's observer's `-Wtautological-bitwise-compare`,
 `-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
 order (`c_check_common_cfg.c`).
+
+`tests/checker/return-calls` (#1393) is one too: `-Wreturn-type` past calls
+(`c_check_return_flow.c`), a direct call's by its declaration, a call through
+a pointer object's name by its type's noreturn (GNU's attribute through its
+declaration, typedefs and typeofs), and the query builtins, which return
+(`__builtin_constant_p`'s operand visited, the object size queries' left
+out).
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
