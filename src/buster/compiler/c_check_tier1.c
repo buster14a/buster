@@ -854,14 +854,24 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const IrSwitchTable* tables = stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 ?
                                       check_tier1_switch_tables(lane->lowered, lane->emitting_body, function, scratch, &table_count, &table_first) :
                                       NULL;
-    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
-                     check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
+    const bool ready = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
+                       check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
     // A candidate whose callers should expand every call of it makes no code now (#2541 step 2, check_tier1_inline_held):
     // it waits for the emission's last pass, which makes it where some emitted code still refers to it.
-    if (own && check_tier1_inline_held(lane, (uint32_t)body, target))
+    if (ready && check_tier1_inline_held(lane, (uint32_t)body, target))
     {
         outcome = (CheckTier1Outcome){ .held = true };
         stage = CHECK_TIER1_STAGE_COUNT;
+    }
+    // But one that takes, returns or passes a by-value aggregate (#3311: its own ABI records, or its calls' aggregates'
+    // metadata) makes its code by the whole pipeline: its summary keeps those aggregates for its callers' expansions, and
+    // its own code passes them as scalars (ir_sroa_scalarize, ir_sroa_scalarize_calls), which only the own pipeline runs.
+    const bool aggregates = ir_typed_own_records(function) || function->argument_sizes != NULL || function->call_result_objects != NULL;
+    const bool own = ready && !aggregates;
+    if (ready && !own)
+    {
+        passes = (CheckTier1Passes){ 0 };
+        inlined_calls = 0;
     }
     if (stage == CHECK_TIER1_COMPILED && !own)
     {
@@ -892,7 +902,22 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     // #3311: a function that takes or returns an aggregate by value (its own ABI records) that no expansion took: SROA
     // with its widening, in steps[5] (the expansion's SROA's, unused without one), so that its register-class
     // aggregates' eightbytes stay out of memory. A body it refuses goes on as it was; any other error is the body's.
-    if (stage == CHECK_TIER1_COMPILED && !own && !expanding && !sroa && lowered.parameter_passed != 0)
+    // Its calls' register-class aggregate arguments as their parts' scalars first (#3311, ir_sroa_scalarize_calls), so
+    // that the objects they passed no longer escape and SROA takes them, even where the expansion ran it already.
+    uint32_t scalar_arguments = 0;
+    if (stage == CHECK_TIER1_COMPILED && !own && lowered.abi_call_count != 0)
+    {
+        IrFunction calls = { 0 };
+        const IrError error = ir_sroa_scalarize_calls(&lowered, &lane->steps[5], scratch, &calls, &scalar_arguments);
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+        if (error == IR_OK && scalar_arguments != 0)
+        {
+            lowered = calls;
+            lowered_verified = false;
+        }
+    }
+    if (stage == CHECK_TIER1_COMPILED && !own && !sroa && ((!expanding && lowered.parameter_passed != 0) || scalar_arguments != 0))
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
