@@ -2596,7 +2596,7 @@ static void check_test_program_initializer_facts(CheckTest* test)
     if (ready)
     {
         memset(facts, 0, types.table.types.count);
-        ready = check_lower_copy_type_facts(&types.table, types.table.types.count, facts, &scratch, false);
+        ready = check_lower_copy_type_facts(&types.table, types.table.types.count, facts, &scratch);
     }
     check_test_expect(test, ready, "initializer pool containment facts are prepared once for a large frozen type table");
     if (ready)
@@ -2832,7 +2832,6 @@ static void check_test_program_resolve_labels(CheckTest* test)
     const bool ready = mapping != MAP_FAILED && page >= 200 && mprotect(mapping + page, page, PROT_NONE) == 0;
     check_test_expect(test, ready, "the branches' kinds have a protected tail");
     uint64_t values[200];
-    uint64_t twin_values[200];
     uint64_t defined_values[200];
     uint32_t labels[16];
     bool same = true;
@@ -2854,17 +2853,14 @@ static void check_test_program_resolve_labels(CheckTest* test)
             kinds[i] = (uint8_t)(BUSTER_TYPED_BRANCH_FALSE - 2 + check_test_random(test) % 8);
             values[i] = check_test_random(test) % (whole ? label_count : label_count + 2);
         }
-        memcpy(twin_values, values, (uint64_t)count * sizeof(uint64_t));
         memcpy(defined_values, values, (uint64_t)count * sizeof(uint64_t));
-        const bool twin = check_lower_resolve_labels_scalar(kinds, twin_values, count, labels, label_count);
         const bool defined = check_test_resolve_labels_definition(kinds, defined_values, count, labels, label_count);
         const bool vector = check_lower_resolve_labels(kinds, values, count, labels, label_count);
-        same &= twin == vector && memcmp(values, twin_values, (uint64_t)count * sizeof(uint64_t)) == 0;
         same &= defined == vector && memcmp(values, defined_values, (uint64_t)count * sizeof(uint64_t)) == 0;
-        resolved += twin;
-        failed += !twin;
+        resolved += defined;
+        failed += !defined;
     }
-    check_test_expect(test, same && resolved != 0 && failed != 0, "the branches' targets by 64 kinds at a time are their definition's and their scalar twin's, and so is the first failure");
+    check_test_expect(test, same && resolved != 0 && failed != 0, "the branches' targets by 64 kinds at a time are their definition's, and so is the first failure");
     if (mapping != MAP_FAILED && mapping != 0)
     {
         munmap(mapping, page * 2);
@@ -3536,8 +3532,7 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
             abi_test_world_close(&world);
         }
     }
-    // A function's memory classes from its entries' classes (check_lower_entry_classes) against their definition's and
-    // its twin's: columns of every count to 200 ending at the guard page, of random classes below F80, with one of F80,
+    // A function's memory classes from its entries' classes (check_lower_entry_classes) against their definition's: columns of every count to 200 ending at the guard page, of random classes below F80, with one of F80,
     // I128, U128 and VECTOR at a random place in three columns of four, and none in the others.
     uint32_t found = 0;
     for (uint32_t count = 0; guarded && count <= 200; count += 1)
@@ -3555,7 +3550,6 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
                 classes[check_test_random(test) % count] = memory[(round + round / 4) % 4];
             }
             const uint32_t vector = check_lower_entry_classes(classes, count);
-            const uint32_t scalar = check_lower_entry_classes_scalar(classes, count);
             // The definition: each class of the entries in turn.
             uint32_t expected = 0;
             for (uint32_t i = 0; i < count; i += 1)
@@ -3566,9 +3560,8 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
             }
             found |= expected;
             char description[160];
-            snprintf(description, sizeof(description), "the memory classes of %u entries' classes, round %u: %u by the vector path, %u by the scalar one, for %u", count,
-                     round, vector, scalar, expected);
-            check_test_expect(test, vector == expected && scalar == expected, description);
+            snprintf(description, sizeof(description), "the memory classes of %u entries' classes, round %u: %u, for %u", count, round, vector, expected);
+            check_test_expect(test, vector == expected, description);
         }
     }
     check_test_expect(test, !guarded || found == (BUSTER_CHECK_LOWER_ENTRIES_X87 | BUSTER_CHECK_LOWER_ENTRIES_WIDE | BUSTER_CHECK_LOWER_ENTRIES_VECTOR),
