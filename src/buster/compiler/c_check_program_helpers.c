@@ -1070,6 +1070,7 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                     const CheckBuiltinFloatEffect* effect = floating < stream->floating_count ? stream->floating + floating : 0;
                     if (math)
                     {
+                        const bool kind_copysign = check_builtin_math_kind(id) == CHECK_BUILTIN_MATH_COPYSIGN;
                         if (effect == NULL || effect->node != node)
                         {
                             result->status = CHECK_PROGRAM_INVALID;
@@ -1082,7 +1083,10 @@ static bool check_program_helpers(CheckProgramHelpers* result, const CheckProgra
                         }
                         else
                         {
+                            // A runtime copysign's checks are its helper's, but the lowering computes it in place, as
+                            // the plain copysign's call (#1373, check_lower_library_sign): no helper.
                             result->status = check_program_helper_math(program, effect, id, &helper);
+                            folded = kind_copysign;
                         }
                     }
                     else if (effect == 0 || effect->node != node || effect->runtime_builtin != id || !effect->compiler_barrier ||

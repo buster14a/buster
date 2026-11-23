@@ -51,8 +51,11 @@ shared library's, in a directory of its own under `--directory` (`TMPDIR` or
   the pattern left in `Bind.symbols`): the same links and bindings, written as
   dynamic PIEs, or against the static runtime as static executables and
   against the static PIE's as static PIEs, by 1 and 8 lanes into the same
-  bytes, which run; and test-bind's loader case bound both ways too, the
-  loaded runtime's PIE running with its status (11);
+  bytes, which run; bound against the loaded one borrowing its atoms' bytes
+  (`bind_begin_borrowed`, the driver's): the same link, its runtime atoms in
+  the mapping, written with the mapping as `ExecutableOptions.borrowed` into
+  the same bytes, the mapping unchanged; and test-bind's loader case bound
+  both ways too, the loaded runtime's PIE running with its status (11);
 - opening: `runtime_open` in a directory two levels below one that exists,
   which it makes private: imported and written, then loaded; with no
   directory, or without an identity, imported and nothing written; and where
