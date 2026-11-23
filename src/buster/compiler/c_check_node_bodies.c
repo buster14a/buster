@@ -1469,7 +1469,8 @@ static _Thread_local struct NodeBodiesCheck node_bodies_check;
 // (BUSTER_TEST_NODE_BODIES), for a replay of each with the bodies taken and without that compares their objects, which
 // no test of a program's behaviour does (the tests' units are temporary files, so their bytes are kept). A command's
 // working directory and arguments, a NUL after each, are DIRECTORY/HASH.command; its inputs' paths the same in
-// HASH.inputs; and each input's bytes HASH.N.input. HASH is of all of them: each distinct command is kept once.
+// HASH.inputs; and each input's bytes HASH.N.input. HASH is of all of them: each distinct command is kept once. A
+// command with an input that is no regular file is not kept.
 static void node_bodies_keep(const char* directory, int count, char** arguments, char** inputs, uint32_t input_count)
 {
     char cwd[4096];
@@ -1489,6 +1490,12 @@ static void node_bodies_keep(const char* directory, int count, char** arguments,
     }
     char block[4096];
     bool read_all = placed;
+    // Each input a regular file: a named pipe's bytes are read once, by the compile, and its open waits for a writer.
+    for (uint32_t n = 0; n < input_count && read_all; n += 1)
+    {
+        struct stat status;
+        read_all = stat(inputs[n], &status) == 0 && S_ISREG(status.st_mode);
+    }
     for (uint32_t n = 0; n < input_count && read_all; n += 1)
     {
         FILE* source = fopen(inputs[n], "rb");
