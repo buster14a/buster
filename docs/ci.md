@@ -1297,7 +1297,16 @@ its window independently after taking the shared lock.
 States move between `not-required`, `complete`, `in-flight`, `ready`,
 `preparing` and `needs-preparation`; `blocked-hosted`, `blocked-native` and
 `failed` (three failed or interrupted measurements) are reported and skipped,
-and never block later states. A rerun keeps its run's ID and takes the next
+and never block later states. A state is `blocked-hosted` when its plain rows
+fail, or after three of the coordinator's preparations of it (its `defer`
+requests) end with no plain verdict: a job the rows need failed, or they were
+cancelled or skipped. The report links the latest such preparation. Without that
+limit a state whose own revision can't run its plain rows took every
+preparation of every evening: #2308's merge fails its selector's self-test
+(`rerun --self-test`), and from 11 to 23 November the prepare job dispatched it
+every five minutes until the cycle's 40 were spent, 478 runs in all. A later
+conclusive pass of the plain rows, such as a person's `full` dispatch of that
+commit, still makes the state ready. A rerun keeps its run's ID and takes the next
 attempt. So a state's hosted and native verdicts are its latest run's latest
 attempt's, whatever order the ledger holds them in. Each failed attempt counts
 toward the three, since each one occupied the 9700X. The cycle's report counts
