@@ -599,10 +599,10 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_TABLES 4096u
 // LICM under #2719's pressure policy (ir_optimize_licm.c's IrLicmOptions.pressure), on by default: in a function without
 // vector or mask values (VECTORS' policy takes those) where its screen (ir_licm_pressure_screen) finds a loop that may
-// hold no call, and where LICM doesn't run on every value. On the 9700X it takes 6.4% of the loop kernels' cycles and
-// changes speedtest1's and Lua's by no more than code placement's noise (Lua's by -0.23% over 8 link orders), for 1.9%
-// of sqlite3.c's --tier1 compile: the bar the owner set for its default on #2719 (docs/ir-loop-motion.md's "On by
-// default").
+// hold no call, and where LICM doesn't run on every value. On the 9700X it takes 2.3% of the loop kernels' cycles (6.4%
+// before the loop vectorizer was on by default) and changes speedtest1's and Lua's by no more than code placement's
+// noise (Lua's by +0.38% over 8 link orders), for 1.9% of sqlite3.c's --tier1 compile: the bar the owner set for its
+// default on #2719 (docs/ir-loop-motion.md's "On by default").
 #define BUSTER_CHECK_TIER1_PASS_HOIST 16384u
 // #866's solver under #2719's pressure policy (ir_optimize_gvn.c's IrGvnOptions.pressure), on promoted SSA after
 // if-conversion and before LICM, off by default: on the 9700X it takes none of speedtest1's or Lua's cycles beyond code
