@@ -475,6 +475,12 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
         const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, BUSTER_CHECK_NONE, scratch);
         result = type.length == 0 ? NULL : check_warning_text(scratch, "restrict requires a pointer or reference (%.*s is invalid)", (int)type.length, type.pointer);
     }
+    else if (report->message == CHECK_INPUT_GENERIC_NO_MATCH && report->type != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+        result = type.length == 0 ? NULL : check_warning_text(scratch, "controlling expression type %.*s not compatible with any generic association type",
+                                                              (int)type.length, type.pointer);
+    }
     else if (report->message == CHECK_INPUT_AUTO_ATOMIC_POINTER && report->type != 0 && name.length != 0)
     {
         const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, token, scratch);
@@ -3130,6 +3136,21 @@ static uint32_t check_semantic_case_begin(const Parser* parser, const CheckInput
     return result;
 }
 
+// Which of clang's CheckCStyleCast pointer errors a cast from `source` (before its lvalue conversion) to `target` is
+// (#2914): 1 from a pointer (an array's or a function's decay too) to a floating or complex type, an _Atomic one's value
+// type; 2 to a pointer from a floating or complex operand; 0 for any other.
+static uint32_t check_semantic_cast_pointer_arithmetic(const TypeTable* types, TypeId target, TypeId source)
+{
+    TypeId value = type_strip_aligned(types, target);
+    value = type_kind(types, value) == BUSTER_TYPE_KIND_ATOMIC ? types->types.base[type_index(value)] : value;
+    const uint8_t target_kind = check_action_kind(types, value);
+    const uint8_t source_kind = check_action_kind(types, source);
+    const bool source_pointer = source_kind == BUSTER_TYPE_KIND_POINTER || source_kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(source_kind);
+    const bool target_fractional = target_kind == BUSTER_TYPE_KIND_FLOATING || target_kind == BUSTER_TYPE_KIND_COMPLEX;
+    const bool source_fractional = source_kind == BUSTER_TYPE_KIND_FLOATING || source_kind == BUSTER_TYPE_KIND_COMPLEX;
+    return source_pointer && target_fractional ? 1u : target_kind == BUSTER_TYPE_KIND_POINTER && source_fractional ? 2u : 0u;
+}
+
 // A semantic report's clang text and location, with its notes in `note`, an array of BUSTER_CHECK_SEMANTIC_NOTES
 // (check_semantic_note_count counts them): const assignment's are several (#1447).
 
@@ -3414,6 +3435,30 @@ static const char* check_semantic_expression(const Parser* parser, Preprocessor*
             result = type.length == 0 ? NULL :
                      to_union ? check_warning_text(scratch, "cast to union type from type %.*s not present in union", (int)type.length, type.pointer) :
                                 check_warning_text(scratch, "used type %.*s where arithmetic or pointer type is required", (int)type.length, type.pointer);
+        }
+        else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_CAST && operand_type != 0 && token + 1 < parser->tokens.count &&
+                 parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST && node < stream->count && graph->types != NULL &&
+                 check_semantic_cast_pointer_arithmetic(types, graph->types[node], operand_type) != 0)
+        {
+            // A cast between a pointer and an arithmetic type that isn't an integer's (#2914, clang's CheckCStyleCast), at
+            // the operand's first token: to a floating or complex type from a pointer, err_cast_pointer_to_non_pointer_int
+            // with the target as written; to a pointer from a floating or complex operand,
+            // err_cast_pointer_from_non_pointer_int with the operand's type after its lvalue conversion, its sugar kept.
+            const bool to_pointer = check_semantic_cast_pointer_arithmetic(types, graph->types[node], operand_type) == 2;
+            const TypeId converted = type_unqualified(type_strip_aligned(types, operand_type));
+            const bool cast = operand < count && graph->ops[operand] == CHECK_OP_CAST;
+            const uint32_t spelling = converted != operand_type ? 0 :
+                                      cast ? check_input_operand_type_spelling(input, parser, operand) : check_semantic_operand_spelling(parser, input, stream, types, operand);
+            const TypeId target = type_strip_aligned(types, graph->types[node]);
+            const bool atomic = type_kind(types, target) == BUSTER_TYPE_KIND_ATOMIC;
+            const String8 type = to_pointer ? check_driver_warning_type(parser, pp, input, types, spell, scratch, converted, spelling) :
+                                 atomic ? check_driver_warning_type(parser, pp, input, types, spell, scratch, types->types.base[type_index(target)], 0) :
+                                          check_driver_warning_type(parser, pp, input, types, spell, scratch, graph->types[node],
+                                                                    check_input_operand_type_spelling(input, parser, node));
+            *location = token + 1;
+            result = type.length == 0 ? NULL :
+                     to_pointer ? check_warning_text(scratch, "operand of type %.*s cannot be cast to a pointer type", (int)type.length, type.pointer) :
+                                  check_warning_text(scratch, "pointer cannot be cast to type %.*s", (int)type.length, type.pointer);
         }
         else if (report->diagnostic == CHECK_DIAG_INCOMPATIBLE && op == CHECK_OP_SUBTRACT && operand_type != 0 && graph->operand1[node] < stream->count &&
                  check_action_kind(types, operand_type) == BUSTER_TYPE_KIND_POINTER &&

@@ -1913,6 +1913,39 @@ static const char* check_warning_objc_macro(const Parser* parser, Preprocessor* 
 // c_check_semantic_diagnostic.c's: a record's name as clang's -Wodr and incompatible-definition errors spell it.
 static String8 check_semantic_tag_spelling(const Parser* parser, Preprocessor* pp, uint32_t token, Arena* scratch);
 
+static uint32_t check_semantic_operator_spelling(const Parser* parser, const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t node);
+static TypeId check_semantic_value_type(const TypeTable* types, TypeId type, bool value_only);
+
+// -Wcompare-distinct-pointer-types's or -Wpointer-integer-compare's text (`warning`) at a comparison's operator `token`,
+// with its two operands' types, "('A' and 'B')", as clang names them (#2914, Sema's diagnoseDistinctPointerComparison and
+// pointer-integer comparison): each after its lvalue conversion (an array's decay, a qualified lvalue's), not the
+// comparison's to their common type, its typedef's sugar kept where the conversion kept the type. The bare text where the token is no comparison's.
+static const char* check_driver_comparison_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                                   CheckWarningSpelling* spell, uint32_t token, uint32_t warning, Arena* scratch)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t node = stream != NULL && stream->graph == graph && input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] :
+                          BUSTER_CHECK_NONE;
+    const bool compared = node < graph->count && node < stream->count && graph->ops[node] >= CHECK_OP_LESS && graph->ops[node] <= CHECK_OP_NOT_EQUAL &&
+                          graph->operand0[node] < stream->count && graph->operand1[node] < stream->count;
+    const char* result = check_diagnostic_message(warning);
+    if (compared)
+    {
+        String8 sides[2];
+        for (uint32_t side = 0; side < 2; side += 1)
+        {
+            const uint32_t operand = side == 0 ? graph->operand0[node] : graph->operand1[node];
+            const TypeId written = check_stream_type(stream, operand);
+            const TypeId converted = check_semantic_value_type(types, written, true);
+            const uint32_t spelling = converted == written ? check_semantic_operator_spelling(parser, input, stream, types, operand) : 0;
+            sides[side] = check_driver_operand_type(parser, pp, input, stream, types, spell, scratch, converted, operand, spelling);
+        }
+        result = sides[0].length != 0 && sides[1].length != 0 ?
+                 check_warning_text(scratch, "%s (%.*s and %.*s)", result, (int)sides[0].length, sides[0].pointer, (int)sides[1].length, sides[1].pointer) : result;
+    }
+    return result;
+}
+
 static const char* check_driver_warning_message(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                                 CheckWarningSpelling* spell, const CheckWarningEvent* event, Arena* scratch)
 {
