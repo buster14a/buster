@@ -976,16 +976,6 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ssa
 
-      - name: Benchmark local SSA construction three times
-        # Where `changes` doesn't rule it out (the module's sources): three separate processes.
-        if: needs.changes.outputs.ssa != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          for repetition in 1 2 3; do
-              echo "SSA repetition $repetition"
-              taskset -c "$cpu" ./build/compiler benchmark-ssa
-          done
-
       - name: Benchmark dominator analysis on synthetic and exported source CFGs
         # The --cfg run is #174's real-function importer smoke: test-ir-source --dominators-cfg writes the
         # qualified CFGs of the focused fixture and benchmark-dominators --cfg reads them back and times the
