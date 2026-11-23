@@ -2383,12 +2383,12 @@ static bool tier1_emit_upper_dirty(const X86Instruction* records, uint32_t count
 // form's low 128 bits (test-tier1-emit runs each pair natively).
 static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, Tier1SelectCode* code)
 {
+    const bool avx = x86_target_form_allowed(allowed_forms, X86_FORM_VADDSS_X_X_XM32) && x86_target_form_allowed(allowed_forms, X86_FORM_VMOVQ_X_RM64);
     bool body = false;
-    for (uint32_t node = 0; node < plan->function->instruction_count; node += 1)
+    for (uint32_t node = 0; avx && node < plan->function->instruction_count; node += 1)
     {
         body = body || tier1_select_body_call(plan->function, node);
     }
-    const bool avx = x86_target_form_allowed(allowed_forms, X86_FORM_VADDSS_X_X_XM32) && x86_target_form_allowed(allowed_forms, X86_FORM_VMOVQ_X_RM64);
     for (uint32_t first = 0; avx && !body && first < code->count; first += 16)
     {
         uint32_t found = tier1_emit_vex_lookup(code->records + first, code->count - first, tier1_emit_vex_forms);
