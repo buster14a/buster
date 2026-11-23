@@ -10840,7 +10840,6 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     bool valid = state->valid;
     CheckDataResult emission = { .status = CHECK_DATA_RESOURCE, .failed_token = BUSTER_CHECK_NONE };
     CheckDebug dwarf = { 0 };
-    check_driver_lower_report(&code, stage_clock);
     if (!valid)
     {
         check_driver_emission_failed(parser, pp, &code);
@@ -10934,6 +10933,9 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_BUILD);
     check_driver_object_release(state, lanes, scratch);
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+    // The lowering's coverage line, a write to stderr of --time-stages' own, after the object's stages, which it would
+    // otherwise be charged to (#3393): of the emission's result as it came, before the object's own failures.
+    check_driver_lower_report(&state->code, stage_clock);
     return valid;
 }
 

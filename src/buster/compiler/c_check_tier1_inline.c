@@ -92,34 +92,18 @@ static uint64_t check_tier1_inline_generations = 0;
 // (#2541). Nor does a target attribute alone: a function of several versions by target attributes is the table's
 // (CheckProgram.body_targets' BUSTER_CHECK_PROGRAM_TARGET_VERSIONS), and LLVM's GlobalDCE drops a dead internal function
 // whatever its target, as clang -O0 emits none of <immintrin.h>'s wrappers (#1398 step 3). The attributed declarations
-// are found 16 tokens at a time, as the emission's scan of them is (check_input_attributed_next), with its scalar twin.
-#define BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE 1u
-#define BUSTER_CHECK_TIER1_INLINE_ROOTED 2u
-static void check_tier1_inline_marks(const CheckProgram* program, uint8_t* marks)
+// are the emission's list of them (check_program_attributed), each one's marks found by its one pass over its records.
+#define BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE BUSTER_CHECK_ATTRIBUTED_INTERPOSABLE
+#define BUSTER_CHECK_TIER1_INLINE_ROOTED BUSTER_CHECK_ATTRIBUTED_ROOTED
+static void check_tier1_inline_marks(const CheckProgram* program, const CheckProgramAttributed* attributed, uint8_t* marks)
 {
     const CheckInput* input = program->input;
     const uint32_t tokens = input->token_count;
-    const CheckSparseWide attributes = input->attributes;
-    for (uint32_t first = check_input_attributed_next(attributes, 0, tokens); first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
+    for (uint32_t d = 0; d < attributed->count; d += 1)
     {
-        for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
-        {
-            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-            const CheckInputAttributes* records = input->declarations[token] == token ? check_input_attributes_at(input, token) : 0;
-            const uint32_t object = input->objects[token];
-            for (uint32_t i = 0; records != 0 && object <= tokens && i < records->count; i += 1)
-            {
-                const CheckInputAttribute* attribute = &records->records[i];
-                const CheckInputAttributeKind kind = attribute->kind;
-                const bool interposable = kind == CHECK_ATTRIBUTE_WEAK || kind == CHECK_ATTRIBUTE_SELECTANY;
-                const bool rooted = interposable || kind == CHECK_ATTRIBUTE_USED || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR ||
-                                    kind == CHECK_ATTRIBUTE_INTERRUPT || kind == CHECK_ATTRIBUTE_TARGET_CLONES ||
-                                    kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_ALIAS ||
-                                    kind == CHECK_ATTRIBUTE_IFUNC || kind == CHECK_ATTRIBUTE_WEAKREF || kind == CHECK_ATTRIBUTE_RETAIN ||
-                                    kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY || kind == CHECK_ATTRIBUTE_NAKED;
-                marks[object] |= attribute->ignored ? 0 : (interposable ? BUSTER_CHECK_TIER1_INLINE_INTERPOSABLE : 0) | (rooted ? BUSTER_CHECK_TIER1_INLINE_ROOTED : 0);
-            }
-        }
+        const uint32_t object = input->objects[attributed->tokens[d]];
+        const uint8_t bits = attributed->bits[d] & BUSTER_CHECK_ATTRIBUTED_MARKS;
+        marks[object <= tokens ? object : 0] |= object <= tokens ? bits : 0;
     }
     for (uint32_t k = 0; k < program->weak_late_count; k += 1)
     {
@@ -136,7 +120,7 @@ static void check_tier1_inline_marks(const CheckProgram* program, uint8_t* marks
 // (check_tier1_inline_marks); it keeps its own code whatever its callers expand. `scalar` takes the attributes'
 // scan's scalar twin.
 static bool check_tier1_inline_table(const CheckProgram* program, const CheckProgramLowered* lowered, uint32_t symbol_count, bool tier1, bool scalar, Arena* arena,
-                                     CheckTier1Inline* table)
+                                     const CheckProgramAttributed* attributed, CheckTier1Inline* table)
 {
     const CheckInput* input = program->input;
     const uint32_t count = program->body_count;
@@ -178,10 +162,14 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
     uint8_t* marks = callees && rooted != 0 && dead != 0 && (!stage || sites != 0) && held != 0 && released != 0 ?
                          BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)input->token_count + 1) :
                          0;
+    // The attributed declarations, the emission's or else the table's own, popped with the marks.
+    CheckProgramAttributed own = { 0 };
+    const CheckProgramAttributed* listed = attributed != NULL || marks == 0 || !check_program_attributed(input, arena, &own) ? attributed : &own;
+    marks = listed != NULL ? marks : 0;
     if (marks != 0)
     {
         memset(marks, 0, (uint64_t)input->token_count + 1);
-        check_tier1_inline_marks(program, marks);
+        check_tier1_inline_marks(program, listed, marks);
         // What else keeps an object's code: static data's references to it, an alias's of it.
         for (uint32_t k = 0; k < program->initializer_reference_count; k += 1)
         {
@@ -1077,8 +1065,9 @@ static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const Emitte
     uint32_t dead = 0;
     if (stack != 0)
     {
-        // Every body a root but the candidates that may lose their code.
+        // Every body a root but the candidates that may lose their code; without one, the walk reaches none (#3393).
         uint32_t depth = 0;
+        uint32_t candidates = 0;
         for (uint32_t b = 0; b < count; b += 1)
         {
             const bool assembly = naked != 0 && naked[b].planned;
@@ -1088,13 +1077,15 @@ static uint32_t check_tier1_inline_dead(CheckTier1Inline* inlining, const Emitte
             const bool may = inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_NONE && inlining->rooted[b] == 0 && inlining->lowered->functions[b].label_count == 0 &&
                              codes[b].label_count == 0 && codes[b].asm_label_count == 0 && !assembly;
             reached[b] = may ? 0 : 1;
+            candidates += may ? 1 : 0;
             if (!may)
             {
                 stack[depth++] = b;
             }
         }
+        depth = candidates != 0 ? depth : 0;
         // The helpers' references, then each reached body's.
-        for (uint32_t h = 0; h < helpers->count; h += 1)
+        for (uint32_t h = 0; candidates != 0 && h < helpers->count; h += 1)
         {
             const Tier0Code* code = &helpers->items[h].code;
             depth = check_tier1_inline_reach(inlining, code->references, code->reference_count, helpers->items[h].assembly != 0, asm_symbols, asm_names, reached, stack, depth);
