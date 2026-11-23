@@ -1631,8 +1631,10 @@ static __attribute__((noinline)) bool node_machine_update_pointer_rule(NodeMachi
     NodeMachineOperand pointer_operand;
     NodeMachineOperand index_operand;
     CheckConversion conversions[2] = { { 0 }, { 0 } };
+    // (The destination's own type is a pointer's: an array's lvalue converts to one as a value, and is no modifiable
+    // lvalue, which the action reports of `a++`.)
     bool taken = op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_SUBTRACT_ASSIGN && (standing_a & 0x03u) == CHECK_LVALUE &&
-                 (columns->value_types[a] & BUSTER_TYPE_QUALIFIERS) == 0 &&
+                 (columns->value_types[a] & BUSTER_TYPE_QUALIFIERS) == 0 && check_action_kind(types, columns->value_types[a]) == BUSTER_TYPE_KIND_POINTER &&
                  (flags_a & (BUSTER_CHECK_VECTOR_DUPLICATE | BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_VOLATILE_PART)) == 0 &&
                  node_machine_operand_value(machine, a, &pointer_operand, conversions) && check_action_kind(types, pointer_operand.type) == BUSTER_TYPE_KIND_POINTER &&
                  pointer_operand.constant_kind == CHECK_CONSTANT_NONE && node_machine_record_fault(machine, a) == CHECK_FAULT_NONE;
