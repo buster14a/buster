@@ -7548,18 +7548,25 @@ target's, its typedef spelled as clang does (`'F' (aka 'float')`). It follows
 the enumerations' carriers (`check_common_float_precision`, as
 `check_common_enum_cast`): initializations, brace initializers' parts
 (designated, nested, file scope), assignments, returns, a prototype's
-arguments, a conditional's arms (both, the true one first) and a root comma's
+arguments (not yet a prototyped builtin's, #3371), a conditional's arms (both, the true one first) and a root comma's
 result. A constant that converts exactly is exempt, as clang's
 `IsSameFloatAfterCast` decides: a folded value or a read of a const object
 whose initializer completed (`CheckInput.const_values`), whose significant bits
 fit the target's precision at its exponent and range (`check_float_fits`,
 subnormals too; a quiet NaN whose payload fits; never a signaling one); an
-assignment's or an increment's value is no constant. A compound assignment
-whose computation's type has a higher rank than its left operand's warns,
-whatever its value, "implicit conversion when assigning computation result
-loses floating-point precision", from the right operand's type to the left
-one's, at the right operand (`check_common_float_result_precision`, clang's
-`AnalyzeCompoundAssignment`). Both are plain Diags, published as the full
+assignment's or an increment's value is no constant, nor is a comma's whose
+right operand is one (the evaluator ignores a comma's left operand). A compound
+assignment whose computation's type has a higher rank than its left operand's
+warns, whatever its value, "implicit conversion when assigning computation
+result loses floating-point precision", from the computation's type (the right
+operand's own, sugar too, where it isn't converted) to the left one's, at the
+right operand (`check_common_float_result_precision`, clang's
+`AnalyzeCompoundAssignment`). The computation is clang's, not the checker's own
+(`check_common_float_computation`): the left operand unpromoted, the right one
+after its unary promotion (`__fp16` to `float`) and `#pragma clang fp
+eval_method`'s widening, by `getFloatingRank` (where `__fp16` ranks above
+`_Float16`), and an `__fp16` left operand against an integer as `float`; so
+`h *= f16` doesn't warn and `h += 1` warns "'float' to '__fp16'". Both are plain Diags, published as the full
 expression completes, in unreachable code and short-circuited operands too,
 but not in `sizeof`'s operand; an `_Atomic` target takes neither. Only a unit
 where the warning may report pays for its candidates
@@ -7574,11 +7581,13 @@ approximate expression ranges, and `-Wdouble-promotion`, its opposite (#3339);
 and static selections, is a floating literal its comparison doesn't convert and
 whose right one is a cast (an implicit conversion, an lvalue's read or an
 explicit cast), or else the other way round, warns where the cast's operand's
-real floating type can't hold the literal exactly: "floating-point comparison
+real floating type (an `_Atomic` one's value type) can't hold the literal exactly: "floating-point comparison
 is always false" for `==`, "true" for `!=`, "constant cannot be represented
 exactly in type 'float'", that type's canonical name, at the operator
 (`check_common_float_comparisons`). A sign, an integer operand, an ordering, a
-complex type or a literal converted to a wider type is none of these. It is a
+complex type or a literal converted to a wider type (by the other operand, or by
+`#pragma clang fp eval_method`, which the constant reader reads from its
+action's FP environment) is none of these. It is a
 plain Diag Sema gives as it builds the comparison, so it reports in
 unevaluated operands (`sizeof`, `typeof`, `_Generic`'s controlling
 expression) and unreachable code too. The constant reader's comparisons that

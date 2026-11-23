@@ -677,6 +677,15 @@ static TypeId check_float_element(const TypeTable* types, TypeId type, bool* com
     return floating ? element : 0;
 }
 
+// The type a value of the type `type` is read as (#1875): unqualified, past aligned typedefs, an _Atomic one's value type,
+// as clang's CheckFloatComparison sees an atomic operand past its read's AtomicToNonAtomic cast. 0 for 0.
+static TypeId check_float_value_type(const TypeTable* types, TypeId type)
+{
+    const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const bool atomic = bare != 0 && type_kind(types, bare) == BUSTER_TYPE_KIND_ATOMIC;
+    return atomic ? type_unqualified(type_strip_aligned(types, type_element(types, bare))) : bare;
+}
+
 // Whether a conversion from `source` to `target` loses floating-point precision (#1875, clang's
 // getFloatingTypeSemanticOrder above zero): both real floating, or both complex floating, the source's of a higher rank.
 static bool check_float_narrows(const TypeTable* types, TypeId source, TypeId target)
@@ -780,7 +789,7 @@ static bool check_constant_float_cast(const CheckConstantInput* input, const Che
     const Parser* parser = reader->parser;
     const TypeTable* types = reader->types;
     const uint32_t leaf = value != BUSTER_CHECK_NONE ? check_constant_enum_leaf(input, value) : BUSTER_CHECK_NONE;
-    const TypeId type = type_is_valid(types, operand->type) ? type_unqualified(type_strip_aligned(types, operand->type)) : 0;
+    const TypeId type = type_is_valid(types, operand->type) ? check_float_value_type(types, operand->type) : 0;
     const bool converted = type != 0 && type != literal;
     const bool cast = !converted && leaf >= input->first && leaf < input->end && parser->tree.roles[leaf] == PARSE_ROLE_CLOSE_CAST;
     uint32_t child = cast ? reader->first_child[leaf] : BUSTER_CHECK_NONE;
@@ -790,7 +799,7 @@ static bool check_constant_float_cast(const CheckConstantInput* input, const Che
     }
     const uint32_t inner = child != BUSTER_CHECK_NONE ? input->first_value[child - input->first] : BUSTER_CHECK_NONE;
     const TypeId cast_source = inner != BUSTER_CHECK_NONE && type_is_valid(types, input->values[inner - input->first].type) ?
-                               type_unqualified(type_strip_aligned(types, input->values[inner - input->first].type)) : 0;
+                               check_float_value_type(types, input->values[inner - input->first].type) : 0;
     *source = converted ? type : cast ? cast_source : type;
     return converted || (cast && cast_source != 0) || (type != 0 && operand->category == CHECK_LVALUE);
 }
@@ -810,6 +819,7 @@ static __attribute__((noinline)) void check_constant_float_compare(CheckConstant
     bool matched = false;
     TypeId source = 0;
     CheckFloatParts parts = { 0 };
+    const TypeId evaluation = check_action_fp_evaluation_type(action->context.fp_environment);
     for (uint32_t side = 0; side < 2 && !matched && values[1] != BUSTER_CHECK_NONE; side += 1)
     {
         const CheckValue* literal = action->operands + side;
@@ -818,9 +828,11 @@ static __attribute__((noinline)) void check_constant_float_compare(CheckConstant
         bool complex = false;
         const TypeId literal_type = type_is_valid(types, literal->type) ? check_float_element(types, literal->type, &complex) : 0;
         bool other_complex = false;
-        const TypeId other_type = type_is_valid(types, other->type) ? check_float_element(types, other->type, &other_complex) : 0;
-        // (Unconverted: the comparison's type is its own, which a wider floating or a complex operand would change.)
-        const bool unconverted = literal_type != 0 && !complex && !other_complex && (other_type == 0 || check_float_rank(other_type) <= check_float_rank(literal_type));
+        const TypeId other_type = type_is_valid(types, other->type) ? check_float_element(types, check_float_value_type(types, other->type), &other_complex) : 0;
+        // (Unconverted: the comparison's type is its own, which a wider floating or a complex operand would change, or the
+        // evaluation method's wider type, which `#pragma clang fp eval_method` gives both operands.)
+        const bool unconverted = literal_type != 0 && !complex && !other_complex && (other_type == 0 || check_float_rank(other_type) <= check_float_rank(literal_type)) &&
+                                 (evaluation == 0 || check_float_rank(evaluation) <= check_float_rank(literal_type));
         const bool written = unconverted && leaf < parser->tokens.count && parser->tokens.kinds[leaf] == PARSE_KIND_NUMBER &&
                              literal->constant_kind == CHECK_CONSTANT_FLOATING;
         matched = written && check_constant_float_cast(input, other, values[1 - side], type_unqualified(type_strip_aligned(types, literal->type)), &source);

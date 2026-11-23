@@ -252,6 +252,60 @@ static const char check_driver_float_everything_source[] =
     "    return compare(1.0, 2.0L, 3.0f) + (n > 0.0f);\n"
     "}\n";
 
+// Review cases (#3361): -Wliteral-range's _Atomic operands, read through their value type, in the graph and in the
+// constant reader; compound assignments' computation types, with the right operand after its own promotion and the
+// left one unpromoted (__fp16's against an integer as float), printed as converted (an __fp16 one with an __bf16 one is
+// left out: clang 23.1.4's backend can't lower it at -c); and commas whose right operand is an
+// assignment, which clang's evaluator doesn't fold, beside ones it does.
+static const char check_driver_float_review_source[] =
+    "_Atomic float af;\n"
+    "_Atomic double ad;\n"
+    "__fp16 gh;\n"
+    "int atomic_compare(void)\n"
+    "{\n"
+    "    _Atomic float *p = &af;\n"
+    "    return (af == 0.1) + ((double)af == 0.1) + (0.1 != af) + (af != 0.1f) + (*p == 0.1);\n"
+    "}\n"
+    "enum { ATOMIC_SIZE = sizeof(af == 0.1) };\n"
+    "float compound(float f, _Float16 g, __bf16 b)\n"
+    "{\n"
+    "    gh += 1;\n"
+    "    f += ad;\n"
+    "    gh *= g;\n"
+    "    gh /= gh;\n"
+    "    g += gh;\n"
+    "    b *= gh;\n"
+    "    return f + g + b;\n"
+    "}\n"
+    "float commas(double d, int i, float f)\n"
+    "{\n"
+    "    f = (i, (i, d = 0.5));\n"
+    "    f = i ? (0, d = 0.5) : 0.5;\n"
+    "    f = (i, 0.5);\n"
+    "    f = (0, (i, 0.25));\n"
+    "    return f;\n"
+    "}\n";
+
+// `#pragma clang fp eval_method(extended)` converts a double or float literal to long double, so only a long double one
+// is still a literal to CheckFloatComparison: in the constant reader and in a body.
+static const char check_driver_float_eval_extended_source[] =
+    "#pragma clang fp eval_method(extended)\n"
+    "float x;\n"
+    "enum E { X = 0.1 != 0.1f, Y = 0.5 == 0.1f, Z = sizeof(x == 0.1L) };\n"
+    "int f(void) { return (x == 0.1) + (x != 0.1L); }\n";
+
+// `#pragma clang fp eval_method(double)` widens a compound assignment's right operand, not its left one.
+static const char check_driver_float_eval_double_source[] =
+    "#pragma clang fp eval_method(double)\n"
+    "float f(float a, float b, __fp16 *h, double d)\n"
+    "{\n"
+    "    a += b;\n"
+    "    a *= 2.0f;\n"
+    "    *h += a;\n"
+    "    d += a;\n"
+    "    return a + d;\n"
+    "}\n";
+
 // One of each, for promotion to errors below the error limit.
 static const char check_driver_float_small_source[] =
     "float small(double d, float f)\n"
@@ -365,6 +419,28 @@ static const CheckDriverDefaultWarningFixture check_driver_float_precision_fixtu
         .source = check_driver_float_everything_source,
         .options = { "-Weverything" },
         .warnings = 7,
+    },
+    {
+        .name = "floating review cases, by default",
+        .source = check_driver_float_review_source,
+        .warnings = 11,
+    },
+    {
+        .name = "floating review cases under -Wimplicit-float-conversion",
+        .source = check_driver_float_review_source,
+        .options = { "-Wimplicit-float-conversion" },
+        .warnings = 18,
+    },
+    {
+        .name = "floating comparisons under eval_method(extended)",
+        .source = check_driver_float_eval_extended_source,
+        .warnings = 2,
+    },
+    {
+        .name = "floating compound assignments under eval_method(double) and -Wimplicit-float-conversion",
+        .source = check_driver_float_eval_double_source,
+        .options = { "-Wimplicit-float-conversion" },
+        .warnings = 4,
     },
 };
 

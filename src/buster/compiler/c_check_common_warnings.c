@@ -3172,10 +3172,17 @@ static bool check_common_float_constant_fits(const TypeTable* types, const Check
 
 // The constant value clang's EvaluateAsRValue finds for the leaf `leaf` (#1875), into `value`: a constant the stream holds
 // (not an assignment's or an increment's, whose stored value is none to clang's evaluator), or a read of a const
-// non-volatile object whose completed initializer gives a floating value (CheckInput.const_values).
-static bool check_common_float_constant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t leaf, CheckValue* value)
+// non-volatile object whose completed initializer gives a floating value (CheckInput.const_values). A comma's is its
+// right operand's, past nested commas: the evaluator ignores its left operand's value and side effects, but an
+// assignment on its right fails it, as alone.
+static bool check_common_float_constant(const CheckInput* input, const CheckStream* stream, const TypeTable* types, uint32_t comma, CheckValue* value)
 {
     const CheckGraph* graph = &input->graph;
+    uint32_t leaf = comma;
+    for (uint32_t steps = 0; graph->ops[leaf] == CHECK_OP_COMMA && graph->operand1[leaf] < graph->count && steps < graph->count; steps += 1)
+    {
+        leaf = check_common_enum_cast_unselected(graph, graph->operand1[leaf]);
+    }
     const CheckOp op = graph->ops[leaf];
     const bool written = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
     const CheckValue own = check_stream_value(stream, leaf);
@@ -3281,10 +3288,45 @@ static __attribute__((noinline)) void check_common_float_precision(const Parser*
     }
 }
 
-// -Wimplicit-float-conversion's compound assignment (#1875, clang's AnalyzeCompoundAssignment): its computation's type, of a
-// higher floating rank than its left operand's, stored back, whatever its right operand's value: "implicit conversion
-// when assigning computation result loses floating-point precision", from the right operand's type to the left one's, at
-// the right operand, DiagnoseImpCast's expression (its context the operator).
+// Clang's getFloatingRank (#1875): __bf16, _Float16, __fp16, float, double, long double, __float128, where __fp16 ranks
+// above _Float16 (check_float_rank's semantic order has them equal); -1 for any other type.
+static int32_t check_common_float_conversion_rank(TypeId type)
+{
+    const int32_t result = type == BUSTER_TYPE_BF16 ? 0 : type == BUSTER_TYPE_FLOAT16 ? 1 : type == BUSTER_TYPE_HALF ? 2 : type == BUSTER_TYPE_FLOAT ? 3 :
+                           type == BUSTER_TYPE_DOUBLE ? 4 : type == BUSTER_TYPE_LONG_DOUBLE ? 5 : type == BUSTER_TYPE_FLOAT128 ? 6 : -1;
+    return result;
+}
+
+// The computation type clang gives the compound assignment `node` whose left operand's type is the real floating `left`
+// (#1875, UsualArithmeticConversions with ACK_CompAssign, handleFloatConversion): the left operand unpromoted, the right
+// one after its unary promotion (__fp16 to float) and the evaluation method's, which `#pragma clang fp eval_method` gives
+// it alone; two real floating types to the higher getFloatingRank, an integer to the left type (an __fp16 one's as
+// float). The checker's own computation promotes the left operand too, and the stream keeps only the right operand's
+// final conversion, to that computation: a right operand converted wider than its promotion and than the promoted left
+// operand was the evaluation method's. 0 for a complex right operand.
+static TypeId check_common_float_computation(const TypeTable* types, const CheckStream* stream, const CheckGraph* graph, uint32_t node, TypeId left)
+{
+    const uint32_t right = graph->operand1[node];
+    const TypeId own = right < graph->count ? check_float_value_type(types, check_stream_type(stream, right)) : 0;
+    const TypeId promoted = own == BUSTER_TYPE_HALF ? BUSTER_TYPE_FLOAT : own;
+    const TypeId final = stream->conversions[node].operands[1].type != 0 ? check_float_value_type(types, stream->conversions[node].operands[1].type) : promoted;
+    const TypeId left_promoted = left == BUSTER_TYPE_HALF ? BUSTER_TYPE_FLOAT : left;
+    const int32_t promoted_rank = check_common_float_conversion_rank(promoted);
+    const int32_t final_rank = check_common_float_conversion_rank(final);
+    const bool evaluated = promoted_rank >= 0 && final_rank > promoted_rank && final_rank > check_common_float_conversion_rank(left_promoted);
+    const TypeId operand = evaluated ? final : promoted;
+    const int32_t operand_rank = check_common_float_conversion_rank(operand);
+    const bool complex = operand != 0 && type_kind(types, operand) == BUSTER_TYPE_KIND_COMPLEX;
+    const TypeId result = operand_rank >= 0 ? (operand_rank > check_common_float_conversion_rank(left) ? operand : left) :
+                          operand != 0 && !complex ? left_promoted : 0;
+    return result;
+}
+
+// -Wimplicit-float-conversion's compound assignment (#1875, clang's AnalyzeCompoundAssignment): its computation's type
+// (check_common_float_computation), of a higher floating rank than its left operand's, stored back, whatever its right
+// operand's value: "implicit conversion when assigning computation result loses floating-point precision", from the
+// right operand's type as converted to the computation's (its own, sugar too, where it is the computation's) to the left
+// one's, at the right operand, DiagnoseImpCast's expression (its context the operator).
 static void check_common_float_result_precision(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, TypeTable* types,
                                                 CheckWarningSpelling* spell, uint32_t node, const uint32_t* parents, uint32_t at_once, Arena* scratch)
 {
@@ -3292,17 +3334,16 @@ static void check_common_float_result_precision(const Parser* parser, Preprocess
     const uint32_t left = graph->operand0[node];
     const uint32_t right = graph->operand1[node];
     const TypeId left_type = left < graph->count ? check_stream_type(stream, left) : 0;
-    const TypeId computation = stream->conversions[node].operands[0].type != 0 ? stream->conversions[node].operands[0].type : left_type;
     bool left_complex = false;
-    bool computation_complex = false;
-    const bool real = left_type != 0 && check_float_element(types, left_type, &left_complex) != 0 && !left_complex &&
-                      check_float_element(types, computation, &computation_complex) != 0 && !computation_complex;
-    if (real && right < graph->count && check_float_narrows(types, computation, left_type) &&
-        check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION, true))
+    const TypeId left_element = left_type != 0 ? check_float_element(types, left_type, &left_complex) : 0;
+    const bool real = left_element != 0 && !left_complex && right < graph->count;
+    const TypeId computation = real ? check_common_float_computation(types, stream, graph, node, left_element) : 0;
+    if (computation != 0 && check_float_narrows(types, computation, left_type) && check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION, true))
     {
         const TypeId right_type = type_unqualified(check_stream_type(stream, right));
-        const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, right_type,
-                                                              check_common_operand_spelling(parser, input, graph, stream, types, right));
+        const bool own = check_float_value_type(types, right_type) == computation && type_kind(types, type_strip_aligned(types, right_type)) != BUSTER_TYPE_KIND_ATOMIC;
+        const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, own ? right_type : computation,
+                                                              own ? check_common_operand_spelling(parser, input, graph, stream, types, right) : 0);
         const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, left_type,
                                                               check_common_operand_spelling(parser, input, graph, stream, types, left));
         if (source_name.length != 0 && target_name.length != 0)
@@ -6777,8 +6818,9 @@ static bool check_common_float_cast_side(const CheckGraph* graph, const CheckStr
     const uint32_t node = operand < graph->count ? check_common_enum_cast_unselected(graph, operand) : BUSTER_CHECK_NONE;
     const bool implicit = node < graph->count && stream->conversions[comparison].operands[side].flags != 0;
     const bool explicit = node < graph->count && !implicit && graph->ops[node] == CHECK_OP_CAST && graph->operand0[node] < graph->count;
-    *source = implicit ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, node))) :
-              explicit ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, graph->operand0[node]))) : 0;
+    // (An _Atomic operand's read is an AtomicToNonAtomic cast to its value type, check_float_value_type.)
+    *source = implicit ? check_float_value_type(types, check_stream_type(stream, node)) :
+              explicit ? check_float_value_type(types, check_stream_type(stream, graph->operand0[node])) : 0;
     return implicit || explicit;
 }
 
