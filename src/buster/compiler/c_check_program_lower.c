@@ -3696,7 +3696,7 @@ static bool check_lower_copy_forward_volatile(CheckLowerWriter* writer, uint32_t
             else if (op == CHECK_OP_CONDITIONAL)
             {
                 bool truth = false;
-                if (check_program_runtime_truth(program, at, graph->operand0[at], &truth))
+                if (check_program_emission_truth(program, at, graph->operand0[at], &truth))
                 {
                     next = truth ? graph->operand1[at] : graph->operand2[at];
                 }
@@ -12517,7 +12517,7 @@ static bool check_lower_branch_operator(const CheckProgram* program, uint32_t no
                               (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
         bool truth = false;
         result = !constant && value.category == CHECK_RVALUE && (op == CHECK_OP_CONDITION || type_unqualified(value.type) == BUSTER_TYPE_INT) &&
-                 (!logical || !check_program_runtime_truth(program, node, graph->operand0[node], &truth));
+                 (!logical || !check_program_emission_truth(program, node, graph->operand0[node], &truth));
     }
     return result;
 }
@@ -12632,7 +12632,7 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
 {
     const bool reuse = op == CHECK_OP_CONDITIONAL && a == b;
     bool truth = false;
-    const bool known = check_program_runtime_truth(program, node, a, &truth);
+    const CheckEmissionTruth known = check_program_emission_truth(program, node, a, &truth);
     const bool conditional = op == CHECK_OP_CONDITIONAL;
     const bool decided = known && !conditional && (op == CHECK_OP_LOGICAL_OR) == truth;
     // Whether the task under this node's EXPRESSION is its consumer's conversion (check_lower_convert_operand's, tagged
@@ -12660,7 +12660,7 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
             check_lower_truth(writer, type_b, false);
             check_lower_operand(writer, node, 1, false, type_b);
         }
-        if ((!reuse || !truth) && check_program_runtime_effects(program, a))
+        if (known == CHECK_EMISSION_CHECKED && (!reuse || !truth) && check_program_runtime_effects(program, a))
         {
             check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
         }
