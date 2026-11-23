@@ -1183,7 +1183,7 @@ lanes' copies and the merge, 15 to 18% of a generated unit and 20 to 50% of
 the real ones measured, on the 9700X. The decision is made with the rule's, before the
 top level's walk, so such a unit takes no lanes.
 
-[The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/deferred-dominant-1668-2026-11-23)
+[The record](https://github.com/buster14a/buster-performance/tree/6bbb66e5ebc6cf0dd26b193b93f3315a86ac9377/docs/measurements/deferred-dominant-1668-2026-11-23)
 measures, at main `a891cc05`, `benchmark-checker-deferred`'s readings by the
 rule on 8 permitted lanes in four processes each, against source order in
 the same process. Fifteen of its generated units (`gen2.c`'s, one or two
@@ -1205,6 +1205,16 @@ it; `sqlite3.c` keeps its 8 lanes. Above half the excess doesn't tell the
 units apart: three read slower apart, among them Lua's interpreter, the only
 real unit besides `sqlite3.c` that reaches four lanes, whose one-lane reading
 costs 46% more than source order.
+
+End to end, `-c -w --deferred-bodies` by `time-runs`, unpinned, two rounds of 11
+runs: of the 21 units, the gate reads the 10 that main reads apart below half
+5.8 to 11.1% faster in wall time and 23 to 32% in CPU time, and changes the
+others by no more than 2.2% in wall time either way. On main, the driver's
+`--deferred-bodies` reads each of the 20 it takes apart (all but
+`d32x5f384s192`, which the rule gives 3 lanes) slower in wall time than source
+order but `d24x38f768s288` in one round, with 30 to 56% more CPU time:
+`onelua.c` by 6.8% and `sqlite3.c` by 2.4%, which "The post-merge
+measurements" in [function-lanes.md](function-lanes.md) had 2.37% faster.
 
 ### The walk's estimate, again (#1667)
 
