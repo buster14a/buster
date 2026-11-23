@@ -2801,7 +2801,7 @@ What the lowering covers past scalars (#145's programs):
   code passes it: its registers from the member, and where none is left a stack
   slot of the union's size and alignment (`getIndirectResult`;
   `abi_finish_transparent` records the union in the ABI table's `transparent`
-  column, which `abi_assign`'s vector path and `abi_assign_call` read), and `va_arg` reads
+  column, which `abi_assign`'s prefix sums and per-call kernel read), and `va_arg` reads
   the member from a slot of the union's size and alignment. Since #1844 the
   member may be an aggregate, of eightbytes or in memory, and the union of any
   size. An aggregate in memory passes as clang's `getIndirectResult` of the
