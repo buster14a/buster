@@ -1275,9 +1275,11 @@ static LinkField link_instruction_field(const X86Instruction* instruction, const
     const uint8_t mode = instruction->mode;
     const bool has_modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT) != 0;
     const bool memory = has_modrm && (form->rm & BUSTER_X86_OPERAND_MEMORY) != 0 && (mode & BUSTER_X86_MODE_MEMORY) != 0;
-    const int32_t scale = form->disp8_scale;
-    const int32_t scaled = instruction->displacement / scale;
-    const bool short_displacement = instruction->displacement % scale == 0 && scaled >= -128 && scaled <= 127;
+    // (The division only where a displacement after a base reads it: most references are branches and RIP-relative ones.)
+    const bool based = field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 0 && memory && (mode & BUSTER_X86_MODE_RIP) == 0 && (mode & BUSTER_X86_MODE_BASE) != 0;
+    const int32_t scale = based ? form->disp8_scale : 1;
+    const int32_t scaled = based ? instruction->displacement / scale : 0;
+    const bool short_displacement = based && instruction->displacement % scale == 0 && scaled >= -128 && scaled <= 127;
     LinkField result = LINK_FIELD_NONE;
     if (field == X86_FIXUP_DISPLACEMENT && form->relative_bytes == 4)
     {
@@ -1330,6 +1332,9 @@ static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, cons
     return result;
 }
 
+// Scalar, a reference at a time: a version of eight references a batch (their instructions, forms' descriptions, kinds
+// and ends gathered, ten gathers a batch) took 69 microseconds more on the 9700X over sqlite3.c's 22,406 references in
+// 2,602 bodies (#3393): Zen 5 issues gathers slowly, and a body's 8.6 references on average make short batches.
 static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* instructions, uint64_t instruction_count, const uint32_t* fixup_ends,
                                  uint64_t marked, const LinkReference* references, uint64_t reference_count)
 {
