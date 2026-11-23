@@ -39,7 +39,7 @@ static uint64_t tier1_vex_test_random(uint64_t* state)
 }
 
 // Runs `record` on `state` natively: loads, the record, stores. False where it doesn't encode or map.
-static bool tier1_vex_test_run(X86Instruction record, Tier1VexTestState* state)
+static __attribute__((no_sanitize("function"))) bool tier1_vex_test_run(X86Instruction record, Tier1VexTestState* state)
 {
     X86Instruction records[64];
     uint32_t count = 0;
