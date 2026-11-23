@@ -1171,17 +1171,15 @@ static void ir_optimize_test_entry_phi(IrOptimizeTest* test, Arena* input, Arena
         ir_optimize_test_expect(test, verified.error == IR_ERROR_PHI && verified.instruction == 0, "shared IR rejects phi with unreachable entry predecessor");
         for (uint32_t passes = 0; passes < 32; passes += 1)
         {
-            {
-                const uint64_t om = output->length;
-                const uint64_t sm = scratch->length;
-                IrOptimizeOptions options = ir_optimize_options();
-                options.passes = passes;
-                IrOptimizeResult result = { .folded = 139 };
-                const IrOptimizeResult saved = result;
-                const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
-                ir_optimize_test_expect(test, check.error == IR_ERROR_PHI && check.instruction == 0 && output->length == om && scratch->length == sm && memcmp(&result, &saved, sizeof(result)) == 0, "entry phi explicitly refused without output mutation for every pass mask");
-                ir_optimize_test_expect(test, f.op[0] == IR_PHI && f.b[0] == 1 && f.extra[0] == 1 && f.extra[1] == 2, "entry phi input remains intact");
-            }
+            const uint64_t om = output->length;
+            const uint64_t sm = scratch->length;
+            IrOptimizeOptions options = ir_optimize_options();
+            options.passes = passes;
+            IrOptimizeResult result = { .folded = 139 };
+            const IrOptimizeResult saved = result;
+            const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
+            ir_optimize_test_expect(test, check.error == IR_ERROR_PHI && check.instruction == 0 && output->length == om && scratch->length == sm && memcmp(&result, &saved, sizeof(result)) == 0, "entry phi explicitly refused without output mutation for every pass mask");
+            ir_optimize_test_expect(test, f.op[0] == IR_PHI && f.b[0] == 1 && f.extra[0] == 1 && f.extra[1] == 2, "entry phi input remains intact");
         }
     }
     arena_pop_to(input, 0);
@@ -1533,6 +1531,37 @@ static uint32_t ir_optimize_test_identities_left(const IrFunction* f)
 // their shapes: with it, the thirteen identities are gone and their users read their operands (the call's argument and
 // the phi's input from b0 are the first parameter itself, the extension's the second), and the subtraction from zero, the
 // shift by three and the and with one stay; without it, all thirteen are still there.
+// An identity at each place of a 64-instruction batch of candidates: a chain of additions of a parameter whose link
+// `at` adds a zero instead, which the identities forward and dead-code removal then drops with the zero.
+static void ir_optimize_test_identity_places(IrOptimizeTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    for (uint32_t at = 2; at < 66; at += 1)
+    {
+        static char text[8192];
+        int length = snprintf(text, sizeof(text), "function (i64) -> i64 {\nb0:\n  %%0 = param.i64 0\n  %%1 = const.i64 0x00000000000000000000000000000000\n");
+        for (uint32_t k = 2; k < 67 && length > 0 && (size_t)length < sizeof(text); k += 1)
+        {
+            length += snprintf(text + length, sizeof(text) - (size_t)length, "  %%%u = add.i64 %%%u, %%%u\n", k, k - 1 == 1 ? 0 : k - 1, k == at ? 1 : 0);
+        }
+        length += snprintf(text + length, sizeof(text) - (size_t)length, "  %%67 = ret.void %%66\n}\n");
+        const uint64_t input_mark = input->length;
+        const uint64_t output_mark = output->length;
+        IrFunction f = { 0 };
+        const IrParseResult parsed = ir_parse((String8){ .pointer = text, .length = (uint64_t)length }, input, scratch, &f);
+        bool ok = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+        if (ok)
+        {
+            IrOptimizeOptions options = ir_optimize_options();
+            options.passes |= BUSTER_IR_OPTIMIZE_IDENTITY;
+            IrOptimizeResult result = { 0 };
+            ok = ir_optimize(&f, output, scratch, options, &result).error == IR_OK && result.function.instruction_count == f.instruction_count - 2;
+        }
+        ir_optimize_test_expect(test, ok, "an identity at every place of a candidates' batch is forwarded");
+        arena_pop_to(output, output_mark);
+        arena_pop_to(input, input_mark);
+    }
+}
+
 static void ir_optimize_test_identities(IrOptimizeTest* test, Arena* input, Arena* vector, Arena* scalar, Arena* scratch)
 {
     IrFunction f = { 0 };
@@ -1545,45 +1574,43 @@ static void ir_optimize_test_identities(IrOptimizeTest* test, Arena* input, Aren
     }
     for (uint32_t identity = 0; created && identity < 2; identity += 1)
     {
+        const uint64_t mark = vector->length;
+        IrOptimizeOptions options = ir_optimize_options();
+        options.passes |= identity != 0 ? BUSTER_IR_OPTIMIZE_IDENTITY : 0;
+        IrOptimizeResult result = { 0 };
+        const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
+        const IrFunction* out = &result.function;
+        bool expected = check.error == IR_OK;
+        if (expected && identity != 0)
         {
-            const uint64_t mark = vector->length;
-            IrOptimizeOptions options = ir_optimize_options();
-            options.passes |= identity != 0 ? BUSTER_IR_OPTIMIZE_IDENTITY : 0;
-            IrOptimizeResult result = { 0 };
-            const IrCheck check = ir_optimize(&f, vector, scratch, options, &result);
-            const IrFunction* out = &result.function;
-            bool expected = check.error == IR_OK;
-            if (expected && identity != 0)
+            uint32_t parameters[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
+            uint32_t call = BUSTER_IR_NONE;
+            uint32_t phi = BUSTER_IR_NONE;
+            uint32_t extension = BUSTER_IR_NONE;
+            uint32_t counts[IR_OP_COUNT] = { 0 };
+            for (uint32_t i = 0; i < out->instruction_count; i += 1)
             {
-                uint32_t parameters[2] = { BUSTER_IR_NONE, BUSTER_IR_NONE };
-                uint32_t call = BUSTER_IR_NONE;
-                uint32_t phi = BUSTER_IR_NONE;
-                uint32_t extension = BUSTER_IR_NONE;
-                uint32_t counts[IR_OP_COUNT] = { 0 };
-                for (uint32_t i = 0; i < out->instruction_count; i += 1)
+                if (out->op[i] == IR_PARAM && out->a[i] < 2)
                 {
-                    if (out->op[i] == IR_PARAM && out->a[i] < 2)
-                    {
-                        parameters[out->a[i]] = i;
-                    }
-                    call = out->op[i] == IR_CALL ? i : call;
-                    phi = out->op[i] == IR_PHI ? i : phi;
-                    extension = out->op[i] == IR_ZEXT ? i : extension;
-                    counts[out->op[i]] += 1;
+                    parameters[out->a[i]] = i;
                 }
-                expected = ir_optimize_test_identities_left(out) == 0 && counts[IR_SHL] == 1 && counts[IR_LSHR] == 0 && counts[IR_ASHR] == 0 && counts[IR_SUB] == 1 && counts[IR_MUL] == 0 &&
-                           counts[IR_UDIV] == 0 && counts[IR_SDIV] == 0 && counts[IR_AND] == 1 && counts[IR_OR] == 0 && counts[IR_XOR] == 0 && parameters[0] != BUSTER_IR_NONE &&
-                           parameters[1] != BUSTER_IR_NONE && call != BUSTER_IR_NONE && phi != BUSTER_IR_NONE && extension != BUSTER_IR_NONE &&
-                           out->extra[out->calls[out->b[call]].argument_first] == parameters[0] && out->a[extension] == parameters[1] && out->b[phi] == 2 &&
-                           (out->extra[out->a[phi] + 1] == parameters[0] || out->extra[out->a[phi] + 3] == parameters[0]);
+                call = out->op[i] == IR_CALL ? i : call;
+                phi = out->op[i] == IR_PHI ? i : phi;
+                extension = out->op[i] == IR_ZEXT ? i : extension;
+                counts[out->op[i]] += 1;
             }
-            else if (expected)
-            {
-                expected = ir_optimize_test_identities_left(out) == 13;
-            }
-            ir_optimize_test_expect(test, expected, identity != 0 ? "identities forward their operands to calls, extensions, additions and phis" : "identities stay without the option");
-            arena_pop_to(vector, mark);
+            expected = ir_optimize_test_identities_left(out) == 0 && counts[IR_SHL] == 1 && counts[IR_LSHR] == 0 && counts[IR_ASHR] == 0 && counts[IR_SUB] == 1 && counts[IR_MUL] == 0 &&
+                       counts[IR_UDIV] == 0 && counts[IR_SDIV] == 0 && counts[IR_AND] == 1 && counts[IR_OR] == 0 && counts[IR_XOR] == 0 && parameters[0] != BUSTER_IR_NONE &&
+                       parameters[1] != BUSTER_IR_NONE && call != BUSTER_IR_NONE && phi != BUSTER_IR_NONE && extension != BUSTER_IR_NONE &&
+                       out->extra[out->calls[out->b[call]].argument_first] == parameters[0] && out->a[extension] == parameters[1] && out->b[phi] == 2 &&
+                       (out->extra[out->a[phi] + 1] == parameters[0] || out->extra[out->a[phi] + 3] == parameters[0]);
         }
+        else if (expected)
+        {
+            expected = ir_optimize_test_identities_left(out) == 13;
+        }
+        ir_optimize_test_expect(test, expected, identity != 0 ? "identities forward their operands to calls, extensions, additions and phis" : "identities stay without the option");
+        arena_pop_to(vector, mark);
     }
     arena_pop_to(input, 0);
 }
@@ -1974,6 +2001,7 @@ static void ir_optimize_test_ir(IrOptimizeTest* test)
         ir_optimize_test_threading(test, &scratch);
         ir_optimize_test_records(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_identities(test, &input, &vector, &scalar, &scratch);
+        ir_optimize_test_identity_places(test, &input, &vector, &scratch);
         ir_optimize_test_vector_compares(test, &input, &vector, &scratch);
         ir_optimize_test_debug_bindings(test, &input, &vector, &scalar, &scratch);
         ir_optimize_test_debug_blocks(test, &input, &vector, &scalar, &scratch);
