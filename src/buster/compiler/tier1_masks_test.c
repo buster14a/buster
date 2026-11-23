@@ -2580,30 +2580,27 @@ static bool tier1_masks_test_typed_pipeline(Tier1MasksTest* test, const char* na
             printf("test-tier1-masks: %s, function %u: lowering error %u at %u\n", name, f, (unsigned)checks[f].error, checks[f].instruction);
         }
     }
-    // The IR's interpreter on each stage: all in memory, promoted by each path, optimized.
-    IrFunction promoted[2][2];
+    // The IR's interpreter on each stage: all in memory, promoted, optimized.
+    IrFunction promoted[2];
     IrFunction optimized[2];
-    const IrFunction* stages[4] = { lowered, promoted[0], promoted[1], optimized };
-    for (uint32_t path = 0; ok && path < 2; path += 1)
+    const IrFunction* stages[3] = { lowered, promoted, optimized };
+    for (uint32_t f = 0; ok && f < 2; f += 1)
     {
-        for (uint32_t f = 0; ok && f < 2; f += 1)
+        const IrCheck check = ssa_ir_promote(&lowered[f], &arenas[0], &test->scratch, &promoted[f]);
+        ok = tier1_masks_test_expect(test, check.error == IR_OK, "SSA promotion takes the typed program's masks");
+        if (!ok)
         {
-            const IrCheck check = path == 0 ? ssa_ir_promote(&lowered[f], &arenas[0], &test->scratch, &promoted[path][f]) : ssa_ir_promote_scalar(&lowered[f], &arenas[0], &test->scratch, &promoted[path][f]);
-            ok = tier1_masks_test_expect(test, check.error == IR_OK, "both SSA paths promote the typed program's masks");
-            if (!ok)
-            {
-                printf("test-tier1-masks: %s, function %u, %s promotion: error %u at %u\n", name, f, path == 0 ? "vector" : "scalar", (unsigned)check.error, check.instruction);
-            }
+            printf("test-tier1-masks: %s, function %u, promotion: error %u at %u\n", name, f, (unsigned)check.error, check.instruction);
         }
     }
     for (uint32_t f = 0; ok && f < 2; f += 1)
     {
         IrOptimizeResult result;
-        const IrCheck check = ir_optimize(&promoted[0][f], &arenas[1], &test->scratch, ir_optimize_options(), &result);
+        const IrCheck check = ir_optimize(&promoted[f], &arenas[1], &test->scratch, ir_optimize_options(), &result);
         ok = tier1_masks_test_expect(test, check.error == IR_OK, "SCCP, dead code and CFG cleanup take the typed program's masks");
         optimized[f] = result.function;
     }
-    for (uint32_t stage = 0; ok && stage < 4; stage += 1)
+    for (uint32_t stage = 0; ok && stage < BUSTER_ARRAY_LENGTH(stages); stage += 1)
     {
         // A machine row's program: the interpreter refuses it, on the first input.
         for (uint32_t input = 0; ok && input < (*machine ? 1 : BUSTER_TIER1_MASKS_TEST_TYPED_INPUTS); input += 1)

@@ -20,13 +20,11 @@ _Static_assert(IR_V4I32 == BUSTER_SSA_TYPE_V4I32 && IR_V8I32 == BUSTER_SSA_TYPE_
                "SSA and IR vector and mask types must agree, the aggregate past them");
 
 static __attribute__((unused)) IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
-static __attribute__((unused)) IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
-// The vector path's promotion (or the scalar twin's, without `vector`) with ssa.c's verifier run on the core's view of
-// the function and its result before the IR is built (#134's tests): every use dominated by its definition, a phi
-// operand per predecessor, no trivial phi, and its reaching-definition equations. `*verified` is its check, whose rule
-// names what failed (SSA_OK with no rule if the promotion failed before it), and a failure fails the promotion as
-// IR_ERROR_PHI (or as the memory's).
-static __attribute__((unused)) IrCheck ssa_ir_promote_verified(const IrFunction* input, bool vector, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified);
+// Promotion with ssa.c's verifier run on the core's view of the function and its result before the IR is built (#134's
+// tests): every use dominated by its definition, a phi operand per predecessor, no trivial phi, and its
+// reaching-definition equations. `*verified` is its check, whose rule names what failed (SSA_OK with no rule if the
+// promotion failed before it), and a failure fails the promotion as IR_ERROR_PHI (or as the memory's).
+static __attribute__((unused)) IrCheck ssa_ir_promote_verified(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified);
 
 typedef struct SsaIrWork SsaIrWork;
 struct SsaIrWork
@@ -893,11 +891,8 @@ static IrError ssa_ir_debug_regions(SsaIrWork* work, IrFunction* output)
 
 // `input_verified`: the caller's input is a function a full verification has passed since its last change (the
 // lowering's or GVN's result, #1379), whose verification promotion then doesn't repeat; every other caller's is verified.
-static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, bool vector, SsaCheck* verified,
-                                   bool input_verified)
+static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified, bool input_verified)
 {
-    (void)vector;
-    const bool rename_vector = BUSTER_VECTOR_PATH(vector);
     SsaIrCrossUses uses = { 0 };
     bool dense = false;
     const uint64_t output_length = output == 0 ? 0 : output->length;
@@ -936,13 +931,11 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        // Bound the complete dense workspace; above that cap use the bounded predecessor reader. The dense vector
-        // constructor takes every size below it (#2924), so `vector` picks only between it and its twin.
+        // Bound the complete dense workspace; above that cap use the bounded predecessor reader.
         dense = !BUSTER_TIER1_PRIVATE_VALUES && ssa_dense_fits(&work.source);
-        vector = dense && BUSTER_VECTOR_PATH(vector);
         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
-        check.error = ssa_ir_error(ssa_prepare_path(&work.work, &work.source, scratch, BUSTER_VECTOR_PATH(vector), dense));
+        check.error = ssa_ir_error(ssa_prepare_path(&work.work, &work.source, scratch, dense));
     }
     if (check.error == IR_OK)
     {
@@ -951,24 +944,16 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     if (check.error == IR_OK)
     {
         ssa_ir_accesses(&work);
-        if (dense && !BUSTER_VECTOR_PATH(vector))
-        {
-            check.error = ssa_ir_error(ssa_definitions(&work.work));
-        }
     }
     if (check.error == IR_OK)
     {
         if (BUSTER_TIER1_PRIVATE_VALUES)
         {
-            check.error = ssa_ir_error(ssa_ir_construct_frontier(&work.work, rename_vector));
-        }
-        else if (dense)
-        {
-            check.error = ssa_ir_error(BUSTER_VECTOR_PATH(vector) ? ssa_construct_dense(&work.work) : ssa_construct_scalar(&work.work));
+            check.error = ssa_ir_error(ssa_ir_construct_frontier(&work.work));
         }
         else
         {
-            check.error = ssa_ir_error(ssa_construct_bounded(&work.work, rename_vector));
+            check.error = ssa_ir_error(dense ? ssa_construct_dense(&work.work) : ssa_construct_bounded(&work.work));
         }
     }
     if (check.error == IR_OK)
@@ -1076,26 +1061,19 @@ static __attribute__((unused)) uint32_t ssa_ir_phis(const IrFunction* f, uint32_
     return phis;
 }
 
-static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result);
-
 static IrCheck ssa_ir_promote(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ssa_ir_promote_path(input, output, scratch, result, true, 0, false);
+    return ssa_ir_promote_path(input, output, scratch, result, 0, false);
 }
 
-static IrCheck ssa_ir_promote_scalar(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
+// ssa_ir_promote's, of a function a full verification has passed since its last change (#1379).
+static __attribute__((unused)) IrCheck ssa_ir_promote_verified_input(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
 {
-    return ssa_ir_promote_path(input, output, scratch, result, false, 0, false);
+    return ssa_ir_promote_path(input, output, scratch, result, 0, true);
 }
 
-// ssa_ir_promote's or its scalar twin's, of a function a full verification has passed since its last change (#1379).
-static __attribute__((unused)) IrCheck ssa_ir_promote_verified_input(const IrFunction* input, bool vector, Arena* output, Arena* scratch, IrFunction* result)
-{
-    return ssa_ir_promote_path(input, output, scratch, result, BUSTER_VECTOR_PATH(vector), 0, true);
-}
-
-static IrCheck ssa_ir_promote_verified(const IrFunction* input, bool vector, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified)
+static IrCheck ssa_ir_promote_verified(const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified)
 {
     *verified = (SsaCheck){ .error = SSA_OK, .instruction = BUSTER_SSA_NONE };
-    return ssa_ir_promote_path(input, output, scratch, result, BUSTER_VECTOR_PATH(vector), verified, false);
+    return ssa_ir_promote_path(input, output, scratch, result, verified, false);
 }

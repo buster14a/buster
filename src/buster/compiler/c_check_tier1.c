@@ -537,7 +537,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         IrCheck check = ir_check(IR_ERROR_UNSUPPORTED, BUSTER_IR_NONE, 0);
         if (moved)
         {
-            check = scalar ? ssa_ir_promote_scalar(&motion.function, promotion, scratch, &promoted) : ssa_ir_promote(&motion.function, promotion, scratch, &promoted);
+            check = ssa_ir_promote(&motion.function, promotion, scratch, &promoted);
             moved = check.error == IR_OK;
             if (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT)
             {
@@ -546,9 +546,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         }
         if (!moved && (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT))
         {
-            check = numbered || input->verified ? ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted) :
-                    scalar                      ? ssa_ir_promote_scalar(unssa, promotion, scratch, &promoted) :
-                                                  ssa_ir_promote(unssa, promotion, scratch, &promoted);
+            check = numbered || input->verified ? ssa_ir_promote_verified_input(unssa, promotion, scratch, &promoted) : ssa_ir_promote(unssa, promotion, scratch, &promoted);
         }
         // The pass's counts: what it looked at, and what it moved where promotion took its function (a dropped one moved
         // nothing).
@@ -578,7 +576,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
             arena_pop_to(promotion, mark);
             unssa = input->unexpanded;
             numbered = false;
-            check = ssa_ir_promote_verified_input(unssa, !scalar, promotion, scratch, &promoted);
+            check = ssa_ir_promote_verified_input(unssa, promotion, scratch, &promoted);
         }
         passes->gvn_removed = numbered ? shared.removed : 0;
         outcome = check_tier1_step(CHECK_TIER1_PROMOTION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
@@ -619,7 +617,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         IrFunction halves = { 0 };
         if (check.error == IR_OK && fields.split_slots != 0)
         {
-            check = ssa_ir_promote_verified_input(&fields.function, !scalar, promotion, scratch, &halves);
+            check = ssa_ir_promote_verified_input(&fields.function, promotion, scratch, &halves);
             wide.function = check.error == IR_OK ? halves : wide.function;
         }
         // A refusal or a function past a pass's limits goes on as the split left it; any other error is the function's.

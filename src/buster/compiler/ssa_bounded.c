@@ -342,7 +342,7 @@ static SsaError ssa_bounded_assemble(SsaWork* work, const SsaBounded* bounded)
     return error;
 }
 
-static SsaError ssa_construct_bounded(SsaWork* work, bool vector)
+static SsaError ssa_construct_bounded(SsaWork* work)
 {
     const SsaInput* input = work->input;
     const uint32_t blocks = input->block_count;
@@ -410,7 +410,7 @@ static SsaError ssa_construct_bounded(SsaWork* work, bool vector)
                     last[instruction_blocks[i]] = operands[i];
                 }
             }
-            error = ssa_bounded_rename(&local_work, accesses, begin, end, frames, BUSTER_VECTOR_PATH(vector));
+            error = ssa_bounded_rename(&local_work, accesses, begin, end, frames, true);
             if (error == SSA_OK)
             {
                 const uint64_t mark = work->scratch->length;

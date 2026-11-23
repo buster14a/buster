@@ -342,7 +342,7 @@ static SsaCheck ssa_verify(const SsaInput* input, const SsaResult* result, Arena
     SsaWork work = { 0 };
     if (check.error == SSA_OK)
     {
-        check.error = ssa_prepare(&work, input, scratch, false);
+        check.error = ssa_prepare(&work, input, scratch);
     }
     if (check.error == SSA_OK)
     {

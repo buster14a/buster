@@ -126,7 +126,6 @@ struct SsaCheck
 // and own no input columns. On any failure, both lengths and *result are unchanged. Scratch is restored on success.
 // A zero-block input is accepted only with zero instructions/locals/edges and a zero element in both offset arrays.
 static __attribute__((unused)) SsaError ssa_build(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result);
-static __attribute__((unused)) SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result);
 // Checks local replacements, types, dominance (phi operands at predecessor exit), exact predecessor multiplicity,
 // and absence of trivial phis. It also checks reaching-definition equations independently of either constructor.
 static __attribute__((unused)) SsaCheck ssa_verify(const SsaInput* input, const SsaResult* result, Arena* scratch);
@@ -180,16 +179,9 @@ static uint32_t ssa_undefined(const SsaWork* work, uint32_t local)
     return work->input->instruction_count + local;
 }
 
-// This is a memory budget, not a measured scalar/vector crossover. The shared analyzer's retained frontier
-// reservation and temporary dominator matrix occupy distinct regions, so their combined payload is bounded here.
+// The sparse frontiers' budget (BUSTER_SSA_FRONTIER_PAIRS) and the dense constructor's.
 #define BUSTER_SSA_DOMINANCE_BYTES (16ull << 20)
 #define BUSTER_SSA_DENSE_BYTES (16ull << 20)
-
-static __attribute__((unused)) bool ssa_vector_fits(uint32_t blocks)
-{
-    const uint64_t row_bytes = ((uint64_t)blocks + BUSTER_DOMINATOR_VECTOR_BITS - 1) / BUSTER_DOMINATOR_VECTOR_BITS * BUSTER_DOMINATOR_VECTOR_BYTES;
-    return ((uint64_t)blocks * 2 + 1) * row_bytes <= BUSTER_SSA_DOMINANCE_BYTES;
-}
 
 // Bound every Cartesian workspace, including provisional SCC cleanup, emission, four padded liveness matrices,
 // and the vector renamer's offsets/cursors. The topology and instruction terms deliberately overestimate their
@@ -295,12 +287,9 @@ static SsaError ssa_check_input(const SsaInput* input)
     return error;
 }
 
-static void ssa_promote(SsaWork* work, bool vector)
+static void ssa_promote(SsaWork* work)
 {
-    (void)vector;
-
     const SsaInput* input = work->input;
-    if (BUSTER_VECTOR_PATH(vector))
     {
         for (uint64_t first = 0; first < input->local_count; first += 64)
         {
@@ -326,20 +315,6 @@ static void ssa_promote(SsaWork* work, bool vector)
             }
         }
     }
-    else
-    {
-        for (uint32_t local = 0; local < input->local_count; local += 1)
-        {
-            work->result.promoted[local] = input->local_types[local] < BUSTER_SSA_TYPE_AGGREGATE && input->local_flags[local] == 0;
-        }
-        for (uint32_t i = 0; i < input->instruction_count; i += 1)
-        {
-            if (input->kinds[i] == BUSTER_SSA_ADDRESS)
-            {
-                work->result.promoted[input->locals[i]] = 0;
-            }
-        }
-    }
     for (uint32_t local = 0; local < input->local_count; local += 1)
     {
         work->dense[local] = BUSTER_SSA_NONE;
@@ -358,10 +333,8 @@ static void ssa_promote(SsaWork* work, bool vector)
 // the parent arena owns the mapping and restores the whole phase.
 // The output layout is seven u32 columns (tree_offsets has one extra element), followed by an optional aligned
 // frontier matrix. No loops are requested. This bound follows dominators.c's published column/storage contract.
-static SsaError ssa_analyze(SsaWork* work, bool vector)
+static SsaError ssa_analyze(SsaWork* work)
 {
-    (void)vector;
-
     Arena* scratch = work->scratch;
     const SsaInput* input = work->input;
     const uint64_t saved = scratch->length;
@@ -414,10 +387,8 @@ static bool ssa_dominates(const SsaWork* work, uint32_t definition, uint32_t use
     return dominators_dominates(&work->dominators, definition, use);
 }
 
-static SsaError ssa_prepare_path(SsaWork* work, const SsaInput* input, Arena* scratch, bool vector, bool dense_flow)
+static SsaError ssa_prepare_path(SsaWork* work, const SsaInput* input, Arena* scratch, bool dense_flow)
 {
-    (void)vector;
-
     *work = (SsaWork){
         .input = input,
         .scratch = scratch,
@@ -442,7 +413,7 @@ static SsaError ssa_prepare_path(SsaWork* work, const SsaInput* input, Arena* sc
     uint32_t* cursor = 0;
     if (error == SSA_OK)
     {
-        ssa_promote(work, BUSTER_VECTOR_PATH(vector));
+        ssa_promote(work);
         cursor = ssa_allocate(scratch, input->block_count, sizeof(uint32_t));
         // Only the budgeted dense constructor needs liveness matrices. Preserve its existing Dataflow layout;
         // the bounded predecessor reader and independent verifier borrow topology without any local bit rows.
@@ -490,7 +461,7 @@ static SsaError ssa_prepare_path(SsaWork* work, const SsaInput* input, Arena* sc
                 work->result.predecessor_edges[slot] = edge;
             }
         }
-        error = ssa_analyze(work, BUSTER_VECTOR_PATH(vector));
+        error = ssa_analyze(work);
     }
     if (error == SSA_OK)
     {
@@ -538,82 +509,9 @@ static SsaError ssa_prepare_path(SsaWork* work, const SsaInput* input, Arena* sc
     return error;
 }
 
-static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch, bool vector)
+static SsaError ssa_prepare(SsaWork* work, const SsaInput* input, Arena* scratch)
 {
-    return ssa_prepare_path(work, input, scratch, vector, false);
-}
-
-static SsaError ssa_definitions(SsaWork* work)
-{
-    const SsaInput* input = work->input;
-    const uint64_t cells = (uint64_t)input->block_count * work->promoted_count;
-    const uint64_t operands = (uint64_t)work->result.reachable_edge_count * work->promoted_count;
-    SsaError error = cells < BUSTER_SSA_NONE - work->result.phi_base && operands < BUSTER_SSA_NONE ? SSA_OK : SSA_ERROR_LIMIT;
-    if (error == SSA_OK)
-    {
-        work->phi_capacity = (uint32_t)cells;
-        work->operand_capacity = (uint32_t)operands;
-        work->last = ssa_allocate(work->scratch, cells, sizeof(uint32_t));
-        work->entry = ssa_allocate(work->scratch, cells, sizeof(uint32_t));
-        work->phi_blocks = ssa_allocate(work->scratch, cells, sizeof(uint32_t));
-        work->phi_locals = ssa_allocate(work->scratch, cells, sizeof(uint32_t));
-        work->phi_offsets = ssa_allocate(work->scratch, cells + 1, sizeof(uint32_t));
-        work->phi_operands = ssa_allocate(work->scratch, operands, sizeof(uint32_t));
-        work->aliases = ssa_allocate(work->scratch, work->result.phi_base + cells, sizeof(uint32_t));
-        if (work->last == 0 || work->entry == 0 || work->phi_blocks == 0 || work->phi_locals == 0 || work->phi_offsets == 0 || work->phi_operands == 0 || work->aliases == 0)
-        {
-            error = SSA_ERROR_MEMORY;
-        }
-    }
-    if (error == SSA_OK)
-    {
-        memset(work->last, 0xff, cells * sizeof(uint32_t));
-        memset(work->entry, 0xff, cells * sizeof(uint32_t));
-        for (uint64_t value = 0; value < work->result.phi_base + cells; value += 1)
-        {
-            work->aliases[value] = (uint32_t)value;
-        }
-        for (uint32_t block = 0; block < input->block_count; block += 1)
-        {
-            if (work->result.reachable[block] != 0)
-            {
-                for (uint32_t i = input->block_offsets[block]; i < input->block_offsets[block + 1]; i += 1)
-                {
-                    const uint8_t kind = input->kinds[i];
-                    if (kind == BUSTER_SSA_READ || kind == BUSTER_SSA_WRITE)
-                    {
-                        const uint32_t dense = work->dense[input->locals[i]];
-                        if (dense != BUSTER_SSA_NONE)
-                        {
-                            const uint64_t cell = (uint64_t)block * work->promoted_count + dense;
-                            const uint64_t word = (uint64_t)block * work->flow.row_words + dense / 64;
-                            const uint64_t bit = 1ull << (dense % 64);
-                            if (kind == BUSTER_SSA_WRITE)
-                            {
-                                work->last[cell] = input->operands[i];
-                                work->flow.def[word] |= bit;
-                            }
-                            else if (work->last[cell] == BUSTER_SSA_NONE)
-                            {
-                                work->flow.use[word] |= bit;
-                            }
-                        }
-                    }
-                }
-            }
-            else
-            {
-                for (uint32_t i = input->block_offsets[block]; i < input->block_offsets[block + 1]; i += 1)
-                {
-                    if (input->kinds[i] == BUSTER_SSA_READ && work->result.promoted[input->locals[i]] != 0)
-                    {
-                        work->aliases[i] = ssa_undefined(work, input->locals[i]);
-                    }
-                }
-            }
-        }
-    }
-    return error;
+    return ssa_prepare_path(work, input, scratch, false);
 }
 
 static uint32_t ssa_add_phi(SsaWork* work, uint32_t block, uint32_t local)
@@ -704,45 +602,6 @@ static uint32_t ssa_read_entry(SsaWork* work, uint32_t block, uint32_t dense, Ss
         }
     }
     return work->entry[root];
-}
-
-static SsaError ssa_construct_scalar(SsaWork* work)
-{
-    const SsaInput* input = work->input;
-    SsaReadFrame* stack = ssa_allocate(work->scratch, input->block_count, sizeof(SsaReadFrame));
-    uint32_t* current = ssa_allocate(work->scratch, work->promoted_count, sizeof(uint32_t));
-    SsaError error = stack != 0 && current != 0 ? SSA_OK : SSA_ERROR_MEMORY;
-    for (uint32_t block = 0; error == SSA_OK && block < input->block_count; block += 1)
-    {
-        if (work->result.reachable[block] != 0)
-        {
-            memset(current, 0xff, (uint64_t)work->promoted_count * sizeof(uint32_t));
-            for (uint32_t i = input->block_offsets[block]; i < input->block_offsets[block + 1]; i += 1)
-            {
-                const uint8_t kind = input->kinds[i];
-                if (kind == BUSTER_SSA_READ || kind == BUSTER_SSA_WRITE)
-                {
-                    const uint32_t dense = work->dense[input->locals[i]];
-                    if (dense != BUSTER_SSA_NONE)
-                    {
-                        if (kind == BUSTER_SSA_WRITE)
-                        {
-                            current[dense] = input->operands[i];
-                        }
-                        else
-                        {
-                            if (current[dense] == BUSTER_SSA_NONE)
-                            {
-                                current[dense] = ssa_read_entry(work, block, dense, stack);
-                            }
-                            work->aliases[i] = current[dense];
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return error == SSA_OK ? work->construction_error : error;
 }
 
 // The vector constructor works a block's slots at a time, or the accesses in instruction order, and never one slot over
@@ -1558,15 +1417,13 @@ static SsaError ssa_construct_dense(SsaWork* work)
     {
         arena_pop_to(work->scratch, mark);
         work->construction_error = SSA_OK;
-        error = ssa_construct_bounded(work, true);
+        error = ssa_construct_bounded(work);
     }
     return error;
 }
 
-static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool vector, bool bounded)
+static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool bounded)
 {
-    (void)vector;
-
     SsaError error = output != 0 && scratch != 0 && output != scratch && result != 0 ? ssa_check_input(input) : SSA_ERROR_INVALID;
     const uint64_t output_length = output == 0 ? 0 : output->length;
     const uint64_t scratch_length = scratch == 0 ? 0 : scratch->length;
@@ -1574,26 +1431,11 @@ static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Ar
     if (error == SSA_OK)
     {
         bounded |= !ssa_dense_fits(input);
-        error = ssa_prepare_path(&work, input, scratch, BUSTER_VECTOR_PATH(vector), !bounded);
-    }
-    if (error == SSA_OK && !bounded && !BUSTER_VECTOR_PATH(vector))
-    {
-        error = ssa_definitions(&work);
+        error = ssa_prepare_path(&work, input, scratch, !bounded);
     }
     if (error == SSA_OK)
     {
-        if (bounded)
-        {
-            error = ssa_construct_bounded(&work, BUSTER_VECTOR_PATH(vector));
-        }
-        else if (BUSTER_VECTOR_PATH(vector))
-        {
-            error = ssa_construct_dense(&work);
-        }
-        else
-        {
-            error = ssa_construct_scalar(&work);
-        }
+        error = bounded ? ssa_construct_bounded(&work) : ssa_construct_dense(&work);
     }
     if (error == SSA_OK)
     {
@@ -1614,27 +1456,15 @@ static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Ar
     return error;
 }
 
-static SsaError ssa_build_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool vector)
-{
-    return ssa_build_selected_path(input, output, scratch, result, vector, false);
-}
-
-// The tests force both bounded kernels on tiny fixtures as well as the memory-limit cases.
-static __attribute__((unused)) SsaError ssa_build_bounded_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool vector)
-{
-    return ssa_build_selected_path(input, output, scratch, result, vector, true);
-}
-
-static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result);
-
 static SsaError ssa_build(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
-    return ssa_build_path(input, output, scratch, result, true);
+    return ssa_build_selected_path(input, output, scratch, result, false);
 }
 
-static SsaError ssa_build_scalar(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
+// The tests force the bounded construction on tiny fixtures as well as the memory-limit cases.
+static __attribute__((unused)) SsaError ssa_build_bounded(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
-    return ssa_build_path(input, output, scratch, result, false);
+    return ssa_build_selected_path(input, output, scratch, result, true);
 }
 
 #include "ssa_verify.c"

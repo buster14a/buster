@@ -554,7 +554,7 @@ static bool ssa_ir_test_identical(const IrFunction* first, const IrFunction* sec
     same = same && lengths[0] == lengths[1] && memcmp(text[0], text[1], lengths[0]) == 0;
     if (!same && text[0] != NULL && text[1] != NULL)
     {
-        fprintf(stderr, "  SSA IR vector/scalar order differs:\n%.*s\n%.*s\n", (int)(lengths[0] < 4096 ? lengths[0] : 4096), text[0],
+        fprintf(stderr, "  SSA IR differs:\n%.*s\n%.*s\n", (int)(lengths[0] < 4096 ? lengths[0] : 4096), text[0],
                 (int)(lengths[1] < 4096 ? lengths[1] : 4096), text[1]);
     }
     free(text[0]);
@@ -572,27 +572,22 @@ static uint32_t ssa_ir_test_count(const IrFunction* function, IrOp op)
     return count;
 }
 
-static bool ssa_ir_test_promote(SsaIrTestTally* tally, const IrFunction* input, Arena* output, Arena* twin_output, Arena* scratch, IrFunction* result, IrFunction* twin)
+static bool ssa_ir_test_promote(SsaIrTestTally* tally, const IrFunction* input, Arena* output, Arena* scratch, IrFunction* result)
 {
     const uint64_t hash = ssa_ir_test_hash(input);
     const uint64_t mark = scratch->length;
-    const IrCheck vector = ssa_ir_promote(input, output, scratch, result);
-    bool ok = ssa_ir_test_expect(tally, scratch->length == mark, "vector restores scratch");
-    const IrCheck scalar = ssa_ir_promote_scalar(input, twin_output, scratch, twin);
-    ok = ssa_ir_test_expect(tally, scratch->length == mark, "scalar restores scratch") && ok;
+    const IrCheck check = ssa_ir_promote(input, output, scratch, result);
+    bool ok = ssa_ir_test_expect(tally, scratch->length == mark, "promotion restores scratch");
     ok = ssa_ir_test_expect(tally, ssa_ir_test_hash(input) == hash, "promotion leaves input columns and metadata unchanged") && ok;
-    ok = ssa_ir_test_expect(tally, vector.error == IR_OK && scalar.error == IR_OK, "both promotion paths accept") && ok;
+    ok = ssa_ir_test_expect(tally, check.error == IR_OK, "promotion accepts") && ok;
     if (!ok && tally->failures < 20)
     {
-        fprintf(stderr, "  vector error=%u instruction=%u detail=%u; scalar error=%u instruction=%u detail=%u\n",
-                vector.error, vector.instruction, vector.detail, scalar.error, scalar.instruction, scalar.detail);
+        fprintf(stderr, "  error=%u instruction=%u detail=%u\n", check.error, check.instruction, check.detail);
     }
     if (ok)
     {
-        ok = ssa_ir_test_expect(tally, vector.dominance_checked && scalar.dominance_checked, "both promotion paths check real dominance");
-        ok = ssa_ir_test_expect(tally, ir_verify(result, scratch, 0).error == IR_OK &&
-                                      ir_verify(twin, scratch, 0).error == IR_OK,
-                                 "the IR verifier accepts both outputs") && ok;
+        ok = ssa_ir_test_expect(tally, check.dominance_checked, "promotion checks real dominance");
+        ok = ssa_ir_test_expect(tally, ir_verify(result, scratch, 0).error == IR_OK, "the IR verifier accepts the output") && ok;
     }
     return ok;
 }
@@ -609,10 +604,9 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
     Arena input = arena_reserve(1ull << 30);
     Arena lowered = arena_reserve(1ull << 30);
     Arena output = arena_reserve(1ull << 30);
-    Arena twin_output = arena_reserve(1ull << 30);
     Arena scratch = arena_reserve(1ull << 30);
     Arena execution = arena_reserve(1ull << 30);
-    bool ready = input.base != 0 && lowered.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0 && tier0_tables_open(&tables);
+    bool ready = input.base != 0 && lowered.base != 0 && output.base != 0 && scratch.base != 0 && execution.base != 0 && tier0_tables_open(&tables);
     ready = ssa_ir_test_expect(tally, ready, "generated-program arenas and ABI tables");
     uint64_t functions_seen = 0;
     uint64_t before = 0;
@@ -620,8 +614,8 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
     uint64_t slots_before = 0;
     uint64_t slots_after = 0;
     uint64_t phis = 0;
-    // Every promoted function's printed IR, by each path (#2924's tests commit).
-    uint64_t digests[2] = { UINT64_C(14695981039346656037), UINT64_C(14695981039346656037) };
+    // Every promoted function's printed IR (#2924).
+    uint64_t digest = UINT64_C(14695981039346656037);
     for (uint32_t p = 0; ready && p < count; p += 1)
     {
         tally->seed = seed + p;
@@ -629,7 +623,6 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
         Tier0Functions* sources = BUSTER_ARENA_PUSH_ARRAY(&input, Tier0Functions, 1);
         IrFunction* memory = BUSTER_ARENA_PUSH_ARRAY(&input, IrFunction, BUSTER_TIER0_GENERATE_MAX_FUNCTIONS);
         IrFunction* promoted = BUSTER_ARENA_PUSH_ARRAY(&input, IrFunction, BUSTER_TIER0_GENERATE_MAX_FUNCTIONS);
-        IrFunction* twin = BUSTER_ARENA_PUSH_ARRAY(&input, IrFunction, BUSTER_TIER0_GENERATE_MAX_FUNCTIONS);
         uint8_t* globals = BUSTER_ARENA_PUSH_ARRAY(&input, uint8_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS * 8 + 64);
         uint8_t* expected_globals = BUSTER_ARENA_PUSH_ARRAY(&input, uint8_t, BUSTER_TIER0_GENERATE_MAX_GLOBALS * BUSTER_TIER0_GENERATE_ARRAY_ELEMENTS * 8 + 64);
         const Tier0ProgramOptions options = {
@@ -643,7 +636,7 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
             .defined = true,
             .objects = objects,
         };
-        bool ok = program != 0 && sources != 0 && memory != 0 && promoted != 0 && twin != 0 && globals != 0 && expected_globals != 0;
+        bool ok = program != 0 && sources != 0 && memory != 0 && promoted != 0 && globals != 0 && expected_globals != 0;
         ok = ok && tier0_generate_program(program, &input, tally->seed, options, "ssa_ir_") && tier0_program_functions(program, &tables, &input, sources);
         ok = ssa_ir_test_expect(tally, ok, "generated typed program");
         for (uint32_t f = 0; ok && f < sources->count; f += 1)
@@ -654,7 +647,7 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
             ok = ssa_ir_test_expect(tally, check.error == IR_OK, "actual Tier 0 stream lowers to shared IR");
             if (ok)
             {
-                ok = ssa_ir_test_promote(tally, &memory[f], &output, &twin_output, &scratch, &promoted[f], &twin[f]);
+                ok = ssa_ir_test_promote(tally, &memory[f], &output, &scratch, &promoted[f]);
             }
             if (ok)
             {
@@ -664,8 +657,7 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
                 slots_before += memory[f].slot_count;
                 slots_after += promoted[f].slot_count;
                 phis += ssa_ir_test_count(&promoted[f], IR_PHI);
-                digests[0] = ssa_ir_test_text_digest(digests[0], &promoted[f], &scratch, NULL);
-                digests[1] = ssa_ir_test_text_digest(digests[1], &twin[f], &scratch, NULL);
+                digest = ssa_ir_test_text_digest(digest, &promoted[f], &scratch, NULL);
             }
         }
         if (ok)
@@ -682,9 +674,8 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
                 const IrFunction* versions[] = {
                     memory,
                     promoted,
-                    twin,
                 };
-                for (uint32_t v = 0; ok && v < 3; v += 1)
+                for (uint32_t v = 0; ok && v < BUSTER_ARRAY_LENGTH(versions); v += 1)
                 {
                     bool fault = false;
                     tier0_test_initial(program, &data, globals);
@@ -701,16 +692,15 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
         arena_pop_to(&input, 0);
         arena_pop_to(&lowered, 0);
         arena_pop_to(&output, 0);
-        arena_pop_to(&twin_output, 0);
     }
     ssa_ir_test_expect(tally, functions_seen == (uint64_t)count * 8 && slots_after < slots_before && phis != 0, "generated path actually promotes locals and constructs phis");
     // Recorded on #2924's tests commit, where the vector constructor and Braun's scalar construction printed the same
     // IR for every function: the default seed and count's digests, without and with objects.
     const uint64_t recorded = objects ? BUSTER_SSA_IR_TEST_DIGEST_OBJECTS : BUSTER_SSA_IR_TEST_DIGEST;
-    printf("SSA IR generated programs%s: promoted IR digest 0x%016" PRIx64 " (twin 0x%016" PRIx64 ")\n", objects ? " with objects" : "", digests[0], digests[1]);
+    printf("SSA IR generated programs%s: promoted IR digest 0x%016" PRIx64 "\n", objects ? " with objects" : "", digest);
     if (seed == 134 && count == 16)
     {
-        ssa_ir_test_expect(tally, digests[0] == recorded && digests[1] == recorded, "promoted IR matches its recorded digest");
+        ssa_ir_test_expect(tally, digest == recorded, "promoted IR matches its recorded digest");
     }
     printf("SSA IR generated programs%s: %" PRIu64 " functions, instructions %" PRIu64 " -> %" PRIu64 ", slots %" PRIu64 " -> %" PRIu64 ", %" PRIu64 " phis\n", objects ? " with objects" : "", functions_seen, before, after,
            slots_before, slots_after, phis);
@@ -718,7 +708,6 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
     arena_release(&input);
     arena_release(&lowered);
     arena_release(&output);
-    arena_release(&twin_output);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -741,7 +730,6 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
 {
     Arena input = arena_reserve(1ull << 24);
     Arena output = arena_reserve(1ull << 24);
-    Arena twin_output = arena_reserve(1ull << 24);
     Arena scratch = arena_reserve(1ull << 24);
     Arena execution = arena_reserve(1ull << 24);
     // Each row changes one reason a direct memory slot may or may not be promoted.
@@ -886,7 +874,7 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
             .promote = true,
         },
     };
-    bool ready = ssa_ir_test_expect(tally, input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0, "memory-policy arenas");
+    bool ready = ssa_ir_test_expect(tally, input.base != 0 && output.base != 0 && scratch.base != 0 && execution.base != 0, "memory-policy arenas");
     for (uint32_t p = 0; ready && p < sizeof(policies) / sizeof(policies[0]); p += 1)
     {
         tally->function = p;
@@ -901,7 +889,6 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
         };
         IrFunction function = {0};
         IrFunction promoted = {0};
-        IrFunction twin = {0};
         bool ok = ssa_ir_test_expect(tally, ir_create(&input, &sizes, &function) == IR_OK, "allocate memory-policy fixture");
         if (ok)
         {
@@ -933,13 +920,12 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
             function.flags[load] = policy.load_flags;
             function.alignment_log2[load] = 3;
             ir_test_instruction(&function, load + 1, IR_RET, IR_VOID, load, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            ok = ssa_ir_test_promote(tally, &function, &output, &twin_output, &scratch, &promoted, &twin);
+            ok = ssa_ir_test_promote(tally, &function, &output, &scratch, &promoted);
         }
         const IrFunction* versions[] = {
             &promoted,
-            &twin,
         };
-        for (uint32_t v = 0; ok && v < 2; v += 1)
+        for (uint32_t v = 0; ok && v < BUSTER_ARRAY_LENGTH(versions); v += 1)
         {
             const IrFunction* result = versions[v];
             const uint32_t retained = !policy.promote;
@@ -959,7 +945,6 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
         }
         arena_pop_to(&input, 0);
         arena_pop_to(&output, 0);
-        arena_pop_to(&twin_output, 0);
     }
     // The index is promoted, while an untyped backing allocation stays in memory.
     // Both value columns of ADDRESS and the retained STACK_ADDR slot ID must move.
@@ -972,7 +957,6 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
     };
     IrFunction address = {0};
     IrFunction promoted = {0};
-    IrFunction twin = {0};
     if (ready && ssa_ir_test_expect(tally, ir_create(&input, &address_sizes, &address) == IR_OK, "allocate indexed-memory fixture"))
     {
         address.result_type = IR_I64;
@@ -1001,13 +985,12 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
         ir_test_instruction(&address, 7, IR_STORE, IR_VOID, 5, 6, BUSTER_IR_NONE);
         ir_test_instruction(&address, 8, IR_LOAD, IR_I64, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_instruction(&address, 9, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        if (ssa_ir_test_promote(tally, &address, &output, &twin_output, &scratch, &promoted, &twin))
+        if (ssa_ir_test_promote(tally, &address, &output, &scratch, &promoted))
         {
             const IrFunction* versions[] = {
                 &promoted,
-                &twin,
             };
-            for (uint32_t v = 0; v < 2; v += 1)
+            for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(versions); v += 1)
             {
                 ssa_ir_test_expect(tally, versions[v]->slot_count == 1 && versions[v]->slots[0].type == IR_VOID && ssa_ir_test_count(versions[v], IR_LOAD) == 1, "indexed backing memory remains and its scalar index is promoted");
                 const uint64_t arguments[1] = {0};
@@ -1037,13 +1020,12 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
         ir_test_instruction(&self_store, 2, IR_LOAD, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_instruction(&self_store, 3, IR_ICMP, IR_I1, 2, 2, IR_EQ);
         ir_test_instruction(&self_store, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        if (ssa_ir_test_promote(tally, &self_store, &output, &twin_output, &scratch, &promoted, &twin))
+        if (ssa_ir_test_promote(tally, &self_store, &output, &scratch, &promoted))
         {
             const IrFunction* versions[] = {
                 &promoted,
-                &twin,
             };
-            for (uint32_t v = 0; v < 2; v += 1)
+            for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(versions); v += 1)
             {
                 ssa_ir_test_expect(tally, versions[v]->slot_count == 1 && ssa_ir_test_count(versions[v], IR_STORE) == 1, "storing an address to itself keeps its storage");
                 const uint64_t arguments[1] = {0};
@@ -1069,14 +1051,13 @@ static void ssa_ir_test_memory(SsaIrTestTally* tally)
         ir_test_instruction(&undefined, 0, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_instruction(&undefined, 1, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_instruction(&undefined, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        if (ssa_ir_test_promote(tally, &undefined, &output, &twin_output, &scratch, &promoted, &twin))
+        if (ssa_ir_test_promote(tally, &undefined, &output, &scratch, &promoted))
         {
-            ssa_ir_test_expect(tally, promoted.slot_count == 0 && twin.slot_count == 0 && ssa_ir_test_count(&promoted, IR_UNDEF) == 1 && ssa_ir_test_count(&twin, IR_UNDEF) == 1, "uninitialized promoted reads produce a typed undef");
+            ssa_ir_test_expect(tally, promoted.slot_count == 0 && ssa_ir_test_count(&promoted, IR_UNDEF) == 1, "uninitialized promoted reads produce a typed undef");
         }
     }
     arena_release(&input);
     arena_release(&output);
-    arena_release(&twin_output);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -1085,7 +1066,6 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
 {
     Arena input = arena_reserve(1ull << 20);
     Arena output = arena_reserve(1ull << 20);
-    Arena twin_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
     const IrSizes sizes =
     {
@@ -1096,7 +1076,6 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
     };
     IrFunction function = { 0 };
     IrFunction promoted = { 0 };
-    IrFunction twin = { 0 };
     bool ready = ssa_ir_test_expect(tally, ir_create(&input, &sizes, &function) == IR_OK, "allocate source-map promotion fixture");
     if (ready)
     {
@@ -1175,10 +1154,10 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
             }
         }
     }
-    if (ready && ssa_ir_test_promote(tally, &function, &output, &twin_output, &scratch, &promoted, &twin))
+    if (ready && ssa_ir_test_promote(tally, &function, &output, &scratch, &promoted))
     {
         const uint32_t origins[] = { 1, 3, 4, 6, 7, 9, 10, 12, 13, 14, 15, 16 };
-        const IrFunction* versions[] = { &promoted, &twin };
+        const IrFunction* versions[] = { &promoted };
         for (uint32_t path = 0; path < BUSTER_ARRAY_LENGTH(versions); path += 1)
         {
             const IrFunction* result = versions[path];
@@ -1214,11 +1193,10 @@ static void ssa_ir_test_debug(SsaIrTestTally* tally)
         IrFunction plain = { 0 };
         const IrCheck check = ssa_ir_promote(&plain_input, &output, &scratch, &plain);
         ssa_ir_test_expect(tally, unchanged && check.error == IR_OK && plain.debug == NULL &&
-                                 ssa_ir_test_identical(&plain, &promoted, &scratch) && ssa_ir_test_identical(&promoted, &twin, &scratch),
+                                 ssa_ir_test_identical(&plain, &promoted, &scratch),
                            "source maps do not mutate the input or change executable SSA IR");
     }
     arena_release(&scratch);
-    arena_release(&twin_output);
     arena_release(&output);
     arena_release(&input);
 }
@@ -1227,7 +1205,6 @@ static void ssa_ir_test_debug_regions(SsaIrTestTally* tally)
 {
     Arena input = arena_reserve(1ull << 20);
     Arena output = arena_reserve(1ull << 20);
-    Arena twin_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
     for (uint32_t mode = 0; mode < 4; mode += 1)
     {
@@ -1297,11 +1274,10 @@ static void ssa_ir_test_debug_regions(SsaIrTestTally* tally)
             }
         }
         IrFunction promoted = { 0 };
-        IrFunction twin = { 0 };
         ssa_ir_test_expect(tally, ready, "allocate initialized and undef-reaching source-region CFG fixtures");
-        if (ready && ssa_ir_test_promote(tally, &function, &output, &twin_output, &scratch, &promoted, &twin))
+        if (ready && ssa_ir_test_promote(tally, &function, &output, &scratch, &promoted))
         {
-            const IrFunction* versions[] = { &promoted, &twin };
+            const IrFunction* versions[] = { &promoted };
             for (uint32_t path = 0; path < BUSTER_ARRAY_LENGTH(versions); path += 1)
             {
                 const IrFunction* result = versions[path];
@@ -1330,12 +1306,10 @@ static void ssa_ir_test_debug_regions(SsaIrTestTally* tally)
             ssa_ir_test_expect(tally, check.error == IR_OK && ssa_ir_test_identical(&plain, &promoted, &scratch),
                                "source-region witnesses create no extra reads, phis or liveness");
         }
-        arena_pop_to(&twin_output, 0);
         arena_pop_to(&output, 0);
         arena_pop_to(&input, 0);
     }
     arena_release(&scratch);
-    arena_release(&twin_output);
     arena_release(&output);
     arena_release(&input);
 }
@@ -1344,12 +1318,10 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
 {
     Arena input = arena_reserve(1ull << 24);
     Arena output = arena_reserve(1ull << 24);
-    Arena twin_output = arena_reserve(1ull << 24);
     Arena scratch = arena_reserve(1ull << 24);
     Arena execution = arena_reserve(1ull << 24);
     IrFunction functions[2] = {0};
     IrFunction promoted[2] = {0};
-    IrFunction twin[2] = {0};
     const IrSizes callee_sizes = {
         .instruction_count = 4,
         .block_count = 1,
@@ -1366,7 +1338,7 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
         .call_type_count = 1,
         .parameter_count = 1,
     };
-    bool ok = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0 && execution.base != 0;
+    bool ok = input.base != 0 && output.base != 0 && scratch.base != 0 && execution.base != 0;
     ok = ssa_ir_test_expect(tally, ok && ir_create(&input, &callee_sizes, &functions[0]) == IR_OK && ir_create(&input, &caller_sizes, &functions[1]) == IR_OK, "allocate phi/call/switch fixture");
     if (ok)
     {
@@ -1481,7 +1453,7 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
         for (uint32_t f = 0; ok && f < 2; f += 1)
         {
             tally->function = f;
-            ok = ssa_ir_test_promote(tally, &functions[f], &output, &twin_output, &scratch, &promoted[f], &twin[f]);
+            ok = ssa_ir_test_promote(tally, &functions[f], &output, &scratch, &promoted[f]);
         }
     }
     if (ok)
@@ -1489,7 +1461,6 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
         const IrFunction* versions[] = {
             functions,
             promoted,
-            twin,
         };
         const uint64_t selectors[] = {
             0,
@@ -1501,7 +1472,7 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
             112,
             212,
         };
-        for (uint32_t v = 0; v < 3; v += 1)
+        for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(versions); v += 1)
         {
             for (uint32_t r = 0; r < 3; r += 1)
             {
@@ -1571,13 +1542,12 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
         ir_test_instruction(caller, 11, IR_RET, IR_VOID, 10, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_instruction(caller, 12, IR_SUB, IR_I64, 4, 5, BUSTER_IR_NONE);
         ir_test_instruction(caller, 13, IR_RET, IR_VOID, 12, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        if (ssa_ir_test_promote(tally, caller, &output, &twin_output, &scratch, &promoted[1], &twin[1]))
+        if (ssa_ir_test_promote(tally, caller, &output, &scratch, &promoted[1]))
         {
             const IrFunction* versions[] = {
                 promoted,
-                twin,
             };
-            for (uint32_t v = 0; v < 2; v += 1)
+            for (uint32_t v = 0; v < BUSTER_ARRAY_LENGTH(versions); v += 1)
             {
                 const uint64_t match = 5;
                 const uint64_t fallback = 7;
@@ -1589,7 +1559,6 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
     }
     arena_pop_to(&input, 0);
     arena_pop_to(&output, 0);
-    arena_pop_to(&twin_output, 0);
     // A local address passed in a variable call-argument slice escapes even if
     // every direct use in its defining function is an ordinary load or store.
     const IrSizes escape_callee_sizes = {
@@ -1647,13 +1616,12 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
         ir_test_instruction(caller, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
         for (uint32_t f = 0; ok && f < 2; f += 1)
         {
-            ok = ssa_ir_test_promote(tally, &functions[f], &output, &twin_output, &scratch, &promoted[f], &twin[f]);
+            ok = ssa_ir_test_promote(tally, &functions[f], &output, &scratch, &promoted[f]);
         }
         const IrFunction* versions[] = {
             promoted,
-            twin,
         };
-        for (uint32_t v = 0; ok && v < 2; v += 1)
+        for (uint32_t v = 0; ok && v < BUSTER_ARRAY_LENGTH(versions); v += 1)
         {
             ssa_ir_test_expect(tally, versions[v][1].slot_count == 1 && ssa_ir_test_count(&versions[v][1], IR_LOAD) == 1, "call-argument escape retains local storage");
             const uint64_t arguments[1] = {0};
@@ -1662,7 +1630,6 @@ static void ssa_ir_test_variable_operands(SsaIrTestTally* tally)
     }
     arena_release(&input);
     arena_release(&output);
-    arena_release(&twin_output);
     arena_release(&scratch);
     arena_release(&execution);
 }
@@ -1671,10 +1638,9 @@ static void ssa_ir_test_failures(SsaIrTestTally* tally)
 {
     Arena input = arena_reserve(1ull << 20);
     Arena output = arena_reserve(1ull << 20);
-    Arena twin_output = arena_reserve(1ull << 20);
     Arena scratch = arena_reserve(1ull << 20);
     IrFunction function = {0};
-    bool ready = input.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0;
+    bool ready = input.base != 0 && output.base != 0 && scratch.base != 0;
     ready = ssa_ir_test_expect(tally, ready && ir_test_simple(&input, &function), "allocate transactional failure fixture");
     if (ready)
     {
@@ -1688,51 +1654,48 @@ static void ssa_ir_test_failures(SsaIrTestTally* tally)
             .instruction_count = 123,
             .symbol_count = 456,
         };
-        for (uint32_t v = 0; v < 2; v += 1)
+        for (uint32_t failure = 0; failure < 4; failure += 1)
         {
-            for (uint32_t failure = 0; failure < 4; failure += 1)
-            {
-                Arena limited_output = output;
-                Arena limited_scratch = scratch;
-                IrFunction result = sentinel;
-                if (failure == 0)
-                {
-                    limited_output.capacity = limited_output.length;
-                }
-                else if (failure == 1)
-                {
-                    limited_scratch.capacity = limited_scratch.length;
-                }
-                else if (failure == 2)
-                {
-                    function.b[1] = BUSTER_IR_NONE;
-                }
-                else
-                {
-                    function.result_type = IR_VOID;
-                    ir_test_instruction(&function, 2, IR_BR, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
-                }
-                const IrCheck check = v == 0 ? ssa_ir_promote(&function, &limited_output, &limited_scratch, &result) : ssa_ir_promote_scalar(&function, &limited_output, &limited_scratch, &result);
-                const bool expected = failure < 2 ? check.error == IR_ERROR_MEMORY : check.error != IR_OK;
-                ssa_ir_test_expect(tally, expected && limited_output.length == output_mark && limited_scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "allocation failure, invalid operand and entry backedge roll back arenas and result");
-                bool prefix_ok = true;
-                for (uint32_t b = 0; b < 64; b += 1)
-                {
-                    prefix_ok = prefix_ok && output_prefix[b] == 0xa5 && scratch_prefix[b] == 0x5a;
-                }
-                ssa_ir_test_expect(tally, prefix_ok, "failure preserves preexisting arena bytes");
-                function.result_type = IR_I64;
-                function.b[1] = 0;
-                ir_test_instruction(&function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            }
+            Arena limited_output = output;
+            Arena limited_scratch = scratch;
             IrFunction result = sentinel;
-            const IrCheck overlap = v == 0 ? ssa_ir_promote(&function, &output, &output, &result) : ssa_ir_promote_scalar(&function, &output, &output, &result);
-            ssa_ir_test_expect(tally, overlap.error != IR_OK && output.length == output_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "aliased output and scratch arenas are rejected transactionally");
-            Arena aliased_input = input;
-            const uint64_t input_mark = input.length;
-            const IrCheck conflict = v == 0 ? ssa_ir_promote(&function, &aliased_input, &scratch, &result) : ssa_ir_promote_scalar(&function, &aliased_input, &scratch, &result);
-            ssa_ir_test_expect(tally, conflict.error != IR_OK && aliased_input.length == input_mark && scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "output overlapping input storage is rejected transactionally");
+            if (failure == 0)
+            {
+                limited_output.capacity = limited_output.length;
+            }
+            else if (failure == 1)
+            {
+                limited_scratch.capacity = limited_scratch.length;
+            }
+            else if (failure == 2)
+            {
+                function.b[1] = BUSTER_IR_NONE;
+            }
+            else
+            {
+                function.result_type = IR_VOID;
+                ir_test_instruction(&function, 2, IR_BR, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            const IrCheck check = ssa_ir_promote(&function, &limited_output, &limited_scratch, &result);
+            const bool expected = failure < 2 ? check.error == IR_ERROR_MEMORY : check.error != IR_OK;
+            ssa_ir_test_expect(tally, expected && limited_output.length == output_mark && limited_scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "allocation failure, invalid operand and entry backedge roll back arenas and result");
+            bool prefix_ok = true;
+            for (uint32_t b = 0; b < 64; b += 1)
+            {
+                prefix_ok = prefix_ok && output_prefix[b] == 0xa5 && scratch_prefix[b] == 0x5a;
+            }
+            ssa_ir_test_expect(tally, prefix_ok, "failure preserves preexisting arena bytes");
+            function.result_type = IR_I64;
+            function.b[1] = 0;
+            ir_test_instruction(&function, 2, IR_RET, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
         }
+        IrFunction result = sentinel;
+        const IrCheck overlap = ssa_ir_promote(&function, &output, &output, &result);
+        ssa_ir_test_expect(tally, overlap.error != IR_OK && output.length == output_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "aliased output and scratch arenas are rejected transactionally");
+        Arena aliased_input = input;
+        const uint64_t input_mark = input.length;
+        const IrCheck conflict = ssa_ir_promote(&function, &aliased_input, &scratch, &result);
+        ssa_ir_test_expect(tally, conflict.error != IR_OK && aliased_input.length == input_mark && scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "output overlapping input storage is rejected transactionally");
         // The input verifier without a dominator view accepts this shape. The
         // adapter must discover that a hidden COPY operand comes from one arm
         // of the diamond and is unavailable on the other reaching edge.
@@ -1760,12 +1723,9 @@ static void ssa_ir_test_failures(SsaIrTestTally* tally)
             ir_test_instruction(&nondominating, 5, IR_COPY, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_test_instruction(&nondominating, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ssa_ir_test_expect(tally, ir_verify(&nondominating, &scratch, 0).error == IR_OK, "hidden-operand fixture requires real cross-block dominance");
-            for (uint32_t v = 0; v < 2; v += 1)
-            {
-                IrFunction result = sentinel;
-                const IrCheck check = v == 0 ? ssa_ir_promote(&nondominating, &output, &scratch, &result) : ssa_ir_promote_scalar(&nondominating, &output, &scratch, &result);
-                ssa_ir_test_expect(tally, check.error == IR_ERROR_DOMINANCE && check.instruction == 5 && output.length == output_mark && scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "hidden non-dominating value use is rejected transactionally");
-            }
+            IrFunction result = sentinel;
+            const IrCheck check = ssa_ir_promote(&nondominating, &output, &scratch, &result);
+            ssa_ir_test_expect(tally, check.error == IR_ERROR_DOMINANCE && check.instruction == 5 && output.length == output_mark && scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "hidden non-dominating value use is rejected transactionally");
         }
         // Tier 0's frame roles (incoming variadic anchors, va_list objects) never reach promotion: ir_lower_typed
         // refuses them, and a slot flag outside IR's three must fail the adapter's input verification rather than
@@ -1793,37 +1753,30 @@ static void ssa_ir_test_failures(SsaIrTestTally* tally)
             ir_test_instruction(&role, 2, IR_STORE, IR_VOID, 0, 1, BUSTER_IR_NONE);
             ir_test_instruction(&role, 3, IR_LOAD, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_test_instruction(&role, 4, IR_RET, IR_VOID, 3, BUSTER_IR_NONE, BUSTER_IR_NONE);
-            for (uint32_t v = 0; v < 2; v += 1)
-            {
-                IrFunction result = sentinel;
-                const IrCheck check = v == 0 ? ssa_ir_promote(&role, &output, &scratch, &result) : ssa_ir_promote_scalar(&role, &output, &scratch, &result);
-                ssa_ir_test_expect(tally, check.error != IR_OK && output.length == output_mark && scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "a slot flag outside IR's set is refused transactionally");
-            }
+            IrFunction result = sentinel;
+            const IrCheck check = ssa_ir_promote(&role, &output, &scratch, &result);
+            ssa_ir_test_expect(tally, check.error != IR_OK && output.length == output_mark && scratch.length == scratch_mark && memcmp(&result, &sentinel, sizeof(result)) == 0, "a slot flag outside IR's set is refused transactionally");
             role.slots[0].flags = 0;
             IrFunction control = {0};
-            IrFunction control_twin = {0};
-            if (ssa_ir_test_promote(tally, &role, &output, &twin_output, &scratch, &control, &control_twin))
+            if (ssa_ir_test_promote(tally, &role, &output, &scratch, &control))
             {
-                ssa_ir_test_expect(tally, control.slot_count == 0 && control_twin.slot_count == 0, "the same slot without the unknown flag promotes");
+                ssa_ir_test_expect(tally, control.slot_count == 0, "the same slot without the unknown flag promotes");
             }
             arena_pop_to(&output, output_mark);
-            arena_pop_to(&twin_output, 0);
         }
         IrFunction empty = {0};
         IrFunction promoted = {0};
-        IrFunction twin = {0};
         const IrSizes empty_sizes = {0};
         if (ssa_ir_test_expect(tally, ir_create(&input, &empty_sizes, &empty) == IR_OK, "allocate empty shared IR"))
         {
-            if (ssa_ir_test_promote(tally, &empty, &output, &twin_output, &scratch, &promoted, &twin))
+            if (ssa_ir_test_promote(tally, &empty, &output, &scratch, &promoted))
             {
-                ssa_ir_test_expect(tally, promoted.block_count == 0 && promoted.instruction_count == 0 && twin.block_count == 0 && twin.instruction_count == 0, "empty function stays empty");
+                ssa_ir_test_expect(tally, promoted.block_count == 0 && promoted.instruction_count == 0, "empty function stays empty");
             }
         }
     }
     arena_release(&input);
     arena_release(&output);
-    arena_release(&twin_output);
     arena_release(&scratch);
 }
 
@@ -1879,7 +1832,6 @@ static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
         "}\n";
     Arena input = arena_reserve(1ull << 24);
     Arena output = arena_reserve(1ull << 24);
-    Arena twin_output = arena_reserve(1ull << 24);
     Arena scratch = arena_reserve(1ull << 24);
     Arena execution = arena_reserve(1ull << 24);
     uint32_t header_phis[2] = { 0, 0 };
@@ -1961,36 +1913,27 @@ static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
         }
         arena_pop_to(&input, 0);
         arena_pop_to(&output, 0);
-        arena_pop_to(&twin_output, 0);
         IrFunction parsed = { 0 };
         const bool read = ssa_ir_test_expect(tally, ir_parse((String8){ .pointer = source, .length = strlen(source) }, &input, &scratch, &parsed).error == IR_PARSE_OK, "the lifetime fixture parses");
         IrFunction promoted = { 0 };
-        IrFunction twin = { 0 };
-        if (read && ssa_ir_test_promote(tally, &parsed, &output, &twin_output, &scratch, &promoted, &twin))
+        if (read && ssa_ir_test_promote(tally, &parsed, &output, &scratch, &promoted))
         {
-            // The counter (slot 2) is read before the sum (slot 1) and the scoped value (slot 0): discovery order
-            // differs between constructors, but the published phis and every rewritten operand must be identical.
-            ssa_ir_test_expect(tally, ssa_ir_test_text(&promoted, recorded[pass], &scratch) && ssa_ir_test_text(&twin, recorded[pass], &scratch),
+            // The counter (slot 2) is read before the sum (slot 1) and the scoped value (slot 0): the published phis
+            // follow the slots' order whatever the order of first reads (#1395), as the recorded text has them.
+            ssa_ir_test_expect(tally, ssa_ir_test_text(&promoted, recorded[pass], &scratch),
                                "promotion publishes the loop's phis in local order with canonical value IDs");
-            for (uint32_t form = 0; form < 2; form += 1)
+            uint32_t phis = 0;
+            for (uint32_t i = promoted.block_offsets[1]; i < promoted.block_offsets[2]; i += 1)
             {
-                const IrFunction* function = form == 0 ? &promoted : &twin;
-                uint32_t phis = 0;
-                for (uint32_t i = function->block_offsets[1]; i < function->block_offsets[2]; i += 1)
-                {
-                    phis += function->op[i] == IR_PHI;
-                }
-                header_phis[pass] = form == 0 ? phis : header_phis[pass];
-                ssa_ir_test_expect(tally, phis == header_phis[pass], "both paths place the header's phis alike");
-                const uint32_t first = function->block_offsets[1];
-                const uint32_t compared = first + phis;
-                ssa_ir_test_expect(tally, phis != 0 && compared < function->block_offsets[2] && function->op[compared] == IR_ICMP && function->a[compared] == compared - 1,
-                                   "the first-read counter is the last local-ordered header phi");
+                phis += promoted.op[i] == IR_PHI;
             }
+            header_phis[pass] = phis;
+            const uint32_t compared = promoted.block_offsets[1] + phis;
+            ssa_ir_test_expect(tally, phis != 0 && compared < promoted.block_offsets[2] && promoted.op[compared] == IR_ICMP && promoted.a[compared] == compared - 1,
+                               "the first-read counter is the last local-ordered header phi");
             const uint64_t arguments[1] = { 10 };
             ssa_ir_test_execute(tally, &parsed, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture in memory");
-            ssa_ir_test_execute(tally, &promoted, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture promoted by the vector path");
-            ssa_ir_test_execute(tally, &twin, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture promoted by the scalar path");
+            ssa_ir_test_execute(tally, &promoted, 1, 0, arguments, 1, &execution, 25, "the lifetime fixture promoted");
         }
     }
     // The header's phis: the sum and the counter, and x's too where its start doesn't end it.
@@ -1998,7 +1941,6 @@ static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
     ssa_ir_test_expect(tally, header_phis[1] == 3, "without the start the loop carries the local");
     arena_release(&execution);
     arena_release(&scratch);
-    arena_release(&twin_output);
     arena_release(&output);
     arena_release(&input);
 }
