@@ -16,7 +16,9 @@ requirements. [Command index](README.md).
   `BUSTER_HUGE_PAGES=1` leaves them as the system has them, and `busy` means the process's arenas alone took base pages
   on a host busy when it started, #672: its tasks runnable at least a quarter of its CPUs online), how many of its
   units were preprocessed a second time for their expansion history (#2850: `history-replays`; a unit that says nothing
-  must read 0, since only a diagnostic or a warning's test of a macro asks for the history), and with
+  must read 0, since only a diagnostic or a warning's test of a macro asks for the history), the tiles its parses
+  took and the units a tile sent to be parsed as one (#2536: `parse-tiles` and `parse-tiles-refused`, for a unit parsed
+  by tiles, `--parse-tile=N`), and with
   `--check-transitions` the memoized transitions'
   hits, misses, folds and entries (#1050: `time-check transition-*`); off by default, its laps test a null pointer.
   `measure-compile [--runs N] [--reference PATH [--reference-option OPTION]... | --variant OPTION]... -- ARGUMENT...`

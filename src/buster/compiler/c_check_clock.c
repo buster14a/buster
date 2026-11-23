@@ -256,6 +256,11 @@ struct CheckClock
     // measure-compile divides each stage's cycles by (#146); `time-process tokens`. The calling thread's unit's; 0 for
     // several source files, whose units run on the lanes in one stage (c_checker_units.c).
     uint64_t tokens;
+    // The tiles the calling thread's units' parses took (ParseStatistics.tiles, --parse-tile=N), and how many of those
+    // units a tile sent to be parsed as one; `time-process parse-tiles` and `parse-tiles-refused`, for a unit parsed by
+    // tiles.
+    uint64_t parse_tiles;
+    uint32_t parse_tiles_refused;
 };
 
 // The expressions' walk's parts, as CheckInput.expression_part_ticks holds them (BUSTER_CHECK_EXPRESSION_PART_*).
@@ -278,6 +283,16 @@ static __attribute__((unused)) void check_clock_tokens(CheckClock* stage_clock, 
     if (stage_clock != NULL)
     {
         stage_clock->tokens += tokens;
+    }
+}
+
+// Adds a unit's parse's tiles to the report's (CheckClock.parse_tiles and parse_tiles_refused), with a clock.
+static __attribute__((unused)) void check_clock_parse_tiles(CheckClock* stage_clock, uint32_t tiles, bool refused)
+{
+    if (stage_clock != NULL)
+    {
+        stage_clock->parse_tiles += tiles;
+        stage_clock->parse_tiles_refused += refused ? 1 : 0;
     }
 }
 
@@ -465,6 +480,11 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     }
     fprintf(stream, "time-process\ttsc-mhz\t%.1f\n", ticks_per_millisecond / 1e3);
     fprintf(stream, "time-process\ttokens\t%" PRIu64 "\n", stage_clock->tokens);
+    if (stage_clock->parse_tiles != 0)
+    {
+        fprintf(stream, "time-process\tparse-tiles\t%" PRIu64 "\n", stage_clock->parse_tiles);
+        fprintf(stream, "time-process\tparse-tiles-refused\t%u\n", stage_clock->parse_tiles_refused);
+    }
     fprintf(stream, "time-process\thistory-replays\t%u\n", stage_clock->history_replays);
     if (stage_clock->lanes_asked != 0)
     {
