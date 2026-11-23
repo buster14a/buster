@@ -4205,8 +4205,9 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t* openin
     {
         for (uint32_t token = 0; token < input->token_count; token += 1)
         {
+            // (--node-bodies: a body its producer took is masked and still the program's, CheckInput.node_bodies.)
             if (check_sparse_get(input->body_declarations, token) != BUSTER_CHECK_NONE &&
-                (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0))
+                (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0 || input->node_bodies))
             {
                 openings[count++] = token;
             }
@@ -4215,7 +4216,7 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t* openin
     else
     {
         count = check_sparse_entries(input->body_declarations, 0, input->token_count, openings);
-        if (input->deferred_tokens != NULL)
+        if (input->deferred_tokens != NULL && !input->node_bodies)
         {
             uint32_t kept = 0;
             for (uint32_t i = 0; i < count; i += 1)
@@ -6234,9 +6235,11 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count * (regions ? 2 : 1) + 2) : 0;
     uint32_t* nodes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* seen = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    // A body's references: its nodes', and its cleanups' functions.
-    uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1) : 0;
-    uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1) : 0;
+    // A body's references: its nodes', and its cleanups' functions. (--node-bodies: a body the producer took has no node,
+    // and its references are its kept tapes' entries' and calls' at most.)
+    const uint64_t taken_references = valid && input->node_bodies ? input->node_front->alone_types->tape_count + input->node_front->alone_types->side_call_count : 0;
+    uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1 + taken_references) : 0;
+    uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1 + taken_references) : 0;
     uint32_t* cleanup_parents = valid && input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : 0;
     uint32_t* cleanup_tops = valid && input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : 0;
     uint32_t* cleanup_scope_last = valid && input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -6684,6 +6687,53 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     return valid;
 }
 
+// The root (a node of the kept columns', NodeFrontTypes) of the expression of a taken body's control at `token`:
+// UINT32_MAX for a control without one.
+static inline __attribute__((unused)) uint32_t node_bodies_control_root(const NodeFrontShadow* supply, const NodeTwinControl* control)
+{
+    const bool rooted = control->valued || control->kind == CHECK_CONTROL_INITIALIZE;
+    const uint32_t found = rooted ? supply->alone_control_roots[control->token] : 0;
+    return found != 0 && found != UINT32_MAX ? found - 1 : UINT32_MAX;
+}
+
+// --node-bodies (#2850): the references of the body at `slot` of the producer's verdicts (node_bodies_slot), which the
+// compile takes: the objects its kept tapes name, a global's entry's and a direct call's callee's, each once, marked
+// needed and kept as check_program_references keeps a checked body's (`epoch` its stamp in `seen`). How many.
+static uint32_t check_program_taken_references(CheckProgram* program, uint32_t slot, uint32_t epoch, uint32_t* seen, uint64_t* references, uint8_t* needed)
+{
+    const NodeFrontShadow* supply = program->input->node_front;
+    const NodeFrontTypes* kept = supply->alone_types;
+    uint32_t reference_count = 0;
+    for (uint32_t c = 0; c < supply->produced_counts[slot]; c += 1)
+    {
+        const uint32_t root = node_bodies_control_root(supply, supply->produced_controls + supply->produced_firsts[slot] + c);
+        if (root == UINT32_MAX)
+        {
+            continue;
+        }
+        const uint64_t first = kept->tape_firsts[root];
+        const uint32_t entries = kept->tape_counts[root] != UINT32_MAX ? kept->tape_counts[root] : 0;
+        const uint32_t calls = kept->side_call_counts[root];
+        for (uint32_t i = 0; i < entries + calls; i += 1)
+        {
+            const uint8_t kind = i < entries ? kept->tape_kinds[first + i] : BUSTER_TYPED_GLOBAL;
+            const bool global = kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
+            const uint64_t object = i < entries ? kept->tape_values[first + i] : kept->side_call_targets[kept->side_call_firsts[root] + (i - entries)];
+            if (global && object != 0 && object < program->object_count && seen[object] != epoch)
+            {
+                seen[object] = epoch;
+                needed[object] = 1;
+                references[reference_count++] = object << 32;
+            }
+            else if (global && object >= program->object_count)
+            {
+                check_program_fail(program, CHECK_PROGRAM_INVALID, supply->alone_body_openings[slot]);
+            }
+        }
+    }
+    return reference_count;
+}
+
 // check_program's loop (#2536's step 2.2c.1): the bodies from the run's next to `end`, each's controls, return flow,
 // chains and references, in token order, as the loop over them all would make them.
 static void check_program_bodies(CheckProgramRun* run, uint32_t end)
@@ -6711,6 +6761,26 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
         const uint32_t label_first = writer->label_position_count;
         const uint32_t exit_start = writer->exit_count;
         writer->body = b;
+        CheckProgramBody* body = &program->bodies[b];
+        const uint32_t taken = __builtin_expect(program->input->node_bodies, 0) ? node_bodies_slot(program->input, token) : UINT32_MAX;
+        const uint64_t references_start = options->selection_census ? __rdtsc() : 0;
+        if (taken != UINT32_MAX)
+        {
+            // --node-bodies (#2850): a body the producer took before the reader's walk has no control here, and its return
+            // flow is proved silent there; its references are the objects its kept tapes name, which the symbols'
+            // numbering and the selection read as they read a checked body's.
+            body->first = start;
+            body->count = 0;
+            body->entry_count = 0;
+            body->reference_first = reference_count;
+            body->label_first = label_first;
+            body->label_count = 0;
+            body->cleanup_first = writer->cleanup_first;
+            body->cleanup_count = 0;
+            body->reference_count = check_program_taken_references(program, taken, b + 1, seen, reference_items, needed);
+        }
+        else
+        {
         check_control_build(writer, token);
         // Its source labels' places, from their numbers, before check_program_return_flow takes the writer's labels.
         for (uint32_t l = label_first; l < writer->label_position_count; l += 1)
@@ -6719,7 +6789,6 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
             writer->label_positions[l] = label < writer->label_count ? writer->labels[label] : BUSTER_CHECK_NONE;
         }
         // Its own fields the setup wrote (check_program_begin); the controls' and the references' here.
-        CheckProgramBody* body = &program->bodies[b];
         body->first = start;
         body->count = writer->count - start;
         body->entry_count = writer->entry_count;
@@ -6734,8 +6803,8 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
         {
             check_program_chains(writer, body, exit_start, scratch);
         }
-        const uint64_t references_start = options->selection_census ? __rdtsc() : 0;
         body->reference_count = check_program_references(program, entries + start, body->entry_count, b + 1, seen, nodes, stack, reference_items, needed);
+        }
         if (body->reference_count > UINT32_MAX - reference_count)
         {
             check_program_fail(program, CHECK_PROGRAM_RESOURCE, token);

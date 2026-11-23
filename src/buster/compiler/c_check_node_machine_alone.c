@@ -549,7 +549,9 @@ static NodeFrontTypes* node_alone_results(CheckInputReader* reader, const NodeFr
         types->declarations = arena_push_array(arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
         // What a splice reads beside a tape: a root's, and the stores, a place a node at most.
         uint32_t** sides[] = { &types->side_label_firsts, &types->side_label_counts, &types->side_call_firsts, &types->side_call_counts, &types->side_temporaries,
-                               &types->side_labels,       &types->side_call_targets, &types->side_call_argument_counts, &types->side_call_argument_firsts };
+                               &types->side_labels,       &types->side_call_targets, &types->side_call_argument_counts, &types->side_call_argument_firsts,
+                               &types->side_call_types,   &types->side_call_results, &types->side_argument_types };
+        _Static_assert(sizeof(TypeId) == sizeof(uint32_t), "the side stores' types are words");
         bool sided = true;
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sides); c += 1)
         {

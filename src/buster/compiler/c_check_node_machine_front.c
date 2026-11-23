@@ -148,6 +148,12 @@
 // body is left at the chunk in which a root of it is first lost or refused, and the machine's one run keeps what it
 // makes of a root (no second run: nothing of a root is compared with the walk's).
 #define BUSTER_NODE_READER_PRODUCE_LEAN 131072u
+// With it and the two above (a compile's --node-bodies): the compile takes the bodies the producer takes. Every body is
+// decided before the walk's first chunk is compacted, and a taken body's tokens are masked from there on as a lazily
+// deferred body's are (CheckInput.deferred_tokens, with CheckInput.node_bodies): the walk and every phase after it
+// leave them, the program keeps the body as its unit's with no control of its own, and the lowering writes its function
+// from the controls and the tapes kept here.
+#define BUSTER_NODE_READER_BODIES 262144u
 // What it says of a body (NodeFrontShadow.alone_body_verdicts): every root the front made of it is taken (T took it, the
 // tests left it silent, C and X took it) and the front left no token of it; or the first thing in the body's order that
 // stops it: a token the front left or a value it lost (an expression it makes no root of), a root the machine didn't run
@@ -164,6 +170,23 @@
 // Its records may have a warning that neither T's rules nor the census's tests stand for before the walk
 // (node_machine_root_loud).
 #define BUSTER_NODE_FRONT_SIDE_LOUD 0x08u
+// A temporary's entry on a tape (an update's of an address, after its postfix): its number among the expression's
+// temporaries, in the order X makes them, with this bit. The lowering's are locals it adds (check_lower_temporary).
+#define BUSTER_NODE_MACHINE_TEMPORARY (UINT64_C(1) << 63)
+// A branch's entry on a tape whose target is its control's (a statement's condition that is branches): a label
+// outside the expression, which the lowering's control numbered before the expression's own and a splice gives.
+#define BUSTER_NODE_MACHINE_CONTROL_LABEL (UINT64_C(1) << 62)
+// A control of a body as the producer's twin makes it from the tokens (c_check_node_bodies.c): the program's kind, token
+// and target, and whether it has an expression where the program's has a node; an INITIALIZE's target, the program's
+// plan, is not the twin's to name.
+typedef struct NodeTwinControl NodeTwinControl;
+struct NodeTwinControl
+{
+    uint32_t token;
+    uint32_t target;
+    uint8_t kind;
+    bool valued;
+};
 #define BUSTER_NODE_ALONE_BODY_WHOLE 0u
 #define BUSTER_NODE_ALONE_BODY_LEFT 1u
 #define BUSTER_NODE_ALONE_BODY_UNRUN 2u
@@ -488,7 +511,8 @@ struct NodeFrontTypes
     // stores had no room for the root's) and their count, its calls' first row in the calls' columns and their count,
     // its temporaries, and its root's facts (BUSTER_NODE_FRONT_SIDE_*). The stores: each label's place on its tape; and,
     // a call's row, what stands for its callee's symbol (0: none), its arguments' count, their first class in
-    // `side_argument_classes`, and whether it is variadic.
+    // `side_argument_classes`, and whether it is variadic; and, for a compile that writes the call's row itself
+    // (--node-bodies), its callee's function type, its result's type and each argument's type as the call converts it.
     uint32_t* side_label_firsts;
     uint32_t* side_label_counts;
     uint32_t* side_call_firsts;
@@ -501,6 +525,9 @@ struct NodeFrontTypes
     uint32_t* side_call_argument_firsts;
     uint8_t* side_call_variadic;
     uint8_t* side_argument_classes;
+    TypeId* side_call_types;
+    TypeId* side_call_results;
+    TypeId* side_argument_types;
     uint64_t side_label_count;
     uint64_t side_call_count;
     uint64_t side_argument_count;
@@ -840,6 +867,30 @@ struct NodeFrontShadow
     uint64_t window_name_differences;
 };
 
+// --node-bodies (CheckInput.node_bodies): the place, among the producer's verdicts (NodeFrontShadow.alone_body_openings,
+// in the bodies' order), of the body whose opening brace is `opening`, where the compile takes it: UINT32_MAX for a body
+// it reads as ever. A taken body is one the mask holds; the program and the lowering ask.
+static inline __attribute__((unused)) uint32_t node_bodies_slot(const CheckInput* input, uint32_t opening)
+{
+    uint32_t slot = UINT32_MAX;
+    if (input->node_bodies && input->deferred_tokens[opening] != 0)
+    {
+        const NodeFrontShadow* supply = input->node_front;
+        uint32_t low = 0;
+        uint32_t high = supply->alone_body_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = supply->alone_body_openings[middle] < opening;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        slot = low < supply->alone_body_count && supply->alone_body_openings[low] == opening ? low : UINT32_MAX;
+    }
+    return slot;
+}
+
+
 #define BUSTER_NODE_FRONT_CONTEXT_UNKNOWN 0xffu
 
 #define BUSTER_NODE_FRONT_FIELD_NODE 1u
@@ -1076,6 +1127,8 @@ static bool node_bodies_check_begin(const char* path);
 static void node_bodies_check_read(const CheckInput* input, const Parser* parser);
 static void node_bodies_check_token(uint32_t token, const char* what, const char* message);
 static void node_bodies_check_end(const Preprocessor* pp);
+// --node-bodies (BUSTER_NODE_READER_BODIES): the bodies the producer took, masked (c_check_node_bodies.c).
+static void node_bodies_mask(CheckInputReader* reader, NodeFrontShadow* shadow);
 // After the walk's last chunk: the roots it took against the tokens the walk's class actions left to its visit
 // (CheckInputReader.expression_declined), which the walk has marked by then.
 static void node_alone_finish(struct NodeAlone* alone, const CheckInputReader* reader);

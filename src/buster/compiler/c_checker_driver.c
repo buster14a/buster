@@ -13122,7 +13122,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             else
             {
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-                if (__builtin_expect(node_bodies_checking, 0) && (repairing || prefix_only || checking != parser || selected != NULL))
+                if (__builtin_expect((checking_pp->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0, 0) &&
+                    (repairing || prefix_only || checking != parser || selected != NULL))
                 {
                     // #2850's producer runs in a unit's ordinary read of its whole parse alone: not in a repaired parse's,
                     // a prefix's or a view's, which are read where the unit has failed already.
@@ -13219,7 +13220,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         checking->typo_sources = typo_edits.sources;
                         checking->typo_count = typo_edits.source_count;
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-                        if (__builtin_expect(node_bodies_checking, 0))
+                        if (__builtin_expect((checking_pp->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0, 0))
                         {
                             // (Nor in a read made again for a typo's correction: what the first read decided stands.)
                             checking_pp->options.node_front = 0;
@@ -13269,6 +13270,25 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     fprintf(errors, "node-window: taken=%u ordinary-nodes-replaced=%u summary-nodes=%u graph-nodes=%u\n", input.window_count, input.window_nodes,
                             input.window_count, input.graph.count);
                 }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                if ((pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0)
+                {
+                    // --node-bodies: the bodies the producer decided, those the compile takes and their tokens.
+                    uint32_t decided = 0;
+                    uint32_t taken = 0;
+                    uint64_t taken_tokens = 0;
+                    const NodeFrontShadow* supply = input.node_front;
+                    for (uint32_t b = 0; supply != NULL && supply->produced_reasons != NULL && b < supply->alone_body_count; b += 1)
+                    {
+                        const uint32_t opening = supply->alone_body_openings[b];
+                        const bool masked = input.node_bodies && opening < checking->tokens.count && input.deferred_tokens[opening] != 0;
+                        decided += 1;
+                        taken += masked;
+                        taken_tokens += masked ? (uint64_t)checking->tree.parents[opening] - opening + 1 : 0;
+                    }
+                    fprintf(errors, "node-bodies: bodies=%u taken=%u tokens=%" PRIu64 " graph-nodes=%u\n", decided, taken, taken_tokens, input.graph.count);
+                }
+#endif
                 for (uint32_t p = 0; p < BUSTER_CHECK_CLOCK_WALK_PARTS; p += 1)
                 {
                     stage_clock->expression_part_ticks[p] += input.expression_part_ticks[p];
@@ -14641,6 +14661,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool node_window = false;
     bool node_window_assignments = false;
     bool node_window_constants = false;
+    // --node-bodies (#2850): the function bodies the node machine's producer takes before the reader's walk are written
+    // from its tapes, where the unit is compiled to an object on one lane without -g.
+    bool node_bodies = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -14950,6 +14973,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             node_window_constants = false;
             node_window = true;
+        }
+        else if (match.exact == C_OPTION_NODE_BODIES)
+        {
+            node_bodies = true;
         }
         else if (match.exact == C_OPTION_CHECK_TRANSITIONS)
         {
@@ -15381,7 +15408,29 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     options.statement_controls = (emit_object || link) && !scalar && !dump && !dump_static &&
                                  !node_window && !node_window_constants && !source_rows;
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
-    if (getenv("BUSTER_TEST_NODE_BODIES_LOG") != NULL)
+    // A test's switch (BUSTER_TEST_NODE_BODIES): --node-bodies for every command that can have it, on any number of lanes;
+    // "N:K" takes the bodies whose place among the producer's is K modulo N, anything else every one.
+    const char* forced_bodies = getenv("BUSTER_TEST_NODE_BODIES");
+    const bool forced = forced_bodies != NULL && forced_bodies[0] != 0;
+    if ((node_bodies || forced) && parsed && emit_object && !link && !scalar && !dump && !dump_static && !source_rows && !lazy_system_headers && !deferred_bodies &&
+        (lanes->lanes == 1 || forced) && !lanes->tier1 && !node_window && !node_window_constants)
+    {
+        unsigned modulus = 0;
+        unsigned residue = 0;
+        if (forced && sscanf(forced_bodies, "%u:%u", &modulus, &residue) == 2 && modulus != 0)
+        {
+            options.node_bodies_modulus = modulus;
+            options.node_bodies_residue = residue % modulus;
+        }
+        // The producer as a compile runs it, and the compile takes what it takes (BUSTER_NODE_READER_BODIES). Off with
+        // more than one lane, with -g's rows, with Tier 1 (whose locals' lifetimes are the program's controls) and with
+        // lazily deferred or #113's deferred bodies; a unit's read of a view, a prefix or a repaired parse runs no producer
+        // (check_driver_unit).
+        options.node_front = BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER;
+        options.node_reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | BUSTER_NODE_READER_ALONE_FIRST | BUSTER_NODE_READER_PRODUCE | BUSTER_NODE_READER_PRODUCE_LEAN |
+                              BUSTER_NODE_READER_BODIES;
+    }
+    else if (getenv("BUSTER_TEST_NODE_BODIES_LOG") != NULL)
     {
         // #2850's producer of the bodies' functions, run beside each unit's ordinary read as a compile would run it and
         // nothing masked: a test's switch (c_check_node_bodies.c's node_bodies_check_end reads what it decided against
@@ -15482,7 +15531,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments | --node-window-constants] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments | --node-window-constants] [--node-bodies] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c | -S] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }

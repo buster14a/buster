@@ -1265,6 +1265,10 @@ struct CheckInput
     // Under PPOptions.node_front alone, the node machine's front's report (c_check_node_machine_front.c, #2524): null in
     // every other run.
     struct NodeFrontShadow* node_front;
+    // --node-bodies (#2850): the mask in `deferred_tokens` is the producer's. A masked body is still the unit's: the
+    // program keeps it with no control of its own, and the lowering writes its function from what `node_front` keeps of
+    // it (its controls, each control's root's tape and what is beside it).
+    bool node_bodies;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;

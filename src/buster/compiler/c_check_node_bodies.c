@@ -54,14 +54,7 @@ static const char* const node_twin_reason_names[NODE_TWIN_REASONS] = {
 //
 // A twin's control has the program's kind, token and target, and whether it has an expression where the program's has a
 // node; an INITIALIZE's target, the program's plan, is not the twin's to name.
-typedef struct NodeTwinControl NodeTwinControl;
-struct NodeTwinControl
-{
-    uint32_t token;
-    uint32_t target;
-    uint8_t kind;
-    bool valued;
-};
+// (NodeTwinControl is c_check_node_machine_front.c's, where the program and the lowering read a taken body's.)
 
 #define BUSTER_NODE_TWIN_TASK_STATEMENT 0u
 #define BUSTER_NODE_TWIN_TASK_LABEL 1u
@@ -1381,6 +1374,49 @@ static void node_producer_keep(struct NodeProducer* producer, NodeFrontShadow* s
     {
         memcpy(shadow->produced_controls + shadow->produced_control_count, twin->entries, (uint64_t)twin->count * sizeof(NodeTwinControl));
         shadow->produced_control_count += twin->count;
+    }
+}
+
+// --node-bodies (BUSTER_NODE_READER_BODIES): the bodies the producer took, masked before the walk's first chunk. Each
+// one's tokens, its braces among them, take the lazily deferred bodies' mask (CheckInput.deferred_tokens, which every
+// phase after the reader's walk skips), no class of the walk's (CheckInputReader.visits) and the reader's own mark
+// (CheckInputReader.ignored); and the input says whose mask it is (CheckInput.node_bodies). A unit with a mask already,
+// or without room, takes none: nothing is then masked, and every body is read as ever.
+static void node_bodies_mask(CheckInputReader* reader, NodeFrontShadow* shadow)
+{
+    CheckInput* input = reader->output;
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t modulus = reader->pp->options.node_bodies_modulus;
+    const uint32_t residue = reader->pp->options.node_bodies_residue;
+    uint32_t taken = 0;
+    for (uint32_t b = 0; shadow->produced_reasons != NULL && b < shadow->alone_body_count; b += 1)
+    {
+        taken += shadow->produced_reasons[b] == NODE_PRODUCER_TAKEN;
+    }
+    uint8_t* mask = taken != 0 && input->deferred_tokens == NULL && !input->resource ? arena_push_array(reader->arena, (uint64_t)count + 1, 1, 64) : NULL;
+    if (mask != NULL)
+    {
+        memset(mask, 0, (uint64_t)count + 1);
+        uint32_t place = 0;
+        for (uint32_t b = 0; b < shadow->alone_body_count; b += 1)
+        {
+            const uint32_t opening = shadow->alone_body_openings[b];
+            const uint32_t closing = opening < count ? parser->tree.parents[opening] : count;
+            const bool produced = shadow->produced_reasons[b] == NODE_PRODUCER_TAKEN && closing < count && closing > opening;
+            // (A test's selection, PPOptions.node_bodies_modulus: some of the producer's bodies, the others read as ever.)
+            const bool selected = produced && (modulus == 0 || place % modulus == residue);
+            place += produced;
+            if (selected)
+            {
+                const uint64_t length = (uint64_t)closing - opening + 1;
+                memset(mask + opening, 1, length);
+                memset(reader->visits + opening, 0, length);
+                memset(reader->ignored + opening, 1, length);
+            }
+        }
+        input->deferred_tokens = mask;
+        input->node_bodies = true;
     }
 }
 

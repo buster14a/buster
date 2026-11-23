@@ -20235,7 +20235,16 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     const uint64_t x86_lanes = check_x86_lanes_room(program);
     // A control's entries, up to four: a deferred lowering's bound is the controls' room the checker's setup reserves.
     const uint64_t controls = deferred ? program->control_capacity : program->control_count;
-    const uint64_t capacity64 = (uint64_t)nodes * 32 + controls * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
+    // --node-bodies (#2850): a body the producer took has no node and no control of the program's. Its function's entries
+    // are its kept tapes' and four a control of the producer's at most, its labels the tapes' own beside the controls',
+    // its temporaries no more than the tapes' entries, and its calls and their arguments the tapes'.
+    const NodeFrontShadow* taken_supply = program->status == CHECK_PROGRAM_OK && input != NULL && input->node_bodies ? input->node_front : NULL;
+    const NodeFrontTypes* taken_kept = taken_supply != NULL ? taken_supply->alone_types : NULL;
+    const uint64_t taken_entries = taken_kept != NULL ? taken_kept->tape_count + (uint64_t)taken_supply->produced_control_count * 4 + taken_kept->side_label_count + 8 : 0;
+    const uint64_t taken_locals = taken_kept != NULL ? taken_kept->tape_count : 0;
+    const uint64_t taken_calls = taken_kept != NULL ? taken_kept->side_call_count : 0;
+    const uint64_t taken_arguments = taken_kept != NULL ? taken_kept->side_argument_count : 0;
+    const uint64_t capacity64 = taken_entries + (uint64_t)nodes * 32 + controls * 4 + (uint64_t)builtin_count * BUSTER_CBUILTIN_LOWER_ENTRIES +
                                 varargs * BUSTER_CBUILTIN_LOWER_ENTRIES + asm_operands * 16 + asm_statements * 6 + asm_labels * 4 + (uint64_t)(input != NULL ? input->kr_parameter_count : 0) * 5 +
                                 limb_room.entries + lane_calls * 17 + node_counts.transport_entries + 32 + x86_lanes;
     // A node's lowering takes up to two temporaries, and a 128-bit integer's four more: a division's two operands, a
@@ -20244,7 +20253,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // Each lane's writer resets its integer pool per body and copies completed local columns to output, so one pool
     // bounds the writer's reusable local room regardless of the number of bodies.
     const uint64_t recipe_pools = integer_builtin_count != 0 ? 1 : 0;
-    const uint64_t local_capacity64 = (uint64_t)count + (uint64_t)nodes * 6 + ((uint64_t)builtin_count - integer_builtin_count + recipe_pools) * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
+    const uint64_t local_capacity64 = taken_locals + (uint64_t)count + (uint64_t)nodes * 6 + ((uint64_t)builtin_count - integer_builtin_count + recipe_pools) * BUSTER_CBUILTIN_LOWER_TEMPORARIES +
                                       varargs * (BUSTER_CBUILTIN_LOWER_TEMPORARIES + 4) + (uint64_t)program->body_count * 5 + asm_operands + asm_statements * 2 + (input != NULL ? input->kr_parameter_count : 0) +
                                       limb_room.locals + node_counts.transport_locals + tls_room + 1;
     bool valid = output != scratch && program->status == CHECK_PROGRAM_OK && tls_ready && capacity64 <= UINT32_MAX && local_capacity64 <= UINT32_MAX &&
@@ -20345,9 +20354,9 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // The cleanups' calls (check_lower_cleanup_calls): a deferred lowering's writer takes its part's
     // (check_lower_deferred_part).
     const uint64_t cleanup_calls = deferred ? 0 : check_lower_cleanup_calls(program, 0, program->control_count);
-    const uint64_t abi_capacity64 = (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls +
+    const uint64_t abi_capacity64 = taken_calls + (uint64_t)nodes * 3 + program->body_count + errno_calls + asm_statements + lowered->initializers.count + limb_room.calls +
                                     lane_calls + lowered->initializers.extra_calls + cleanup_calls + tls_room + 1;
-    const uint64_t argument_capacity64 = input != 0 ? (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
+    const uint64_t argument_capacity64 = input != 0 ? taken_arguments + (uint64_t)input->graph.argument_count + count + (uint64_t)nodes * 4 + errno_calls + asm_statements +
                                                     (uint64_t)lowered->initializers.count * 3 + limb_room.arguments + lane_arguments + lowered->initializers.extra_arguments + cleanup_calls + 1 : 0;
     const uint64_t pool_base = (uint64_t)program->symbol_count + lowered->helpers.count + 1;
     const uint64_t provisional64 = pool_base + lowered->initializers.count;
@@ -20880,6 +20889,277 @@ static void check_lower_deferred_reset(const CheckLowerShared* shared)
     }
 }
 
+// --node-bodies (#2850): a call's row of a kept tape, row `row` of the kept calls' columns (NodeFrontTypes.side_call_*),
+// written as check_lower_call_body writes a plain call's: the callee's symbol where it is called directly, its
+// arguments' count, classes and types, its result's type, and the row's signature for the part's locations. What a
+// plain call is refused for is refused the same (its callee's convention, more arguments than Tier 0 takes).
+static void check_lower_taken_call(CheckLowerWriter* writer, const NodeFrontTypes* kept, uint64_t row)
+{
+    const CheckProgram* program = writer->program;
+    const TypeTable* types = program->types;
+    CheckLowerAbi* abi = writer->abi;
+    const TypeId function = kept->side_call_types[row];
+    const TypeId result = kept->side_call_results[row];
+    const uint32_t count = kept->side_call_argument_counts[row];
+    const uint32_t first = kept->side_call_argument_firsts[row];
+    const uint32_t object = kept->side_call_targets[row];
+    const uint8_t flags = function != 0 ? types->types.flags[type_index(function)] : 0;
+    uint32_t parameters = 0;
+    const TypeId* parameter_types = function != 0 ? type_parameters(types, function, &parameters) : NULL;
+    const bool variadic = (flags & BUSTER_TYPE_FLAG_VARIADIC) != 0 || (flags & BUSTER_TYPE_FLAG_PROTOTYPE) == 0;
+    const char* passed = function != 0 ? check_lower_convention_call(types, function, writer->target.features) : NULL;
+    const SymbolId symbol = object != 0 && object < program->object_count ? program->object_symbols[object] : 0;
+    if (function == 0 || (object != 0 && symbol == 0))
+    {
+        // (A callee the tape calls directly has a symbol: the body's references name it.)
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+    }
+    else if (passed != NULL || count > BUSTER_TIER0_MAX_CALL_ARGUMENTS)
+    {
+        check_lower_unsupported(writer, count > BUSTER_TIER0_MAX_CALL_ARGUMENTS ? "calls with more than 239 arguments" : passed);
+    }
+    else if (abi->count >= abi->capacity || count > abi->argument_capacity - abi->argument_count)
+    {
+        check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+    }
+    else
+    {
+        writer->calls_returns_twice |= writer->twice && (object != 0 ? check_lower_calls_twice(writer, object) : check_lower_indirect_twice(writer, parameter_types, parameters));
+        const uint32_t call = writer->call_count++;
+        writer->call_targets[call] = symbol;
+        writer->call_first[call] = writer->argument_count;
+        writer->call_counts[call] = count;
+        writer->call_variadic[call] = variadic;
+        writer->call_result_objects[call] = 0;
+        abi->first[abi->count] = abi->argument_count;
+        abi->results[abi->count] = result;
+        abi->counts[abi->count] = count;
+        abi->named[abi->count] = (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 ? parameters : count;
+        abi->variadic[abi->count++] = variadic;
+        for (uint32_t a = 0; a < count; a += 1)
+        {
+            const TypeId argument = kept->side_argument_types[first + a];
+            abi->arguments[abi->argument_count++] = argument;
+            writer->argument_sizes[writer->argument_count] = 0;
+            writer->argument_classes[writer->argument_count++] = writer->type_templates != NULL ? (uint8_t)check_lower_type_info(writer, argument) : check_lower_value_class(writer, argument);
+        }
+    }
+}
+
+// --node-bodies (#2850): the tape kept for the root `root` (NodeFrontTypes, the machine's with no node of the walk's),
+// written at the writer's place as the lowering's tasks would have written the expression: its temporaries are locals
+// the writer adds, in the tape's order; its labels are labels the writer numbers, each placed at its entry; its calls'
+// rows are rows the writer adds (check_lower_taken_call); a declared object's local is the writer's map's, its address
+// marked taken where an entry takes it; a global's object is the program's symbol; and a branch to its control's own
+// label is one to `control_label`. Whether the expression is branches (its control then writes no branch of its own).
+static bool check_lower_taken_tape(CheckLowerWriter* writer, const NodeFrontTypes* kept, uint32_t root, uint32_t control_label)
+{
+    const CheckProgram* program = writer->program;
+    const uint64_t first = kept->tape_firsts[root];
+    const uint32_t entries = kept->tape_counts[root] != UINT32_MAX && kept->side_label_firsts[root] != UINT32_MAX ? kept->tape_counts[root] : UINT32_MAX;
+    if (entries == UINT32_MAX)
+    {
+        // (The producer takes a body only with every control's root kept.)
+        check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        return false;
+    }
+    const uint8_t* kinds = kept->tape_kinds + first;
+    const uint8_t* classes = kept->tape_classes + first;
+    const uint64_t* values = kept->tape_values + first;
+    const uint32_t* labels = kept->side_labels + kept->side_label_firsts[root];
+    const uint32_t label_count = kept->side_label_counts[root];
+    const uint32_t temporaries = kept->side_temporaries[root];
+    const uint32_t calls = kept->side_call_counts[root];
+    // The temporaries, each a local of no class until its first entry that is no address gives it its own.
+    const uint32_t temporary_base = writer->local_count;
+    for (uint32_t k = 0; k < temporaries && writer->output->status == CHECK_PROGRAM_OK; k += 1)
+    {
+        const uint32_t local = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
+        if (writer->output->status == CHECK_PROGRAM_OK)
+        {
+            writer->local_classes[local] = BUSTER_TYPED_CLASS_VOID;
+        }
+    }
+    const uint32_t label_base = writer->label_count;
+    for (uint32_t l = 0; l < label_count && writer->output->status == CHECK_PROGRAM_OK; l += 1)
+    {
+        (void)check_lower_label(writer);
+    }
+    const uint32_t call_base = writer->call_count;
+    for (uint32_t k = 0; k < calls && writer->output->status == CHECK_PROGRAM_OK; k += 1)
+    {
+        check_lower_taken_call(writer, kept, (uint64_t)kept->side_call_firsts[root] + k);
+    }
+    for (uint32_t t = 0; t <= entries && writer->output->status == CHECK_PROGRAM_OK; t += 1)
+    {
+        for (uint32_t l = 0; l < label_count; l += 1)
+        {
+            if (labels[l] == t)
+            {
+                check_lower_place(writer, label_base + l);
+            }
+        }
+        if (t == entries)
+        {
+            break;
+        }
+        const uint8_t kind = kinds[t];
+        const uint8_t class = classes[t];
+        const uint64_t value = values[t];
+        const bool local_kind = kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL;
+        const bool global_kind = kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
+        const bool branch = kind >= BUSTER_TYPED_BRANCH_FALSE && kind <= BUSTER_TYPED_JUMP_VALUE;
+        if (local_kind)
+        {
+            const bool temporary = (value & BUSTER_NODE_MACHINE_TEMPORARY) != 0;
+            const uint64_t number = value & ~BUSTER_NODE_MACHINE_TEMPORARY;
+            const uint32_t local = temporary ? (number < temporaries ? temporary_base + (uint32_t)number : BUSTER_CHECK_NONE) :
+                                   number < program->object_count ? check_lower_local_of(writer, (uint32_t)number) : BUSTER_CHECK_NONE;
+            if (local == BUSTER_CHECK_NONE || local >= writer->local_count)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else
+            {
+                if (kind == BUSTER_TYPED_LOCAL_ADDRESS)
+                {
+                    writer->local_flags[local] |= BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
+                }
+                else if (temporary && writer->local_classes[local] == BUSTER_TYPED_CLASS_VOID)
+                {
+                    writer->local_classes[local] = class;
+                }
+                check_lower_emit(writer, kind, class, local);
+            }
+        }
+        else if (branch && value == BUSTER_NODE_MACHINE_CONTROL_LABEL)
+        {
+            check_lower_emit(writer, kind, class, control_label);
+        }
+        else if (branch)
+        {
+            if (value >= label_count)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else
+            {
+                check_lower_emit(writer, kind, class, label_base + value);
+            }
+        }
+        else if (kind == BUSTER_TYPED_CALL)
+        {
+            if (value >= calls)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else
+            {
+                check_lower_emit(writer, kind, class, call_base + value);
+            }
+        }
+        else if (global_kind)
+        {
+            const SymbolId symbol = value != 0 && value < program->object_count ? program->object_symbols[value] : 0;
+            if (symbol == 0)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else
+            {
+                check_lower_emit(writer, kind, class, symbol);
+            }
+        }
+        else
+        {
+            check_lower_emit(writer, kind, class, value);
+        }
+    }
+    // (A temporary no entry reads or writes but by its address is a pointer's.)
+    for (uint32_t k = 0; k < temporaries && writer->output->status == CHECK_PROGRAM_OK; k += 1)
+    {
+        if (writer->local_classes[temporary_base + k] == BUSTER_TYPED_CLASS_VOID)
+        {
+            writer->local_classes[temporary_base + k] = BUSTER_TYPED_CLASS_U64;
+        }
+    }
+    return (kept->side_facts[root] & BUSTER_NODE_FRONT_SIDE_BRANCHED) != 0;
+}
+
+// --node-bodies (#2850): the statements of the body at `slot` of the producer's verdicts (node_bodies_slot), which the
+// compile takes, after the lowering's own setup of its function and before its own end: each control the producer kept
+// (the program's, made from the tokens before the reader's walk), in order, its label placed, its expression's kept tape
+// written (check_lower_taken_tape), and its own entries as check_lower_control writes them: a condition's branch where
+// its expression is none, a jump, a return, and an initialization's store.
+static void check_lower_taken_body(CheckLowerWriter* writer, uint32_t slot)
+{
+    const CheckProgram* program = writer->program;
+    const CheckInput* input = program->input;
+    const NodeFrontShadow* supply = input->node_front;
+    const NodeFrontTypes* kept = supply->alone_types;
+    const NodeTwinControl* controls = supply->produced_controls + supply->produced_firsts[slot];
+    const uint32_t count = supply->produced_counts[slot];
+    const uint8_t result = writer->result == BUSTER_TYPE_VOID ? BUSTER_TYPED_CLASS_VOID : check_lower_class(writer, writer->result);
+    for (uint32_t i = 0; i < count && writer->output->status == CHECK_PROGRAM_OK; i += 1)
+    {
+        const NodeTwinControl control = controls[i];
+        check_lower_place(writer, i);
+        writer->token = control.token;
+        const uint32_t root = node_bodies_control_root(supply, &control);
+        const bool rooted = control.valued || control.kind == CHECK_CONTROL_INITIALIZE;
+        if (rooted && root == UINT32_MAX)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+        const bool branched = rooted && root != UINT32_MAX && check_lower_taken_tape(writer, kept, root, control.target);
+        if (writer->output->status != CHECK_PROGRAM_OK)
+        {
+            // (Its failure stands.)
+        }
+        else if (control.kind == CHECK_CONTROL_BRANCH_FALSE || control.kind == CHECK_CONTROL_BRANCH_TRUE)
+        {
+            if (!branched)
+            {
+                check_lower_emit(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, control.target);
+            }
+        }
+        else if (control.kind == CHECK_CONTROL_JUMP)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, control.target);
+        }
+        else if (control.kind == CHECK_CONTROL_RETURN)
+        {
+            if (control.valued != (result != BUSTER_TYPED_CLASS_VOID))
+            {
+                // (The producer takes a return with a value where the function has a result, and without where it has none.)
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else
+            {
+                check_lower_emit(writer, BUSTER_TYPED_RETURN, result, 0);
+            }
+        }
+        else if (control.kind == CHECK_CONTROL_INITIALIZE)
+        {
+            const uint32_t local = control.token < input->token_count ? check_lower_local_of(writer, input->objects[control.token]) : BUSTER_CHECK_NONE;
+            const uint8_t class = control.token < input->token_count ? check_lower_class(writer, input->declared_types[control.token]) : UINT8_MAX;
+            if (local == BUSTER_CHECK_NONE || local >= writer->local_count || writer->local_sizes[local] != 0 || class == UINT8_MAX)
+            {
+                // (The producer takes an initialization of a plain scalar's local alone.)
+                check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+            }
+            else
+            {
+                check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+            }
+        }
+        else if (control.kind != CHECK_CONTROL_EVALUATE && control.kind != CHECK_CONTROL_END)
+        {
+            check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+        }
+    }
+}
+
 static inline __attribute__((always_inline)) void check_lower_part_body(CheckLowerWriter* writer, const CheckLowerShared* shared, CheckLowerPart* part,
                                                                        bool sources, Arena* output, Arena* scratch)
 {
@@ -20922,6 +21202,10 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
     {
         const CheckProgramBody body = program->bodies[b];
         const TypeId type = input->declared_types[body.declaration];
+        // --node-bodies (#2850): a body the producer took before the reader's walk, by its place among its verdicts. Its
+        // labels are its producer's controls' (the program has none of it), and its statements check_lower_taken_body's.
+        const uint32_t taken = __builtin_expect(input->node_bodies, 0) ? node_bodies_slot(input, body.opening) : UINT32_MAX;
+        const uint32_t body_controls = taken != UINT32_MAX ? input->node_front->produced_counts[taken] : body.count;
         // A naked function's code is its templates' (check_program_asm_plan_naked): its own is a void function of no
         // parameters, locals or statements, which the emission doesn't compile, its one entry at its first statement.
         const CheckProgramNaked* naked = lowered->asms.naked != 0 ? lowered->asms.naked + b : 0;
@@ -20951,7 +21235,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->builtin_scratch.count = 0;
         writer->miscellaneous_count = 0;
         writer->floating_count = 0;
-        writer->label_count = body.count + 1;
+        writer->label_count = body_controls + 1;
         writer->stack_count = 0;
         writer->stack_head = 0;
         writer->constant_end = BUSTER_CHECK_NONE;
@@ -21001,7 +21285,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->x87_constants[0] = 0;
         writer->x87_constants[1] = 0;
         memset(writer->extent_locals, 0xff, ((uint64_t)input->vla_count + 1) * sizeof(uint32_t));
-        memset(writer->labels, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));
+        memset(writer->labels, 0xff, ((uint64_t)body_controls + 1) * sizeof(uint32_t));
         // Its cleanups' chains (#1370): an entry label past each fall's store, which the exits jump to, and destinations
         // activated only by emitted exits. Each writer owns its destinations: target_clones can lower copies of one
         // cleanup plan on different lanes, and an exit may only reuse a tail this writer has emitted.
@@ -21015,7 +21299,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         if (writer->track)
         {
-            memset(writer->label_heads, 0xff, ((uint64_t)body.count + 1) * sizeof(uint32_t));
+            memset(writer->label_heads, 0xff, ((uint64_t)body_controls + 1) * sizeof(uint32_t));
         }
         shared->signatures[b] = abi->count;
         abi->first[abi->count] = abi->argument_count;
@@ -21335,7 +21619,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         // #1048's node templates: the body's nodes' contexts and closed subtrees' entries, before its statements.
         writer->template_ready = false;
-        if (writer->templates && !bare && status->status == CHECK_PROGRAM_OK)
+        if (writer->templates && !bare && taken == UINT32_MAX && status->status == CHECK_PROGRAM_OK)
         {
             check_lower_template_body(writer, program->bodies + b);
         }
@@ -21368,12 +21652,16 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
                 check_lower_drain(writer);
             }
         }
+        if (taken != UINT32_MAX && !bare && status->status == CHECK_PROGRAM_OK)
+        {
+            check_lower_taken_body(writer, taken);
+        }
         part->statement_ticks += timed ? __rdtsc() - statements_start : 0;
         // Whether control reaches the function's end: a statement that falls through to it, or a branch to it.
-        const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body.count] != BUSTER_CHECK_NONE :
+        const bool falls = (body.return_flow && body.falls) || (writer->track ? writer->reachable || writer->label_heads[body_controls] != BUSTER_CHECK_NONE :
                                                                             writer->count == 0 || (writer->kinds[writer->count - 1] != BUSTER_TYPED_RETURN &&
                                                                                                    writer->kinds[writer->count - 1] != BUSTER_TYPED_TAIL_CALL));
-        check_lower_place(writer, body.count);
+        check_lower_place(writer, body_controls);
         // The function's end, its implicit return, is its closing brace's (an opener's parent is its closer); a naked
         // function's one entry its first statement's `asm`, where its code starts, as clang's row is.
         const bool first_asm = bare && body.count != 0 && program->controls[body.first].kind == CHECK_CONTROL_ASM;
