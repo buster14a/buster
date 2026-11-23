@@ -745,7 +745,12 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
             const uint64_t needed = swept + BUSTER_NODE_ALONE_SLACK;
             capacity = needed < capacity ? (uint32_t)needed : capacity;
             argument_capacity = needed < argument_capacity ? (uint32_t)needed : argument_capacity;
+            shadow->alone_swept = swept;
         }
+    }
+    if (room)
+    {
+        shadow->alone_room = capacity;
     }
     const uint32_t words = capacity / 64 + 1;
     uint64_t* bits = room ? arena_push_array(reader->scratch, words, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;

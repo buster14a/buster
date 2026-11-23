@@ -1832,6 +1832,8 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     if ((fronted & BUSTER_NODE_FRONT_TYPES) != 0)
     {
+        const uint64_t scratch_before = reader->scratch->length;
+        const uint64_t arena_before = reader->arena->length;
         front->typer = node_machine_reader_begin(reader, front->shadow, (fronted & BUSTER_NODE_FRONT_SWEEPS) != 0);
         // Whether the front writes the fact words' window (BUSTER_NODE_READER_WINDOW), where the kernel runs there.
         node_facts_window_begin(front, reader);
@@ -1840,6 +1842,7 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
             // The machine with no node of the walk's, a body at a time before the walk acts at it.
             front->alone = node_alone_begin(front, reader);
         }
+        front->shadow->alone_made = (reader->scratch->length - scratch_before) + (reader->arena->length - arena_before);
     }
 #else
     (void)reader;
