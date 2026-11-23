@@ -274,6 +274,9 @@ enum
     // computation stored back, -Wimplicit-float-conversion's, off by default, under -Wconversion. (-Wliteral-range's
     // floating comparison with a literal its other operand's type can't hold is CHECK_WARNING_ID_LITERAL_RANGE's.)
     CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION = 170,
+    // A character literal added to a character pointer (#2406, clang's diagnoseStringPlusChar): on by default,
+    // independently of -Wstring-plus-int, which can also diagnose the same addition.
+    CHECK_WARNING_ID_STRING_PLUS_CHAR = 171,
     CHECK_WARNING_ID_COUNT,
 };
 

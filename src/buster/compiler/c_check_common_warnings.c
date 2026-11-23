@@ -5399,23 +5399,38 @@ static uint32_t check_common_operand_root(const Parser* parser, uint32_t op, uin
     return at < count && parser->tree.parents[at] == op && (!strings || parser->tokens.kinds[at] == PARSE_KIND_STRING) ? at : BUSTER_CHECK_NONE;
 }
 
+// Whether the operand's converted type is a pointer or array of char, signed char or unsigned char. An atomic
+// pointer's lvalue conversion keeps its pointer value; an atomic character pointee remains a different type.
+static bool check_common_character_pointer(const TypeTable* types, TypeId type)
+{
+    const TypeId base = type_conversion_operand(types, type);
+    const uint8_t kind = base != 0 ? type_kind(types, base) : 0;
+    const TypeId element = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ?
+                           type_unqualified(type_strip_aligned(types, type_element(types, base))) : 0;
+    return element == BUSTER_TYPE_CHAR || element == BUSTER_TYPE_SCHAR || element == BUSTER_TYPE_UCHAR;
+}
+
 // -Wstring-plus-int (#2190, clang's diagnoseStringPlusInt): a `+` of a string literal, unparenthesized, and an operand of
 // integer, boolean or enumeration type, in either order, "adding 'T' to a string does not append to the string" at the
 // `+`, T the operand's type as written, with its note there; given as clang builds the `+`, after its operands' own. A
-// `+` whose neighbor isn't a string literal is skipped at once.
+// `+` whose neighbor isn't a string literal is skipped at once. The same scan gives -Wstring-plus-char (#2406): an
+// unparenthesized character literal added to a character pointer, including a parenthesized string or a variable. The
+// two warnings are independent; where both apply, the integer warning and its note come first.
 static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
                                          CheckWarningSpelling* spell, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count;
     static const uint8_t roles[] = { PARSE_ROLE_ADDITIVE };
     CheckCommonScan scan = { 0 };
-    const bool enabled = stream != NULL && types != NULL && input->token_nodes != NULL && check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_INT, false);
+    const bool integers = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_INT, false);
+    const bool characters = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_CHAR, false);
+    const bool enabled = stream != NULL && types != NULL && input->token_nodes != NULL && (integers || characters);
     for (uint32_t token = enabled ? check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan) : count; token < count;
          token = check_common_next_token(parser, count, BUSTER_CHECK_NONE, roles, BUSTER_ARRAY_LENGTH(roles), &scan))
     {
         const bool plus = parser->tokens.kinds[token] == PARSE_KIND_PLUS && token > 0 && token + 1 < count;
-        const uint32_t left_string = plus && parser->tokens.kinds[token - 1] == PARSE_KIND_STRING ? check_common_operand_root(parser, token, token - 1, true) : BUSTER_CHECK_NONE;
-        const uint32_t right_string = plus && left_string == BUSTER_CHECK_NONE && parser->tokens.kinds[token + 1] == PARSE_KIND_STRING ?
+        const uint32_t left_string = integers && plus && parser->tokens.kinds[token - 1] == PARSE_KIND_STRING ? check_common_operand_root(parser, token, token - 1, true) : BUSTER_CHECK_NONE;
+        const uint32_t right_string = integers && plus && left_string == BUSTER_CHECK_NONE && parser->tokens.kinds[token + 1] == PARSE_KIND_STRING ?
                                       check_common_operand_root(parser, token, token + 1, true) : BUSTER_CHECK_NONE;
         const bool string = left_string != BUSTER_CHECK_NONE || right_string != BUSTER_CHECK_NONE;
         const uint32_t index = !string ? BUSTER_CHECK_NONE : left_string != BUSTER_CHECK_NONE ? check_common_operand_root(parser, token, token + 1, false) :
@@ -5423,6 +5438,7 @@ static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp,
         const uint32_t node = index < input->token_count ? input->token_nodes[index] : BUSTER_CHECK_NONE;
         const TypeId value = node < stream->count ? check_stream_type(stream, node) : 0;
         const uint8_t value_kind = value != 0 ? type_kind(types, type_unqualified(type_strip_aligned(types, value))) : 0;
+        uint32_t completion = BUSTER_CHECK_NONE;
         if (value_kind == BUSTER_TYPE_KIND_INTEGER || value_kind == BUSTER_TYPE_KIND_ENUM || value_kind == BUSTER_TYPE_KIND_BIT_INT)
         {
             // Its type as clang names it past its implicit conversions: a typedef's or typeof's spelling, an integer's
@@ -5437,8 +5453,34 @@ static void check_common_string_plus_int(const Parser* parser, Preprocessor* pp,
             const CheckCommonNote note = { token, "use array indexing to silence this warning" };
             if (message != NULL)
             {
-                check_common_report_at(parser, pp, input, token, check_common_operand_end(parser, token), CHECK_WARNING_ID_STRING_PLUS_INT, false, message, &note, 1,
+                completion = check_common_operand_end(parser, token);
+                check_common_report_at(parser, pp, input, token, completion, CHECK_WARNING_ID_STRING_PLUS_INT, false, message, &note, 1,
                                        scratch);
+            }
+            arena_pop_to(scratch, mark);
+        }
+        const uint32_t character = characters && plus && parser->tokens.kinds[token - 1] == PARSE_KIND_CHARACTER && parser->tree.parents[token - 1] == token ? token - 1 :
+                                   characters && plus && parser->tokens.kinds[token + 1] == PARSE_KIND_CHARACTER && parser->tree.parents[token + 1] == token ? token + 1 :
+                                   BUSTER_CHECK_NONE;
+        const uint32_t pointer = character != BUSTER_CHECK_NONE ? check_common_operand_root(parser, token, character < token ? token + 1 : token - 1, false) : BUSTER_CHECK_NONE;
+        const uint32_t pointer_node = pointer < input->token_count ? input->token_nodes[pointer] : BUSTER_CHECK_NONE;
+        const TypeId pointer_type = pointer_node < stream->count ? check_stream_type(stream, pointer_node) : 0;
+        if (character != BUSTER_CHECK_NONE && check_common_character_pointer(types, pointer_type))
+        {
+            const uint64_t mark = scratch->length;
+            const String8 written = check_semantic_token(parser, pp, character, scratch);
+            const CheckLiteral literal = check_literal_character_by((const uint8_t*)written.pointer, (uint32_t)written.length,
+                pp->options.language.standard >= 2023, pp->options.predefines.char_unsigned, true);
+            // Clang calls a value fitting one byte 'char', except for a UTF-8 literal's own unsigned char type. A
+            // multi-character or wide literal whose value does not fit keeps its type; an ordinary negative byte too.
+            const TypeId type = literal.integer <= UINT8_MAX && literal.type != BUSTER_TYPE_UCHAR ? BUSTER_TYPE_CHAR : literal.type;
+            const String8 name = literal.valid ? check_driver_warning_type(parser, pp, input, types, spell, scratch, type, 0) : (String8){ 0 };
+            const char* message = name.length != 0 ? check_warning_text(scratch, "adding %.*s to a string pointer does not append to the string", (int)name.length, name.pointer) : NULL;
+            const CheckCommonNote note = { token, "use array indexing to silence this warning" };
+            if (message != NULL)
+            {
+                completion = completion == BUSTER_CHECK_NONE ? check_common_operand_end(parser, token) : completion;
+                check_common_report_at(parser, pp, input, token, completion, CHECK_WARNING_ID_STRING_PLUS_CHAR, false, message, &note, 1, scratch);
             }
             arena_pop_to(scratch, mark);
         }
@@ -6078,6 +6120,49 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
     return result;
 }
 
+// Whether the statement that starts at `token` was clang's StmtError: a recovery view's `;` that ends a statement the
+// repair deleted whole (BUSTER_PARSE_DROPPED_STATEMENT, #2406), or a statement whose body is one, which clang drops with
+// it: a for, while or switch (ParseForStatement, ParseWhileStatement, ParseSwitchStatement), a do (ParseDoStatement) and
+// an if without an else (ParseIfStatement; an else makes the then-branch a null statement instead). Such a statement is
+// neither an empty body nor the statement after a loop, and ActOnForStmt never sees its loop.
+static bool check_common_dropped_statement(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    bool result = false;
+    bool walking = true;
+    bool conditional = false;
+    uint32_t at = token;
+    while (walking && at < count)
+    {
+        const uint8_t kind = parser->tokens.kinds[at];
+        result = kind == PARSE_KIND_SEMI && parser->tree.roles[at] == PARSE_ROLE_TERMINATOR &&
+                 (parser->tokens.flags[at] & BUSTER_PARSE_DROPPED_STATEMENT) != 0;
+        // An else after the dropped body belongs to the innermost if, which keeps every statement around it.
+        result = result && !(conditional && at + 1 < count && parser->tokens.kinds[at + 1] == PARSE_KIND_ELSE);
+        // A head: step past its parenthesized group to its body; a do's body follows it directly.
+        const bool headed = !result && (kind == PARSE_KIND_FOR || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_IF) &&
+                            at + 1 < count && parser->tokens.kinds[at + 1] == PARSE_KIND_L_PAREN;
+        conditional |= headed && kind == PARSE_KIND_IF;
+        uint32_t depth = 0;
+        uint32_t close = at + 1;
+        bool scanning = headed;
+        while (scanning && close < count)
+        {
+            const uint8_t inner = parser->tokens.kinds[close];
+            depth += inner == PARSE_KIND_L_PAREN;
+            depth -= inner == PARSE_KIND_R_PAREN && depth != 0;
+            scanning = depth != 0;
+            close += scanning ? 1u : 0u;
+        }
+        const bool body = headed && close < count &&
+                          (parser->tree.roles[close] == PARSE_ROLE_CLOSE_FOR || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CONDITION);
+        const bool repeat = !result && kind == PARSE_KIND_DO;
+        walking = body || repeat;
+        at = repeat ? at + 1 : close + 1;
+    }
+    return result;
+}
+
 // Clang emits an if's or switch's `;`-body warning when the statement parses, but a for's or while's
 // only once its block's `}` is seen — there its elements are known and the next statement's shape or
 // indentation decides. Publishing a loop's at its owner's position replays that later diagnostic order.
@@ -6104,8 +6189,8 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
                                   parser->tokens.kinds[token + 1] == PARSE_KIND_ELSE && parser->tree.parents[token + 1] == parent;
             // The `;` must spell on the `)`'s line: `while (x)\n;` is quiet, as is a `;` a macro's body
             // provides (its spelling line is its definition's).
-            bool warn = kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR ||
-                        kind == PARSE_KIND_SWITCH;
+            bool warn = (kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR ||
+                         kind == PARSE_KIND_SWITCH) && !check_common_dropped_statement(parser, token);
             warn = warn && !has_else && check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_EMPTY_BODY, false) != CHECK_WARNING_IGNORE &&
                    check_common_spelling_line(parser, pp, token) != 0 &&
                    check_common_spelling_line(parser, pp, token) == check_common_expansion_point(parser, pp, parent, 0);
@@ -6122,7 +6207,7 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
                 uint32_t sibling = BUSTER_CHECK_NONE;
                 for (uint32_t t = warn ? token + 1 : owner; t < owner; t += 1)
                 {
-                    if (parser->tree.parents[t] == owner)
+                    if (parser->tree.parents[t] == owner && !check_common_dropped_statement(parser, check_common_subtree_start(parser, t)))
                     {
                         sibling = t;
                         break;
@@ -13141,10 +13226,14 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
         {
             end += 1;
         }
-        if (semis[1] == BUSTER_CHECK_NONE || open >= close)
+        // A loop whose body was clang's StmtError was dropped with it: ActOnForStmt never saw it (#2406).
+        if (semis[1] == BUSTER_CHECK_NONE || open >= close || check_common_dropped_statement(parser, close + 1))
         {
             continue;
         }
+        // Clang's ActOnForStmt runs before the next statement parses: where the view deleted that statement whole,
+        // publish before the error its first token had (#2406).
+        const uint32_t publication = check_common_dropped_statement(parser, end + 1) ? end : end + 1;
         // The condition, clang's Second: its truth test's operand, the root a token of it climbs to that is the test (a
         // statement expression's statements and a static selection's other operands are roots of their own). Clang skips
         // it where the warning is ignored at its first token.
@@ -13213,7 +13302,7 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
                                                    (int)names[0].length, names[0].pointer, (int)names[1].length, names[1].pointer,
                                                    (int)names[2].length, names[2].pointer, (int)names[3].length, names[3].pointer) :
                     "variables used in loop condition not modified in loop body";
-                check_common_report_at(parser, pp, input, at, end + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, NULL, 0, scratch);
+                check_common_report_at(parser, pp, input, at, publication, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, NULL, 0, scratch);
             }
         }
         // The increment and the body block's last statement, each exactly a variable's ++ or --.
@@ -13256,7 +13345,7 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
                 const char* message = check_warning_text(scratch, "variable '%.*s' is %s both in the loop header and in the loop body",
                                                          (int)intern_length(pp->table, name), intern_bytes(pp->table, name), word);
                 const CheckCommonNote note = { header_name, check_warning_text(scratch, "%s here", word) };
-                check_common_report_at(parser, pp, input, body_name, end + 1, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, &note, 1, scratch);
+                check_common_report_at(parser, pp, input, body_name, publication, CHECK_WARNING_ID_FOR_LOOP_ANALYSIS, true, message, &note, 1, scratch);
             }
         }
     }
