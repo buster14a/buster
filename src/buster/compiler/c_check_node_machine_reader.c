@@ -706,7 +706,11 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
                 facts != NULL && symbols != NULL;
     // C's and X's results by root node, and the tapes' store: two entries a node, which the corpora's tapes are well
     // under (1.3 an evaluated node on sqlite3.c).
-    const uint64_t tape_capacity = sweeps ? 2 * (uint64_t)capacity + BUSTER_NODE_MACHINE_TAPE_MOST : 0;
+    // (--node-bodies, BUSTER_NODE_READER_BODIES: a compile runs no machine on the walk's nodes. These results are then
+    // the place of the objects' columns alone: their capacity is the report's few nodes, they have no tape's store, and
+    // the tests have no state.)
+    const bool compile = (reader->pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0;
+    const uint64_t tape_capacity = !sweeps ? 0 : compile ? 1 : 2 * (uint64_t)capacity + BUSTER_NODE_MACHINE_TAPE_MOST;
     uint8_t* sweep_refusals = sweeps ? arena_push_array(reader->arena, capacity, sizeof(uint8_t), 1) : NULL;
     TypeId* targets = sweeps ? arena_push_array(reader->arena, capacity, sizeof(TypeId), _Alignof(TypeId)) : NULL;
     uint32_t* root_objects = sweeps ? arena_push_array(reader->arena, capacity, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
@@ -790,8 +794,8 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
             types->kinds = kinds;
             types->declared = declared;
             types->declarations = root_declarations;
-            typer->tests = node_census_reader_begin(reader, &typer->machine, types, capacity);
-            room = typer->tests != NULL;
+            typer->tests = compile ? NULL : node_census_reader_begin(reader, &typer->machine, types, capacity);
+            room = compile || typer->tests != NULL;
         }
         if (room && (options & BUSTER_NODE_READER_FACTS) != 0 && (reader->pp->options.node_front & BUSTER_NODE_FRONT_LEAN) != 0)
         {

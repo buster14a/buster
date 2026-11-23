@@ -2304,7 +2304,8 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     }
     if (front != NULL)
     {
-        const uint32_t words = reader->output->graph.capacity / 64 + 1;
+        // (--node-bodies: a compile's walk runs no front and no machine on its nodes, and the report has a word's nodes.)
+        const uint32_t words = (reader->pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0 ? 1 : reader->output->graph.capacity / 64 + 1;
         NodeFrontShadow* shadow = arena_push_array(reader->arena, 1, sizeof(NodeFrontShadow), _Alignof(NodeFrontShadow));
         uint64_t* bits = arena_push_array(reader->arena, words, sizeof(uint64_t), _Alignof(uint64_t));
         uint8_t* contexts = arena_push_array(reader->arena, (uint64_t)words * 64, sizeof(uint8_t), 1);
