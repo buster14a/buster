@@ -228,6 +228,9 @@ test "${#host_flags[@]}" -gt 0
 if awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'rsp'; then exit 1; fi
 if awk '/^add_l2:/,/^\tret/' build/register-aggregates.s | grep -q -- '-8(%rsp)'; then exit 1; fi
 awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'ret'
+# Exact-width call-site parts: small_args's 4- and 12-byte objects stay in registers; its stack holds only n's spill.
+test "$(awk '/^small_args:/,/^\tret/' build/register-aggregates.s | grep -c '(%rsp)')" -le 2
+awk '/^small_args:/,/^\tret/' build/register-aggregates.s | grep -q 'call sum_args'
 # Call sites' argument parts loaded at their own widths: objects that end at an inaccessible page (native only).
 "$BUSTER_COMPILER" --tier1 --tier1-strict -o build/register-aggregates-page-end tests/ir-source/register-aggregates-page-end.c
 build/register-aggregates-page-end > build/register-aggregates-page-end.out && printf 'page end 3615 654\n' | cmp - build/register-aggregates-page-end.out

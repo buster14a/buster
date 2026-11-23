@@ -234,6 +234,21 @@ __attribute__((noinline)) static long callers(int n)
     return total + i2.x + i2.y + l2.x + l2.y + (long)(f2.x * 1000.0f) + (long)(f2.y * 1000.0f) + one_value.c + s2.a + s2.b + (long)d2.x + (long)d2.y + ifl.i + (long)ifl.f;
 }
 
+// Call sites of exact-width parts (#3311): a 4-byte struct passed and returned, and a 12-byte one whose second part is
+// 4 bytes, each loaded at its own width; both objects stay in registers (no red-zone staging, checked in CI).
+__attribute__((noinline)) static long small_args(int n)
+{
+    S2 s2 = { 5, -6 };
+    long total = 0;
+    for (int i = 0; i < n; i++)
+    {
+        s2 = swap_s2(s2);
+        I3 i3 = { i, 2, 3 };
+        total += sum_args((I2){ 1, i }, (L2){ 3, 4 }, 5, (F2){ 0.5f, 0.7f }, i3);
+    }
+    return total + s2.a + s2.b;
+}
+
 int main(void)
 {
     I4 acc4 = { 0 };
@@ -309,5 +324,6 @@ int main(void)
     printf("pointer %d %d %d\n", fp.a, fp.b, fp.c);
     printf("sum %ld\n", sum_args((I2){ 1, 2 }, (L2){ 3, 4 }, 5, (F2){ 0.5f, 0.7f }, (I3){ 6, 7, 8 }));
     printf("callers %ld %ld\n", callers(10), callers(37 + vz));
+    printf("small %ld\n", small_args(9 + vz));
     return 0;
 }
