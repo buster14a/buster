@@ -2712,6 +2712,15 @@ static void asm_instruction(AsmParser* parser, uint32_t end, uint32_t encoding)
             asm_operand(parser, ends[i], instruction->branch, &instruction->request.operands[i], &instruction->expressions[i]);
             asm_decorations(parser, ends[i], &instruction->request, i);
             X86Operand* operand = &instruction->request.operands[i];
+            if ((encoding & BUSTER_X86_MATCH_REL32) && operand->kind == X86_OPERAND_MEMORY)
+            {
+                // {disp32} constrains the address on a memory operand. Without a base it already has four bytes.
+                instruction->request.encoding &= ~BUSTER_X86_MATCH_REL32;
+                if (operand->mode & BUSTER_X86_MODE_BASE)
+                {
+                    operand->mode |= BUSTER_X86_MODE_DISP32;
+                }
+            }
             const bool shift = x86_match_name(*name, "shl") || x86_match_name(*name, "shr") || x86_match_name(*name, "sar") || x86_match_name(*name, "rol") || x86_match_name(*name, "ror") || x86_match_name(*name, "shld") || x86_match_name(*name, "shrd");
             const bool count_register = !parser->options.intel && i == 0 && shift && operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_GPR8 && operand->reg == 1;
             if (checked && width != 0 && operand->kind != X86_OPERAND_IMMEDIATE && !count_register && !(address && operand->kind == X86_OPERAND_MEMORY))

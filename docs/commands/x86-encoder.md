@@ -32,7 +32,7 @@ requirements. [Command index](README.md).
 
 `./build/compiler test-x86-encoder` (about 1.8 s) checks that every form fits a
 template (and that building each, in every mode, at a `PROT_NONE` page writes
-nothing past it), `x86_encode` on 761 known encodings from GNU as (each also
+nothing past it), `x86_encode` on 782 known encodings from GNU as (each also
 with the fixup flag, whose end it must report), a digest of its output for
 100,000 random instructions, every batch width and variant of `x86_encode`
 against the reference encoder (`x86_validate` and `x86_encode`: bytes, offsets
@@ -49,17 +49,17 @@ it (memory operands in the 232 FS and GS forms without room for the override
 among them). `x86_encode` checks nothing: it takes what `x86_validate` accepts,
 as the code generator makes it (an immediate or rel8 outside its field's range,
 for one, gets its low bytes). Then it runs those checks again with 32-bit
-addresses, but the known fixups: 34 known encodings, a digest of their own,
+addresses, but the known fixups: 35 known encodings, a digest of their own,
 `x86_encode_16_address32` and `x86_encode_64_address32` against the reference
 encoder on the random streams (and their digest) and at page edges, and invalid operands, among
 them MPX memory operands and memory operands in the 312 FS and GS forms and the
 116 forms without room for the `67`. And again for APX, but the known fixups:
-153 known encodings, 31 known invalid instructions (as GNU as rejects them), a
+154 known encodings, 31 known invalid instructions (as GNU as rejects them), a
 digest of their own, `x86_encode_16_apx` and `x86_encode_64_apx` against the
 reference encoder on random streams (and their digest) in which half the forms have REX2 and a quarter
 are EVEX ones, and at page edges, and invalid operands, among them a high byte
 register with REX2, registers 16 to 31 in forms without REX2 or EVEX and XMM16
-to XMM31 in SSE's forms. And in 32-bit and 16-bit modes: 159 and 150 known
+to XMM31 in SSE's forms. And in 32-bit and 16-bit modes: 160 and 151 known
 encodings, 13 and 16 known fixups, a digest of each, the modes' loops at 16 and
 64 instructions per iteration (`x86_encode_16_mode32` and the rest) against the
 mode's own entry point after its validation (and their digest) on random streams with both address sizes and segment overrides
