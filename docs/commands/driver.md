@@ -537,7 +537,7 @@ the options say so, and otherwise naming the source and the symbol:
 
 - debug information (`-g`) and inline assembly (asm statements, naked
   functions, file-scope assembly): the design's stages 3 and 4;
-- thread-local storage, section groups, common symbols, patchable function
+- thread-local storage, section groups, patchable function
   entries, multiversioned functions' resolvers, and the other refusals of the
   sink below;
 - assembly and linker inputs beside the C sources.
@@ -613,11 +613,14 @@ The form contract, which its tests hold GNU as to:
   class's object section, `object_class_sections`), in atom order, after
   `.p2align` with int3 in code and zeros elsewhere, as the object writer fills
   its gaps; rows of `.byte`, `.zero` for runs of zeros and for zero-fill
-  sections, and `.string` and `.ascii` in string pools.
+  sections, and `.string` and `.ascii` in string pools. For a tentative
+  definition selected by `-fcommon` or the `common` attribute, the writer emits
+  `.comm name, size, alignment` with the alignment in bytes. The symbol keeps
+  its visibility and the linker allocates its storage.
 
 What the sink doesn't print yet it refuses with the reason naming it
 (`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, linked-order
-sections, common and unique symbols, code without records (inline assembly's),
+sections, unique symbols, code without records (inline assembly's),
 the C runtime's `.init` and `.fini` fragments, and fixups GNU as can't spell
 where they are. A view that contradicts itself (records that don't encode to
 their atom's bytes, a symbol inside an instruction, a branch without a target, a
