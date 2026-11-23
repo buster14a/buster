@@ -225,9 +225,16 @@ Every body is parsed and checked by default. `-flazy-system-headers` optionally
 skips semantic checking of provably unreferenced static and nonemitting inline
 bodies defined in system headers, identified by `-isystem` or system-header
 pragmas. Declarations, ordinary-source bodies, referenced bodies and all syntax
-are still checked. This mode intentionally accepts a system header whose only
-semantic error is in a deferred body; it departs from standard C diagnostics
-and from Clang's default behavior, as authorized in
+are still checked, with one exception: where the tree planner proves that no
+token outside a deferred body names a deferred definition but its own
+declarator, and that definition's header declares no tag (no `struct`, `union`
+or `enum` keyword and no brace) and holds no assembly or static assertion, its
+whole header is skipped with its body (#3307). Its specifiers, declarator and
+attributes are then not read, so nothing is declared and no diagnostic is given
+for them; `<immintrin.h>`'s 4,806 intrinsics are such definitions. This mode
+intentionally accepts a system header whose only semantic error is in a
+deferred body or such a header; it departs from standard C diagnostics and from
+Clang's default behavior, as authorized in
 [#155](https://github.com/buster14a/buster/issues/155).
 The unit's end has its warnings in both modes: an internal function used and
 never defined is reported from the tokens that were read, so that a use only a
@@ -256,7 +263,7 @@ An allocation failure is a resource failure, not an admission failure.
 The ordinary eager path does not run either planner. The selected reader still
 checks headers and demanded bodies in original source order, and emission
 still follows the checked semantic references. With `--time-stages`, a
-`time-lazy` row reports the route (`eager`, `tree` or `bindings`), scalar-replay token count, body selection,
+`time-lazy` row reports the route (`eager`, `tree` or `bindings`), scalar-replay token count, body selection, skipped headers,
 references and retained bytes; planning remains charged to `check-input`.
 Use those counters to distinguish an admitted tree plan from a grammar fallback
 when measuring a workload. The new planner's performance requires the approved

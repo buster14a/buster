@@ -13093,9 +13093,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             {
                 // Planning remains charged to check-input. These structural counters make an unsupported
                 // tree certificate's whole-unit grammar fallback visible in opt-in measurements (#1364).
-                fprintf(errors, "time-lazy planner=%s tokens=%u scalar-replay-tokens=%u bodies=%u selected=%u deferred=%u references=%u retained-bytes=%llu\n",
+                fprintf(errors, "time-lazy planner=%s tokens=%u scalar-replay-tokens=%u bodies=%u selected=%u deferred=%u skipped=%u references=%u retained-bytes=%llu\n",
                         eager ? "eager" : lazy.replay_tokens != 0 ? "bindings" : "tree", tokens, lazy.replay_tokens, lazy.body_count, lazy.selected_count,
-                        lazy.deferred_count, lazy.reference_count, (unsigned long long)lazy.retained_bytes);
+                        lazy.deferred_count, lazy.skipped_count, lazy.reference_count, (unsigned long long)lazy.retained_bytes);
             }
         }
         if (ready)
