@@ -726,7 +726,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED && (everywhere || vectors || hoist))
     {
         IrLicmOptions options = ir_licm_options();
-        options.scalar = scalar;
         options.vectors = !everywhere && vectors;
         options.pressure = hoist;
         IrLicmResult moved = { 0 };

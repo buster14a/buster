@@ -18,8 +18,8 @@
 // - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, the
 //   three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), value numbering with memory alone
 //   (#2718) and Tier 1's set with it, forced vector and forced scalar: the same function and the same forwarded loads.
-// - LICM on P, by its per-loop walk and by its whole-function oracle's scalar worklist: the same function, or the same
-//   refusal; and the walk's result, given to LICM again, moves nothing (#2979).
+// - LICM on P (#2924: its twin is gone): its result, given to LICM again, moves nothing, since each loop's one walk
+//   reaches the fixed point of its readiness (#2979).
 // - #2755's unroller on P optimized with Tier 1's set and its truth values simplified: an unrolled function must verify
 //   with dominance (#2924: its twin is gone).
 // - The loop vectorizer (#2743) on P optimized with Tier 1's set: a changed function must go through the optimizer,
@@ -222,19 +222,11 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
     // LICM on the promoted function. Its result, given to LICM again, moves nothing: each loop's one walk reached the
     // fixed point of its readiness (#2979).
     {
-        IrLicmOptions options = ir_licm_options();
-        IrLicmResult vector = { 0 };
-        IrLicmResult scalar = { 0 };
-        const IrCheck vector_check = ir_optimize_licm(promoted, output, scratch, options, &vector);
+        IrLicmResult moved = { 0 };
+        const IrCheck check = ir_optimize_licm(promoted, output, scratch, ir_licm_options(), &moved);
         IrLicmResult again = { 0 };
-        const bool settled = vector_check.error != IR_OK || (ir_optimize_licm(&vector.function, twin, scratch, options, &again).error == IR_OK && again.moved == 0);
-        arena_pop_to(twin, twin_mark);
-        // The per-loop walk against its whole-function oracle, the worklist's fixed point (#2979).
-        options.whole = true;
-        options.scalar = true;
-        const IrCheck scalar_check = ir_optimize_licm(promoted, twin, scratch, options, &scalar);
-        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.moved == scalar.moved && ir_source_passes_equal(&vector.function, &scalar.function) && settled;
-        ir_source_passes_record(totals, IR_SOURCE_PASS_LICM, file, name, vector_check, scalar_check, same, true, vector.moved != 0, vector.moved);
+        const bool settled = check.error != IR_OK || (ir_optimize_licm(&moved.function, twin, scratch, ir_licm_options(), &again).error == IR_OK && again.moved == 0);
+        ir_source_passes_record(totals, IR_SOURCE_PASS_LICM, file, name, check, check, settled, true, moved.moved != 0, moved.moved);
         arena_pop_to(output, output_mark);
         arena_pop_to(twin, twin_mark);
     }
@@ -570,7 +562,7 @@ static int run_ir_source_passes_tests(int count, char** arguments)
 // #139's compile time per pass for both versions (benchmark-ir-source --passes): the files' functions prepared as
 // test-ir-source --passes prepares them, each lowered (L) and promoted (P) once outside the time, and each caller's
 // inlining unit built once; then each pass by its vector and its scalar version over the whole corpus (by its one version,
-// where #2924 left one: the inliner, the unroller, the loop vectorizer and value numbering with memory alone), in
+// where #2924 left one: the inliner, the unroller, the loop vectorizer, LICM and value numbering with memory alone), in
 // BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of the pair runs first, after a warm-up of each. The passes
 // take the inputs --tier1's pipeline gives them: SROA (Tier 1's options), #866's solver and the inliner the lowered form,
 // the optimizer's rows and LICM the promoted one (the driver's optimizer and LICM take it after the wide integers' halves,
@@ -636,10 +628,8 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
         }
         else if (pass == IR_SOURCE_PASS_LICM)
         {
-            IrLicmOptions options = ir_licm_options();
-            options.scalar = scalar;
             IrLicmResult result = { 0 };
-            check = ir_optimize_licm(&corpus->promoted[f], output, scratch, options, &result);
+            check = ir_optimize_licm(&corpus->promoted[f], output, scratch, ir_licm_options(), &result);
         }
         else if (pass == IR_SOURCE_PASS_VECTORIZE)
         {
@@ -885,10 +875,10 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             }
             double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
             memset(values, 0, sizeof(values));
-            // The inliner, the unroller, the loop vectorizer and value numbering with memory alone have one path (#2924):
-            // timed once.
+            // The inliner, the unroller, the loop vectorizer, LICM and value numbering with memory alone have one path
+            // (#2924): timed once.
             const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_STORE_MOTION || pass == IR_SOURCE_PASS_INLINE ||
-                                              pass == IR_SOURCE_PASS_MEMORY ? 1 : 2;
+                                              pass == IR_SOURCE_PASS_LICM || pass == IR_SOURCE_PASS_MEMORY ? 1 : 2;
             for (uint32_t version = 0; version < versions; version += 1)
             {
                 failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;

@@ -27,7 +27,7 @@ requirements. [Command index](README.md).
   the worklist path exceeded before the change.
   #1450's SIMD fixtures exercise constant lane folding against the lane model
   and interpreter, wide phi/bitcast propagation, exact-bit splats, GVN's complete
-  vector payload keys and LICM's integer-lane motion on both paths. A floating
+  vector payload keys and LICM's integer-lane motion. A floating
   lane folds exactly where the model gives the same bits under every rounding
   and under FTZ with DAZ (4,096 random lane pairs, and every lane fixture), the
   operation's row staying for its effects.
@@ -130,8 +130,9 @@ values, it runs value numbering before promotion and LICM after if-conversion,
 restricted to those values; `+gvn` and `+licm` still request the unrestricted
 passes, and `-vectors` disables both restricted forms. The LICM implementation
 walks each eligible loop's own blocks and skips loops with no safe vector or
-mask value. `test-ir-gvn` and `test-ir-licm` cover both host paths, the
-per-loop/whole-function LICM oracle, scalar neutrality and nested loops;
+mask value. `test-ir-gvn` covers both host paths, and `test-ir-licm` the
+walk's frozen digest (its whole-function oracle went in #2924), scalar
+neutrality and nested loops;
 `test-checker-driver` checks the default and `-vectors` reports and native
 output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
 

@@ -129,23 +129,19 @@ static void ir_licm_test_fold(IrOptimizeTest* test, const IrLicmResult* result)
     ir_optimize_test_fold(&test->licm_digest, result->called_loops);
 }
 
-static void ir_licm_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* scratch, uint32_t expected_moved)
+// LICM on a fixture: the per-loop walk moves the expected count and keeps the input's returns, faults and effects; the
+// vector-only policy, on these fixtures without a vector or mask value, skips every loop's walk and returns the input
+// unwritten. Both results go into the digest.
+static void ir_licm_test_fixture(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* scratch, uint32_t expected_moved)
 {
-    const uint64_t vm = vector->length;
-    const uint64_t sm = scalar->length;
+    const uint64_t om = output->length;
     const uint64_t tm = scratch->length;
-    IrLicmOptions options = ir_licm_options();
     IrLicmResult a = { 0 };
-    IrLicmResult b = { 0 };
-    const IrCheck ac = ir_optimize_licm(f, vector, scratch, options, &a);
-    options.whole = true;
-    options.scalar = true;
-    const IrCheck bc = ir_optimize_licm(f, scalar, scratch, options, &b);
-    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == tm, "LICM's walk and its whole-function worklist accept fixture and restore scratch");
-    if (ac.error == IR_OK && bc.error == IR_OK)
+    const IrCheck ac = ir_optimize_licm(f, output, scratch, ir_licm_options(), &a);
+    ir_optimize_test_expect(test, ac.error == IR_OK && scratch->length == tm, "LICM's walk accepts the fixture and restores scratch");
+    if (ac.error == IR_OK)
     {
-        ir_optimize_test_expect(test, a.moved == expected_moved && b.moved == a.moved && ir_optimize_test_equal(&a.function, &b.function) && a.sweeps == 0 && !a.fallback,
-                                "LICM's per-loop walk matches the whole-function worklist exactly, with the expected motion count");
+        ir_optimize_test_expect(test, a.moved == expected_moved, "LICM's per-loop walk moves the expected count");
         ir_licm_test_fold(test, &a);
         for (uint32_t trial = 0; trial < 18; trial += 1)
         {
@@ -154,32 +150,21 @@ static void ir_licm_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
             const IrOptimizeExecution after = ir_optimize_test_execute(&a.function, scratch, parameter, trial & 1);
             ir_optimize_test_expect(test, before.status != 4 && before.status == after.status && before.value == after.value && before.effects == after.effects, "LICM independently interpreted returns, faults and effects unchanged");
         }
-        arena_pop_to(scalar, sm);
-        options.scalar = false;
-        IrLicmResult swept = { 0 };
-        const IrCheck sc = ir_optimize_licm(f, scalar, scratch, options, &swept);
-        ir_optimize_test_expect(test, sc.error == IR_OK && ir_optimize_test_equal(&a.function, &swept.function), "LICM's per-loop walk matches the whole-function sweeps exactly");
-        arena_pop_to(scalar, sm);
-        options.sweep_limit = 0;
-        IrLicmResult fallback = { 0 };
-        const IrCheck fc = ir_optimize_licm(f, scalar, scratch, options, &fallback);
-        ir_optimize_test_expect(test, fc.error == IR_OK && ir_optimize_test_equal(&a.function, &fallback.function), "LICM forced worklist completion is exact");
     }
     // The scalar fixtures have no vector or mask value: the restricted policy skips every loop's instruction walk and
     // returns their input without writing a replacement.
-    const uint64_t mark = vector->length;
+    const uint64_t mark = output->length;
     IrLicmOptions restricted_options = ir_licm_options();
     restricted_options.vectors = true;
     IrLicmResult restricted = { 0 };
-    const IrCheck rc = ir_optimize_licm(f, vector, scratch, restricted_options, &restricted);
-    ir_optimize_test_expect(test, rc.error == IR_OK && restricted.moved == 0 && restricted.visits == 0 && vector->length == mark &&
+    const IrCheck rc = ir_optimize_licm(f, output, scratch, restricted_options, &restricted);
+    ir_optimize_test_expect(test, rc.error == IR_OK && restricted.moved == 0 && restricted.visits == 0 && output->length == mark &&
                                 ir_optimize_test_equal(f, &restricted.function), "LICM's vector-only policy skips loops without vector values and writes nothing");
     if (rc.error == IR_OK)
     {
         ir_licm_test_fold(test, &restricted);
     }
-    arena_pop_to(scalar, sm);
-    arena_pop_to(vector, vm);
+    arena_pop_to(output, om);
 }
 
 // IrLicmOptions.pressure on ir_licm_test_chain's loop (#2719): its header's two phis and the parameter live through it,
@@ -212,58 +197,6 @@ static void ir_licm_test_pressure_chain(IrOptimizeTest* test, const IrFunction* 
         ir_optimize_test_expect(test, before.status == after.status && before.value == after.value && before.effects == after.effects, "LICM's pressure policy keeps returns, faults and effects");
     }
     arena_pop_to(output, om);
-}
-
-static void ir_licm_test_guards(IrOptimizeTest* test)
-{
-    const long page = sysconf(_SC_PAGESIZE);
-    void* mapping = page > 0 ? mmap(0, (uint64_t)page * 6, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
-    bool ready = mapping != MAP_FAILED;
-    for (uint32_t p = 1; ready && p < 6; p += 2)
-    {
-        ready = mprotect((char*)mapping + p * page, page, PROT_NONE) == 0;
-    }
-    ir_optimize_test_expect(test, ready, "LICM guarded readiness columns setup");
-    uint32_t operands[33] = { 0 };
-    uint32_t reference[33] = { 0 };
-    uint32_t offsets[34] = { 0 };
-    uint32_t queue[33] = { 0 };
-    uint8_t queued[33] = { 0 };
-    for (uint32_t count = 0; ready && count <= 33; count += 1)
-    {
-        IrFunction f = {
-            .instruction_count = count,
-            .op = (uint8_t*)((char*)mapping + page - count),
-            .a = operands,
-            .b = operands,
-            .c = operands,
-        };
-        IrLicmWork work = {
-            .ir = { .function = &f, .uses = { .offsets = offsets }, .queue = queue, .queued = queued },
-            .candidate = (uint8_t*)((char*)mapping + 3 * page - count),
-            .available = reference,
-        };
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            f.op[i] = i == 0 ? IR_PARAM : IR_ADD;
-            operands[i] = i == 0 ? 0 : i - 1;
-            work.candidate[i] = 1;
-            reference[i] = 0;
-        }
-        ir_licm_worklist(&work);
-        work.available = (uint32_t*)((char*)mapping + 5 * page - count * sizeof(uint32_t));
-        memset(work.available, 0, count * sizeof(uint32_t));
-        bool changed = true;
-        for (uint32_t round = 0; changed && round <= count; round += 1)
-        {
-            changed = ir_licm_sweep(&work);
-        }
-        ir_optimize_test_expect(test, !changed && memcmp(reference, work.available, count * sizeof(uint32_t)) == 0, "LICM guarded dependency chain matches worklist at every tail");
-    }
-    if (mapping != MAP_FAILED)
-    {
-        munmap(mapping, (uint64_t)page * 6);
-    }
 }
 
 // ir_licm_classify's masked loads and stores at every tail (#2924): the operation, type, flag and discriminator columns
@@ -336,9 +269,8 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(16ull << 20);
     Arena vector = arena_reserve(16ull << 20);
-    Arena scalar = arena_reserve(16ull << 20);
     Arena scratch = arena_reserve(32ull << 20);
-    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && scratch.base != 0;
+    const bool ready = input.base != 0 && vector.base != 0 && scratch.base != 0;
     ir_optimize_test_expect(test, ready, "LICM fixture arenas");
     if (ready)
     {
@@ -349,7 +281,7 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "LICM loop fixture allocation");
             if (created)
             {
-                ir_licm_test_compare(test, &f, &vector, &scalar, &scratch, kind == 0 ? 2 : 0);
+                ir_licm_test_fixture(test, &f, &vector, &scratch, kind == 0 ? 2 : 0);
                 if (kind == 0)
                 {
                     IrLicmResult result = { 0 };
@@ -372,7 +304,7 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
                     f.c[4] = 3;
                     // The exit now has a bypass path; return an entry value instead of the loop phi.
                     f.a[15] = 1;
-                    ir_licm_test_compare(test, &f, &vector, &scalar, &scratch, 0);
+                    ir_licm_test_fixture(test, &f, &vector, &scratch, 0);
                 }
             }
             arena_pop_to(&input, 0);
@@ -382,7 +314,7 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
         ir_optimize_test_expect(test, nested_created, "LICM nested loop allocation");
         if (nested_created)
         {
-            ir_licm_test_compare(test, &nested, &vector, &scalar, &scratch, 2);
+            ir_licm_test_fixture(test, &nested, &vector, &scratch, 2);
             IrLicmResult result = { 0 };
             const IrCheck check = ir_optimize_licm(&nested, &vector, &scratch, ir_licm_options(), &result);
             ir_optimize_test_expect(test, check.error == IR_OK && result.eligible_loops == 2 && result.function.block_offsets[1] == 7, "LICM inner invariants can move again through outer preheader");
@@ -413,14 +345,14 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "LICM no-loop random fixture allocation");
             if (created)
             {
-                ir_licm_test_compare(test, &f, &vector, &scalar, &scratch, 0);
+                ir_licm_test_fixture(test, &f, &vector, &scratch, 0);
             }
             arena_pop_to(&input, 0);
             const bool chain_created = ir_licm_test_chain(&input, &f, test, length);
             ir_optimize_test_expect(test, chain_created, "LICM random loop invariant chain allocation");
             if (chain_created)
             {
-                ir_licm_test_compare(test, &f, &vector, &scalar, &scratch, length);
+                ir_licm_test_fixture(test, &f, &vector, &scratch, length);
                 ir_licm_test_pressure_chain(test, &f, &vector, &scratch, length);
             }
             arena_pop_to(&input, 0);
@@ -437,21 +369,19 @@ static void ir_licm_test_ir(IrOptimizeTest* test)
         }
     }
     arena_release(&scratch);
-    arena_release(&scalar);
     arena_release(&vector);
     arena_release(&input);
 }
 
-// Exercise the whole pass, not a time threshold: a long thin frontier must stop sweeping, a wide one must
-// keep its vector completion, and a phi-dependent chain must remain variant. The old 64-sweep policy fails
-// the thin/mixed work bounds even though its output is identical.
+// The walk of long loops (#2979): independent values, a chain, an independent half before a chain, and a chain whose
+// root reads the loop's phi, at 255, 256, 257 and 4,096 values. Each loop's invariant values all move (the variant
+// root's chain none), each of its instructions is visited once, and the input's returns, faults and effects stay.
 static void ir_licm_test_progress(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(16ull << 20);
-    Arena vector = arena_reserve(16ull << 20);
-    Arena scalar = arena_reserve(16ull << 20);
+    Arena output = arena_reserve(16ull << 20);
     Arena scratch = arena_reserve(32ull << 20);
-    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && scratch.base != 0;
+    const bool ready = input.base != 0 && output.base != 0 && scratch.base != 0;
     ir_optimize_test_expect(test, ready, "LICM progress fixture arenas");
     const uint32_t lengths[] = {
         255,
@@ -481,79 +411,47 @@ static void ir_licm_test_progress(IrOptimizeTest* test)
                 {
                     f.a[9] = 5;
                 }
-                IrLicmOptions options = ir_licm_options();
-                options.whole = true;
-                IrLicmResult a = { 0 };
-                IrLicmResult b = { 0 };
-                const IrCheck ac = ir_optimize_licm(&f, &vector, &scratch, options, &a);
-                options.scalar = true;
-                const IrCheck bc = ir_optimize_licm(&f, &scalar, &scratch, options, &b);
-                ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch.length == 0, "LICM progress cases restore scratch");
-                if (ac.error == IR_OK && bc.error == IR_OK)
+                IrLicmResult walked = { 0 };
+                const IrCheck wc = ir_optimize_licm(&f, &output, &scratch, ir_licm_options(), &walked);
+                const uint32_t moved = shape == 3 ? 0 : length;
+                ir_optimize_test_expect(test, wc.error == IR_OK && scratch.length == 0 && walked.moved == moved && walked.visits <= f.instruction_count,
+                                        "LICM's per-loop walk moves a long loop's invariant values and visits each of its instructions once");
+                if (wc.error == IR_OK)
                 {
-                    const uint32_t moved = shape == 3 ? 0 : length;
-                    ir_optimize_test_expect(test, a.moved == moved && b.moved == moved && ir_optimize_test_equal(&a.function, &b.function), "LICM adaptive completion preserves exact worklist motion and output");
-                    const uint64_t mark = scalar.length;
-                    IrLicmResult walked = { 0 };
-                    const IrCheck wc = ir_optimize_licm(&f, &scalar, &scratch, ir_licm_options(), &walked);
-                    ir_optimize_test_expect(test, wc.error == IR_OK && walked.moved == moved && walked.sweeps == 0 && !walked.fallback && walked.visits <= f.instruction_count &&
-                                                ir_optimize_test_equal(&a.function, &walked.function), "LICM's per-loop walk visits each instruction of the loop once and matches the sweeps");
-                    if (wc.error == IR_OK)
+                    ir_licm_test_fold(test, &walked);
+                    for (uint32_t trial = 0; trial < 3; trial += 1)
                     {
-                        ir_licm_test_fold(test, &walked);
+                        const uint64_t parameter = trial == 2 ? UINT64_MAX : trial * 7;
+                        const IrOptimizeExecution before = ir_optimize_test_execute(&f, &scratch, parameter, trial & 1);
+                        const IrOptimizeExecution after = ir_optimize_test_execute(&walked.function, &scratch, parameter, trial & 1);
+                        ir_optimize_test_expect(test, before.status != 4 && before.status == after.status && before.value == after.value && before.effects == after.effects,
+                                                "LICM keeps a long loop's returns, faults and effects");
                     }
-                    arena_pop_to(&scalar, mark);
-                    const uint64_t sweeps = shape == 1 || shape == 2 ? 2 : 1;
-                    const bool fallback = shape == 0 || shape == 2;
-                    ir_optimize_test_expect(test, a.sweeps == sweeps && a.fallback == fallback && a.visits <= (sweeps + 1) * f.instruction_count, "LICM thin frontiers stop promptly and wide or stalled frontiers do not fall back");
-                    ir_optimize_test_expect(test, b.sweeps == 0 && !b.fallback, "LICM scalar oracle stays an independent worklist");
                 }
             }
             arena_pop_to(&scratch, 0);
-            arena_pop_to(&scalar, 0);
-            arena_pop_to(&vector, 0);
+            arena_pop_to(&output, 0);
             arena_pop_to(&input, 0);
         }
     }
     arena_release(&scratch);
-    arena_release(&scalar);
-    arena_release(&vector);
+    arena_release(&output);
     arena_release(&input);
 }
 
-// IrLicmOptions.vectors' per-loop walk against its whole-function oracle (#2781), on both host paths. Every result
-// must be the same rewritten function, not merely the same motion count, and preserve the interpreter's SIMD behavior.
-static void ir_licm_test_vectors_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* scratch, uint32_t expected_moved)
+// IrLicmOptions.vectors' walk (#2781): it moves exactly the expected vector values and their operands, and keeps the
+// interpreter's SIMD behavior. Its result goes into the digest.
+static void ir_licm_test_vectors(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* scratch, uint32_t expected_moved)
 {
-    IrLicmResult results[2][2] = { 0 };
-    for (uint32_t path = 0; path < 2; path += 1)
+    IrLicmOptions options = ir_licm_options();
+    options.vectors = true;
+    IrLicmResult result = { 0 };
+    const IrCheck check = ir_optimize_licm(f, output, scratch, options, &result);
+    ir_optimize_test_expect(test, check.error == IR_OK && result.moved == expected_moved, "LICM's vector-only walk moves exactly the vector values and their operands");
+    if (check.error == IR_OK)
     {
-        for (uint32_t whole = 0; whole < 2; whole += 1)
-        {
-            IrLicmOptions options = ir_licm_options();
-            options.scalar = path != 0;
-            options.vectors = true;
-            options.whole = whole != 0;
-            Arena* output = path != 0 ? scalar : vector;
-            const IrCheck check = ir_optimize_licm(f, output, scratch, options, &results[path][whole]);
-            ir_optimize_test_expect(test, check.error == IR_OK && results[path][whole].moved == expected_moved, "LICM's vector-only walk moves exactly the vector values and their operands");
-            if (check.error == IR_OK)
-            {
-                ir_optimize_test_simd_semantics(test, f, &results[path][whole].function, scratch);
-            }
-            if (check.error == IR_OK && path == 0 && whole == 0)
-            {
-                ir_licm_test_fold(test, &results[path][whole]);
-            }
-        }
-    }
-    for (uint32_t path = 0; path < 2; path += 1)
-    {
-        for (uint32_t whole = 0; whole < 2; whole += 1)
-        {
-            ir_optimize_test_expect(test, results[path][whole].function.instruction_count != 0 && results[0][0].function.instruction_count != 0 &&
-                                        ir_optimize_test_equal(&results[0][0].function, &results[path][whole].function), "LICM's per-loop and whole-function vector walks agree exactly");
-        }
+        ir_optimize_test_simd_semantics(test, f, &result.function, scratch);
+        ir_licm_test_fold(test, &result);
     }
 }
 
@@ -594,20 +492,18 @@ static void ir_licm_test_vector_nested(IrOptimizeTest* test)
                                "}\n";
     Arena input = arena_reserve(UINT64_C(16) << 20);
     Arena vector = arena_reserve(UINT64_C(16) << 20);
-    Arena scalar = arena_reserve(UINT64_C(16) << 20);
     Arena scratch = arena_reserve(UINT64_C(16) << 20);
     IrFunction f = { 0 };
-    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL;
+    const bool ready = input.base != NULL && vector.base != NULL && scratch.base != NULL;
     const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
     const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
     ir_optimize_test_expect(test, fixture, "LICM's nested vector-only fixture parses");
     if (fixture)
     {
-        ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 1);
+        ir_licm_test_vectors(test, &f, &vector, &scratch, 1);
     }
     arena_release(&input);
     arena_release(&vector);
-    arena_release(&scalar);
     arena_release(&scratch);
 }
 
@@ -615,7 +511,6 @@ static void ir_licm_test_simd(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(UINT64_C(16) << 20);
     Arena vector = arena_reserve(UINT64_C(16) << 20);
-    Arena scalar = arena_reserve(UINT64_C(16) << 20);
     Arena scratch = arena_reserve(UINT64_C(16) << 20);
     const IrSizes sizes = {
         .instruction_count = 21,
@@ -625,7 +520,7 @@ static void ir_licm_test_simd(IrOptimizeTest* test)
         .extra_count = 8,
     };
     IrFunction f = { 0 };
-    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &f) == IR_OK;
+    const bool ready = input.base != NULL && vector.base != NULL && scratch.base != NULL && ir_create(&input, &sizes, &f) == IR_OK;
     ir_optimize_test_expect(test, ready, "LICM SIMD loop fixture allocation");
     if (ready)
     {
@@ -666,58 +561,42 @@ static void ir_licm_test_simd(IrOptimizeTest* test)
         ir_optimize_test_instruction(&f, 18, IR_ADD, IR_I64, 7, 3, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, 19, IR_BR, IR_VOID, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_optimize_test_instruction(&f, 20, IR_RET, IR_VOID, 8, BUSTER_IR_NONE, BUSTER_IR_NONE);
-        IrLicmResult results[2] = { 0 };
-        for (uint32_t path = 0; path < 2; path += 1)
+        IrLicmResult moved = { 0 };
+        const IrCheck check = ir_optimize_licm(&f, &vector, &scratch, ir_licm_options(), &moved);
+        ir_optimize_test_expect(test, check.error == IR_OK && moved.moved == 5, "LICM hoists vector arithmetic, total shifts, integer compare and select");
+        if (check.error == IR_OK)
         {
-            IrLicmOptions options = ir_licm_options();
-            options.whole = path != 0;
-            const IrCheck check = ir_optimize_licm(&f, path != 0 ? &scalar : &vector, &scratch, options, results + path);
-            ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 5, "LICM hoists vector arithmetic, total shifts, integer compare and select");
-            if (check.error == IR_OK)
+            const IrFunction* out = &moved.function;
+            uint32_t floating_inside = 0;
+            for (uint32_t i = out->block_offsets[2]; i < out->block_offsets[3]; i += 1)
             {
-                const IrFunction* out = &results[path].function;
-                uint32_t floating_inside = 0;
-                for (uint32_t i = out->block_offsets[2]; i < out->block_offsets[3]; i += 1)
-                {
-                    floating_inside += ir_optimize_simd_effect(out, i);
-                }
-                ir_optimize_test_expect(test, floating_inside == 2, "LICM keeps both floating environment effects inside the loop");
-                ir_optimize_test_simd_semantics(test, &f, out, &scratch);
-                if (path == 0)
-                {
-                    ir_licm_test_fold(test, &results[path]);
-                }
+                floating_inside += ir_optimize_simd_effect(out, i);
             }
+            ir_optimize_test_expect(test, floating_inside == 2, "LICM keeps both floating environment effects inside the loop");
+            ir_optimize_test_simd_semantics(test, &f, out, &scratch);
+            ir_licm_test_fold(test, &moved);
         }
-        ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
-                                ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM's SIMD walk and whole-function sweeps produce identical remapped rows");
         // The restricted policy moves the same five vector values; the scalar addition depends on the loop's phi and stays.
-        ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 5);
+        ir_licm_test_vectors(test, &f, &vector, &scratch, 5);
         f.op[0] = IR_UNDEF;
         f.a[0] = BUSTER_IR_NONE;
-        for (uint32_t path = 0; path < 2; path += 1)
+        arena_pop_to(&vector, 0);
+        IrLicmResult result = { 0 };
+        const IrCheck tainted = ir_optimize_licm(&f, &vector, &scratch, ir_licm_options(), &result);
+        ir_optimize_test_expect(test, tainted.error == IR_OK && result.moved == 0, "LICM keeps undef-tainted vector operations in their original blocks");
+        if (tainted.error == IR_OK)
         {
-            arena_pop_to(&vector, 0);
-            IrLicmOptions options = ir_licm_options();
-            options.whole = path != 0;
-            IrLicmResult result = { 0 };
-            const IrCheck check = ir_optimize_licm(&f, &vector, &scratch, options, &result);
-            ir_optimize_test_expect(test, check.error == IR_OK && result.moved == 0, "LICM keeps undef-tainted vector operations in their original blocks");
-            if (check.error == IR_OK && path == 0)
-            {
-                ir_licm_test_fold(test, &result);
-            }
+            ir_licm_test_fold(test, &result);
         }
     }
     arena_release(&input);
     arena_release(&vector);
-    arena_release(&scalar);
     arena_release(&scratch);
 }
 
 // The width changes (#1840) in a loop, on values SCCP can't fold, a parameter's splat: LICM hoists the loop-invariant widen
-// and the extract of its zeros, keeps the insert of the loop's phi and its extract inside, by both paths, and the
-// interpreter's mask is unchanged.
+// and the extract of its zeros, keeps the insert of the loop's phi and its extract inside, and the interpreter's mask is
+// unchanged.
 static void ir_licm_test_widths(IrOptimizeTest* test)
 {
     static const char text[] = "function (i32) -> m16 {\n"
@@ -750,49 +629,41 @@ static void ir_licm_test_widths(IrOptimizeTest* test)
                                "}\n";
     Arena input = arena_reserve(UINT64_C(16) << 20);
     Arena vector = arena_reserve(UINT64_C(16) << 20);
-    Arena scalar = arena_reserve(UINT64_C(16) << 20);
     Arena scratch = arena_reserve(UINT64_C(16) << 20);
     IrFunction f = { 0 };
-    const bool ready = input.base != NULL && vector.base != NULL && scalar.base != NULL && scratch.base != NULL;
+    const bool ready = input.base != NULL && vector.base != NULL && scratch.base != NULL;
     const IrParseResult parsed = ready ? ir_parse((String8){ .pointer = (char*)text, .length = sizeof(text) - 1 }, &input, &scratch, &f) : (IrParseResult){ .error = IR_PARSE_END };
-    ir_optimize_test_expect(test, parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK, "LICM's width change fixture parses");
-    IrLicmResult results[2] = { 0 };
-    for (uint32_t path = 0; parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK && path < 2; path += 1)
+    const bool fixture = parsed.error == IR_PARSE_OK && parsed.check.error == IR_OK;
+    ir_optimize_test_expect(test, fixture, "LICM's width change fixture parses");
+    IrLicmResult moved = { 0 };
+    const IrCheck check = fixture ? ir_optimize_licm(&f, &vector, &scratch, ir_licm_options(), &moved) : ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+    ir_optimize_test_expect(test, check.error == IR_OK && moved.moved == 2, "LICM hoists the invariant widen and its extract");
+    if (check.error == IR_OK)
     {
-        IrLicmOptions options = ir_licm_options();
-        options.whole = path != 0;
-        const IrCheck check = ir_optimize_licm(&f, path != 0 ? &scalar : &vector, &scratch, options, results + path);
-        ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 2, "LICM hoists the invariant widen and its extract");
-        if (check.error == IR_OK)
+        // The loop's header (b2) keeps the insert and the extract of the phi's part alone.
+        const IrFunction* out = &moved.function;
+        uint32_t inside = 0;
+        for (uint32_t i = out->block_offsets[2]; i < out->block_offsets[3]; i += 1)
         {
-            // The loop's header (b2) keeps the insert and the extract of the phi's part alone.
-            const IrFunction* out = &results[path].function;
-            uint32_t inside = 0;
-            for (uint32_t i = out->block_offsets[2]; i < out->block_offsets[3]; i += 1)
-            {
-                const bool intrinsic = out->op[i] == IR_INTRINSIC;
-                inside += intrinsic && (out->c[i] == BUSTER_IR_INTRINSIC_INSERT || out->c[i] == BUSTER_IR_INTRINSIC_EXTRACT || out->c[i] == BUSTER_IR_INTRINSIC_WIDEN);
-            }
-            ir_optimize_test_expect(test, inside == 2, "LICM keeps the loop-variant insert and extract inside the loop");
-            ir_optimize_test_simd_semantics(test, &f, out, &scratch);
-            if (path == 0)
-            {
-                ir_licm_test_fold(test, &results[path]);
-            }
+            const bool intrinsic = out->op[i] == IR_INTRINSIC;
+            inside += intrinsic && (out->c[i] == BUSTER_IR_INTRINSIC_INSERT || out->c[i] == BUSTER_IR_INTRINSIC_EXTRACT || out->c[i] == BUSTER_IR_INTRINSIC_WIDEN);
         }
+        ir_optimize_test_expect(test, inside == 2, "LICM keeps the loop-variant insert and extract inside the loop");
+        ir_optimize_test_simd_semantics(test, &f, out, &scratch);
+        ir_licm_test_fold(test, &moved);
     }
-    ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
-                            ir_optimize_test_equal(&results[0].function, &results[1].function), "LICM's walk and its whole-function oracle hoist the width changes alike");
-    ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 2);
+    if (fixture)
+    {
+        ir_licm_test_vectors(test, &f, &vector, &scratch, 2);
+    }
     arena_release(&input);
     arena_release(&vector);
-    arena_release(&scalar);
     arena_release(&scratch);
 }
 
 // A permute of two tables (#1840), whose third operand is in the extra array: an invariant one twice in a loop, which GVN
 // gives one value, and LICM then hoists with the sum of the two, beside a loop-carried one that stays; each result the
-// interpreter's, on both paths.
+// interpreter's, after each of GVN's two paths.
 static void ir_licm_test_permute2(IrOptimizeTest* test)
 {
     static const char text[] = "function (i32) -> m16 {\n"
@@ -839,9 +710,7 @@ static void ir_licm_test_permute2(IrOptimizeTest* test)
         if (gvn.error == IR_OK)
         {
             ir_optimize_test_simd_semantics(test, &f, &numbered.function, &scratch);
-            IrLicmOptions options = ir_licm_options();
-            options.whole = path != 0;
-            const IrCheck check = ir_optimize_licm(&numbered.function, output, &scratch, options, results + path);
+            const IrCheck check = ir_optimize_licm(&numbered.function, output, &scratch, ir_licm_options(), results + path);
             ir_optimize_test_expect(test, check.error == IR_OK && results[path].moved == 2, "LICM hoists the invariant permute2 and its sum");
             if (check.error == IR_OK)
             {
@@ -854,9 +723,12 @@ static void ir_licm_test_permute2(IrOptimizeTest* test)
         }
     }
     ir_optimize_test_expect(test, results[0].function.instruction_count != 0 && results[1].function.instruction_count != 0 &&
-                            ir_optimize_test_equal(&results[0].function, &results[1].function), "GVN and LICM's paths treat permute2 alike");
+                            ir_optimize_test_equal(&results[0].function, &results[1].function), "GVN's two paths, each followed by LICM, treat permute2 alike");
     // Without GVN the two equal permute2s remain separate values, so the vector policy moves both and their sum.
-    ir_licm_test_vectors_compare(test, &f, &vector, &scalar, &scratch, 3);
+    if (fixture)
+    {
+        ir_licm_test_vectors(test, &f, &vector, &scratch, 3);
+    }
     arena_release(&input);
     arena_release(&vector);
     arena_release(&scalar);
@@ -888,7 +760,6 @@ static __attribute__((unused)) int run_ir_licm_tests(int argc, char** argv)
     if (valid)
     {
         const uint64_t seed = test.random;
-        ir_licm_test_guards(&test);
         ir_licm_test_classify_guards(&test);
         ir_licm_test_ir(&test);
         ir_licm_test_progress(&test);

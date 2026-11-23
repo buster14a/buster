@@ -723,10 +723,8 @@ static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass,
     }
     else if (pass == 6)
     {
-        IrLicmOptions options = ir_licm_options();
-        options.scalar = scalar;
         IrLicmResult optimized = { 0 };
-        check = ir_optimize_licm(function, output, scratch, options, &optimized);
+        check = ir_optimize_licm(function, output, scratch, ir_licm_options(), &optimized);
         if (check.error == IR_OK)
         {
             *result = optimized.function;
