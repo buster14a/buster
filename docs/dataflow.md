@@ -20,21 +20,19 @@ def share one line and in and out the next ("Where the caller's Dataflow
 falls").
 
 `dataflow_create` allocates the columns and rows from a caller-owned `Arena`:
-the successor offsets, the two orders and the successors, then in and out, then
-use and def. The sweeps load the columns in every block and store in and out,
+the successor offsets, the postorder and the successors, then in and out, then
+use and def, then the backward order's columns, which only a solve that needs
+them writes ("The two orders" below). The sweeps load the columns in every block and store in and out,
 and while the span from the first column to the end of out fits in 4 KB,
 padding included, this order keeps the columns' low 12 address bits off every
 in and out row ("Where the AVX-512 solver's frame falls" has why that matters
 and for which sizes it holds). Allocation failure leaves the
 arena at its old position and returns no partially usable graph. The caller
 fills the successors and input rows, then calls `dataflow_postorder`. It
-validates the successor representation and constructs two orders with an
-explicit DFS stack: the postorder of a DFS forest over the successors, and the
-backward order, the reverse postorder of one over the predecessors rooted
-first at the blocks without successors ("The two orders" below). A forest walk
-covers disconnected blocks and components without exits too. The temporary
-stack, marks and predecessor columns use the supplied scratch arena; they do
-not become graph state.
+validates the successor representation and constructs a postorder with an
+explicit DFS stack. A forest walk covers disconnected blocks and components
+without exits too. The temporary stack and marks use the supplied scratch
+arena; they do not become graph state.
 
 The solve functions require this prepared CFG and zero padding in both
 input matrices. They clear `in` before solving, so repeated calls compute the
@@ -48,9 +46,11 @@ and storing out").
 
 The solver is AVX-512 alone. Until #2924 a scalar twin solved the same
 equations word by word as its test oracle and benchmark alternative; the
-sections below that measure it are the record of that time. Its odd sweeps
-visit the postorder and its even ones the backward order ("The two orders"
-below). For each block in the sweep's order:
+sections below that measure it are the record of that time. Its first
+`BUSTER_DATAFLOW_POSTORDER_SWEEPS` (4) sweeps visit the postorder; a solve
+still changing after them builds the backward order and goes on alternating
+it with the postorder, the backward order first ("The two orders" below). For
+each block in the sweep's order:
 
 ```text
 out[block] = OR(in[successor] for each successor)
@@ -116,8 +116,8 @@ license and provenance are in `THIRD_PARTY_NOTICES.md`.
 
 `dataflow_sweeps_test.c` finds, without a fixpoint, the sweep in which the
 solver first sets each live bit, and with it the solver's exact iteration
-count. Each sweep visits its order (the postorder in odd sweeps, the backward
-order in even ones) and reads every successor's `in` row as the sweep has left
+count. Each sweep visits its order (the postorder in the first four sweeps,
+then the backward order and the postorder in turn) and reads every successor's `in` row as the sweep has left
 it, so in sweep `t` an edge to a later block in `t`'s order, or to the block
 itself, reads sweep `t - 1`'s row: call it stale in `t`. A bit that a
 successor gains in sweep `t` reaches the predecessor in sweep `t` through an
@@ -153,22 +153,37 @@ body, so a back edge reads the header's row from the same sweep, but a
 header's edge into its own loop now reads the body's previous row: a value
 used only in the innermost body (a pointer the body loads through) then
 reaches the outer headers one level per sweep. Each order carries in one sweep
-what the other carries one level at a time, so the solver alternates them, the
-postorder first: on the nest, the first sweep gives every block what forward
-paths make live, the second what the back edges add, and the third changes
-nothing. `test-dataflow` checks that bound on the nest at 1 to 700 levels,
-with both kinds of value, and the sweep search checks every graph's count
-exactly. The fixpoint is the same least one, so the rows are unchanged; only
-the count can change. Other shapes, such as irreducible graphs or loops left
-from deep inside their bodies, can still need more sweeps than the nest, and
-each sweep costs what it did.
+what the other carries one level at a time, so alternating them settles the
+nest in a few sweeps. The fixpoint is the same least one whatever the orders,
+so the rows are unchanged; only the count can change.
+
+Building the backward order costs a counting sort of the edges into
+predecessor columns and a second DFS. Built for every function and alternated
+from the first sweep (the first version of #3332), it cost ordinary code more
+than its fewer sweeps saved: on the 9700X, `--tier1 -c` of sqlite3.c took
+0.65% more time and Lua's 34 sources 0.72% (one layout each; buster-performance
+`liveness-loop-nest-2995-3332-2026-11-23`), and `benchmark-dataflow`'s
+large-local took 6 sweeps for 5, 16% longer. So the solver visits the
+postorder alone for `BUSTER_DATAFLOW_POSTORDER_SWEEPS` sweeps, four: a function
+whose values cross a loop level or two settles in that many, and most never
+build the backward order. A solve still changing after them builds it in
+columns `dataflow_create` set aside after the rows, and goes on from the rows
+it has, alternating the backward order and the postorder, the backward order
+first. On the nest the fifth sweep, in the backward order, carries what the
+back edges add, and the sixth changes nothing: six sweeps at any depth, which
+`test-dataflow` checks at 1 to 700 levels with both kinds of value, and the
+sweep search checks every graph's count exactly. A function that needs exactly
+five sweeps, such as large-local, settles in the fifth all the same. Other
+shapes, such as irreducible graphs or loops left from deep inside their
+bodies, can still need more sweeps than the nest.
 
 Which predecessor the backward DFS takes first decides the order within a
 loop. Over the Tier 1 functions of sqlite3.c (SQLite 3.53.2, the frozen
 corpus's) and Lua 5.4.8's 34 sources, each function's sweeps times its blocks
 times its row words, summed over every solve a `--tier1 -c` compile makes
-(the row words the sweeps read and write), came
-to (Release build, cloud container; the counts are exact, not timings):
+(the row words the sweeps read and write), came to the following when every
+solve alternated from its first sweep (Release build, cloud container; the
+counts are exact, not timings):
 
 | schedule | sqlite3.c | Lua |
 | --- | ---: | ---: |
@@ -179,21 +194,18 @@ to (Release build, cloud container; the counts are exact, not timings):
 | postorder twice, then alternating, latest first | 2,434,720 | 279,992 |
 
 So the predecessors go latest in the postorder first, which costs nothing: the
-counting sort fills the columns from the postorder's end. sqlite3.c's row
-work falls 20% and Lua's rises 1.6%: Lua's largest function, `luaV_execute`
-(1,287 blocks), takes five sweeps where it took four, on paths through inner
-loops whose headers' edges into their bodies the backward order reads stale.
-Every loop nest above took three sweeps under each alternating schedule: `for`
-nests exiting at their headers, the same with a `break` at every level, and
-with a pointer used only in the innermost body. `do`/`while` nests exit at
-their latches, so no path needs an inner back edge, and both orders settle them
-in two. Visiting a loop-aware order alone (each header before its loop's
-body) took 64 sweeps on the 64-deep `do`/`while` nest.
+counting sort fills the columns from the postorder's end. Every loop nest
+above took three sweeps under each alternating schedule: `for` nests exiting
+at their headers, the same with a `break` at every level, and with a pointer
+used only in the innermost body. `do`/`while` nests exit at their latches, so
+no path needs an inner back edge, and both orders settle them in two. Visiting
+a loop-aware order alone (each header before its loop's body) took 64 sweeps
+on the 64-deep `do`/`while` nest.
 
-The backward order costs `dataflow_postorder` a counting sort of the edges into
-predecessor columns and a second DFS, in scratch, and `dataflow_create` one
-more column of `block_count` words. Its base is kept after out in the struct,
-so that the struct's first line is unchanged.
+The backward order's columns (the order, predecessor offsets and
+predecessors, a DFS stack and marks) come after use and def, so that the
+columns a sweep loads keep their place before in and out. Its base is kept
+after out in the struct, so that the struct's first line is unchanged.
 
 ## Measuring the alternatives
 

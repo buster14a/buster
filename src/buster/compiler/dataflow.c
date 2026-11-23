@@ -2,13 +2,14 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Backward liveness over a CFG's successor columns and per-block bitsets. The caller owns the CFG and fills use/def;
-// dataflow_postorder validates its edges and builds two orders with an explicit stack, each covering every block: the
-// postorder of a DFS forest over the successors, and the reverse postorder of one over the predecessors, rooted at the
-// blocks without successors (the backward order). The liveness solver starts with empty in rows and alternates the two,
-// the postorder first, until in stops changing, storing every block's out row in each sweep. Its iteration count
-// includes the final stable sweep. The postorder carries liveness along forward paths in one sweep and the backward
-// order carries it around back edges, so a loop nest settles in a few sweeps where the postorder alone took one per
-// level a value crosses on back edges (#2995). It is AVX-512 alone (#2924): the tests check it against the liveness
+// dataflow_postorder validates its edges and builds the postorder of a DFS forest with an explicit stack, including
+// unreachable blocks. The liveness solver starts with empty in rows and visits that postorder until in stops changing,
+// storing every block's out row in each sweep. Its iteration count includes the final stable sweep. A postorder reads
+// each back edge's target from the previous sweep, so a value crossing k back edges takes k more sweeps: a loop nest
+// of N levels took N + 2 (#2995). So when BUSTER_DATAFLOW_POSTORDER_SWEEPS sweeps leave in still changing, the solver
+// builds the backward order (dataflow_backward), in which back edges read the current sweep, and from there alternates
+// it with the postorder, the backward order first: a loop nest then settles in a few more sweeps. Functions that settle
+// sooner, nearly all of them, never build it. It is AVX-512 alone (#2924): the tests check it against the liveness
 // equations, use-before-def reachability and the sweep search of dataflow_sweeps_test.c, which gives every live bit's
 // sweep and so the exact count.
 //
@@ -34,6 +35,17 @@
 // and out its second, wherever a caller keeps it. Where def and in shared a line whose low 12 address bits an in or out
 // row shares, a solve after one that stored that row took longer, with more loads held by older stores: up to 2.5
 // cycles more on the benchmark's small diamond (docs/dataflow.md, "Where the caller's Dataflow falls").
+// The postorder sweeps before the solver turns to the alternating orders. Ordinary functions, whose values cross a loop
+// level or two, settle within them (docs/dataflow.md, "The two orders").
+#define BUSTER_DATAFLOW_POSTORDER_SWEEPS 4
+
+typedef struct DataflowVisit DataflowVisit;
+struct DataflowVisit
+{
+    uint32_t block;
+    uint32_t next_edge;
+};
+
 typedef struct Dataflow Dataflow;
 struct __attribute__((aligned(64))) Dataflow
 {
@@ -49,20 +61,31 @@ struct __attribute__((aligned(64))) Dataflow
     uint64_t* def;
     uint64_t* in;
     uint64_t* out;
-    // The reverse postorder of a DFS forest over the predecessors, rooted first at the blocks without successors: the
-    // solver's even sweeps visit it. After out, so that the first line keeps the columns that the comment above
-    // describes.
+    // The reverse postorder of a DFS forest over the predecessors, rooted first at the blocks without successors, which
+    // dataflow_backward builds when a solve needs it, with the three columns after it. After out, so that the first line
+    // keeps the columns that the comment above describes.
     uint32_t* backward;
+    uint32_t* predecessor_offsets;
+    uint32_t* predecessors;
+    DataflowVisit* backward_stack;
+    uint8_t* backward_visited;
 };
 
 // Failure preserves both the arena's length and *result. Empty CFGs are allowed only without edges.
 static __attribute__((unused)) bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_count, uint32_t edge_count, Dataflow* result);
-// Failure leaves both orders unchanged. Scratch memory is returned to its original length on either outcome.
+// Failure leaves postorder unchanged. Scratch memory is returned to its original length on either outcome.
 static __attribute__((unused)) bool dataflow_postorder(Dataflow* dataflow, Arena* scratch);
 // An upper bound on the scratch bytes dataflow_postorder takes for a CFG of this size, alignment gaps included.
 static __attribute__((unused)) uint64_t dataflow_postorder_scratch_bytes(uint32_t block_count, uint32_t edge_count);
-static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow);
-static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_rows(Dataflow* dataflow);
+// Builds backward from a complete postorder, in the Dataflow's own columns. The solver calls it when it needs it; the
+// tests call it to read the order.
+static __attribute__((unused)) void dataflow_backward(Dataflow* dataflow);
+// Sweeps from visiting, swapping it with following after each, until a sweep changes nothing (*settled) or limit sweeps
+// have run; in is cleared first unless resuming. Returns the sweeps run.
+static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow, const uint32_t* visiting, const uint32_t* following,
+                                                                                         uint64_t limit, bool resume, bool* settled);
+static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_rows(Dataflow* dataflow, const uint32_t* visiting, const uint32_t* following,
+                                                                                          uint64_t limit, bool resume, bool* settled);
 static __attribute__((unused)) uint64_t dataflow_liveness(Dataflow* dataflow);
 static __attribute__((unused)) bool dataflow_intersects(const uint64_t* left, const uint64_t* right, uint64_t row_words);
 
@@ -87,8 +110,7 @@ static bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_c
     if (success && block_count != 0)
     {
         candidate.postorder = arena_push_array(arena, block_count, sizeof(uint32_t), _Alignof(uint32_t));
-        candidate.backward = arena_push_array(arena, block_count, sizeof(uint32_t), _Alignof(uint32_t));
-        success = candidate.postorder != 0 && candidate.backward != 0;
+        success = candidate.postorder != 0;
     }
     if (success && edge_count != 0)
     {
@@ -107,13 +129,26 @@ static bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_c
         candidate.def = arena_push(arena, matrix_bytes, BUSTER_DATAFLOW_VECTOR_BYTES);
         success = candidate.use != 0 && candidate.def != 0 && candidate.in != 0 && candidate.out != 0;
     }
+    if (success && block_count != 0)
+    {
+        // The backward order's columns, after everything a sweep touches: only a solve that needs the order writes them.
+        candidate.backward = arena_push_array(arena, block_count, sizeof(uint32_t), _Alignof(uint32_t));
+        candidate.predecessor_offsets = arena_push_array(arena, (uint64_t)block_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        candidate.backward_stack = arena_push_array(arena, block_count, sizeof(DataflowVisit), _Alignof(DataflowVisit));
+        candidate.backward_visited = arena_push_array(arena, block_count, sizeof(uint8_t), _Alignof(uint8_t));
+        success = candidate.backward != 0 && candidate.predecessor_offsets != 0 && candidate.backward_stack != 0 && candidate.backward_visited != 0;
+    }
+    if (success && edge_count != 0)
+    {
+        candidate.predecessors = arena_push_array(arena, edge_count, sizeof(uint32_t), _Alignof(uint32_t));
+        success = candidate.predecessors != 0;
+    }
     if (success)
     {
         memset(candidate.successor_offsets, 0, ((uint64_t)block_count + 1) * sizeof(uint32_t));
         if (block_count != 0)
         {
             memset(candidate.postorder, 0, (uint64_t)block_count * sizeof(uint32_t));
-            memset(candidate.backward, 0, (uint64_t)block_count * sizeof(uint32_t));
         }
         if (edge_count != 0)
         {
@@ -135,13 +170,6 @@ static bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_c
     return success;
 }
 
-typedef struct DataflowVisit DataflowVisit;
-struct DataflowVisit
-{
-    uint32_t block;
-    uint32_t next_edge;
-};
-
 // The backward order: a DFS over the predecessors, rooted first at every block without successors in block order,
 // then at the rest in postorder, and its finishing order reversed. Each block's predecessors are taken latest in the
 // postorder first. Every edge then leads to an earlier block except where the DFS met an ancestor, which in a reducible
@@ -149,11 +177,15 @@ struct DataflowVisit
 // from the same sweep, where the postorder reads the last sweep's. Of the predecessor orders tried on sqlite3.c's and
 // Lua's Tier 1 functions, latest first took the fewest sweeps (docs/dataflow.md, "The two orders"). The postorder must
 // be complete.
-static void dataflow_backward(Dataflow* dataflow, uint8_t* visited, DataflowVisit* stack, uint32_t* predecessor_offsets, uint32_t* predecessors,
-                              uint32_t* finished)
+static void dataflow_backward(Dataflow* dataflow)
 {
     const uint32_t block_count = dataflow->block_count;
     const uint32_t edge_count = dataflow->edge_count;
+    uint32_t* const backward = dataflow->backward;
+    uint32_t* const predecessor_offsets = dataflow->predecessor_offsets;
+    uint32_t* const predecessors = dataflow->predecessors;
+    DataflowVisit* const stack = dataflow->backward_stack;
+    uint8_t* const visited = dataflow->backward_visited;
     // Predecessor columns by a counting sort of the edges, filled from the postorder's end: each block's predecessors
     // latest in the postorder first.
     memset(predecessor_offsets, 0, ((uint64_t)block_count + 1) * sizeof(uint32_t));
@@ -164,8 +196,8 @@ static void dataflow_backward(Dataflow* dataflow, uint8_t* visited, DataflowVisi
     for (uint32_t block = 0; block < block_count; block += 1)
     {
         predecessor_offsets[(uint64_t)block + 1] += predecessor_offsets[block];
-        // finished holds each block's next free predecessor slot until the DFS below reuses it.
-        finished[block] = predecessor_offsets[block];
+        // backward holds each block's next free predecessor slot until the DFS below writes the order over it.
+        backward[block] = predecessor_offsets[block];
     }
     for (uint32_t position = block_count; position != 0; position -= 1)
     {
@@ -173,11 +205,12 @@ static void dataflow_backward(Dataflow* dataflow, uint8_t* visited, DataflowVisi
         for (uint32_t edge = dataflow->successor_offsets[block]; edge < dataflow->successor_offsets[(uint64_t)block + 1]; edge += 1)
         {
             const uint32_t successor = dataflow->successors[edge];
-            predecessors[finished[successor]] = block;
-            finished[successor] += 1;
+            predecessors[backward[successor]] = block;
+            backward[successor] += 1;
         }
     }
     memset(visited, 0, block_count);
+    // The finishing order, reversed as it is written: the first block to finish is backward's last.
     uint32_t finished_count = 0;
     for (uint32_t pass = 0; pass < 2; pass += 1)
     {
@@ -213,7 +246,7 @@ static void dataflow_backward(Dataflow* dataflow, uint8_t* visited, DataflowVisi
                     }
                     else
                     {
-                        finished[finished_count] = visit->block;
+                        backward[block_count - 1 - finished_count] = visit->block;
                         finished_count += 1;
                         depth -= 1;
                     }
@@ -221,26 +254,20 @@ static void dataflow_backward(Dataflow* dataflow, uint8_t* visited, DataflowVisi
             }
         }
     }
-    for (uint32_t position = 0; position < block_count; position += 1)
-    {
-        dataflow->backward[position] = finished[block_count - 1 - position];
-    }
 }
 
-// visited, the visit stack, predecessor_offsets and finished per block, predecessors per edge, and at most one alignment
-// gap before each of the pushes that can have one (the stack's and the first uint32_t column's).
+// visited and the visit stack per block, and at most one alignment gap, before the stack.
 static uint64_t dataflow_postorder_scratch_bytes(uint32_t block_count, uint32_t edge_count)
 {
-    const uint64_t blocks = (uint64_t)block_count * (sizeof(uint8_t) + sizeof(DataflowVisit) + 2 * sizeof(uint32_t)) + sizeof(uint32_t);
-    const uint64_t edges = (uint64_t)edge_count * sizeof(uint32_t);
-    return blocks + edges + _Alignof(DataflowVisit) + _Alignof(uint32_t);
+    (void)edge_count;
+    return (uint64_t)block_count * (sizeof(uint8_t) + sizeof(DataflowVisit)) + _Alignof(DataflowVisit);
 }
 
 static bool dataflow_postorder(Dataflow* dataflow, Arena* scratch)
 {
     const uint64_t saved_length = scratch->length;
     const uint32_t block_count = dataflow->block_count;
-    bool success = dataflow->successor_offsets != 0 && (block_count == 0 || (dataflow->postorder != 0 && dataflow->backward != 0)) &&
+    bool success = dataflow->successor_offsets != 0 && (block_count == 0 || dataflow->postorder != 0) &&
                    (dataflow->edge_count == 0 || dataflow->successors != 0);
     if (success)
     {
@@ -258,21 +285,11 @@ static bool dataflow_postorder(Dataflow* dataflow, Arena* scratch)
     }
     uint8_t* visited = 0;
     DataflowVisit* stack = 0;
-    uint32_t* predecessor_offsets = 0;
-    uint32_t* predecessors = 0;
-    uint32_t* finished = 0;
     if (success && block_count != 0)
     {
         visited = arena_push_array(scratch, block_count, sizeof(uint8_t), _Alignof(uint8_t));
         stack = arena_push_array(scratch, block_count, sizeof(DataflowVisit), _Alignof(DataflowVisit));
-        predecessor_offsets = arena_push_array(scratch, (uint64_t)block_count + 1, sizeof(uint32_t), _Alignof(uint32_t));
-        finished = arena_push_array(scratch, block_count, sizeof(uint32_t), _Alignof(uint32_t));
-        success = visited != 0 && stack != 0 && predecessor_offsets != 0 && finished != 0;
-    }
-    if (success && dataflow->edge_count != 0)
-    {
-        predecessors = arena_push_array(scratch, dataflow->edge_count, sizeof(uint32_t), _Alignof(uint32_t));
-        success = predecessors != 0;
+        success = visited != 0 && stack != 0;
     }
     if (success && block_count != 0)
     {
@@ -316,7 +333,6 @@ static bool dataflow_postorder(Dataflow* dataflow, Arena* scratch)
                 }
             }
         }
-        dataflow_backward(dataflow, visited, stack, predecessor_offsets, predecessors, finished);
     }
     arena_pop_to(scratch, saved_length);
     return success;
@@ -328,15 +344,13 @@ static bool dataflow_postorder(Dataflow* dataflow, Arena* scratch)
 // wait on those stores, and some processes fall into states 10% to 150% slower. Neither of its sweep's loops is
 // unrolled: unrolled, either takes registers, and Clang moves some of the loop's state back to the stack
 // (docs/dataflow.md, "Where the AVX-512 solver's frame falls").
-static __attribute__((noinline, aligned(64), no_builtin("memset"))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow)
+static __attribute__((noinline, aligned(64), no_builtin("memset"))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow, const uint32_t* visiting, const uint32_t* following,
+                                                                                                         uint64_t limit, bool resume, bool* settled)
 {
-    uint64_t iterations = 1;
+    uint64_t sweeps = 0;
     const uint32_t block_count = dataflow->block_count;
     const uint32_t* restrict successor_offsets = dataflow->successor_offsets;
     const uint32_t* restrict successors = dataflow->successors;
-    // The order this sweep visits and the one the next visits: the postorder first, then the backward order, in turn.
-    const uint32_t* visiting = dataflow->postorder;
-    const uint32_t* following = dataflow->backward;
     const uint64_t* restrict use_rows = dataflow->use;
     const uint64_t* restrict def_rows = dataflow->def;
     uint64_t* restrict in_rows = dataflow->in;
@@ -348,10 +362,13 @@ static __attribute__((noinline, aligned(64), no_builtin("memset"))) uint64_t dat
     // solve took about 2% longer wherever the caller's Dataflow put its def and in bases on a 64-byte line sharing
     // its low 12 address bits with an in or out row. Unrolled 8 times, since a row at a time took up to 2.4% more
     // cycles than memset at 256 blocks (docs/dataflow.md, "Where the caller's Dataflow falls").
-    #pragma clang loop unroll_count(8)
-    for (uint32_t block = 0; block < block_count; block += 1)
+    if (!resume)
     {
-        _mm512_store_si512(in_rows + (uint64_t)block * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
+        #pragma clang loop unroll_count(8)
+        for (uint32_t block = 0; block < block_count; block += 1)
+        {
+            _mm512_store_si512(in_rows + (uint64_t)block * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
+        }
     }
     bool changed;
     do
@@ -404,25 +421,25 @@ static __attribute__((noinline, aligned(64), no_builtin("memset"))) uint64_t dat
             previous_in = in;
         }
         changed = _mm512_test_epi64_mask(changes, changes) != 0;
-        iterations += changed;
+        sweeps += 1;
         const uint32_t* const swapped = visiting;
         visiting = following;
         following = swapped;
-    } while (changed);
-    return iterations;
+    } while (changed && sweeps != limit);
+    *settled = !changed;
+    return sweeps;
 }
 
 // Rows of any width, a vector of eight words at a time.
-static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_rows(Dataflow* dataflow)
+static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_rows(Dataflow* dataflow, const uint32_t* visiting, const uint32_t* following,
+                                                                                    uint64_t limit, bool resume, bool* settled)
 {
-    uint64_t iterations = 1;
+    uint64_t sweeps = 0;
+    bool changed = false;
     const uint32_t block_count = dataflow->block_count;
     const uint64_t row_words = dataflow->row_words;
     const uint32_t* restrict successor_offsets = dataflow->successor_offsets;
     const uint32_t* restrict successors = dataflow->successors;
-    // The order this sweep visits and the one the next visits: the postorder first, then the backward order, in turn.
-    const uint32_t* visiting = dataflow->postorder;
-    const uint32_t* following = dataflow->backward;
     const uint64_t* restrict use_rows = dataflow->use;
     const uint64_t* restrict def_rows = dataflow->def;
     uint64_t* restrict in_rows = dataflow->in;
@@ -434,8 +451,10 @@ static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_
         // Only in is cleared, as in the loop for one-vector rows: every sweep stores every word of every block's out
         // row, padding included, and nothing reads out (docs/dataflow.md, "Clearing and storing out").
         const uint64_t matrix_bytes = (uint64_t)block_count * row_words * sizeof(uint64_t);
-        memset(in_rows, 0, matrix_bytes);
-        bool changed;
+        if (!resume)
+        {
+            memset(in_rows, 0, matrix_bytes);
+        }
         do
         {
             __mmask8 changes = 0;
@@ -464,13 +483,14 @@ static __attribute__((noinline, aligned(64))) uint64_t dataflow_liveness_vector_
                 }
             }
             changed = changes != 0;
-            iterations += changed;
+            sweeps += 1;
             const uint32_t* const swapped = visiting;
             visiting = following;
             following = swapped;
-        } while (changed);
+        } while (changed && sweeps != limit);
     }
-    return iterations;
+    *settled = !changed;
+    return sweeps;
 }
 
 // The two loops are separate functions, so that neither changes how Clang compiles the other: inlined together, the
@@ -481,13 +501,23 @@ static uint64_t dataflow_liveness(Dataflow* dataflow)
     // With no row to solve the count is the one sweep that changes nothing, here, without calling either loop: the call
     // was most of a solve of a function with no value live across blocks (#2950).
     uint64_t iterations = 1;
-    if (dataflow->row_words == BUSTER_DATAFLOW_VECTOR_WORDS && dataflow->block_count != 0)
+    if (dataflow->row_words != 0 && dataflow->block_count != 0)
     {
-        iterations = dataflow_liveness_vector_one(dataflow);
-    }
-    else if (dataflow->row_words != 0 && dataflow->block_count != 0)
-    {
-        iterations = dataflow_liveness_vector_rows(dataflow);
+        const bool one = dataflow->row_words == BUSTER_DATAFLOW_VECTOR_WORDS;
+        const uint32_t* const postorder = dataflow->postorder;
+        bool settled = false;
+        // The postorder alone first. A solve still changing after BUSTER_DATAFLOW_POSTORDER_SWEEPS builds the backward
+        // order and goes on from the rows it has, alternating the two orders, the backward order first, to the same
+        // least fixpoint.
+        iterations = one ? dataflow_liveness_vector_one(dataflow, postorder, postorder, BUSTER_DATAFLOW_POSTORDER_SWEEPS, false, &settled) :
+                           dataflow_liveness_vector_rows(dataflow, postorder, postorder, BUSTER_DATAFLOW_POSTORDER_SWEEPS, false, &settled);
+        if (!settled)
+        {
+            dataflow_backward(dataflow);
+            const uint32_t* const backward = dataflow->backward;
+            iterations += one ? dataflow_liveness_vector_one(dataflow, backward, postorder, UINT64_MAX, true, &settled) :
+                                dataflow_liveness_vector_rows(dataflow, backward, postorder, UINT64_MAX, true, &settled);
+        }
     }
     return iterations;
 }

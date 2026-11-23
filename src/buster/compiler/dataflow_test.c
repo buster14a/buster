@@ -98,7 +98,6 @@ static bool dataflow_test_inputs_equal(const Dataflow* a, const Dataflow* b)
         if (a->block_count != 0)
         {
             result = result && memcmp(a->postorder, b->postorder, (uint64_t)a->block_count * sizeof(uint32_t)) == 0;
-            result = result && memcmp(a->backward, b->backward, (uint64_t)a->block_count * sizeof(uint32_t)) == 0;
         }
         if (bytes != 0)
         {
@@ -360,9 +359,14 @@ static bool dataflow_test_connected(const Dataflow* graph, Arena* scratch)
     return result;
 }
 
-static bool dataflow_test_order(const Dataflow* graph, Arena* scratch)
+// Builds the backward order, which a solve builds only when the postorder alone has not settled, and checks both.
+static bool dataflow_test_order(Dataflow* graph, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
+    if (graph->block_count != 0)
+    {
+        dataflow_backward(graph);
+    }
     uint8_t* seen = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, graph->block_count);
     bool result = graph->block_count == 0 || seen != 0;
     if (result && graph->block_count != 0)
@@ -393,7 +397,7 @@ static bool dataflow_test_order(const Dataflow* graph, Arena* scratch)
 }
 
 // dataflow_postorder again, in an arena of exactly dataflow_postorder_scratch_bytes from a 64-byte boundary: it must
-// succeed there, take no more than the bound, and rebuild the same two orders.
+// succeed there, take no more than the bound, rebuild the same postorder and leave the backward order alone.
 static bool dataflow_test_postorder_bound(Dataflow* graph, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
@@ -637,7 +641,8 @@ static void dataflow_test_known(DataflowTestTally* tally, Arena* memory, Arena* 
 // 2 + 3K increments r. Value 0 is a, 1 is r, 2 + k is ik and 2 + K is u, set at the entry and used in the body alone.
 // Each ik crosses every inner level's back edge to reach the innermost blocks, which the postorder alone took a sweep
 // apiece for; u is live through the headers only along forward edges, which the backward order alone took a sweep apiece
-// for. The two orders in turn settle the whole nest in at most three sweeps and one that changes nothing.
+// for. After the postorder's BUSTER_DATAFLOW_POSTORDER_SWEEPS, the two orders in turn settle the whole nest in one more
+// sweep and one that changes nothing.
 static void dataflow_test_loop_nest(DataflowTestTally* tally, Arena* memory, Arena* scratch, uint32_t levels)
 {
     const uint64_t mark = memory->length;
@@ -707,7 +712,7 @@ static void dataflow_test_loop_nest(DataflowTestTally* tally, Arena* memory, Are
     if (valid)
     {
         const uint64_t iterations = dataflow_test_solve(tally, &graph, scratch, levels <= 64);
-        dataflow_test_expect(tally, iterations <= 4, "the loop nest did not settle in a bounded number of sweeps");
+        dataflow_test_expect(tally, iterations <= BUSTER_DATAFLOW_POSTORDER_SWEEPS + 2, "the loop nest did not settle in a bounded number of sweeps");
         // The innermost body holds every value; without a header, every value but a.
         bool full = true;
         for (uint32_t value = levels != 0 ? 0 : 1; value < values; value += 1)
@@ -1015,6 +1020,7 @@ static void dataflow_test_limits(DataflowTestTally* tally, Arena* memory, Arena*
         {
             dataflow_test_expect(tally, graph.postorder[0] == 2 && graph.postorder[1] == 1 && graph.postorder[2] == 0,
                 "chain is not in postorder");
+            dataflow_backward(&graph);
             dataflow_test_expect(tally, graph.backward[0] == 2 && graph.backward[1] == 1 && graph.backward[2] == 0,
                 "chain's backward order does not start at its exit");
         }
