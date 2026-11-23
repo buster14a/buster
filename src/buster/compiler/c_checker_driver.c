@@ -5009,6 +5009,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         if (show_warnings && construction)
         {
             check_common_conditional_conversions(parser, pp, input, stream, types, &spell, repair, from, scratch);
+            check_common_float_comparisons(parser, pp, input, stream, types, &spell, repair, from, scratch);
         }
         for (uint32_t i = 0; i < completion_count; i += 1)
         {

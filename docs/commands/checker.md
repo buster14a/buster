@@ -84,6 +84,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
+  --float-precision-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
@@ -148,6 +149,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--float-precision-only` runs `c_check_float_precision_driver_test.c` (#1875):
+  `-Wimplicit-float-conversion`'s and `-Wliteral-range`'s floating comparisons
+  against clang's complete output, with their controls and policies
+  ([the c-checker section](../c-checker.md#floating-precision-and-floating-comparisons-1875)).
   `--unused-comparison-only` runs `c_check_unused_comparison_driver_test.c`
   and the original `tests/driver/unused_comparison*.c` sources (#2906).
   It compares complete Clang diagnostics for discarded comparisons, eligible
@@ -928,6 +933,14 @@ the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
 builder's observer's `-Wtautological-bitwise-compare`,
 `-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
 order (`c_check_common_cfg.c`).
+
+`tests/checker/system-macros` (#3338) is one too: common warnings at a system
+header's macro expanded in user code, which the expansion location decides as
+clang's DiagnosticsEngine does (`check_common_severity`), and the checks whose
+clang code tests `isInSystemMacro` itself: a conversion's context
+(`check_common_conversion_context`), a discarded value's macro
+(`check_common_unused_quiet`), a format call's extra argument and an array
+index both a system header spells.
 
 `tests/checker/return-calls` (#1393) is one too: `-Wreturn-type` past calls
 (`c_check_return_flow.c`), a direct call's by its declaration, a call through

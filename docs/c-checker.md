@@ -7056,9 +7056,17 @@ assignment writes and no read uses.
 
 Each uses the shared warning policy, so a default or group option, a
 `#pragma clang diagnostic` change and `-Werror` promotion behave as the other
-sparse warnings do. A token from a system-header macro is suppressed by its
-spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
-for it. The `-Wswitch` check needs a named enum's source definition and literal
+sparse warnings do. A warning in a system header is suppressed, unless
+`-Wsystem-headers` asks for it, by its token's expansion location, as clang's
+DiagnosticsEngine does: a system header's macro expanded in user code warns
+there, with its "expanded from macro" note (#3338). The checks whose clang code
+tests `isInSystemMacro` itself test the token's spelling: a value conversion's
+context (CheckImplicitConversion's CC: the assignment's operator, the
+declarator's name, the `return`, the call, the brace), a discarded value's
+expression, which a macro's body silences too (DiagnoseUnusedExprResult), a
+format call's extra argument, and an array index whose `]` and index a system
+header spells; `assert`'s empty `if` is quiet because its `;` is on another
+line. The `-Wswitch` check needs a named enum's source definition and literal
 enumerator `case` labels; it compares the enumerators' checked values, so
 aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
 computed case leaves the switch to a full constant evaluator.
@@ -7589,6 +7597,80 @@ each common-warning scratch allocation in turn and requires the capacity error,
 then the unconstrained output once the index passes the last. The semantics are also covered by
 `test-checker`'s existing warning and constraint fixtures, and by
 `test-diagnostics` for their ordering.
+
+### Floating precision and floating comparisons (#1875)
+
+`-Wimplicit-float-conversion` (off by default, under `-Wconversion`) is the
+floating case of clang's `CheckImplicitConversion`: an implicit conversion of a
+floating value to a floating type of lower rank (`getFloatingTypeSemanticOrder`:
+`__bf16`, `_Float16` and `__fp16` alike, `float`, `double`, `long double`,
+`__float128`; complex types by their elements, complex to complex alone) warns
+"implicit conversion loses floating-point precision: 'double' to 'float'", at the
+converted expression past its implicit conversions (`check_common_float_location`:
+an operator's at its operator, a call's at its callee's name, a builtin's too),
+its type as written, an lvalue's qualifiers included (`'const double'`), to the
+target's, its typedef spelled as clang does (`'F' (aka 'float')`). It follows
+the enumerations' carriers (`check_common_float_precision`, as
+`check_common_enum_cast`): initializations, brace initializers' parts
+(designated, nested, file scope), assignments, returns, a prototype's
+arguments (not yet a prototyped builtin's, #3371), a conditional's arms (both, the true one first) and a root comma's
+result. A constant that converts exactly is exempt, as clang's
+`IsSameFloatAfterCast` decides: a folded value or a read of a const object
+whose initializer completed (`CheckInput.const_values`), whose significant bits
+fit the target's precision at its exponent and range (`check_float_fits`,
+subnormals too; a quiet NaN whose payload fits; never a signaling one); an
+assignment's or an increment's value is no constant, nor is one computed from
+it (`-(d = 0.5)`, BUSTER_CHECK_MODIFICATION) or a comma's whose right operand is
+one (the evaluator ignores a comma's left operand). A compound
+assignment whose computation's type has a higher rank than its left operand's
+warns, whatever its value, "implicit conversion when assigning computation
+result loses floating-point precision", from the computation's type (the right
+operand's own, sugar too, an `_Atomic` one's value type's, where it isn't
+converted) to the left one's, at the
+right operand (`check_common_float_result_precision`, clang's
+`AnalyzeCompoundAssignment`). The computation is clang's, not the checker's own
+(`check_common_float_computation`): the left operand unpromoted, the right one
+after its unary promotion (`__fp16` to `float`) and `#pragma clang fp
+eval_method`'s widening, by `getFloatingRank` (where `__fp16` ranks above
+`_Float16`), and an `__fp16` left operand against an integer as `float`; so
+`h *= f16` doesn't warn and `h += 1` warns "'float' to '__fp16'". Both are plain Diags, published as the full
+expression completes, in unreachable code and short-circuited operands too,
+but not in `sizeof`'s operand; an `_Atomic` target takes neither. Only a unit
+where the warning may report pays for its candidates
+(`CheckCommonEnabled.float_precision`): the compound assignments join the
+walk's reach operators then. Not given: its child
+`-Wimplicit-int-float-conversion`'s integer conversions, which need clang's
+approximate expression ranges, and `-Wdouble-promotion`, its opposite (#3339);
+`-Wconversion` itself stays refused (#1365).
+
+`-Wliteral-range`'s floating comparison (on by default) is clang's
+`CheckFloatComparison`: an `==` or `!=` whose left operand, past parentheses
+and static selections, is a floating literal its comparison doesn't convert and
+whose right one is a cast (an implicit conversion, an lvalue's read or an
+explicit cast), or else the other way round, warns where the cast's operand's
+real floating type (an `_Atomic` one's value type) can't hold the literal exactly: "floating-point comparison
+is always false" for `==`, "true" for `!=`, "constant cannot be represented
+exactly in type 'float'", that type's canonical name, at the operator
+(`check_common_float_comparisons`). A sign, an integer operand, an ordering, a
+complex type or a literal converted to a wider type (by the other operand, or by
+`#pragma clang fp eval_method`, which the constant reader reads from its
+action's FP environment) is none of these. It is a
+plain Diag Sema gives as it builds the comparison, so it reports in
+unevaluated operands (`sizeof`, `typeof`, `_Generic`'s controlling
+expression) and unreachable code too. The constant reader's comparisons that
+no graph node holds (an array bound's, an enumerator's, a bit-field width's)
+are kept as `CHECK_WARNING_EVENT_FLOAT_COMPARE` events
+(`check_constant_float_compare`) and reported among them.
+
+The original driver fixtures (`c_check_float_precision_driver_test.c`,
+`test-checker-driver --float-precision-only`) compare clang's complete output
+at the default flags, `-Wall`, `-Wimplicit-float-conversion`, `-Weverything`,
+`-Wno-`, `-Werror=`, `-Werror`, `-w` and diagnostic pragmas, in gnu17 and C23,
+through both readers and one and three lanes, at `-fsyntax-only` and `-c`,
+with controls that must not warn. A system header's macro's literal (`M_PI`) is
+still suppressed by the common warnings' system-token test, which reads the
+token's spelling place where clang reads its expansion's; `-Wliteral-conversion`
+shares that gap (#3338).
 
 ## The constraint catalogue
 

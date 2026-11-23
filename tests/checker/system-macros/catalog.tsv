@@ -1,0 +1,6 @@
+buster-fixtures v1 checker-warnings
+conversions.c	12	0	12	#3338: conversions of system macros' values warn; contexts a system macro writes are quiet
+unused.c	10	0	7	#3338: discarded values a macro's body or a system macro writes are quiet; arguments warn
+operators.c	11	1	25	#3338: operator warnings at system macros' expansions, and array bounds a system macro spells
+literals.c	7	0	7	#3338: literal warnings at system macros' expansions, and format arguments they begin
+bitfields.c	6	0	2	#3338: a one-bit bit-field takes a system header's true quietly; other system macros' values warn
