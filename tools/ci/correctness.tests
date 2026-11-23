@@ -1107,7 +1107,7 @@ rm -r "$objects"
 "$BUSTER_COMPILER" test-ir-store-motion
 # #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
 "$BUSTER_COMPILER" test-ir-vectorize
-# #2805: compare the C reductions built by the opt-in Tier 1 vectorizer and Clang.
+# #2805: compare the C reductions built by the Tier 1 vectorizer and Clang.
 objects=$(mktemp -d)
 kernels=tests/ir/vectorize/minmax.c
 "$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict --tier1-report --verify -march=x86-64-v4 -c "$kernels" -o "$objects/buster.o"
@@ -1139,11 +1139,14 @@ for symbol in max_volatile max_inline_volatile; do
     test "$(grep -c 'DWORD PTR' "$objects/$symbol.s")" -ge 2
     if grep -E '[[:space:]]call[[:space:]]' "$objects/$symbol.s"; then exit 1; fi
 done
-# The pass is opt-in, and the available horizontal reductions require EVEX.
-"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64-v4 -c "$kernels" -o "$objects/default.o"
-"$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict -march=x86-64-v3 -c "$kernels" -o "$objects/v3.o"
-objdump -d "$objects/default.o" "$objects/v3.o" > "$objects/scalar.s"
+# -vectorize turns the pass off (#2743: on by default), and the available horizontal reductions require EVEX.
+"$BUSTER_COMPILER" --tier1 --tier1-passes=-vectorize --tier1-strict -march=x86-64-v4 -c "$kernels" -o "$objects/off.o"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64-v3 -c "$kernels" -o "$objects/v3.o"
+objdump -d "$objects/off.o" "$objects/v3.o" > "$objects/scalar.s"
 if grep -E 'v?p(min|max)[su]d' "$objects/scalar.s"; then exit 1; fi
+# The default is the pass's: --tier1 alone gives +vectorize's object.
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64-v4 -c "$kernels" -o "$objects/default.o"
+cmp "$objects/buster.o" "$objects/default.o"
 rm -r "$objects"
 "$BUSTER_COMPILER" test-ir-inline
 == Test dataflow bitsets
