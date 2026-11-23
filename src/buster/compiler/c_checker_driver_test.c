@@ -10334,6 +10334,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool record_extensions_only = false;
     // --auto-qualifiers-only: qualified __auto_type declarations and recovered atomic pointees (#1844).
     bool auto_qualifiers_only = false;
+    // --string-plus-only: the string literal and character pointer addition warnings, including their independent policies.
+    bool string_plus_only = false;
     // --type-sugar-only: the type sugar section alone (#1447).
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
@@ -10435,6 +10437,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             auto_qualifiers_only = true;
         }
+        else if (strcmp(argv[i], "--string-plus-only") == 0)
+        {
+            string_plus_only = true;
+        }
         else if (strcmp(argv[i], "--type-sugar-only") == 0)
         {
             type_sugar_only = true;
@@ -10504,7 +10510,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)float_precision_only +
-                             (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)initializer_diagnostics_only;
+                             (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -11065,6 +11071,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_auto_qualifiers(&test, clang, executable, directory);
     }
+    if (temporary && string_plus_only)
+    {
+        check_test_driver_string_plus_int(&test, clang, executable, directory);
+    }
     if (temporary && assert_diagnostics_only)
     {
         check_test_driver_assert_const(&test, clang, executable, directory);
@@ -11326,9 +11336,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_string_plus_int,
             check_test_driver_asm_label_auto,
             check_test_driver_assert_const,
-            check_test_driver_assert_bool,
-            check_test_driver_node_bodies,
-            check_test_driver_node_gate,
+            check_test_driver_assert_bool_and_node,
             check_test_driver_constant_logical,
             check_test_driver_query_bool,
             check_test_driver_ident,

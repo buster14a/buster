@@ -150,12 +150,14 @@ void check(void)
 void check(void)
 {
     __builtin_clz(int);
+    after_builtin_call;
 }
 #elif BUSTER_CASE == 18
 int printf(const char*, ...);
 void check(void)
 {
     printf(int);
+    after_library_call;
 }
 #elif BUSTER_CASE == 19
 struct Pair { int (*member)(int); } pair;
@@ -349,6 +351,7 @@ int printf(const char*, ...);
 void check(void)
 {
     printf("%d", int);
+    after_library_later_argument;
 }
 #elif BUSTER_CASE == 45
 int known(int, int);
@@ -375,5 +378,349 @@ void check(void)
 {
     known((int (*)(Missing value))0, int, missing_later);
     after_earlier_parse_diagnostic;
+}
+#elif BUSTER_CASE == 49
+void check(int n)
+{
+    int s = 0;
+    foo(int i = 0; i < n; i++) s += i;
+    after_loop_like_call;
+    (void)s;
+}
+#elif BUSTER_CASE == 50
+struct Pair { int member; } pair;
+void check(void)
+{
+    sizeo(int) + pair.missing;
+    after_sizeof_typo;
+}
+#elif BUSTER_CASE == 51
+int foo(int);
+void check(int n)
+{
+    int s = 0;
+    foo(int i = 0; i < n; i++) s += i;
+    after_declared_loop_like_call;
+    (void)s;
+}
+#elif BUSTER_CASE == 52
+int known(int);
+void check(int n, int i)
+{
+    known(int; i < n; i++);
+    after_semicolon_warning;
+}
+#elif BUSTER_CASE == 53
+void check(void)
+{
+    __builtin_clz(int, missing_builtin_argument);
+    after_builtin_arguments;
+}
+#elif BUSTER_CASE == 54
+void check(void)
+{
+    printf(int);
+    after_implicit_library;
+}
+#elif BUSTER_CASE == 55
+void check(void)
+{
+    __attribute__((unused)) __builtin_ctz(unread_argument);
+    after_attributed_builtin;
+}
+#elif BUSTER_CASE == 56
+void check(void)
+{
+    __builtin_va_start(int);
+    after_varargs_builtin;
+}
+#elif BUSTER_CASE == 57
+void check(void)
+{
+    __builtin_invoke(int);
+    after_invoke_builtin;
+}
+#elif BUSTER_CASE == 58
+void check(void)
+{
+    __builtin_ia32_pause(int, missing_pause_argument);
+    after_target_builtin;
+}
+#elif BUSTER_CASE == 59
+void check(void)
+{
+    __builtin_fprintf(int);
+    after_header_builtin;
+}
+#elif BUSTER_CASE == 60
+int known(int);
+int outer(int);
+void check(void)
+{
+    outer(known(int; unread;));
+}
+#elif BUSTER_CASE == 61
+int known(int);
+void check(void)
+{
+    int value = known(int; unread;);
+}
+#elif BUSTER_CASE == 62
+int known(int);
+int check(void)
+{
+    return known(int; unread;);
+}
+#elif BUSTER_CASE == 63
+void check(void)
+{
+    __builtin_fprintf(int);
+    __builtin_fprintf(1);
+    after_first_header_builtin;
+}
+void second(void)
+{
+    __attribute__((unused)) __builtin_fprintf(unread_argument);
+    after_second_header_builtin;
+}
+#elif BUSTER_CASE == 64
+int known(int);
+void check(int i)
+{
+    known(int x; 0; i++) skipped_tail;
+    after_valid_postfix;
+}
+#elif BUSTER_CASE == 65
+int known(int);
+int target(int);
+void check(void)
+{
+    known(int x; 0; target(missing_tail_operand)) skipped_tail;
+    after_call_operand;
+}
+#elif BUSTER_CASE == 66
+int known(int);
+void check(void)
+{
+    known(int x; 0; missing_tail_operand++) skipped_tail;
+    after_invalid_postfix;
+}
+#elif BUSTER_CASE == 67
+int known(int);
+void check(void)
+{
+    known(int x; 0; 1 + missing_tail_operand) skipped_tail;
+    after_invalid_binary;
+}
+#elif BUSTER_CASE == 68
+void check(int c)
+{
+    for (; c;) ); { }
+    after_orphan_for_body;
+}
+#elif BUSTER_CASE == 69
+void check(int c)
+{
+    for (; c;);
+        ) + 1;
+}
+void later(void)
+{
+    after_orphan_after_loop;
+}
+#elif BUSTER_CASE == 70
+void check(void)
+{
+    fprintf(int);
+    after_recovered_library;
+}
+#elif BUSTER_CASE == 71
+void check(int c)
+{
+    for (; c;)
+#pragma GCC diagnostic push
+        ;
+}
+void later(void)
+{
+    after_pragma_for_body;
+}
+#elif BUSTER_CASE == 72
+void check(int c)
+{
+    if (c) _Pragma("GCC diagnostic push") ;
+}
+void later(void)
+{
+    after_pragma_if_body;
+}
+#elif BUSTER_CASE == 73
+void check(int c)
+{
+    while (c);
+#pragma GCC diagnostic push
+        ;
+}
+void later(void)
+{
+    after_pragma_following;
+}
+#elif BUSTER_CASE == 74
+void check(int c)
+{
+    while (c);
+        c ) ;
+}
+void later(void)
+{
+    after_kept_tail;
+}
+#elif BUSTER_CASE == 75
+void check(int c)
+{
+    while (c);
+    c ) ;
+        (void)c;
+}
+void later(void)
+{
+    after_kept_unindented;
+}
+#elif BUSTER_CASE == 76
+void check(int c, int d)
+{
+    for (; c;) for (; d;) );
+    after_nested_loops;
+}
+#elif BUSTER_CASE == 77
+void check(int c, int d)
+{
+    while (c);
+        for (; d;) );
+    (void)d;
+}
+void later(void)
+{
+    after_dropped_loop;
+}
+#elif BUSTER_CASE == 78
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) if (d) for (; d;) ) ;
+}
+void later(void)
+{
+    after_dropped_if;
+}
+#elif BUSTER_CASE == 79
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        do ) ; while (d);
+    (void)d;
+}
+void later(void)
+{
+    after_dropped_do;
+}
+#elif BUSTER_CASE == 80
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) switch (d) for (; d;) ) ;
+}
+void later(void)
+{
+    after_dropped_switch;
+}
+#elif BUSTER_CASE == 81
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) do ) ; while (d);
+}
+void later(void)
+{
+    after_dropped_do_body;
+}
+#elif BUSTER_CASE == 82
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) if (d) for (; d;) ) ; else (void)d;
+}
+void later(void)
+{
+    after_kept_if_else;
+}
+#elif BUSTER_CASE == 83
+typedef int myint;
+void check(int c, int d)
+{
+    if (c) else ;
+}
+void later(void)
+{
+    after_stray_else_body;
+}
+#elif BUSTER_CASE == 84
+typedef int myint;
+void check(int c, int d)
+{
+    for (; c;) if ;
+}
+void later(void)
+{
+    after_missing_head_body;
+}
+#elif BUSTER_CASE == 85
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        else ;
+    (void)c;
+}
+void later(void)
+{
+    after_stray_else_following;
+}
+#elif BUSTER_CASE == 86
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        while ;
+    (void)c;
+}
+void later(void)
+{
+    after_missing_head_following;
+}
+#elif BUSTER_CASE == 87
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        int 1;
+    (void)c;
+}
+void later(void)
+{
+    after_missing_declarator;
+}
+#elif BUSTER_CASE == 88
+typedef int myint;
+void check(int c, int d)
+{
+    while (c);
+        myint & 1;
+    (void)c;
+}
+void later(void)
+{
+    after_typedef_declarator;
 }
 #endif

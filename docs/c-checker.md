@@ -122,7 +122,9 @@ Later compatible declarations share the entity; an incompatible library
 prototype warns under `-Wincompatible-library-redeclaration`. Static linkage
 conflicts and malformed calls remain errors. Header-dependent descriptors such
 as `FILE *` do not become invented types: a direct pre-C23 call falls back to
-the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`.
+the ordinary implicit declaration and diagnoses `-Wbuiltin-requires-header`,
+naming `<stdio.h>` as clang does. Only `FILE` rows reach it: every `jmp_buf` or
+`ucontext_t` library row has attribute `T`, which clang declares without it.
 
 An implicit library declaration warns by default even in C89. The ordinary
 implicit-declaration warning switches, promotion/demotion and source pragmas
@@ -5268,9 +5270,9 @@ survive for later statements. A silent invalid-use report then cuts the
 synthetic call before expression checking, so it cannot invent an arity,
 noncallable or deprecation diagnostic. The view retains preprocessor source
 indices across recovery rounds and repeated macro expansions. It applies only
-to a balanced call followed by a semicolon; catalog-recognized builtin spellings
-(including library names) and a semicolon within the outer argument list keep
-the existing recovery.
+to a balanced call followed by a semicolon, including catalog-recognized builtin
+and library names. A semicolon within an attribute-led call's outer argument
+list keeps the existing recovery.
 
 `c_check_attribute_call_recovery_driver_test.c` reads the original runtime
 fixtures in `tests/checker/parse-recovery/attributed-call*.c`. It compares the
@@ -5278,7 +5280,8 @@ whole diagnostic stream and status with Clang in GNU89 and GNU17, through both
 readers, syntax-only and object output, and one/three requested lanes with
 deferred bodies. The cases cover ordinary prototypes, noncallable and annotated
 callees, preserved implicit declarations, repeated macros, prior recovery
-rounds, deeply nested unread arguments, and builtin exclusion. Warning
+rounds and deeply nested unread arguments. The malformed-call suite below also
+covers catalog-recognized callees in this classification-only view. Warning
 promotion/suppression and the error limit are checked; rejected compilations
 preserve an existing output, while accepted controls replace it with an ELF
 object. A separate control keeps C23's declaration grammar.
@@ -5302,9 +5305,25 @@ call's recovery. Callee source/use records are sorted together and deduplicated
 after all rounds, independently of the parse errors' token order, so an outer
 callee revisited after a nested one remains searchable. The invalid callee
 suppresses synthetic arity, conversion and noncallable errors.
-Empty arguments, member callees, catalog-recognized builtin/library
-names (also with `-fno-builtin`), mismatched delimiters and semicolon-crossing
-calls retain the existing recovery.
+Catalog-recognized builtin and library names use the same lookup recovery,
+including under `-fno-builtin`. The builtin adapter classifies their declarations
+without constructing an intrinsic call from the surviving arguments: it does not
+apply argument counts, conversions or integer-constant constraints to that
+synthetic call. Before C23, a missing `FILE` context keeps Clang's unknown-builtin
+and `<stdio.h>` diagnostics and the implicit declaration for later calls. C23
+keeps the undeclared-identifier error.
+
+A type-first error in a call that is itself a block expression statement may
+also stop at its first outer semicolon. The parser proves that statement context;
+the private view closes the call at the semicolon's source and keeps the original
+semicolon and following tokens. In `foo(int i = 0; i < n; i++) s += i;`, the
+following clauses are then checked as statements. Before C23, lookup errors in
+the increment suppress the cascading orphan-parenthesis errors; a valid
+increment retains those parse errors. C23's successful `foo` to `for` correction
+reparses the original tokens as a loop. Orphan closers discard only through the
+next proven statement semicolon, so later statements remain checked. Empty
+arguments, member callees, mismatched delimiters, and semicolon crossings in
+nested calls, initializers or return expressions retain the existing recovery.
 
 `test-checker-driver --malformed-calls-only` reads the original runtime source
 and case catalog in `tests/checker/parse-recovery/malformed-calls.*`. It compares
@@ -5314,8 +5333,11 @@ readers and syntax/object output with one/three requested lanes and deferred
 bodies. Mixed ordinary and attribute-led calls run before C23, including repeated
 macro expansions, multiple recovery rounds and rejected/repaired views. Contract
 checks verify paired metadata, nested callee ordering, repeated-callee
-deduplication and the excluded boundaries. Earlier and later arguments retain
-lookup, member, availability and warning diagnostics exactly once. Rejected compilations
+deduplication, synthetic closer sources and the excluded boundaries. Earlier and
+later arguments retain lookup, member, availability and warning diagnostics
+exactly once. Builtin controls retain independent arguments without synthetic
+arity/constant constraints, and semicolon controls distinguish invalid name
+expressions from valid increments and known calls with invalid arguments. Rejected compilations
 preserve existing output; valid cast and `sizeof` calls produce an ELF object.
 
 Phase 2 covers redeclarations that conflict with a declaration of the same
@@ -6105,12 +6127,9 @@ Left as they were:
   list (`int b(voi);`, clang's "a parameter list without types is only
   allowed in a function definition"), which ends the reading before a later
   parameter's search (#2498).
-- A statement start's correction whose statement then fails to parse in a way
-  no recovery view reads past (`whil;`'s "expected '(' after 'while'", `myint
-  & 1`) ends the checking of its body there, as other such parse errors do;
-  so does a parse error within a call's parentheses (`foo (int i = 0; ...)`,
-  C23's `for`, and `sizeo (int)`). A statement whose undeclared name ends
-  before a `}` without a `;` keeps the parser's error.
+- A statement whose undeclared name ends before a `}` without a `;` keeps
+  the parser's error. Recovery for `whil;`, `myint & 1`, `sizeo(int)` and
+  malformed calls is described under semantic error recovery above (#2406).
 - A name before an operand that is declared, or that a correction takes as a
   value (`a 5`, `nosuch 5` near a variable `nosuce`), keeps the parser's
   error, which ends the checking of its body or the unit's file scope after
@@ -6119,16 +6138,13 @@ Left as they were:
   missing `;` after `return 0`): its name's error is the parser's.
 - After a block item's GNU attributes, a builtin's name without a call
   (`__builtin_abs;`, clang's "expected identifier or '('") is still an
-  implicit int's declarator. A catalog-recognized builtin spelling's call there still keeps
-  the existing parse error and may end the body's checking. The bounded
-  pre-C23 recovery for ordinary calls is described under semantic error
-  recovery above (#2406).
-- A declaration's type name outside a statement's start is clang's parser's
-  to correct (`DiagnoseUnknownTypeName`): a parameter's `myin v` keeps
-  buster's "unknown type name" with no suggestion, and its prefix view
-  recovers it as `int`. Neither does an implicit declaration's diagnostic
-  that `-Werror` makes an error before C99. A cast to one (`(myin)x`) is
-  still buster's parse error.
+  implicit int's declarator. The bounded pre-C23 recovery for ordinary and
+  catalog-recognized calls is described under semantic error recovery above
+  (#2406).
+- An implicit declaration's diagnostic that `-Werror` makes an error before
+  C99 still does not trigger a correction. Parameter type-name and cast
+  corrections, including the corrected typedef's type in prefix views, are
+  described above.
 - A function designator's comparison statement keeps its `-Wunused` and
   `-Wparentheses` notes after a correction.
 - A name the walk itself reads is searched in the walk's order
@@ -6934,7 +6950,16 @@ default, `check_common_string_plus_int`) is clang's `diagnoseStringPlusInt`: a
 boolean or enumeration type in either order, "adding 'T' to a string does not
 append to the string" at the `+` with its note, T the operand's type as
 written (a typedef's, `__size_t`'s sugar), given as the `+` is built; a `+`
-whose neighbor is no string literal is passed at once.
+whose neighbor is no string literal is passed at once for this warning. The same
+scan gives `-Wstring-plus-char` (#2406, also on by default): a character pointer
+or array added to a directly unparenthesized character literal, in either order,
+warns "adding 'char' to a string pointer does not append to the string" and gives
+the array-indexing note. The pointer may be a variable or a parenthesized string;
+its pointee must be `char`, `signed char` or `unsigned char`. The literal's type
+name follows Clang's byte-value rule, including UTF-8 and multicharacter literals.
+The two warnings have independent controls. Where both apply, the integer
+warning and its note precede the character warning and its note. Parenthesizing
+or casting the character literal suppresses the character warning.
 `-Wtautological-constant-out-of-range-compare` (#2218, on by default, in
 `-Wtautological-constant-compare` and `-Wtautological-compare`,
 `check_common_out_of_range`) is clang's `CheckTautologicalComparison`'s out-of-range
@@ -7246,7 +7271,14 @@ arm a `_Generic` or `__builtin_choose_expr` selects. A dereference, a
 comparison, a comma's left operand, a `?:` condition (a GNU `?:` included), a
 selection's controlling expression and its other arms consume it or don't
 return it. `-Wempty-body` leaves an `if` that has an
-`else` alone. A loop and its following statement use their outer macro
+`else` alone. A statement a recovery view deleted whole keeps its `;` marked
+`BUSTER_PARSE_DROPPED_STATEMENT` (#2406): one that starts at an orphan `)`, a
+stray `else`, a control keyword without its `(`, a declaration before its first
+declarator. That was clang's StmtError, and so is a `for`, `while`, `switch` or
+`do` whose body is one, and an `if` without an `else` whose then-branch is one:
+none is an empty body or a loop's following statement, and such a `for` gets no
+`-Wfor-loop-analysis`. A repair that keeps the statement (an extraneous `)`
+before its `;`) leaves it an ordinary statement. A loop and its following statement use their outer macro
 invocations' columns, including an argument-first or nested expansion (#1339).
 Only an enabled candidate whose position comes from a macro requests deferred
 expansion history; file-spelled positions and units without empty-body candidates keep
