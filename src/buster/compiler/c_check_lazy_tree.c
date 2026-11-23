@@ -12,8 +12,9 @@
 // binding adapter. The semantic reader still visits its selected bodies in original source order.
 //
 // Scratch holds one name-to-body table and compact body/reference columns, never a token-wide owner or binding
-// column. Numeric name masks have scalar/vector twins. Unsupported inputs and resource failures restore both
-// arenas; success retains only the existing ordered body records and final byte mask.
+// column. Numeric name masks take 64 tokens at a time (a name count past the gathers' signed indices, a token at a
+// time). Unsupported inputs and resource failures restore both arenas; success retains only the existing ordered body
+// records and final byte mask.
 
 #ifndef BUSTER_CHECK_LAZY_TREE_INCLUDED
 #define BUSTER_CHECK_LAZY_TREE_INCLUDED 1
@@ -47,10 +48,10 @@ static uint64_t check_lazy_tree_mask_scalar(const Parser* parser, const uint32_t
     return mask;
 }
 
-static __attribute__((noinline)) uint64_t check_lazy_tree_mask(const Parser* parser, const uint32_t* targets, uint32_t names, uint32_t first, uint32_t count, bool scalar)
+static __attribute__((noinline)) uint64_t check_lazy_tree_mask(const Parser* parser, const uint32_t* targets, uint32_t names, uint32_t first, uint32_t count)
 {
     uint64_t mask = 0;
-    if (!scalar && names <= INT32_MAX)
+    if (names <= INT32_MAX)
     {
         const uint64_t live = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
         const __m512i kinds = _mm512_maskz_loadu_epi8(live, parser->tokens.kinds + first);
@@ -307,7 +308,7 @@ static bool check_lazy_tree_skippable(const Parser* parser, const Preprocessor* 
     return valid;
 }
 
-static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* parser, const Preprocessor* pp, Arena* output, Arena* scratch, bool scalar)
+static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* parser, const Preprocessor* pp, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -381,7 +382,7 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
         for (uint64_t block = 0; block < count; block += 64)
         {
             const uint32_t live = count - block < 64 ? (uint32_t)(count - block) : 64;
-            uint64_t mask = check_lazy_tree_mask(parser, targets, names, (uint32_t)block, live, BUSTER_SCALAR_PATH(scalar));
+            uint64_t mask = check_lazy_tree_mask(parser, targets, names, (uint32_t)block, live);
             while (mask != 0)
             {
                 const uint32_t token = (uint32_t)block + (uint32_t)__builtin_ctzll(mask);
@@ -426,7 +427,7 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
         for (uint64_t block = 0; valid && block < count; block += 64)
         {
             const uint32_t live = count - block < 64 ? (uint32_t)(count - block) : 64;
-            uint64_t mask = check_lazy_tree_mask(parser, targets, names, (uint32_t)block, live, BUSTER_SCALAR_PATH(scalar));
+            uint64_t mask = check_lazy_tree_mask(parser, targets, names, (uint32_t)block, live);
             while (valid && mask != 0)
             {
                 const uint32_t token = (uint32_t)block + (uint32_t)__builtin_ctzll(mask);
@@ -507,7 +508,7 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
             .reference_kind = kinds,
         };
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
-        valid = valid && (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, C_LOWERING_REACHABLE) : c_lowering_vector(&plan, C_LOWERING_REACHABLE)) == C_LOWERING_OK;
+        valid = valid && c_lowering_vector(&plan, C_LOWERING_REACHABLE) == C_LOWERING_OK;
         if (valid)
         {
             for (uint32_t at = 0; at < named_count; at += 1)

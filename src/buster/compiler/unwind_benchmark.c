@@ -60,7 +60,7 @@ static UnwindBenchmarkResult unwind_benchmark_chain(const Tier0Function* functio
     }
     if (result.valid && way != 0)
     {
-        result.valid = unwind_write(descriptions, count, output, false) == UNWIND_OK;
+        result.valid = unwind_write(descriptions, count, output) == UNWIND_OK;
     }
     return result;
 }
@@ -107,8 +107,8 @@ static int run_unwind_benchmark(int argc, char** argv)
     Arena input = arena_reserve(1ull << 32);
     Arena temporary = arena_reserve(64ull << 20);
     Tier0Function* functions = BUSTER_ARENA_PUSH_ARRAY(&input, Tier0Function, count);
-    // The vector path's descriptions and pairs, the published path's with one CIE, and the exact writer's of the same
-    // with one CIE, which the published path's must be.
+    // The vector path's descriptions and pairs, the published path's with one CIE, and a third output the published
+    // path's descriptions take.
     UnwindFunction* descriptions[3];
     UnwindOutput output[3] = { 0 };
     for (uint32_t way = 0; way < 3; way += 1)
@@ -155,8 +155,6 @@ static int run_unwind_benchmark(int argc, char** argv)
         valid &= controls[way].valid && controls[way].records == controls[0].records && controls[way].bytes == controls[0].bytes && controls[way].hash == controls[0].hash;
     }
     valid = valid && memcmp(descriptions[0], descriptions[1], (uint64_t)count * sizeof(UnwindFunction)) == 0;
-    valid = valid && unwind_write(descriptions[1], count, &output[2], true) == UNWIND_OK && output[1].size == output[2].size &&
-            memcmp(output[1].bytes, output[2].bytes, output[1].size) == 0 && memcmp(output[1].locations, output[2].locations, (uint64_t)count * sizeof(uint32_t)) == 0;
     if (valid)
     {
         const struct perf_event_attr attribute = {
@@ -181,11 +179,11 @@ static int run_unwind_benchmark(int argc, char** argv)
                 {
                     const uint32_t index = way == 0 ? 0 : way - 1;
                     const uint64_t until = debug_benchmark_time() + (uint64_t)after_scalar * 1000000;
-                    // The same light scalar-emission workload precedes every compared path: the exact writer's, which
+                    // The same light emission workload precedes every compared path: the CFI writer's, which
                     // runs no Tier 0, sizing or encoding.
                     while (valid && after_scalar != 0 && debug_benchmark_time() < until)
                     {
-                        valid &= unwind_write(descriptions[0], count, &output[0], true) == UNWIND_OK;
+                        valid &= unwind_write(descriptions[0], count, &output[0]) == UNWIND_OK;
                     }
                     if (counter >= 0)
                     {

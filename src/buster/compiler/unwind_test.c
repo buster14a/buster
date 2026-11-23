@@ -436,75 +436,67 @@ static bool unwind_test_emitters(void)
         }
     }
     bool valid = unwind_check(functions, count) == UNWIND_OK;
-    static uint8_t bytes[2][64 * 16 * 384];
-    static uint32_t locations[2][64 * 16];
+    static uint8_t bytes[64 * 16 * 384];
+    static uint32_t locations[64 * 16];
     for (uint32_t shared = 0; shared < 2; shared += 1)
     {
-        UnwindOutput outputs[2] = { 0 };
-        for (uint32_t way = 0; way < 2; way += 1)
-        {
-            outputs[way] = (UnwindOutput){
-                .bytes = bytes[way],
-                .capacity = sizeof(bytes[way]),
-                .locations = locations[way],
-                .location_capacity = count,
-                .shared = shared != 0,
-            };
-            memset(bytes[way], 0xa5, sizeof(bytes[way]));
-            valid &= unwind_write(functions, count, &outputs[way], way == 0) == UNWIND_OK && unwind_test_decode(functions, count, &outputs[way]);
-        }
-        valid &= outputs[0].size == outputs[1].size && memcmp(bytes[0], bytes[1], outputs[0].size) == 0 && memcmp(locations[0], locations[1], sizeof(locations[0])) == 0;
-        // The vector writer's bytes and locations, frozen (FNV-1a) while the exact writer wrote the same: pairs, then one
-        // shared CIE.
+        UnwindOutput output = {
+            .bytes = bytes,
+            .capacity = sizeof(bytes),
+            .locations = locations,
+            .location_capacity = count,
+            .shared = shared != 0,
+        };
+        memset(bytes, 0xa5, sizeof(bytes));
+        valid &= unwind_write(functions, count, &output) == UNWIND_OK && unwind_test_decode(functions, count, &output);
+        // The bytes and locations, frozen (FNV-1a) while the vector writer and the exact one (unwind_write's `exact`
+        // until #2924) wrote the same: pairs, then one shared CIE.
         static const uint64_t frozen[2] = { UINT64_C(0xf339e5aad4c85f73), UINT64_C(0x386e7d0eb0a3cfb0) };
         uint64_t digest = UINT64_C(0xcbf29ce484222325);
-        for (uint64_t byte = 0; byte < outputs[1].size; byte += 1)
+        for (uint64_t byte = 0; byte < output.size; byte += 1)
         {
-            digest = (digest ^ bytes[1][byte]) * UINT64_C(0x100000001b3);
+            digest = (digest ^ bytes[byte]) * UINT64_C(0x100000001b3);
         }
         for (uint32_t location = 0; location < count; location += 1)
         {
-            digest = (digest ^ locations[1][location]) * UINT64_C(0x100000001b3);
+            digest = (digest ^ locations[location]) * UINT64_C(0x100000001b3);
         }
         if (digest != frozen[shared])
         {
             printf("unwind-test: emitters' frozen digest, %s CIE: 0x%016llx, expected 0x%016llx (%llu bytes)\n", shared != 0 ? "shared" : "paired",
-                   (unsigned long long)digest, (unsigned long long)frozen[shared], (unsigned long long)outputs[1].size);
+                   (unsigned long long)digest, (unsigned long long)frozen[shared], (unsigned long long)output.size);
             valid = false;
         }
         // Negative controls for the independent interpreter: corrupt the return-address rule and the first FDE's range.
-        bytes[0][21] ^= 3;
-        valid &= !unwind_test_decode(functions, count, &outputs[0]);
-        bytes[0][21] ^= 3;
-        bytes[0][locations[0][0] + 4] ^= 1;
-        valid &= !unwind_test_decode(functions, count, &outputs[0]);
-        bytes[0][locations[0][0] + 4] ^= 1;
+        bytes[21] ^= 3;
+        valid &= !unwind_test_decode(functions, count, &output);
+        bytes[21] ^= 3;
+        bytes[locations[0] + 4] ^= 1;
+        valid &= !unwind_test_decode(functions, count, &output);
+        bytes[locations[0] + 4] ^= 1;
         // Every refusal is before stores, including an insufficient location slice after the byte slice fits.
-        for (uint32_t way = 0; way < 2; way += 1)
+        for (uint32_t failure = 0; failure < 2; failure += 1)
         {
-            for (uint32_t failure = 0; failure < 2; failure += 1)
+            UnwindOutput short_output = output;
+            short_output.capacity = failure == 0 ? output.size - 1 : output.size;
+            short_output.location_capacity = count - (failure != 0);
+            memset(bytes, 0xa5, sizeof(bytes));
+            memset(locations, 0xa5, sizeof(locations));
+            valid &= unwind_write(functions, count, &short_output) == UNWIND_ERROR_CAPACITY && short_output.size == output.size;
+            for (uint32_t byte = 0; byte < sizeof(bytes); byte += 1)
             {
-                UnwindOutput short_output = outputs[way];
-                short_output.capacity = failure == 0 ? outputs[way].size - 1 : outputs[way].size;
-                short_output.location_capacity = count - (failure != 0);
-                memset(bytes[way], 0xa5, sizeof(bytes[way]));
-                memset(locations[way], 0xa5, sizeof(locations[way]));
-                valid &= unwind_write(functions, count, &short_output, way == 0) == UNWIND_ERROR_CAPACITY && short_output.size == outputs[way].size;
-                for (uint32_t byte = 0; byte < sizeof(bytes[way]); byte += 1)
-                {
-                    valid &= bytes[way][byte] == 0xa5;
-                }
-                for (uint32_t location = 0; location < count; location += 1)
-                {
-                    valid &= locations[way][location] == 0xa5a5a5a5;
-                }
+                valid &= bytes[byte] == 0xa5;
+            }
+            for (uint32_t location = 0; location < count; location += 1)
+            {
+                valid &= locations[location] == 0xa5a5a5a5;
             }
         }
     }
-    // The shared layout is the pairs' less a CIE per FDE but the first: measured by both writers.
+    // The shared layout is the pairs' less a CIE per FDE but the first.
     UnwindOutput pairs = { .location_capacity = count };
     UnwindOutput shared = { .location_capacity = count, .shared = true };
-    valid &= unwind_write(functions, count, &pairs, false) == UNWIND_ERROR_CAPACITY && unwind_write(functions, count, &shared, true) == UNWIND_ERROR_CAPACITY &&
+    valid &= unwind_write(functions, count, &pairs) == UNWIND_ERROR_CAPACITY && unwind_write(functions, count, &shared) == UNWIND_ERROR_CAPACITY &&
              shared.size == pairs.size - (uint64_t)(count - 1) * BUSTER_UNWIND_CIE_BYTES;
     printf("unwind emitters: %u save/frame combinations, frame pointers and %u with tail calls or open among them, as pairs and with one CIE, independent CFI "
            "rows and atomic capacity refusal: %s\n",
@@ -527,24 +519,20 @@ static bool unwind_test_compact(void)
         }
         functions[i].size = functions[i].event_count + 1;
     }
-    uint8_t bytes[2][(BUSTER_UNWIND_BATCH + 1) * 120] = { 0 };
-    uint32_t locations[2][BUSTER_UNWIND_BATCH + 1] = { 0 };
+    uint8_t bytes[(BUSTER_UNWIND_BATCH + 1) * 120] = { 0 };
+    uint32_t locations[BUSTER_UNWIND_BATCH + 1] = { 0 };
     bool valid = unwind_check(functions, count) == UNWIND_OK;
     for (uint32_t shared = 0; shared < 2; shared += 1)
     {
         const uint64_t expected = shared != 0 ? 40 + (uint64_t)count * 80 : (uint64_t)count * 120;
-        for (uint32_t way = 0; way < 2; way += 1)
-        {
-            UnwindOutput output = {
-                .bytes = bytes[way],
-                .capacity = expected,
-                .locations = locations[way],
-                .location_capacity = count,
-                .shared = shared != 0,
-            };
-            valid &= unwind_write(functions, count, &output, way == 0) == UNWIND_OK && output.size == expected && unwind_test_decode(functions, count, &output);
-        }
-        valid &= memcmp(bytes[0], bytes[1], expected) == 0 && memcmp(locations[0], locations[1], sizeof(locations[0])) == 0;
+        UnwindOutput output = {
+            .bytes = bytes,
+            .capacity = expected,
+            .locations = locations,
+            .location_capacity = count,
+            .shared = shared != 0,
+        };
+        valid &= unwind_write(functions, count, &output) == UNWIND_OK && output.size == expected && unwind_test_decode(functions, count, &output);
     }
 
     // A general row program starts at PC 0 and changes two rules at one PC. Neither case emits a zero advance;
@@ -618,16 +606,16 @@ static bool unwind_test_compact(void)
         .row_count = BUSTER_ARRAY_LENGTH(rows),
     };
     valid &= unwind_check(&program, 1) == UNWIND_OK;
-    for (uint32_t way = 0; way < 4; way += 1)
+    for (uint32_t way = 0; way < 2; way += 1)
     {
         UnwindOutput output = {
-            .bytes = bytes[0],
+            .bytes = bytes,
             .capacity = 96,
-            .locations = locations[0],
+            .locations = locations,
             .location_capacity = 1,
-            .shared = way >= 2,
+            .shared = way != 0,
         };
-        const bool written = unwind_write(&program, 1, &output, way % 2 == 0) == UNWIND_OK && output.size == 96;
+        const bool written = unwind_write(&program, 1, &output) == UNWIND_OK && output.size == 96;
         valid &= written;
         if (written)
         {
@@ -677,21 +665,18 @@ static bool unwind_test_diagnostics(void)
         valid &= unwind_check(&bad, 1) == (change >= 6 ? UNWIND_ERROR_LIMIT : UNWIND_ERROR_INVALID);
         if (change >= 6)
         {
-            for (uint32_t way = 0; way < 2; way += 1)
-            {
-                uint8_t byte = 0x5a;
-                uint32_t location = 0x12345678;
-                UnwindOutput output = {
-                    .bytes = &byte,
-                    .capacity = 1,
-                    .size = 456,
-                    .locations = &location,
-                    .location_capacity = 1,
-                };
-                const UnwindOutput before = output;
-                valid &= unwind_write(&bad, 1, &output, way == 0) == UNWIND_ERROR_LIMIT && memcmp(&output, &before, sizeof(output)) == 0 &&
-                         byte == 0x5a && location == 0x12345678;
-            }
+            uint8_t byte = 0x5a;
+            uint32_t location = 0x12345678;
+            UnwindOutput output = {
+                .bytes = &byte,
+                .capacity = 1,
+                .size = 456,
+                .locations = &location,
+                .location_capacity = 1,
+            };
+            const UnwindOutput before = output;
+            valid &= unwind_write(&bad, 1, &output) == UNWIND_ERROR_LIMIT && memcmp(&output, &before, sizeof(output)) == 0 && byte == 0x5a &&
+                     location == 0x12345678;
         }
     }
     UnwindFunction inactive = unwind_test_description(0, 0);
@@ -794,18 +779,18 @@ static bool unwind_test_guards(void)
                                i % 5 == 4 ? unwind_test_tail_description(i & 61, i % 2 != 0 ? 64 : 0, i % 3 == 2, 1, tail_events[i]) :
                                i % 3 == 2 ? unwind_test_pointer_description(i & 61) : unwind_test_description(i & 63, i % 2 != 0 ? INT32_MAX : 0);
             }
-            for (uint32_t way = 0; valid && way < 4; way += 1)
+            for (uint32_t way = 0; valid && way < 2; way += 1)
             {
                 UnwindOutput output = {
-                    .shared = way >= 2,
+                    .shared = way != 0,
                 };
-                const UnwindError measured = unwind_write(functions, count, &output, way % 2 == 0);
+                const UnwindError measured = unwind_write(functions, count, &output);
                 valid &= measured == (count == 0 ? UNWIND_OK : UNWIND_ERROR_CAPACITY) && output.size <= region;
                 output.bytes = mapping + 3 * region - output.size;
                 output.capacity = output.size;
                 output.locations = (uint32_t*)(mapping + 5 * region - count * sizeof(uint32_t));
                 output.location_capacity = count;
-                valid &= unwind_write(functions, count, &output, way % 2 == 0) == UNWIND_OK && unwind_test_decode(functions, count, &output);
+                valid &= unwind_write(functions, count, &output) == UNWIND_OK && unwind_test_decode(functions, count, &output);
             }
         }
         munmap(mapping, 6 * region);

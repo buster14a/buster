@@ -151,14 +151,12 @@ static void check_test_lazy_fixture(CheckTest* test, const CheckLazyFixture* fix
         snprintf(description, sizeof(description), "%s: %s grammar replay oracle", fixture->name, path == 0 ? "scalar" : "vector");
         check_test_expect(test, replayed && scratch.length == 0, description);
         check_test_lazy_path(test, replays + path, parsers[path].tokens.count, CHECK_LAZY_TEST_REPLAY, "replay oracle reports every grammar token");
-        uint32_t eager_selected[2] = { 0 };
-        const bool scalar_eager = check_lazy_eager(parsers + path, &pp, true, eager_selected);
-        const bool vector_eager = check_lazy_eager(parsers + path, &pp, false, eager_selected + 1);
+        uint32_t eager_selected = 0;
+        const bool eager = check_lazy_eager(parsers + path, &pp, &eager_selected);
         const bool opaque = replayed && replays[path].body_count != 0 && (replays[path].bodies[0].flags & BUSTER_CHECK_LAZY_OPAQUE) != 0;
         snprintf(description, sizeof(description), "%s: eager preflight agrees with the old opaque policy", fixture->name);
-        check_test_expect(test, replayed && scalar_eager == vector_eager && eager_selected[0] == eager_selected[1] &&
-                               (replays[path].body_count == 0 || scalar_eager == opaque) &&
-                               (!scalar_eager || (replays[path].deferred_count == 0 && eager_selected[0] == replays[path].body_count)), description);
+        check_test_expect(test, replayed && (replays[path].body_count == 0 || eager == opaque) &&
+                               (!eager || (replays[path].deferred_count == 0 && eager_selected == replays[path].body_count)), description);
     }
     for (uint32_t path = 0; ready && path < BUSTER_ARRAY_LENGTH(plans); path += 1)
     {
@@ -438,14 +436,15 @@ static void check_test_lazy_masks(CheckTest* test)
                 parser.tokens.kinds = kinds;
                 parser.tokens.names = names;
                 parser.tree.roles = roles;
-                const uint64_t scalar = check_lazy_tree_mask(&parser, targets, limit, first, count, true);
-                const uint64_t vector = check_lazy_tree_mask(&parser, targets, limit, first, count, false);
+                // (The token-at-a-time mask is the fallback for a name count past the gathers' signed indices.)
+                const uint64_t scalar = check_lazy_tree_mask_scalar(&parser, targets, limit, first, count);
+                const uint64_t vector = check_lazy_tree_mask(&parser, targets, limit, first, count);
                 differences += scalar != expected || vector != expected;
                 cases += 1;
             }
         }
     }
-    check_test_expect(test, differences == 0 && cases == 1560, "lazy scalar/vector masks match independent keys and roles at every guarded tail");
+    check_test_expect(test, differences == 0 && cases == 1560, "lazy masks and their fallback match independent keys and roles at every guarded tail");
     for (uint32_t column = 0; column < COLUMNS; column += 1)
     {
         if (mappings[column] != MAP_FAILED)

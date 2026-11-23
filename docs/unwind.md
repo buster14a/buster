@@ -233,7 +233,7 @@ programs use the same encoding rule. A row at the current PC adds no advance;
 remembering a state still takes none. Only the representation changes: each
 rule takes effect at the same instruction boundary as before.
 
-`unwind_write(functions, count, output, exact)` fills caller-owned byte and
+`unwind_write(functions, count, output)` fills caller-owned byte and
 location slices. A capacity result reports the required byte size while
 preserving both slices. Other errors preserve the output descriptor too. Inputs
 and the two output slices must be disjoint. Empty input needs no storage.
@@ -414,15 +414,16 @@ explicit fixture rows do not establish automatic source-row production.
 loop and pointer work. It compares the same vector Tier0 producer, branch sizing
 and encoding with no CFI, scalar analysis/emission, vector analysis/emission,
 and the C driver's: the published frame and the vector writer's batch with one
-CIE (`published`), whose descriptors must be the analyzer's and whose bytes the
-exact writer's.
+CIE (`published`), whose descriptors must be the analyzer's.
 Per-function allocation and cleanup are inside timing. Program generation,
 signature assignment, initialization and byte-identity preflight are outside.
 It reports 21-pass median and range, nanoseconds and user cycles per typed entry,
 whole-unit time, code/CFI bytes and temporary arena use. Options are
 `--functions N`, `--only baseline|vector|published` and `--after-scalar MS`.
-The latter runs the exact CFI writer alone before every timed path, with the
-same duration for each; it does not condition with the vector backend chain.
+The latter runs the CFI writer alone (`unwind_write` of the analyzer's
+descriptions) before every timed path, with the same duration for each; it does
+not condition with the vector backend chain. (Until #2924 it ran the exact
+writer, which `unwind_write`'s `exact` selected for every function.)
 
 All builds, tests and measurements use the approved 9700X through the shared
 lock; measurements use CPU 2. File I/O, source-map production, parsing and
