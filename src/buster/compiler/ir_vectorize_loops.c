@@ -2252,9 +2252,11 @@ static void ir_vectorize_vector_row(IrVectorizeWork* work, IrVectorizeBuild* bui
         {
             const int64_t offset = s + 1 < shape.loads ? (int64_t)s * shape.width : (int64_t)shape.needed - (int64_t)shape.width;
             const uint32_t pointer = s == 0 ? base : ir_vectorize_offset(build, base, offset);
+            // A load past lane 0's address is as aligned as an element alone: its offset is a multiple of the element's.
+            const uint32_t alignment = s == 0 || f->alignment_log2[i] < size ? f->alignment_log2[i] : size;
             // A masked load's inactive lanes, which no permute reads, take the index vector's.
-            const uint32_t loaded = shape.masked ? ir_vectorize_row(build, IR_MASKED_LOAD, wide, ir_vectorize_lane(size, false), f->alignment_log2[i], pointer, work->zeros[i], work->ones[i], origin) :
-                                                   ir_vectorize_row(build, IR_LOAD, wide, 0, f->alignment_log2[i], pointer, BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
+            const uint32_t loaded = shape.masked ? ir_vectorize_row(build, IR_MASKED_LOAD, wide, ir_vectorize_lane(size, false), alignment, pointer, work->zeros[i], work->ones[i], origin) :
+                                                   ir_vectorize_row(build, IR_LOAD, wide, 0, alignment, pointer, BUSTER_IR_NONE, BUSTER_IR_NONE, origin);
             const bool permute = s != 0 || shape.loads == 1;
             const uint32_t extra = build->extras;
             if (permute && !build->counting)
