@@ -13064,10 +13064,8 @@ static void check_common_rejected_initializer_commas(const Parser* parser, Prepr
             }
         }
     }
-    else if (graph->count != 0)
+    else
     {
-        // (An empty graph, a unit whose only rejected initializer holds no expression, has no commas: #1842's skipped
-        // designations.)
         check_common_exhausted(pp);
     }
     arena_pop_to(scratch, mark);

@@ -780,7 +780,8 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         result->status = CHECK_INIT_RESOURCE;
     }
     result->failures = kept;
-    if (valid && recovered_elements && warnings != NULL && warnings->events != NULL)
+    // (An empty graph, whose only rejected initializers skipped their values (#1842), has no roots to keep.)
+    if (valid && recovered_elements && warnings != NULL && warnings->events != NULL && stream->count != 0)
     {
         result->rejected_roots = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, stream->count);
         if (result->rejected_roots != NULL)
