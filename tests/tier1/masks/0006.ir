@@ -1,0 +1,27 @@
+function (ptr, i64) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = param.i64 1
+  %2 = load.m16 %0 align=2
+  %3 = address.ptr %0 offset=8
+  %4 = load.m64 %3 align=8
+  %5 = address.ptr %0 offset=16
+  %6 = load.m8 %5 align=1
+  %7 = call.i64 @9(%1) fixed=(i64) variadic=0
+  %8 = not.m16 %2
+  %9 = call.i64 @9(%7) fixed=(i64) variadic=0
+  %10 = not.m64 %4
+  %11 = address.ptr %0 offset=128
+  %12 = store.void %11, %2 align=2
+  %13 = address.ptr %0 offset=130
+  %14 = store.void %13, %8 align=2
+  %15 = address.ptr %0 offset=136
+  %16 = store.void %15, %4 align=8
+  %17 = address.ptr %0 offset=144
+  %18 = store.void %17, %10 align=8
+  %19 = address.ptr %0 offset=152
+  %20 = store.void %19, %6 align=1
+  %21 = address.ptr %0 offset=160
+  %22 = store.void %21, %9 align=8
+  %23 = ret.void
+}
