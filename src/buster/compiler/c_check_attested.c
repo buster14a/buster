@@ -760,7 +760,8 @@ static uint32_t check_attested_builtin_target(CheckAttested* census, const Inter
 // initializer, an attribute's operands, typeof's, a static assertion's), a lookup.
 #define BUSTER_ATTESTED_LEVEL_DECLARES 0x01u
 #define BUSTER_ATTESTED_LEVEL_LOOKS_UP 0x02u
-#define BUSTER_ATTESTED_LEVEL_ENUM 0x04u
+// (An enum body's base has both bits.)
+#define BUSTER_ATTESTED_LEVEL_ENUM 0x03u
 #define BUSTER_ATTESTED_LEVEL_SYMBOLS 0x08u
 
 // A level's flags in the lists: an `=` or a bit-field's `:` read since its last comma (what follows is an expression),
@@ -920,10 +921,10 @@ static inline uint8_t check_attested_level_flags(uint64_t expression, uint64_t e
     return (uint8_t)((expression & 1) != 0 ? BUSTER_ATTESTED_LEVEL_EXPRESSION : 0) | (uint8_t)((enumerator & 1) != 0 ? BUSTER_ATTESTED_LEVEL_ENUMERATOR : 0);
 }
 
-static inline uint8_t check_attested_level_bits(uint64_t declares, uint64_t looks, uint64_t enumerated, uint64_t symbols)
+static inline uint8_t check_attested_level_bits(uint64_t base_low, uint64_t base_high, uint64_t symbols)
 {
-    return (uint8_t)((declares & 1) != 0 ? BUSTER_ATTESTED_LEVEL_DECLARES : 0) | (uint8_t)((looks & 1) != 0 ? BUSTER_ATTESTED_LEVEL_LOOKS_UP : 0) |
-           (uint8_t)((enumerated & 1) != 0 ? BUSTER_ATTESTED_LEVEL_ENUM : 0) | (uint8_t)((symbols & 1) != 0 ? BUSTER_ATTESTED_LEVEL_SYMBOLS : 0);
+    return (uint8_t)((base_low & 1) != 0 ? BUSTER_ATTESTED_LEVEL_DECLARES : 0) | (uint8_t)((base_high & 1) != 0 ? BUSTER_ATTESTED_LEVEL_LOOKS_UP : 0) |
+           (uint8_t)((symbols & 1) != 0 ? BUSTER_ATTESTED_LEVEL_SYMBOLS : 0);
 }
 
 // A byte's lanes equal to `value`, among `lanes`.
@@ -1025,9 +1026,8 @@ static void check_attested_list_run(CheckAttestedListing* listing, uint32_t d, u
         }
         // Each level, from the lowest: its tokens' state, its names' classes and its openers' bits for the level each
         // opens (the bits of the level each token is in come from the last token below it, its opener).
-        uint64_t open_declares = 0;
-        uint64_t open_looks = 0;
-        uint64_t open_enums = 0;
+        uint64_t open_low = 0;
+        uint64_t open_high = 0;
         uint64_t open_symbols = 0;
         uint64_t declares = 0;
         uint64_t looks = 0;
@@ -1045,25 +1045,25 @@ static void check_attested_list_run(CheckAttestedListing* listing, uint32_t d, u
             const uint64_t held_enumerator = (held & BUSTER_ATTESTED_LEVEL_ENUMERATOR) != 0;
             const uint64_t expression = check_attested_latch(expressions & at, ((commas | semis) & at) | below | resets, held_expression);
             const uint64_t enumerator = check_attested_latch((commas & at) | below, ((identifiers | semis) & at) | resets, held_enumerator);
-            const uint64_t base_declares = check_attested_latch(below & open_declares, below & ~open_declares, (bits & BUSTER_ATTESTED_LEVEL_DECLARES) != 0);
-            const uint64_t base_looks = check_attested_latch(below & open_looks, below & ~open_looks, (bits & BUSTER_ATTESTED_LEVEL_LOOKS_UP) != 0);
-            const uint64_t base_enum = check_attested_latch(below & open_enums, below & ~open_enums, (bits & BUSTER_ATTESTED_LEVEL_ENUM) != 0);
+            // The base's two bits (BUSTER_ATTESTED_LEVEL_DECLARES, _LOOKS_UP; both an enum body's).
+            const uint64_t base_low = check_attested_latch(below & open_low, below & ~open_low, (bits & BUSTER_ATTESTED_LEVEL_DECLARES) != 0);
+            const uint64_t base_high = check_attested_latch(below & open_high, below & ~open_high, (bits & BUSTER_ATTESTED_LEVEL_LOOKS_UP) != 0);
+            const uint64_t base_enum = base_low & base_high;
             const uint64_t base_symbols = check_attested_latch(below & open_symbols, below & ~open_symbols, (bits & BUSTER_ATTESTED_LEVEL_SYMBOLS) != 0);
             // The state before each token: an `=` read, an enumerator's name next.
             const uint64_t x = expression << 1 | held_expression;
             const uint64_t p = enumerator << 1 | held_enumerator;
-            const uint64_t class_declares = ~x & ((base_enum & p) | (~base_enum & base_declares));
-            const uint64_t class_looks = x | (base_enum & ~p) | (~base_enum & base_looks);
+            const uint64_t class_declares = ~x & ((base_enum & p) | (base_low & ~base_high));
+            const uint64_t class_looks = x | (base_enum & ~p) | (base_high & ~base_low);
             declares |= at & class_declares;
             looks |= at & class_looks;
             inside |= at & base_symbols;
             const uint64_t openers = opens & at;
-            open_declares |= openers & groups & class_declares;
-            open_looks |= openers & ((groups & class_looks) | ~(groups | plain | enums));
-            open_enums |= openers & enums;
+            open_low |= openers & ((groups & class_declares) | enums);
+            open_high |= openers & ((groups & class_looks) | enums | ~(groups | plain));
             open_symbols |= openers & (base_symbols | symbols);
             level_flags[at_depth] = check_attested_level_flags(expression >> last, enumerator >> last);
-            level_bases[at_depth] = check_attested_level_bits(base_declares >> last, base_looks >> last, base_enum >> last, base_symbols >> last);
+            level_bases[at_depth] = check_attested_level_bits(base_low >> last, base_high >> last, base_symbols >> last);
         }
         if ((opens >> last & 1) != 0)
         {
@@ -1071,7 +1071,7 @@ static void check_attested_list_run(CheckAttestedListing* listing, uint32_t d, u
             // the next block's latches start from (after the loop, which reads each level's state before it writes it).
             const uint32_t opened = depths[t + last] + 1;
             level_flags[opened] = BUSTER_ATTESTED_LEVEL_ENUMERATOR;
-            level_bases[opened] = check_attested_level_bits(open_declares >> last, open_looks >> last, open_enums >> last, open_symbols >> last);
+            level_bases[opened] = check_attested_level_bits(open_low >> last, open_high >> last, open_symbols >> last);
         }
         // The names' entries (a tag's declares and looks up, a specifier's looks up, a member's neither) and the
         // declared ones' keys.
