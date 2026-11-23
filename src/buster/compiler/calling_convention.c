@@ -2184,7 +2184,12 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
 // else gives the union's bytes their own byval slot; or of an
 // aggregate member in memory, which clang passes as the member (getIndirectResult of it: byval at its alignment, the
 // union's bytes, or as an integer of its size where it has 8 bytes or less, aligned to 8 or less, and clang no general
-// register left). Another member keeps its refusal (check_lower_transparent_passed).
+// register left). A member in memory may be LARGER (#3400: an _Atomic of a type of no size, or a record holding one,
+// which is in memory for it): getIndirectResult reads the member's C size and alignment, never its copy's, and the slot
+// is the union's, which is never LARGER (clang lays a union out in its own bytes), so a GROWN member is an integer of its
+// size where clang has no general register left, as it is alone, and its copy's bytes are none of the union's. Every
+// union of a GROWN member differs: its stack bytes are 8 where its member's are 16 or more, unless its own alignment of
+// 16 or more sets them, which differs from the member's. Another member keeps its refusal (check_lower_transparent_passed).
 static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     uint32_t result = 0;
@@ -2192,11 +2197,13 @@ static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* tab
     {
         const uint32_t tag = table->types.index[index];
         const uint32_t member = table->tags.member_count[tag] != 0 ? table->members.type[table->tags.member_begin[tag]] >> BUSTER_TYPE_INDEX_SHIFT : 0;
-        const uint32_t refused = BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE |
-                                 BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_END_MEMORY;
+        const uint32_t refused = BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY |
+                                 BUSTER_ABI_PASS_END_MEMORY;
+        const uint32_t larger = BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_GROWN;
         const uint32_t pass = member != 0 && member < abi->capacity ? abi->pass[member] : 0;
         const bool in_memory = (pass & BUSTER_ABI_PASS_MEMORY) != 0;
-        const bool simple = (pass & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (pass & refused) == 0 && (!in_memory || (pass & BUSTER_ABI_PASS_AGGREGATE) != 0);
+        const bool placed = in_memory ? (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 : (pass & larger) == 0;
+        const bool simple = (pass & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (pass & refused) == 0 && placed;
         const bool differs = simple && (abi->stack_bytes[index] != abi->stack_bytes[member] || abi->alignment_log2[index] != abi->alignment_log2[member]);
         result = differs ? member : 0;
     }
@@ -3690,9 +3697,9 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, uint
         arguments.late_vector = counted & (__mmask16)~in_memory & (__mmask16)~aggregate & no_integers & (__mmask16)~wide_variadic;
         arguments.late_general = counted & (__mmask16)~in_memory & (__mmask16)~(aggregate | pair) & no_vectors & _mm512_cmpeq_epi32_mask(need_integers, one);
         // With no general register free, clang passes an aggregate of 8 bytes or less, aligned to 8 or less, as an
-        // integer of its size, MEMORY or not (a GROWN one's copy takes more); one of no size is an i0, which takes none
-        // (EMPTY).
-        arguments.integer = (BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_GROWN) & (__mmask16)~transparent) | word;
+        // integer of its size, MEMORY or not (a GROWN one's copy takes more, a transparent union's GROWN member's too,
+        // #3400); one of no size is an i0, which takes none (EMPTY).
+        arguments.integer = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_GROWN) | word;
         arguments.integer_register = (__mmask16)~BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_EMPTY);
         arguments.wholes = vector | pair;
         arguments.whole_vector = vector & (__mmask16)~wide_variadic;

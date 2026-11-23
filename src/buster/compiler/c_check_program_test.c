@@ -1051,6 +1051,18 @@ static bool check_test_program_daz(void)
     "typedef union __attribute__((transparent_union,aligned(32))){_Complex long c;_Complex long d;}ExternalOC;"                                                    \
     "typedef union __attribute__((transparent_union,packed)){__int128 w;__int128 v;}ExternalOX;"
 
+// Transparent unions of a LARGER first member in memory (#3400), which clang passes as the member: a packed struct ending
+// in an _Atomic of a struct of no size, GROWN (7 bytes in C, its copy 14 to LLVM), in unions aligned to 16 and 32, of no
+// attribute and packed; and a 9-byte one, LARGER but not GROWN, in a union aligned to 16.
+#define BUSTER_CHECK_TEST_TRANSPARENT_GROWN_UNIONS                                                                                                                    \
+    "struct external_z{long x[0];};struct __attribute__((packed)) external_gr{int i;short s;_Atomic(struct external_z) z;};"                                       \
+    "struct __attribute__((packed)) external_ge{long l;_Atomic(struct external_z) z;};"                                                                              \
+    "typedef union __attribute__((transparent_union,aligned(16))){struct external_gr g;}ExternalGA;"                                                                \
+    "typedef union __attribute__((transparent_union,aligned(32))){struct external_gr g;}ExternalGB;"                                                                \
+    "typedef union __attribute__((transparent_union)){struct external_gr g;}ExternalGP;"                                                                            \
+    "typedef union __attribute__((transparent_union,packed)){struct external_gr g;}ExternalGK;"                                                                     \
+    "typedef union __attribute__((transparent_union,aligned(16))){struct external_ge e;}ExternalGE;"
+
 // The program every checked object and its oracle are linked with: it runs both on the same inputs.
 static const char check_test_program_harness[] =
     "#include <stdio.h>\n"
@@ -1269,6 +1281,31 @@ static const char check_test_program_harness[] =
     "h=external_fold(h,(unsigned long)(__real__ c.c+__imag__ c.c*9));}va_end(a);return h;}\n"
     "unsigned long external_own_pairs_variadic_apply(unsigned long(*f)(int,...),int n){ExternalOW w={.w=(__int128)n*5};"
     "ExternalOV v={.v={{n,-n,7,n*2}}};ExternalOC c={.c=n};return f(4,w,v,c,w,v,c,w,v,c,w,v,c);}\n"
+    // The unions of a LARGER member in memory (#3400): a byval slot of the union's bytes at the member's 8 where clang has
+    // a general register, else the member's i56 (after four longs, an _Atomic long, which clang doesn't count and LLVM
+    // gives r8, and an __int128, which clang counts two for and LLVM puts on the stack): in r9, then in 8-byte slots;
+    // the program's through pointers, and va_arg's, at offsets of the union's alignment, where clang's reads them.
+    BUSTER_CHECK_TEST_TRANSPARENT_GROWN_UNIONS
+    "static unsigned long external_grown_fold(unsigned long h,int k,ExternalGA a,ExternalGB b,ExternalGP p,ExternalGK q,ExternalGE e){"
+    "h=external_fold(external_fold(h,(unsigned long)k),(unsigned long)(a.g.i+a.g.s*3));h=external_fold(h,(unsigned long)(b.g.i*5+b.g.s));"
+    "h=external_fold(h,(unsigned long)(p.g.i+p.g.s*7));h=external_fold(h,(unsigned long)(q.g.i*9+q.g.s));return external_fold(h,(unsigned long)e.e.l);}\n"
+    "unsigned long external_grown(int k,ExternalGA a,ExternalGB b,ExternalGP p,ExternalGK q,ExternalGE e){return external_grown_fold(0,k,a,b,p,q,e);}\n"
+    "unsigned long external_grown_tight(long l0,long l1,long l2,long l3,_Atomic long u,__int128 w,ExternalGB b,ExternalGA a,long z){"
+    "unsigned long h=external_fold((unsigned long)(l0+l1*3+l2*5+l3*7+u),(unsigned long)w^(unsigned long)(w>>64));"
+    "h=external_fold(h,(unsigned long)(b.g.i*5+b.g.s));h=external_fold(h,(unsigned long)(a.g.i+a.g.s*3));return external_fold(h,(unsigned long)z);}\n"
+    "unsigned long external_grown_late(long l0,long l1,long l2,long l3,long l4,long l5,long l6,int k,ExternalGA a,ExternalGB b,ExternalGP p,ExternalGK q,"
+    "ExternalGE e){return external_grown_fold((unsigned long)(l0+l1+l2+l3+l4+l5+l6*3),k,a,b,p,q,e);}\n"
+    "unsigned long external_grown_apply(unsigned long(*f)(int,ExternalGA,ExternalGB,ExternalGP,ExternalGK,ExternalGE),"
+    "unsigned long(*t)(long,long,long,long,_Atomic long,__int128,ExternalGB,ExternalGA,long),"
+    "unsigned long(*g)(long,long,long,long,long,long,long,int,ExternalGA,ExternalGB,ExternalGP,ExternalGK,ExternalGE),int n){"
+    "struct external_gr r={n*3,(short)(n-2)};struct external_ge e={(long)n*1000003};ExternalGA ga={.g={n,5}};"
+    "return f(0,r,r,r,r,e)^f(1,ga,r,r,r,e)^t(1,2,3,n,(long)n*9,(__int128)n<<64,r,ga,n*7)^g(1,2,3,4,5,6,n,2,ga,r,r,r,e);}\n"
+    "unsigned long external_grown_variadic(int count,...){va_list a;va_start(a,count);unsigned long h=(unsigned long)count;"
+    "for(int i=0;i<count;i++){ExternalGP p=va_arg(a,ExternalGP);ExternalGK q=va_arg(a,ExternalGK);ExternalGA r=va_arg(a,ExternalGA);"
+    "h=external_fold(h,(unsigned long)(p.g.i+p.g.s*7));h=external_fold(h,(unsigned long)(q.g.i*9+q.g.s));h=external_fold(h,(unsigned long)(r.g.i+r.g.s*3));}"
+    "va_end(a);return h;}\n"
+    "unsigned long external_grown_variadic_apply(unsigned long(*f)(int,...),int n){ExternalGP p={.g={n,-3}};ExternalGK q={.g={-n,4}};ExternalGA r={.g={n*7,1}};"
+    "return f(3,p,q,r,p,q,r,p,q,r);}\n"
     // After 6 longs and 8 doubles, every union on the stack.
     "unsigned long external_transparent_late(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,"
     "double d6,double d7,ExternalTF f,ExternalTS s,ExternalTP p,ExternalTD d,ExternalTW w,ExternalTA a,ExternalTB b){"

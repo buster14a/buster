@@ -2585,6 +2585,12 @@ static void abi_test_ordering(AbiTestTally* tally)
 //     without LOW, the long at 8; and after the __int128 above, a union aligned to 16 of packed
 //     {long, _Atomic {long[0]}} (9 bytes, in memory for its _Atomic member) takes the union's 16 bytes at 16, aligned
 //     to the member's 8 (getIndirectResult of the member), and the long r9.
+// And five for a transparent union of a LARGER member in memory (#3400), whose table entry is the member's
+// (AbiTable.transparent): packed {_Atomic {long[0]}} is GROWN (1 byte in C, its copy 9 to LLVM). After the __int128
+// above, a union of it aligned to 16 is the member's i8 in r9, the long on the stack at 16, and so is the union of it
+// without attributes; after five longs and struct {long, long, long} at 0 the union aligned to 16 takes its own 16
+// bytes at 24, aligned to the member's 8, the long r9, and so does the union aligned to 16 of the 9-byte member above;
+// and after seven longs, the union aligned to 16 is the i8 in an 8-byte slot at 8 (LOW), the long at 16.
 // By abi_assign and by the kernel over every call (abi_test_assign_starved).
 static void abi_test_kernel_rules(AbiTestTally* tally)
 {
@@ -2644,12 +2650,33 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
         m[0] = abi_test_member(&builder, atomic_ending);
         const TypeId memory_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 5);
         const bool memory_marked = memory_union != 0 && type_mark_transparent_union(table, memory_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
-        const bool made = started && marked && wide_marked && packed_marked && record_marked && own_marked && memory_marked && packed != 0 && three != 0 && atomic_int != 0 &&
-                          vector != 0 && atomic_vector != 0 && atomic_long != 0 && atomic_double != 0 && doubles != 0 && flexible != 0;
+        m[0] = abi_test_member(&builder, type_atomic(table, no_size));
+        const TypeId grown = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, m, 1, true, 0);
+        m[0] = abi_test_member(&builder, grown);
+        const TypeId grown_union = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 5);
+        const bool grown_marked = grown_union != 0 && type_mark_transparent_union(table, grown_union).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        m[0] = abi_test_member(&builder, grown);
+        const TypeId grown_plain = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, m, 1, false, 0);
+        const bool plain_marked = grown_plain != 0 && type_mark_transparent_union(table, grown_plain).status == TYPE_TRANSPARENT_UNION_APPLIED;
+        const bool made = started && marked && wide_marked && packed_marked && record_marked && own_marked && memory_marked && grown_marked && plain_marked && packed != 0 &&
+                          three != 0 && atomic_int != 0 && vector != 0 && atomic_vector != 0 && atomic_long != 0 && atomic_double != 0 && doubles != 0 && flexible != 0;
         abi_test_expect(tally, made, "fixtures", "the kernel's fixtures can't be made");
         if (made)
         {
             abi_classify_all(&tables.abi, table);
+            // The unions of a LARGER member in memory pass as it (#3400): their entries name it, GROWN or not.
+            const uint32_t grown_index = grown >> BUSTER_TYPE_INDEX_SHIFT;
+            const uint32_t grown_pass = tables.abi.pass[grown_index];
+            const uint32_t grown_entry = tables.abi.transparent[grown_union >> BUSTER_TYPE_INDEX_SHIFT];
+            const uint32_t plain_entry = tables.abi.transparent[grown_plain >> BUSTER_TYPE_INDEX_SHIFT];
+            const uint32_t memory_entry = tables.abi.transparent[memory_union >> BUSTER_TYPE_INDEX_SHIFT];
+            char entries_detail[192];
+            snprintf(entries_detail, sizeof(entries_detail), "the kernel's rules: the GROWN member's pass %08x, the unions' entries %u, %u and %u, not %u, %u and %u", grown_pass,
+                     grown_entry, plain_entry, memory_entry, grown_index, grown_index, atomic_ending >> BUSTER_TYPE_INDEX_SHIFT);
+            abi_test_expect(tally,
+                            (grown_pass & (BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_MEMORY)) == (BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_MEMORY) && grown_entry == grown_index &&
+                                plain_entry == grown_index && memory_entry == atomic_ending >> BUSTER_TYPE_INDEX_SHIFT,
+                            "fixtures", entries_detail);
             const TypeId arguments[] = {
                 atomic_int, three, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, packed, BUSTER_TYPE_LONG,
                 BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, transparent, BUSTER_TYPE_LONG,
@@ -2663,12 +2690,18 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
                 BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, own_union, BUSTER_TYPE_LONG,
                 BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, packed_union, BUSTER_TYPE_LONG,
                 BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_NULLPTR, BUSTER_TYPE_INT128, memory_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_NULLPTR, BUSTER_TYPE_INT128, grown_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, three, grown_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, grown_union, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_NULLPTR, BUSTER_TYPE_INT128, grown_plain, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, three, memory_union, BUSTER_TYPE_LONG,
             };
             const TypeId results[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID,
-                                       BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID };
-            const uint32_t counts[] = { 8, 8, 10, 2, 7, 9, 9, 8, 8, 7, 8, 8 };
-            const uint32_t named[] = { 8, 8, 10, 1, 7, 9, 1, 8, 8, 7, 8, 8 };
-            const uint8_t variadic[] = { 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0 };
+                                       BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID,
+                                       BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID, BUSTER_TYPE_VOID };
+            const uint32_t counts[] = { 8, 8, 10, 2, 7, 9, 9, 8, 8, 7, 8, 8, 8, 8, 9, 8, 8 };
+            const uint32_t named[] = { 8, 8, 10, 1, 7, 9, 1, 8, 8, 7, 8, 8, 8, 8, 9, 8, 8 };
+            const uint8_t variadic[] = { 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
             const AbiSignatures signatures = {
                 .results = results,
                 .counts = counts,
@@ -2709,11 +2742,30 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
                 { 89, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
                 { 90, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
                 { 91, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 97, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 98, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 99, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 105, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 106, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 24 },
+                { 107, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 114, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 0 },
+                { 115, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 8 },
+                { 116, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 123, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
+                { 124, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 16 },
+                { 131, BUSTER_ABI_LOCATION_STACK, BUSTER_ABI_REGISTER_NONE, 24 },
+                { 132, BUSTER_ABI_LOCATION_REGISTERS, BUSTER_ABI_R9, 0 },
             };
-            // And the flags of those whose flags a rule decides: neither FIRST in a union's own slot nor LOW for 8 bytes.
+            // And the flags of those whose flags a rule decides: neither FIRST in a union's own slot nor LOW for 8 bytes;
+            // a GROWN member's i8 in r9 none, and LOW in its slot of the union's 16 bytes.
             const uint32_t flagged[][2] = {
                 { 74, 0 },
                 { 82, 0 },
+                { 98, 0 },
+                { 106, 0 },
+                { 115, BUSTER_ABI_FLAG_LOW },
+                { 123, 0 },
+                { 131, 0 },
             };
             for (uint32_t route = 0; route < 2; route += 1)
             {
@@ -2759,6 +2811,11 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
                     { 9, 6, 0, 32, 5 },
                     { 10, 6, 0, 16, 4 },
                     { 11, 6, 0, 32, 4 },
+                    { 12, 6, 0, 24, 4 },
+                    { 13, 6, 0, 40, 4 },
+                    { 14, 6, 0, 24, 4 },
+                    { 15, 6, 0, 24, 4 },
+                    { 16, 6, 0, 40, 4 },
                 };
                 for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(totals); k += 1)
                 {

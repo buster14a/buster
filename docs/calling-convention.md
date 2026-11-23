@@ -86,6 +86,14 @@ one), and where clang has none for them the union's byval slot, or the
 member's alignment for a member in memory; past 16 bytes every location of
 the member's own (registers, eightbytes' slots, or a pair's or vector's value
 slot) carries the union's first 16 bytes (`BUSTER_ABI_FLAG_FIRST`, #1844).
+A member in memory may be `LARGER` (#3400): `getIndirectResult` reads its C
+size and alignment, not its copy's, and the byval slot is the union's bytes
+(a union is never `LARGER`: clang lays it out in its own bytes), so a `GROWN`
+member is the integer of its C size once clang has no general register, in
+the register LLVM has left or an 8-byte slot, as it is alone. clang 23.1.4
+passes `union __attribute__((transparent_union, aligned(16))) { struct
+__attribute__((packed)) { _Atomic(struct { long x[0]; }) z; } g; }` after four
+longs, a `nullptr` and an `__int128` as `i8` in r9.
 
 `vector_bytes`, which `abi_initialize` takes, is the widest vector register
 the generated code may use: 16, 32 or 64 (no AVX, AVX, AVX-512F), clang's
