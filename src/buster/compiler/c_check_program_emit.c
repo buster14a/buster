@@ -562,8 +562,8 @@ struct CheckEmitGrowth
 // default) and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
 // the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither;
 // and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol. LICM's
-// pressure policy (--tier1-passes=+hoist, #2719) takes step 9 too, reserved at the lane's first function that has a loop,
-// and step 13 is the value numbering's on promoted SSA under the same policy (--tier1-passes=+numbering).
+// pressure policy (HOIST, #2719) takes step 9 too, reserved at the lane's first function its screen finds a loop without
+// a call in, and step 13 is the value numbering's on promoted SSA under the same policy (--tier1-passes=+numbering).
 #define BUSTER_CHECK_TIER1_STEPS 14
 #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
@@ -579,7 +579,7 @@ struct CheckEmitGrowth
 // value numbering with memory's maps to its BUSTER_IR_OPTIMIZE_MEMORY. #866's solver and the inlining keep their own
 // options (--tier1-gvn, --tier1-no-inline), which the option's list sets too. VECTORS (#2781, on by default) is the
 // solver and LICM on vector and mask values alone, in the functions that have such values and where the option doesn't
-// run the pass on every value; HOIST (#2719, off by default) is LICM under its pressure policy in the other functions.
+// run the pass on every value; HOIST (#2719, on by default) is LICM under its pressure policy in the other functions.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
 #define BUSTER_CHECK_TIER1_PASS_CFG 4u
@@ -597,18 +597,20 @@ struct CheckEmitGrowth
 // #3298's switches whose arms only give constants, as loads of their jump tables' values (ir_switch_table.c), on by
 // default.
 #define BUSTER_CHECK_TIER1_PASS_TABLES 4096u
-// LICM under #2719's pressure policy (ir_optimize_licm.c's IrLicmOptions.pressure), off by default: in a function without
-// vector or mask values (VECTORS' policy takes those) that has a loop, where LICM doesn't run on every value. On the 9700X
-// it takes 6.2% of the loop kernels' cycles, and none of speedtest1's or Lua's beyond code placement's, for 3.4% of
-// sqlite3.c's --tier1 compile (docs/ir-loop-motion.md's "The pressure policy").
+// LICM under #2719's pressure policy (ir_optimize_licm.c's IrLicmOptions.pressure), on by default: in a function without
+// vector or mask values (VECTORS' policy takes those) where its screen (ir_licm_pressure_screen) finds a loop that may
+// hold no call, and where LICM doesn't run on every value. On the 9700X it takes 6.4% of the loop kernels' cycles and
+// changes speedtest1's and Lua's by no more than code placement's noise (Lua's by -0.23% over 8 link orders), for 1.9%
+// of sqlite3.c's --tier1 compile: the bar the owner set for its default on #2719 (docs/ir-loop-motion.md's "On by
+// default").
 #define BUSTER_CHECK_TIER1_PASS_HOIST 16384u
 // #866's solver under #2719's pressure policy (ir_optimize_gvn.c's IrGvnOptions.pressure), on promoted SSA after
 // if-conversion and before LICM, off by default: on the 9700X it takes none of speedtest1's or Lua's cycles beyond code
-// placement's, for 16.2% of sqlite3.c's --tier1 compile.
+// placement's, for 11.1% to 11.4% more of sqlite3.c's --tier1 compile than the default.
 #define BUSTER_CHECK_TIER1_PASS_NUMBERING 32768u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT                                                                                                                              \
     (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \
-     BUSTER_CHECK_TIER1_PASS_TABLES | BUSTER_CHECK_TIER1_PASS_VECTORIZE)
+     BUSTER_CHECK_TIER1_PASS_TABLES | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_HOIST)
 // Loop store motion (#3309, ir_store_motion.c): a loop's globals read from registers, before promotion; off by default
 // (docs/tier1-store-motion.md's MEASUREMENTS: of speedtest1's and Lua's code it changes one start-up loop, sqlite3.c's
 // memsys5Init, and it costs a --tier1 compile of sqlite3.c 0.27% more instructions).

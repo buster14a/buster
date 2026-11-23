@@ -690,8 +690,9 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     }
     // --tier1-passes=+numbering (#2719's measurement): the solver on the promoted function under the pressure policy
     // (IrGvnOptions.pressure), in steps[13], after if-conversion and before LICM, where it sees the values promotion made
-    // of the locals' loads and stores. A function where nothing merges goes on as it was, borrowed; one it refuses or finds
-    // past its limits too; any other error is the function's.
+    // of the locals' loads and stores. Promotion verified it, and the passes since take it as verified, as this one does
+    // (IrGvnOptions.validated). A function where nothing merges goes on as it was, borrowed; one it refuses or finds past
+    // its limits too; any other error is the function's.
     if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_NUMBERING) != 0)
     {
         if (!check_tier1_lane_reserve(lane, 6))
@@ -703,6 +704,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
             IrGvnOptions options = ir_gvn_options();
             options.scalar = scalar;
             options.pressure = true;
+            options.validated = true;
             IrGvnResult numbered_ssa = { 0 };
             const IrCheck check = ir_optimize_gvn(&wide.function, &lane->steps[13], scratch, options, &numbered_ssa);
             const IrError error = check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT ? IR_OK : check.error;
@@ -716,18 +718,20 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     }
     // Loop-invariant motion, in steps[9], before the optimizer, whose dead-code removal, CFG cleanup and final
     // verification then take its result: every value's with --tier1-passes=+licm (#139's measurement), or #2781's, the
-    // vector and mask values' and their operands', in a function that has such values, or with --tier1-passes=+hoist
-    // #2719's pressure policy in a function that has a loop and no such value (IrLicmOptions.pressure: what pays for the
-    // register it holds, in loops without calls). A
-    // function it refuses (IR_ERROR_UNSUPPORTED: the constructs ir_optimize_licm.c names) goes on as it was; any other
-    // error is the function's.
+    // vector and mask values' and their operands', in a function that has such values, or by default (HOIST) #2719's
+    // pressure policy in a function that has no such value, where its screen finds a loop that may hold no call
+    // (IrLicmOptions.pressure: what pays for the register it holds, in loops without calls). Promotion verified the
+    // function and the passes since take it as verified, as this one does (IrLicmOptions.validated); the optimizer after
+    // it verifies what reaches it. A function it refuses (IR_ERROR_UNSUPPORTED: the constructs ir_optimize_licm.c names)
+    // goes on as it was; any other error is the function's.
     const bool everywhere = (on & BUSTER_CHECK_TIER1_PASS_LICM) != 0;
-    const bool hoist = stage == CHECK_TIER1_COMPILED && !everywhere && !simd && (on & BUSTER_CHECK_TIER1_PASS_HOIST) != 0 && ir_function_cyclic(&wide.function);
+    const bool hoist = stage == CHECK_TIER1_COMPILED && !everywhere && !simd && (on & BUSTER_CHECK_TIER1_PASS_HOIST) != 0 && ir_licm_pressure_screen(&wide.function, scratch);
     if (stage == CHECK_TIER1_COMPILED && (everywhere || vectors || hoist))
     {
         IrLicmOptions options = ir_licm_options();
         options.vectors = !everywhere && vectors;
         options.pressure = hoist;
+        options.validated = true;
         IrLicmResult moved = { 0 };
         if (!everywhere && !check_tier1_lane_reserve(lane, 2))
         {
