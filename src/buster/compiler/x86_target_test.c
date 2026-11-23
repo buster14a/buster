@@ -141,7 +141,6 @@ static bool x86_target_test_forms(void)
         { X86_FORM_NONE, 255 },
         { X86_FORM_FEMMS, 255 }, // Obsolete 3DNow! is not part of a supported profile.
     };
-    uint8_t scalar[X86_FORM_COUNT];
     uint8_t vector[X86_FORM_COUNT];
     uint64_t random = 180;
     bool passed = x86_encoder_initialize();
@@ -150,9 +149,8 @@ static bool x86_target_test_forms(void)
     {
         X86Target target;
         passed &= x86_target_parse(profiles[p], strlen(profiles[p]), &target);
-        x86_target_forms_scalar(&target, scalar);
         x86_target_forms(&target, vector);
-        passed &= memcmp(scalar, vector, sizeof(scalar)) == 0;
+        passed &= x86_target_test_definition(&target, vector);
         const X86Instruction rounds_control =
         {
             .rm = X86_REGISTER_RSP,
@@ -160,7 +158,7 @@ static bool x86_target_test_forms(void)
             .form = X86_FORM_FNSTCW_M16,
         };
         // The baseline control-word read stays available at all profiles, including detected native.
-        passed &= scalar[X86_FORM_FNSTCW_M16] != 0 && vector[X86_FORM_FNSTCW_M16] != 0;
+        passed &= vector[X86_FORM_FNSTCW_M16] != 0;
         passed &= x86_target_validate(vector, &rounds_control, 1) == 1;
         const X86Instruction sse_control =
         {
@@ -168,7 +166,7 @@ static bool x86_target_test_forms(void)
             .mode = BUSTER_X86_MEMORY_BASE,
             .form = X86_FORM_STMXCSR_M32,
         };
-        passed &= scalar[X86_FORM_STMXCSR_M32] != 0 && vector[X86_FORM_STMXCSR_M32] != 0;
+        passed &= vector[X86_FORM_STMXCSR_M32] != 0;
         passed &= x86_target_validate(vector, &sse_control, 1) == 1;
         const uint16_t scalar_cas[] = { X86_FORM_LOCK_CMPXCHG_M8_R8, X86_FORM_LOCK_CMPXCHG_M16_R16, X86_FORM_LOCK_CMPXCHG_M32_R32, X86_FORM_LOCK_CMPXCHG_M64_R64 };
         for (uint32_t c = 0; c < sizeof(scalar_cas) / sizeof(scalar_cas[0]); c += 1)
@@ -180,12 +178,12 @@ static bool x86_target_test_forms(void)
                 .mode = BUSTER_X86_MEMORY_BASE,
                 .form = scalar_cas[c],
             };
-            passed &= scalar[scalar_cas[c]] != 0 && vector[scalar_cas[c]] != 0;
+            passed &= vector[scalar_cas[c]] != 0;
             passed &= x86_target_validate(vector, &compare, 1) == 1;
         }
         for (uint32_t c = 0; p < 5 && c < sizeof(cases) / sizeof(cases[0]); c += 1)
         {
-            if ((scalar[cases[c].form] != 0) != (p >= cases[c].first))
+            if ((vector[cases[c].form] != 0) != (p >= cases[c].first))
             {
                 printf("target %s: unexpected eligibility for form %u\n", profiles[p], cases[c].form);
                 passed = false;
@@ -194,12 +192,12 @@ static bool x86_target_test_forms(void)
         for (uint32_t form = 0; form <= UINT16_MAX; form += 1)
         {
             const uint32_t number = form & BUSTER_X86_FORM_NUMBER;
-            const bool expected = number < BUSTER_X86_FORM_TEMPLATES && scalar[number % X86_FORM_COUNT] != 0;
+            const bool expected = number < BUSTER_X86_FORM_TEMPLATES && x86_target_requirement(number % X86_FORM_COUNT) != 0 && vector[number % X86_FORM_COUNT] != 0;
             passed &= x86_target_form_allowed(vector, form) == expected;
         }
         for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
         {
-            if (scalar[form])
+            if (vector[form])
             {
                 X86Instruction instruction = x86_random_instruction(&random, (uint16_t)form, false);
                 passed &= x86_target_validate(vector, &instruction, 1) == 1;
@@ -264,7 +262,8 @@ static bool x86_target_test_pages(void)
             X86Target target;
             passed &= x86_target_parse("x86-64-v4", 9, &target);
             uint8_t expected[X86_FORM_COUNT];
-            x86_target_forms_scalar(&target, expected);
+            x86_target_forms(&target, expected);
+            passed &= x86_target_test_definition(&target, expected);
             uint8_t* begin = mapping + page;
             uint8_t* end = begin + bytes;
             x86_target_forms(&target, begin);
