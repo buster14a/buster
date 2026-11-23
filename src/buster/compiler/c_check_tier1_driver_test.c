@@ -1463,8 +1463,8 @@ static bool check_test_tier1_field(const char* text, const char* name, uint64_t*
 // The function `name` in `-c`'s object at `path`: its bytes, decoded by the scalar disassembler into `records` (room for
 // `capacity`), and its relocations, each one's offset from the function's start and type (as R_X86_64_PC32) in
 // `offsets` and `types` (room for `capacity` too). Returns how many records, *relocation_count set, or 0 on a failure.
-// It sets the disassembler's tables up itself: test-checker-driver deals its units to --part's parts in turn, so no
-// caller may count on an earlier unit of its part having done it.
+// It sets the disassembler's tables up itself: test-checker-driver deals its units to --part's parts by their weights,
+// so no caller may count on an earlier unit of its part having done it.
 static uint32_t check_test_tier1_function(const char* path, const char* name, X86Decoded* records, uint32_t capacity, uint32_t* offsets, uint32_t* types, uint32_t* relocation_count)
 {
     uint64_t length = 0;

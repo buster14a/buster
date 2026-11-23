@@ -2094,7 +2094,7 @@ static bool check_corpus_view_equal(const CheckCorpusPath* a, const CheckCorpusP
                 left->place == right->place && left->error == right->error && left->note == right->note &&
                 left->resumed == right->resumed && left->parameter_type == right->parameter_type && left->resume_colon == right->resume_colon &&
                 left->resume_at == right->resume_at && left->resume_closers == right->resume_closers &&
-                left->resume_follow == right->resume_follow && left->resume_attribute == right->resume_attribute &&
+                left->resume_follow == right->resume_follow && left->resume_attribute == right->resume_attribute && left->resume_statement == right->resume_statement &&
                 left->attribute_prefix == right->attribute_prefix;
     }
     if (equal && a->prefix != 0)
@@ -2415,7 +2415,7 @@ static bool check_corpus_equal(const CheckCorpusPath* a, const CheckCorpusPath* 
                     left->place == right->place && left->error == right->error && left->note == right->note && left->resumed == right->resumed &&
                     left->resume_delete == right->resume_delete && left->resume_end == right->resume_end && left->resume_begin == right->resume_begin &&
                     left->resume_colon == right->resume_colon && left->resume_at == right->resume_at && left->resume_closers == right->resume_closers &&
-                    left->resume_follow == right->resume_follow && left->resume_attribute == right->resume_attribute &&
+                    left->resume_follow == right->resume_follow && left->resume_attribute == right->resume_attribute && left->resume_statement == right->resume_statement &&
                     left->attribute_prefix == right->attribute_prefix;
         }
     }

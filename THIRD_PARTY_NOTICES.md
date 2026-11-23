@@ -51,9 +51,13 @@ The malformed-block-item resume metadata in `c_parser_impl.c` (#2406), its
 semantic-driver checks and the original runtime fixtures under
 `tests/checker/parse-recovery/` use the project default terms. LLVM revision
 `7a941dfb2877a0b8cf30323fefa85ad019e0b0f5`'s `clang/lib/Parse/ParseStmt.cpp`
-was consulted for behavioral facts about recovery after invalid expressions
-and missing control-statement parentheses. Clang is an external diagnostic
-oracle; no upstream implementation or test fixture is imported.
+and `ParseExpr.cpp` were consulted for behavioral facts about recovery after
+invalid expressions, malformed calls and missing control-statement parentheses.
+The builtin-call recovery, orphan-closer diagnostic filtering and
+`-Wstring-plus-char` implementation, including its warning-policy/node-census
+integration and original runtime fixtures, also use the project default terms.
+Clang 23.1.4 is an external diagnostic oracle; no upstream implementation or
+test fixture is imported.
 
 The production implementation-boundary changes keep existing material under
 its recorded terms. `c_preprocessor_impl.c` and

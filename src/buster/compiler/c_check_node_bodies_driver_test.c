@@ -75,6 +75,16 @@ static const struct
 };
 
 // Whether the files at `left` and `right` hold the same bytes, and some.
+// The fixture's positions in the bodies the producer reads (check_test_driver_node_bodies' count of the option's line).
+#define BUSTER_TEST_NODE_BODIES_SWEPT 410ull
+// A unit that is large outside its bodies: a table of this many values at file scope beside two small functions (300
+// thousand tokens). And the most bytes the machine's state may take of the reader's arenas for it. It takes 7,846,892: the
+// columns a token of the unit (the objects', the controls' roots, the tests' own: 4.5 MB) and the machine's own fixed
+// state. One more column of four bytes a token or a node of the unit is 1,200,084 more, past this bound; the unit's
+// nodes' columns as they were made before it were 135 MB.
+#define BUSTER_TEST_NODE_BODIES_TABLE 150000u
+#define BUSTER_TEST_NODE_BODIES_MADE (17ull << 19)
+
 static bool check_test_driver_node_bodies_same(const char* left, const char* right)
 {
     FILE* a = fopen(left, "rb");
@@ -159,12 +169,23 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
     unsigned took = 0;
     unsigned long long tokens = 0;
     unsigned nodes = 0;
-    const bool counted = line != NULL && sscanf(line, "node-bodies: bodies=%u taken=%u tokens=%llu graph-nodes=%u", &bodies, &took, &tokens, &nodes) == 4;
+    unsigned long long swept = 0;
+    unsigned room = 0;
+    const bool counted = line != NULL && sscanf(line, "node-bodies: bodies=%u taken=%u tokens=%llu graph-nodes=%u swept=%llu room=%u", &bodies, &took, &tokens, &nodes, &swept,
+                                                &room) == 6;
     check_test_expect(test, timed_status == 0 && counted && bodies == 18 && took == 15 && nodes != 0 && nodes < 48 && check_test_driver_node_bodies_same(plain, taken),
                       "node-bodies: fifteen of the fixture's eighteen bodies are taken, and the walk makes nodes of the other three alone");
     if (timed_status == 0 && !(counted && bodies == 18 && took == 15 && nodes != 0 && nodes < 48))
     {
         fprintf(stderr, "test-checker-driver: node-bodies: bodies %u, taken %u, tokens %llu, graph nodes %u\n", bodies, took, tokens, nodes);
+    }
+    // What its machine's columns are made for: the positions of the bodies the producer has no reason against before any
+    // reading (the taken fifteen's and those of the ones it refuses after their sweeps), and the slack; not the unit's.
+    check_test_expect(test, timed_status == 0 && counted && swept == BUSTER_TEST_NODE_BODIES_SWEPT && room == swept + 64,
+                      "node-bodies: the machine's columns are made for the positions of the bodies the producer reads");
+    if (timed_status == 0 && !(counted && swept == BUSTER_TEST_NODE_BODIES_SWEPT && room == swept + 64))
+    {
+        fprintf(stderr, "test-checker-driver: node-bodies: swept %llu, room %u\n", swept, room);
     }
     free(timed_text);
     // Some of the producer's bodies taken and the others read as ever, by a test's selection: each third of them.
@@ -282,6 +303,55 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
                       "node-bodies: a unit with a reason of its own has no body decided, and its object is the ordinary compile's");
     free(reasoned_plain_text);
     free(reasoned_timed_text);
+    // A unit large outside its bodies: the machine's columns are made for the bodies the producer reads, not for the unit.
+    {
+        const uint64_t room = (uint64_t)BUSTER_TEST_NODE_BODIES_TABLE * 2 + 256;
+        char* large = malloc(room);
+        uint64_t length = 0;
+        if (large != NULL)
+        {
+            static const char head[] = "static const unsigned char table[] = {";
+            static const char tail[] = "};\nint first(int a) { return a + table[1]; }\nint second(int a, int b) { if (a > b) { return a - b; } return b - a; }\n";
+            memcpy(large, head, sizeof(head) - 1);
+            length = sizeof(head) - 1;
+            for (uint32_t i = 0; i < BUSTER_TEST_NODE_BODIES_TABLE; i += 1)
+            {
+                large[length++] = (char)('0' + i % 10);
+                large[length++] = ',';
+            }
+            memcpy(large + length, tail, sizeof(tail) - 1);
+            length += sizeof(tail) - 1;
+        }
+        char* large_plain_text = NULL;
+        char* large_timed_text = NULL;
+        unlink(plain);
+        unlink(taken);
+        const bool large_written = large != NULL && parse_test_write(source, large, length);
+        const int large_plain_status = large_written ? check_test_driver_node_bodies_compile(executable, source, plain, NULL, 0, &large_plain_text) : -1;
+        const int large_timed_status = large_written ? check_test_driver_node_bodies_compile(executable, source, taken, timed, 2, &large_timed_text) : -1;
+        const char* large_line = large_timed_text != NULL ? strstr(large_timed_text, "node-bodies: bodies=") : NULL;
+        unsigned large_bodies = 0;
+        unsigned large_took = 0;
+        unsigned long long large_tokens = 0;
+        unsigned large_nodes = 0;
+        unsigned long long large_swept = 0;
+        unsigned large_room = 0;
+        unsigned long long large_made = 0;
+        const bool large_counted = large_line != NULL && sscanf(large_line, "node-bodies: bodies=%u taken=%u tokens=%llu graph-nodes=%u swept=%llu room=%u made=%llu", &large_bodies,
+                                                                &large_took, &large_tokens, &large_nodes, &large_swept, &large_room, &large_made) == 7;
+        const bool large_sized = large_plain_status == 0 && large_timed_status == 0 && large_counted && large_bodies == 2 && large_took == 2 && large_swept != 0 &&
+                                 large_swept < 64 && large_room == large_swept + 64 && large_made != 0 && large_made <= BUSTER_TEST_NODE_BODIES_MADE &&
+                                 check_test_driver_node_bodies_same(plain, taken);
+        check_test_expect(test, large_sized, "node-bodies: a unit large outside its bodies has the machine's columns made for its bodies, and its object is the ordinary compile's");
+        if (!large_sized)
+        {
+            fprintf(stderr, "test-checker-driver: node-bodies: the large unit: status %d and %d with the option, bodies %u, taken %u, swept %llu, room %u, made %llu\n",
+                    large_plain_status, large_timed_status, large_bodies, large_took, large_swept, large_room, large_made);
+        }
+        free(large_plain_text);
+        free(large_timed_text);
+        free(large);
+    }
     if (restored != NULL)
     {
         setenv("BUSTER_TEST_NODE_BODIES", restored, 1);

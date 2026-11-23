@@ -418,6 +418,9 @@ typedef enum CheckInputMessage
     // An _Atomic __auto_type pointee is never compatible with its initializer (#1844). The pointer placeholder's
     // type and the initializer's unconverted type (value's low half; typedef spelling in its high half) survive recovery.
     CHECK_INPUT_AUTO_ATOMIC_POINTER,
+    // A _Generic selection whose controlling type (its lvalue conversion's) matches no association and which has no
+    // default (#2914): clang's err_generic_sel_no_match at the controlling expression's first token, with that type.
+    CHECK_INPUT_GENERIC_NO_MATCH,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -595,6 +598,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENUM_INVALID_BASE] = "non-integral type is an invalid underlying type",
     [CHECK_INPUT_ENUM_VALUE_TYPE] = "integer constant expression must have integer type",
     [CHECK_INPUT_AUTO_ATOMIC_POINTER] = "variable with atomic deduced pointee has incompatible initializer",
+    [CHECK_INPUT_GENERIC_NO_MATCH] = "controlling expression type not compatible with any generic association type",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
@@ -14578,7 +14582,19 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
         const uint32_t close = parser->tree.parents[end];
         const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL &&
                           end + 1 < close && parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
-        if (call && builtin == CBUILTIN_INVOKE)
+        const bool malformed = call && __builtin_expect(parser->invalid_call_count != 0, 0) &&
+                               check_input_invalid_call_index(parser, i) < parser->invalid_call_count;
+        if (malformed)
+        {
+            // The private view keeps lookup and independent argument diagnostics, not a builtin call (#2406).
+            // In particular invoke must not turn the first surviving argument into a callee, and vararg preparation
+            // must not infer a context or count from the remaining arguments. The later silent report cuts the call.
+            for (uint32_t t = group; t <= end; t += 1)
+            {
+                reader->ignored[t] = true;
+            }
+        }
+        else if (call && builtin == CBUILTIN_INVOKE)
         {
             // __builtin_invoke(f, a...) is the call f(a...) in C (#148), as clang's Sema builds it: the name goes, with
             // its parentheses, and the call's first operand is its callee, its others its arguments. With none,
@@ -14634,7 +14650,12 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
         {
             check_input_implicit_function(reader, i);
         }
-        if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
+        if (intrinsic == CHECK_INPUT_INTRINSIC_INVALID_CALL)
+        {
+            // Its declaration was classified, but its recovered argument list cannot create an intrinsic action.
+            reader->ignored[i] = true;
+        }
+        else if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
         {
             const uint32_t close = parser->tree.parents[i];
             const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[close] - 1;

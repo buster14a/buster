@@ -780,6 +780,14 @@ struct NodeFrontShadow
     uint64_t produced_after_ticks;
     uint64_t produced_unread;
     uint64_t produced_unread_tokens;
+    // The nodes the machine's graph, its results and its tests' columns are made for (node_alone_begin): the unit's, as
+    // the reader's own graph is; or, where the producer runs as a compile would, the positions of the bodies it has no
+    // reason against before any reading (`alone_swept`) and BUSTER_NODE_ALONE_SLACK more.
+    uint64_t alone_swept;
+    uint32_t alone_room;
+    // The bytes the machine's state takes of the reader's two arenas for the unit, all of it: the machine at reader time,
+    // the one with no node of the walk's, the tests' and the producer's (node_front_started's pushes).
+    uint64_t alone_made;
     // Whether it ran for the unit, and the unit's own reason not to take any body (BUSTER_NODE_PRODUCER_UNIT_*, 0: none).
     bool produced_ran;
     uint8_t produced_unit;

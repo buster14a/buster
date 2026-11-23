@@ -516,8 +516,11 @@ static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diag
                                          diagnostic->resume_end <= view->tokens.count &&
                                          view->tokens.kinds[callee] == PARSE_KIND_IDENTIFIER &&
                                          view->tokens.kinds[callee + 1] == PARSE_KIND_L_PAREN &&
-                                         view->tokens.kinds[diagnostic->resume_end - 1] == PARSE_KIND_R_PAREN));
+                                         (diagnostic->resume_call_semi ? diagnostic->resume_end < view->tokens.count &&
+                                                                         view->tokens.kinds[diagnostic->resume_end] == PARSE_KIND_SEMI :
+                                                                         view->tokens.kinds[diagnostic->resume_end - 1] == PARSE_KIND_R_PAREN)));
     const uint32_t arguments = diagnostic->resume_call_arguments;
+    valid &= !diagnostic->resume_call_semi || (diagnostic->resume_call && diagnostic->resume_call_value && arguments == 0);
     valid = valid && (arguments == 0 || (diagnostic->resume_call && diagnostic->resume_call_value && arguments > diagnostic->token &&
                                         arguments < diagnostic->resume_end - 1 && view->tokens.kinds[arguments - 1] == PARSE_KIND_COMMA));
     valid = valid && (!diagnostic->resume_call || !diagnostic->resume_call_value ||
@@ -557,6 +560,8 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
         result.note = diagnostic->note < count ? origin[diagnostic->note] : diagnostic->note;
         result.publication = diagnostic->publication != 0 ? (diagnostic->publication < count ? origin[diagnostic->publication] : original_count) : 0;
         result.resume_callee = diagnostic->resume_call && diagnostic->resume_callee < count ? origin[diagnostic->resume_callee] : diagnostic->resume_callee;
+        result.recovery_expression_begin = diagnostic->recovery_expression_begin != 0 && diagnostic->recovery_expression_begin < count ?
+                                           origin[diagnostic->recovery_expression_begin] : diagnostic->recovery_expression_begin;
     }
     result.resumed = false;
     result.resume_delete = false;
@@ -913,7 +918,10 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                                           current->tokens.kinds[at - 1] == PARSE_KIND_R_SQUARE &&
                                                           current->tokens.kinds[at - 2] == PARSE_KIND_R_SQUARE &&
                                                           diagnostic->resume_end < count && current->tokens.kinds[diagnostic->resume_end] == PARSE_KIND_SEMI;
-                        dropped_declarator = attribute_declarator ? diagnostic->resume_end : dropped_declarator;
+                        // A statement deleted whole marks its kept `;` the same way (BUSTER_PARSE_DROPPED_STATEMENT, #2406).
+                        const bool statement = diagnostic->resume_statement && diagnostic->resume_delete && diagnostic->resume_end < count &&
+                                               current->tokens.kinds[diagnostic->resume_end] == PARSE_KIND_SEMI;
+                        dropped_declarator = attribute_declarator || statement ? diagnostic->resume_end : dropped_declarator;
                         if (diagnostic->resume_call)
                         {
                             const uint32_t attributes = check_prefix_call_attributes(diagnostic);
@@ -947,11 +955,14 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                             const uint32_t retained_call = prefix + diagnostic->resume_end - arguments;
                             for (uint32_t c = 0; c < retained_call; c += 1)
                             {
-                                const uint32_t token = c < prefix ? diagnostic->resume_callee + c : arguments + c - prefix;
-                                view->tokens.kinds[written] = current->tokens.kinds[token];
-                                view->tokens.names[written] = current->tokens.names[token];
+                                // StopAtSemi abandons this call before its original closer. The replacement ')'
+                                // borrows the semicolon's source just as a synthetic ';' borrows its next token's.
+                                const bool close = diagnostic->resume_call_semi && c == prefix;
+                                const uint32_t token = c < prefix ? diagnostic->resume_callee + c : close ? diagnostic->resume_end : arguments + c - prefix;
+                                view->tokens.kinds[written] = close ? PARSE_KIND_R_PAREN : current->tokens.kinds[token];
+                                view->tokens.names[written] = close ? 0 : current->tokens.names[token];
                                 view->tokens.sources[written] = parse_source_index(&current->tokens, token);
-                                view->tokens.flags[written] = current->tokens.flags[token];
+                                view->tokens.flags[written] = close ? 0 : current->tokens.flags[token];
                                 next_origin[written] = origin != NULL ? origin[token] : token;
                                 written += 1;
                             }
@@ -1032,6 +1043,18 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         if (resumed->status == CHECK_PREFIX_READY)
         {
             check_prefix_sort_diagnostics(resumed->diagnostics, temporary, total);
+            for (uint32_t d = 1; d < total; d += 1)
+            {
+                const ParseDiagnostic* prior = resumed->diagnostics + d - 1;
+                ParseDiagnostic* diagnostic = resumed->diagnostics + d;
+                // Inserting a missing ';' before an orphan ')' makes the next round reject it as a new statement.
+                // Both errors disappear if an unresolved name made the expression unusable; their original token is the same.
+                if (prior->recovery_expression_begin != 0 && prior->message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION &&
+                    diagnostic->token == prior->token && diagnostic->message == PARSE_MESSAGE_EXPECTED_EXPRESSION)
+                {
+                    diagnostic->recovery_expression_begin = prior->recovery_expression_begin;
+                }
+            }
             uint32_t calls = 0;
             for (uint32_t d = 0; d < total; d += 1)
             {

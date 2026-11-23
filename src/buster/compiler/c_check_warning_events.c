@@ -274,6 +274,12 @@ enum
     // computation stored back, -Wimplicit-float-conversion's, off by default, under -Wconversion. (-Wliteral-range's
     // floating comparison with a literal its other operand's type can't hold is CHECK_WARNING_ID_LITERAL_RANGE's.)
     CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION = 170,
+    // A character literal added to a character pointer (#2406, clang's diagnoseStringPlusChar): on by default,
+    // independently of -Wstring-plus-int, which can also diagnose the same addition.
+    CHECK_WARNING_ID_STRING_PLUS_CHAR = 171,
+    // A cleanup function's pointer parameter more aligned than its variable's type (#1844, clang's CheckArgAlignment in
+    // handleCleanupAttr): -Walign-mismatch, on by default.
+    CHECK_WARNING_ID_ALIGN_MISMATCH = 172,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -644,6 +650,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION,
     // payload.data is 0 for &&, 1 for ||. The source adapter retains the operator's construction boundary.
     CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND,
+    // payload.data the argument's alignment's log2 in its low byte and the parameter's above it; payload.name the cleanup
+    // function's name.
+    CHECK_WARNING_EVENT_ALIGN_MISMATCH,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

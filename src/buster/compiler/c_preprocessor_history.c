@@ -64,6 +64,15 @@ static __attribute__((unused)) void pp_diagnostic_suborder(Preprocessor* pp, con
     }
 }
 
+// Move the new records to `phase` at their publication position (#2914), keeping that position.
+static __attribute__((unused)) void pp_diagnostic_phase(Preprocessor* pp, const PPDiagnosticRecord* previous, PPDiagnosticPhase phase)
+{
+    for (PPDiagnosticRecord* record = previous != NULL ? previous->next : pp->diagnostic_first; record != NULL; record = record->next)
+    {
+        record->position = record->position - record->position % PP_DIAGNOSTIC_PHASE_COUNT + phase;
+    }
+}
+
 // Order the new records among the others at their publication position by their tokens rather than by discovery (#2252):
 // publication puts each before the first other record there whose token follows its own, the others keeping their order.
 // A function body's constant's comma is clang's in source order among the body's queued diagnostics, which the reader

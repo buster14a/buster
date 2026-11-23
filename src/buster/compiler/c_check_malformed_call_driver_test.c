@@ -29,6 +29,19 @@ static void check_test_malformed_call_views(CheckTest* test)
         44,
         45,
         46,
+        49,
+        51,
+        52,
+        53,
+        54,
+        55,
+        56,
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
     };
     for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(cases); fixture += 1)
     {
@@ -83,7 +96,8 @@ static void check_test_malformed_call_views(CheckTest* test)
                                         rejected.parser.invalid_call_values == view->invalid_call_values && rejected.parser.invalid_call_count == view->invalid_call_count,
                                   "malformed calls: rejected view borrows both invalid-call columns");
             }
-            else if (c >= 31 && c <= 40)
+            else if ((c >= 31 && c <= 40) || c == 15 || c == 17 || c == 18 || c == 44 || c == 45 || c == 49 || c == 51 || c == 52 ||
+                     (c >= 53 && c <= 59))
             {
                 const Parser* view = &resumed.parser;
                 const uint32_t calls = c == 36 || c == 37 ? 2 : 1;
@@ -91,14 +105,34 @@ static void check_test_malformed_call_views(CheckTest* test)
                                 view->invalid_call_sources != NULL && view->invalid_call_values != NULL;
                 for (uint32_t i = 0; metadata && i < calls; i += 1)
                 {
-                    metadata = view->invalid_call_values[i] == 1 && (i == 0 || view->invalid_call_sources[i - 1] < view->invalid_call_sources[i]);
+                    metadata = view->invalid_call_values[i] == (c == 55 ? 0 : 1) &&
+                               (i == 0 || view->invalid_call_sources[i - 1] < view->invalid_call_sources[i]);
                 }
-                check_test_expect(test, metadata, "malformed calls: earlier arguments and repeated/nested repairs keep unique ordered callee sources and value flags");
+                check_test_expect(test, metadata, "malformed calls: earlier arguments, catalog calls and repeated/nested repairs keep unique ordered callee sources and value flags");
+                if (c == 15 || c == 45 || c == 49 || c == 51 || c == 52)
+                {
+                    uint32_t original_errors = 0;
+                    for (uint32_t d = 0; metadata && d < resumed.diagnostic_count; d += 1)
+                    {
+                        const ParseDiagnostic* diagnostic = resumed.diagnostics + d;
+                        original_errors += diagnostic->resume_call_semi && diagnostic->call_statement &&
+                                           diagnostic->message == PARSE_MESSAGE_EXPECTED_EXPRESSION && diagnostic->token < parser.tokens.count &&
+                                           parser.tokens.kinds[diagnostic->token] == PARSE_KIND_TYPE;
+                    }
+                    bool closer = false;
+                    for (uint32_t t = 0; metadata && t + 1 < view->tokens.count; t += 1)
+                    {
+                        closer |= view->tokens.kinds[t] == PARSE_KIND_R_PAREN && view->tokens.kinds[t + 1] == PARSE_KIND_SEMI &&
+                                  parse_source_index(&view->tokens, t) == parse_source_index(&view->tokens, t + 1);
+                    }
+                    check_test_expect(test, metadata && original_errors == 1 && closer,
+                                      "malformed calls: early semicolon keeps one original argument error and the synthetic closer's source");
+                }
             }
             else
             {
                 check_test_expect(test, !parsed && status != CHECK_PREFIX_RESOURCE && status != CHECK_PREFIX_INVALID && resumed.parser.invalid_call_count == 0,
-                                  "malformed calls: semicolons, mismatched delimiters, builtin/catalog names, members and empty arguments keep existing recovery");
+                                  "malformed calls: nested semicolon calls, mismatched delimiters, members and empty arguments keep existing recovery");
             }
             parse_release(&parser);
             arena_pop_to(&scratch, 0);
@@ -111,9 +145,14 @@ static void check_test_malformed_call_views(CheckTest* test)
     }
 }
 
+// A long sweep (32 s on a 4-CPU Xeon VM, #3399): the views' check and each case are units of test-checker-driver's deal
+// (check_test_driver_takes).
 static void check_test_driver_malformed_calls(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    check_test_malformed_call_views(test);
+    if (check_test_driver_takes())
+    {
+        check_test_malformed_call_views(test);
+    }
     CheckTestFixtures files = { .storage = arena_reserve(CHECK_TEST_FIXTURE_BYTES + 4096) };
     uint64_t length = 0;
     char* catalog = files.storage.base != NULL ? check_test_fixture_read(&files, "tests/checker/parse-recovery/malformed-calls.cases", &length) : NULL;
@@ -152,6 +191,10 @@ static void check_test_driver_malformed_calls(CheckTest* test, const char* clang
         char define[64];
         snprintf(define, sizeof(define), "-DBUSTER_CASE=%u", id);
         fixtures += valid;
+        if (!check_test_driver_takes())
+        {
+            continue;
+        }
         for (uint32_t s = 0; valid && s < BUSTER_ARRAY_LENGTH(standards); s += 1)
         {
             if ((languages & (1u << s)) == 0)
