@@ -1,0 +1,12 @@
+function (ptr) -> void {
+  row #0 (f32, f32) -> f32 [VPADDD_X_X_XM128 0xb0 0xb0 0xa1 0x00 0x00 0x00 0 0]
+b0:
+  %0 = param.ptr 0
+  %1 = load.f32 %0 align=4
+  %2 = address.ptr %0 offset=4
+  %3 = load.f32 %2 align=4
+  %4 = call.f32 row #0(%1, %3) fixed=(f32, f32) variadic=0
+  %5 = address.ptr %0 offset=128
+  %6 = store.void %5, %4 align=4
+  %7 = ret.void
+}

@@ -1,0 +1,43 @@
+buster-fixtures v1 ir-parse
+# test-ir-parse's canonical fixtures (ir_parse_test.c; #2053): ID, FILE, NAME, tab-separated. Both parser paths take each
+# file whole and print it back byte for byte; together they cover every opcode and type. Every .ir file here is one.
+arithmetic	arithmetic.ir	arithmetic
+conversions	conversions.ir	conversions
+control	control.ir	control
+memory-calls	memory-calls.ir	memory calls
+dynamic-stack	dynamic-stack.ir	dynamic stack
+frame-address	frame-address.ir	frame address
+labels	labels.ir	labels
+aggregates	aggregates.ir	aggregates
+vector-mask	vector-mask.ir	vector mask
+vector-lanes	vector-lanes.ir	vector lanes
+empty	empty.ir	empty
+tier0-add	tier0-add.ir	tier0 add
+hello	hello.ir	hello
+fences	fences.ir	fences
+atomics	atomics.ir	atomics
+segments	segments.ir	segments
+wide	wide.ir	wide
+intrinsics	intrinsics.ir	intrinsics
+bit-intrinsics	bit-intrinsics.ir	bit intrinsics
+overflow-intrinsics	overflow-intrinsics.ir	overflow intrinsics
+splats	splats.ir	splats
+widths	widths.ir	widths
+rows	rows.ir	rows
+carrier-rows	carrier-rows.ir	carrier rows
+masked-memory	masked-memory.ir	masked memory
+gathers	gathers.ir	gathers
+fma	fma.ir	fma
+lane-moves	lane-moves.ir	lane moves
+reductions	reductions.ir	reductions
+lane-unary	lane-unary.ir	lane unary
+carriers	carriers.ir	carriers
+bitshuffle	bitshuffle.ir	bitshuffle
+quadword-op	quadword-op.ir	quadword op
+pairwise	pairwise.ir	pairwise
+funnel	funnel.ir	funnel
+fround	fround.ir	fround
+float-selects	float-selects.ir	float selects
+float-select-loops	float-select-loops.ir	float select loops
+libm-call	libm-call.ir	libm call
+narrow-bitwise	narrow-bitwise.ir	narrow bitwise

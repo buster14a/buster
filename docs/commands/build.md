@@ -387,7 +387,8 @@ they run, so that editing a case or adding one compiles, links and bakes
 nothing. A new ordinary regression program goes there, not into a C string.
 The checker's suites are its shared source fixtures, `tests/checker/sources/`,
 and ten test files' own tables beside them ([the checker
-guide](checker.md#runtime-fixtures)).
+guide](checker.md#runtime-fixtures)); Tier 1's mask IR is `tests/tier1/masks/`
+and the IR parser's fixtures `tests/ir/catalog.tsv`'s.
 C keeps what isn't data: independent oracles, generated inputs, guarded
 memory and the checks themselves. Nothing under `tests/` is a build input:
 no generated C array, `#include` or `#embed` brings it back.
