@@ -1753,11 +1753,19 @@ static LinkError link_check(Link* link)
     {
         memset(owned, 0, (link->fixups.count / 64 + 1) * sizeof(*owned));
     }
+    // The atoms with fixups, 16 at a time (#3393): an atom without one passes link_check_atom_fixups as it is, and the
+    // unit's data's atoms, its literals', mostly have none.
     uint64_t fixups = 0;
-    for (AtomId atom = 1; result == LINK_ERROR_NONE && atom < atoms->count; atom += 1)
+    for (AtomId first = 1; result == LINK_ERROR_NONE && first < atoms->count; first += 16)
     {
-        result = link_check_atom_fixups(link, atom, owned);
-        fixups += atoms->fixup_count[atom];
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, atoms->count - first < 16 ? atoms->count - first : 16);
+        const __m512i counts = _mm512_maskz_loadu_epi32(lanes, atoms->fixup_count + first);
+        fixups += (uint64_t)_mm512_reduce_add_epi64(_mm512_cvtepu32_epi64(_mm512_castsi512_si256(counts))) +
+                  (uint64_t)_mm512_reduce_add_epi64(_mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(counts, 1)));
+        for (uint32_t fixed = _mm512_test_epi32_mask(counts, counts); result == LINK_ERROR_NONE && fixed != 0; fixed &= fixed - 1)
+        {
+            result = link_check_atom_fixups(link, first + (AtomId)__builtin_ctz(fixed), owned);
+        }
     }
     // Fixups in no atom's range.
     if (result == LINK_ERROR_NONE && fixups + 1 != link->fixups.count)
