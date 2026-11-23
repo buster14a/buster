@@ -94,6 +94,18 @@ static bool tier1_code_size_self_test(void)
 {
     uint32_t checks = 0;
     uint32_t failures = 0;
+    char letters[] = "abcdefghijklmnop";
+    Tier1SizeSymbol symbols[sizeof(letters) - 1];
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(symbols); i += 1)
+    {
+        symbols[i] = (Tier1SizeSymbol){ .name = { .pointer = letters + i, .length = 1 } };
+    }
+    const Tier1SizeObject sparse = { .symbols = symbols, .count = BUSTER_ARRAY_LENGTH(symbols) };
+    uint32_t cursor = 0;
+    const Tier1SizeSymbol* missing = tier1_code_size_find(&sparse, (String8){ .pointer = "ka", .length = 2 }, &cursor, 2);
+    const Tier1SizeSymbol* next = tier1_code_size_find(&sparse, symbols[11].name, &cursor, 1);
+    tier1_code_size_test_expect(&checks, &failures, missing == NULL && next == symbols + 11 && cursor == 12,
+                               "sparse search retains a missing name's insertion point and consumes the next match");
     Arena arena = arena_reserve(UINT64_C(1) << 24);
     Tier1SizeTestElf ours;
     Tier1SizeTestElf theirs;
@@ -124,6 +136,12 @@ static bool tier1_code_size_self_test(void)
                                sizes.tier1_bytes == 8 && sizes.clang_bytes == 0 && sizes.fallback_bytes == 12 && !tier1_code_size_qualified(&sizes),
                                "entirely unmatched Tier 1 bodies keep their byte cost and cannot qualify alone");
     const Tier1CodeSize unmatched = sizes;
+    static const char miss_then_match[] = BUSTER_TIER1_SIZE_TEST_HEADER BUSTER_TIER1_SIZE_TEST_GOOD
+                                         "tier1-function-size\ttier=tier1\tbytes=5\tname=68656c706572\n" BUSTER_TIER1_SIZE_TEST_END
+                                         "tier1\tfunctions=2\trequested=2\tcompiled=2\tfallbacks=0\n";
+    valid = arena.base != NULL && tier1_code_size_test_compare(&sizes, &ours, &theirs, miss_then_match, &arena);
+    tier1_code_size_test_expect(&checks, &failures, valid && sizes.matched == 1 && sizes.clang_bytes == 5 && sizes.unmatched_bytes == 8,
+                               "an absent reference preserves the next greater symbol for the following body");
     Tier1CodeSize matched = { 0 };
     tier1_code_size_test_object(&theirs, "good", 17, 64, true, false);
     valid = arena.base != NULL && tier1_code_size_test_compare(&matched, &ours, &theirs, report, &arena);

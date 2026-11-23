@@ -371,7 +371,7 @@ written first. [The design](../node-machine.md)'s
 
 ### The shadow (step 1)
 
-`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
+`./build/compiler measure-node-machine --shadow [--scalar] [--verify] [--fused] [--interleave N] [--front|--front-first] [--front-lean] [--front-warm] [--front-types] [--front-flat|--front-flat-first] [--front-sweeps] [--front-tests] [--front-tests-last] [--front-alone|--front-alone-split|--front-alone-first] [--bodies] [--front-facts] [--front-window] [--window-tests] [--window-contexts] [--window-rows] [--no-window-summaries] [--passes N] [--repeat N] [--list N] [preprocessor options] file...`
 is step 1: the machine itself, run after the pipeline on every full expression
 the census takes, compared with what the pipeline made and timed. No compile
 takes its entries.
@@ -1706,8 +1706,8 @@ The report adds:
   not-their-payloads'=0`: the operators the rule left out, of every record
   the loop swept; with `--verify`, those of them in an expression the tests
   ran on, each checked (a swept record of an expression without tests has
-  none to check), and the integer constants whose record says its value
-  (one folded from a floating constant is a wide value, which says none);
+  none to check), and the integer constants whose record says its value, including ordinary integers folded from floating
+  constants;
 - `node-shadow: own tests calls-left-out=N checked=N of-them-with-a-test=0
   of-them-with-a-loud-argument=0 casts-over-one=N
   callees-asked-for-their-result=N
@@ -2455,8 +2455,10 @@ survey of those passes, what it measured and its gates.
   is asked its own fact a record at a time (`node_rows_summary_call`, the
   flow's `check_program_return_call` by the callee's record's byte: a stop
   where it is the leaf of a function declared noreturn, none where it is a
-  plain function's, and an unknown for any other: a call through a value,
-  or of a library's name the flow leaves unknown). The flow reads a callee
+  plain function's; for a pointer object's leaf a stop where its function
+  type is noreturn and none otherwise (#1393, `node_tests_window_returns`);
+  and an unknown for any other: a call through another value, or of a
+  library's name the flow leaves unknown). The flow reads a callee
   through `*` and `&` to a function's name; C lists an expression that
   calls `*f` or `&f` of one, so the window asks no such call. An
   expression's fact is its calls' facts together, but where a call stops
@@ -2470,7 +2472,9 @@ survey of those passes, what it measured and its gates.
   value's to answer, with nothing in the side record.
   `check_program_branch_truth` knows a branch's condition's truth where the
   condition's value has none when one operand decides a logical operator,
-  including under a cast or `!`. The turns list an `&&` or an `||` whose
+  including under a cast or `!`, and where clang's CFG heuristics decide it
+  (#2990: `x * 0`, `x | 1`, `(x & 8) == 4`, `x == 1 && x == 2`, `x && !x`),
+  which the window doesn't list yet. The turns list an `&&` or an `||` whose
   second operand has a known truth (`node_rows_window_decided`, reason
   `branches`). A cast with no known value can pass an inferred logical
   result of 0 or 1. It cannot inherit the truth of an address before
@@ -2594,6 +2598,16 @@ type.
   form's table sends `<`, `<=`, `>` and `>=` for an operand that converts
   to a pointer. The window's loop leaves out one whose two operands both
   do, a loop's `p < end`, where nothing else sends it.
+- **The CFG builder's observer's warnings** (#2990,
+  `-Wtautological-bitwise-compare`, `-Wtautological-overlap-compare` and
+  `-Wtautological-negation-compare`, `-Wall`'s) have a test of their own
+  (`cfg-tautology`, `node_census_tautology`): an equality of a bitwise `&`
+  or `|`, a `|` of one literal or enumerator, and an `&&` or `||` of a name,
+  a member or an element and its negation, or of two comparisons of such
+  an operand with constants whose five values decide it
+  (`node_census_overlap`, the program's `check_cfg_analyze`). Under those
+  warnings the own form's table sends `==`, `!=`, `|`, `&&` and `||`
+  always (`always`), as `-Wsign-compare` sends a comparison.
 - **What converts to a pointer** (`BUSTER_NODE_CENSUS_TYPE_CONVERTS`): a
   function's type's byte has the pointer's bit and the void pointee's, as
   `nullptr_t`'s has, so a cast of a function or of an array to an integer
@@ -2663,8 +2677,10 @@ reader settles after the bodies.
   (`node_machine_renames`), T refuses every call the reader marked for a
   library builtin, at both times, and asks no label. The shadow leaves the
   label of such an object out of its comparison and counts the object.
-  (In a unit with no `asm` token the program reads no label at all:
-  [#3208](https://github.com/buster14a/buster/issues/3208).)
+  Lowering reads the applied pragma's label even in units without an
+  `asm` token. A call before the directive can use its label if the call
+  saw the labelled declaration and Clang emits its body after the pragma.
+  [#3208](https://github.com/buster14a/buster/issues/3208)
 - **A weak name** is the name's from a token on, not a declaration's: the
   reader notes it at a `weak`, `weakref` or `weak_import` attribute on any
   declaration of the name (`CheckInput.weak_names`) and at a `#pragma
@@ -2719,6 +2735,275 @@ search of lists of every length to 20, and
 `node_objects_test_comparisons` the shadow's own comparisons, a row a
 case: an object's facts against the program's, the objects a rename
 pragma labelled, and a name's line by its number or its words.
+
+
+### The machine with no node of the walk's (#2850)
+
+`./build/compiler measure-node-machine --shadow --front-alone [--list N] [preprocessor options] file...`
+runs the reference machine (T, the census's tests, C and X) on the front's
+records alone: for each function body, before the reader's coded walk acts at
+its first token. The option asks for the machine at reader time on the walk's
+nodes too (`--front-types`, `--front-sweeps`, `--front-tests`), which it is
+compared with after the pipeline. No compile takes it
+([the one-core path](../one-core-path.md#the-redesigns-second-piece-the-machine-with-no-node-of-the-walks)).
+
+It reports three lines a run:
+
+- `alone bodies=... left=... postorder-positions=... records=... roots=...
+  taken=... ticks: ...`: the bodies it read whole and those it left (a body
+  within another's, one whose tokens are no run of the postorder, one past
+  its graph's room), their postorder positions, the records it made, the
+  roots it ran on and those the whole machine takes there; then its ticks:
+  its reading (the acting tokens' compaction and their entries, the front,
+  the records' writing to its graph), the machine's first run on the roots,
+  and the two a position.
+- `alone compared=... differences=...`: the roots both machines ran on,
+  paired by their token, and those that differ, by the first field that
+  does (`records`, `refusal`, `digest`, `tested`, `tests`, `swept`,
+  `sweep-refusal`, `root`, `tape`, `side`); the roots only one of the two ran
+  on (the walk's nodes' outside a function body are counted apart: it reads
+  the bodies alone); the roots it took at whose tokens the walk then raised
+  a warning's event; and the roots it took with, among their expression's
+  tokens, one the walk's class actions left to its visit (the option asks
+  the walk to mark them, as its numbering's check does), with how many such
+  tokens the bodies hold.
+- `alone lowered-bodies' verdicts before the walk` and `alone bodies whole`:
+  what it said of each body the lowering lowered, before the walk acted at
+  it (every root taken; or a root the front lost, a root not run, T's
+  refusal, the tests', C's or X's, no room), in bodies and in their tokens;
+  the times its front lost its waiting values; and its whole bodies against
+  those whose every popped root the machine on the walk's nodes takes.
+
+Two more kinds of line follow in every such run:
+
+- `alone verdict=... bodies=... tokens=... ticks: reading=...
+  the-machine's-first-run=... by-the-chunk-that-stops-them=...
+  a-scan-of-the-tokens-refuses: bodies=... tokens=...`, one a verdict: its
+  bodies' ticks (their reading, the machine's first run on them, and what
+  was spent by the end of the chunk in which each is first stopped), and how
+  many of them a scan of their tokens alone finds a lost root in.
+- `alone a scan of every body's tokens for a root the front would lose:
+  tokens-read=... ticks=... a-token-read=...`: the scan's own cost. It reads
+  a body's tokens' kinds and parents and the walk's visit bytes before any of
+  the body is compacted, and finds a lost root where a token the front
+  leaves (a `sizeof` or `_Alignof`, a token of the walk's own visit, a
+  character constant with an escape or of several characters) has its value
+  reach a root's token through the parents that take values. It refuses
+  nothing here: the lines say what it would.
+
+`--front-alone-split` is the same run with the clock read before each of the
+machine's sweeps and after the last, in its first run, and one line more:
+`alone the machine's first run by sweep: T=... the-tests=... C=... X=...`, the
+reads it took, and what is left of the run (its loop, the roots' ranges, the
+settling of the types made since the last chunk).
+
+`--front-alone-first` reads every body of the unit before the walk's first
+chunk, where `--front-alone` reads each before the walk acts at it: what a
+compile that walks none of them would read.
+
+A difference, a root only one of the two ran on in a body, a root taken
+before an event of the walk's or with a token its actions left, or a lowered
+body it did not read makes the command exit 1. While the machine runs, the
+reader's own graph has no column of nodes, so a read of the walk's node
+faults. `--list N` prints the first N
+differences (`alone difference file=... line=... field=...`), the first N
+bodies it refuses whose popped roots the other takes, and the first N bodies
+the scan and the front disagree on (`alone the scan finds ...`).
+
+### A body's entries from its controls and its tapes (#2850)
+
+`./build/compiler measure-node-machine --shadow --bodies [--list N] [preprocessor options] file...`
+makes each lowered body's stream again, after the pipeline, from the
+program's controls and the tapes the machine makes of the body's roots, and
+compares it with the lowered function's, entry for entry: kind, class and
+value. No compile takes it
+([the node machine](../node-machine.md#a-bodys-entries-from-its-controls-and-its-tapes)).
+
+It reports two lines a run, and a third where it applies:
+
+- `bodies lowered=... the-machine-takes-every-root-of=... attempted=...
+  same=... different=...`: the lowered bodies and their tokens; those whose
+  every popped root the machine takes; those the piece attempts, with their
+  tokens and the entries it made; those whose entries are the lowered
+  function's, and those that differ.
+- `bodies left out, by the first reason: ...`: the others, in bodies and
+  tokens: a root the machine does not take; a root that is no control's of
+  its own; a tracked stack; copies of parameters without a prototype; a
+  result of another class; a control of another kind; a return of another
+  kind; an initialization of another form; no room.
+
+Where a body is left out for a control of another kind, a third line counts
+those bodies by the first such control's kind (`switch=...`).
+
+With `--front-alone` the comparison is made a second time before the walk
+([the node machine](../node-machine.md#the-same-comparison-before-the-walk)),
+and the run has these lines more:
+
+- `alone roots against the program's controls with an expression, in the
+  lowered bodies: evaluate=... branch=... return=... initialize=...
+  another=...`: by the control's kind, the controls, those whose
+  expression's root's token has one root the machine ran on before the walk,
+  none or several, and those whose root's control's token is the control's;
+  then the roots it ran on in those bodies and those some control has.
+- `bodies before the walk lowered=... attempted=... same=... different=...`
+  and `bodies before the walk left out, by the first reason: ...`: the same
+  two lines for the entries made from the tapes kept before the walk, each
+  control finding its root by its token; "every root the machine's" is that
+  machine's verdict of the body before the walk. Two reasons are its own: a
+  control whose root is not kept before the walk, and a condition that is a
+  constant (an `if`'s).
+- `bodies before the walk the program dropped a range of=...
+  attempted-there=...`: the bodies with a constant `if` the program folded,
+  and those of them attempted, which must be none.
+- `controls from the tokens: attempted=... same=... different=... left out:
+  ...`: the bodies whose controls the twin made from the tokens, its
+  controls, the bodies whose controls are the program's and those that
+  differ, and the others by reason (not whole before the walk, a range the
+  program dropped, a `switch`, an `asm` statement, a variable-length array or
+  `typeof`, a cleanup, a jump of another kind, a block's static or extern
+  declaration, a statement expression, a shape it does not know, no room).
+
+- `controls from the tokens, the return flow: its silence proved for=...
+  the program warns of=... proved-silent-and-warned-of=...`: of the bodies
+  the twin attempts, those whose END its controls cannot reach (or whose
+  function is `main`, or has no result and is not `noreturn`), those the
+  program's own return flow has a warning for, and those of them the proof
+  called silent, which must be none.
+
+A body that differs in either, one attempted where the program dropped a
+range, or one proved silent that the program warns of makes the command exit
+1; `--list N` prints the first N of each
+(`bodies before the walk difference ...`, `controls from the tokens
+difference file=... line=... field=... control=...`).
+
+A body that differs makes the command exit 1. `--list N` prints the first N
+(`bodies difference file=... line=... field=... entry=...`: the body's first
+line, the first field that differs among `count`, `locals`, `calls`,
+`calls'-rows`, `kind`, `class`, `local`, `label`, `temporary` and `value`,
+and the entry).
+
+### Compiling with the bodies taken (#2850)
+
+`./build/compiler --node-bodies --lanes 1 -c file.c -o file.o` takes the
+function bodies the node machine's producer takes
+([`node-machine.md`](../node-machine.md), "The producer, deciding before the
+walk"). It is off by default, and applies to a compile to an object on one lane
+at Tier 0, without `-g`, lazily deferred bodies or #113's deferred bodies; any
+other command ignores it. The unit's object, diagnostics and exit status are
+the ordinary compile's.
+
+For a body it takes:
+
+- **The reader** decides every body before its expressions' walk reads any
+  (`check_input_expressions_coded_range`) and masks the taken ones' tokens
+  (`node_bodies_mask`: `CheckInput.deferred_tokens`, with
+  `CheckInput.node_bodies` saying whose mask it is). The walk makes no node of
+  them. Every pass before the walk has read the body as any body: its names,
+  its declarations, its strings' records, its labels. The reader's pass after
+  the walk that reads a body's tokens for what it reports outside the body
+  still reads it (`check_input_fp_types`: a type that is available only in the
+  default evaluation method, used in a body and reported at its typedef): a
+  use in a taken body is a use.
+- **The initializers' stage** makes no plan for a declaration in it.
+- **The program** keeps it as its unit's, with no control and no return flow
+  of its own (the producer proved that silent); its references are the objects
+  its kept tapes name, a global's entry's and a direct call's callee's
+  (`check_program_taken_references`).
+- **The lowering** runs its own setup of the function (its ABI row, its
+  parameters, its declared locals in their order) and its own end (the
+  implicit return, the labels' resolution, the calls' locations, the
+  validation), unchanged. Between them `check_lower_taken_body` writes each
+  control the producer kept, in order: its label; its expression's kept tape
+  (`check_lower_taken_tape`: a temporary is a local the writer adds, a label
+  one the writer numbers and places at its entry, a call's row one the writer
+  adds as a plain call's with its signature for the part's locations, a
+  declared object's local the writer's map's, its address marked taken where an
+  entry takes it, and a global's object the program's symbol); and the
+  control's own entries, as `check_lower_control` writes them (a condition's
+  branch where its expression is none, a jump, a return, an initialization's
+  store).
+- **What the splice does not expect of a tape fails the unit** as an internal
+  error (a root not kept, a local without a place, a callee without a symbol):
+  nothing is guessed.
+
+**A unit that takes no body pays nothing.** The producer has reasons of a
+unit's own to take none of its bodies (a `-W` option, a diagnostic pragma, an
+error before the walk, and the others of its list). A compile asks that first
+(`node_producer_unit`, which reads what the reader has before its expressions'
+walk and nothing of the machine), and a unit with one has no front: neither
+machine is begun for it, and the walk acts as without the option. Its
+`--time-stages` line then reads `bodies=0 taken=0`. Before this the compiler's
+own source, which takes none for its diagnostic pragma, was 18.5 ms slower
+with the option on the 9700X, and `sqlite3.c` with `-Wall -Wextra` 5.8 ms; they
+are -0.67 ms and +0.29 ms now, paired, five rounds each.
+
+With `--time-stages` the unit prints `node-bodies: bodies=N taken=M tokens=T
+graph-nodes=G`: the bodies the producer decided, those the compile took, their
+tokens, and the nodes the walk made of what is left.
+
+`BUSTER_TEST_NODE_BODIES` is the tests' switch: any value forces the option on
+every command that can have it, on any number of lanes, a link's units and a
+check without an object among them, so that the programs the tests run have
+taken bodies' code and the fixtures' diagnostics are read with the mask on;
+`N:K` takes only the producer's bodies whose place among them is K modulo N,
+the others read as ever.
+
+**What it was checked against** (Develop, this session's machine, at
+`4fcadeb45`, main's head merged in; [the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)).
+A compile that takes bodies is tested by its outputs, compared with the
+ordinary compile's, and not by what its programs do: a call where the lowering
+expands one, or two operations where it fuses them, runs as well.
+
+- **The corpora:** each unit's object, diagnostics and status are the ordinary
+  compile's with the option: `sqlite3.c` (1,753 of 2,674 bodies taken), Lua's
+  34 units (545 taken), the compiler's own source (none taken: a diagnostic
+  pragma), musl's 1,336 units (4,442 taken); the same as position-independent
+  code, and with each half of the producer's bodies taken (877 and 876 of
+  `sqlite3.c`'s). With `-Wall -Wextra` the same, no body taken.
+- **349 small units,** each with one loud or unusual body between two that say
+  nothing (`scripts/gen.py`, `gen2.py`): the same, with a body taken in 329 of
+  them, 120 of those in a unit that says something; and under the 104 option
+  sets of 230 that accept a unit, 31,016 pairs of compiles, the same.
+- **The tests' own commands.** With `BUSTER_TEST_NODE_BODIES_KEEP` a run of
+  the tests with the option forced keeps each distinct command it is forced
+  on: 44,274 of the 34 blocks that compile a unit. Each replayed as ever and
+  with the bodies taken, a check without an object replayed as a compile to
+  one: 1,529 take a body, 1,041 of those make an output both ways, and every
+  output and status is the same; the diagnostics differ in 22 commands, each
+  `--time-stages`' own text.
+- **The tests with the option forced** (`BUSTER_TEST_NODE_BODIES=1`, then
+  `2:0` and `2:1`, each half of the producer's bodies): the 34 blocks pass each
+  way, 4,962 of their units with a taken body. The whole inventory forced
+  (at `d06fbb705`): no block of its 156 fails that passes without the option;
+  26 fail both ways on this machine, which lacks the frozen corpora and the
+  CPU counts they ask.
+- **The memory and address rows** with the option forced: 34 blocks each, 34 passed and
+  no report; and the sanitized compiler with the option forced on `sqlite3.c`,
+  Lua's units and a quarter of musl's (418 units, 407 to an object): each
+  object the plain compile's, no report.
+- **Single faults:** twelve single changes to the splice, the program's hook,
+  the initializers' skip, the reader's pass and two of the producer's rules,
+  each built and run against the driver's eight parts: each fails the option's
+  test or the gate's.
+
+**Its price** (the 9700X, Release, CPU 2, paired with the same binary without
+the option, at `06681bbdb`; one set of objects and of diagnostics in each
+pair):
+
+| | without | with `--node-bodies` | paired; its least and most |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`, seven rounds, ms | 117.382 | 140.247 | +23.064; +22.266, +23.419 |
+| Lua's 34 units, five rounds | 65.663 | 76.331 | +10.680; +10.403, +10.776 |
+| the compiler's own source | 617.975 | 636.013 | +18.549; +14.735, +21.119 |
+| musl's 1,336 units | 662.998 | 757.900 | +95.027; +94.254, +95.739 |
+
+It is slower on each: the reference machine that makes a taken body's tapes
+costs more than the walk and the lowering's tasks it replaces, and a unit pays
+for the producer's columns whether it takes a body or not (the compiler's own
+source takes none). On `sqlite3.c` the 23.06 ms are 95.7 M user cycles and
+31.9 M kernel cycles more. With the option off nothing moves against main's
+commit the branch stood on (`89362fd0f`): `sqlite3.c` -0.120 ms, Lua -0.183,
+the compiler's own source -4.950, musl -2.637.
 
 
 ### Compiling with the window (#2850)

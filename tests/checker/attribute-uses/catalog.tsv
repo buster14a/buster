@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-warnings
+structors.c	4	0	1	a constructor or destructor definition is never unused; one never defined, one whose attribute follows its definition, and a plain one are (#3300)
+ifunc.c	4	0	0	an ifunc resolver declared before the attribute is used; one declared after it, or named by an ignored ifunc, is unused (#3300)
+alias.c	5	0	0	an alias target declared before the attribute is used; a later one, an asm-labelled one, and weakref and pragma targets are unused (#3300)

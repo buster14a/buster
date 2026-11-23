@@ -178,6 +178,10 @@ struct X86Target
     X86Architecture architecture;
     // Clang's CPU identity macros describe -march, even with an explicit -mtune.
     bool native_znver5;
+    // Whether the tuning CPU (-mtune's, else -march's; a function's tune= or arch=) has LLVM's TuningSlowUAMem16, whose
+    // unaligned 16-byte accesses are slow without SSE4.2: clang's code then moves a constant memmove's bytes in 8-byte
+    // pieces, and so inlines no more than 64 of them at -O0 (c_predefines.c's predefines_slow_unaligned, #1373).
+    bool slow_unaligned_16;
 };
 
 typedef struct X86CpuId X86CpuId;

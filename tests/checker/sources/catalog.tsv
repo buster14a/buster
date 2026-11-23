@@ -432,3 +432,8 @@ quadratic-generic-duplicate	quadratic-generic-duplicate.c	rejected	a duplicate t
 quadratic-typeof-chains	quadratic-typeof-chains.c	-	typeof queries nested as the whole type name of the one around them (#2995)
 quadratic-statement-expressions	quadratic-statement-expressions.c	-	statement expressions nested 100 deep, in loops and switches with GNU break and continue, and many under deep blocks (#2995; the program tests run it, against GCC, and count its walks)
 quadratic-vla-bounds	quadratic-vla-bounds.c	-	a variable-length array of 100 bounds, a declaration of 100 such declarators, and arrays of several in nested blocks (#2995; the program tests run it and count its walks)
+jump-contexts	jump-contexts.c	-	break and continue in a deep else-if chain, nested bodies and GNU loop heads inside an outer loop (#3220)
+jump-contexts-invalid	jump-contexts-invalid.c	rejected	jumps past a loop, in its head or in a sibling statement (#3220)
+weak-alias-object-lazy	weak-alias-object-lazy.c	overload-none	a weak object alias leaves overload tables absent for deferred checking (#2449)
+weak-alias-function-overload	weak-alias-function-overload.c	overload-tables	weak function clone selection initializes overload tables inside constant queries (#2449)
+quadratic-switches	quadratic-switches.c	-	switches nested 200 deep, a constant switch whose dropped arms a label keeps, and blocks holding an outer switch's case (#2995; the program tests run it and count check_control_enterable's work)

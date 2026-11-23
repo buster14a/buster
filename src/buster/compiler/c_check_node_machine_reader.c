@@ -67,6 +67,13 @@ struct NodeMachineReader
     uint32_t strings;
     // The census's tests at reader time (c_check_node_census.c's), or null.
     struct NodeCensusReader* tests;
+    // Whether `graph` is the machine's own, made of the front's records alone (c_check_node_machine_alone.c): a chunk's
+    // run then leaves it as it stands, where it otherwise takes the reader's graph as the walk has left it.
+    bool alone;
+    // With `alone`: the chunk has one run, which keeps what a compile would keep of a root (its records' place, its
+    // verdicts, its tape and what is beside it), with no digest and no count (BUSTER_NODE_READER_PRODUCE_LEAN: the
+    // producer as a compile would run it). Nothing of a root is then compared with the walk's.
+    bool keeps;
     // #2850's fact words' kernel at reader time (c_check_node_machine_facts.c's), or null.
     struct NodeFactsReader* facts;
 };
@@ -136,6 +143,9 @@ static void node_machine_settle(NodeMachine* machine)
 // steps: its prototype's arguments, a memory builtin's size a constant of at most BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES,
 // its callee without an asm label), with the size's and the callee's values read of T's records where the program reads
 // the stream's.
+// A memmove of 33 to 128 bytes it takes as its row's limit has it (cbuiltin_library_inline_bytes): at reader time it sees
+// no function's tuning or minsize, with which the program keeps one past 64 or 32 bytes a call (#1373,
+// check_program_move_bytes), and the shadow counts the difference.
 static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_t r, uint32_t node)
 {
     const CheckGraph* graph = machine->graph;
@@ -158,7 +168,7 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
             marked = op != CHECK_OP_BUILTIN_QUERY && op != CHECK_OP_STATEMENT_VALUE && op != CHECK_OP_INITIALIZE && node_machine_record_category(machine, size) == CHECK_RVALUE &&
                      node_machine_record_constant_kind(machine, size) == CHECK_CONSTANT_INTEGER && node_machine_record_fault(machine, size) == CHECK_FAULT_NONE &&
                      (node_machine_record_flags(machine, size) & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0 &&
-                     node_machine_record_integer(machine, size) <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
+                     node_machine_record_integer(machine, size) <= cbuiltin_library_inline_bytes(computed);
         }
         const uint32_t callee = node_machine_record_left(machine, r);
         const uint32_t object = marked && callee < r ? node_machine_record_object(machine, callee) : 0;
@@ -217,6 +227,11 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
                     symbols[object] = object;
                     const uint32_t bits = attributes != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_program_attribute_bits(attributes) : 0;
                     machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_TWICE : 0;
+                    machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_INLINED : 0;
+                    // A function with a target of its own (a target, its clones, a processor's version or its dispatch):
+                    // no machine reads the attribute's string here, and the unit is taken for one whose target fuses a
+                    // product and a sum (NodeMachine.fuses).
+                    machine->fuses |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET) != 0;
                 }
                 // The asm pass, which runs after the bodies, ignores a label on a declaration of an object that a
                 // declaration before it defines, where none before it kept a label (check_input_asm_labels): the same of
@@ -273,7 +288,11 @@ static uint64_t node_machine_digest(const NodeMachine* machine, NodeMachineRefus
         digest = node_machine_mix(digest, (uint64_t)value.object << 32 | value.overload_head);
         digest = node_machine_mix(digest, (uint64_t)value.offset);
         digest = node_machine_mix(digest, (uint64_t)value.bit_width << 32 | (uint64_t)value.fault);
-        digest = node_machine_mix(digest, (uint64_t)value.fault_node << 32 | value.object_bit_offset);
+        // A fault's node as its record of the expression's: the nodes are another graph's where the machine reads the
+        // front's records alone (c_check_node_machine_alone.c), and the record is the same in both.
+        const uint32_t fault_record = value.fault == CHECK_FAULT_NONE ? value.fault_node : value.fault_node == machine->root ? machine->count - 1 :
+                                                                                           value.fault_node - machine->first;
+        digest = node_machine_mix(digest, (uint64_t)fault_record << 32 | value.object_bit_offset);
         digest = node_machine_mix(digest, (uint64_t)columns->words[r] << 32 | (uint64_t)columns->facts[r] << 8 | columns->value_classes[r]);
         digest = node_machine_mix(digest, (uint64_t)node_machine_record_converted(machine, r, 0) << 32 | node_machine_record_conversion_flags(machine, r, 0));
         digest = node_machine_mix(digest, (uint64_t)node_machine_record_converted(machine, r, 1) << 32 | node_machine_record_conversion_flags(machine, r, 1));
@@ -310,6 +329,340 @@ static uint64_t node_machine_side_digest(const NodeMachine* machine)
     return digest;
 }
 
+// Whether the machine's current expression's root's value converts to `target` as a direct assignment's source does
+// without a diagnostic: node_machine_store_rule's test of its conversion (a builtin arithmetic type to another, a pointer
+// to the same pointer type, a null pointer constant or a pointer node_machine_pointer_assignable takes to a pointer). An
+// initialization's value owes it to its declared type, and T, which types the value without its INITIALIZE record, does
+// not ask. It is narrower than what the action takes quietly (an enumeration's value, among others, is left out).
+static bool node_machine_root_converts(NodeMachine* machine, TypeId target)
+{
+    const TypeTable* types = machine->types;
+    NodeMachineOperand source;
+    CheckConversion conversion;
+    bool taken = machine->count != 0 && type_is_valid(types, target) && node_machine_operand_value(machine, machine->count - 1, &source, &conversion);
+    if (taken)
+    {
+        const uint8_t target_kind = check_action_kind(types, target);
+        taken = target_kind != BUSTER_TYPE_KIND_ATOMIC && check_action_kind(types, source.type) != BUSTER_TYPE_KIND_ATOMIC && target_kind != BUSTER_TYPE_KIND_VOID;
+        const TypeId converted = taken ? type_conversion_operand(types, target) : target;
+        taken = taken && (node_machine_assignable(machine, converted, source.type) ||
+                          (check_action_kind(types, converted) == BUSTER_TYPE_KIND_POINTER &&
+                           (node_machine_null(machine, &source) || node_machine_pointer_assignable(machine, converted, source.type))));
+    }
+    return taken;
+}
+
+// The most records of a conditional's or a comma's arms that wait to be asked at once, where each arm's own are asked
+// before the other's and a nesting stops at 8: one a level, and the one at hand.
+#define BUSTER_NODE_MACHINE_ARMS 16u
+
+// The enumeration that record `r` itself is of, its arms aside: its value's type where that is one; an enumerator's leaf's
+// own enumeration (its type is int), UINT32_MAX where its definition is not found. 0 for none.
+static TypeId node_machine_record_enumeration_own(const NodeMachine* machine, uint32_t r)
+{
+    const TypeTable* types = machine->types;
+    const CheckInput* input = machine->input;
+    const CheckGraph* graph = machine->graph;
+    const TypeId own = type_unqualified(type_strip_aligned(types, node_machine_record_type(machine, r)));
+    TypeId result = own != 0 && type_kind(types, own) == BUSTER_TYPE_KIND_ENUM ? own : 0;
+    if (node_machine_record_op(machine, r) == CHECK_OP_VALUE && result == 0)
+    {
+        const uint32_t node = r + 1 == machine->count ? machine->root : machine->first + r;
+        const uint32_t token = node < graph->count ? graph->tokens[node] : BUSTER_CHECK_NONE;
+        const uint32_t declaration = token < input->token_count && input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
+        if (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR)
+        {
+            // The innermost definition that holds the declaration and has closed before the leaf: every definition is
+            // asked (they are few), since one nested in an enumerator's value or in a fixed underlying type is not in its
+            // braces' order.
+            uint32_t selected = 0;
+            for (uint32_t i = 0; i < machine->reader_enum_count; i += 1)
+            {
+                const CheckInputEnumDefinition* definition = machine->reader_enums + i;
+                const uint32_t candidate = definition->open < declaration && declaration < definition->close && token > definition->close ? i + 1 : 0;
+                selected = candidate != 0 && (selected == 0 || definition->open > machine->reader_enums[selected - 1].open) ? candidate : selected;
+            }
+            // (An enumerator whose definition is not found is of an enumeration all the same: of none that another is.)
+            result = selected != 0 ? type_unqualified(type_strip_aligned(types, machine->reader_enums[selected - 1].type)) : UINT32_MAX;
+        }
+    }
+    return result;
+}
+
+// The enumeration that record `r` of the machine's current expression is of, as the enumerations' warnings read an
+// operand (check_common_enum_coerced, check_common_enum_cast): its own (node_machine_record_enumeration_own); a comma's
+// second operand's; a conditional's arms', where they agree or one has none. 0 for none, and UINT32_MAX for arms of two
+// enumerations or a nesting past `depth`. The arms are asked from a list, with no call of itself (the call graph's
+// rule): a record that is a conditional or a comma with no enumeration of its own puts its arms there, each with the
+// nesting left to it, and every other one's enumeration joins the answer.
+static TypeId node_machine_record_enumeration(const NodeMachine* machine, uint32_t r, uint32_t depth)
+{
+    uint32_t pending[BUSTER_NODE_MACHINE_ARMS];
+    uint32_t nesting[BUSTER_NODE_MACHINE_ARMS];
+    uint32_t count = 1;
+    TypeId result = 0;
+    pending[0] = r;
+    nesting[0] = depth;
+    while (count != 0)
+    {
+        count -= 1;
+        const uint32_t at = pending[count];
+        const uint32_t left = nesting[count];
+        const CheckOp op = node_machine_record_op(machine, at);
+        TypeId found = node_machine_record_enumeration_own(machine, at);
+        if ((op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA) && found == 0)
+        {
+            const uint32_t second = node_machine_record_right(machine, at);
+            const uint32_t third = op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, at) : UINT32_MAX;
+            const bool room = left != 0 && count + 2 <= BUSTER_NODE_MACHINE_ARMS;
+            found = room ? 0 : UINT32_MAX;
+            if (room && third != UINT32_MAX)
+            {
+                pending[count] = third;
+                nesting[count] = left - 1;
+                count += 1;
+            }
+            if (room && second != UINT32_MAX)
+            {
+                pending[count] = second;
+                nesting[count] = left - 1;
+                count += 1;
+            }
+        }
+        // Two arms of one enumeration are of it, and so is one beside an arm of none; two of different ones are of two.
+        result = found != 0 && result != 0 && found != result ? UINT32_MAX : found != 0 ? found : result;
+    }
+    return result;
+}
+
+// Whether the conversion of record `r`'s own value to `target` may be warned of for a constant it changes, its arms
+// aside: an integer constant, but to a floating target that holds it exactly whatever its type (under 2^24); a floating
+// constant to what is no floating type at least as large; a constant the columns do not hold whole.
+static bool node_machine_arm_changes_own(const NodeMachine* machine, uint32_t r, TypeId target)
+{
+    const TypeTable* types = machine->types;
+    const CheckConstantKind kind = node_machine_record_constant_kind(machine, r);
+    const TypeId source = node_machine_record_type(machine, r);
+    const bool target_floating = check_action_kind(types, target) == BUSTER_TYPE_KIND_FLOATING;
+    bool changes = false;
+    if (kind == CHECK_CONSTANT_INTEGER)
+    {
+        uint32_t width = 0;
+        bool is_signed = false;
+        const bool whole = node_machine_record_wide(machine, r) == NULL && (machine->columns->standings[r] & BUSTER_NODE_MACHINE_FIELD) == 0 &&
+                           check_action_integer_type(types, source, &width, &is_signed) && width != 0 && width <= 64;
+        const uint64_t raw = whole ? machine->columns->payloads[r] : 0;
+        const uint32_t shift = whole ? 64 - width : 0;
+        const int64_t value = is_signed ? (int64_t)(raw << shift) >> shift : (int64_t)((raw << shift) >> shift);
+        const bool huge = whole && !is_signed && width == 64 && (raw >> 63) != 0;
+        const bool exact = whole && target_floating && !huge && value > -(INT64_C(1) << 24) && value < (INT64_C(1) << 24);
+        changes = !exact;
+    }
+    else if (kind == CHECK_CONSTANT_FLOATING)
+    {
+        changes = !(target_floating && check_action_kind(types, source) == BUSTER_TYPE_KIND_FLOATING && type_size(types, target) >= type_size(types, source));
+    }
+    return changes;
+}
+
+// Whether the conversion of record `r`'s value to `target` may be warned of for a constant it changes, where the record
+// is a conditional (or a comma, by its second operand) and its arms carry the conversion (clang's
+// CheckConditionalOperator; check_common_conversion_arms): an arm that is such a constant
+// (node_machine_arm_changes_own), or a nesting past `depth`. (T takes a conditional's conversion to a floating target
+// alone so far: an integer constant arm to an integer target is refused here whatever its value.) The arms are asked
+// from a list, as node_machine_record_enumeration asks them.
+static bool node_machine_arm_changes(const NodeMachine* machine, uint32_t r, TypeId target, uint32_t depth)
+{
+    uint32_t pending[BUSTER_NODE_MACHINE_ARMS];
+    uint32_t nesting[BUSTER_NODE_MACHINE_ARMS];
+    uint32_t count = 1;
+    bool changes = false;
+    pending[0] = r;
+    nesting[0] = depth;
+    while (count != 0 && !changes)
+    {
+        count -= 1;
+        const uint32_t at = pending[count];
+        const uint32_t left = nesting[count];
+        const CheckOp op = node_machine_record_op(machine, at);
+        if (op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA)
+        {
+            const uint32_t second = node_machine_record_right(machine, at);
+            const uint32_t third = op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, at) : UINT32_MAX;
+            const bool room = left != 0 && count + 2 <= BUSTER_NODE_MACHINE_ARMS;
+            changes = !room;
+            if (room && third != UINT32_MAX)
+            {
+                pending[count] = third;
+                nesting[count] = left - 1;
+                count += 1;
+            }
+            if (room && second != UINT32_MAX)
+            {
+                pending[count] = second;
+                nesting[count] = left - 1;
+                count += 1;
+            }
+        }
+        else
+        {
+            changes = node_machine_arm_changes_own(machine, at, target);
+        }
+    }
+    return changes;
+}
+
+// Whether the walk's actions or the passes after it may warn of the machine's current expression for what neither T's
+// rules nor the census's tests at reader time stand for (BUSTER_NODE_FRONT_SIDE_LOUD), by T's records:
+// - two enumerations meeting: an operator's two operands (an arithmetic, bitwise, shift or comparison operator's, their
+//   assignments', a conditional's arms) of different enumerations, or one of an enumeration and one of a floating type
+//   (check_common_enum_arithmetic); and a value of an enumeration converted to another (an operand's conversion, an
+//   assignment's stored value, a call's argument, a return's: check_common_enum_cast). An enumerator is of its own
+//   enumeration there, though its type is int, which is what the census's test of the operands' types does not see;
+// - a conditional whose conversion to another type changes a constant arm (node_machine_arm_changes).
+// `initialized` is the type of the object the root's value initializes (0 for a root that is no initialization's): that
+// conversion is asked of the root's own record.
+// The first is asked only in a unit that defines an enumeration (NodeMachine.reader_enums), and the second only of an
+// expression with a conditional. It refuses more than is warned of: the ranges that keep clang from comparing two enumerations
+// (check_common_enum_cast_reached), an unnamed enumeration and a compound assignment's silence are not read.
+static bool node_machine_root_loud(const NodeMachine* machine, TypeId initialized)
+{
+    const TypeTable* types = machine->types;
+    const CheckInput* input = machine->input;
+    const uint32_t count = machine->count;
+    const bool enums = input != NULL && machine->reader_enum_count != 0;
+    bool conditional = false;
+    for (uint32_t r = 0; r < count; r += 1)
+    {
+        conditional |= machine->columns->codes[r] == CHECK_OP_CONDITIONAL;
+    }
+    bool loud = false;
+    for (uint32_t r = 0; (enums || conditional) && r < count && !loud; r += 1)
+    {
+        const CheckOp op = node_machine_record_op(machine, r);
+        if (op == CHECK_OP_VALUE || op == CHECK_OP_CAST)
+        {
+            continue;
+        }
+        const uint32_t operands[3] = { node_machine_record_left(machine, r), node_machine_record_right(machine, r),
+                                       op == CHECK_OP_CONDITIONAL ? node_machine_record_third(machine, r) : UINT32_MAX };
+        const bool mixes = (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) || op == CHECK_OP_ADD || op == CHECK_OP_SUBTRACT || op == CHECK_OP_MULTIPLY ||
+                           op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || op == CHECK_OP_BIT_AND || op == CHECK_OP_BIT_OR || op == CHECK_OP_BIT_XOR ||
+                           op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT || op == CHECK_OP_ADD_ASSIGN || op == CHECK_OP_SUBTRACT_ASSIGN ||
+                           op == CHECK_OP_MULTIPLY_ASSIGN || op == CHECK_OP_DIVIDE_ASSIGN || op == CHECK_OP_REMAINDER_ASSIGN || op == CHECK_OP_BIT_AND_ASSIGN ||
+                           op == CHECK_OP_BIT_OR_ASSIGN || op == CHECK_OP_BIT_XOR_ASSIGN || op == CHECK_OP_SHIFT_LEFT_ASSIGN || op == CHECK_OP_SHIFT_RIGHT_ASSIGN;
+        if (enums && (mixes || op == CHECK_OP_CONDITIONAL))
+        {
+            const uint32_t left = op == CHECK_OP_CONDITIONAL ? operands[1] : operands[0];
+            const uint32_t right = op == CHECK_OP_CONDITIONAL ? operands[2] : operands[1];
+            const TypeId a = left != UINT32_MAX ? node_machine_record_enumeration(machine, left, 8) : 0;
+            const TypeId b = right != UINT32_MAX ? node_machine_record_enumeration(machine, right, 8) : 0;
+            const bool a_floating = left != UINT32_MAX && check_action_kind(types, node_machine_record_type(machine, left)) == BUSTER_TYPE_KIND_FLOATING;
+            const bool b_floating = right != UINT32_MAX && check_action_kind(types, node_machine_record_type(machine, right)) == BUSTER_TYPE_KIND_FLOATING;
+            loud = (a != 0 && b != 0 && a != b) || a == UINT32_MAX || b == UINT32_MAX || (a != 0 && b_floating) || (b != 0 && a_floating);
+        }
+        // Each operand's conversion: to the type the operator converts it to; a conversion's or an initialization's own
+        // type; an assignment's first operand's type for its second.
+        for (uint32_t k = 0; k < 3 && !loud; k += 1)
+        {
+            const uint32_t o = operands[k];
+            TypeId target = o == UINT32_MAX ? 0 : k < 2 ? node_machine_record_converted(machine, r, k) : node_machine_record_converted_third(machine, r);
+            target = target == 0 && o != UINT32_MAX && k == 0 && (op == CHECK_OP_CONVERT || op == CHECK_OP_INITIALIZE) ? node_machine_record_type(machine, r) : target;
+            target = target == 0 && o != UINT32_MAX && k == 1 && op == CHECK_OP_ASSIGN && operands[0] != UINT32_MAX ? node_machine_record_type(machine, operands[0]) : target;
+            const TypeId plain = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
+            if (plain != 0 && plain != BUSTER_TYPE_VOID)
+            {
+                const TypeId from = enums && type_kind(types, plain) == BUSTER_TYPE_KIND_ENUM ? node_machine_record_enumeration(machine, o, 8) : 0;
+                const CheckOp inner = node_machine_record_op(machine, o);
+                const bool arms = (inner == CHECK_OP_CONDITIONAL || inner == CHECK_OP_COMMA) &&
+                                  type_unqualified(type_strip_aligned(types, node_machine_record_type(machine, o))) != plain;
+                loud = (from != 0 && from != plain) || (arms && node_machine_arm_changes(machine, o, plain, 8));
+            }
+        }
+        for (uint32_t i = 0; op == CHECK_OP_CALL && !loud && i < node_machine_record_argument_count(machine, r); i += 1)
+        {
+            const uint32_t o = node_machine_record_argument(machine, r, i);
+            const TypeId target = node_machine_record_argument_converted(machine, r, i);
+            const TypeId plain = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
+            if (plain != 0 && o < count)
+            {
+                const TypeId from = enums && type_kind(types, plain) == BUSTER_TYPE_KIND_ENUM ? node_machine_record_enumeration(machine, o, 8) : 0;
+                const CheckOp inner = node_machine_record_op(machine, o);
+                const bool arms = (inner == CHECK_OP_CONDITIONAL || inner == CHECK_OP_COMMA) &&
+                                  type_unqualified(type_strip_aligned(types, node_machine_record_type(machine, o))) != plain;
+                loud = (from != 0 && from != plain) || (arms && node_machine_arm_changes(machine, o, plain, 8));
+            }
+        }
+    }
+    // An initialization's value's conversion to its object's type, which no record holds (T types the value without its
+    // INITIALIZE record): the root's record's, asked the same.
+    if ((enums || conditional) && !loud && initialized != 0 && count != 0)
+    {
+        const uint32_t o = count - 1;
+        const TypeId plain = type_unqualified(type_strip_aligned(types, initialized));
+        const TypeId from = enums && type_kind(types, plain) == BUSTER_TYPE_KIND_ENUM ? node_machine_record_enumeration(machine, o, 8) : 0;
+        const CheckOp inner = node_machine_record_op(machine, o);
+        const bool arms = (inner == CHECK_OP_CONDITIONAL || inner == CHECK_OP_COMMA) && type_unqualified(type_strip_aligned(types, node_machine_record_type(machine, o))) != plain;
+        loud = (from != 0 && from != plain) || (arms && node_machine_arm_changes(machine, o, plain, 8));
+    }
+    return loud;
+}
+
+// What a splice reads of the machine's current expression beside its tape (NodeFrontTypes.side_*), kept by its root's
+// node `root`: its labels' places, its calls' rows, its temporaries and its root's facts. `initialized` is the type of the
+// object the root's value initializes, without its qualifiers, or 0 for a root that is no initialization's. A root C and X refused, or one
+// the stores have no room for, keeps none (its labels' first is UINT32_MAX).
+static void node_machine_reader_side(NodeFrontTypes* types, NodeMachine* machine, uint32_t root, bool taken, TypeId initialized)
+{
+    uint64_t arguments = 0;
+    for (uint32_t call = 0; taken && call < machine->call_count; call += 1)
+    {
+        arguments += node_machine_record_argument_count(machine, machine->call_records[call]);
+    }
+    const bool room = taken && machine->label_count <= types->side_capacity - types->side_label_count && machine->call_count <= types->side_capacity - types->side_call_count &&
+                      arguments <= types->side_capacity - types->side_argument_count;
+    types->side_label_firsts[root] = room ? (uint32_t)types->side_label_count : UINT32_MAX;
+    types->side_label_counts[root] = room ? machine->label_count : 0;
+    types->side_call_firsts[root] = room ? (uint32_t)types->side_call_count : 0;
+    types->side_call_counts[root] = room ? machine->call_count : 0;
+    types->side_temporaries[root] = room ? machine->temporary_count : 0;
+    types->side_facts[root] = 0;
+    types->side_unkept += taken && !room;
+    if (room)
+    {
+        // The root's record is the expression's last: a statement's condition's is its truth, a constant where its
+        // operand's value is one (an lvalue's own kind is its address's, and says nothing of its value).
+        const uint32_t last = machine->count - 1;
+        const bool constant = node_machine_record_constant_kind(machine, last) != CHECK_CONSTANT_NONE;
+        types->side_facts[root] = (uint8_t)(((node_machine_record_state(machine, last) & BUSTER_NODE_MACHINE_BRANCHED) != 0 ? BUSTER_NODE_FRONT_SIDE_BRANCHED : 0u) |
+                                            (constant ? BUSTER_NODE_FRONT_SIDE_CONSTANT : 0u));
+        memcpy(types->side_labels + types->side_label_count, machine->label_entries, (uint64_t)machine->label_count * sizeof(uint32_t));
+        types->side_label_count += machine->label_count;
+        for (uint32_t call = 0; call < machine->call_count; call += 1)
+        {
+            const uint32_t r = machine->call_records[call];
+            const uint32_t count = node_machine_record_argument_count(machine, r);
+            const uint64_t row = types->side_call_count;
+            types->side_call_targets[row] = node_machine_call_target(machine, r);
+            types->side_call_argument_counts[row] = count;
+            types->side_call_argument_firsts[row] = (uint32_t)types->side_argument_count;
+            types->side_call_variadic[row] = node_machine_call_variadic(machine, r);
+            types->side_call_types[row] = node_machine_callee_function(machine, node_machine_record_left(machine, r));
+            types->side_call_results[row] = node_machine_record_type(machine, r);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                types->side_argument_classes[types->side_argument_count + i] = node_machine_class(machine, node_machine_record_argument_converted(machine, r, i));
+                types->side_argument_types[types->side_argument_count + i] = node_machine_record_argument_converted(machine, r, i);
+            }
+            types->side_argument_count += count;
+            types->side_call_count += 1;
+        }
+        // Last, since it reads the root's value as an operand: whether it converts to its consumer's target quietly.
+        types->side_facts[root] |= initialized != 0 && node_machine_root_converts(machine, initialized) ? BUSTER_NODE_FRONT_SIDE_CONVERTS : 0u;
+        types->side_facts[root] |= node_machine_root_loud(machine, initialized) ? BUSTER_NODE_FRONT_SIDE_LOUD : 0u;
+    }
+}
+
 // The conversion's target the lowering's task gives the machine's current expression's root where its consumer converts
 // it to `to` (check_lower_expression's, which a pop logs): `to` where the root's type isn't it and the conversion writes
 // entries (check_lower_conversion_empty's test, of the types' words), 0 otherwise.
@@ -325,10 +678,7 @@ static TypeId node_machine_reader_target(const NodeMachine* machine, TypeId to)
         const uint8_t to_facts = (uint8_t)(to_word >> 8);
         const uint8_t source = (from_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)from_word;
         const uint8_t class = (to_facts & BUSTER_CHECK_LOWER_TYPE_AGGREGATE) != 0 ? BUSTER_TYPED_CLASS_U64 : (uint8_t)to_word;
-        const bool empty = source == class && source < BUSTER_TYPED_CLASSES &&
-                           ((from_facts ^ to_facts) & (BUSTER_CHECK_LOWER_TYPE_AGGREGATE | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0 &&
-                           ((from_facts | to_facts) & BUSTER_CHECK_LOWER_TYPE_COMPLEX) == 0 &&
-                           (to_facts & (BUSTER_CHECK_LOWER_TYPE_BOOL | BUSTER_CHECK_LOWER_TYPE_BIT_INT)) == 0;
+        const bool empty = check_lower_conversion_empty_by_class(source, from_facts, class, to_facts);
         target = empty ? 0 : to;
     }
     return target;
@@ -392,8 +742,11 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         typer->strings = 0;
         typer->tests = NULL;
         typer->facts = NULL;
+        typer->alone = false;
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
                                          symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
+        typer->machine.fuses |= (reader->pp->options.target.features & BUSTER_NODE_MACHINE_FUSED) != 0;
+        typer->machine.marks = (options & BUSTER_NODE_READER_WINDOW) == 0;
     }
     if (room)
     {
@@ -534,15 +887,20 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
     const bool tested = typer->tests != NULL;
     const bool last = (reader->pp->options.node_reader & BUSTER_NODE_READER_LAST) != 0;
     // The graph as it stands after the chunk, and the types made since the last.
-    typer->graph = reader->output->graph;
-    typer->graph.contexts = front->shadow->contexts;
+    if (!typer->alone)
+    {
+        typer->graph = reader->output->graph;
+        typer->graph.const_values = &reader->output->const_values;
+        typer->graph.contexts = front->shadow->contexts;
+    }
     node_machine_settle(machine);
     node_machine_reader_strings(typer, reader->output);
     if (tested)
     {
         node_census_reader_chunk(typer->tests, reader);
     }
-    for (uint32_t pass = 0; pass < 2; pass += 1)
+    const bool keeps = typer->keeps && typer->alone && types->side_label_firsts != NULL;
+    for (uint32_t pass = 0; pass < (keeps ? 1u : 2u); pass += 1)
     {
         const uint64_t start = __rdtsc();
         for (uint32_t record = front->made; record < front->count; record += 1)
@@ -571,7 +929,21 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                     // record's VALUE context even when the outer node lies beyond the shadow's capacity.
                     const uint32_t initializer = front->tokens[record];
                     const bool required = initialization && initializer < reader->parser->tokens.count && BUSTER_CHECK_RARE(reader, static_initializers, initializer);
+                    // (The first run by sweep where the unit asks: a clock's read before each and after the last.)
+                    const bool split = pass == 0 && types->split;
+                    const uint64_t typing = split ? __rdtsc() : 0;
                     const NodeMachineRefusal refusal = node_machine_type_in_context(machine, first, root, records, required);
+                    if (split)
+                    {
+                        types->sweep_ticks[0] += __rdtsc() - typing;
+                        types->sweep_reads += 2;
+                    }
+                    if (keeps)
+                    {
+                        types->firsts[root] = first;
+                        types->counts[root] = records;
+                        types->refusals[root] = (uint8_t)refusal;
+                    }
                     if (pass != 0)
                     {
                         types->digests[root] = node_machine_digest(machine, refusal);
@@ -600,7 +972,21 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         const uint32_t declaration = initialization && token < reader->parser->tokens.count ? reader->initializer_declarations[token] : BUSTER_CHECK_NONE;
                         const TypeId declared = declaration < reader->output->token_count ? reader->declared_types[declaration] : 0;
                         uint8_t kind = 0;
+                        const uint64_t testing = split ? __rdtsc() : 0;
                         verdict = node_census_reader_expression(typer->tests, root, (CheckOp)front->ops[record], token, declaration, declared, &kind, NULL);
+                        if (split)
+                        {
+                            types->sweep_ticks[1] += __rdtsc() - testing;
+                            types->sweep_reads += 2;
+                        }
+                        if (keeps)
+                        {
+                            types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_TESTED;
+                            types->tests[root] = verdict;
+                            types->kinds[root] = kind;
+                            types->declared[root] = declared;
+                            types->declarations[root] = declaration;
+                        }
                         if (pass != 0)
                         {
                             types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_TESTED;
@@ -634,10 +1020,37 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                         }
                         const uint64_t expand_start = __rdtsc();
                         swept = swept == NODE_MACHINE_TAKEN ? node_machine_expand(machine, object) : swept;
+                        if (split)
+                        {
+                            types->sweep_ticks[2] += expand_start - contexts_start;
+                            types->sweep_ticks[3] += __rdtsc() - expand_start;
+                            types->sweep_reads += 1;
+                        }
                         if (pass != 0 && typer->facts != NULL)
                         {
                             // The reference of X's rows on the window: this run's ticks; its tape is kept below.
                             node_facts_reader_rows(typer->facts, __rdtsc() - expand_start);
+                        }
+                        if (keeps)
+                        {
+                            const bool taken = swept == NODE_MACHINE_TAKEN;
+                            const uint32_t entries = taken ? machine->entry_count : 0;
+                            const bool kept = entries <= types->tape_capacity - types->tape_count;
+                            types->refusals[root] |= BUSTER_NODE_FRONT_TYPED_SWEPT;
+                            types->sweep_refusals[root] = (uint8_t)swept;
+                            types->targets[root] = target;
+                            types->objects[root] = object;
+                            types->tape_firsts[root] = (uint32_t)types->tape_count;
+                            types->tape_counts[root] = kept ? entries : UINT32_MAX;
+                            if (kept && entries != 0)
+                            {
+                                memcpy(types->tape_kinds + types->tape_count, machine->kinds, entries);
+                                memcpy(types->tape_classes + types->tape_count, machine->classes, entries);
+                                memcpy(types->tape_values + types->tape_count, machine->tape, (uint64_t)entries * sizeof(uint64_t));
+                                types->tape_count += entries;
+                            }
+                            node_machine_reader_side(types, machine, root, taken,
+                                                     initialization && front->nodes[record] < typer->graph.count ? type_unqualified(typer->graph.types[front->nodes[record]]) : 0);
                         }
                         if (pass != 0)
                         {
@@ -657,6 +1070,11 @@ static void node_machine_reader_chunk(NodeMachineReader* typer, const NodeFront*
                                 memcpy(types->tape_classes + types->tape_count, machine->classes, entries);
                                 memcpy(types->tape_values + types->tape_count, machine->tape, (uint64_t)entries * sizeof(uint64_t));
                                 types->tape_count += entries;
+                            }
+                            if (types->side_label_firsts != NULL)
+                            {
+                                node_machine_reader_side(types, machine, root, taken,
+                                                     initialization && front->nodes[record] < typer->graph.count ? type_unqualified(typer->graph.types[front->nodes[record]]) : 0);
                             }
                             types->swept += 1;
                             types->swept_refused[swept] += 1;

@@ -50,7 +50,9 @@
 // shared library's symbol only by the kinds that can reach one from an executable: through the GOT (CALL_GOT, LOAD_GOT,
 // GOTPCREL and GOTTPOFF), by ABS64, which the executable relocates when it loads, and for a function by CALL, which
 // the executable sends through a stub. It checks the fixup rules above again too, for columns that lanes filled
-// themselves.
+// themselves. Its checks go eight records a vector (link_check_symbols, link_check_priorities and, an atom at a time,
+// link_check_atom_fixups), the records' rows gathered by their ids: it reads every record of a link that is about to be
+// written, which a compile's static hello world, whose runtime joins 12,000 fixups, paid for a record at a time (#2546).
 //
 // Code: link_add_code_fixups turns x86_encode's output into an atom's fixups (docs/object-writer-and-linker.md, "Fixups
 // from the encoder"). The code generator marks each instruction with a symbolic field (BUSTER_X86_FORM_FIXUP) and
@@ -75,7 +77,9 @@
 //   - Tables: link_capacity_bytes, link_initialize, link_add_atom, link_add_symbol, link_define_symbol, link_add_fixup,
 //     link_fixup_addend and link_add_priority.
 //   - Code: link_instruction_field, link_kind_fits and link_add_code_fixups.
-//   - Checks: link_check_fixups, link_check_target and link_check.
+//   - Checks: link_check_fixups, link_check_target, link_groups_valid, link_check_lanes_below, link_check_in_set,
+//     link_check_gather_bytes, link_check_gather_words, link_check_first, link_check_symbols, link_check_priorities,
+//     link_check_own, link_check_atom_fixups and link_check.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -210,9 +214,10 @@ typedef uint32_t FixupId;
 //     R_X86_64_DTPOFF32; that offset + A, which in an executable is TPOFF32's, from the end of the block.
 //   - TPOFF64, DTPOFF64: TPOFF32's and DTPOFF32's values in 8 bytes, a 64-bit immediate (movabs rax, x@tpoff) or data
 //     (DWARF's location of a TLS variable, `.quad x@dtpoff`): R_X86_64_TPOFF64, R_X86_64_DTPOFF64 (#1115).
-// Only imported objects and the assembler have the last five (libgcc.a's decimal floating point and split-stack members,
-// GCC 16's libgcc_eh.a's heap trampolines, and compilers' -S output): the code generator makes local-exec and
-// initial-exec accesses.
+// Imported objects and the assembler have the last five (libgcc.a's decimal floating point and split-stack members,
+// GCC 16's libgcc_eh.a's heap trampolines, and compilers' -S output); the code generator makes local-exec and
+// initial-exec accesses, and in position-independent code (-fPIC's, #2101) TLSGD, TLSLD and DTPOFF32 in its
+// thread-locals' accessors (check_program_emit_tls_atoms).
 #define BUSTER_LINK_FIXUP_NONE 0
 #define BUSTER_LINK_FIXUP_CALL 1
 #define BUSTER_LINK_FIXUP_CALL_GOT 2
@@ -1340,7 +1345,7 @@ static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* 
 // The checks of link_check that the adds already make, again, for columns that lanes filled without them: every atom's
 // fixups within the table and the atom, in order and apart, with kinds and targets that exist and wide addends in the
 // side table, and every fixup in exactly one atom's range (counted in `owned`, a bit per fixup, which starts clear).
-static bool link_check_fixups(const Link* link, AtomId atom, uint64_t* owned)
+static __attribute__((unused)) bool link_check_fixups(const Link* link, AtomId atom, uint64_t* owned)
 {
     const LinkFixups* fixups = &link->fixups;
     const FixupId begin = link->atoms.fixup_begin[atom];
@@ -1461,46 +1466,232 @@ static bool link_groups_valid(const Link* link)
     return valid;
 }
 
-static LinkError link_check(Link* link)
+// link_check's vectors: eight records a batch, one in each 64-bit lane, a mask of the lanes whose record exists.
+#define BUSTER_LINK_CHECK_BATCH 8
+
+static __mmask8 link_check_lanes_below(uint64_t count)
+{
+    return (__mmask8)_bzhi_u32(0xff, count < BUSTER_LINK_CHECK_BATCH ? (uint32_t)count : BUSTER_LINK_CHECK_BATCH);
+}
+
+// The lanes whose value is one of those whose bits `set` holds (values of 64 or more are in none).
+static __mmask8 link_check_in_set(__m512i values, uint64_t set)
+{
+    return _mm512_test_epi64_mask(_mm512_srlv_epi64(_mm512_set1_epi64((long long)set), values), _mm512_set1_epi64(1));
+}
+
+// Byte `index` of `column` in each of the `lanes`, zero-extended (0 in the others): each from the aligned 32-bit word
+// that holds it, which is in the same page as the byte, so that no gather reads past a column's last page.
+static __m512i link_check_gather_bytes(const uint8_t* column, __m512i index, __mmask8 lanes)
+{
+    const uintptr_t misalignment = (uintptr_t)column & 3;
+    const int* words = (const int*)(uintptr_t)((uintptr_t)column - misalignment);
+    const __m512i at = _mm512_add_epi64(index, _mm512_set1_epi64((long long)misalignment));
+    const __m256i loaded = _mm512_mask_i64gather_epi32(_mm256_setzero_si256(), lanes, _mm512_srli_epi64(at, 2), words, 4);
+    const __m512i shift = _mm512_slli_epi64(_mm512_and_si512(at, _mm512_set1_epi64(3)), 3);
+    return _mm512_maskz_and_epi64(lanes, _mm512_srlv_epi64(_mm512_cvtepu32_epi64(loaded), shift), _mm512_set1_epi64(0xff));
+}
+
+// Element `index` of a 32-bit column in each of the `lanes`, zero-extended (0 in the others).
+static __m512i link_check_gather_words(const uint32_t* column, __m512i index, __mmask8 lanes)
+{
+    return _mm512_cvtepu32_epi64(_mm512_mask_i64gather_epi32(_mm256_setzero_si256(), lanes, index, (const int*)column, 4));
+}
+
+// The first error of a batch whose lanes failed as `id`, `binding` and `record` say, by its first failing lane, and
+// that lane's first failing rule in link_check's order (an id, then a binding, then a record); LINK_ERROR_NONE if none.
+static LinkError link_check_first(__mmask8 id, __mmask8 binding, __mmask8 record)
+{
+    const uint32_t failed = (uint32_t)(id | binding | record);
+    const uint32_t lane = failed != 0 ? (uint32_t)__builtin_ctz(failed) : 0;
+    return failed == 0                    ? LINK_ERROR_NONE :
+           ((id >> lane) & 1) != 0        ? LINK_ERROR_ID :
+           ((binding >> lane) & 1) != 0   ? LINK_ERROR_BINDING :
+                                            LINK_ERROR_RECORD;
+}
+
+// link_check's symbols, eight at a time (link_check_symbol's rules): the first error, by symbol.
+static LinkError link_check_symbols(const Link* link)
 {
     const LinkSymbols* symbols = &link->symbols;
     const LinkAtoms* atoms = &link->atoms;
-    LinkError result = link_groups_valid(link) ? LINK_ERROR_NONE : LINK_ERROR_RECORD;
-    for (SymbolId symbol = 1; result == LINK_ERROR_NONE && symbol < symbols->count; symbol += 1)
+    const __m512i name_count = _mm512_set1_epi64(link->names.count);
+    const __m512i atom_count = _mm512_set1_epi64(atoms->count);
+    const __m512i zero = _mm512_setzero_si512();
+    const uint64_t in_atom_sources = (1ull << BUSTER_LINK_SOURCE_PROGRAM) | (1ull << BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE) | (1ull << BUSTER_LINK_SOURCE_FOREIGN_OBJECT);
+    const uint64_t tls_classes = (1ull << BUSTER_LINK_CLASS_TDATA) | (1ull << BUSTER_LINK_CLASS_TBSS);
+    LinkError result = LINK_ERROR_NONE;
+    for (uint64_t first = 1; result == LINK_ERROR_NONE && first < symbols->count; first += BUSTER_LINK_CHECK_BATCH)
     {
-        const uint8_t source = symbols->source[symbol];
-        const AtomId atom = symbols->atom[symbol];
-        const bool in_atom_source = source == BUSTER_LINK_SOURCE_PROGRAM || source == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE || source == BUSTER_LINK_SOURCE_FOREIGN_OBJECT;
-        const bool absolute = source == BUSTER_LINK_SOURCE_ABSOLUTE;
-        const bool local = (symbols->flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_LOCAL;
-        if (symbols->name[symbol] >= link->names.count || atom >= atoms->count || source >= BUSTER_LINK_SOURCE_COUNT)
-        {
-            result = LINK_ERROR_ID;
-        }
-        else if ((source == BUSTER_LINK_SOURCE_PROGRAM && atom == 0) || (!in_atom_source && atom != 0) || (local && !in_atom_source && !absolute))
-        {
-            result = LINK_ERROR_BINDING;
-        }
-        else if ((atom != 0 && !link_symbol_fits(link, atom, symbols->value[symbol], symbols->size[symbol], symbols->flags[symbol])) ||
-                 (absolute && !link_absolute_fits(atom, symbols->flags[symbol])))
-        {
-            result = LINK_ERROR_RECORD;
-        }
+        const __mmask8 lanes = link_check_lanes_below(symbols->count - first);
+        const __m512i names = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, symbols->name + first));
+        const __m512i atom = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, symbols->atom + first));
+        const __m512i source = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, symbols->source + first));
+        const __m512i flags = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, symbols->flags + first));
+        const __m512i value = _mm512_maskz_loadu_epi64(lanes, symbols->value + first);
+        const __m512i size = _mm512_maskz_loadu_epi64(lanes, symbols->size + first);
+        const __mmask8 id = _mm512_mask_cmpge_epu64_mask(lanes, names, name_count) | _mm512_mask_cmpge_epu64_mask(lanes, atom, atom_count) |
+                            _mm512_mask_cmpge_epu64_mask(lanes, source, _mm512_set1_epi64(BUSTER_LINK_SOURCE_COUNT));
+        const __mmask8 in_atom_source = link_check_in_set(source, in_atom_sources);
+        const __mmask8 absolute = _mm512_cmpeq_epi64_mask(source, _mm512_set1_epi64(BUSTER_LINK_SOURCE_ABSOLUTE));
+        const __mmask8 local = _mm512_testn_epi64_mask(flags, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_BINDING));
+        const __mmask8 in_atom = _mm512_test_epi64_mask(atom, atom);
+        const __mmask8 program = _mm512_cmpeq_epi64_mask(source, _mm512_set1_epi64(BUSTER_LINK_SOURCE_PROGRAM));
+        const __mmask8 binding = lanes & (__mmask8) ~id &
+                                 (__mmask8)((program & (__mmask8)~in_atom) | ((__mmask8)~in_atom_source & in_atom) | (local & (__mmask8)~in_atom_source & (__mmask8)~absolute));
+        // A symbol in an atom fits in it, and is TLS exactly when the atom is (link_symbol_fits).
+        const __mmask8 placed = lanes & (__mmask8) ~id & in_atom;
+        const __m512i atom_size = _mm512_mask_i64gather_epi64(zero, placed, atom, (const long long*)atoms->size, 8);
+        const __m512i class = link_check_gather_bytes(atoms->class, atom, placed);
+        const __m512i type = _mm512_and_si512(flags, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_TYPE));
+        const __mmask8 tls = _mm512_cmpeq_epi64_mask(type, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_TLS));
+        const __mmask8 fits = _mm512_cmple_epu64_mask(value, atom_size) & _mm512_cmple_epu64_mask(size, _mm512_sub_epi64(atom_size, value)) &
+                              (__mmask8) ~(tls ^ link_check_in_set(class, tls_classes));
+        // An absolute symbol is in no atom (a binding error otherwise), and neither TLS nor an IFUNC (link_absolute_fits).
+        const __mmask8 ifunc = _mm512_cmpeq_epi64_mask(type, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_IFUNC));
+        const __mmask8 record = lanes & (__mmask8) ~id & (__mmask8) ~binding & (__mmask8)((placed & (__mmask8)~fits) | (absolute & (__mmask8)(tls | ifunc)));
+        result = link_check_first(id, binding, record);
     }
-    // The priorities: by atom in id order, each an init or fini array's.
+    return result;
+}
+
+// link_check's priorities, eight at a time: by atom in id order, each an init or fini array's. The first error.
+static LinkError link_check_priorities(const Link* link)
+{
     const LinkPriorities* priorities = &link->priorities;
-    for (uint32_t entry = 1; result == LINK_ERROR_NONE && entry < priorities->count; entry += 1)
+    const __m512i atom_count = _mm512_set1_epi64(link->atoms.count);
+    const uint64_t arrays = (1ull << BUSTER_LINK_CLASS_INIT_ARRAY) | (1ull << BUSTER_LINK_CLASS_FINI_ARRAY);
+    LinkError result = LINK_ERROR_NONE;
+    for (uint64_t first = 1; result == LINK_ERROR_NONE && first < priorities->count; first += BUSTER_LINK_CHECK_BATCH)
     {
-        const AtomId atom = priorities->atom[entry];
-        if (atom == 0 || atom >= atoms->count)
-        {
-            result = LINK_ERROR_ID;
-        }
-        else if (!link_class_is_array(atoms->class[atom]) || (entry > 1 && priorities->atom[entry - 1] >= atom))
-        {
-            result = LINK_ERROR_RECORD;
-        }
+        const __mmask8 lanes = link_check_lanes_below(priorities->count - first);
+        const __m512i atom = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, priorities->atom + first));
+        // Entry 0's atom is before entry 1's, which has none to follow.
+        const __mmask8 following = (__mmask8)(lanes & (first == 1 ? 0xfe : 0xff));
+        const __m512i previous = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(following, priorities->atom + first - 1));
+        const __mmask8 id = _mm512_mask_testn_epi64_mask(lanes, atom, atom) | _mm512_mask_cmpge_epu64_mask(lanes, atom, atom_count);
+        const __mmask8 valid = lanes & (__mmask8)~id;
+        const __m512i class = link_check_gather_bytes(link->atoms.class, atom, valid);
+        const __mmask8 record = valid & (__mmask8)((__mmask8)~link_check_in_set(class, arrays) | _mm512_mask_cmpge_epu64_mask(following, previous, atom));
+        result = link_check_first(id, 0, record);
     }
+    return result;
+}
+
+// Marks fixups [begin, begin + count) as `owned`'s, a bit each: false if one was already.
+static bool link_check_own(uint64_t* owned, FixupId begin, uint32_t count)
+{
+    bool result = true;
+    const uint64_t end = (uint64_t)begin + count;
+    for (uint64_t word = begin / 64; count != 0 && word <= (end - 1) / 64; word += 1)
+    {
+        const uint64_t low = word * 64 > begin ? 0 : begin % 64;
+        const uint64_t high = (word + 1) * 64 < end ? 64 : end - word * 64;
+        const uint64_t bits = _bzhi_u64(~0ull, (uint32_t)high) & ~_bzhi_u64(~0ull, (uint32_t)low);
+        result = result && (owned[word] & bits) == 0;
+        owned[word] |= bits;
+    }
+    return result;
+}
+
+// link_check's fixups of `atom`, eight at a time: whether they are in the table, in order and apart within the atom,
+// with kinds and targets that exist and wide addends in the side table, and none in an earlier atom's range
+// (link_check_fixups), a record error otherwise; then whether each may refer to its target (link_check_target), a binding
+// error otherwise.
+static LinkError link_check_atom_fixups(const Link* link, AtomId atom, uint64_t* owned)
+{
+    const LinkFixups* fixups = &link->fixups;
+    const LinkSymbols* symbols = &link->symbols;
+    const LinkAtoms* atoms = &link->atoms;
+    const FixupId begin = atoms->fixup_begin[atom];
+    const uint32_t count = atoms->fixup_count[atom];
+    const bool ranged = count == 0 || (begin != 0 && begin <= fixups->count && count <= fixups->count - begin && atoms->bytes[atom] != 0);
+    // Each kind's field width, by its low five bits: the kinds past the table are refused before their width matters.
+    const __m512i widths_low = _mm512_setr_epi64(link_fixup_kinds[0].width, link_fixup_kinds[1].width, link_fixup_kinds[2].width, link_fixup_kinds[3].width,
+                                                 link_fixup_kinds[4].width, link_fixup_kinds[5].width, link_fixup_kinds[6].width, link_fixup_kinds[7].width);
+    const __m512i widths_high = _mm512_setr_epi64(link_fixup_kinds[8].width, link_fixup_kinds[9].width, link_fixup_kinds[10].width, link_fixup_kinds[11].width,
+                                                  link_fixup_kinds[12].width, link_fixup_kinds[13].width, link_fixup_kinds[14].width, link_fixup_kinds[15].width);
+    const __m512i widths_last = _mm512_setr_epi64(link_fixup_kinds[16].width, link_fixup_kinds[17].width, link_fixup_kinds[18].width, 0, 0, 0, 0, 0);
+    _Static_assert(BUSTER_LINK_FIXUP_KINDS == 19, "link_check_atom_fixups's widths name every kind");
+    const __m512i kind_mask = _mm512_set1_epi64(BUSTER_LINK_FIXUP_KIND);
+    const __m512i atom_size = _mm512_set1_epi64((long long)atoms->size[atom]);
+    bool record = !ranged || !link_check_own(owned, begin, count);
+    for (uint32_t i = 0; !record && i < count; i += BUSTER_LINK_CHECK_BATCH)
+    {
+        const __mmask8 lanes = link_check_lanes_below(count - i);
+        const FixupId first = begin + i;
+        const __m512i raw = _mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, fixups->kind + first));
+        const __m512i kind = _mm512_and_si512(raw, kind_mask);
+        const __m512i target = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, fixups->target + first));
+        const __m512i addend = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, (const uint32_t*)fixups->addend + first));
+        const __m512i offset = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, fixups->offset + first));
+        const __m512i width = _mm512_mask_permutexvar_epi64(_mm512_permutex2var_epi64(widths_low, kind, widths_high), _mm512_cmpge_epu64_mask(kind, _mm512_set1_epi64(16)),
+                                                            kind, widths_last);
+        // The previous fixup's end, from which each starts: none before the atom's first.
+        const __mmask8 following = (__mmask8)(lanes & (i == 0 ? 0xfe : 0xff));
+        const __m512i previous_kind = _mm512_and_si512(_mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(following, fixups->kind + first - 1)), kind_mask);
+        const __m512i previous_offset = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(following, fixups->offset + first - 1));
+        const __m512i previous_width = _mm512_mask_permutexvar_epi64(_mm512_permutex2var_epi64(widths_low, previous_kind, widths_high),
+                                                                     _mm512_cmpge_epu64_mask(previous_kind, _mm512_set1_epi64(16)), previous_kind, widths_last);
+        const __m512i next = _mm512_maskz_add_epi64(following, previous_offset, previous_width);
+        const __mmask8 wide = _mm512_test_epi64_mask(raw, _mm512_set1_epi64(BUSTER_LINK_FIXUP_WIDE));
+        const __mmask8 valid = _mm512_test_epi64_mask(kind, kind) & _mm512_cmplt_epu64_mask(kind, _mm512_set1_epi64(BUSTER_LINK_FIXUP_KINDS)) &
+                               _mm512_test_epi64_mask(target, target) & _mm512_cmplt_epu64_mask(target, _mm512_set1_epi64(symbols->count)) &
+                               (__mmask8)(~wide | (_mm512_test_epi64_mask(addend, addend) & _mm512_cmplt_epu64_mask(addend, _mm512_set1_epi64(fixups->wide_count)))) &
+                               _mm512_cmpge_epu64_mask(offset, next) & _mm512_cmple_epu64_mask(_mm512_add_epi64(offset, width), atom_size);
+        record = (lanes & (__mmask8)~valid) != 0;
+    }
+    // Each fixup's target, once every one exists (link_check_target).
+    const uint8_t class = atoms->class[atom];
+    const uint32_t unit = atoms->unit[atom];
+    const bool unwind_pool = class == BUSTER_LINK_CLASS_EH_FRAME && unit == 0;
+    const __m512i own_unit = _mm512_set1_epi64(unit);
+    const __m512i shared_unit = _mm512_set1_epi64(BUSTER_LINK_UNIT_SHARED);
+    const uint64_t tls_kinds = (1ull << BUSTER_LINK_FIXUP_TPOFF32) | (1ull << BUSTER_LINK_FIXUP_GOTTPOFF) | (1ull << BUSTER_LINK_FIXUP_TLSGD) | (1ull << BUSTER_LINK_FIXUP_TLSLD) |
+                               (1ull << BUSTER_LINK_FIXUP_DTPOFF32) | (1ull << BUSTER_LINK_FIXUP_TPOFF64) | (1ull << BUSTER_LINK_FIXUP_DTPOFF64);
+    const uint64_t size_kinds = (1ull << BUSTER_LINK_FIXUP_SIZE32) | (1ull << BUSTER_LINK_FIXUP_SIZE64);
+    const uint64_t got_kinds = (1ull << BUSTER_LINK_FIXUP_CALL_GOT) | (1ull << BUSTER_LINK_FIXUP_LOAD_GOT) | (1ull << BUSTER_LINK_FIXUP_GOTPCREL) |
+                               (1ull << BUSTER_LINK_FIXUP_GOTTPOFF);
+    const uint64_t shared_reaching_kinds = got_kinds | (1ull << BUSTER_LINK_FIXUP_TLSGD) | (1ull << BUSTER_LINK_FIXUP_ABS64);
+    const uint64_t shared_sources = (1ull << BUSTER_LINK_SOURCE_RUNTIME_SHARED) | (1ull << BUSTER_LINK_SOURCE_FOREIGN_SHARED);
+    bool binding = false;
+    for (uint32_t i = 0; !record && !binding && i < count; i += BUSTER_LINK_CHECK_BATCH)
+    {
+        const __mmask8 lanes = link_check_lanes_below(count - i);
+        const FixupId first = begin + i;
+        const __m512i kind = _mm512_and_si512(_mm512_cvtepu8_epi64(_mm_maskz_loadu_epi8(lanes, fixups->kind + first)), _mm512_set1_epi64(BUSTER_LINK_FIXUP_KIND));
+        const __m512i target = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, fixups->target + first));
+        const __m512i flags = link_check_gather_bytes(symbols->flags, target, lanes);
+        const __m512i source = link_check_gather_bytes(symbols->source, target, lanes);
+        const __m512i target_atom = link_check_gather_words(symbols->atom, target, lanes);
+        const __mmask8 placed = lanes & _mm512_test_epi64_mask(target_atom, target_atom);
+        const __m512i target_class = link_check_gather_bytes(atoms->class, target_atom, placed);
+        const __m512i target_unit = link_check_gather_words(atoms->unit, target_atom, placed);
+        const __m512i type = _mm512_and_si512(flags, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_TYPE));
+        const __mmask8 tls_target = _mm512_cmpeq_epi64_mask(type, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_TLS));
+        const __mmask8 local = _mm512_testn_epi64_mask(flags, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_BINDING));
+        const __mmask8 shared = link_check_in_set(source, shared_sources);
+        const __mmask8 call = _mm512_cmpeq_epi64_mask(kind, _mm512_set1_epi64(BUSTER_LINK_FIXUP_CALL)) &
+                              _mm512_cmpeq_epi64_mask(type, _mm512_set1_epi64(BUSTER_LINK_SYMBOL_FUNCTION));
+        const __mmask8 reaches_shared = link_check_in_set(kind, shared_reaching_kinds) | call;
+        const __mmask8 absolute = _mm512_cmpeq_epi64_mask(source, _mm512_set1_epi64(BUSTER_LINK_SOURCE_ABSOLUTE));
+        const __mmask8 pooled = placed & _mm512_cmpeq_epi64_mask(target_class, _mm512_set1_epi64(BUSTER_LINK_CLASS_STRINGS)) & _mm512_testn_epi64_mask(target_unit, target_unit);
+        const __mmask8 merged = (__mmask8)(unit == BUSTER_LINK_UNIT_SHARED ? 0xff : 0) | (placed & _mm512_cmpeq_epi64_mask(target_unit, shared_unit));
+        const __mmask8 same_unit = placed & (__mmask8)(unwind_pool ? 0xff : _mm512_cmpeq_epi64_mask(target_unit, own_unit));
+        const __mmask8 typed = link_check_in_set(kind, size_kinds) | (__mmask8) ~(link_check_in_set(kind, tls_kinds) ^ tls_target);
+        const __mmask8 reachable = (__mmask8)(~local | absolute | pooled | merged | same_unit);
+        const __mmask8 allowed = typed & reachable & (__mmask8)(~shared | reaches_shared);
+        binding = (lanes & (__mmask8)~allowed) != 0;
+    }
+    return record ? LINK_ERROR_RECORD : binding ? LINK_ERROR_BINDING : LINK_ERROR_NONE;
+}
+
+static LinkError link_check(Link* link)
+{
+    const LinkAtoms* atoms = &link->atoms;
+    LinkError result = link_groups_valid(link) ? LINK_ERROR_NONE : LINK_ERROR_RECORD;
+    result = result == LINK_ERROR_NONE ? link_check_symbols(link) : result;
+    result = result == LINK_ERROR_NONE ? link_check_priorities(link) : result;
 
     Scratch scratch = scratch_begin(0);
     uint64_t* owned = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, link->fixups.count / 64 + 1);
@@ -1515,19 +1706,7 @@ static LinkError link_check(Link* link)
     uint64_t fixups = 0;
     for (AtomId atom = 1; result == LINK_ERROR_NONE && atom < atoms->count; atom += 1)
     {
-        if (!link_check_fixups(link, atom, owned))
-        {
-            result = LINK_ERROR_RECORD;
-        }
-        const FixupId begin = atoms->fixup_begin[atom];
-        for (uint32_t i = 0; result == LINK_ERROR_NONE && i < atoms->fixup_count[atom]; i += 1)
-        {
-            const FixupId fixup = begin + i;
-            if (!link_check_target(link, atom, link->fixups.kind[fixup] & BUSTER_LINK_FIXUP_KIND, link->fixups.target[fixup]))
-            {
-                result = LINK_ERROR_BINDING;
-            }
-        }
+        result = link_check_atom_fixups(link, atom, owned);
         fixups += atoms->fixup_count[atom];
     }
     // Fixups in no atom's range.

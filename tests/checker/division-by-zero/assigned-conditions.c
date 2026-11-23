@@ -1,0 +1,20 @@
+int f1(int y) { return (y = 0) ? 1 / 0 : 2; }
+int f2(int y) { return ({ y = 0; }) ? 1 / 0 : 2; }
+int f3(int y) { return (y = 0, 1) ? 2 : 1 / 0; }
+int f4(int y) { return ({ y = 0; 1; }) ? 2 : 1 / 0; }
+int f5(int y) { return !(y = 0) ? 2 : 1 / 0; }
+int f6(int y) { return (y += 0) ? 1 / 0 : 2; }
+int f7(int y) { return (y++, 0) ? 1 / 0 : 2; }
+int f8(int y) { return 0 && (y = 1) ? 1 / 0 : 2; }
+int f9(int y) { return (y = 0) && y ? 1 / 0 : 2; }
+int f10(int y) { if (y = 0) return 1 / 0; return 2; }
+int f11(int y) { while (y = 0) return 1 / 0; return 2; }
+int f12(int y) { return 1 ? 2 : (y = 0) ? 1 / 0 : 3; }
+int f13(int y) { return ((y = 0) + 0) ? 1 / 0 : 2; }
+int f14(int y) { return (0 ? y = 1 : 0) ? 1 / 0 : 2; }
+int f15(int y) { return (1, (y = 0)) ? 1 / 0 : 2; }
+int f16(int y) { return ((void)(y = 0), 0) ? 1 / 0 : 2; }
+int f17(int y) { return (y = 0) || 0 ? 1 / 0 : 2; }
+int f18(int y) { return 1 || (y = 0) ? 2 : 1 / 0; }
+int f19(int y) { for (; y = 0;) return 1 / 0; return 2; }
+int f20(int y) { return (int)(y = 0) ? 1 / 0 : 2; }

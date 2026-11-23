@@ -532,6 +532,21 @@ executor traces a fence among the stores, volatile loads and calls), and
 `tests/ir-source/fences.c` runs through both lowerings, promotion, the text's
 round trip and the IR's three forms against clang.
 
+### Volatile accesses (#3310)
+
+A `load` or a `store` with `BUSTER_IR_VOLATILE` is a volatile lvalue's access,
+from the typed stream's `BUSTER_TYPED_ACCESS_VOLATILE` (`ir_typed_access`),
+printed as `volatile` after its alignment: a load's or a store's of any type, a
+vector's included, and each piece of a volatile aggregate's copy (#3329, a marked
+`COPY`, whose pieces are integers that don't overlap). It is in `BUSTER_IR_OBSERVABLE`: no
+pass removes, merges, forwards or moves it, and value numbering with memory
+counts it as a write of general memory. Before #3310 only a volatile local's
+slot (`BUSTER_IR_SLOT_VOLATILE`) carried the qualifier, and `+memory` merged two
+reads of a volatile global and forwarded a stored value to the next read through
+a pointer to volatile. An empty asm statement's `"memory"` clobber, the compiler
+barrier, reaches the IR as `fence seq_cst signal`, for which no code is emitted.
+`tests/ir-source/volatiles.c` counts each and runs against clang.
+
 ### Segment overrides (#1447)
 
 A `load` or a `store` in `__seg_fs`, `__seg_gs` or address space 258 carries its

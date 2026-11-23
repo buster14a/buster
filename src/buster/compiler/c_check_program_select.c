@@ -278,6 +278,20 @@ static bool check_program_object_size_inline(const CheckInput* input, uint32_t d
            (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_INLINE) != 0;
 }
 
+// Whether another module may preempt `object`'s symbol (#2101): a declaration of external linkage and default
+// visibility, which a shared library's symbol is unless the unit's attributes or pragmas say otherwise, but a private
+// size wrapper (check_program_object_size_inline), whose symbol is the unit's own; a literal is never one. Clang's
+// -fPIC reaches such a symbol through its GOT and calls it through its PLT, wherever its definition is.
+static bool check_program_preemptible(const CheckProgram* program, uint32_t object)
+{
+    const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
+    const CheckInput* input = program->input;
+    const bool named = declaration != BUSTER_CHECK_NONE && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
+    // object_visibility: 0 for none given, else the visibility (BUSTER_LINK_SYMBOL_DEFAULT's 0 to PROTECTED's 3) plus 1.
+    const bool visible = input->object_visibility == NULL || input->object_visibility[object] <= 1;
+    return named && visible && check_input_linkage(input->declaration_bits, declaration) == 2 && !check_program_object_size_inline(input, declaration);
+}
+
 // Whether clang emits `body`'s function where the unit defines it (CheckProgram.body_eager), as CodeGenModule::EmitGlobal
 // decides when the parser hands over the definition: by the declarations that exist then, those of the function up to
 // and including the definition (a run of check_data_prepare's keys, in object and token order), not the unit's final
@@ -682,13 +696,31 @@ static bool check_program_symbol_pragmas(CheckProgram* program, const CheckDataP
                 first[target] = point < first[target] ? point : first[target];
             }
         }
+        // Each accepted rename is its object's only one. Reuse the watched objects' slots once
+        // their first use has decided the spelling, to retain the late function pragmas for lowering.
+        bool late_function = false;
         for (uint32_t i = 0; valid && i < history->count; i += 1)
         {
             const CheckInputSymbolPragma* record = history->records + i;
             if (record->after_use && record->declaration < input->token_count)
             {
                 const uint32_t object = input->objects[record->declaration];
-                program->symbol_pragma_originals[i] = object != 0 && object < program->object_count && first[object] != 0 && first[object] <= record->token;
+                if (object != 0 && object < program->object_count)
+                {
+                    program->symbol_pragma_originals[i] = first[object] != 0 && first[object] <= record->token;
+                    const bool function = input->declaration_kinds[record->declaration] == C_BINDING_FUNCTION;
+                    first[object] = function ? i + 1 : 0;
+                    late_function |= function;
+                }
+            }
+        }
+        if (valid && late_function)
+        {
+            program->late_function_renames = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->object_count);
+            valid = program->late_function_renames != NULL;
+            if (valid)
+            {
+                memcpy(program->late_function_renames, first, (uint64_t)program->object_count * sizeof(uint32_t));
             }
         }
     }
@@ -1001,6 +1033,315 @@ static bool check_program_weak_bindings(CheckProgram* program, const CheckDataPr
     return valid;
 }
 
+// A wrapper's parameter or result type that its expansion binds (#2983, CheckProgramWrapper): an integer, an enumeration
+// or a pointer of at most 8 bytes, a value of one class on the typed stack; and for the result, void too.
+static bool check_program_wrapper_type(const TypeTable* types, TypeId type, bool result)
+{
+    const uint8_t kind = check_action_kind(types, type);
+    const bool scalar = kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_POINTER;
+    return (result && kind == BUSTER_TYPE_KIND_VOID) || (scalar && type_size(types, type) <= 8);
+}
+
+// Whether a wrapper's expression may read `value`, a VALUE node's, in another function's body: a constant; one of its
+// own `parameters` (`count`), read; or an object or function of external linkage, which the caller's code reaches by its
+// symbol as the wrapper's would. A string literal, an object of internal linkage and a local of the wrapper's are not:
+// the lowering makes those for the bodies it selected.
+static bool check_program_wrapper_value(const CheckProgram* full, const CheckValue* value, const uint32_t* parameters, uint32_t count)
+{
+    const CheckInput* input = full->input;
+    const bool referenced = value->object != 0 && (value->category != CHECK_RVALUE || value->constant_kind == CHECK_CONSTANT_ADDRESS);
+    bool parameter = false;
+    for (uint32_t p = 0; referenced && p < count; p += 1)
+    {
+        parameter |= parameters[p] != 0 && parameters[p] == value->object && value->category == CHECK_LVALUE;
+    }
+    const uint32_t string = referenced && !parameter && check_sparse_present(input->string_ids) && value->object - 1 < input->token_count ?
+                            check_sparse_get(input->string_ids, value->object - 1) : BUSTER_CHECK_NONE;
+    const uint32_t declared = referenced && value->object < full->object_count && full->object_declarations != NULL ? full->object_declarations[value->object] :
+                                                                                                                       BUSTER_CHECK_NONE;
+    const uint32_t declaration = declared != BUSTER_CHECK_NONE ? declared : value->object - 1;
+    const bool external = referenced && !parameter && string >= input->string_count && declaration < input->token_count &&
+                          check_input_linkage(input->declaration_bits, declaration) == 2;
+    return !referenced || parameter || external;
+}
+
+// The next of `count` controls from `index` that isn't a lifetime's (#177), or `count`.
+static uint32_t check_program_wrapper_next(const CheckControl* controls, uint32_t index, uint32_t count)
+{
+    uint32_t next = index;
+    while (next < count && controls[next].kind == CHECK_CONTROL_LIFETIME)
+    {
+        next += 1;
+    }
+    return next;
+}
+
+// A wrapper's local (#2983, CheckProgramWrapper.plans): `control`, an INITIALIZE, of an automatic object of a type a
+// parameter's may be (check_program_wrapper_type) whose plan is one value part, which the expansion binds as it does a
+// parameter. Its value's node in *node.
+static bool check_program_wrapper_local(const CheckProgram* full, const CheckControl* control, uint32_t* node)
+{
+    const CheckInput* input = full->input;
+    const CheckInitializers* initializers = full->initializers;
+    const CheckInitializer* plan = initializers != NULL && control->target < initializers->count ? initializers->plans + control->target : NULL;
+    const CheckInitPart* part = plan != NULL && plan->count == 1 ? plan->parts : NULL;
+    const bool valid = part != NULL && part->kind == CHECK_INIT_VALUE && part->bit_offset == 0 && part->bit_width == 0 && part->overload_candidate == 0 &&
+                       part->node < input->graph.count && control->token < input->token_count && input->objects[control->token] != 0 &&
+                       check_program_wrapper_type(full->types, input->declared_types[control->token], false) &&
+                       check_program_wrapper_type(full->types, part->conversion.type, false);
+    *node = valid ? part->node : 0;
+    return valid;
+}
+
+// The statements of `body`, a wrapper's (#2983, CheckProgramWrapper), of `count` parameters whose objects `parameters`
+// holds, of a result (`void_result` false) or not: with one, its locals (check_program_wrapper_local), written after the
+// parameters' objects, then its guards `if (C) return E;`, then `return E;` or the last guard's `else return E;`, and
+// its END; without one, `E;` and its END. The lifetimes' controls between them (#177) do nothing here. Writes the
+// wrapper's statements' fields, the least and the greatest of their expressions' nodes and the END's token.
+static bool check_program_wrapper_statements(const CheckProgram* full, const CheckProgramBody* body, bool void_result, uint32_t* parameters, uint32_t count,
+                                             CheckProgramWrapper* wrapper, uint32_t* low, uint32_t* high, uint32_t* closing)
+{
+    const CheckInput* input = full->input;
+    const uint32_t nodes = input->graph.count;
+    const CheckControl* controls = full->controls + body->first;
+    const uint32_t total = body->count;
+    bool valid = true;
+    bool returned = false;
+    uint32_t index = check_program_wrapper_next(controls, 0, total);
+    *low = UINT32_MAX;
+    *high = 0;
+    while (valid && !returned && index < total)
+    {
+        const CheckControl* control = controls + index;
+        uint32_t node = control->node;
+        if (control->kind == CHECK_CONTROL_INITIALIZE && !void_result && wrapper->guard_count == 0 && count + wrapper->local_count < BUSTER_CHECK_WRAPPER_PARAMETERS)
+        {
+            valid = check_program_wrapper_local(full, control, &node);
+            parameters[count + wrapper->local_count] = valid ? input->objects[control->token] : 0;
+            wrapper->plans[wrapper->local_count] = control->target;
+            wrapper->local_count += 1;
+            index = check_program_wrapper_next(controls, index + 1, total);
+        }
+        else if (control->kind == CHECK_CONTROL_BRANCH_FALSE && !void_result && wrapper->guard_count < BUSTER_CHECK_WRAPPER_GUARDS && node < nodes)
+        {
+            // `if (C) return E;`: the branch past the return, or past its jump over an `else`'s statement, the last.
+            const uint32_t at = check_program_wrapper_next(controls, index + 1, total);
+            const CheckControl* taken = at < total ? controls + at : NULL;
+            const uint32_t after = taken != NULL ? check_program_wrapper_next(controls, at + 1, total) : total;
+            const bool jump = after < total && controls[after].kind == CHECK_CONTROL_JUMP;
+            valid = taken != NULL && taken->kind == CHECK_CONTROL_RETURN && taken->target == BUSTER_CHECK_NONE && taken->node < nodes && control->target > at &&
+                    control->target <= (jump ? after + 1 : after) && control->target < total;
+            wrapper->guards[wrapper->guard_count][0] = node;
+            wrapper->guards[wrapper->guard_count][1] = valid ? taken->node : 0;
+            wrapper->guard_count += 1;
+            *low = valid && taken->node < *low ? taken->node : *low;
+            *high = valid && taken->node > *high ? taken->node : *high;
+            index = valid ? check_program_wrapper_next(controls, control->target, total) : total;
+            // After an `else`, its statement is the last.
+            valid = valid && (!jump || (index < total && controls[index].kind == CHECK_CONTROL_RETURN));
+        }
+        else if ((control->kind == CHECK_CONTROL_RETURN && !void_result) || (control->kind == CHECK_CONTROL_EVALUATE && void_result))
+        {
+            valid = control->target == BUSTER_CHECK_NONE && node < nodes && (!void_result || total == 2);
+            wrapper->node = node;
+            returned = true;
+            index = check_program_wrapper_next(controls, index + 1, total);
+        }
+        else
+        {
+            valid = false;
+        }
+        *low = valid && node < *low ? node : *low;
+        *high = valid && node > *high ? node : *high;
+    }
+    const bool ended = valid && returned && index < total && controls[index].kind == CHECK_CONTROL_END &&
+                       check_program_wrapper_next(controls, index + 1, total) == total;
+    *closing = ended ? controls[index].token : 0;
+    return ended && body->opening < *closing;
+}
+
+// Whether `body`, an always_inline function's inline-only definition, is a wrapper the lowering expands at its direct
+// calls (#2983, CheckProgramWrapper): a prototype, not variadic, of at most BUSTER_CHECK_WRAPPER_PARAMETERS parameters,
+// each an integer or a pointer, as its result is (or void); and a body of the statements
+// check_program_wrapper_statements takes, whose expressions' nodes (their postorder: the nodes from the first one's
+// first whose tokens are the body's) are of the operators below alone, read its parameters and locals (never assign,
+// increment or take their addresses) and refer to nothing the caller's body can't (check_program_wrapper_value). Writes
+// the wrapper and its parameters' objects (0 for an unnamed one), then its locals'.
+static bool check_program_wrapper_body(const CheckProgram* full, const CheckProgramBody* body, uint32_t* parameters, CheckProgramWrapper* wrapper)
+{
+    const CheckInput* input = full->input;
+    const CheckGraph* graph = &input->graph;
+    const TypeTable* types = full->types;
+    const TypeId type = input->declared_types[body->declaration];
+    const bool function = type_kind(types, type) == BUSTER_TYPE_KIND_FUNCTION;
+    const uint8_t flags = function ? types->types.flags[type_index(type)] : 0;
+    uint32_t count = 0;
+    const TypeId* parameter_types = function ? type_parameters(types, type, &count) : NULL;
+    const TypeId result = function ? type_return(types, type) : 0;
+    const bool kr = input->function_flags != NULL && (input->function_flags[body->declaration] & CHECK_INPUT_FUNCTION_KR) != 0;
+    bool valid = function && (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0 && (flags & BUSTER_TYPE_FLAG_VARIADIC) == 0 && !kr && count <= BUSTER_CHECK_WRAPPER_PARAMETERS &&
+                 body->count >= 2 && check_program_wrapper_type(types, result, true);
+    for (uint32_t p = 0; valid && p < count; p += 1)
+    {
+        valid = check_program_wrapper_type(types, parameter_types[p], false);
+    }
+    *wrapper = (CheckProgramWrapper){ 0 };
+    const bool void_result = valid && check_action_kind(types, result) == BUSTER_TYPE_KIND_VOID;
+    uint32_t low = 0;
+    uint32_t high = 0;
+    uint32_t closing = 0;
+    valid = valid && check_program_wrapper_statements(full, body, void_result, parameters, count, wrapper, &low, &high, &closing);
+    uint32_t parameter = valid ? check_sparse_get(input->parameters, body->opening) : BUSTER_CHECK_NONE;
+    for (uint32_t p = 0; valid && p < count; p += 1)
+    {
+        const bool named = parameter != BUSTER_CHECK_NONE && check_sparse_get(input->parameters, parameter) == p;
+        parameters[p] = named ? input->objects[parameter] : 0;
+        parameter = named ? check_sparse_get(input->parameter_next, parameter) : parameter;
+    }
+    const uint32_t declared = valid ? count + wrapper->local_count : 0;
+    uint32_t first = valid ? low : 0;
+    while (valid && first != 0 && graph->tokens[first - 1] > body->opening && graph->tokens[first - 1] < closing)
+    {
+        first -= 1;
+    }
+    const CheckStream* stream = full->stream;
+    for (uint32_t n = first; valid && n <= high; n += 1)
+    {
+        const CheckOp op = graph->ops[n];
+        // C's operators that read, convert, select and call; not those that write an object or need the body they are in
+        // (a statement expression, va_arg, a variable-length array's). Of the builtins, the object-size and constant
+        // queries and glibc's fortified calls (__builtin___memcpy_chk and its kin) alone: the lowering plans the others'
+        // helpers and rows for the selected bodies' nodes (an x86 builtin's helper, a math function's).
+        const uint32_t x86 = op == CHECK_OP_BUILTIN_X86 ? check_program_builtin_index(stream->x86, stream->x86_count, sizeof(CheckBuiltinX86Effect), n) :
+                                                          BUSTER_CHECK_NONE;
+        const BuiltinIntrinsicInfo* info = x86 != BUSTER_CHECK_NONE ? stream->x86[x86].info : NULL;
+        const bool fortified = info != NULL && cbuiltin_fortify_id(info->name, info->name_length) != CBUILTIN_FORTIFY_COUNT;
+        // A local's declaration's store of its value, its plan's part (check_program_wrapper_local), which the expansion
+        // lowers alone.
+        bool local = false;
+        for (uint32_t l = 0; op == CHECK_OP_INITIALIZE && l < wrapper->local_count; l += 1)
+        {
+            local |= graph->operand0[n] == full->initializers->plans[wrapper->plans[l]].parts->node;
+        }
+        valid = graph->tokens[n] > body->opening && graph->tokens[n] < closing &&
+                (op <= CHECK_OP_ARROW || op == CHECK_OP_CALL || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITION || op == CHECK_OP_SELECT ||
+                 op == CHECK_OP_BUILTIN_QUERY || fortified || local) &&
+                op != CHECK_OP_ASSIGN;
+        if (valid && op == CHECK_OP_VALUE)
+        {
+            const CheckValue value = check_stream_value(full->stream, n);
+            valid = check_program_wrapper_value(full, &value, parameters, declared);
+        }
+        else if (valid && op == CHECK_OP_ADDRESS && graph->operand0[n] < graph->count && graph->ops[graph->operand0[n]] == CHECK_OP_VALUE)
+        {
+            const CheckValue operand = check_stream_value(full->stream, graph->operand0[n]);
+            for (uint32_t p = 0; valid && p < declared; p += 1)
+            {
+                valid = parameters[p] == 0 || parameters[p] != operand.object;
+            }
+        }
+    }
+    if (valid)
+    {
+        wrapper->object = body->object;
+        wrapper->first = first;
+        wrapper->parameter_count = count;
+        // Its parameters' pass_object_size attributes: clang's caller computes such a bound itself (#2983).
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, body->declaration);
+        for (uint32_t p = 0; attributes != NULL && attributes->object_sizes != NULL && attributes->object_size_count == count && p < count; p += 1)
+        {
+            wrapper->sizes[p] = attributes->object_sizes[p];
+        }
+    }
+    return valid;
+}
+
+// Whether definition `definition` (body `raw` of `full`, of object `object`) may be a wrapper (#2983): its object's only
+// definition (`object_definitions`), whose declarations give always_inline and not noinline, inline only (`flags`) or a
+// private wrapper of pass_object_size's (check_program_object_size_inline).
+static bool check_program_wrapper_candidate(const CheckProgram* full, uint32_t raw, uint32_t object, uint32_t definition, uint32_t flags, const uint32_t* object_definitions)
+{
+    return raw < full->body_count && object < full->object_count && object_definitions[object] == definition + 1 &&
+           full->object_inline[object] == BUSTER_CHECK_PROGRAM_INLINE_ALWAYS &&
+           ((flags & BUSTER_C_LOWERING_INLINE_ONLY) != 0 || check_program_object_size_inline(full->input, full->bodies[raw].declaration));
+}
+
+// The selection's wrappers (#2983, CheckProgram.wrappers): of the definitions (`order`'s bodies, of `definition_objects`
+// and `definition_flags`), the candidates (check_program_wrapper_candidate) whose bodies the lowering may expand
+// (check_program_wrapper_body), by object, in `output`, and each one's body in the full program (`bodies`, in `scratch`).
+// Called only where a declaration has always_inline. Returns false where there was no room.
+static __attribute__((noinline)) bool check_program_select_wrappers(CheckProgram* program, const CheckProgram* full, const uint64_t* order, const uint32_t* definition_objects,
+                                                                     const uint32_t* definition_flags, const uint32_t* object_definitions, uint32_t definitions, Arena* output,
+                                                                     Arena* scratch, uint32_t** bodies)
+{
+    uint32_t count = 0;
+    for (uint32_t definition = 0; definition < definitions; definition += 1)
+    {
+        count += check_program_wrapper_candidate(full, (uint32_t)order[definition], definition_objects[definition], definition, definition_flags[definition],
+                                                 object_definitions);
+    }
+    CheckProgramWrapper* wrappers = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckProgramWrapper, count) : NULL;
+    uint32_t* parameters = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count * BUSTER_CHECK_WRAPPER_PARAMETERS) : NULL;
+    uint32_t* wrapper_bodies = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : NULL;
+    const bool valid = count == 0 || (wrappers != NULL && parameters != NULL && wrapper_bodies != NULL);
+    uint32_t written = 0;
+    for (uint32_t definition = 0; valid && count != 0 && definition < definitions; definition += 1)
+    {
+        const uint32_t raw = (uint32_t)order[definition];
+        const uint32_t object = definition_objects[definition];
+        CheckProgramWrapper wrapper = { 0 };
+        uint32_t* own = parameters + (uint64_t)written * BUSTER_CHECK_WRAPPER_PARAMETERS;
+        if (check_program_wrapper_candidate(full, raw, object, definition, definition_flags[definition], object_definitions) &&
+            check_program_wrapper_body(full, full->bodies + raw, own, &wrapper))
+        {
+            // In object order (the definitions are in their declarations' order): an insertion, of a few. Each keeps its
+            // parameters' row, written in place.
+            uint32_t at = written;
+            while (at != 0 && wrappers[at - 1].object > object)
+            {
+                wrappers[at] = wrappers[at - 1];
+                wrapper_bodies[at] = wrapper_bodies[at - 1];
+                at -= 1;
+            }
+            wrapper.parameter_first = written * BUSTER_CHECK_WRAPPER_PARAMETERS;
+            wrappers[at] = wrapper;
+            wrapper_bodies[at] = raw;
+            written += 1;
+        }
+    }
+    program->wrappers = written != 0 ? wrappers : NULL;
+    program->wrapper_parameters = written != 0 ? parameters : NULL;
+    program->wrapper_count = written;
+    *bodies = wrapper_bodies;
+    return valid;
+}
+
+// The objects a selection's expanded wrappers refer to (#2983): an expansion calls what its wrapper calls, so each
+// reference of a wrapper whose object is `needed` (a selected body's reference, or another such wrapper's) is needed as
+// a selected body's is. `bodies` holds each wrapper's body in the full program, `reached` a byte each.
+static void check_program_wrapper_needed(const CheckProgram* full, const CheckProgram* program, const uint32_t* bodies, uint8_t* needed, uint8_t* reached)
+{
+    memset(reached, 0, program->wrapper_count);
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        for (uint32_t w = 0; w < program->wrapper_count; w += 1)
+        {
+            if (reached[w] == 0 && needed[program->wrappers[w].object] != 0)
+            {
+                const CheckProgramBody* body = full->bodies + bodies[w];
+                reached[w] = 1;
+                changed = true;
+                for (uint32_t r = 0; r < body->reference_count; r += 1)
+                {
+                    needed[full->references[body->reference_first + r]] = 1;
+                }
+            }
+        }
+    }
+}
+
 static bool check_program_select_shared(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
                                         bool scalar, bool keep_sectioned, CheckProgramSelectShared* shared, Arena* output, Arena* scratch)
 {
@@ -1054,6 +1395,10 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
     uint32_t* kinds = targets != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)reference_capacity + 1) : 0;
     // Each static object's place among the data's declared ones, at the object (check_program_declared_at).
     uint32_t* declared_at = kinds != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, objects) : 0;
+    // The inline-only always_inline functions whose direct calls the lowering expands (#2983), only in a unit with
+    // always_inline (CheckProgram.object_inline): their table, and each one's body in the full program.
+    CheckProgram wrapped = { 0 };
+    uint32_t* wrapper_bodies = NULL;
     if (valid)
     {
         candidate.status = CHECK_PROGRAM_RESOURCE;
@@ -1228,6 +1573,9 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
                 }
             }
         }
+        valid = valid && (full->object_inline == NULL ||
+                          check_program_select_wrappers(&wrapped, full, order, definition_objects, definition_flags, object_definitions, definitions, output, scratch,
+                                                        &wrapper_bodies));
         // An alias's or ifunc's base (#147): clang emits every alias and ifunc, and so the definition its symbol is at,
         // unless the definition is inline only, which the planner keeps (BUSTER_C_LOWERING_ALIAS_TARGET).
         for (uint32_t k = 0; valid && k < full->alias_count; k += 1)
@@ -1442,6 +1790,9 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
     {
         candidate.program = *full;
         candidate.data = *data;
+        candidate.program.wrappers = wrapped.wrappers;
+        candidate.program.wrapper_parameters = wrapped.wrapper_parameters;
+        candidate.program.wrapper_count = wrapped.wrapper_count;
         candidate.program.body_count = candidate.selected_functions;
         candidate.program.reference_count = body_references;
         candidate.program.builtin_count = 0;
@@ -1570,6 +1921,13 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
             {
                 candidate.program.builtin_nodes[builtins++] = node;
             }
+        }
+        // What the wrappers whose calls the selection's code expands refer to (#2983).
+        uint8_t* reached = valid && candidate.program.wrapper_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, candidate.program.wrapper_count) : NULL;
+        valid = valid && (candidate.program.wrapper_count == 0 || reached != NULL);
+        if (reached != NULL)
+        {
+            check_program_wrapper_needed(full, &candidate.program, wrapper_bodies, needed, reached);
         }
         memset(candidate.program.object_symbols, 0, (uint64_t)objects * sizeof(SymbolId));
         // GNU's aliases and ifuncs (#147) are needed, as clang emits each; this selection's states of the entries are its

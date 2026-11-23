@@ -8,6 +8,8 @@ defined-variable-reference	defined-variable-reference.c	rejected	reference remai
 variable-repeated	variable-repeated.c	rejected	repeated declarations after a weak alias retain both errors
 combined	combined.c	rejected	weak alias errors preserve the rest of the translation unit
 before-target	before-target.c	-	a weak alias clone is not visible before its target declaration
+declaration-before-target	declaration-before-target.c	rejected	a declaration between pragma and target is earlier than the created clone
+object-before-target	object-before-target.c	rejected	an object clone becomes ambiguous only after its late target is declared
 local-shadow	local-shadow.c	-	local shadows do not name the weak alias
 defined-alias	defined-alias.c	rejected	a call is ambiguous even when the alias was already defined
 missing-target	missing-target.c	-	a genuinely missing weak alias target still warns
@@ -24,3 +26,53 @@ mixed-aliased	mixed-aliased.c	rejected	a prior alias attribute still participate
 mixed-static	mixed-static.c	rejected	an internal object declaration still participates in ambiguous lookup
 mixed-unused	mixed-unused.c	-	unused mixed-kind and incompatible object declarations retain their emitted clones
 mixed-warning-order	mixed-warning-order.c	rejected	mixed lookup errors preserve adjacent warnings and independent errors
+later-object-type	later-object-type.c	rejected	a later object declaration conflicts with the clone's type
+later-object-function	later-object-function.c	rejected	a later function declaration conflicts with an object clone
+later-function-object	later-function-object.c	rejected	a later object declaration conflicts with a function clone
+later-function-type	later-function-type.c	rejected	a later function declaration conflicts with the clone's return type
+later-object-definition	later-object-definition.c	rejected	a later initialized object conflicts with the alias definition
+later-function-definition	later-function-definition.c	rejected	a later function body conflicts with the alias definition
+later-object-repeated	later-object-repeated.c	rejected	repeated incompatible declarations retain the previous-declaration chain
+later-static-object	later-static-object.c	rejected	a static object cannot redeclare an external pragma clone
+later-static-function	later-static-function.c	rejected	a static function cannot redeclare an external pragma clone
+later-qualifiers	later-qualifiers.c	rejected	later object qualifiers retain their conflicting-type diagnostic
+later-thread-local	later-thread-local.c	rejected	the clone drops target TLS storage while an independent later error remains
+local-shadow-mixed	local-shadow-mixed.c	-	parameter block and for-init shadows do not reference a mismatched file alias
+local-shadow-static	local-shadow-static.c	-	a local shadow does not name an internal mismatched alias
+local-shadow-ended	local-shadow-ended.c	rejected	an expired local shadow does not hide subsequent clone ambiguity
+local-extern	local-extern.c	rejected	a local extern cannot redeclare an ambiguous object lookup set
+overload-calls	overload-calls.c	-	function calls choose the original or pragma clone by argument type
+overload-unviable	overload-unviable.c	rejected	a function lookup with no viable candidate keeps its candidate notes
+overload-address	overload-address.c	-	a typed function pointer selects the matching function candidate
+overload-address-mismatch	overload-address-mismatch.c	rejected	a typed address with no matching function retains candidate notes
+overload-type	overload-type.c	-	unevaluated calls retain the selected candidate's result type
+overload-same-parameters	overload-same-parameters.c	rejected	return types alone cannot disambiguate identical function parameters
+overload-identical-address	overload-identical-address.c	rejected	identical signatures still form an overload set for typed addresses, assignments and arguments
+object-repeated-clones	object-repeated-clones.c	rejected	each object clone made before a reference is a candidate, newest first
+object-repeated-forward	object-repeated-forward.c	rejected	forward targets order an object's candidates by when their clones are made
+object-invalid-redeclaration	object-invalid-redeclaration.c	rejected	an invalid redeclaration after an object clone moves A's earlier declaration first among the candidates
+object-invalid-redeclarations	object-invalid-redeclarations.c	rejected	invalid redeclarations after an object clone alternate each one's previous declaration as clang's lookup filter does
+object-invalid-between-clones	object-invalid-between-clones.c	rejected	invalid redeclarations between three object clones order the ambiguous reference's candidates
+object-invalid-type-redeclaration	object-invalid-type-redeclaration.c	rejected	a redeclaration of another type after an object clone is invalid in the candidates' order too
+overload-operand	overload-operand.c	rejected	a function clone's lookup set as an operator's operand is unresolved with possible targets at the pragma and the declaration
+overload-operand-contexts	overload-operand-contexts.c	rejected	a function clone's lookup set returned, assigned, compared, negated and cast to void
+later-alias-attribute	later-alias-attribute.c	rejected	a later alias attribute on a function clone's name redefines the clone
+later-object-alias-attribute	later-object-alias-attribute.c	rejected	a later alias attribute on an object clone's name redefines the clone, noted at the target
+later-ifunc-attribute	later-ifunc-attribute.c	rejected	a later ifunc attribute on a clone's name redefines the clone
+declared-later-alias-attribute	declared-later-alias-attribute.c	rejected	a later alias attribute redefines the clone where the name was declared before the pragma
+early-function-call	early-function-call.c	rejected	a declaration after two function clones merges with the newer and leaves the older a candidate
+early-function-signatures	early-function-signatures.c	-	calls select the older clone or the declaration that merged with the newer one by argument type
+early-function-unused	early-function-unused.c	-	a declaration after two function clones carries the first clone's alias without a use
+early-function-address	early-function-address.c	rejected	an address of an early clone set lists the declaration before the older clone
+early-function-conflict	early-function-conflict.c	rejected	a declaration conflicting with the newest early clone drops out of the candidates
+early-function-later-clone	early-function-later-clone.c	rejected	a clone after the declaration heads the early clones and the declaration
+early-function-redeclared	early-function-redeclared.c	rejected	the latest declaration is the early clone set's declaration candidate
+early-function-forward	early-function-forward.c	rejected	early clones made at forward targets keep the pragma as their candidate location
+early-function-three	early-function-three.c	rejected	three early clones leave two older candidates beside the declaration
+early-function-definition	early-function-definition.c	rejected	a definition after early clones redefines the newest and stays a candidate
+early-object-reference	early-object-reference.c	rejected	a declaration after two object clones is a different kind of symbol and later references are ambiguous
+early-object-redeclared	early-object-redeclared.c	rejected	repeated declarations after object clones alternate the lookup's representative
+early-object-function	early-object-function.c	rejected	a function declaration after object clones is a different kind of symbol
+early-mixed-reference	early-mixed-reference.c	rejected	a declaration after mixed function and object clones notes the newest and the reference lists both
+early-object-unused	early-object-unused.c	rejected	a declaration after two object clones is a different kind of symbol without a reference
+early-function-run	early-function-run.c	-	calls through an early clone set name the first clone's weak alias

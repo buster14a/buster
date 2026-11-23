@@ -903,8 +903,10 @@ static void check_test_driver_ignored_pragmas(CheckTest* test, const char* clang
         // the checker reads the source; `barrier` is the spelling that barrier must name.
         const char* barrier;
     } refused[] = {
-        // A target the unit doesn't define (#1849: clang's "alias must point to a defined variable or function").
-        { "#pragma weak alias = target\nextern int target;\n", "weak", NULL, NULL, NULL },
+        // A reference to function clones after an object declaration of their name (#2934: clang's
+        // '<overloaded function type>' operand).
+        { "int t1(void) { return 1; }\nint t2(void) { return 2; }\n#pragma weak a = t1\n#pragma weak a = t2\nextern int a;\nint use(void) { return a; }\n", "weak",
+          NULL, NULL, NULL },
         { "#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },
         { "#pragma omp parallel\nint object;\n", "omp", "-fno-openmp", "-fopenmp", "-fopenmp" },
         { "#undef _OPENMP\n#pragma omp parallel\nint object;\n", "omp", "-fopenmp", NULL, "-fopenmp" },

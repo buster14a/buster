@@ -216,7 +216,14 @@ static CheckLazyTreeUse check_lazy_tree_use(const Parser* parser, uint32_t token
     {
         const uint8_t role = roles[at];
         const uint32_t parent = parents[at];
-        if (role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_SPECIFIER || (role == PARSE_ROLE_CLOSE_FUNCTION && !expression) || gnu_syntax_attribute_role(role) ||
+        if (role == PARSE_ROLE_CLOSE_KEYWORD && expression)
+        {
+            // A name already inside an expression that is a keyword's operand, as `__builtin_bit_cast(T, f())`'s: a use,
+            // where clang reads it (evaluated or not, a use only keeps more bodies).
+            result = CHECK_LAZY_TREE_USE;
+            done = true;
+        }
+        else if (role == PARSE_ROLE_CLOSE_KEYWORD || role == PARSE_ROLE_CLOSE_SPECIFIER || (role == PARSE_ROLE_CLOSE_FUNCTION && !expression) || gnu_syntax_attribute_role(role) ||
             (role >= PARSE_ROLE_CLOSE_ATTRIBUTE && role <= PARSE_ROLE_CLOSE_ATTRIBUTE_LIST))
         {
             done = true;
@@ -282,6 +289,22 @@ static bool check_lazy_tree_eligible(uint32_t flags)
 {
     return (flags & BUSTER_CHECK_LAZY_SYSTEM) != 0 && (flags & (BUSTER_CHECK_LAZY_STATIC | BUSTER_CHECK_LAZY_INLINE)) != 0 &&
            (flags & (BUSTER_CHECK_LAZY_RETAIN | BUSTER_CHECK_LAZY_OPAQUE)) == 0;
+}
+
+// Whether a deferred definition's header can be skipped with its body (#3307): no token outside its own body and
+// declarator names it, so nothing the reader reads can refer to it, and its header, written in a system header, declares
+// nothing else a later token could see: no tag (a struct, union or enum keyword, or any brace) and no assembly or static
+// assertion. Its specifiers, declarator and attributes then go unread, as the body does, with their diagnostics.
+static bool check_lazy_tree_skippable(const Parser* parser, const Preprocessor* pp, const CheckLazyBody* row, uint32_t first)
+{
+    bool valid = (row->flags & BUSTER_CHECK_LAZY_NAMED) == 0 && first < row->declaration && row->declaration < row->begin &&
+                 check_lazy_system(pp, parse_source_index(&parser->tokens, first));
+    for (uint32_t token = first; valid && token < row->begin; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        valid = kind != PARSE_KIND_L_BRACE && kind != PARSE_KIND_STRUCT && kind != PARSE_KIND_ENUM && kind != PARSE_KIND_ASM && kind != PARSE_KIND_STATIC_ASSERT;
+    }
+    return valid;
 }
 
 static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* parser, const Preprocessor* pp, Arena* output, Arena* scratch, bool scalar)
@@ -392,7 +415,12 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
         uint32_t* destinations = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)occurrences + 1);
         uint32_t* kinds = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)occurrences + 1);
         uint32_t* flags = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)body_count + 1);
-        valid = sources != NULL && destinations != NULL && kinds != NULL && flags != NULL;
+        // Each occurrence of a definition's name in another body, any kind: one in a body that stays read keeps the
+        // definition's header read, as a use the demand graph doesn't count (one before the definition) may need it.
+        uint32_t* named_owners = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)occurrences + 1);
+        uint32_t* named_targets = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)occurrences + 1);
+        uint32_t named_count = 0;
+        valid = sources != NULL && destinations != NULL && kinds != NULL && flags != NULL && named_owners != NULL && named_targets != NULL;
         uint32_t body = 0;
         uint32_t attribute_end = 0;
         for (uint64_t block = 0; valid && block < count; block += 64)
@@ -424,6 +452,11 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
                 }
                 else if (target != 0)
                 {
+                    // Another declaration or a use outside every body keeps the definition's header read (#3307).
+                    candidate.bodies[target - 1].flags |= owner == 0 && token != candidate.bodies[target - 1].declaration ? BUSTER_CHECK_LAZY_NAMED : 0;
+                    named_owners[named_count] = owner - 1;
+                    named_targets[named_count] = target - 1;
+                    named_count += owner != 0 && owner != target;
                     uint32_t first = 0;
                     uint32_t point = 0;
                     if (owner == 0 && check_lazy_tree_function(parser, token, &first, &point))
@@ -477,13 +510,25 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
         valid = valid && (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, C_LOWERING_REACHABLE) : c_lowering_vector(&plan, C_LOWERING_REACHABLE)) == C_LOWERING_OK;
         if (valid)
         {
+            for (uint32_t at = 0; at < named_count; at += 1)
+            {
+                const uint32_t owner = named_owners[at];
+                const bool read = (plan.reached[owner / 64] & (UINT64_C(1) << (owner % 64))) != 0;
+                candidate.bodies[named_targets[at]].flags |= read ? BUSTER_CHECK_LAZY_NAMED : 0;
+            }
             for (uint32_t body = 0; body < body_count; body += 1)
             {
                 CheckLazyBody* row = candidate.bodies + body;
                 row->selected = (plan.reached[body / 64] & (UINT64_C(1) << (body % 64))) != 0;
                 if (!row->selected)
                 {
-                    memset(candidate.deferred_tokens + row->begin, 1, row->end - row->begin);
+                    memset(candidate.deferred_tokens + row->begin, BUSTER_CHECK_LAZY_MASK_BODY, row->end - row->begin);
+                    const uint32_t first = check_lazy_tree_first(parser, row->begin);
+                    if (check_lazy_tree_skippable(parser, pp, row, first))
+                    {
+                        memset(candidate.deferred_tokens + first, BUSTER_CHECK_LAZY_MASK_HEADER, row->begin - first);
+                        candidate.skipped_count += 1;
+                    }
                 }
             }
             candidate.selected_count = plan.selected_count;

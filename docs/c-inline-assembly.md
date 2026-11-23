@@ -177,7 +177,14 @@ its label is the next record's), whose place in the function's code Tier 0
 writes as it emits the body's call (`Tier0Code.asm_label_records`), and whose
 symbol the emission defines at that record's offset, as a naked function's
 labels are (`EmittedCode.asm_label_records`). Such a function isn't inlined by
-Tier 0 (`tier0_inline_callee_valid`), so each label is defined once. The IR's
+Tier 0 (`tier0_inline_callee_valid`), so each label is defined once. A private
+label (#2351's gap 4: a `.L` name that no template refers to and no directive
+names, as `.Lx%=` usually is) is the body's alone: its template's branches reach
+it as the body's own, and the object's symbols leave `.L` names out, so the
+planning drops it from the body's labels (`check_program_asm_names`). A function
+whose bodies' labels are all private is inlined, each copy's branches its own,
+as clang's inlined copies each renumber `%=`. Another name keeps its function
+out of the splicing, as clang fails to assemble two copies of it. The IR's
 body call carries no labels, so under `--tier1` a template of instructions and
 labels keeps its helper, which Tier 1 calls, and a function with a label of a
 template of no instructions is Tier 0's (`ir_lower`'s `IR_ERROR_UNSUPPORTED`). A template that returns and has a label keeps the
@@ -196,6 +203,20 @@ the block's load did). Tier 0 takes it as it takes a call:
 - the prologue saves the callee-saved ones among them, as clang's prologue
   saves `cpuid`'s rbx;
 - rsp is 16-byte aligned at the template, as in a function that calls.
+
+A register output can be the call row's result instead of a store (#2144,
+`CheckProgramAsm.inline_result`, `Tier0AsmBody.result`): the first output that is
+a general register's `int` or `long` (4 or 8 bytes; not a high byte, `A`'s
+widened register, nor a register variable's) and whose lvalue is an automatic,
+non-volatile object named by itself (`check_asm_returnable`), and that the body
+touches. The body doesn't store it and the block holds no address for it; a `+`
+one's input is the object's value, passed in its register. The row's result is
+in that register, which Tier 0 moves to its depth's (`tier0_call_result_register`,
+the deep path's store too), and the lowering's SET_LOCAL after the row stores it
+into the object's local. The `"c"` shift's `+r` output then costs no block slot,
+no address and no store through it. An asm goto keeps its exit in eax, and a
+lowering for `--tier1` keeps the store: the IR's body call has no result yet, and
+`ir_lower` leaves a function with a result's body to Tier 0.
 
 There is no call, return or frame of the template's own. `cpuid` with its four
 fixed outputs runs as two loads, `cpuid` and four stores in its function.
@@ -1050,19 +1071,22 @@ frame or block address.
 
 Where nothing runs after the body, Tier 0 drops the exits and the dispatch, and
 the template's jumps go straight to the labels, as clang's `callbr` does
-(#2351). That takes a body without outputs (`Tier0AsmBody.exits`: its exits
-fall straight into the move into eax), whose call row has no value under its
-arguments on any stack and isn't a deep entry's, and the dispatch the lowering
-writes after it (a SET_LOCAL of the exit's temporary, then per label a LOCAL,
-CONST, EQ and BRANCH_TRUE), none of whose entries is a label
-(`tier0_asm_direct`). The typed stream keeps the dispatch, so the validator,
-the inliner and the IR see the statement's edges as before; Tier 0 absorbs its
-entries, branches from the template's jump to label l (to the exit's record
-before) to the target of the l-th BRANCH_TRUE, and takes the dispatch's
-references from the temporary, which then has no home. A statement with outputs,
-or one under a value of its expression (a statement expression's), keeps the
-exit's move, compare and branch: its label's exit would need its own copy of the
-outputs' stores, and of the restores after the call row. Under `--tier1` the statement
+(#2351). That takes a body (`Tier0AsmBody.exits` and `goto_labels`) whose call
+row has no value under its arguments on any stack and isn't a deep entry's, so
+that no restore follows the row, and the dispatch the lowering writes after it
+(a SET_LOCAL of the exit's temporary, then per label a LOCAL, CONST, EQ and
+BRANCH_TRUE), none of whose entries is a label (`tier0_asm_direct`). The typed
+stream keeps the dispatch, so the validator, the inliner and the IR see the
+statement's edges as before; Tier 0 absorbs its entries, branches from the
+template's jump to label l (to the exit's record before) to the target of the
+l-th BRANCH_TRUE, and takes the dispatch's references from the temporary, which
+then has no home. A body with outputs (or x87 inputs' pops) writes a copy of
+their stores per exit instead, as clang's `callbr` targets' blocks have them
+(`tier0_emit_call_record`): the fall-through's after the template, jumping past
+the others, then each label's, which the template's jumps to that label reach,
+jumping to the label's entry. A statement under a value of its expression (a
+statement expression's) keeps the exit's move, compare and branch, as values
+under it would need their restores on every exit. Under `--tier1` the statement
 keeps its helper, as the IR's body call returns nothing. Tier 0 sorts its branch
 columns where a body has branches: a body's are a deferred entry's, written after
 the branches of the entries that follow it.
@@ -1415,7 +1439,7 @@ has the commands, the logs and the default path's numbers against main.
 ## Pending
 
 What placement in the caller doesn't take yet (#1839), each keeping its helper:
-templates of references to names, asm goto under `--tier1` (and the dispatch of one with outputs or under an expression's value, #2351), `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
+templates of references to names, asm goto under `--tier1` (and the dispatch of one under an expression's value, #2351), `loop` and `jrcxz` across a sized branch (assembled whole, as templates that take directives are),
 templates that return but keep a helper for another reason (refused by name), templates
 that take directives, and forms of unknown effects outside `check_asm_implicit`.
 Under `--tier1`, templates of named labels keep their helpers (a body's labels

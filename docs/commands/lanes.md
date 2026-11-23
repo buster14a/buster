@@ -41,7 +41,11 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   back; an arena's base pages committed at once and then four times what is
   committed where commit isn't charged, 64 KB and within twice where it is;
   and a full half, compact reservations and limits that aren't fixed each
-  leaving a reservation a mapping of its own;
+  leaving a reservation a mapping of its own; and, in a child, a pool's
+  releases (#3070, `arena_pool_writable`): an arena's writable prefix its
+  commit, its written pages freed and the arena taken again zero, a copy's
+  commit past it found, its page freed and read zero again, and without
+  `PROCMAP_QUERY` the whole mapping's pages freed;
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;

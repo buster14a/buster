@@ -278,8 +278,27 @@ jobs:
         with:
           script: bash tools/ci/vector-draw.sh product "$BUSTER_SANITIZER"
 
+      # The wait returns once download-artifact's own lookup (ListArtifacts by name) serves the product, not when the
+      # run's listing first names it, which was about a second earlier (#3301). The download still asks once more, after
+      # 30 s, if that ask fails, into an emptied directory; a product it can't fetch twice fails the item, and whatever
+      # it fetched is installed only by the SHA-256 its name holds.
       - name: Download the vector configuration's product
+        id: download
         if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ${{ steps.product.outputs.name }}
+          path: ${{ runner.temp }}/vector-product-download
+
+      - name: Wait to download the vector configuration's product again
+        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1' && steps.download.outcome == 'failure'
+        run: |
+          rm -rf -- "$RUNNER_TEMP/vector-product-download"
+          sleep 30
+
+      - name: Download the vector configuration's product again
+        if: env.BUSTER_SHARD != '' && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER != '1' && steps.download.outcome == 'failure'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: ${{ steps.product.outputs.name }}

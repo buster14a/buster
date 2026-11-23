@@ -1813,6 +1813,7 @@ static __attribute__((noinline)) uint64_t node_front_acted(NodeFront* front, uin
 static __attribute__((noinline)) void node_front_started(NodeFront* front, CheckInputReader* reader, uint8_t fronted)
 {
     front->typer = NULL;
+    front->alone = NULL;
     front->window = false;
     front->window_facts = NULL;
     front->window_numbers = NULL;
@@ -1834,6 +1835,11 @@ static __attribute__((noinline)) void node_front_started(NodeFront* front, Check
         front->typer = node_machine_reader_begin(reader, front->shadow, (fronted & BUSTER_NODE_FRONT_SWEEPS) != 0);
         // Whether the front writes the fact words' window (BUSTER_NODE_READER_WINDOW), where the kernel runs there.
         node_facts_window_begin(front, reader);
+        if (front->typer != NULL && (reader->pp->options.node_reader & BUSTER_NODE_READER_ALONE) != 0)
+        {
+            // The machine with no node of the walk's, a body at a time before the walk acts at it.
+            front->alone = node_alone_begin(front, reader);
+        }
     }
 #else
     (void)reader;
@@ -2280,7 +2286,15 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     }
     // The node machine's front in the shadow (PPOptions.node_front, #2524): over the whole unit's coded walk, its state on
     // the scratch and its report, with a bit a node the graph has room for, in the output's arena.
-    const uint8_t fronted = coded && begin == 0 && stop == count ? reader->pp->options.node_front : 0;
+    // (--node-bodies, BUSTER_NODE_READER_BODIES: a unit with a reason of its own to take no body has no front. Nothing of
+    // the machine is made for it, and the walk acts as without the option, node_producer_unit.)
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    const bool reasoned = coded && begin == 0 && stop == count && (reader->pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0 &&
+                          reader->pp->options.node_front != 0 && node_producer_unit(reader) != 0;
+#else
+    const bool reasoned = false;
+#endif
+    const uint8_t fronted = coded && begin == 0 && stop == count && !reasoned ? reader->pp->options.node_front : 0;
     NodeFront* front = fronted != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64) : NULL;
     if (front != NULL && (fronted & BUSTER_NODE_FRONT_WARM) != 0)
     {
@@ -2335,11 +2349,25 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     const bool timed = coded && reader->pp->options.expression_timing;
     // Deferred parts publish their graphs separately; they do not own a unit's tape. A musttail check needs the
     // original root's operand even for a rejected return. The shadow and the graph-numbering probe compare graph nodes.
-    const bool window = (reader->pp->options.node_window || reader->pp->options.node_window_constants) && coded && begin == 0 && stop == count && !timed && front == NULL &&
+    // (The producer as a compile would run it, BUSTER_NODE_READER_PRODUCE_LEAN, has a front for its state alone: the walk
+    // acts as without one.)
+    const bool window = (reader->pp->options.node_window || reader->pp->options.node_window_constants) && coded && begin == 0 && stop == count && !timed &&
+                        (front == NULL || (reader->pp->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0) &&
                         reader->expression_declined == NULL && reader->parser->errors == 0 && input->musttail_count == 0 && check_node_window_prepare();
     const bool profile = !reader->pp->options.skip_expression_profile;
+    // (BUSTER_NODE_READER_PRODUCE_LEAN: the producer of the bodies' functions as a compile would run it, in the shadow.)
+    const bool produced = front != NULL && (reader->pp->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0;
     uint64_t* visit_ticks = profile ? &visited : NULL;
     uint32_t reached[4][BUSTER_CHECK_EXPRESSION_CODES] = { 0 };
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (produced && front->alone != NULL && (reader->pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0)
+    {
+        // --node-bodies: every body decided before the walk's first chunk is compacted, and the ones the producer takes
+        // masked from here on (the chunks' own calls below then find no body left to read).
+        node_alone_bodies(front->alone, front, reader, begin, stop);
+        node_bodies_mask(reader, front->shadow);
+    }
+#endif
     for (uint32_t first = begin; first < stop && !reader->output->resource; first += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint64_t start = profile ? __rdtsc() : 0;
@@ -2350,7 +2378,31 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         uint64_t fronting = 0;
         if (front != NULL)
         {
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+            uint64_t alone = 0;
+            if (front->alone != NULL)
+            {
+                // The bodies that begin in the chunk, each read whole before the walk acts at its first token: no part's
+                // ticks of the walk's.
+                const uint64_t before = __rdtsc();
+                node_alone_bodies(front->alone, front, reader, first, end);
+                alone = __rdtsc() - before;
+            }
+            if (produced)
+            {
+                // The producer as a compile would run it: the bodies are read above, and the walk's chunk is prepared as
+                // without a front. No front runs beside the walk, and no machine on its nodes.
+                check_input_expression_identifiers(reader, tokens, classes, acting, &identifiers);
+                check_input_expression_literals(reader, tokens, classes, acting, &literals);
+                fronting = alone;
+            }
+            else
+            {
+                fronting = node_front_prepared(front, fronted, reader, tokens, classes, acting, &identifiers, &literals, start + alone) + alone;
+            }
+#else
             fronting = node_front_prepared(front, fronted, reader, tokens, classes, acting, &identifiers, &literals, start);
+#endif
         }
         else if (coded)
         {
@@ -2394,7 +2446,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         const uint64_t done = profile ? __rdtsc() : 0;
         prepared += ready - start - fronting;
         acted += done - ready;
-        if (front != NULL)
+        if (front != NULL && !produced)
         {
             acted += node_front_acted(front, fronted, reader, batch, tokens, classes, acting, &identifiers, &literals);
         }
@@ -2406,7 +2458,7 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
         check_input_expression_flush(reader, batch);
         acted += profile ? __rdtsc() - start : 0;
     }
-    if (front != NULL)
+    if (front != NULL && !produced)
     {
         node_front_finish(front, reader, base);
     }
@@ -2423,6 +2475,16 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
             reader->output->expression_acted[code] = tokens_reached - reader->output->expression_left[code];
         }
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (front != NULL && front->alone != NULL)
+    {
+        // The roots the machine with no node of the walk's took, against the tokens the walk's actions left. And what the
+        // reader has said as the walk ends (the producer's verdicts are read against it, c_check_node_bodies.c).
+        node_alone_finish(front->alone, reader);
+        front->shadow->produced_reports_walked = reader->output->report_count;
+        front->shadow->produced_events_walked = reader->warning_events.count;
+    }
+#endif
     if (reader->expression_declined != NULL && !reader->output->resource)
     {
         check_input_expression_numbering(reader, base, tokens, classes);

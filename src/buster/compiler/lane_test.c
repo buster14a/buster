@@ -141,6 +141,8 @@
 #include <execinfo.h>
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
+// uname, for lane_test_kernel_at_least: the driver's arena checks alone ask the kernel's release.
+#include <sys/utsname.h>
 #define BUSTER_LANE_TEST_MAX_LANES 8
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
 #define BUSTER_LANE_TEST_MAX_RANGE 1000
@@ -823,11 +825,132 @@ static void lane_test_arena_regions(LaneTestTally* tally)
     lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of reservations taken together failed in their process");
 }
 
+// Whether `count` bytes at `bytes` are all zero.
+static bool lane_test_zero(const uint8_t* bytes, uint64_t count)
+{
+    bool zero = bytes != 0;
+    for (uint64_t i = 0; zero && i < count; i += 1)
+    {
+        zero = bytes[i] == 0;
+    }
+    return zero;
+}
+
+// Whether the kernel's release (uname's) is `major`.`minor` or later.
+static bool lane_test_kernel_at_least(uint64_t major, uint64_t minor)
+{
+    struct utsname kernel;
+    uint64_t numbers[2] = { 0, 0 };
+    const bool named = uname(&kernel) == 0;
+    const char* at = kernel.release;
+    for (uint32_t part = 0; named && part < 2; part += 1)
+    {
+        while (*at >= '0' && *at <= '9')
+        {
+            numbers[part] = numbers[part] * 10 + (uint64_t)(*at - '0');
+            at += 1;
+        }
+        at += *at == '.' ? 1 : 0;
+    }
+    return named && (numbers[0] > major || (numbers[0] == major && numbers[1] >= minor));
+}
+
+// A pool's releases free the pages of their arenas' writable prefixes alone (#3070, arena_pool_writable), where commit
+// isn't charged. The prefix is the arena's commit where no copy of it committed further, which one query answers; a
+// released arena's pages there are freed, and it is taken again zero. A copy that commits past the arena's commit and
+// writes there: the query finds the writable mapping it made, the release frees the copy's page, and reuse reads zero
+// there. Without the query (a kernel before Linux 6.11), the release frees the whole mapping's pages, and reuse reads
+// zero all the same. arena_pool_release closes the pool's /proc/self/maps. In a process of its own
+// (lane_test_arena_pool_writable), as the regions' checks are: its reservations' regions count against the
+// address-space limit that later checks lower.
+static void lane_test_arena_pool_writable_child(LaneTestTally* tally)
+{
+    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
+    const bool queries = lane_test_kernel_at_least(6, 11);
+    arena_limits = (ArenaLimits){
+        .fixed = true,
+        .address_share = BUSTER_ARENA_MAX_CAPACITY,
+        .commit_unbounded = true,
+    };
+    static ArenaPool pool;
+    arena_pool = &pool;
+    for (uint32_t asked = 0; asked < 2; asked += 1)
+    {
+        // The second round's pool can't ask, as on a kernel without PROCMAP_QUERY.
+        if (asked == 1)
+        {
+            if (pool.opened && pool.maps >= 0)
+            {
+                close(pool.maps);
+            }
+            pool.opened = true;
+            pool.maps = -1;
+        }
+        const bool asks = asked == 0 && queries;
+        Arena arena = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+        uint8_t* const bytes = arena.base != 0 ? arena_push(&arena, 3 * page, page) : 0;
+        uint8_t* const mapping = arena.base - arena.mapping_offset;
+        if (bytes != 0)
+        {
+            memset(bytes, 0x5a, 3 * page);
+        }
+        const uint64_t writable = bytes != 0 ? arena_pool_writable(&pool, mapping, arena.mapping_bytes, arena.committed) : 0;
+        lane_test_expect(tally, bytes != 0 && writable == (asks ? arena.committed : arena.mapping_bytes) && (asked == 1 || !queries || pool.maps >= 0),
+                         "a pooled arena's writable prefix wasn't its commit, or the whole mapping without the query");
+        const uint8_t* const base = arena.base;
+        arena_release(&arena);
+        lane_test_expect(tally, pool.count == 1 && !lane_test_resident(bytes) && !lane_test_resident(bytes + 2 * page), "a pooled arena's written pages weren't freed");
+        // Taken again zero; then a copy commits past its commit and writes at the end of what it pushed.
+        arena = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+        const uint8_t* const again = arena.base == base && base != 0 ? arena_push(&arena, 3 * page, page) : 0;
+        lane_test_expect(tally, again == bytes && lane_test_zero(again, 3 * page), "a pooled arena wasn't taken again zero");
+        const uint64_t arena_end = again != 0 ? arena.committed - arena.mapping_offset : 0;
+        Arena copy = arena;
+        uint8_t* const far = again != 0 ? arena_push(&copy, arena_end + 8 * page, page) : 0;
+        const bool past = far != 0 && copy.committed > arena.committed;
+        uint8_t* const far_page = past ? far + arena_end + 7 * page : 0;
+        if (past)
+        {
+            *far_page = 0x55;
+        }
+        const uint64_t copied = past ? arena_pool_writable(&pool, mapping, arena.mapping_bytes, arena.committed) : 0;
+        lane_test_expect(tally, past && (asks ? copied >= copy.committed && copied < arena.mapping_bytes : copied == arena.mapping_bytes),
+                         "a pooled arena's writable prefix didn't reach what its copy committed");
+        arena_release(&arena);
+        lane_test_expect(tally, past && !lane_test_resident((const uint8_t*)((uintptr_t)far_page & ~(uintptr_t)(page - 1))), "a copy's page past its arena's commit wasn't freed");
+        arena = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+        const uint8_t* const reused = arena.base == base && past ? arena_push(&arena, 2 * arena_end + 16 * page, page) : 0;
+        lane_test_expect(tally, reused != 0 && reused[(uint64_t)(far_page - bytes)] == 0, "a pooled arena whose copy committed past it wasn't taken again zero there");
+        arena_release(&arena);
+    }
+    arena_pool = 0;
+    arena_pool_release(&pool);
+    lane_test_expect(tally, !pool.opened && pool.count == 0, "a released pool kept its /proc/self/maps");
+}
+
+// lane_test_arena_pool_writable_child in a process of its own: one check here, that every check of its passed.
+static void lane_test_arena_pool_writable(LaneTestTally* tally)
+{
+    fflush(stdout);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        LaneTestTally own = { 0 };
+        lane_test_arena_pool_writable_child(&own);
+        fflush(stdout);
+        _exit(own.failures == 0 && own.checks != 0 ? 0 : 1);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of a pool's writable prefixes failed in their process");
+}
+
 static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
     lane_test_stack_base_pages(&tally);
     lane_test_arena_regions(&tally);
+    lane_test_arena_pool_writable(&tally);
 
     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
     static const struct

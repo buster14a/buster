@@ -759,6 +759,16 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                     result.ambiguous |= memory_width != 0 && memory_width != form->operand_bytes;
                     memory_width = form->operand_bytes;
                 }
+                // Among the forms that match, a legacy or VEX one before an EVEX one, as GNU as picks them, though an EVEX
+                // form's compressed displacement (disp8*N) can make it shorter: AVX-512 isn't what an AVX instruction needs
+                // (#1134: the C lowering's index has every feature). A VEX form that yields to an EVEX one
+                // (x86_match_yields) comes after both. Then the shortest.
+                const uint32_t attributes = index->attributes[at];
+                const uint8_t rank = (attributes & BUSTER_X86_MATCH_YIELDS) ? 2 : (attributes & BUSTER_X86_MATCH_EVEX) ? 1 : 0;
+                if (result.found && rank > result.rank)
+                {
+                    continue;
+                }
                 uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
                 // The candidate has crossed the complete x86_validate boundary, and its record doesn't change after
                 // it: encode_one gives its length.
@@ -774,14 +784,8 @@ static X86Match x86_match(const X86MatchIndex* index, const X86MatchRequest* req
                 // And an immediate that fits a sign-extended byte in its imm8 form, not the accumulator's (#1115:
                 // `cmpw $120, %ax` is 66 83 F8 78, not 66 3D 78 00), where the two are as long: AX's 16-bit forms.
                 const bool accumulator = result.found && x86_form_descriptions[chosen].syntax == X86_SYNTAX_ACC_IMM && x86_form_descriptions[number].syntax != X86_SYNTAX_ACC_IMM;
-                // Among the forms that match, a legacy or VEX one before an EVEX one, as GNU as picks them, though an EVEX
-                // form's compressed displacement (disp8*N) can make it shorter: AVX-512 isn't what an AVX instruction needs
-                // (#1134: the C lowering's index has every feature). A VEX form that yields to an EVEX one
-                // (x86_match_yields) comes after both. Then the shortest.
-                const uint32_t attributes = index->attributes[at];
-                const uint8_t rank = (attributes & BUSTER_X86_MATCH_YIELDS) ? 2 : (attributes & BUSTER_X86_MATCH_EVEX) ? 1 : 0;
                 const bool shorter = length < result.length || (length == result.length && (movq || accumulator));
-                if (length > 0 && (!result.found || rank < result.rank || (rank == result.rank && shorter)))
+                if (length > 0 && (!result.found || rank < result.rank || shorter))
                 {
                     result.instruction = instruction;
                     result.length = (uint32_t)length;

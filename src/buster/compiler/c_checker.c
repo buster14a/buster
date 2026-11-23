@@ -1491,7 +1491,8 @@ static bool check_graph_validate_lists(const CheckGraph* graph)
         const uint32_t library = candidate->library_call;
         result = (candidate->previous == BUSTER_CHECK_NONE || candidate->previous < i) && candidate->declaration != BUSTER_CHECK_NONE &&
                  candidate->canonical != BUSTER_CHECK_NONE &&
-                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED | BUSTER_CHECK_OVERLOAD_TARGET)) == 0 &&
+                 (flags & ~(BUSTER_CHECK_OVERLOADABLE | BUSTER_CHECK_OVERLOAD_UNAVAILABLE | BUSTER_CHECK_OVERLOAD_DEFINED | BUSTER_CHECK_OVERLOAD_TARGET |
+                            BUSTER_CHECK_OVERLOAD_WEAK_PRAGMA)) == 0 &&
                  (library == 0 || ((library & BUSTER_CHECK_LIBRARY_CALL) != 0 && (library & ~BUSTER_CHECK_LIBRARY_CALL) < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS &&
                                   (flags & BUSTER_CHECK_OVERLOADABLE) == 0));
     }
@@ -3599,6 +3600,67 @@ static bool check_graph_warning_needed(TypeTable* types, const CheckGraph* graph
     return stream->warnings[node] != 0 || check_graph_gnu_constant(types, context, &value);
 }
 
+// Whether clang's evaluator gives `root`'s value, which a modification on its value's path fails (#2264: an assignment, a
+// compound assignment or an increment, as `(y = 0)` and `({ y = 0; })` are, EvaluateAsBooleanCondition's evaluation
+// failing on an object it didn't create), though one it only discards doesn't: a comma's left operand's, a statement
+// expression's earlier statements', a logical operator's right operand that its left decides and a constant
+// conditional's other arm's. Only a node whose value carries BUSTER_CHECK_MODIFICATION is walked, by its operands that
+// carry it too, on an explicit stack (the call graph's no-recursion rule); a path deeper than the stack is taken as
+// failing.
+#define BUSTER_CHECK_EVALUABLE_FRAMES 64u
+static bool check_graph_evaluable(const TypeTable* types, const CheckGraph* graph, const CheckStream* stream, uint32_t root)
+{
+    uint32_t stack[BUSTER_CHECK_EVALUABLE_FRAMES];
+    uint32_t count = 1;
+    bool evaluable = true;
+    stack[0] = root;
+    while (evaluable && count != 0)
+    {
+        const uint32_t node = stack[--count];
+        if ((check_stream_flags(stream, node) & BUSTER_CHECK_MODIFICATION) != 0)
+        {
+            const CheckOp op = graph->ops[node];
+            const uint32_t left = graph->operand0[node];
+            const bool decided = (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) && left < graph->count &&
+                                 check_stream_constant_kind(stream, left) != CHECK_CONSTANT_NONE;
+            bool truth = false;
+            const CheckValue value = decided ? check_stream_value(stream, left) : (CheckValue){ 0 };
+            const bool known = decided && value.fault == CHECK_FAULT_NONE && check_action_truth(types, &value, &truth);
+            uint32_t operands[3] = { left, graph->operand1[node], graph->operand2[node] };
+            if (op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN))
+            {
+                evaluable = false;
+            }
+            else if (op == CHECK_OP_COMMA)
+            {
+                operands[0] = BUSTER_CHECK_NONE;
+            }
+            else if (known && (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR))
+            {
+                // `0 && x` and `1 || x` stop at their left operand.
+                operands[1] = truth == (op == CHECK_OP_LOGICAL_OR) ? BUSTER_CHECK_NONE : operands[1];
+            }
+            else if (known && op == CHECK_OP_CONDITIONAL)
+            {
+                // The arm it selects (a GNU `x ?: y`'s first is its condition).
+                operands[truth ? 2 : 1] = BUSTER_CHECK_NONE;
+            }
+            const uint32_t arguments = check_graph_has_arguments(op) ? graph->argument_counts[node] : 0;
+            for (uint32_t k = 0; evaluable && k < BUSTER_ARRAY_LENGTH(operands) + arguments; k += 1)
+            {
+                const uint32_t operand = k < BUSTER_ARRAY_LENGTH(operands) ? operands[k] : graph->argument_nodes[graph->argument_offsets[node] + k - BUSTER_ARRAY_LENGTH(operands)];
+                if (operand < graph->count && (check_stream_flags(stream, operand) & BUSTER_CHECK_MODIFICATION) != 0)
+                {
+                    evaluable = count < BUSTER_CHECK_EVALUABLE_FRAMES;
+                    stack[count] = operand;
+                    count += evaluable;
+                }
+            }
+        }
+    }
+    return evaluable;
+}
+
 static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states)
 {
     stream->warning_count = 0;
@@ -3678,7 +3740,8 @@ static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* gra
         {
             mask = 0;
         }
-        else if (selection && check_action_truth(types, &condition, &truth))
+        else if (selection && check_action_truth(types, &condition, &truth) &&
+                 ((condition.flags & BUSTER_CHECK_MODIFICATION) == 0 || check_graph_evaluable(types, graph, stream, graph->operand0[node])))
         {
             mask = op == CHECK_OP_CONDITIONAL ? (truth ? 3 : 5) :
                    ((op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth)) ? 1 : 3;

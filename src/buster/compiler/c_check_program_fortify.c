@@ -59,6 +59,13 @@ static bool check_lower_fortify_constant(const CheckLowerWriter* writer, uint32_
         {
             value = effect->runtime_value;
         }
+        // A wrapper's query of its own parameter, in its expansion, is its argument's object size (#2983): glibc's
+        // fortified functions' bounds, which the caller's object gives.
+        uint64_t size = 0;
+        if (allowed && writer->wrapper_depth != 0 && check_lower_wrapper_query(writer, operand, effect->mode, &size))
+        {
+            value.integer = size;
+        }
     }
     const bool constant = allowed && value.category == CHECK_RVALUE && value.constant_kind == CHECK_CONSTANT_INTEGER &&
                           value.fault == CHECK_FAULT_NONE && (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;

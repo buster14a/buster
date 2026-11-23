@@ -70,6 +70,8 @@ struct CheckTier1Summary
 {
     CheckTier1Passes passes;
     Arena frozen;
+    // Built by the summary's lane before publication. Slot marks, if present, live beside the optimized body.
+    const IrInlineBody* shape;
     uint32_t inlined;
     bool vectors;
     bool vectorize_volatile;
@@ -162,7 +164,7 @@ static bool check_tier1_inline_table(const CheckProgram* program, const CheckPro
     uint32_t* states = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1) : 0;
     CheckTier1Summary* summaries = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckTier1Summary, (uint64_t)count + 1) : 0;
     Arena* arenas = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, Arena, 2 * BUSTER_CHECK_EMIT_MAX_LANES) : 0;
-    uint32_t* word = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 1) : 0;
+    uint32_t* word = stage ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_TIER1_PRIVATE_VALUES ? 2 : 1) : 0;
     const bool columns = candidates != 0 && classes != 0 && (!stage || (cyclic != 0 && states != 0 && summaries != 0 && arenas != 0 && word != 0));
     // Per body, whether an internal candidate keeps its code whatever its callers expand (CheckTier1Inline.rooted), and
     // whether the emission gave it none (CheckTier1Inline.dead).
@@ -390,10 +392,17 @@ static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inl
             memset(indices, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
             memset(stacked, 0, (uint64_t)count + 1);
         }
+        // The second stage word belongs to the private-value build. A vector introduced through any chain
+        // of inline summaries can run GVN on a formerly scalar body. Publish this with the ready word.
+        bool vector_bodies = false;
         // Each candidate's direct calls in the unit (CheckTier1Inline.sites), by every lowered body's.
         for (uint32_t b = 0; b < count; b += 1)
         {
             const Tier0Function* function = &functions[b];
+            if (BUSTER_TIER1_PRIVATE_VALUES && inlining->ready[b] != 0 && function->vectors)
+            {
+                vector_bodies = true;
+            }
             for (uint32_t c = 0; inlining->ready[b] != 0 && c < function->call_count; c += 1)
             {
                 const SymbolId target = function->call_targets[c];
@@ -493,6 +502,10 @@ static bool check_tier1_inline_stage(Arena* scratch, const CheckTier1Inline* inl
             inlining->held[b] = held ? BUSTER_CHECK_TIER1_INLINE_HELD : 0;
         }
         arena_pop_to(scratch, mark);
+        if (BUSTER_TIER1_PRIVATE_VALUES)
+        {
+            inlining->stage[1] = vector_bodies;
+        }
         lane_publish(inlining->stage, BUSTER_CHECK_TIER1_INLINE_READY);
         state = BUSTER_CHECK_TIER1_INLINE_READY;
     }
@@ -535,17 +548,21 @@ static bool check_tier1_inline_single(const CheckTier1Inline* inlining, uint32_t
     return inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_SMALL && inlining->rooted[b] == 0 && inlining->sites[b] == 1;
 }
 
+// Whether a body of this size is offered in its candidate class.
+static bool check_tier1_inline_size(const CheckTier1Inline* inlining, uint32_t b, uint32_t count)
+{
+    const uint32_t limit = check_tier1_inline_single(inlining, b) ? BUSTER_CHECK_TIER1_INLINE_SINGLE_SIZE : BUSTER_CHECK_TIER1_INLINE_SMALL_SIZE;
+    return inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS || count <= limit;
+}
+
 // Whether candidate body `b`'s ready summary may be copied into a caller at `target`: its target's features are the
 // caller's, and a small one is within its class's size.
 static bool check_tier1_inline_offered(const CheckTier1Inline* inlining, uint32_t b, const X86Target* target)
 {
     const X86Target* own = check_tier1_inline_target(inlining->program, b);
     const bool features = (own->features & ~target->features) == 0 && (own->extensions & ~target->extensions) == 0;
-    const bool always = inlining->classes[b] == BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS;
     const bool ready = __atomic_load_n(&inlining->states[b], __ATOMIC_ACQUIRE) == BUSTER_CHECK_TIER1_INLINE_READY;
-    const uint32_t size = check_tier1_inline_single(inlining, b) ? BUSTER_CHECK_TIER1_INLINE_SINGLE_SIZE :
-                                                                   BUSTER_CHECK_TIER1_INLINE_SMALL_SIZE;
-    return features && ready && (always || check_tier1_inline_function(inlining, b)->instruction_count <= size);
+    return features && ready && check_tier1_inline_size(inlining, b, check_tier1_inline_function(inlining, b)->instruction_count);
 }
 
 // Whether the call at `node` of `function` passes an aggregate by value or gives one back: its expansion copies the
@@ -583,42 +600,70 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     const uint64_t mark = scratch->length;
     // The callees, each once (a byte a body marks the ones taken, cleared after), as keys of their symbol in the high half
     // and their body in the low, and the caller's own last.
-    const uint64_t room = (uint64_t)lowered->call_count + 1;
-    uint64_t* keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
-    uint64_t* sorting = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
-    uint8_t* taken = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)inlining->body_count + 1);
-    const bool fits = keys != 0 && sorting != 0 && taken != 0;
-    if (taken != 0)
+    uint64_t* keys = NULL;
+    uint64_t* sorting = NULL;
+    uint8_t* taken = NULL;
+    if (lowered->call_count != 0)
     {
-        memset(taken, 0, (uint64_t)inlining->body_count + 1);
+        const uint64_t room = (uint64_t)lowered->call_count + 1;
+        keys = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
+        sorting = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, room);
+        taken = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)inlining->body_count + 1);
+        if (taken != NULL)
+        {
+            memset(taken, 0, (uint64_t)inlining->body_count + 1);
+        }
     }
+    const bool fits = keys != NULL && sorting != NULL && taken != NULL;
     // A callee is taken (1) where it is offered and every call of it matches its signature, which the inliner checks at
     // each call and refuses the whole unit for (ir_inline_signature): a call that doesn't match leaves it out (2), and its
     // calls stay calls.
     uint32_t taken_count = 0;
-    for (uint32_t node = 0; fits && node < lowered->instruction_count; node += 1)
+    for (uint32_t first = 0; fits && first < lowered->instruction_count;)
     {
-        const bool direct = lowered->op[node] == IR_CALL && lowered->calls[lowered->b[node]].row == 0 && lowered->calls[lowered->b[node]].body == 0 && lowered->a[node] < inlining->symbol_count;
-        const uint32_t candidate = direct ? inlining->candidates[lowered->a[node]] : 0;
-        const uint32_t b = candidate - 1;
-        if (candidate != 0 && b != caller && taken[b] != 2)
+        const uint32_t left = lowered->instruction_count - first;
+        const uint32_t length = left < 64 ? left : 64;
+        const __mmask64 lanes = length == 64 ? UINT64_MAX : (UINT64_C(1) << length) - 1;
+        const __m512i ops = _mm512_maskz_loadu_epi8(lanes, lowered->op + first);
+        __mmask64 calls = _mm512_mask_cmpeq_epi8_mask(lanes, ops, _mm512_set1_epi8(IR_CALL));
+        for (; calls != 0; calls &= calls - 1)
         {
-            const bool first = taken[b] == 0;
-            const bool offered = !first || (inlining->cyclic[b] == 0 && check_tier1_inline_offered(inlining, b, target));
-            const bool matches = offered && ir_inline_signature(lowered, node, check_tier1_inline_function(inlining, b), check_tier1_inline_flags(inlining, b));
-            keys[taken_count] = (uint64_t)program->object_symbols[program->bodies[b].object] << 32 | b;
-            taken_count += first && matches ? 1 : 0;
-            taken[b] = matches ? 1 : 2;
+            const uint32_t node = first + (uint32_t)__builtin_ctzll(calls);
+            const IrCall call = lowered->calls[lowered->b[node]];
+            const bool direct = call.row == 0 && call.body == 0 && lowered->a[node] < inlining->symbol_count;
+            const uint32_t candidate = direct ? inlining->candidates[lowered->a[node]] : 0;
+            const uint32_t b = candidate - 1;
+            if (candidate != 0 && b != caller && taken[b] != 2)
+            {
+                const bool first = taken[b] == 0;
+                const bool offered = !first || (inlining->cyclic[b] == 0 && check_tier1_inline_offered(inlining, b, target));
+                const bool matches = offered && ir_inline_signature(lowered, node, check_tier1_inline_function(inlining, b), check_tier1_inline_flags(inlining, b));
+                keys[taken_count] = (uint64_t)program->object_symbols[program->bodies[b].object] << 32 | b;
+                taken_count += first && matches ? 1 : 0;
+                taken[b] = matches ? 1 : 2;
+            }
         }
-    }
-    // The callees taken, each once.
-    uint32_t count = 0;
-    for (uint32_t k = 0; k < taken_count; k += 1)
-    {
-        keys[count] = keys[k];
-        count += taken[(uint32_t)keys[k]] == 1 ? 1 : 0;
+        first += length;
     }
     const SymbolId own = program->bodies[caller].object <= program->input->token_count ? program->object_symbols[program->bodies[caller].object] : 0;
+    // Compute the varying symbol bits while compacting the accepted keys. The caller is also
+    // a member, so the bits differing from its symbol cover every radix digit the sort needs.
+    uint32_t count = 0;
+    uint32_t varying = 0;
+    uint32_t previous = 0;
+    bool ordered = true;
+    for (uint32_t k = 0; k < taken_count; k += 1)
+    {
+        const uint64_t key = keys[k];
+        if (taken[(uint32_t)key] == 1)
+        {
+            const uint32_t symbol = (uint32_t)(key >> 32);
+            keys[count++] = key;
+            varying |= symbol ^ own;
+            ordered = ordered && previous <= symbol;
+            previous = symbol;
+        }
+    }
     IrFunction current = *lowered;
     bool aggregates = false;
     if (count != 0 && own != 0 && own < inlining->symbol_count)
@@ -626,7 +671,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         // The unit: the caller and its callees, by symbol (a radix sort of the keys, as the bindings' are).
         keys[count] = (uint64_t)own << 32 | UINT32_MAX;
         const uint32_t members = count + 1;
-        const uint64_t* sorted = c_bindings_sort(keys, sorting, members, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX);
+        const uint64_t* sorted = ordered && previous <= own ? keys : c_bindings_sort(keys, sorting, members, !BUSTER_SCALAR_PATH(scalar), varying);
         // The unit's columns precede the inliner's output (steps[4]), whose unused tail its inputs mustn't share, as they
         // mustn't its scratch.
         Arena* columns = &lane->steps[4];
@@ -634,6 +679,8 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         uint32_t* symbols = BUSTER_ARENA_PUSH_ARRAY(columns, uint32_t, members);
         uint8_t* flags = BUSTER_ARENA_PUSH_ARRAY(columns, uint8_t, members);
         uint32_t* limits = BUSTER_ARENA_PUSH_ARRAY(columns, uint32_t, members);
+        // The sort's other buffer has one pointer-sized cell per member and lives through the expansion.
+        const IrInlineBody** shapes = (const IrInlineBody**)(sorted == keys ? sorting : keys);
         const bool unit_fits = functions != 0 && symbols != 0 && flags != 0 && limits != 0;
         uint32_t position = 0;
         for (uint32_t k = 0; unit_fits && k < members; k += 1)
@@ -641,6 +688,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
             const uint32_t b = (uint32_t)sorted[k];
             const bool self = b == UINT32_MAX;
             functions[k] = self ? *lowered : *check_tier1_inline_function(inlining, b);
+            shapes[k] = self ? NULL : inlining->summaries[b].shape;
             symbols[k] = (uint32_t)(sorted[k] >> 32);
             flags[k] = self ? 0 : check_tier1_inline_flags(inlining, b);
             limits[k] = self ? 0 :
@@ -670,7 +718,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         IrInlineResult expanded = { 0 };
         uint32_t failed = BUSTER_IR_NONE;
         // (A unit that didn't fit is no unit, which the inliner refuses.)
-        const IrCheck check = unit_fits ? ir_optimize_inline(&unit, &lane->steps[4], scratch, options, &expanded, &failed) : ir_check(IR_ERROR_MEMORY, BUSTER_IR_NONE, 0);
+        const IrCheck check = unit_fits ? ir_inline_with_shapes(&unit, &lane->steps[4], scratch, options, shapes, &expanded, &failed) : ir_check(IR_ERROR_MEMORY, BUSTER_IR_NONE, 0);
         for (uint32_t call = check.error == IR_OK ? expanded.call_offsets[position] : 0; check.error == IR_OK && call < expanded.call_offsets[position + 1]; call += 1)
         {
             *inlined += expanded.decisions[call] == IR_INLINE_SELECTED;
@@ -703,15 +751,18 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     // source's or an expanded callee's (*vectors): a COPY's 16-byte pieces (#2693, ir_typed_copy_pointers) are vectors in
     // the IR but give SROA nothing of theirs to split, and on sqlite3.c they made it split sqlite3VdbeExec (+141 M
     // instructions).
-    if (aggregates || (*vectors && ir_function_has_vectors(&current)))
+    // And a function that takes or returns an aggregate by value (#3311, its own ABI records): SROA's widening keeps its
+    // register-class aggregates' eightbytes out of memory.
+    if (aggregates || (*vectors && ir_function_has_vectors(&current)) || current.parameter_passed != 0)
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
         options.simd = true;
         options.flagged = true;
+        options.widen = true;
         IrSroaResult split = { 0 };
         const IrCheck check = ir_optimize_sroa(&current, &lane->steps[5], scratch, options, &split);
-        if (check.error == IR_OK && (split.split_slots != 0 || split.assembled != 0))
+        if (check.error == IR_OK && (split.split_slots != 0 || split.assembled != 0 || split.widened_slots != 0))
         {
             current = split.function;
             changed = true;
@@ -728,6 +779,24 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     }
     *result = current;
     return changed;
+}
+
+// Full GVN and SROA can observe storage identity. Restricted GVN can run after expansion introduces
+// vectors from another body. A unit with such a body shares storage form across its inline summaries.
+static IrCheck check_tier1_lower_body(const CheckTier1Lane* lane, const Tier0Function* function, IrType type, uint32_t symbols, uint64_t target, Arena* output, Arena* scratch, IrFunction* result, bool sources)
+{
+    bool direct = BUSTER_TIER1_PRIVATE_VALUES && !sources && !lane->preserve_local_storage;
+    if (direct && (check_tier1_passes_on(lane) & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0)
+    {
+        const CheckTier1Inline* inlining = lane->inlining;
+        direct = !function->vectors;
+        if (direct && inlining != NULL && inlining->stage != NULL)
+        {
+            check_tier1_inline_stage(scratch, inlining);
+            direct = inlining->stage[1] == 0;
+        }
+    }
+    return ir_lower_typed_target_path(function, type, symbols, output, scratch, result, target, true, sources, direct);
 }
 
 // Candidate body `b`'s summary, built by this lane: its stream lowered at its own target in steps[1], its calls expanded
@@ -755,8 +824,8 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
         // for check_tier1_passes' split (#1624), else a summary of a function with one is refused and its calls stay calls
         // (the compiler's own scalar-host build, whose AVX-512 types are wider than x86-64's: #2541). Under -g with its
         // source identities, which its callers' expansions carry as an instance's (#2541 step 3).
-        check = inlining->sources ? ir_lower_typed_target_pieces_sources(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered) :
-                                    ir_lower_typed_target_pieces(function, result_type, inlining->symbol_count, target->features, &lane->steps[1], scratch, &lowered);
+        check = check_tier1_lower_body(lane, function, result_type, inlining->symbol_count, target->features,
+                                          &lane->steps[1], scratch, &lowered, inlining->sources);
     }
     IrFunction expanded = lowered;
     uint32_t inlined = 0;
@@ -770,6 +839,13 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     {
         const uint64_t output_mark = output->length;
         const uint64_t analyses_mark = analyses->length;
+        // The body's jump tables (#3298), which its own code takes from the summary converted: no caller expands a body
+        // with labels.
+        uint32_t table_count = 0;
+        uint32_t table_first = 0;
+        const IrSwitchTable* tables = (check_tier1_passes_on(lane) & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 ?
+                                          check_tier1_switch_tables(inlining->lowered, b, function, scratch, &table_count, &table_first) :
+                                          NULL;
         // The lowering is verified as it is made, and an expansion SROA took by SROA.
         const CheckTier1PassesInput input = {
             .function = &expanded,
@@ -777,11 +853,47 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
             .unexpanded = changed && inlined != 0 ? &lowered : NULL,
             .summary = true,
             .vectorize_volatile = vectorize_volatile,
+            .tables = tables,
+            .table_count = table_count,
         };
         IrVerifiedRevision revision = { 0 };
         const CheckTier1Outcome outcome = check_tier1_passes(lane, &input, target, scalar, certify, NULL, &lane->steps[2], output, analyses, &revision, &summary.passes);
         built = outcome.stage == CHECK_TIER1_COMPILED;
+        // The converted tables' values, from steps[6], which is emptied below, into the summary's arena.
+        int32_t** values = built && summary.passes.tables_converted != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, int32_t*, table_count) : NULL;
+        built = built && (summary.passes.tables_converted == 0 || values != NULL);
+        for (uint32_t k = 0; built && values != NULL && k < table_count; k += 1)
+        {
+            const int32_t* converted = summary.passes.table_values[k];
+            values[k] = converted != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, int32_t, tables[k].count) : NULL;
+            built = converted == NULL || values[k] != NULL;
+            if (built && converted != NULL)
+            {
+                memcpy(values[k], converted, (uint64_t)tables[k].count * sizeof(int32_t));
+            }
+        }
+        summary.passes.table_values = values;
+        summary.passes.tables_converted = built ? summary.passes.tables_converted : 0;
         summary.inlined = summary.passes.unexpanded ? 0 : inlined;
+        const IrFunction* optimized = &summary.passes.optimized.function;
+        if (built && inlining->sites[b] != 0 && check_tier1_inline_size(inlining, b, optimized->instruction_count))
+        {
+            const uint64_t shape_mark = output->length;
+            IrInlineBody shape = { 0 };
+            if (ir_inline_shape(optimized, true, output, &shape))
+            {
+                IrInlineBody* retained = arena_push_array(output, 1, sizeof(*retained), _Alignof(IrInlineBody));
+                if (retained != NULL)
+                {
+                    *retained = shape;
+                    summary.shape = retained;
+                }
+            }
+            if (summary.shape == NULL)
+            {
+                arena_pop_to(output, shape_mark);
+            }
+        }
         arena_pop_to(output, built ? output->length : output_mark);
         arena_pop_to(analyses, built ? analyses->length : analyses_mark);
     }
@@ -882,7 +994,7 @@ static bool check_tier1_inline_summary(CheckTier1Lane* lane, const CheckTier1Inl
 // steps[4] and steps[5], verified where *verified; or false, and `lowered` stays the body's. The unit stage runs first,
 // once.
 static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFunction* lowered, const X86Target* target, bool scalar, bool certify, IrFunction* result,
-                               uint32_t* inlined, bool* verified, bool* vectorize_volatile)
+                               uint32_t* inlined, bool* verified, bool* vectorize_volatile, bool* expanding)
 {
     const CheckTier1Inline* inlining = lane->inlining;
     const Tier0Function* function = &inlining->lowered->functions[caller];
@@ -890,7 +1002,8 @@ static bool check_tier1_inline(CheckTier1Lane* lane, uint32_t caller, const IrFu
     *verified = true;
     *result = *lowered;
     bool changed = false;
-    if (inlining->stage != 0 && check_tier1_inline_stage(&lane->scratch, inlining))
+    *expanding = inlining->stage != 0 && check_tier1_inline_stage(&lane->scratch, inlining);
+    if (*expanding)
     {
         for (uint32_t c = 0; c < function->call_count; c += 1)
         {
@@ -1015,10 +1128,15 @@ static bool check_tier1_inline_held(CheckTier1Lane* lane, uint32_t b, const X86T
     if (held && inlining->classes[b] != BUSTER_CHECK_TIER1_INLINE_CLASS_ALWAYS)
     {
         const uint64_t mark = lane->scratch.length;
-        IrInlineBody shape = { 0 };
+        IrInlineBody built = { 0 };
+        const IrInlineBody* shape = inlining->summaries[b].shape;
         const uint32_t limit = check_tier1_inline_single(inlining, b) ? BUSTER_CHECK_TIER1_INLINE_SINGLE_COST :
                                                                          BUSTER_CHECK_TIER1_INLINE_SMALL_COST;
-        held = ir_inline_shape(check_tier1_inline_function(inlining, b), true, &lane->scratch, &shape) && shape.supported && shape.cost <= limit;
+        if (shape == NULL && ir_inline_shape(check_tier1_inline_function(inlining, b), true, &lane->scratch, &built))
+        {
+            shape = &built;
+        }
+        held = shape != NULL && shape->supported && shape->cost <= limit;
         arena_pop_to(&lane->scratch, mark);
     }
     // It waits (BUSTER_CHECK_TIER1_INLINE_WAITING), which the last pass reads once the lanes are done: this lane alone

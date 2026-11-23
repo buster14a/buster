@@ -234,6 +234,17 @@ definition. Its flags and edges:
   keep normal dispatch. Complete retained blocks keep their scope exits;
   terminal breaks use the ordinary cleanup, VLA-restore and lifetime machinery.
   Dropped regions and block-scope statics introduce no selection roots.
+
+  Ordinary `if` and `switch` conditions, the left operand of `&&` and `||`,
+  and the condition of `?:` can also read a completed nonvolatile const
+  integer initializer (#2987). The value may come from a file- or block-scope
+  object, a record member or an in-bounds array element. Emission follows
+  integer promotions and short-circuit evaluation, so `off && f()` drops the
+  call when `off` is zero. Reference selection and target-feature checking use
+  the same decision. A runtime read, an inactive union member or a label that
+  can enter the skipped code keeps the ordinary control flow. The regression
+  in `tests/checker/const-selection.c` compares emitted symbols and executable
+  results with Clang.
 - **Statements no control reaches (#2987):** a block's statements are walked
   in source order (`c_check_program_reach.c`). One that follows a `return`,
   `break`, `continue`, `goto` or `__builtin_unreachable()`, and that holds no
@@ -1738,7 +1749,7 @@ checked program, never from a name, and fails on any other:
 | --- | --- | --- |
 | folded | ours only: an object that a selected body reads, a const and not volatile scalar with an initializer | Reads its value as a constant (`CodeGenFunction::tryEmitAsConstant`), so nothing needs the object. musl's `math` constants (`pS0`, `pio2_hi`) and Lua's `HOOKKEY` and `CLIBS`. |
 | unselected | clang only: a definition the selection reaches when it also counts the operands that a constant condition never evaluates (`CheckProgramOptions.unselected_operands`) | Emits a `?:` in a branch's condition as branches without folding a constant condition (`CodeGenFunction::EmitBranchOnBoolExpr`), so the dead arm's calls stay. musl's `isnan` and `signbit` call `__FLOAT_BITS` in the dead arm for a `double`. |
-| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 splices such calls too (#1398) and leaves out a callee it spliced at every call (step 3); the object still defines one whose call it keeps (a cycle's, one the splice refuses: two returns, a result in memory), and every one under `--tier0-no-inline`. |
+| inlined | ours only: a local function whose definition has `always_inline` | Inlines it at its calls at -O0 too (its always-inliner) and emits none of a local function it inlined everywhere, as SQLite's `SQLITE_INLINE` `allocateSpace` is. Tier 0 splices such calls too (#1398) and leaves out a callee it spliced at every call (step 3); the object still defines one whose call it keeps (a cycle's, one the splice refuses: two returns, a result in memory), and every one under `--tier0-no-inline`. An inline-only one of one statement (glibc's `__fortify_function` wrappers) is expanded at its calls by the lowering itself, with its callers' object sizes ([#2983](c-builtins-fortify.md#the-wrappers-bounds-2983)). |
 
 Until #1108 there was a fourth, dropped: a definition only ours had, which
 clang's model left out because only a constant `if`'s dead arm reached it

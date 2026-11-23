@@ -89,11 +89,6 @@ typedef enum CheckRequestError
     CHECK_REQUEST_SANITIZER,
     CHECK_REQUEST_COVERAGE,
     CHECK_REQUEST_OPENMP,
-    // Position-independent code for shared libraries (-fPIC, -fpic), for a request that emits code other than a link's
-    // executable: Tier 0 can't yet emit shared-library-safe symbol and TLS accesses (#811). A link takes them (#2101):
-    // its executable's code is the code it has without them, and only interposition, which an executable's definitions
-    // don't have, tells -fPIC's code from -fPIE's.
-    CHECK_REQUEST_PIC,
     // An ABI layout the checker doesn't implement (-fshort-enums, -fpack-struct).
     CHECK_REQUEST_LAYOUT,
     // A language or target the checker doesn't take (check_input_target_supported).
@@ -308,14 +303,12 @@ static bool check_request_scan_match(CheckRequestScan* scan, const char* argumen
 // What the request scanned into `scan` asks for that the driver doesn't implement: code generation's options, with the
 // object and linkage options' when it emits code (`code` OBJECT for -c, EXECUTABLE for a link), which the driver
 // reports before a usage error; then, with `options` (null before they are parsed), its instrumentation when it emits
-// code, its position-independent code when it emits any but a link's executable (#2101), its layout and its language
-// and target too, the first that applies in that order.
+// code, its layout and its language and target too, the first that applies in that order. -fPIC and -fpic are taken
+// wherever code is emitted (#2101, CheckProgramOptions.pic).
 static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, const PPOptions* options, CheckRequestCode code)
 {
     CheckRequestRefusal result = { .error = CHECK_REQUEST_ACCEPTED };
     const bool emits = code != CHECK_REQUEST_CODE_NONE;
-    // -fPIC and -fpic are refused wherever code is emitted, but in a link's executable (#2101).
-    const bool pic_refused = emits && code != CHECK_REQUEST_CODE_EXECUTABLE;
     const char* visibility = check_request_visibility(scan->visibility) ? scan->visibility : NULL;
     const char* object = !emits ? NULL : visibility != NULL ? visibility : scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
     const char* codegen = scan->codegen != NULL ? scan->codegen : scan->stack_protector != NULL ? scan->stack_protector :
@@ -323,8 +316,6 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
     const bool sanitized = options != NULL && emits && options->predefines.sanitizers != 0;
     const bool covered = options != NULL && emits && options->predefines.sanitize_coverage;
     const bool parallel = options != NULL && emits && options->predefines.openmp_enabled;
-    const char* pic = options != NULL && pic_refused ? (options->predefines.pic == BUSTER_PREDEFINES_PIC_BIG ? "-fPIC" :
-                                                        options->predefines.pic == BUSTER_PREDEFINES_PIC_SMALL ? "-fpic" : NULL) : NULL;
     const char* packed = scan->pack_value ? scan->packed_value : scan->packed_bare;
     const char* layout = scan->invalid_pack != NULL ? scan->invalid_pack : scan->short_enums != NULL ? scan->short_enums : packed;
     if (codegen != NULL)
@@ -345,10 +336,6 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
             snprintf(result.spelling, sizeof(result.spelling), "%s%s%s", sanitized ? "-fsanitize" : covered ? "-fsanitize-coverage" : "-fopenmp",
                      runtime != NULL ? "=" : "", runtime != NULL ? runtime : "");
         }
-    }
-    else if (pic != NULL)
-    {
-        result = (CheckRequestRefusal){ .error = CHECK_REQUEST_PIC, .option = pic };
     }
     else if (options != NULL && layout != NULL)
     {
@@ -386,9 +373,6 @@ static void check_request_describe(FILE* stream, const CheckRequestRefusal* refu
             break;
         case CHECK_REQUEST_OPENMP:
             fprintf(stream, "unsupported code generation option '%s' (OpenMP code generation is not implemented)", named);
-            break;
-        case CHECK_REQUEST_PIC:
-            fprintf(stream, "unsupported code generation option '%s' (position-independent code for shared libraries is not implemented)", named);
             break;
         case CHECK_REQUEST_LAYOUT:
             fprintf(stream, "unsupported option '%s' (the checker does not implement its ABI layout)", named);
@@ -507,7 +491,7 @@ static bool check_request_parse(PPOptions* parsed, CheckRequestRefusal* refusal,
 // predefines its functions' target attributes resolve against (CheckProgram.body_targets), the same for every client,
 // so that none compiles for another target than its source was preprocessed for. `unit` holds the unit's own borrowed
 // state (its initializers, assembly, prepared data and their references) and the client's explicit overrides (the
-// scalar path, #129's models, #177's lifetimes), which this keeps. The predefines are `pp`'s: the program reads them
+// scalar path, #129's models, #177's lifetimes, whether its code may go into a shared library: `pic`), which this keeps. The predefines are `pp`'s: the program reads them
 // while it is checked, so `pp` outlives check_program.
 static CheckProgramOptions check_request_program_options(const Preprocessor* pp, CheckProgramOptions unit)
 {
@@ -516,6 +500,9 @@ static CheckProgramOptions check_request_program_options(const Preprocessor* pp,
     unit.predefines = &pp->options.predefines;
     unit.frame_pointer = predefines_frame_pointer(&pp->options.predefines);
     unit.probe_stack = predefines_stack_clash(&pp->options.predefines);
+    // -fPIC's and -fpic's code (#2101) where the client's output may go into a shared library: -fPIE's elsewhere, as a
+    // link's executable takes them.
+    unit.pic = unit.pic && (pp->options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG || pp->options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL);
     // -fpatchable-function-entry's NOPs (#1447), which predefines_finish_options checked: every function's without the
     // attribute, and the section of every entry whose attribute names none.
     const char* section = 0;
@@ -566,6 +553,9 @@ static CheckRequestReceipt check_request_receipt(const Preprocessor* pp, const c
     uint64_t digest = check_request_mix_word(0, 1, target.features);
     digest = check_request_mix_word(digest, 2, target.extensions);
     digest = check_request_mix_word(digest, 3, (uint64_t)target.architecture << 1 | (target.native_znver5 ? 1u : 0u));
+    // A tuning with slow unaligned 16-byte accesses (#1373, X86Target.slow_unaligned_16), which bounds the memmoves the code
+    // computes: mixed in where it is set alone, so that every other request's digest stays what it was.
+    digest = target.slow_unaligned_16 ? check_request_mix_word(digest, 40, 1) : digest;
     digest = check_request_mix_word(digest, 4, (uint64_t)language.standard << 32 | (uint64_t)language.gnu << 16 | (uint64_t)language.gnu_keywords << 8 | language.digraphs);
     const uint64_t lexical = (uint64_t)options->freestanding | (uint64_t)options->no_builtin << 1 | (uint64_t)options->undefine << 2 | (uint64_t)options->trigraphs << 3 |
                              (uint64_t)options->assembly << 4 | (uint64_t)options->clang_features << 5 | (uint64_t)options->no_standard_includes << 6 |

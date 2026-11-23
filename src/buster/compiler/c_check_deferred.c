@@ -77,6 +77,9 @@
 // 2 lanes, 56.9 on 3 and 55.7 on 4, against source order's 56.7 (#151, docs/function-lanes.md's "The checker's bodies on
 // lanes").
 #define BUSTER_CHECK_DEFERRED_COMPILE_LANES 4
+// Nor where the bodies' tokens beyond their critical path are less than this part (1/N) of the unit's tokens
+// (check_deferred_dominant, #1668): docs/c-deferred-bodies.md's "A dominant body (#1668)".
+#define BUSTER_CHECK_DEFERRED_DOMINANT_SHARE 2
 // The reader's rounds of a command's flow (#151, CheckDeferredFlow): bodies, merge and post-merge work. The C
 // driver's flow also runs the emission's (BUSTER_CHECK_EMIT_ROUND_BODIES, 1), and its other lanes run each kind's lane
 // (check_deferred_follow).
@@ -2567,6 +2570,17 @@ static uint32_t check_deferred_rule_of(uint32_t lanes, bool every_lane, uint64_t
     return paid < most ? (uint32_t)paid : most;
 }
 
+// Whether the driver's reading leaves a unit to source order for its dominant body (#1668): where the bodies' tokens
+// beyond their critical path (check_deferred_rule_of's) are less than 1/BUSTER_CHECK_DEFERRED_DOMINANT_SHARE of the
+// unit's `count`, the lanes save less than the deferred reader's top level's record and merge cost over source order.
+static bool check_deferred_dominant(uint32_t count, uint64_t body_tokens, uint32_t largest, uint32_t second_body)
+{
+    const uint64_t second = (uint64_t)second_body * 2;
+    const uint64_t path = largest > second ? largest : second;
+    const uint64_t excess = body_tokens > path ? body_tokens - path : 0;
+    return excess * BUSTER_CHECK_DEFERRED_DOMINANT_SHARE < count;
+}
+
 // check_deferred_rule_of with the state's lanes.
 static uint32_t check_deferred_rule(const CheckDeferred* deferred, uint64_t total, uint32_t bodies, uint32_t largest, uint32_t second_body, uint32_t lane_tokens)
 {
@@ -2603,14 +2617,16 @@ static void check_deferred_bodies(CheckDeferred* deferred, CheckInputReader* rea
 {
     CheckInput* input = reader->output;
     deferred->top.changes = 0;
+    const bool weak_overloads = input->overload_heads == NULL && check_input_symbol_overload_needed(reader);
     // A unit whose top level reported, that has overloadable functions, a function multiversioned by target strings (whose
     // rules ask what bodies used before a declaration, #1838), or #pragma clang section, whose settings and conflicts read
     // the walk's declarations in source order (c_check_section_input.c), is source order's.
     bool valid = !deferred->unsupported && input->report_count == 0 && !input->resource && reader->bindings.valid && !deferred->top_changes.full &&
-                 input->overload_heads == 0 && input->sections == 0 && !input->target_multiversion && reader->output->invalid_count == 0 &&
+                 input->overload_heads == 0 && !weak_overloads && input->sections == 0 && !input->target_multiversion && reader->output->invalid_count == 0 &&
                  reader->ambiguous_count == 0 && deferred->lanes != 0 && deferred->lanes <= BUSTER_CHECK_DEFERRED_MAX_LANES;
     // (An invalid declaration's uses are quiet in source order's binding answers, #1447: check_input_invalid_declare.)
     deferred->reason = input->report_count != 0 ? "the top level reports an error" : input->overload_heads != 0 ? "overloadable functions" :
+                       weak_overloads ? "a weak pragma forms a function overload set" :
                        input->target_multiversion ? "a function multiversioned by target strings" :
                        reader->output->invalid_count != 0 ? "an invalid declaration" : reader->ambiguous_count != 0 ? "an enum's C23 redefinition" :
                        input->sections != 0 ? "#pragma clang section" : deferred->unsupported && deferred->reason != 0 ? deferred->reason :
@@ -2909,14 +2925,17 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
     // check_deferred_bodies would send to source order after the top level's walk: on fewer lanes the deferred reader's
     // top level's record and merge cost more than its lanes save.
     const uint32_t least = every_lane ? 2 : BUSTER_CHECK_DEFERRED_COMPILE_LANES;
-    const bool sections = valid && compile && ruled >= least && check_deferred_sections(parser, pp);
+    // Nor where a dominant body leaves the lanes too little of the unit to share (check_deferred_dominant), but where
+    // --lanes N forces them.
+    const bool dominant = valid && compile && !every_lane && ruled >= least && check_deferred_dominant(count, body_tokens, largest, second);
+    const bool sections = valid && compile && ruled >= least && !dominant && check_deferred_sections(parser, pp);
     // In a caller's flow, as many of the planned lanes as it grants (CheckDeferredFlow), taken before the top level's walk,
     // whose bodies' rule is this one; they are given back after the final post-merge round, or on a source-order retry.
-    const bool leased = valid && flow != 0 && ruled > 1 && (!compile || (ruled >= least && !sections));
+    const bool leased = valid && flow != 0 && ruled > 1 && (!compile || (ruled >= least && !sections && !dominant));
     const uint32_t granted = leased ? flow->grant(flow->context, ruled) : lanes;
     const uint32_t reading = granted == 0 ? 1 : granted < lanes ? granted : lanes;
     const uint32_t planned = check_deferred_rule_of(reading, every_lane, body_tokens, bodies, largest, second, lane_tokens);
-    const bool alone = valid && compile && (sections || planned < least);
+    const bool alone = valid && compile && (sections || dominant || planned < least);
     if (alone)
     {
         // The driver's reading of a unit for source order, decided before it reserves or zeroes anything: the state as it
@@ -2929,7 +2948,7 @@ static bool check_input_deferred_run(CheckDeferred* deferred, CheckInput* input,
         deferred->leased = false;
         deferred->unsupported = true;
         deferred->active = 0;
-        deferred->reason = sections ? "#pragma clang section" : "too few lanes";
+        deferred->reason = sections ? "#pragma clang section" : dominant ? "a dominant body" : "too few lanes";
     }
     else
     {

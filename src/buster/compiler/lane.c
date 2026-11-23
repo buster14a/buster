@@ -78,6 +78,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/prctl.h>
 #include <sys/resource.h>
@@ -216,9 +217,11 @@ static _Thread_local uint64_t arena_small_floor;
 // allocation, alignment and page advice, and keeping its committed prefix writable avoids repeating its commits (#1128):
 // each of those calls takes the address space's lock for writing, which the other lanes' reservations, commits and
 // faults wait for. Release frees the pages with MADV_DONTNEED, which takes the lock only for reading, so that reuse finds
-// them zero. Where commit charge is bounded (arena_commit_unbounded), release reprotects the prefix first, returning its
-// charge, and reuse starts inaccessible. A reservation takes the arena of the smallest mapping that holds its capacity
-// with the same base pages and page layout, the latest released of those; a full pool evicts its oldest arena.
+// them zero: those of the writable prefix of the mapping alone, where that is all that can hold any (#3070,
+// arena_pool_writable). Where commit charge is bounded (arena_commit_unbounded), release reprotects the prefix first,
+// returning its charge, frees the whole mapping's pages, and reuse starts inaccessible. A reservation takes the arena of
+// the smallest mapping that holds its capacity with the same base pages and page layout, the latest released of those; a
+// full pool evicts its oldest arena.
 #define BUSTER_ARENA_POOL_SLOTS 256
 typedef struct ArenaPool ArenaPool;
 struct ArenaPool
@@ -229,6 +232,11 @@ struct ArenaPool
     // prefixes writable.
     bool limits;
     bool keeps_commits;
+    // /proc/self/maps, which the pool's releases ask where their arenas' writable prefixes end (arena_pool_writable),
+    // opened at the first such release (`opened`): -1 where it can't be or the kernel has no PROCMAP_QUERY, and then each
+    // release frees its whole mapping's pages, as before. Closed by arena_pool_release.
+    bool opened;
+    int maps;
     uint64_t address_share;
     // The releases so far, and the one that put each arena here.
     uint64_t clock;
@@ -617,6 +625,78 @@ static uint32_t arena_pool_choose(const ArenaPool* pool, uint64_t capacity, uint
         slot = match && better ? i : slot;
     }
     return slot;
+}
+
+// PROCMAP_QUERY (Linux 6.11), which the C library's headers may not name: the ioctl of /proc/PID/maps that answers the
+// mapping (VMA) that covers an address, or the next one, of those with the flags asked, from the kernel's tree of
+// mappings rather than their page tables, and its argument (struct procmap_query).
+#define BUSTER_PROCMAP_QUERY UINT64_C(0xc0686611)
+#define BUSTER_PROCMAP_QUERY_WRITABLE UINT64_C(0x02)
+#define BUSTER_PROCMAP_QUERY_COVERING_OR_NEXT UINT64_C(0x10)
+typedef struct ProcmapQuery ProcmapQuery;
+struct ProcmapQuery
+{
+    uint64_t size;
+    uint64_t query_flags;
+    uint64_t query_address;
+    uint64_t start;
+    uint64_t end;
+    uint64_t flags;
+    uint64_t page_size;
+    uint64_t offset;
+    uint64_t inode;
+    uint32_t device_major;
+    uint32_t device_minor;
+    uint32_t name_size;
+    uint32_t build_id_size;
+    uint64_t name_address;
+    uint64_t build_id_address;
+};
+_Static_assert(sizeof(ProcmapQuery) == 104, "PROCMAP_QUERY's argument is the kernel's");
+
+// The bytes of the mapping of `bytes` at `mapping` that can hold a page, from its start (#3070): `committed`, which the
+// arena committed, or past it the end of the last writable mapping (VMA) the kernel has that starts within it, where a
+// copy of the arena committed further; `bytes` where the kernel can't say. Where commit isn't charged a pooled arena's
+// pages are in the prefix of its mapping that it or a copy of it committed, which only grows (arena_commit; a release
+// that failed to reprotect never pools its arena), so a release frees that prefix alone. A release of the whole mapping,
+// up to 64 GB, made the kernel walk the page tables of each gigabyte of it that had been touched a 2 MB entry at a time
+// (unmap_page_range, a fifth of an empty unit's cycles in one command on the 9700X: about 5,500 ticks a release, where
+// 16 MB take 2,400 and this query 340). The query is from the arena's commit on, so one answers where no copy committed
+// past it, and a kernel without it fails every query of the pool's.
+static uint64_t arena_pool_writable(ArenaPool* pool, uint8_t* mapping, uint64_t bytes, uint64_t committed)
+{
+    if (!pool->opened)
+    {
+        pool->maps = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+        pool->opened = true;
+    }
+    const uint64_t start = (uint64_t)(uintptr_t)mapping;
+    const uint64_t end = start + bytes;
+    uint64_t result = committed < bytes ? committed : bytes;
+    uint64_t at = start + result;
+    bool valid = pool->maps >= 0;
+    while (valid && at < end)
+    {
+        ProcmapQuery query = {
+            .size = sizeof(query),
+            .query_flags = BUSTER_PROCMAP_QUERY_WRITABLE | BUSTER_PROCMAP_QUERY_COVERING_OR_NEXT,
+            .query_address = at,
+        };
+        const bool answered = ioctl(pool->maps, BUSTER_PROCMAP_QUERY, &query) == 0;
+        const int error = answered ? 0 : errno;
+        // No writable mapping at or past `at` (ENOENT) ends the walk, as one past the arena's mapping does.
+        valid = (answered && query.end > at && query.end > query.start) || error == ENOENT;
+        const bool inside = answered && valid && query.start < end;
+        result = inside ? (query.end < end ? query.end : end) - start : result;
+        at = inside ? query.end : end;
+        // A kernel without the query refuses it as an ioctl it doesn't know: no later release of the pool's asks again.
+        if (error == ENOTTY || error == EINVAL)
+        {
+            close(pool->maps);
+            pool->maps = -1;
+        }
+    }
+    return valid ? result : bytes;
 }
 
 // Takes the arena in `slot` out of the pool, with the reservation's capacity, as a fresh arena's would be, whatever its
@@ -1302,7 +1382,9 @@ static void arena_release(Arena* arena)
         }
         const bool protected = pool != 0 && !arena->unaccounted &&
                                (arena->committed == committed || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
-        const bool pooled = protected && madvise(mapping, bytes, MADV_DONTNEED) == 0;
+        // Where the prefix stays writable, its pages alone (#3070), and elsewhere the whole mapping's.
+        const uint64_t extent = protected && pool->keeps_commits ? arena_pool_writable(pool, mapping, bytes, arena->committed) : bytes;
+        const bool pooled = protected && (extent == 0 || madvise(mapping, extent, MADV_DONTNEED) == 0);
         if (pooled)
         {
             // A free slot, or else the one whose arena was released longest ago, which is unmapped.
@@ -1350,8 +1432,13 @@ static void arena_pool_release(ArenaPool* pool)
     {
         munmap(pool->arenas[i].base - pool->arenas[i].mapping_offset, pool->arenas[i].mapping_bytes);
     }
+    if (pool->opened && pool->maps >= 0)
+    {
+        close(pool->maps);
+    }
     pool->count = 0;
     pool->limits = false;
+    pool->opened = false;
 }
 
 // Undoes a commit attempt that may have applied to a leading part of [committed, target) before refusing across a
@@ -3680,11 +3767,12 @@ struct LaneExitSegment
     uint64_t begin;
     uint64_t end;
 };
-// The segments the helper looks at (an executable has two, its read-only data and its code), the ranges of each it
-// counts (128 MB, a bit a range in a word), the regions a scan answers at once (they and the ranges' counts are on the
-// helper's stack, a page), the pages of 4 KB mapped in a range from which it is worth a huge page (four of the kernel's
-// fault-around windows, three faults saved a process), and how many processes go by for one that looks whatever its
-// probe says, as a power of two.
+// The segments the helper looks at (an executable has two, its read-only data and its code, and a third where the bake
+// sealed its tables and relocated read-only data, baked.c's bake_seal), the ranges of each it counts (128 MB, a bit a
+// range in a word), the regions a scan answers at once (they and the ranges' counts are on the helper's stack, a page),
+// the pages of 4 KB mapped in a range from which it is worth a huge page (four of the kernel's fault-around windows,
+// three faults saved a process), and how many processes go by for one that looks whatever its probe says, as a power of
+// two.
 #define BUSTER_LANE_EXIT_SEGMENTS 4
 #define BUSTER_LANE_EXIT_RANGES 64
 #define BUSTER_LANE_EXIT_REGIONS 64

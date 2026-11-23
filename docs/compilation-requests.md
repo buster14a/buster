@@ -34,13 +34,15 @@ extends the existing contracts (`PPOptions`, `CheckProgramOptions`,
   protected or internal default visibility, `-ffunction-sections` and
   `-fdata-sections`; `-fcommon` is implemented, #147), then, when the request emits code, instrumentation (#1112: a sanitizer, coverage or
   OpenMP, from the resolved predefines, which a later `-fno-` option may
-  have cancelled) and position-independent code (#811) but in a link's
-  executable (#2101), a layout, then a
+  have cancelled), a layout, then a
   language or target the checker doesn't take
   (`check_input_target_supported`). What the request makes of its code is
   its `CheckRequestCode`: none (`-E`, `-fsyntax-only`), an object another
   link may take (`-c`, and the clients that compile as `-c` does) or a
-  link's executable, which takes `-fPIC` and `-fpic`.
+  link's. Every one takes `-fPIC` and `-fpic` (#2101): their code is
+  position-independent code where the client's output may go into a shared
+  library (`-c`'s, `-S`'s, `-shared`'s and the source clients', which set
+  `CheckProgramOptions.pic`), and a link's executable's is `-fPIE`'s.
   `check_request_describe` writes the driver's message for the refusal. The
   driver prints it after `error: `, and the other clients print it in their
   own reports.

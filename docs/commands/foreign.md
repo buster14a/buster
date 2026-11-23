@@ -133,6 +133,19 @@ and every COMDAT group's fate.
   `link-foreign` links it; and libA's references unchecked without a libB on
   the line. The driver's own cases are `test-checker-driver`'s
   `check_test_driver_versions`, by the direct route and a mixed one.
+- unversioned library references (the same file, #2910): needed libraries'
+  missing strong references are refused after the executable winners are
+  known. Default library exports satisfy them, including a default version,
+  but non-default-only exports do not. Visible strong, weak, protected and
+  absolute executable definitions satisfy them and suppress unnecessary
+  providers; hidden/internal definitions do neither. Cases cover weak
+  references, dropped libraries, the `DT_NEEDED` and unknown-dependency
+  exemptions, transitive and reversed providers, archive-extracted
+  definitions, two references with only one executable-satisfied, and the
+  unchanged raw mode. Each runs by both paths on 1/2/3/8 lanes. The source
+  driver's `check_test_driver_unversioned_libraries` compares direct and
+  forced mixed links, their exact `DT_NEEDED`, execution, scalar/vector
+  bytes, diagnostics and preservation of an existing output on refusal.
 
 The files go in a new directory under `--directory` (`TMPDIR` or `/tmp`),
 removed unless `--keep`. `--seed N` changes the generated programs, and

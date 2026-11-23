@@ -1950,7 +1950,7 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
     }
     if (equal && contents && symbols_a != NULL)
     {
-        equal = symbols_a->count == symbols_b->count;
+        equal = symbols_a->count == symbols_b->count && symbols_a->has_asm_label == symbols_b->has_asm_label;
         for (uint32_t i = 0; equal && i < symbols_a->count; i += 1)
         {
             const CheckInputSymbolPragma* p = symbols_a->records + i;
@@ -1958,6 +1958,8 @@ static bool check_corpus_pragmas_equal(const CheckInput* a, const CheckInput* b)
             equal = p->pragma == q->pragma && p->source == q->source && p->end == q->end && p->token == q->token &&
                     p->name == q->name && p->target == q->target && p->diagnostic_source == q->diagnostic_source &&
                     p->diagnostic_location == q->diagnostic_location && p->declaration == q->declaration &&
+                    p->alias_declaration == q->alias_declaration && p->alias_target == q->alias_target && p->overload_head == q->overload_head &&
+                    p->overload_declaration == q->overload_declaration &&
                     p->kind == q->kind && p->warning == q->warning && p->supported == q->supported && p->after_use == q->after_use;
         }
     }

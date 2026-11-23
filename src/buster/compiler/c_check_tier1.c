@@ -18,6 +18,7 @@
 #include "ir_truth.c"
 #include "ir_if_convert.c"
 #include "ir_thread.c"
+#include "ir_switch_table.c"
 #include "ir_vectorize_loops.c"
 #include "ir_vectorize_target.c"
 #include "tier1_schedule_ir.c"
@@ -308,6 +309,45 @@ static bool check_tier1_frame(const Tier1EmitResult* emitted, uint32_t count, ui
 
 #include "c_check_tier1_debug.c"
 
+// Body `b`'s jump tables (#3298), as ir_switch_tables takes them, in `scratch`: the lowering's tables of `function`
+// (CheckLowerTable, sorted by function, which a binary search finds), each with the symbol its dispatch's GLOBAL_ADDRESS
+// entry names in the typed stream, which the IR's symbol_addr keeps. `*first` is the first one's index in the
+// lowering's tables. None where there is no lowering or `function` isn't body `b`'s.
+static IrSwitchTable* check_tier1_switch_tables(const CheckProgramLowered* lowered, uint32_t b, const Tier0Function* function, Arena* scratch, uint32_t* count, uint32_t* first)
+{
+    const bool body = lowered != NULL && function->table_count != 0 && lowered->tables != NULL && function == lowered->functions + b;
+    const uint32_t total = body ? lowered->table_count : 0;
+    uint32_t low = 0;
+    uint32_t high = total;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        const bool before = lowered->tables[middle].function < b;
+        low = before ? middle + 1 : low;
+        high = before ? high : middle;
+    }
+    uint32_t end = low;
+    while (end < total && lowered->tables[end].function == b)
+    {
+        end += 1;
+    }
+    IrSwitchTable* tables = end > low ? BUSTER_ARENA_PUSH_ARRAY(scratch, IrSwitchTable, end - low) : NULL;
+    for (uint32_t t = low; tables != NULL && t < end; t += 1)
+    {
+        const CheckLowerTable* table = lowered->tables + t;
+        const bool addressed = table->address < function->count;
+        tables[t - low] = (IrSwitchTable){
+            .entries = table->entries,
+            .count = table->count,
+            .first = table->first_label,
+            .symbol = addressed ? (uint32_t)function->values[table->address] : BUSTER_IR_NONE,
+        };
+    }
+    *count = tables != NULL ? end - low : 0;
+    *first = low;
+    return tables;
+}
+
 // A function's IR as Tier 1's passes take it, after its lowering, its calls' expansion (#2541) and #866's solver: its
 // verified-ness, which promotion then doesn't check again, and the unexpanded lowering, which promotion takes where it
 // refuses the expansion or finds it past its limits (null where nothing was expanded).
@@ -325,6 +365,10 @@ struct CheckTier1PassesInput
     bool summary;
     // An original or inlined C body with a potentially volatile indirect access (#2805).
     bool vectorize_volatile;
+    // The body's jump tables (#3298, check_tier1_switch_tables), which a switch of constants' dispatch may load. A
+    // summary converts them too: no caller expands a body with labels, so a summary of one is its own code alone.
+    const IrSwitchTable* tables;
+    uint32_t table_count;
 };
 
 // What Tier 1's passes made of a function (check_tier1_passes): the optimized function and its verified analysis,
@@ -350,6 +394,10 @@ struct CheckTier1Passes
     uint32_t unroll_copies;
     uint32_t unroll_reductions;
     uint32_t unroll_added;
+    // #3298's switches of constants: per input table (CheckTier1PassesInput.tables), its entries' values where its
+    // dispatch became a load of them, which the emission writes in place of its labels' offsets; null where none did.
+    int32_t** table_values;
+    uint32_t tables_converted;
     bool unexpanded;
 };
 
@@ -478,6 +526,37 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    // The 128-bit integers' frame objects in registers (#3299): the checker gives an __int128 local, parameter and
+    // temporary a 16-byte object, which the lowering copies by 8-byte pieces and reads and writes whole, so that promotion
+    // keeps it in memory and each operation's value went through its slot. The split makes every access of such an object
+    // an 8-byte half at offset 0 or 8, which SROA (flagged: the typed stream marks every object address-taken, and SROA
+    // takes one whose every use its provenance understands) splits into two I64 fields, and promotion then makes the
+    // halves values. An object whose address escapes (a call's argument or result, a return's bytes) stays memory. In
+    // steps[8], as --tier1-passes=+sroa's; a function SROA refuses or splits nothing of goes on as the split left it.
+    if (stage == CHECK_TIER1_COMPILED && wide.split && !check_tier1_lane_reserve(lane, 1))
+    {
+        outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+    }
+    if (stage == CHECK_TIER1_COMPILED && wide.split)
+    {
+        IrSroaOptions options = ir_sroa_options();
+        options.scalar = scalar;
+        options.simd = true;
+        options.flagged = true;
+        IrSroaResult fields = { 0 };
+        IrCheck check = ir_optimize_sroa(&wide.function, &lane->steps[8], scratch, options, &fields);
+        IrFunction halves = { 0 };
+        if (check.error == IR_OK && fields.split_slots != 0)
+        {
+            check = ssa_ir_promote_verified_input(&fields.function, !scalar, promotion, scratch, &halves);
+            wide.function = check.error == IR_OK ? halves : wide.function;
+        }
+        // A refusal or a function past a pass's limits goes on as the split left it; any other error is the function's.
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_WIDE, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        stage = outcome.stage;
+    }
     // The vectors wider than the target moves whole, as its widest vectors' pieces (#1624, ir_vector_split.c), in the same
     // step's arena, after the halves: a function without any is the halves' (or the promoted one) itself, borrowed.
     if (stage == CHECK_TIER1_COMPILED)
@@ -524,6 +603,20 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
         wide.function = stage == CHECK_TIER1_COMPILED ? converted.function : wide.function;
+    }
+    // #3298's switches whose arms only give constants (ir_switch_table.c): the dispatch's jump table holds the constants
+    // and the dispatch loads its value, in steps[6] with if-conversion's result, whose arms it then leaves to the
+    // optimizer's cleanup. The values live in steps[6] until the code is published (check_tier1_compile), or a summary
+    // copies them (check_tier1_inline_build).
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 && input->table_count != 0)
+    {
+        IrSwitchTableResult switched = { 0 };
+        const IrCheck check = ir_switch_tables(&wide.function, input->tables, input->table_count, &lane->steps[6], scratch, &switched);
+        outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, NULL);
+        stage = outcome.stage;
+        wide.function = stage == CHECK_TIER1_COMPILED ? switched.function : wide.function;
+        passes->table_values = stage == CHECK_TIER1_COMPILED ? switched.values : NULL;
+        passes->tables_converted = stage == CHECK_TIER1_COMPILED ? switched.converted : 0;
     }
     // Loop-invariant motion, in steps[9], before the optimizer, whose dead-code removal, CFG cleanup and final
     // verification then take its result: every value's with --tier1-passes=+licm (#139's measurement), or #2781's, the
@@ -664,6 +757,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     // --tier1-passes='s SROA on every body, LICM and the loop vectorizer, each with an arena of its own.
     const uint32_t on = check_tier1_passes_on(lane);
     const bool sroa = (on & BUSTER_CHECK_TIER1_PASS_SROA) != 0;
+    lane->preserve_local_storage = BUSTER_TIER1_PRIVATE_VALUES && (gvn || sroa);
     const uint8_t optional = (uint8_t)((gvn ? 1u : 0) | (sroa ? 2u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_LICM) != 0 ? 4u : 0) |
                                        ((on & BUSTER_CHECK_TIER1_PASS_VECTORIZE) != 0 ? 8u : 0) | ((on & BUSTER_CHECK_TIER1_PASS_UNROLL) != 0 ? 16u : 0));
     CheckTier1Outcome outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA,
@@ -689,6 +783,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const bool member = inlining != NULL && function >= inlining->lowered->functions && body < inlining->program->body_count;
     CheckTier1Passes passes = { 0 };
     uint32_t inlined_calls = 0;
+    // The body's jump tables, where #3298's pass may make a switch's of values (check_tier1_switch_tables), the same list
+    // a candidate's summary converts them by (check_tier1_inline_build).
+    uint32_t table_count = 0;
+    uint32_t table_first = 0;
+    const IrSwitchTable* tables = stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 ?
+                                      check_tier1_switch_tables(lane->lowered, lane->emitting_body, function, scratch, &table_count, &table_first) :
+                                      NULL;
     const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
                      check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
     // A candidate whose callers should expand every call of it makes no code now (#2541 step 2, check_tier1_inline_held):
@@ -701,8 +802,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && !own)
     {
         // A vector wider than the target moves whole is taken, and split below (#1624).
-        const IrCheck check = sources ? ir_lower_typed_target_pieces_sources(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered) :
-                                       ir_lower_typed_target_pieces(function, result_type, function->symbol_count, target->features, &lane->steps[0], scratch, &lowered);
+        const IrCheck check = check_tier1_lower_body(lane, function, result_type, function->symbol_count, target->features,
+                                                          &lane->steps[0], scratch, &lowered, sources);
         outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         stage = outcome.stage;
@@ -716,10 +817,36 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const IrFunction original = lowered;
     bool expanded_verified = true;
     bool vectorize_volatile = lane->vectorize_volatile != NULL && lane->vectorize_volatile[lane->emitting_body] != 0;
-    if (stage == CHECK_TIER1_COMPILED && !own && member && check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified, &vectorize_volatile))
+    // Whether the expansion ran, and with it SROA where the function has aggregates (check_tier1_inline_expand).
+    bool expanding = false;
+    if (stage == CHECK_TIER1_COMPILED && !own && member &&
+        check_tier1_inline(lane, (uint32_t)body, &lowered, target, scalar, certify, &expanded, &inlined_calls, &expanded_verified, &vectorize_volatile, &expanding))
     {
         lowered = expanded;
         lowered_verified = expanded_verified;
+    }
+    // #3311: a function that takes or returns an aggregate by value (its own ABI records) that no expansion took: SROA
+    // with its widening, in steps[5] (the expansion's SROA's, unused without one), so that its register-class
+    // aggregates' eightbytes stay out of memory. A body it refuses goes on as it was; any other error is the body's.
+    if (stage == CHECK_TIER1_COMPILED && !own && !expanding && !sroa && lowered.parameter_passed != 0)
+    {
+        IrSroaOptions options = ir_sroa_options();
+        options.scalar = scalar;
+        options.simd = true;
+        options.flagged = true;
+        options.widen = true;
+        IrSroaResult split = { 0 };
+        const IrCheck check = ir_optimize_sroa(&lowered, &lane->steps[5], scratch, options, &split);
+        const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+        outcome.operation = check.instruction < lowered.instruction_count ? lowered.op[check.instruction] : IR_OP_COUNT;
+        stage = outcome.stage;
+        if (check.error == IR_OK && (split.split_slots != 0 || split.assembled != 0 || split.widened_slots != 0))
+        {
+            // SROA verifies its input as it prepares and its output as it ends.
+            lowered = split.function;
+            lowered_verified = true;
+        }
     }
     // --tier1-passes=+sroa (#139's measurement): SROA on every body, the expansion where there is one, in steps[8], with
     // the inlining's options (#1282's simd and flagged), before the solver and promotion. A body it refuses
@@ -731,6 +858,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
         options.scalar = scalar;
         options.simd = true;
         options.flagged = true;
+        options.widen = true;
         IrSroaResult split = { 0 };
         const IrCheck check = ir_optimize_sroa(&lowered, &lane->steps[8], scratch, options, &split);
         const IrError error = check.error == IR_ERROR_UNSUPPORTED ? IR_OK : check.error;
@@ -743,6 +871,24 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             lowered = split.function;
             lowered_verified = true;
             sroa_split = split.split_slots;
+        }
+    }
+    // #3311: the function's own register-class aggregate parameters and its one-eightbyte result as the scalars the
+    // convention passes them as (ir_sroa_scalarize), after SROA left them only their eightbytes' loads and stores; in
+    // steps[5], after what SROA or the expansion put there. Never a candidate's summary, which its callers expand. The
+    // result is verified by promotion.
+    uint32_t scalar_parameters = 0;
+    uint32_t scalar_results = 0;
+    if (stage == CHECK_TIER1_COMPILED && !own && lowered.parameter_passed != 0)
+    {
+        IrFunction scalars = { 0 };
+        const IrError error = ir_sroa_scalarize(&lowered, &lane->steps[5], scratch, &scalars, &scalar_parameters, &scalar_results);
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+        if (error == IR_OK && (scalar_parameters != 0 || scalar_results != 0))
+        {
+            lowered = scalars;
+            lowered_verified = false;
         }
     }
     // #866's congruence solver, before promotion, so that promotion's phi placement decides what its merged values
@@ -775,6 +921,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .unexpanded = !gvn_applied && inlined_calls != 0 ? &original : NULL,
             .numbered = gvn_applied,
             .vectorize_volatile = vectorize_volatile,
+            .tables = tables,
+            .table_count = table_count,
         };
         outcome = check_tier1_passes(lane, &input, target, scalar, certify, fault, &lane->steps[1], &lane->steps[2], &lane->steps[3], &revision, &passes);
         stage = outcome.stage;
@@ -888,12 +1036,31 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     LinkReference* references = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, LinkReference, (uint64_t)emitted.reference_count + 1) : 0;
     // Its literals (#2744, EmittedLiteral), which its references name as Tier 1 numbered them (BUSTER_TIER1_EMIT_LITERAL).
     EmittedLiteral* literals = stage == CHECK_TIER1_COMPILED && emitted.literal_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, EmittedLiteral, emitted.literal_count) : 0;
+    // Its jump tables of values (#3298, EmittedValueTable), each table's values copied from the pass's arena.
+    const uint32_t value_table_count = stage == CHECK_TIER1_COMPILED ? passes.tables_converted : 0;
+    EmittedValueTable* value_tables = value_table_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, EmittedValueTable, value_table_count) : 0;
+    bool values_copied = value_table_count == 0 || value_tables != 0;
+    for (uint32_t k = 0, v = 0; values_copied && value_table_count != 0 && k < table_count; k += 1)
+    {
+        const int32_t* values = passes.table_values[k];
+        int32_t* copy = values != NULL ? BUSTER_ARENA_PUSH_ARRAY(output, int32_t, tables[k].count) : NULL;
+        values_copied = values == NULL || copy != NULL;
+        if (copy != NULL)
+        {
+            memcpy(copy, values, (uint64_t)tables[k].count * sizeof(int32_t));
+            value_tables[v] = (EmittedValueTable){
+                .values = copy,
+                .table = table_first + k,
+            };
+            v += 1;
+        }
+    }
     // Each label's first record, where the emission defines its symbol (#789).
     uint32_t* labels = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)emitted.label_count + 1) : 0;
     // Its frame's events (#1056); with -g, source/storage ranges are published only after final record scheduling.
     EmissionFrameEvent* frames = stage == CHECK_TIER1_COMPILED ? BUSTER_ARENA_PUSH_ARRAY(output, EmissionFrameEvent, (uint64_t)emitted.frame_event_count + 1) : 0;
     if (stage == CHECK_TIER1_COMPILED && (records == 0 || branches == 0 || targets == 0 || references == 0 || labels == 0 || frames == 0 ||
-                                          (emitted.literal_count != 0 && literals == 0)))
+                                          (emitted.literal_count != 0 && literals == 0) || !values_copied))
     {
         arena_pop_to(output, mark);
         outcome = check_tier1_failure(CHECK_TIER1_PUBLICATION, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_OUTPUT, BUSTER_IR_NONE, 0);
@@ -949,6 +1116,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .removed_blocks = passes.optimized.removed_blocks,
             .merged_blocks = passes.optimized.merged_blocks,
             .licm_moved = passes.licm_moved,
+            .value_tables = value_table_count,
             .sroa_split = sroa_split,
             .gvn_removed = gvn_applied ? gvn_result.removed : passes.gvn_removed,
             .loads_forwarded = passes.optimized.forwarded_loads,
@@ -1005,6 +1173,8 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .reference_count = emitted.reference_count,
             .literals = literals,
             .literal_count = emitted.literal_count,
+            .value_tables = value_tables,
+            .value_table_count = value_table_count,
             .label_records = labels,
             .label_count = emitted.label_count,
             .local_count = sources ? function->local_count : 0,
@@ -1130,12 +1300,12 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
                     "\treturn_tails=%" PRIu64 "\tred_zones=%" PRIu64 "\tcode_certified=%" PRIu64 "\tcode_uncertified=%" PRIu64 "\tmachine_rows=%" PRIu64 "\trow_moves=%" PRIu64 "\tinlined=%" PRIu64
                     "\tschedule_blocks=%" PRIu64 "\tschedule_moved=%" PRIu64 "\tsunk=%" PRIu64 "\tfolded=%" PRIu64 "\tremoved_instructions=%" PRIu64
                     "\tremoved_blocks=%" PRIu64 "\tmerged_blocks=%" PRIu64 "\tlicm_moved=%" PRIu64 "\tsroa_split=%" PRIu64 "\tgvn_removed=%" PRIu64 "\tloads_forwarded=%" PRIu64
-                    "\tdead=%" PRIu64 "\n",
+                    "\tvalue_tables=%" PRIu64 "\tdead=%" PRIu64 "\n",
             report->records, report->spill_stores, report->spill_loads, report->call_stores, report->call_loads, report->rematerializations,
             report->dropped_definitions, report->edge_moves, report->spill_slots, report->frame_bytes, report->open_frames, report->return_tails, report->red_zones,
             report->code_certified, report->code_uncertified, report->machine_rows, report->row_moves, report->inlined_calls, report->schedule_blocks,
             report->schedule_moved, report->sunk, report->folded, report->removed_instructions, report->removed_blocks, report->merged_blocks, report->licm_moved,
-            report->sroa_split, report->gvn_removed, report->loads_forwarded, report->dead_functions);
+            report->sroa_split, report->gvn_removed, report->loads_forwarded, report->value_tables, report->dead_functions);
     // The loop vectorizer's (--tier1-passes=+vectorize, #2743): a line of its own, so that the line above keeps its
     // fields.
     static const char* const refusals[IR_VECTORIZE_REFUSALS] = { "shape", "induction", "phi", "operation", "address", "use", "dependence", "width" };
