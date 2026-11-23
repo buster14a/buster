@@ -1219,9 +1219,10 @@ static bool node_machine_arguments(NodeMachine* machine, uint32_t r, uint32_t no
 // computes (the reader's BUSTER_CHECK_LIBRARY_CALL, check_program_call_library) and any the reader marked for one in a
 // unit with a rename pragma (node_machine_renames), any call in a unit with overload sets (node_machine_overloads), a
 // callee without a prototype or of another convention than System V's (what check_lower_convention_call refuses, and
-// the conventions that keep more registers), more arguments than Tier 0's calls take, or a callee that returns twice
-// (check_lower_calls_twice's and check_lower_indirect_twice's, which the lowering marks its function for). The census
-// refuses before it the callees whose attributes or names the warnings read (node_census_callee).
+// the conventions that keep more registers), more arguments than Tier 0's calls take, a callee that returns twice
+// (check_lower_calls_twice's and check_lower_indirect_twice's, which the lowering marks its function for), or one a
+// declaration gives always_inline, whose direct call the lowering may expand in its caller (#2983). The census refuses
+// before it the callees whose attributes or names the warnings read (node_census_callee).
 static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, uint32_t node, uint32_t a)
 {
     const NodeMachineColumns* columns = machine->columns;
@@ -1237,7 +1238,7 @@ static bool node_machine_callee_refused(const NodeMachine* machine, uint32_t r, 
     if (!refused && object != 0)
     {
         const IdentId name = node_machine_object_name(machine, object);
-        refused = node_machine_object_twice(machine, object);
+        refused = node_machine_object_twice(machine, object) || node_machine_object_inlined(machine, object);
         for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
         {
             refused |= name != 0 && machine->twice_names[k] == name;

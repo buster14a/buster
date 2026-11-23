@@ -1259,7 +1259,8 @@ static uint8_t node_producer_before(struct NodeProducer* producer, const NodeMac
     if (reason == NODE_PRODUCER_TAKEN)
     {
         // Its function, as the bodies' comparison asks it of the lowered one (node_bodies_begin): a prototype or no
-        // parameter, and a result that is void or a scalar's.
+        // parameter, and a result that is void or a scalar's. And no naked one: a pass after the walk reports each of
+        // its statements that is no asm and each use of a parameter, in the body (check_input_naked_finish).
         const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
         const TypeId type = declaration < input->token_count ? input->declared_types[declaration] : 0;
         const bool function = type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_FUNCTION;
@@ -1268,10 +1269,11 @@ static uint8_t node_producer_before(struct NodeProducer* producer, const NodeMac
         const uint8_t class = function && !none ? node_machine_class(&typer->machine, result) : BUSTER_TYPED_CLASS_VOID;
         const bool unprototyped = function && (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 &&
                                   check_sparse_get(input->parameters, opening) != BUSTER_CHECK_NONE;
-        if (!function || unprototyped || (!none && (class < BUSTER_TYPED_CLASS_I8 || class > BUSTER_TYPED_CLASS_F64)))
+        const bool naked = declaration < input->token_count && input->function_flags != NULL && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NAKED) != 0;
+        if (!function || unprototyped || (!none && (class < BUSTER_TYPED_CLASS_I8 || class > BUSTER_TYPED_CLASS_F64)) || naked)
         {
             reason = NODE_PRODUCER_FUNCTION;
-            *detail = !function ? 1 : unprototyped ? 2 : 3;
+            *detail = !function ? 1 : unprototyped ? 2 : naked ? 4 : 3;
         }
     }
     return reason;

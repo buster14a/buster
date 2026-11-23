@@ -179,29 +179,6 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
     return own;
 }
 
-// Whether a declaration of the unit has an attribute that gives its function a target of its own (a target, its clones,
-// a processor's version or its dispatch), by the tokens that have attributes. The reader's machine reads no such
-// attribute's string, and takes the unit for one whose target fuses a product and a sum (NodeMachine.fuses).
-static bool node_machine_reader_targeted(const CheckInput* input)
-{
-    bool targeted = false;
-    const uint32_t end = input->token_count;
-    for (uint32_t first = check_input_attributed_next(input->attributes, 0, end); !targeted && first < end;
-         first = check_input_attributed_next(input->attributes, first + 16, end))
-    {
-        for (uint32_t selected = check_input_attributed_group(input->attributes, first, end); selected != 0; selected &= selected - 1)
-        {
-            const CheckInputAttributes* attributes = check_input_attributes_at(input, first + (uint32_t)__builtin_ctz(selected));
-            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
-            {
-                const uint32_t kind = attributes->records[i].kind;
-                targeted |= kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || kind == CHECK_ATTRIBUTE_CPU_DISPATCH;
-            }
-        }
-    }
-    return targeted;
-}
-
 // The machine's columns at reader time, for the unit whose input is `input`, read so far as the coded walk finds it: its
 // declarations bound, its types made, its graph `graph` (the reader's, or a view of it) being written. From `arena`;
 // whether there was room. The program's columns T reads are made from the input's as the program makes them, into
@@ -247,6 +224,11 @@ static bool node_machine_begin_reader(NodeMachine* machine, const CheckInput* in
                     symbols[object] = object;
                     const uint32_t bits = attributes != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_program_attribute_bits(attributes) : 0;
                     machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_RETURNS_TWICE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_TWICE : 0;
+                    machine->reader_facts[object] |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_ALWAYS_INLINE) != 0 ? BUSTER_NODE_MACHINE_OBJECT_INLINED : 0;
+                    // A function with a target of its own (a target, its clones, a processor's version or its dispatch):
+                    // no machine reads the attribute's string here, and the unit is taken for one whose target fuses a
+                    // product and a sum (NodeMachine.fuses).
+                    machine->fuses |= (bits & BUSTER_CHECK_PROGRAM_ATTRIBUTE_TARGET) != 0;
                 }
                 // The asm pass, which runs after the bodies, ignores a label on a declaration of an object that a
                 // declaration before it defines, where none before it kept a label (check_input_asm_labels): the same of
@@ -685,7 +667,7 @@ static NodeMachineReader* node_machine_reader_begin(CheckInputReader* reader, No
         typer->alone = false;
         room = node_machine_begin_reader(&typer->machine, reader->output, reader->parser, reader->types, &typer->graph, reader->pp->table, declarations, facts,
                                          symbols, (options & BUSTER_NODE_READER_VERIFY) != 0, reader->scratch);
-        typer->machine.fuses = (reader->pp->options.target.features & BUSTER_NODE_MACHINE_FUSED) != 0 || node_machine_reader_targeted(reader->output);
+        typer->machine.fuses |= (reader->pp->options.target.features & BUSTER_NODE_MACHINE_FUSED) != 0;
     }
     if (room)
     {
