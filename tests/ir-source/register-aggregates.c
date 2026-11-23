@@ -196,6 +196,59 @@ __attribute__((noinline)) static long sum_args(I2 a, L2 b, long c, F2 d, I3 e)
     return a.x + a.y + b.x + b.y + c + (long)(d.x * 10.0f) + (long)(d.y * 10.0f) + e.a + e.b + e.c;
 }
 
+typedef struct { short a, b; } S2;
+
+__attribute__((noinline)) static S2 swap_s2(S2 v)
+{
+    return (S2){ v.b, (short)(v.a + 1) };
+}
+
+// Call sites (#3311): register-class arguments passed as their parts and one-part results returned as values, the
+// caller's objects then kept in registers, in loops and through branches.
+__attribute__((noinline)) static long callers(int n)
+{
+    I2 i2 = { 1, 2 };
+    L2 l2 = { 3, 4 };
+    F2 f2 = { 1.0f, 2.0f };
+    One one_value = { 1 };
+    S2 s2 = { 5, -6 };
+    D2 d2 = { 0.5, 1.5 };
+    IntFloat ifl = { 1, 1.0f };
+    long total = 0;
+    for (int i = 0; i < n; i++)
+    {
+        i2 = add_i2(i2, (I2){ i, 1 });
+        l2 = add_l2(l2, (L2){ i, 2 });
+        f2 = scale_f2(f2, 0.5f);
+        one_value = one(one_value);
+        s2 = swap_s2(s2);
+        d2 = swap_d2(d2);
+        ifl = int_float((IntFloat){ ifl.i % 1000, ifl.f });
+        if (i & 1)
+        {
+            I2 c = choose(i2, (I2){ i, -i }, i % 3);
+            total += c.x - c.y;
+        }
+        total += first_only((I4){ i, 2, i * 3, 4 });
+    }
+    return total + i2.x + i2.y + l2.x + l2.y + (long)(f2.x * 1000.0f) + (long)(f2.y * 1000.0f) + one_value.c + s2.a + s2.b + (long)d2.x + (long)d2.y + ifl.i + (long)ifl.f;
+}
+
+// Call sites of exact-width parts (#3311): a 4-byte struct passed and returned, and a 12-byte one whose second part is
+// 4 bytes, each loaded at its own width; both objects stay in registers (no red-zone staging, checked in CI).
+__attribute__((noinline)) static long small_args(int n)
+{
+    S2 s2 = { 5, -6 };
+    long total = 0;
+    for (int i = 0; i < n; i++)
+    {
+        s2 = swap_s2(s2);
+        I3 i3 = { i, 2, 3 };
+        total += sum_args((I2){ 1, i }, (L2){ 3, 4 }, 5, (F2){ 0.5f, 0.7f }, i3);
+    }
+    return total + s2.a + s2.b;
+}
+
 int main(void)
 {
     I4 acc4 = { 0 };
@@ -270,5 +323,7 @@ int main(void)
     I3 fp = from_pointer(&source);
     printf("pointer %d %d %d\n", fp.a, fp.b, fp.c);
     printf("sum %ld\n", sum_args((I2){ 1, 2 }, (L2){ 3, 4 }, 5, (F2){ 0.5f, 0.7f }, (I3){ 6, 7, 8 }));
+    printf("callers %ld %ld\n", callers(10), callers(37 + vz));
+    printf("small %ld\n", small_args(9 + vz));
     return 0;
 }

@@ -1703,7 +1703,10 @@ static TypeId check_constant_intrinsic_type(CheckConstantInput* input, uint32_t 
     {
         if (!input->cached)
         {
-            check_input_implicit_function(reader, token);
+            if (reader->output->symbol_pragmas == NULL || (input->scoped_names && reader->declared_types[token] != 0) || !check_input_symbol_unbound_use(reader, token))
+            {
+                check_input_implicit_function(reader, token);
+            }
             type = reader->declared_types[token];
         }
         if (type == 0 && parser->tree.parents[token] < input->end && check_input_intrinsic_call_shape(parser, token))

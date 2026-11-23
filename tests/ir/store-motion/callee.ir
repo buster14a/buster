@@ -1,0 +1,12 @@
+function (i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = symbol_addr.ptr @1
+  %2 = load.i64 %1 align=8
+  %3 = const.i64 0x00000000000000000000000000000003
+  %4 = mul.i64 %0, %3
+  %5 = add.i64 %2, %4
+  %6 = symbol_addr.ptr @1
+  %7 = store.void %6, %5 align=8
+  %8 = ret.void %5
+}

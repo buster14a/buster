@@ -367,7 +367,7 @@ static bool assembly_test_unlist_got(ObjectView* view, uint8_t* object)
     return found;
 }
 
-// Our object (`ours`, `ours_size` bytes) against GNU as's (`theirs`, which this changes): the same but for the
+// Our object (`ours`, `ours_size` bytes) against the reassembled object (`theirs`, which this changes): the same but for the
 // normalizations above. False, with the first difference, if they differ.
 static bool assembly_test_same_objects(AssemblyTest* test, const uint8_t* ours_bytes, uint64_t ours_size, String8 theirs, char* error, uint64_t error_size)
 {
@@ -384,6 +384,8 @@ static bool assembly_test_same_objects(AssemblyTest* test, const uint8_t* ours_b
     if (passed)
     {
         assembly_test_resolve(&ours_view, ours);
+        // Buster can retain a relocation for a local call that GNU as resolves in place.
+        assembly_test_resolve(&theirs_view, (uint8_t*)theirs.pointer);
         assembly_test_unlist_got(&theirs_view, (uint8_t*)theirs.pointer);
         passed = object_test_same_as(&ours_view, &theirs_view, error, error_size);
     }
@@ -520,13 +522,23 @@ static void assembly_test_program(AssemblyTest* test)
         arena_release(&small);
     }
     assembly_test_check(test, result.error != ASSEMBLY_OK || printed, "a scratch arena of a megabyte holds the tables", 0);
-    if (result.error == ASSEMBLY_OK && test->cross_check)
+    if (result.error == ASSEMBLY_OK)
     {
         const uint64_t object_mark = test->scratch.length;
         const Object object = assembly_test_object(&fixture, &test->scratch);
+        const String8 source = { .pointer = (char*)result.bytes, .length = result.length };
+        AsmResult assembled = asm_assemble(source, test->index, (AsmOptions){ .vectorized = true }, &test->scratch);
+        const Object rebuilt = assembled.error == 0 ? asm_object(&assembled, BUSTER_S8("fixture.c"), &test->scratch) : (Object){0};
         char error[256] = { 0 };
-        const bool same = object.error == OBJECT_ERROR_NONE && assembly_test_against_as(test, "program", result.bytes, result.length, &object, error, sizeof(error));
-        assembly_test_check(test, same, "GNU as's object of the program is the object writer's", error);
+        const String8 bytes = { .pointer = (char*)rebuilt.bytes, .length = rebuilt.size };
+        const bool same = object.error == OBJECT_ERROR_NONE && assembled.error == 0 && rebuilt.error == OBJECT_ERROR_NONE &&
+                          assembly_test_same_objects(test, object.bytes, object.size, bytes, error, sizeof(error));
+        assembly_test_check(test, same, "the assembler reads the assembly writer's program back into its object", assembled.error != 0 ? assembled.error : error);
+        if (test->cross_check)
+        {
+            const bool gnu = object.error == OBJECT_ERROR_NONE && assembly_test_against_as(test, "program", result.bytes, result.length, &object, error, sizeof(error));
+            assembly_test_check(test, gnu, "GNU as's object of the program is the object writer's", error);
+        }
         arena_pop_to(&test->scratch, object_mark);
     }
     arena_pop_to(&test->output, output_mark);

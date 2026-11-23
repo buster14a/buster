@@ -2307,6 +2307,81 @@ that the straight-line consumer hints it to each argument's interval that ends
 there, both of them over the call fixtures. A mutation of each rule fails its
 check.
 
+### Arguments out of each other's registers (#2823)
+
+Where an argument's register was taken, by an incoming parameter the call reads
+in another register or a value that lives past the call, the argument took the
+lowest free register, often the one another argument goes to while that
+argument sat in this one's. The call's parallel move then swapped the two
+through the scratch register, three moves where one was owed: Lua's
+`luaT_callorderiTM` calls in `luaV_execute` put the constant for `rcx` in `rsi`
+while the value for `rsi` sat in `rcx`, and `lua_settable` loaded `L->top - 2`,
+for `rdx`, into `rcx` and `L->top - 1`, for `rcx`, into `rdx`.
+
+- **The rule.** A general interval whose last use is a call's register argument,
+  and that nothing hints but that register and a tie (no value, named interval or
+  alternate), avoids the registers the call reads its other arguments in
+  (`tier1_cfg_argument_avoidance`, into `Tier1AllocationInput.avoided_registers`,
+  #2767's column): an avoided register is the last free one it takes, so where
+  its own is taken it takes one no argument goes to, and the parallel move is a
+  chain, not a cycle. A hinted interval keeps its hint, so a range entering a
+  block in its value's register still does.
+- **Along ties.** A two-address result takes its dying operand's register
+  (#2685), so its register hint and the registers it avoids go back along the
+  ties to the operand's interval, where nothing else hints that one: a load then
+  an add for an argument loads into the argument's register. Only where the
+  chain starts at a definition nothing hints: one whose tie names an operand
+  that can't follow (a value live past it, or one hinted elsewhere) keeps its
+  ties. Avoiding the other registers there broke `rebuildPage`'s copy of `sz`
+  into `rdx`, tied to `sz` in `rsi`, into a move to `r8` and another to `rdx`.
+- **Not a phi's.** A phi's interval is placed by its edges, and keeps the rules
+  it had.
+- **Scalar, and why.** Each position's registers are one pass over the uses,
+  scattered into a column, and each interval reads its end's; the scatter's
+  positions collide (a call's arguments share one), and the walks back are tie
+  chains, one or two long.
+
+What stays: arguments that are both live past the call in their registers and
+passed in each other's (`luaT_trybinassocTM` passes its `p2` and `p1` swapped,
+both saved around the call in their incoming registers, as #2610's parameters
+are), the dispatch's rotations of `luaV_execute`'s values before its indirect
+jump, and an argument hinted to a value's register.
+
+| Tier 1 objects (`--tier1 -fno-asynchronous-unwind-tables`) | main `a891cc05` | this |
+| --- | ---: | ---: |
+| speedtest1's swaps through `r11` within six instructions of a call | 125 | 57 |
+| Lua's | 46 | 10 |
+| speedtest1's register-to-register moves | 36,567 | 33,579 |
+| Lua's | 10,452 | 9,937 |
+| speedtest1's instructions | 380,718 | 377,985 |
+| Lua's | 111,655 | 111,055 |
+| speedtest1's `.text` bytes | 1,511,593 | 1,502,678 |
+| Lua's | 399,376 | 397,760 |
+| speedtest1's instructions run (callgrind, `--size 5`, `mix1`) | 2,657.51 M | 2,647.25 M |
+| Lua's five scripts' | 4,500.66 M | 4,496.52 M |
+
+By callgrind, speedtest1's falls are `getCellInfo`'s (1.61 M),
+`sqlite3BtreeIndexMoveto`'s (1.13 M, #2823's `xRecordCompare` call),
+`jsonTranslateTextToBlob`'s (1.05 M) and `sqlite3VdbeExec`'s (0.97 M); one
+function runs more, `sqlite3_str_vappendf` (+45 K), where a call's two moves
+left one path and a block's entry convention added one on a hotter one. Lua's
+functions that run more are its string hashing's and tables' (`luaH_getshortstr`,
+`luaH_get`, `luaS_newlstr`), whose code is the same bytes: Lua seeds its hash with
+the time and addresses, so their probes vary from run to run.
+
+(#2823 counted 932 and 283 sites at `6415e30`; #2646's hints left 125 and 46.)
+
+**Tests.** `tier1_cfg_test.c`'s call-arguments fixture, on the scan and the
+coloring path, with and without a tie: an argument whose register a bound value
+holds takes neither its own nor the other argument's register, and a tied
+result takes its operand's. `tier1_cfg_test_avoided`'s reference recomputes the
+avoided registers and register hints of every interval by brute force over the
+uses and ties. The argument-exclusions fixture, on both paths, holds a phi
+whose interval ends at a register argument, which avoids nothing, and a result
+tied to a phi, whose chain has no root, which keeps its operand's register.
+Disabling the rule, or only its walk along ties, fails them, as do counting a
+chain without a root as rooted (6 checks) and opening the rule to phis (4).
+
 ## Rematerialization
 
 `Tier1RematerializationInput` is a borrowed column view of selection facts,

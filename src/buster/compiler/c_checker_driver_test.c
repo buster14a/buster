@@ -11011,6 +11011,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && semantic_recovery_only)
     {
         check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/initializer-comma");
+        check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/designator-recovery");
         check_test_driver_semantic_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_statement_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_type_attribute_recovery(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
@@ -11311,9 +11312,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_string_plus_int,
             check_test_driver_asm_label_auto,
             check_test_driver_assert_const,
-            check_test_driver_assert_bool,
-            check_test_driver_node_bodies,
-            check_test_driver_node_gate,
+            check_test_driver_assert_bool_and_node,
             check_test_driver_constant_logical_sections,
             check_test_driver_query_bool,
             check_test_driver_ident,
