@@ -519,8 +519,9 @@ AT&T syntax, which assembles into the object `-c` writes (the assembly sink's
 form contract, below), compiled by Tier 0 or with `--tier1` as `-c` compiles it.
 Its output is `-o FILE`, standard output with `-o -`, and otherwise each
 source's base name with `.s` in the current directory, as clang names it (`-o`
-with several sources is refused, as with `-c`). `-fsyntax-only` takes precedence
-over `-S`, and `-S` over `-c`, whichever comes first, as clang's phases do. It
+with several sources is refused, as with `-c`). `-E` with `-S` selects
+preprocessing in either order. `-fsyntax-only` takes precedence over `-S`,
+and `-S` over `-c`, whichever comes first, as clang's phases do. It
 runs the compile `-c` runs, its diagnostics and their promotions alike, and
 writes its file only after the unit's code and data are made: a unit with an
 error, or one the sink refuses, writes nothing and leaves an existing file as it

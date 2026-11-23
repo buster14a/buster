@@ -903,6 +903,10 @@ static int driver_compatibility_tests(const char* compiler, const char* clang)
 #endif
         const char* const ep[] = { "-E", "-MD", "-P", "a.c", "-o", "out/a.i", NULL };
         cc_compat_oracle(&test, "-E -MD -o produces primary and side dependency", NULL, ep, "out/a.d");
+        const char* const preprocess_before_assembly[] = { "-E", "-S", "-P", "a.c", NULL };
+        cc_compat_oracle(&test, "-E -S preprocesses C and writes to stdout", NULL, preprocess_before_assembly, NULL);
+        const char* const assembly_before_preprocess[] = { "-S", "-P", "bad.c", "-E", NULL };
+        cc_compat_oracle(&test, "-S -E skips compilation even with a C syntax error", NULL, assembly_before_preprocess, NULL);
         const char* const mixed[] = { "-MD", "-M", "a.c", NULL };
         cc_compat_oracle(&test, "dependency side-effect precedence is independent of order", NULL, mixed, "a.d");
         const char* const mixed_system[] = { "-MM", "-M", "-MD", "-isystem", "sys", "system.c", NULL };
