@@ -1270,9 +1270,8 @@ static bool link_add_priority(Link* link, AtomId atom, uint32_t priority)
 // 32-bit when it is RIP-relative, absolute or index-only; after a base, only when it doesn't fit in 8 bits in units of
 // an EVEX form's N, since the encoder makes small ones 8-bit or leaves them out, as GNU as does with numbers. So a
 // symbolic one there needs a placeholder that doesn't fit, such as INT32_MIN (x86_fixup_distance says the same).
-static LinkField link_instruction_field(const X86Instruction* instruction, X86FixupField field)
+static LinkField link_instruction_field(const X86Instruction* instruction, const X86FormDescription* form, X86FixupField field)
 {
-    const X86FormDescription* form = x86_form_description(instruction->form);
     const uint8_t mode = instruction->mode;
     const bool has_modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT) != 0;
     const bool memory = has_modrm && (form->rm & BUSTER_X86_OPERAND_MEMORY) != 0 && (mode & BUSTER_X86_MODE_MEMORY) != 0;
@@ -1306,10 +1305,10 @@ static LinkField link_instruction_field(const X86Instruction* instruction, X86Fi
 // Whether `kind` can patch the instruction's field: one of the kind's fields and, for the kinds whose instructions
 // linkers rewrite (call and jmp through the GOT into direct ones, mov from the GOT into lea, initial-exec into
 // local-exec), one of those instructions.
-static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, X86FixupField field)
+static bool link_kind_fits(uint8_t kind, const X86Instruction* instruction, const X86FormDescription* description, X86FixupField field)
 {
     const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
-    bool result = kind < BUSTER_LINK_FIXUP_KINDS && (link_fixup_kinds[kind].fields & BUSTER_LINK_FIELD_BIT(link_instruction_field(instruction, field))) != 0;
+    bool result = kind < BUSTER_LINK_FIXUP_KINDS && (link_fixup_kinds[kind].fields & BUSTER_LINK_FIELD_BIT(link_instruction_field(instruction, description, field))) != 0;
     if (kind == BUSTER_LINK_FIXUP_CALL_GOT)
     {
         result = result && (form == X86_FORM_CALL_RM64 || form == X86_FORM_JMP_RM64);
@@ -1351,14 +1350,17 @@ static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* 
         const bool next_instruction = previous == UINT64_MAX || index > previous;
         const bool next_field = index == previous && previous_field == X86_FIXUP_DISPLACEMENT && reference->field == X86_FIXUP_IMMEDIATE;
         ordinal += next_instruction ? 1 : 0;
+        // The instruction's form's description, which its field's class and its distance from the end read (#3393: once).
+        const X86FormDescription* description = index < instruction_count ? x86_form_description(instructions[index].form) : NULL;
         result = index < instruction_count && (next_instruction || next_field) && reference->field <= X86_FIXUP_IMMEDIATE && ordinal < marked &&
-                 (instructions[index].form & BUSTER_X86_FORM_FIXUP) != 0 && link_kind_fits(reference->kind, &instructions[index], reference->field);
+                 (instructions[index].form & BUSTER_X86_FORM_FIXUP) != 0 && link_kind_fits(reference->kind, &instructions[index], description, reference->field);
         uint32_t offset = 0;
         int64_t addend = reference->addend;
         if (result)
         {
             const uint32_t end = fixup_ends[ordinal];
-            const uint32_t distance = x86_fixup_distance(instructions[index].form, reference->field);
+            const uint32_t distance = description->immediate_bytes +
+                                      (reference->field == X86_FIXUP_DISPLACEMENT ? (description->relative_bytes != 0 ? description->relative_bytes : 4u) : 0u);
             offset = end - distance;
             result = distance <= end && !(link_fixup_kinds[reference->kind].pc_relative && __builtin_sub_overflow(reference->addend, (int64_t)distance, &addend));
         }
@@ -1372,7 +1374,8 @@ static bool link_add_code_fixups(Link* link, AtomId atom, const X86Instruction* 
         }
         if (result)
         {
-            memset(link->atoms.bytes[atom] + offset, 0, link_fixup_kinds[reference->kind].width);
+            // The placeholder's bytes cleared: a field of 8 bytes at most, by one masked store.
+            _mm_mask_storeu_epi8(link->atoms.bytes[atom] + offset, (__mmask16)_bzhi_u32(0xffff, link_fixup_kinds[reference->kind].width), _mm_setzero_si128());
         }
         previous = index;
         previous_field = reference->field;
