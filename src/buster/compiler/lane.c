@@ -3767,11 +3767,12 @@ struct LaneExitSegment
     uint64_t begin;
     uint64_t end;
 };
-// The segments the helper looks at (an executable has two, its read-only data and its code), the ranges of each it
-// counts (128 MB, a bit a range in a word), the regions a scan answers at once (they and the ranges' counts are on the
-// helper's stack, a page), the pages of 4 KB mapped in a range from which it is worth a huge page (four of the kernel's
-// fault-around windows, three faults saved a process), and how many processes go by for one that looks whatever its
-// probe says, as a power of two.
+// The segments the helper looks at (an executable has two, its read-only data and its code, and a third where the bake
+// sealed its tables and relocated read-only data, baked.c's bake_seal), the ranges of each it counts (128 MB, a bit a
+// range in a word), the regions a scan answers at once (they and the ranges' counts are on the helper's stack, a page),
+// the pages of 4 KB mapped in a range from which it is worth a huge page (four of the kernel's fault-around windows,
+// three faults saved a process), and how many processes go by for one that looks whatever its probe says, as a power of
+// two.
 #define BUSTER_LANE_EXIT_SEGMENTS 4
 #define BUSTER_LANE_EXIT_RANGES 64
 #define BUSTER_LANE_EXIT_REGIONS 64
