@@ -2031,6 +2031,13 @@ static const struct { const char* text; uint32_t bodies; } node_producer_test_co
 static const char node_producer_test_fused_text[] = "double summed(double a, double b, double c) { return a * b + c; }\n"
                                                     "int stepped(int i, double a, double b) { i -= a * b; return i; }\n"
                                                     "double multiplied(double a, double b) { return a * b; }\n";
+// A function whose declaration gives it always_inline, an inline-only wrapper that the lowering expands at its direct
+// call (#2983): the body that calls it is left (the machine takes no such callee's call), the one beside it taken. And a
+// naked function, whose statements a pass after the walk reports: left by its function, the one beside it taken.
+static const char node_producer_test_inlined_text[] = "__attribute__((always_inline)) inline int wrap(int a) { return a + 1; }\n"
+                                                      "int caller(int a) { return wrap(a); }\n"
+                                                      "int beside(int a) { return a + 2; }\n";
+static const char node_producer_test_naked_text[] = "__attribute__((naked)) void bare(void) { }\nint beside(int a) { return a + 2; }\n";
 static const char node_producer_test_results_text[] = "typedef int W __attribute__((warn_unused_result));\nW w(void);\nint result(void) { return 1; }\n";
 
 static bool node_producer_test_fixture(const char* directory, const char* text, uint64_t length, char** options, uint32_t option_count, bool lean,
@@ -7864,6 +7871,14 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_results_text, sizeof(node_producer_test_results_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_results),
                       "node-producer: a unit with a result's attribute on a type takes no body");
+    const NodeProducerExpected produced_inlined = { .reasons = { [NODE_PRODUCER_TAKEN] = 1, [NODE_PRODUCER_MACHINE] = 1 } };
+    const NodeProducerExpected produced_naked = { .reasons = { [NODE_PRODUCER_TAKEN] = 1, [NODE_PRODUCER_FUNCTION] = 1 } };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_inlined_text, sizeof(node_producer_test_inlined_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_inlined),
+                      "node-producer: a body that calls a function a declaration gives always_inline is left");
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_naked_text, sizeof(node_producer_test_naked_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_naked),
+                      "node-producer: a naked function's body is left");
     const NodeProducerExpected produced_linkage = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_counted_text, sizeof(node_producer_test_counted_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_members),

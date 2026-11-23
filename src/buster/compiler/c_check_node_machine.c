@@ -477,7 +477,7 @@ struct NodeMachine
     // so C refuses a sum or a compound sum of a float's or a double's class there, whatever its operands are
     // (node_machine_classify, node_machine_update_plan), and the window's C lists every sum and every update
     // (node_contexts_window_loop). At reader time, where no attribute's target is read, it is the options' target's, or
-    // true in a unit with a function of a target of its own, whatever that names (node_machine_reader_targeted).
+    // true in a unit with a function of a target of its own, whatever that names (node_machine_begin_reader).
     bool fuses;
     uint32_t* reader_declarations;
     uint8_t* reader_facts;
@@ -505,6 +505,8 @@ struct NodeMachine
 #define BUSTER_NODE_MACHINE_OBJECT_LABELLED 0x02u
 #define BUSTER_NODE_MACHINE_OBJECT_DECLARED 0x04u
 #define BUSTER_NODE_MACHINE_OBJECT_DEFINED 0x08u
+// A declaration of the function has always_inline (CheckProgram.object_inline's BUSTER_CHECK_PROGRAM_INLINE_ALWAYS).
+#define BUSTER_NODE_MACHINE_OBJECT_INLINED 0x10u
 
 // Forgets the unit's call answers, the types' pointers and the argument memo, as a unit starts without them:
 // node_machine_begin, and the shadow's timing before each pass (c_check_node_census.c's node_shadow_time), so that each
@@ -1061,7 +1063,8 @@ static inline bool node_machine_symbolled(const NodeMachine* machine, uint32_t o
 }
 
 // What T's callee refusal asks of a directly called object (node_machine_callee_refused): its declaration's name, and
-// whether a declaration gives it returns_twice; of the program's columns, or at reader time of the reader's.
+// whether a declaration gives it returns_twice or always_inline; of the program's columns, or at reader time of the
+// reader's.
 static inline IdentId node_machine_object_name(const NodeMachine* machine, uint32_t object)
 {
     const CheckProgram* program = machine->program;
@@ -1077,6 +1080,15 @@ static inline bool node_machine_object_twice(const NodeMachine* machine, uint32_
     const CheckProgram* program = machine->program;
     return program != NULL ? program->object_returns_twice != NULL && program->object_returns_twice[object] != 0 :
                              (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_TWICE) != 0;
+}
+
+// Whether a declaration gives it always_inline: the lowering expands a direct call of such a function's inline-only
+// definition in its caller (#2983, check_program_select_wrappers), and the machine has a call's row alone.
+static inline bool node_machine_object_inlined(const NodeMachine* machine, uint32_t object)
+{
+    const CheckProgram* program = machine->program;
+    return program != NULL ? program->object_inline != NULL && (program->object_inline[object] & BUSTER_CHECK_PROGRAM_INLINE_ALWAYS) != 0 :
+                             (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_INLINED) != 0;
 }
 
 // Whether call node `node`, record `r`, has a plain library builtin's semantics of its own (check_program_call_library):
