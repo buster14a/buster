@@ -1,18 +1,19 @@
 // Copyright (c) 2026 David Gonzalez Martin
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
-// test-x86-zen5 and benchmark-x86-zen5 (#181): exact scalar/vector lookups over every byte ID, length and guarded tail;
+// test-x86-zen5 and benchmark-x86-zen5 (#181): lookups against the column's own entries over every byte ID, length and
+// guarded tail, with nothing written past the count;
 // each record's operand kind (zero idioms, LEA's shapes, memory with and without an index) and what doesn't change it
 // (immediates, decorations, segment overrides, fixups); the table's completeness (every case accounts for every
 // column); and the harness: every case's fixtures resolve to the case, validate, encode alike by both encoders, and run
 // where the host's target allows them. These tests check no timing: measure-x86-zen5 --check reproduces the table.
 
 // Every byte ID of every column, every count through 256, with synthetic distinct entries in all 256 slots so that a
-// swapped bank or lane shows; then tails that end at a guard page.
+// swapped bank or lane shows, each output the column's entry for its ID (the definition) and every slot past the count
+// left as it was; then tails that end at a guard page.
 static bool x86_zen5_test_lookup(void)
 {
     uint8_t ids[256];
-    uint16_t scalar[256];
     uint16_t vector[256];
     static uint16_t saved[X86_COST_COLUMN_COUNT][BUSTER_X86_COST_CAPACITY];
     memcpy(saved, x86_zen5_columns, sizeof(saved));
@@ -32,14 +33,11 @@ static bool x86_zen5_test_lookup(void)
     {
         for (uint32_t count = 0; count <= 256; count += 1)
         {
-            memset(scalar, 0x5a, sizeof(scalar));
             memset(vector, 0x5a, sizeof(vector));
-            x86_zen5_lookup_scalar(ids, count, (X86CostColumn)column, scalar);
             x86_zen5_lookup(ids, count, (X86CostColumn)column, vector);
-            valid &= memcmp(scalar, vector, sizeof(scalar)) == 0;
-            for (uint32_t i = 0; i < count; i += 1)
+            for (uint32_t i = 0; i < 256; i += 1)
             {
-                valid &= vector[i] == x86_zen5_columns[column][ids[i]];
+                valid &= vector[i] == (i < count ? x86_zen5_columns[column][ids[i]] : 0x5a5a);
             }
         }
     }
@@ -58,9 +56,11 @@ static bool x86_zen5_test_lookup(void)
                 uint8_t* source = input + 2 * page - count;
                 uint16_t* destination = (uint16_t*)(output + 2 * page - count * 2);
                 memcpy(source, ids, count);
-                x86_zen5_lookup_scalar(source, count, (X86CostColumn)column, scalar);
                 x86_zen5_lookup(source, count, (X86CostColumn)column, destination);
-                valid &= memcmp(scalar, destination, count * 2) == 0;
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    valid &= destination[i] == x86_zen5_columns[column][ids[i]];
+                }
             }
         }
     }
