@@ -4435,8 +4435,19 @@ What the lowering covers past scalars (#145's programs):
   `_Bool`, or a pointer to a compatible type whatever either's qualifiers, or
   an `_Atomic` one of those, which clang's `CheckAssignmentConstraints` checks
   as its value's type (`_Atomic(int *)`, `_Atomic(void *)`, `_Atomic _Bool`:
-  #1844) ("'cleanup' function 'f' parameter has incompatible type", the spelling of
-  clang's message without its two types). A pointer of another signedness or
+  #1844) ("'cleanup' function 'f' parameter has type 'long *' which is
+  incompatible with type 'int *'", both types as clang prints them: the
+  parameter's typedef and its own qualifiers, which its function's type drops,
+  read back from its declarator, and a pointer to the variable's type with the
+  variable's typedef, each with its a.k.a., #1844's
+  `check_input_cleanup_type_error`). Where the parameter is a pointer to a
+  complete type more aligned than the variable's type (an `aligned(1)`
+  typedef's variable, or another type's), clang's `-Walign-mismatch` comes
+  first, from its `CheckArgAlignment` ("passing 4-byte aligned argument to
+  8-byte aligned parameter 1 of 'f' may result in an unaligned pointer
+  access", `check_input_cleanup_alignment`), and on its own where the types
+  are compatible; after the unit's first error, the driver's later rounds give
+  the errors without it. A pointer of another signedness or
   to a pointer of other qualifiers, which an assignment only warns about, is
   an error here. An `__auto_type` variable's parameter type is checked once
   its initializer gives the type (`check_input_cleanup_deduced`, from the

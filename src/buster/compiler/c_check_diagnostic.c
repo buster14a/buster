@@ -223,6 +223,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE] = { "-Wtautological-negation-compare", "-Wtautological-compare",
                                                          "'&&' of a value and its negation always evaluates to false" },
     [CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND] = { "-Wconstant-logical-operand", NULL, "use of logical operator with constant operand" },
+    [CHECK_WARNING_ID_ALIGN_MISMATCH] = { "-Walign-mismatch", NULL, "passing argument may result in an unaligned pointer access" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

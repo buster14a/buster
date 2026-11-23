@@ -269,6 +269,9 @@ enum
     CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE = 168,
     // An integer logical operator with a non-boolean constant right operand (#2900), on by default, no parent group.
     CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND = 169,
+    // A cleanup function's pointer parameter more aligned than its variable's type (#1844, clang's CheckArgAlignment in
+    // handleCleanupAttr): -Walign-mismatch, on by default.
+    CHECK_WARNING_ID_ALIGN_MISMATCH = 170,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -634,6 +637,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION,
     // payload.data is 0 for &&, 1 for ||. The source adapter retains the operator's construction boundary.
     CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND,
+    // payload.data the argument's alignment's log2 in its low byte and the parameter's above it; payload.name the cleanup
+    // function's name.
+    CHECK_WARNING_EVENT_ALIGN_MISMATCH,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

@@ -6357,6 +6357,18 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                  "unknown builtin", (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
                                                  kind == CHECK_INPUT_UNDECLARED ? "" : " [-Wimplicit-function-declaration]");
                         }
+                        else if (phase == 0 && kind == CHECK_INPUT_CLEANUP_TYPE && named && input->reports[index].type != 0 && (TypeId)input->reports[index].value != 0)
+                        {
+                            // clang's handleCleanupAttr names the argument and both types (#1844): the parameter's, as its
+                            // function's type has it, and a pointer to the variable's.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t name = parser->tokens.names[token];
+                            const String8 parameter = check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling);
+                            const String8 pointer = check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, (uint32_t)(report->value >> 32));
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'cleanup' function '%.*s' parameter has type %.*s which is incompatible with type %.*s",
+                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)parameter.length, parameter.pointer,
+                                                 (int)pointer.length, pointer.pointer);
+                        }
                         else if ((kind == CHECK_INPUT_CLEANUP_FUNCTION || kind == CHECK_INPUT_CLEANUP_PARAMETERS || kind == CHECK_INPUT_CLEANUP_TYPE) && named)
                         {
                             // clang's handleCleanupAttr names the argument; of the parameter's type it says what its other
