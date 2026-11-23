@@ -7667,8 +7667,8 @@ target's, its typedef spelled as clang does (`'F' (aka 'float')`). It follows
 the enumerations' carriers (`check_common_float_precision`, as
 `check_common_enum_cast`): initializations, brace initializers' parts
 (designated, nested, file scope), assignments, returns, a prototype's
-arguments (not yet a prototyped builtin's, #3371), a conditional's arms (both, the true one first) and a root comma's
-result. A constant that converts exactly is exempt, as clang's
+arguments (including builtin parameters, #3371), a conditional's arms (both,
+the true one first) and a root comma's result. A constant that converts exactly is exempt, as clang's
 `IsSameFloatAfterCast` decides: a folded value or a read of a const object
 whose initializer completed (`CheckInput.const_values`), whose significant bits
 fit the target's precision at its exponent and range (`check_float_fits`,
