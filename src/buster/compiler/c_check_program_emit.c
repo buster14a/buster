@@ -599,13 +599,14 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_TABLES 4096u
 // LICM under #2719's pressure policy (ir_optimize_licm.c's IrLicmOptions.pressure), on by default: in a function without
 // vector or mask values (VECTORS' policy takes those) where its screen (ir_licm_pressure_screen) finds a loop that may
-// hold no call, and where LICM doesn't run on every value. On the 9700X it takes the loop kernels' cycles and costs
-// speedtest1 and Lua none beyond code placement's noise (docs/ir-loop-motion.md's "The pressure policy"), which is the
-// default's bar the owner set for it on #2719.
+// hold no call, and where LICM doesn't run on every value. On the 9700X it takes 6.4% of the loop kernels' cycles and
+// changes speedtest1's and Lua's by no more than code placement's noise (Lua's by -0.23% over 8 link orders), for 1.9%
+// of sqlite3.c's --tier1 compile: the bar the owner set for its default on #2719 (docs/ir-loop-motion.md's "On by
+// default").
 #define BUSTER_CHECK_TIER1_PASS_HOIST 16384u
 // #866's solver under #2719's pressure policy (ir_optimize_gvn.c's IrGvnOptions.pressure), on promoted SSA after
 // if-conversion and before LICM, off by default: on the 9700X it takes none of speedtest1's or Lua's cycles beyond code
-// placement's, for 16.2% of sqlite3.c's --tier1 compile.
+// placement's, for 11.1% to 11.4% more of sqlite3.c's --tier1 compile than the default.
 #define BUSTER_CHECK_TIER1_PASS_NUMBERING 32768u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT                                                                                                                              \
     (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \

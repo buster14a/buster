@@ -240,9 +240,46 @@ between equal builds; Lua's scripts moved 2–3% each way at equal
 instructions), and the instructions show why: those loops hold calls, or no
 invariant work. The kernels gain 6.2% of their cycles, and the compile costs
 3.4% more: the preparation's verification, use lists and dominator tree of
-every function with a loop. #2719 asks for gains on speedtest1 and Lua before
+every function with a loop. #2719 asked for gains on speedtest1 and Lua before
 a pass is on by default, as `+vectorize`, `+unroll` and `+storemotion` are
-measured, so `hoist` stays off.
+measured, so `hoist` stayed off then.
+
+### On by default
+
+No policy of the motion can reach that bar: speedtest1's and Lua's hot loops
+hold calls or no invariant work. The owner set the bar for `hoist` on
+2026-11-23 instead: a gain on the loop kernels, no change to speedtest1's and
+Lua's run time beyond code placement's noise, and a compile cost that the pass
+pays only where it may act ("What it costs to compile" above). With that cut,
+Tier 1 runs it by default. On the 9700X (each run under the lock on one CPU;
+the logs are in `~/buster-fast-bench/2719-claude-default/` there), against
+`--tier1-passes=-hoist` of the same compiler:
+
+| | User cycles | Instructions |
+| --- | ---: | ---: |
+| the 30 loop kernels (`time-runs --runs 11`) | 0.9358 | 0.8913 |
+| speedtest1 (`measure-tier1-programs --runs 11`) | 0.9983 | 0.9978 |
+| Lua's five scripts, one link order (the same run) | 1.0164 | 1.0006 |
+| Lua's five scripts, 8 link orders (paired mean) | 0.9977 | |
+| `sqlite3.c`'s `-c --tier1 --lanes 1` (`measure-compile --runs 11`) | 1.0188 | 1.0158 |
+
+Lua's one executable ran 1.6% more cycles at equal instructions, though
+`hoist` leaves its interpreter loop (`lvm.c`) as it was: it changes `ldo`,
+`lstring`, `ltm` and `lstrlib`, whose sizes move the code after them. So, as
+[the profiling guide](commands/profiling.md#comparing-generated-tier-1-code-over-layouts-1450)
+says, both builds' objects were linked in the same 8 orders (Lua's Makefile
+order and seven shuffles of it by Python's `random.Random(2719)`, fixed before
+any timing), every executable's output checked against clang -O0's, and each
+script timed over all 16 placements: the five scripts' cycles came to −0.23%
+(a 95% interval of −0.98% to +0.52% over the paired layouts), each script's
+interval spanning zero but `arithmetic.lua`'s, +0.25% (+0.03% to +0.48%), whose
+code is unchanged. Before the cut, main's `+hoist` cost the same compile 3.2%
+to 3.4% of its cycles and 4.0% of its instructions; with it, Tier 1's default
+compile of `sqlite3.c` takes 1.6% to 1.8% more cycles and 1.4% more
+instructions than main's without the pass. A differential campaign of 20 Csmith
+and 20 YARPGen programs (seed 2719, both tiers, in a cloud container) passed
+all 30 that clang -O0 built and ran in time, with `hoist` on and again with
+`+numbering`.
 
 The implementation is original. LLVM's [loop terminology](
 https://llvm.org/docs/LoopTerminology.html) was consulted for the preheader,
