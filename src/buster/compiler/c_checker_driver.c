@@ -12431,7 +12431,7 @@ static bool check_driver_typo_add(CheckDriverTypoEdits* edits, CheckPrefixEdit e
     return added;
 }
 
-static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token);
+static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token, bool stop_at_comma);
 
 // Retain a failed call's name for lookup, without inventing a valid call of its unread arguments (#2406). An ordinary
 // call's earlier and later arguments are read even after an invalid one: remove only that argument. A parser-proven
@@ -12446,10 +12446,11 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
     uint8_t* stack = BUSTER_ARENA_PUSH_ARRAY(edits->scratch, uint8_t, count - callee);
     uint32_t depth = 0;
     uint32_t end = callee + 1;
-    uint32_t arguments = 0;
+    uint32_t comma = 0;
     uint32_t argument_begin = callee + 2;
     uint32_t conditionals = 0;
     bool semicolon = false;
+    bool empty_argument = false;
     bool balanced = stack != NULL;
     do
     {
@@ -12461,7 +12462,8 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
                            view->tokens.kinds[end - 1] == PARSE_KIND_COMMA;
         const bool boundary = depth == 1 && kind == PARSE_KIND_SEMI;
         semicolon = boundary && value && diagnostic->call_statement && end > diagnostic->token;
-        balanced = balanced && end < count && kind != PARSE_KIND_END && !empty && (!boundary || semicolon) &&
+        empty_argument |= empty;
+        balanced = balanced && end < count && kind != PARSE_KIND_END && (!boundary || semicolon) &&
                    (!close || (depth != 0 && stack[depth - 1] == wanted));
         if (balanced && value && depth == 1 && end < diagnostic->token)
         {
@@ -12470,7 +12472,7 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
             conditionals -= kind == PARSE_KIND_COLON && conditionals != 0;
             argument_begin = kind == PARSE_KIND_COMMA && conditionals == 0 ? end + 1 : argument_begin;
         }
-        arguments = balanced && value && depth == 1 && kind == PARSE_KIND_COMMA && end > diagnostic->token && arguments == 0 ? end + 1 : arguments;
+        comma = balanced && value && depth == 1 && kind == PARSE_KIND_COMMA && end > diagnostic->token && comma == 0 ? end : comma;
         if (balanced && open)
         {
             stack[depth++] = kind;
@@ -12482,14 +12484,14 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
         end += balanced && !semicolon ? 1u : 0u;
     }
     while (balanced && depth != 0 && !semicolon);
-    // Empty later arguments need their own parse error and keep the existing recovery above.
-    if (balanced && end < count && (value ? argument_begin == diagnostic->token : view->tokens.kinds[end] == PARSE_KIND_SEMI))
+    // At an early semicolon the retained delimiters can recover an empty argument on the next parse.
+    if (balanced && end < count && (!empty_argument || semicolon) && (value ? argument_begin == diagnostic->token : view->tokens.kinds[end] == PARSE_KIND_SEMI))
     {
         diagnostic->resumed = true;
         diagnostic->resume_delete = true;
         diagnostic->resume_call = true;
         diagnostic->resume_callee = callee;
-        diagnostic->resume_call_arguments = semicolon ? 0 : arguments;
+        diagnostic->resume_call_tail = comma != 0 ? comma : end - !semicolon;
         diagnostic->resume_call_value = value;
         diagnostic->resume_call_semi = semicolon;
         diagnostic->resume_begin = begin;
@@ -12497,6 +12499,42 @@ static void check_driver_invalid_call(const Parser* view, ParseDiagnostic* diagn
         diagnostic->publication = value ? 0 : callee + 1;
     }
     arena_pop_to(edits->scratch, mark);
+}
+
+// A later syntax error inside the arguments of a call already stopped at a semicolon (#3372).
+// Only punctuation marked by that repair is a synchronization point.
+static void check_driver_recover_call_argument(const Parser* view, ParseDiagnostic* diagnostic)
+{
+    const uint32_t count = view->tokens.count;
+    const uint32_t at = diagnostic->token;
+    const bool operand = diagnostic->message == PARSE_MESSAGE_EXPECTED_EXPRESSION;
+    const bool member = diagnostic->message == PARSE_MESSAGE_EXPECTED_IDENTIFIER && at != 0 &&
+                        (view->tokens.kinds[at - 1] == PARSE_KIND_PERIOD || view->tokens.kinds[at - 1] == PARSE_KIND_ARROW);
+    const bool paren = diagnostic->message == PARSE_MESSAGE_EXPECTED_R_PAREN;
+    const bool square = diagnostic->message == PARSE_MESSAGE_EXPECTED_R_SQUARE;
+    const uint32_t stop = operand || member || paren || square ? check_driver_skip_end(view, at, operand || member) : count;
+    if (stop < count && parse_argument_delimiter(view->tokens.kinds[stop]) && (view->tokens.flags[stop] & BUSTER_PARSE_RECOVERY_ARGUMENT) != 0)
+    {
+        // Keep what the parser read of this argument and resume at its next delimiter. A missing operand
+        // or member name becomes an invalid use so its parent cannot produce a spurious type diagnostic.
+        if (operand || member)
+        {
+            diagnostic->resumed = true;
+            diagnostic->resume_operand = true;
+            diagnostic->resume_end = stop;
+        }
+        else if (at < stop && view->tokens.kinds[stop] == (paren ? PARSE_KIND_R_PAREN : PARSE_KIND_R_SQUARE))
+        {
+            diagnostic->resumed = true;
+            diagnostic->resume_delete = true;
+            diagnostic->resume_end = stop;
+            // Clang abandons an already-invalid call when the argument list ends without a ')'.
+            // A nested group's own missing closer still gets its error and matching-opener note.
+            const uint32_t open = diagnostic->note;
+            diagnostic->tail = open < count && view->tokens.kinds[open] == PARSE_KIND_L_PAREN &&
+                               (view->tokens.flags[open] & BUSTER_PARSE_RECOVERY_ARGUMENT) != 0;
+        }
+    }
 }
 
 // The immediate enclosing call of a type-first invalid argument. Earlier parsed arguments may contain balanced
@@ -12621,6 +12659,10 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
     {
         check_driver_invalid_call(view, diagnostic, malformed, malformed, true, edits);
     }
+    if (origin != NULL && !diagnostic->resumed && !diagnostic->resume_colon)
+    {
+        check_driver_recover_call_argument(view, diagnostic);
+    }
     // A complete adjacent GNU/C23 prefix before an implicit int's name, after a statement's start. At least one GNU
     // list is required: those lists make this a declaration before clang classifies its following name.
     const bool call = ordinary && diagnostic->message == PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN && view->language.standard < 2023 && at + 1 < count &&
@@ -12705,7 +12747,7 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
     // (Any other name too: one that stays undeclared is clang's "use of undeclared identifier", its expression invalid
     // and its rest skipped as a keyword's typo's is, `u8'a'` before C23 among them; the reading confirms it.)
     keyword |= near;
-    const uint32_t end = keyword ? check_driver_skip_end(view, at) : BUSTER_CHECK_NONE;
+    const uint32_t end = keyword ? check_driver_skip_end(view, at, false) : BUSTER_CHECK_NONE;
     // (The tail ends at a `,` outside its groups too, an initializer's or an argument's end.)
     uint32_t stop = end;
     uint32_t depth = 0;
@@ -12721,8 +12763,9 @@ static uint32_t check_driver_typo_tail(const Parser* view, const uint32_t* origi
 }
 
 // The token where clang's SkipUntil(r_brace, StopAtSemi | StopBeforeMatch) stops from `token` on: a `;` or a `}` outside
-// the groups it opens, which it skips whole; or BUSTER_CHECK_NONE where the unit ends first.
-static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token)
+// the groups it opens, which it skips whole; or BUSTER_CHECK_NONE where the unit ends first. Argument recovery
+// also stops at a comma at the same depth.
+static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token, bool stop_at_comma)
 {
     const uint32_t count = parser->tokens.count;
     uint32_t depth = 0;
@@ -12731,7 +12774,8 @@ static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token)
     while (going)
     {
         const uint8_t kind = parser->tokens.kinds[at];
-        const bool stop = depth == 0 && (kind == PARSE_KIND_SEMI || kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE);
+        const bool stop = depth == 0 && ((stop_at_comma && kind == PARSE_KIND_COMMA) || kind == PARSE_KIND_SEMI ||
+                                         kind == PARSE_KIND_R_BRACE || kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE);
         depth += kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE ? 1u : 0u;
         depth -= !stop && depth != 0 && (kind == PARSE_KIND_R_PAREN || kind == PARSE_KIND_R_SQUARE || kind == PARSE_KIND_R_BRACE) ? 1u : 0u;
         at += stop ? 0u : 1u;
@@ -12773,7 +12817,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
             confirmed |= at_name && (value || (!attributes && report->message == CHECK_INPUT_UNDECLARED && (report->detail & CHECK_TYPO_STATEMENT) == 0));
             taken = at_name && value ? check_driver_original_token(original, checking, report->note_token) : taken;
         }
-        const uint32_t end = confirmed && attributes ? check_driver_skip_end(original, name) : BUSTER_CHECK_NONE;
+        const uint32_t end = confirmed && attributes ? check_driver_skip_end(original, name, false) : BUSTER_CHECK_NONE;
         if (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && taken < count)
         {
             // The attributes and the rest left out, and the name an empty statement's `;` at its place.
@@ -12860,7 +12904,7 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
                                    BUSTER_CHECK_NONE;
             undeclared |= token >= first && token < at;
         }
-        const uint32_t end = undeclared ? check_driver_skip_end(original, at) : BUSTER_CHECK_NONE;
+        const uint32_t end = undeclared ? check_driver_skip_end(original, at, false) : BUSTER_CHECK_NONE;
         if (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && end > at)
         {
             const CheckPrefixEdit edit = { .token = at, .end = end, .name = 0, .kind = 0 };

@@ -3712,6 +3712,14 @@ static uint32_t check_input_invalid_call_index(const Parser* parser, uint32_t to
     return low < parser->invalid_call_count && parser->invalid_call_sources[low] == source ? low : BUSTER_CHECK_NONE;
 }
 
+// A recovered argument's placeholder fits the grammar without supplying a value or a member name.
+static bool check_input_missing_operand(const Parser* parser, uint32_t token)
+{
+    const bool number = parser->tokens.kinds[token] == PARSE_KIND_NUMBER;
+    const bool member = parser->tree.roles[token] == PARSE_ROLE_MEMBER && parser->tokens.names[token] == 0;
+    return (number || member) && (parser->tokens.flags[token] & BUSTER_PARSE_RECOVERY_ARGUMENT) != 0;
+}
+
 // A failed parse's call-shaped lookup is never an expression to check (#2406). The private view has already erased
 // its unread argument (all arguments for an attribute-led call); earlier/later arguments and the ordinary binding and
 // implicit declaration must survive for independent checks and later statements. Append the
@@ -3722,7 +3730,11 @@ static void check_input_invalid_calls(CheckInputReader* reader)
     const uint32_t count = parser->tokens.count;
     for (uint32_t token = 0; token < count; token += 1)
     {
-        if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND)
+        if (check_input_missing_operand(parser, token))
+        {
+            check_input_report(reader, token, CHECK_INPUT_INVALID_USE);
+        }
+        else if (parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[token] == PARSE_ROLE_OPERAND)
         {
             // Search the sorted original callee sources, not a view's token sources: a repair's synthetic closers
             // have no source, and another diagnostic view may repeat a source for inserted punctuation or casts.
@@ -3790,7 +3802,8 @@ static void check_input_diagnostic_recover(CheckInputReader* reader, bool resolv
         recoverable = (item->message == CHECK_INPUT_UNDECLARED || item->message == CHECK_INPUT_INVALID_USE || item->message == CHECK_INPUT_AMBIGUOUS ||
                        item->message == CHECK_INPUT_BUILTIN_NOT_CALLED) &&
                       item->pragma == 0 && item->token < count &&
-                      parser->tokens.kinds[item->token] == PARSE_KIND_IDENTIFIER && parser->tree.roles[item->token] == PARSE_ROLE_OPERAND;
+                      ((parser->tree.roles[item->token] == PARSE_ROLE_OPERAND && parser->tokens.kinds[item->token] == PARSE_KIND_IDENTIFIER) ||
+                       (item->message == CHECK_INPUT_INVALID_USE && check_input_missing_operand(parser, item->token)));
     }
     if (recoverable)
     {

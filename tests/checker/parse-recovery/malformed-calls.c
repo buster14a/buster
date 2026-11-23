@@ -756,4 +756,68 @@ int check(void)
 {
     retrn;
 }
+#elif BUSTER_CASE == 93
+int known(int, int);
+void check(int n)
+{
+    known(int, missing_later; after_semicolon);
+    known(int, 1 / 0; n);
+}
+#elif BUSTER_CASE == 94
+int known(int, int);
+void check(int a, int x)
+{
+    known(int, missing_operand, a +; x);
+    after_incomplete;
+}
+#elif BUSTER_CASE == 95
+#define ARGUMENTS int, inner(int, missing_inner), 1 / 0
+int known(int, int);
+int inner(int, int);
+void check(int n)
+{
+    known(n, ARGUMENTS; n);
+    after_macro_call;
+}
+#elif BUSTER_CASE == 96
+int known(int, int);
+void check(int n)
+{
+    known(int, ; n);
+    known(int, n /, missing_later; n);
+    after_empty_argument;
+}
+#elif BUSTER_CASE == 97
+int known(int, int);
+void check(int n)
+{
+    known(int, missing_earlier, double; n);
+    after_second_type;
+}
+#elif BUSTER_CASE == 98
+struct Pair { int x; };
+int known(int, int);
+void check(struct Pair p, int n)
+{
+    known(int, 1 + p., missing_member_argument; n);
+    known(int, n ? 1; n);
+    after_missing_operands;
+}
+#elif BUSTER_CASE == 99
+int known(int, int);
+void check(int n)
+{
+    known(int, { skipped_name }, missing_later; n);
+    known(int, (n n); n);
+    known(int, n n; n);
+    after_bad_arguments;
+}
+#elif BUSTER_CASE == 100
+int aligned(int, int);
+void check(void)
+{
+    int x __attribute__((vector_size(int + (unread(1, 2)), unread_tail), aligned(0)));
+    aligned(int, missing_call_argument);
+    x = after_bad_attribute;
+}
 #endif
