@@ -25,8 +25,7 @@ static __attribute__((unused)) IrCheck ssa_ir_promote_scalar(const IrFunction* i
 // the function and its result before the IR is built (#134's tests): every use dominated by its definition, a phi
 // operand per predecessor, no trivial phi, and its reaching-definition equations. `*verified` is its check, whose rule
 // names what failed (SSA_OK with no rule if the promotion failed before it), and a failure fails the promotion as
-// IR_ERROR_PHI (or as the memory's). The vector path's constructor runs here wherever its memory bound admits, past the
-// cells where ssa_ir_promote takes the twin's (#787).
+// IR_ERROR_PHI (or as the memory's).
 static __attribute__((unused)) IrCheck ssa_ir_promote_verified(const IrFunction* input, bool vector, Arena* output, Arena* scratch, IrFunction* result, SsaCheck* verified);
 
 typedef struct SsaIrWork SsaIrWork;
@@ -795,14 +794,6 @@ static IrCheck ssa_ir_verify_output(const SsaIrWork* work, const IrFunction* f)
     return check;
 }
 
-// The most (block, slot) cells a function's promotion takes the vector path for (#787). Its phi placement, entry
-// definitions and renaming each pass over every cell (ssa.c's ssa_place_phis, ssa_entry_definitions and
-// ssa_rename_vector), where the scalar twin's work follows the instructions, so past this many the twin is faster. On
-// the 9700X, each of the frozen sqlite3.c's 2,602 functions timed by both paths (benchmark-ir-source --functions): the
-// vector path alone 40.15 ms, the twin alone 37.01, the vector path to 16,384 cells and the twin past them 35.96 (each
-// function's faster path 35.32); every bound from 8,192 to 32,768 cells came within -0.28% to +0.26% of it.
-#define BUSTER_SSA_IR_VECTOR_CELLS (UINT64_C(1) << 14)
-
 // A real local read witnesses its exact reaching value, including an already semantic phi, without adding a read
 // or keeping a phi alive for debugging. Undef is not a wildcard: if any incoming path is indeterminate, a phi cannot
 // describe an initialized source value. Propagate that fact through phi users with a sparse reverse edge list.
@@ -945,13 +936,10 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     }
     if (check.error == IR_OK)
     {
-        // Bound the complete dense workspace as well as the frontier matrix. Past BUSTER_SSA_IR_VECTOR_CELLS,
-        // the measured crossover, dense vector construction costs more than it saves (#787). Above the storage
-        // cap use the bounded predecessor reader, with either host's renaming kernel. Verified promotion also
-        // exercises dense vector construction past the crossover wherever the complete memory bound admits it.
-        const uint64_t cells = (uint64_t)input->block_count * work.source.local_count;
+        // Bound the complete dense workspace; above that cap use the bounded predecessor reader. The dense vector
+        // constructor takes every size below it (#2924), so `vector` picks only between it and its twin.
         dense = !BUSTER_TIER1_PRIVATE_VALUES && ssa_dense_fits(&work.source);
-        vector = dense && BUSTER_VECTOR_PATH(vector) && ssa_vector_fits(input->block_count) && (verified != 0 || cells <= BUSTER_SSA_IR_VECTOR_CELLS);
+        vector = dense && BUSTER_VECTOR_PATH(vector);
         // Eligibility is complete, but kinds are still VALUE: check every real use with this dominance tree before
         // exposing READ/WRITE. Their types and operand ordering were already checked by the full IR verifier.
         check.error = ssa_ir_error(ssa_prepare_path(&work.work, &work.source, scratch, BUSTER_VECTOR_PATH(vector), dense));
@@ -963,7 +951,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
     if (check.error == IR_OK)
     {
         ssa_ir_accesses(&work);
-        if (dense)
+        if (dense && !BUSTER_VECTOR_PATH(vector))
         {
             check.error = ssa_ir_error(ssa_definitions(&work.work));
         }
@@ -976,7 +964,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         }
         else if (dense)
         {
-            check.error = ssa_ir_error(BUSTER_VECTOR_PATH(vector) ? ssa_construct_vector(&work.work) : ssa_construct_scalar(&work.work));
+            check.error = ssa_ir_error(BUSTER_VECTOR_PATH(vector) ? ssa_construct_dense(&work.work) : ssa_construct_scalar(&work.work));
         }
         else
         {

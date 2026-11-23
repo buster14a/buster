@@ -651,6 +651,51 @@ static void ssa_test_bounded_cycles(SsaTestTally* tally, SsaTestSpace* space)
     }
 }
 
+// The vector constructor's sparse frontiers against the definition: a reachable join j is in x's list iff x dominates a
+// reachable predecessor of j and doesn't strictly dominate j, once; and with a budget one pair short, the lists refuse.
+static void ssa_test_frontiers(SsaTestTally* tally, SsaTestSpace* space, const SsaInput* input)
+{
+    const uint64_t mark = space->scratch.length;
+    SsaWork work;
+    bool ok = ssa_prepare_path(&work, input, &space->scratch, true, false) == SSA_OK;
+    uint32_t* offsets = 0;
+    uint32_t* targets = 0;
+    ok = ok && ssa_frontiers(&work, BUSTER_SSA_FRONTIER_PAIRS, &offsets, &targets) == SSA_OK;
+    uint32_t pairs = 0;
+    for (uint32_t x = 0; ok && x < input->block_count; x += 1)
+    {
+        for (uint32_t j = 0; ok && j < input->block_count; j += 1)
+        {
+            bool expected = false;
+            if (work.result.reachable[x] != 0 && work.result.reachable[j] != 0 && !(x != j && ssa_dominates(&work, x, j)))
+            {
+                for (uint32_t edge = work.result.predecessor_offsets[j]; edge < work.result.predecessor_offsets[j + 1]; edge += 1)
+                {
+                    expected |= ssa_dominates(&work, x, work.result.predecessors[edge]);
+                }
+            }
+            uint32_t listed = 0;
+            for (uint32_t at = offsets[x]; at < offsets[x + 1]; at += 1)
+            {
+                listed += targets[at] == j;
+            }
+            ok = listed == (expected ? 1u : 0u);
+            pairs += listed;
+        }
+    }
+    ssa_test_expect(tally, ok, "sparse frontiers are the definition's, each join once");
+    if (ok && pairs != 0)
+    {
+        arena_pop_to(&space->scratch, mark);
+        ok = ssa_prepare_path(&work, input, &space->scratch, true, false) == SSA_OK;
+        ssa_test_expect(tally, ok && ssa_frontiers(&work, pairs, &offsets, &targets) == SSA_OK, "frontiers fit a budget of their exact pairs");
+        arena_pop_to(&space->scratch, mark);
+        ok = ssa_prepare_path(&work, input, &space->scratch, true, false) == SSA_OK;
+        ssa_test_expect(tally, ok && ssa_frontiers(&work, pairs - 1, &offsets, &targets) == SSA_ERROR_LIMIT, "frontiers one pair past their budget refuse");
+    }
+    arena_pop_to(&space->scratch, mark);
+}
+
 static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_t count)
 {
     static const uint32_t boundaries[] = { 1, 2, 15, 16, 17, 63, 64, 65, 511, 512, 513, 1025 };
@@ -665,6 +710,7 @@ static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_
             if (ssa_test_expect(tally, ssa_generate(&space->input, boundaries[index], locals, shape, tally->seed + index, &input), "generate input"))
             {
                 ssa_test_run(tally, space, &input, false, false);
+                ssa_test_frontiers(tally, space, &input);
             }
         }
     }
@@ -703,6 +749,7 @@ static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_
         if (ssa_test_expect(tally, ssa_generate(&space->input, blocks, locals, shape, random, &input), "generate random input"))
         {
             ssa_test_run(tally, space, &input, false, false);
+            ssa_test_frontiers(tally, space, &input);
             // The same program with every fourth write one of its local's undef instead (#141's lifetime starts).
             uint32_t kills = 0;
             for (uint32_t w = 0; w < input.instruction_count; w += 1)
