@@ -267,6 +267,8 @@ enum
     CHECK_WARNING_ID_TAUTOLOGICAL_BITWISE_COMPARE = 166,
     CHECK_WARNING_ID_TAUTOLOGICAL_OVERLAP_COMPARE = 167,
     CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE = 168,
+    // An integer logical operator with a non-boolean constant right operand (#2900), on by default, no parent group.
+    CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND = 169,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -630,6 +632,8 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_ELABORATED_ENUM_BASE,
     CHECK_WARNING_EVENT_UNDERLYING_ATOMIC_QUALIFIER,
     CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION,
+    // payload.data is 0 for &&, 1 for ||. The source adapter retains the operator's construction boundary.
+    CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 
@@ -726,6 +730,8 @@ typedef enum CheckWarningNoteKind
     // to turn this inequality comparison into an or-assignment" (BUSTER_CHECK_UNUSED_INEQUALITY).
     CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT,
     CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE,
+    CHECK_WARNING_NOTE_LOGICAL_BITWISE,
+    CHECK_WARNING_NOTE_LOGICAL_REMOVE_CONSTANT,
     CHECK_WARNING_NOTE_KIND_COUNT,
 } CheckWarningNoteKind;
 
