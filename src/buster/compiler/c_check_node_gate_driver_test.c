@@ -75,3 +75,14 @@ static void check_test_driver_node_gate(CheckTest* test, const char* clang, cons
     unlink(object);
     unlink(log);
 }
+
+// The node machine's two tests above with the section before them, as one of the driver test's sections. The parts are
+// dealt a section at a time (check_test_driver_takes), and each of the two as a section of its own moved every later
+// section to the next part: on a hosted runner part 3 of 8, the longest, took 16 s of CPU more for them and part 4
+// 98 s more (#2263).
+static void check_test_driver_assert_bool_and_node(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_assert_bool(test, clang, executable, directory);
+    check_test_driver_node_bodies(test, clang, executable, directory);
+    check_test_driver_node_gate(test, clang, executable, directory);
+}
