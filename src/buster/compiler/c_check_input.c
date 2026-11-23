@@ -10120,6 +10120,7 @@ struct CheckTagFrame
     CheckInputAttributes* member_attributes;
     CheckDeclaratorRun* member_run;
     uint32_t member_declarator;
+    uint32_t member_warning_start;
     // The member declaration's first token, for its attributes' warnings that clang places there.
     uint32_t member_begin;
     uint8_t member_abi_origin;
@@ -10756,6 +10757,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                 if (valid && frame->member_run == 0)
                 {
                     frame->member_declarator = i;
+                    frame->member_warning_start = reader->warning_events.count;
                     reader->specifier_abi_origin = frame->member_abi_origin;
                     reader->specifier_noderef = frame->member_noderef;
                     reader->declarator_common = frame->member_attributes;
@@ -10910,6 +10912,7 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             .bit_width = width,
                             .packed = attributes != 0 && attributes->packed,
                             .alignment_log2 = attributes != 0 ? attributes->alignment_log2 : 0,
+                            .invalid = name != BUSTER_CHECK_NONE && check_input_vla_modified(reader->types, type),
                         };
                         if (attributes != 0 && attributes->count != 0 && parser->language.standard >= 2023 && name != BUSTER_CHECK_NONE)
                         {
@@ -10938,12 +10941,28 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             const uint32_t at = name != BUSTER_CHECK_NONE ? name : failed_token;
                             check_input_warning(reader, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_GC_WEAK_FIELD, at, CHECK_WARNING_COMPLETE_AT_TOKEN, at);
                         }
-                        // A block's record's variably modified member (#1447): clang's "fields must have a constant
-                        // size"; at file scope the bound gives it (check_input_vla_place).
-                        if (valid && name != BUSTER_CHECK_NONE && check_input_vla_modified(reader->types, type))
+                        // Clang rejects a variably modified field after reading its declarator. Keep the invalid field
+                        // bound so later fields and declarations still get their diagnostics (#2252).
+                        if (valid && member.invalid)
                         {
+                            // Folding a dimension did not make the entire field constant. Suppress the declarator's
+                            // fold warning while keeping warnings from evaluating each dimension.
+                            for (uint32_t warning = frame->member_warning_start; warning < reader->warning_events.count; warning += 1)
+                            {
+                                CheckWarningEvent* event = reader->warning_events.events + warning;
+                                if (event->kind == CHECK_WARNING_EVENT_GNU_ARRAY_FOLD && event->token == name)
+                                {
+                                    event->flags |= BUSTER_CHECK_WARNING_SUPPRESSED;
+                                }
+                            }
+                            const uint32_t before = reader->output->report_count;
                             check_input_report(reader, name, CHECK_INPUT_VLA_FIELD);
-                            valid = false;
+                            if (reader->output->report_count == before + 1)
+                            {
+                                reader->output->reports[before].sort = i;
+                            }
+                            check_input_lane_refuse(reader, reader->lane, "invalid member declarations recover in source order");
+                            valid = !reader->lane && check_input_recover_reports(reader, before);
                         }
                         valid = valid && type_check_member(reader->types, &member, true, &flexible) == TYPE_ERROR_NONE;
                         if (!valid && !type_is_complete(reader->types, type) && type_kind(reader->types, type_strip_aligned(reader->types, type)) != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY &&

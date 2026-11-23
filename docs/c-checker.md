@@ -842,7 +842,7 @@ in a file-scope initializer (#2528); the completed queried type decides whether
 its size is runtime, after its bounds have been checked.
 A variable-length array or variably modified type where C allows none takes
 clang's error at the declarator's name (`check_input_vla_place`,
-`check_input_vla_declaration`):
+`check_input_vla_declaration`, `check_input_tag_definition`):
 - at file scope, "variable length array declaration not allowed at file
   scope", or "variably modified type declaration …" where the declared type
   is no array (`int (*p)[n]`);
@@ -885,8 +885,14 @@ does: the graph's cast follows a comma of the captured bounds
 evaluating the bound again. In an unevaluated `sizeof` operand the bound isn't
 evaluated.
 
-Differences left: a member's error still stops the reader, where clang marks
-the field and its record invalid. A warning inside a `sizeof` or `typeof`
+A variably modified member's bound is read without a runtime capture. Its
+comma warnings are retained, the field and record are marked invalid, and
+later members and declarations still receive diagnostics (#2252). Ordinary
+references to the invalid field produce no extra error.
+
+Differences left include statement expressions in rejected member bounds,
+and constant evaluation after a reference to an invalid field or a query of
+the invalid record's offsets. A warning inside a `sizeof` or `typeof`
 operand of variable array type (`sizeof(*(int (*)[(1, n)])v)`'s comma) is given
 once, where clang, which transforms that operand again as potentially
 evaluated, gives it twice.

@@ -224,8 +224,8 @@ static uint32_t check_input_vla_initializer_element(const CheckInputReader* read
 }
 
 // clang's error for a variable-length array that a bound makes where none can be (`open` its declarator's `[`, `name`
-// the declarator's name or BUSTER_CHECK_NONE in a type name), when the reader has no report yet: a member's, at its
-// name; a declarator's at file scope, at its name; a sizeof's type name in a file-scope initializer, at the
+// the declarator's name or BUSTER_CHECK_NONE in a type name), when the reader has no report yet: a declarator's at
+// file scope, at its name; a sizeof's type name in a file-scope initializer, at the
 // initializer's element. Elsewhere (a cast's or typeof's type name) the caller's report stays.
 // The construct whose group holds the declarator `open` opens: its closing token's role (a member's, a sizeof's or
 // _Alignof's, a cast's, a specifier's, a keyword's, a body's or a block's), PARSE_ROLE_CLOSE_BODY where there's none, with
@@ -258,12 +258,7 @@ static void check_input_vla_place(CheckInputReader* reader, uint32_t open, uint3
     const bool named = name < parser->tokens.count;
     uint32_t at = BUSTER_CHECK_NONE;
     CheckInputMessage message = CHECK_INPUT_DECLARATION;
-    if (context == PARSE_ROLE_CLOSE_STRUCT && named)
-    {
-        at = name;
-        message = CHECK_INPUT_VLA_FIELD;
-    }
-    else if (context == PARSE_ROLE_CLOSE_SIZEOF && !named && context_token < parser->tokens.count &&
+    if (context == PARSE_ROLE_CLOSE_SIZEOF && !named && context_token < parser->tokens.count &&
              parser->tokens.names[parser->tree.parents[context_token]] == C_NAME_SIZEOF)
     {
         // Not _Alignof's, whose variable type name clang takes at file scope.
@@ -311,6 +306,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     *zero_length = false;
     *fold_warning = BUSTER_CHECK_NONE;
     *definition = BUSTER_CHECK_NONE;
+    bool member = false;
     if (valid && first != end && !star)
     {
         const uint32_t reports = reader->output->report_count;
@@ -386,11 +382,12 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
         {
             *kind = BUSTER_TYPE_KIND_VARIABLE_ARRAY;
             *extent = (uint64_t)first + 1;
-            if (!walked && !parameter && reader->function_body == BUSTER_CHECK_NONE)
+            uint32_t context_token;
+            member = !parameter && name < parser->tokens.count && check_input_vla_context(reader, open, &context_token) == PARSE_ROLE_CLOSE_STRUCT;
+            if (!walked && !parameter && (member || reader->function_body == BUSTER_CHECK_NONE))
             {
-                // A variable bound at file scope (#2252: a sizeof's, an _Alignof's or a cast's type, or the declaration
-                // clang refuses), which no graph walk reads either: its commas' -Wunused-value, as clang builds them. (Not a
-                // parameter's, which its definition's walk reads.)
+                // A variable bound in a member or at file scope, which no graph walk reads. Keep its commas' -Wunused-value
+                // even when the completed field's type is rejected (#2252).
                 check_input_attribute_unused(reader, first, end, true);
             }
             // Clang reads a bound constant-evaluated, where its runtime warnings are dropped (DiagRuntimeBehavior), and a
@@ -434,7 +431,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     // Only the completed sizeof type tells whether its size is runtime: a pointer to the variable array still has a
     // constant size. check_input_declarator rejects the completed runtime-sized query, preserving its initializer's
     // diagnostic. A cast's value and an _Alignof's result need no bound, and no VLA is captured for any of these.
-    bool unevaluated = false;
+    bool unevaluated = member;
     if (valid && *kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && !parameter && !star && reader->function_body == BUSTER_CHECK_NONE && name >= parser->tokens.count)
     {
         uint32_t context_token = BUSTER_CHECK_NONE;
