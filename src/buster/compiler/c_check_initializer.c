@@ -177,6 +177,9 @@ struct CheckInitFrame
     bool wrapper;
     // Whether the frame is a brace elision's, whose list ends at the last value it takes.
     bool counted_elided;
+    // Whether a designator that names no member failed in this list or one inside it while it was open (#1842): clang's
+    // InitListChecker has an error there, and gives no excess warning for its leftover values.
+    bool failed;
 };
 
 // The lists of records with counted_by or counted_by_or_null pointer members (#1842's 3d), which a diagnostic walk traces
@@ -379,6 +382,12 @@ struct CheckInitWalker
     CheckInitializer* result;
     CheckInitFailureSink* failures;
     CheckInitFailure first_failure;
+    // Whether first_failure holds a failure the walk recovered from: a conversion's (`converted` too, which holds back
+    // every later excess warning), or a designator's that names no member (check_init_skip_member, #1842), after which
+    // `skipped` says the designation's value is to be skipped.
+    bool recovered;
+    bool converted;
+    bool skipped;
     // The counted members' trace (#1842's 3d), only in a diagnostic walk of a unit that has them.
     CheckInitCounted* counted;
 };
@@ -488,10 +497,12 @@ static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic 
             .token = token,
             .completion = failures->completion,
         };
-        if (walker->first_failure.failed_source == 0)
+        if (!walker->recovered)
         {
             walker->first_failure = failure;
         }
+        walker->recovered = true;
+        walker->converted = true;
         if (token >= failures->token_count || node >= failures->root_count ||
             (!failures->seen[token] && failures->count == failures->capacity))
         {
@@ -648,7 +659,13 @@ static void check_init_warning(CheckInitWalker* walker, uint32_t token, TypeId o
     // Conversion recovery visits elements the strict walk never reached (#2441). Keep its excess-warning
     // frontier: a rejected list must not acquire a trailing excess warning. Later valid nested lists still
     // need their own error state and interleaved publication before their excess warnings can be recovered.
-    if (walker->first_failure.failed_source == 0)
+    // Nor does a list in which a designator that names no member failed (#1842): the innermost braces open.
+    uint32_t list = walker->depth;
+    while (list > 1 && !walker->frames[list - 1].braced)
+    {
+        list -= 1;
+    }
+    if (!walker->converted && !(list != 0 && walker->frames[list - 1].failed))
     {
         if (walker->result->warning_count == 0)
         {
@@ -1493,7 +1510,9 @@ static __attribute__((noinline, cold)) void check_init_counted_close(CheckInitWa
             CheckInitCountedMissing* found = pass == 1 && missing != 0 ? BUSTER_ARENA_PUSH_ARRAY(walker->scratch, CheckInitCountedMissing, 2 * (uint64_t)missing) : NULL;
             counted->failed |= pass == 1 && missing != 0 && found == NULL;
             uint32_t count = 0;
-            for (uint32_t i = closing->counted_first; !counted->failed && i < counted->list_count; i += 1)
+            // Braces with a designator that named no member (CheckInitFrame.failed, #1842) fill nothing in: clang's
+            // InitListChecker has an error there.
+            for (uint32_t i = closing->counted_first; !counted->failed && !closing->failed && i < counted->list_count; i += 1)
             {
                 const CheckInitCountedList* list = counted->lists + i;
                 const TypeId record = list->alive ? type_strip_aligned(types, list->type) : 0;
@@ -1759,6 +1778,67 @@ static void check_init_designator_kind(CheckInitWalker* walker, CheckInitStatus 
     check_init_fail(walker, status, token);
 }
 
+// A field designator `name_token` that names no member of `record` in a diagnostic walk (#1842): clang's error, kept with
+// the walk's other recovered failures, after which the walk goes on as clang's InitListChecker does
+// (CheckDesignatedInitializer returns before it moves the list's next member). Every list open here has the error, the
+// designation's value is skipped (`skipped`) and the list's next element is the one before the designation. False, as
+// before, where the walk keeps no failures, a GNU range repeats the designation, or the sink is full.
+static bool check_init_skip_member(CheckInitWalker* walker, uint32_t name_token, TypeId record, bool ranged)
+{
+    CheckInitFailureSink* failures = walker->failures;
+    const bool recover = failures != NULL && walker->result->status == CHECK_INIT_OK && !ranged && walker->repeat == 0 &&
+                         name_token < failures->token_count && (failures->seen[name_token] || failures->count < failures->capacity);
+    if (recover)
+    {
+        const CheckInitFailure failure = {
+            .status = CHECK_INIT_MEMBER,
+            .failed_type = record,
+            .failed_declaration = failures->declaration,
+            .token = name_token,
+            .completion = failures->completion,
+        };
+        if (!walker->recovered)
+        {
+            walker->first_failure = failure;
+        }
+        walker->recovered = true;
+        if (!failures->seen[name_token])
+        {
+            failures->failures[failures->count++] = failure;
+            failures->seen[name_token] = 1;
+        }
+        for (uint32_t d = 0; d < walker->depth; d += 1)
+        {
+            walker->frames[d].failed = true;
+        }
+        walker->skipped = true;
+    }
+    return recover;
+}
+
+// The end of the designation's value from `token` that a failed designator skips (check_init_skip_member): past its
+// braces, or its expression.
+static uint32_t check_init_skip_value(const Parser* parser, uint32_t token, uint32_t end)
+{
+    uint32_t result = token;
+    if (token < end && parser->tokens.kinds[token] == PARSE_KIND_L_BRACE)
+    {
+        uint32_t depth = 0;
+        do
+        {
+            const uint8_t kind = parser->tokens.kinds[result];
+            depth += kind == PARSE_KIND_L_BRACE;
+            depth -= kind == PARSE_KIND_R_BRACE;
+            result += 1;
+        } while (result < end && depth != 0);
+    }
+    else
+    {
+        result = check_init_expression_end(parser, token, end);
+    }
+    return result;
+}
+
 static void check_init_designate(CheckInitWalker* walker, uint32_t* position, uint32_t end)
 {
     const Parser* parser = walker->parser;
@@ -1799,9 +1879,13 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
     CheckInitRepeat* repeat = walker->repeat != 0 && walker->repeat->token == token ? walker->repeat : 0;
     const bool replay = repeat != 0;
     CheckInitRange* range = replay ? repeat->first : 0;
+    // The list's place before the designation, which a failed one leaves as it was (check_init_skip_member).
+    const uint64_t base_next = walker->frames[base_depth - 1].next;
+    const uint32_t base_designator = walker->frames[base_depth - 1].designator;
+    bool ranged = false;
     bool more = true;
     uint32_t designators = 0;
-    while (more && token < end && walker->result->status == CHECK_INIT_OK)
+    while (more && !walker->skipped && token < end && walker->result->status == CHECK_INIT_OK)
     {
         designators += 1;
         CheckInitFrame* frame = &walker->frames[walker->depth - 1];
@@ -1826,6 +1910,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
             }
             uint64_t index = 0;
             uint64_t last = 0;
+            ranged = ranged || ellipsis != BUSTER_CHECK_NONE;
             if (kind != BUSTER_TYPE_KIND_ARRAY && kind != BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
             {
                 check_init_designator_kind(walker, CHECK_INIT_ARRAY_DESIGNATOR, token, frame->type);
@@ -1921,7 +2006,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
             {
                 const uint32_t name = parser->tokens.names[name_token];
                 bool found = false;
-                while (!found && walker->result->status == CHECK_INIT_OK)
+                while (!found && !walker->skipped && walker->result->status == CHECK_INIT_OK)
                 {
                     frame = &walker->frames[walker->depth - 1];
                     const TypeId record = type_strip_aligned(walker->types, frame->type);
@@ -1935,8 +2020,12 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
                     }
                     if (member == 0)
                     {
-                        check_init_fail(walker, CHECK_INIT_MEMBER, name_token);
-                        walker->result->failed_type = field_type;
+                        // Recovered where it can be: the designation's rest and its value are skipped below.
+                        if (!check_init_skip_member(walker, name_token, field_type, ranged))
+                        {
+                            check_init_fail(walker, CHECK_INIT_MEMBER, name_token);
+                            walker->result->failed_type = field_type;
+                        }
                     }
                     else
                     {
@@ -1967,7 +2056,7 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
         {
             check_init_fail(walker, CHECK_INIT_INVALID, token);
         }
-        if (walker->result->status == CHECK_INIT_OK)
+        if (walker->result->status == CHECK_INIT_OK && !walker->skipped)
         {
             CheckInitSelection selected = { 0 };
             frame = &walker->frames[walker->depth - 1];
@@ -2002,7 +2091,28 @@ static void check_init_designate(CheckInitWalker* walker, uint32_t* position, ui
             }
         }
     }
-    if (walker->result->status == CHECK_INIT_OK)
+    if (walker->skipped)
+    {
+        // A designator that names no member (check_init_skip_member): the designation's later designators and its `=` are
+        // skipped, and the list keeps its place.
+        while (token < end && (parser->tokens.kinds[token] == PARSE_KIND_PERIOD || parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE))
+        {
+            uint32_t depth = 0;
+            const bool square = parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE;
+            do
+            {
+                depth += parser->tokens.kinds[token] == PARSE_KIND_L_SQUARE;
+                depth -= parser->tokens.kinds[token] == PARSE_KIND_R_SQUARE;
+                token += 1;
+            } while (square && token < end && depth != 0);
+            token += !square && token < end && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER;
+        }
+        token += token < end && (parser->tokens.kinds[token] == PARSE_KIND_EQUAL || (old_style && parser->tokens.kinds[token] == PARSE_KIND_COLON));
+        walker->depth = base_depth;
+        walker->frames[base_depth - 1].next = base_next;
+        walker->frames[base_depth - 1].designator = base_designator;
+    }
+    else if (walker->result->status == CHECK_INIT_OK)
     {
         // GNU's obsolete `[index] value` (and `[first ... last] value`): a designation of one array designator may
         // leave out its `=`, as clang (ext_gnu_missing_equal_designator) and GCC take it; the parser refused the rest.
@@ -3312,15 +3422,21 @@ static bool check_init_walk(CheckInitWalker* walker, TypeId type, uint32_t begin
             {
                 const uint32_t first_list = walker->counted != NULL ? walker->counted->list_count : 0;
                 check_init_designate(walker, &token, end);
-                if (__builtin_expect(walker->counted != NULL, 0))
+                if (__builtin_expect(walker->counted != NULL, 0) && !walker->skipped)
                 {
                     check_init_counted_designated(walker, first_list, token, end);
                 }
             }
+            // A designation whose designator named no member (check_init_skip_member) initializes nothing: its value is
+            // skipped, as clang's InitListChecker skips it.
+            const bool skipped = walker->skipped;
+            walker->skipped = false;
+            token = skipped ? check_init_skip_value(walker->parser, token, end) : token;
+            after_value = after_value || skipped;
             CheckInitSelection selected = { 0 };
             CheckInitFrame* frame = &walker->frames[walker->depth - 1];
-            bool excess = false;
-            if (walker->result->status == CHECK_INIT_OK && (token >= end || !check_init_select(walker, frame, &selected)))
+            bool excess = skipped;
+            if (!excess && walker->result->status == CHECK_INIT_OK && (token >= end || !check_init_select(walker, frame, &selected)))
             {
                 if (token < end && !designated && frame->braced && walker->ignore_excess)
                 {
@@ -3637,7 +3753,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .counted = counted != NULL && diagnostic_only && graph != NULL && !counted->failed ? counted : NULL,
         };
         valid = check_init_walk(&walker, type, begin, end);
-        if (failures != NULL && walker.first_failure.failed_source != 0)
+        if (failures != NULL && walker.recovered)
         {
             // A failed element consumes its subobject but never contributes a write. Keep valid siblings' source
             // roots before discarding the entire diagnostic plan; no partial plan reaches object preparation.

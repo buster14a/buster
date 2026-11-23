@@ -317,6 +317,19 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "T(&pm->a,m);T(&pm->b,m);m.p=&g2;T(m.p,g2);T(pm->p,g2);T(ret(),g2);T(reta(),g2);T(rets(),g2);T(&ret()[0][1],g2);\n"
         "return (int)(h^(h>>32));}\n",
         "generic-clear-padding-sugar-reached", clang);
+    // __builtin_clear_padding of a typedef's arrays subscripted out of a cast's pointer (#1842): the cast's typedef
+    // specifier writes its level with sugar, and clang keeps it, and the typedef's own declaration decides below it (a
+    // typedef of the typedef's arrays, its element); a typedef of a record, and a plain type name's rows, it clears.
+    check_test_program_source(test,
+        "void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}\n"
+        "struct S{char c;int i;};typedef struct S R[3];typedef R T[2];typedef struct S U;static struct S g[4][2][3];\n"
+        "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
+        "#define C(arg) do{memset((void*)g,0xff,sizeof(g));__builtin_clear_padding(arg);bytes((const void*)g,sizeof(g));}while(0)\n"
+        "int tested(int n){h=(unsigned)n;void* p=g;C(&(*(R (*)[2])p)[1]);C(&(*(R (*)[2])p)[1][2]);C(&(*(T (*)[2])p)[1]);\n"
+        "C(&(*(T (*)[2])p)[1][1]);C(&(*(T (*)[2])p)[1][1][2]);C(&(*(const R (*)[2])p)[0]);C(&((R (*)[2])p)[1][0]);\n"
+        "C(&(*(U (*)[2][3])p)[1]);C(&(*(struct S (*)[2][3])p)[1]);C(&((R *)p)[1]);R (*q)[2]=p;C(&(*q)[1]);\n"
+        "return (int)(h^(h>>32));}\n",
+        "generic-clear-padding-cast-typedef", clang);
     // __builtin_clear_padding of a type nested 90 levels (#1842), past the walk's first room, whose stack grows: before, past
     // 64 levels it was refused, and its frame written past the stack.
     check_test_program_source(test,

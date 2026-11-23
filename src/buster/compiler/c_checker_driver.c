@@ -13558,6 +13558,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 {
                                     given_before |= additional[d].repeated && additional[d].token == place && additional[d].message == nonconstant;
                                 }
+                                // Nor where a designator in the same initializer named no member (#1842): clang's list then has
+                                // an error, and its initializer isn't checked for constants.
+                                for (uint32_t g = 0; conversion != NULL && g < failure_total; g += 1)
+                                {
+                                    const CheckInitFailure* sibling = g != 0 ? earlier.failures + (g - 1) : NULL;
+                                    given_before |= sibling != NULL ? sibling->status == CHECK_INIT_MEMBER && sibling->failed_declaration == failure.failed_declaration :
+                                                    earlier.status == CHECK_INIT_MEMBER && earlier.failed_declaration == failure.failed_declaration;
+                                }
                                 if (conversion != NULL && !given_before && failure.failed_source != 0 && failure.failed_declaration < input.token_count &&
                                     check_input_bit(input.declaration_bits, failure.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
                                     check_init_value_nonconstant(&stream, &types, failure.failed_type, failure.failed_source - 1))

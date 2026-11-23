@@ -6360,6 +6360,44 @@ The later phases are left:
   a left-out tag's definition or label (`struct S { int m; } s[sizeof(k())];`),
   is still lost.
 
+#### A designator that names no member (#1842)
+
+A field designator that names no member of its record is clang's error, and a
+diagnostic walk of the initializer (one with a failure sink, the source path's)
+goes on as clang's InitListChecker does, whose `CheckDesignatedInitializer`
+returns before it moves the list's next member (`check_init_skip_member`):
+
+- the error joins the walk's other recovered failures, in source order, and the
+  declaration is rejected;
+- the designation's later designators and its value are skipped
+  (`check_init_skip_value`), and the list's next element is the one before
+  the designation, an array's index too: `{ .nope = 1, { 1, 2 } }` gives the
+  braces to the record's first member;
+- the lists open there have the error (`CheckInitFrame.failed`): their leftover
+  values give no excess warning, and their braces fill in no `counted_by`
+  list as they close (clang's "cannot implicitly initialize"), while braces
+  that follow the error, for later members, fill theirs and warn of their own
+  excess;
+- a conversion's second error, clang's "initializer element is not a
+  compile-time constant", isn't given in the same initializer, whose list
+  clang leaves invalid.
+
+A designator chain whose earlier designators named members (`.b.nope`) keeps
+what they selected as used, so later braces for that member get clang's
+`-Winitializer-overrides`. A GNU range in the designation (`[0 ... 2].nope`), or
+a walk without a sink, still stops at the error. `tests/checker/designator-recovery`
+is a warning catalog of `test-checker-driver`'s, run where `initializer-comma`
+is (`check_test_driver_warning_catalog`).
+
+Differences left:
+- clang's typo correction (`.xvl` "did you mean 'xval'?" and its note), after
+  which clang initializes the corrected member;
+- an initializer's warnings publish before its errors (#2914), so an excess or
+  `-Winitializer-overrides` warning comes before the designator's error;
+- an override warning of braces that have a hard error of their own, which
+  clang leaves out (also without a failed designator:
+  `struct P a[2] = { [1] = { 0 }, [1] = { 1, gp } };`).
+
 ### What the lowering costs (#531)
 
 On the 9700X, the lowering (`check_lower_prepare`, then the bodies'

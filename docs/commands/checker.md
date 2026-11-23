@@ -847,6 +847,14 @@ for a condition on an lvalue at an absolute address (#3028).
 WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
 compared with clang's in every policy, mode, lane request and reader.
 
+`tests/checker/designator-recovery` (#1842) is a warning catalog of
+`test-checker-driver`'s, beside `initializer-comma` (its parts' unused-result
+section and `--semantic-recovery-only`), in the same format: the
+lists after a designator that names no member, each unit's whole output and
+status compared with clang's in every policy, mode, lane request and reader
+([the checker guide](../c-checker.md)'s "A designator that names no member
+(#1842)").
+
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
 run, pair each case with data of their own, or pick cases by index (#2053 lists

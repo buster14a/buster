@@ -2020,7 +2020,10 @@ object p points to, as clang's `PaddingClearer` does.
     - a cast's type name, or a call's result: an array that a pointer there
       points to is always written with sugar (a declarator's parentheses, a
       typedef or `typeof`), so clang keeps it; an element subscripted out of
-      it, it clears.
+      it, it clears, unless the cast's typedef specifier writes that level
+      (an array of a typedef's arrays, `&(*(R (*)[2])p)[1]` with
+      `typedef struct S R[3]`), whose own declaration answers below it
+      (`check_lower_padding_cast_typedef`, #1842).
   - **The sugar** (`check_lower_padding_sugared`):
     - a group's `PAREN` node, which the reader makes over an array in a unit
       that names the builtin (`docs/c-types.md`'s "Type sugar");
@@ -2031,9 +2034,10 @@ object p points to, as clang's `PaddingClearer` does.
   - **The walk:** a frame's `opaque` count makes the array it reaches all
     occupied (`check_lower_padding_entries`).
 
-  **Still cleared:** an array of a typedef's arrays subscripted out of a cast's
-  pointer (`(R (*)[2])p` with `typedef struct S R[3]`, `&(*q)[1]`), whose
-  typedef no type name's sugar records here.
+  **Still cleared:** an array of a `typeof` specifier's arrays subscripted out
+  of a cast's pointer (`&(*(__typeof__(r) (*)[2])p)[1]`), and of a call's
+  result's (`&(*f())[1]` with `R (*f(void))[2]`), whose specifier this
+  doesn't read.
 
 `__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
 clang's Sema builds it.
