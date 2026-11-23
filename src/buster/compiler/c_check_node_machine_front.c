@@ -1131,6 +1131,8 @@ static void node_bodies_check_end(const Preprocessor* pp);
 static void node_bodies_keep(const char* directory, int count, char** arguments, char** inputs, uint32_t input_count);
 // --node-bodies (BUSTER_NODE_READER_BODIES): the bodies the producer took, masked (c_check_node_bodies.c).
 static void node_bodies_mask(CheckInputReader* reader, NodeFrontShadow* shadow);
+// And the unit's own reason to take no body, asked before any of the machine is made for it (c_check_node_bodies.c).
+static uint8_t node_producer_unit(const CheckInputReader* reader);
 // After the walk's last chunk: the roots it took against the tokens the walk's class actions left to its visit
 // (CheckInputReader.expression_declined), which the walk has marked by then.
 static void node_alone_finish(struct NodeAlone* alone, const CheckInputReader* reader);

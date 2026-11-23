@@ -948,6 +948,56 @@ static bool node_census_aggregate(const TypeTable* types, TypeId type);
 static uint8_t node_census_kind(const TypeTable* types, TypeId type);
 static bool node_census_labelled(const CheckInput* input, const Parser* parser, uint32_t declaration);
 
+// The unit's own reason to take no body (BUSTER_NODE_PRODUCER_UNIT_*, 0 for none), from what the reader has before its
+// expressions' walk and with nothing of the machine: a compile asks it before it makes a front for the unit
+// (check_input_expressions_coded_range), so that a unit with one pays for none.
+static uint8_t node_producer_unit(const CheckInputReader* reader)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    const uint32_t count = parser->tokens.count;
+    uint8_t unit = 0;
+    // Whether a member of a record has an attribute of the counted_by family, by the types' members' flags.
+    bool counted_member = false;
+    for (uint32_t member = 1; member < reader->types->members.count; member += 1)
+    {
+        counted_member |= (reader->types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) != 0;
+    }
+    // The unit's own reason. Of its attributes, by the tokens that have some: a function's whose code they change or
+    // choose (a target, its clones, an interrupt's, a processor's dispatch, internal linkage); and a result's on what is
+    // no function's declaration.
+    bool attributed = false;
+    bool results = false;
+    const uint32_t attributed_end = count < input->token_count ? count : input->token_count;
+    for (uint32_t first = check_input_attributed_next(input->attributes, 0, attributed_end); first < attributed_end;
+         first = check_input_attributed_next(input->attributes, first + 16, attributed_end))
+    {
+        for (uint32_t selected = check_input_attributed_group(input->attributes, first, attributed_end); selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+            const bool function = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && input->declaration_kinds != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION;
+            results |= attributes != NULL && attributes->results && !function;
+            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+            {
+                const uint32_t kind = attributes->records[i].kind;
+                attributed |= kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_INTERRUPT || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                              kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_INTERNAL_LINKAGE;
+            }
+        }
+    }
+    // (An error the reader recovers from is moved off its reports so that it reads on, CheckInput.recovered_reports: the
+    // unit fails all the same.)
+    unit = input->report_count != 0 || input->recovered_count != 0 || parser->errors != 0 || reader->pp->errors != 0 ? BUSTER_NODE_PRODUCER_UNIT_REPORTS :
+                     reader->pp->options.semantic_warning_option_count != 0 ? BUSTER_NODE_PRODUCER_UNIT_WARNINGS :
+                     input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0 ? BUSTER_NODE_PRODUCER_UNIT_PRAGMAS :
+                     input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0 ? BUSTER_NODE_PRODUCER_UNIT_SYMBOLS :
+                     attributed ? BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES :
+                     counted_member || input->marked_member_count != 0 ? BUSTER_NODE_PRODUCER_UNIT_MEMBERS :
+                     results ? BUSTER_NODE_PRODUCER_UNIT_RESULTS : 0;
+    return unit;
+}
+
 // The producer's state for a unit, made where the machine with no node of the walk's is (node_alone_begin): the twin's
 // columns for the unit's largest body, the tokens something was said at, the unit's own reason, and the verdicts' and
 // the kept controls' room for `bodies` bodies. Null without room.
@@ -1075,44 +1125,7 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
                 valid = producer->enums != NULL;
             }
         }
-        // And whether a member of a record has an attribute of the counted_by family, by the types' members' flags.
-        bool counted_member = false;
-        for (uint32_t member = 1; member < reader->types->members.count; member += 1)
-        {
-            counted_member |= (reader->types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) != 0;
-        }
-        // The unit's own reason. Of its attributes, by the tokens that have some: a function's whose code they change or
-        // choose (a target, its clones, an interrupt's, a processor's dispatch, internal linkage); and a result's on what is
-        // no function's declaration.
-        bool attributed = false;
-        bool results = false;
-        const uint32_t attributed_end = count < input->token_count ? count : input->token_count;
-        for (uint32_t first = check_input_attributed_next(input->attributes, 0, attributed_end); first < attributed_end;
-             first = check_input_attributed_next(input->attributes, first + 16, attributed_end))
-        {
-            for (uint32_t selected = check_input_attributed_group(input->attributes, first, attributed_end); selected != 0; selected &= selected - 1)
-            {
-                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-                const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
-                const bool function = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && input->declaration_kinds != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION;
-                results |= attributes != NULL && attributes->results && !function;
-                for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
-                {
-                    const uint32_t kind = attributes->records[i].kind;
-                    attributed |= kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_INTERRUPT || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
-                                  kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_INTERNAL_LINKAGE;
-                }
-            }
-        }
-        // (An error the reader recovers from is moved off its reports so that it reads on, CheckInput.recovered_reports: the
-        // unit fails all the same.)
-        producer->unit = input->report_count != 0 || input->recovered_count != 0 || parser->errors != 0 || reader->pp->errors != 0 ? BUSTER_NODE_PRODUCER_UNIT_REPORTS :
-                         reader->pp->options.semantic_warning_option_count != 0 ? BUSTER_NODE_PRODUCER_UNIT_WARNINGS :
-                         input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0 ? BUSTER_NODE_PRODUCER_UNIT_PRAGMAS :
-                         input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0 ? BUSTER_NODE_PRODUCER_UNIT_SYMBOLS :
-                         attributed ? BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES :
-                         counted_member || input->marked_member_count != 0 ? BUSTER_NODE_PRODUCER_UNIT_MEMBERS :
-                         results ? BUSTER_NODE_PRODUCER_UNIT_RESULTS : 0;
+        producer->unit = node_producer_unit(reader);
         shadow->produced_unit = producer->unit;
         shadow->produced_ran = true;
         shadow->produced_reports_before = input->report_count;
