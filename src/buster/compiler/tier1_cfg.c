@@ -962,10 +962,11 @@ struct Tier1CfgEdge
     // Ordinary CFG edges only: each fragment's last spill end, and the predecessor's first position.
     const uint32_t* spill_ends;
     uint32_t block_start;
-    // Ordinary CFG edges only: the values whose slots hold them at the predecessor's start, besides their places
-    // (tier1_cfg_current_slots), each stamped `current_stamp`, or null.
-    const uint32_t* current_stamps;
-    uint32_t current_stamp;
+    // Ordinary CFG edges only: the values whose slots hold them at the predecessor's start besides their places
+    // (tier1_cfg_current_slots), current[current_begin .. current_end), ascending; null for none.
+    const uint32_t* current;
+    uint32_t current_begin;
+    uint32_t current_end;
 };
 
 static uint8_t tier1_cfg_kind_of_location(uint32_t location)
@@ -982,18 +983,20 @@ static uint8_t tier1_cfg_kind_of_location(uint32_t location)
     return kind;
 }
 
+static bool tier1_cfg_listed(const uint32_t* list, uint32_t begin, uint32_t end, uint32_t block);
+
 // Adds the move `carried` needs to take `value`'s place, when the two locations differ and the destination is not a
 // recomputation. A matching pair, a rematerialized destination, or a slot the predecessor already holds, adds nothing.
 static void tier1_cfg_edge_place(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t from, uint8_t from_kind, uint32_t to, uint8_t to_kind, uint32_t exit)
 {
     // A self-phi, an unchanged live-through value, or an operand of a phi whose slot it shares, need not store a register
     // back to its own slot where that slot already holds it at the predecessor's exit: current at its start and live
-    // through it (tier1_cfg_current_slots), or stored in it, which is the rest of the analysis' OUT for a value in a
-    // register there. A different phi operand must still write it, even when the phi's old value is present there.
+    // through it (the predecessor's list, tier1_cfg_current_slots), or stored in it, which is the rest of the analysis'
+    // OUT for a value in a register there. A different phi operand must still write it, even when the phi's old value is
+    // present there.
     const bool own_slot = from_kind == BUSTER_TIER1_ALLOCATE_REGISTER && to_kind == BUSTER_TIER1_ALLOCATE_SPILL && edge->spill_ends != 0 && result->allocation.spill_ids[carried] != UINT32_MAX &&
                           to == BUSTER_TIER1_CFG_SPILL + result->allocation.spill_ids[carried];
-    const bool current = own_slot && edge->current_stamps != 0 && edge->current_stamps[carried] == edge->current_stamp;
-    const bool current_slot = own_slot && (current || tier1_cfg_slot_current(result, edge->spill_ends, carried, exit, edge->block_start));
+    const bool current_slot = own_slot && ((edge->current != 0 && tier1_cfg_listed(edge->current, edge->current_begin, edge->current_end, carried)) || tier1_cfg_slot_current(result, edge->spill_ends, carried, exit, edge->block_start));
     if (to_kind != BUSTER_TIER1_ALLOCATE_REMATERIALIZE && from != to && !current_slot)
     {
         if (from_kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
@@ -3004,26 +3007,33 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
 
 // One group of tier1_cfg_current_slots' candidates, ranks [first, last), solved in `rows` (dataflow.c's, one vector a
 // block): LIVE_IN in `use`, SLOT in `def`, IN and OUT in theirs, bit r - first for rank r.
-static void tier1_cfg_current_group(const Tier1CfgInput* input, const Tier1CfgLiveSets* live, const Tier1CfgAllocation* result, const uint32_t* ranks, const uint32_t* ranked, uint32_t first, uint32_t last, Dataflow* rows)
+static void tier1_cfg_current_group(const Tier1CfgInput* input, const Tier1CfgAllocation* result, const uint32_t* ranked, uint32_t first, uint32_t last, Dataflow* rows)
 {
     const uint32_t blocks = input->block_count;
     const Tier1Allocation* allocation = &result->allocation;
+    const Tier1AllocationInput* intervals = &result->intervals;
     for (uint32_t b = 0; b < blocks; b += 1)
     {
         _mm512_store_si512(rows->use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
         _mm512_store_si512(rows->def + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
-        for (uint32_t k = live->in_offsets[b]; k < live->in_offsets[b + 1]; k += 1)
-        {
-            const uint32_t r = ranks[live->in_values[k]];
-            if (r >= first && r < last)
-            {
-                tier1_cfg_set(rows->use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, r - first);
-            }
-        }
     }
     for (uint32_t r = first; r < last; r += 1)
     {
         const uint32_t v = ranked[r];
+        // LIVE_IN: the blocks whose starts the value's intervals cover, but its definition's (tier1_cfg_current_slots).
+        const uint32_t home = tier1_cfg_block_at(input, result, input->definitions[v]);
+        for (uint32_t k = result->value_interval_offsets[v]; k < result->value_interval_offsets[v + 1]; k += 1)
+        {
+            uint32_t b = tier1_cfg_block_at(input, result, intervals->starts[k]);
+            b += input->block_starts[b] < intervals->starts[k] ? 1 : 0;
+            for (; b < blocks && input->block_starts[b] < intervals->ends[k]; b += 1)
+            {
+                if (b != home)
+                {
+                    tier1_cfg_set(rows->use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, r - first);
+                }
+            }
+        }
         for (uint32_t f = allocation->fragment_offsets[result->value_interval_offsets[v]]; f < allocation->fragment_offsets[result->value_interval_offsets[v + 1]]; f += 1)
         {
             if (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL)
@@ -3082,43 +3092,48 @@ static void tier1_cfg_current_group(const Tier1CfgInput* input, const Tier1CfgLi
 //
 // The entry's IN and that of a block without predecessors are empty. A value is live into no block its definition is in,
 // so a loop's earlier iteration proves nothing of the next. The candidates are the values with a slot that are live into
-// some block (tier1_cfg_live_sets' lists), solved, as the liveness is, in groups of BUSTER_DATAFLOW_VECTOR_BITS, each in
+// some block, read from their own intervals (each covers the start of every block its value is live into, but its
+// definition's), rather than from every block's live-in list, which holds every global value and was read twice. They
+// are solved, as the liveness is, in groups of BUSTER_DATAFLOW_VECTOR_BITS, each in
 // one vector row a block (dataflow.c's rows), so that the rows take blocks * 256 bytes however many values have slots
 // (#1384). A group keeps OUT beside IN, so that an edge is a load and an AND, starts every block's IN full but the
 // entry's and those without predecessors, and sweeps the blocks in reverse postorder (every block is in the postorder,
 // unreachable ones too) until none changes: in layout order, where a loop's header follows its body, sqlite3VdbeExec
 // took 7 sweeps. The result gets each block's values live into it whose slots hold them, ascending
 // (current_slot_offsets and current_slots, on `output`): counted, then filled, a group solved again for the fill where
-// there is more than one. The edges read them; a store a block makes itself is the predecessor's own proof
-// (tier1_cfg_slot_current). The scratch arena ends as it began. False where an arena is short.
-static bool tier1_cfg_current_slots(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Tier1CfgAllocation* result, Arena* output, Arena* scratch)
+// there is more than one. An edge searches its predecessor's list where it would store a value into its own slot; a
+// store the block makes itself is the predecessor's own proof (tier1_cfg_slot_current). The scratch arena ends as it
+// began. False where an arena is short.
+static bool tier1_cfg_current_slots(const Tier1CfgInput* input, Tier1CfgAllocation* result, Arena* output, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const uint32_t blocks = input->block_count;
     const uint32_t values = input->value_count;
-    const Tier1CfgLiveSets* live = &prepared->live;
     const uint32_t* spill_ids = result->allocation.spill_ids;
-    // Each candidate's rank, in value order, and each rank's value.
-    uint32_t* ranks = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    const Tier1AllocationInput* intervals = &result->intervals;
+    // The candidates in value order, each rank's value: a value with a slot one of whose intervals covers the start of a
+    // block other than its definition's, which it is then live into. Only the values with slots are looked at, not every
+    // block's live-in list.
     uint32_t* ranked = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* cursors = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* offsets = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
-    bool ready = ranks != 0 && ranked != 0 && cursors != 0 && offsets != 0;
+    bool ready = ranked != 0 && cursors != 0 && offsets != 0;
     uint32_t count = 0;
     if (ready)
     {
-        memset(ranks, 0xff, ((uint64_t)values + 1) * sizeof(uint32_t));
         memset(offsets, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
-        for (uint32_t k = 0; k < live->in_offsets[blocks]; k += 1)
-        {
-            const uint32_t v = live->in_values[k];
-            ranks[v] = spill_ids[v] != UINT32_MAX ? 0 : ranks[v];
-        }
         for (uint32_t v = 0; v < values; v += 1)
         {
+            bool entered = false;
+            const uint32_t home = spill_ids[v] != UINT32_MAX ? tier1_cfg_block_at(input, result, input->definitions[v]) : 0;
+            for (uint32_t k = spill_ids[v] != UINT32_MAX ? result->value_interval_offsets[v] : 0; !entered && spill_ids[v] != UINT32_MAX && k < result->value_interval_offsets[v + 1]; k += 1)
+            {
+                uint32_t b = tier1_cfg_block_at(input, result, intervals->starts[k]);
+                b += input->block_starts[b] < intervals->starts[k] ? 1 : 0;
+                entered = b < blocks && input->block_starts[b] < intervals->ends[k] && (b != home || (b + 1 < blocks && input->block_starts[b + 1] < intervals->ends[k]));
+            }
             ranked[count] = v;
-            count += ranks[v] == 0;
-            ranks[v] = ranks[v] == 0 ? count - 1 : UINT32_MAX;
+            count += entered;
         }
     }
     const uint32_t groups = (uint32_t)(((uint64_t)count + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS);
@@ -3157,7 +3172,7 @@ static bool tier1_cfg_current_slots(const Tier1CfgInput* input, const Tier1CfgPr
             const uint32_t last = count - first < BUSTER_DATAFLOW_VECTOR_BITS ? count : first + BUSTER_DATAFLOW_VECTOR_BITS;
             if (pass == 0 || groups > 1)
             {
-                tier1_cfg_current_group(input, live, result, ranks, ranked, first, last, &rows);
+                tier1_cfg_current_group(input, result, ranked, first, last, &rows);
             }
             for (uint32_t b = 0; b < blocks; b += 1)
             {
@@ -3264,15 +3279,9 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     {
         tier1_cfg_spill_prefix(&candidate, spill_ends);
     }
-    // The slots current at each block's start (#2553), each block's stamped as its edges are made.
-    ready = ready && (spills == 0 || tier1_cfg_current_slots(input, prepared, &candidate, output, scratch));
-    uint32_t* current_stamps = ready && spills != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-    ready = ready && (spills == 0 || current_stamps != 0);
-    if (current_stamps != 0)
-    {
-        memset(current_stamps, 0, ((uint64_t)input->value_count + 1) * sizeof(uint32_t));
-    }
-    Tier1CfgEdge edge = { .spill_ends = spill_ends, .current_stamps = current_stamps };
+    // The slots current at each block's start (#2553), which each block's edges search.
+    ready = ready && (spills == 0 || tier1_cfg_current_slots(input, &candidate, output, scratch));
+    Tier1CfgEdge edge = { .spill_ends = spill_ends };
     uint32_t* staged = ready ? arena_push_array(scratch, (bound + 2) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* sources = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* destinations = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
@@ -3304,11 +3313,9 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
         const uint32_t exit = input->block_starts[b + 1] - 1;
         edge.block_start = input->block_starts[b];
         // The block's current slots (tier1_cfg_current_slots).
-        for (uint32_t k = current_stamps != 0 ? candidate.current_slot_offsets[b] : 0; current_stamps != 0 && k < candidate.current_slot_offsets[b + 1]; k += 1)
-        {
-            current_stamps[candidate.current_slots[k]] = b + 1;
-        }
-        edge.current_stamp = b + 1;
+        edge.current = candidate.current_slot_offsets != 0 ? candidate.current_slots : 0;
+        edge.current_begin = candidate.current_slot_offsets != 0 ? candidate.current_slot_offsets[b] : 0;
+        edge.current_end = candidate.current_slot_offsets != 0 ? candidate.current_slot_offsets[b + 1] : 0;
         if (bounds.ready)
         {
             uint32_t rank = 0;
@@ -3391,7 +3398,7 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     }
     // Slot-current elision is for CFG edges only; keep the existing split-move contract unchanged.
     edge.spill_ends = 0;
-    edge.current_stamps = 0;
+    edge.current = 0;
     // Each split's moves: from the value's location just before the position to its new piece's.
     for (uint32_t q = 0; ready && q < input->position_count; q += 1)
     {

@@ -624,8 +624,8 @@ or they rest there),
 with the entry's IN, and that of a block without predecessors, empty. A
 value is live into no block its definition is in, so `LIVE_IN` drops what an
 earlier iteration of a loop stored before the value's next definition. The
-candidates are the values with a slot that are live into some block (the
-liveness's lists), solved as the liveness is since #1384, 512 at a time in
+candidates are the values with a slot that are live into some block, read
+from their own intervals, solved as the liveness is since #1384, 512 at a time in
 one AVX-512 row a block (`dataflow.c`'s rows), so that the rows take
 blocks * 256 bytes however many values have slots. A group keeps OUT beside
 IN, so that an edge is a load and an AND, starts every IN full but the
@@ -635,9 +635,10 @@ header follows its body, `sqlite3VdbeExec` took 7 sweeps.
 
 - **The edges.** An edge leaves out a store of a value from a register into
   its own slot where the slot is current at the predecessor's exit: current at
-  its start and live through it (the predecessor's list, stamped as its edges
-  are made), or stored in it (`tier1_cfg_slot_current`, #1216's proof, which
-  is the rest of OUT for a value in a register at the exit). An operand of a phi whose slot it
+  its start and live through it (a binary search of the predecessor's list,
+  which only such a store makes), or stored in it (`tier1_cfg_slot_current`,
+  #1216's proof, which is the rest of OUT for a value in a register at the
+  exit). An operand of a phi whose slot it
   shares counts too: the slot then holds the operand, which is what the phi
   takes. A changed operand of another slot still stores.
 - **The blocks.** The allocation publishes each block's IN restricted to the
