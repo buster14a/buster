@@ -11067,11 +11067,20 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
         if (query < parser->tokens.count && parser->tokens.names[query] == C_NAME_SIZEOF && !check_input_warning_unevaluated(reader, query))
         {
             const uint32_t at = check_input_vla_initializer_element(reader, query);
-            if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource)
+            // Once per initializer element: an earlier runtime-sized query of the same element recovered its report.
+            const CheckInput* output = reader->output;
+            const bool reported = output->recovered_count != 0 && output->recovered_reports[output->recovered_count - 1].token == at &&
+                                  output->recovered_reports[output->recovered_count - 1].message == CHECK_INPUT_CONSTANT_INITIALIZER;
+            if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource && !reported)
             {
                 check_input_report(reader, at, CHECK_INPUT_CONSTANT_INITIALIZER);
             }
-            result = 0;
+            // clang goes on past the error (#2252): the query reads as an int's size, so the initializer's later commas
+            // and the unit's later declarations keep their diagnostics.
+            const bool eligible = reported || (reader->output->report_count == 1 && reader->output->reports[0].token == at);
+            check_input_lane_refuse(reader, eligible && reader->lane, "an invalid initializer's later diagnostics are in source order");
+            const bool recovered = eligible && !reader->lane && (reported || check_input_recover_reports(reader, 0));
+            result = recovered ? BUSTER_TYPE_INT : 0;
         }
     }
     return result;
