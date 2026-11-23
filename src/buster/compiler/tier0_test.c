@@ -2015,6 +2015,62 @@ static void tier0_test_moves(Tier0TestTally* tally)
     }
 }
 
+// A call's effects on the stacks (tier0_raw_effects, #2874), its arguments' classes counted 64 at a time, against the
+// stacks' definition (tier0_stack): each argument pops its class's stack (none for VOID and MASK), an indirect call its
+// callee from the integer stack, and the call pushes its result's; for calls and tail calls of 0 to 200 arguments of
+// random classes, every class among them, around each 64-class boundary, direct and indirect.
+static void tier0_test_call_effects(Tier0TestTally* tally)
+{
+    static const uint32_t argument_counts[] = { 0, 1, 2, 7, 16, 63, 64, 65, 127, 128, 129, 200 };
+    static const uint8_t results[] = { BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_CLASS_I32, BUSTER_TYPED_CLASS_F64, BUSTER_TYPED_CLASS_MASK };
+    uint64_t random = 0x6a09e667f3bcc909ull;
+    uint8_t argument_classes[200];
+    uint32_t wrong = UINT32_MAX;
+    for (uint32_t round = 0; round < 64; round += 1)
+    {
+        for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(argument_counts); c += 1)
+        {
+            const uint32_t arguments = argument_counts[c];
+            int32_t integer_expected = 0;
+            int32_t floating_expected = 0;
+            for (uint32_t a = 0; a < arguments; a += 1)
+            {
+                // Every class in turn in the first round, random ones after it.
+                argument_classes[a] = (uint8_t)(round == 0 ? a % BUSTER_TYPED_CLASS_LIMIT : tier0_generate_below(&random, BUSTER_TYPED_CLASS_LIMIT));
+                const uint32_t stack = tier0_stack(argument_classes[a]);
+                integer_expected -= stack == 1 ? 1 : 0;
+                floating_expected -= stack == 2 ? 1 : 0;
+            }
+            const bool indirect = tier0_generate_below(&random, 2) != 0;
+            const uint8_t kind = tier0_generate_below(&random, 2) != 0 ? BUSTER_TYPED_TAIL_CALL : BUSTER_TYPED_CALL;
+            const uint8_t result = kind == BUSTER_TYPED_TAIL_CALL ? BUSTER_TYPED_CLASS_VOID : results[tier0_generate_below(&random, BUSTER_ARRAY_LENGTH(results))];
+            integer_expected -= indirect ? 1 : 0;
+            integer_expected += tier0_stack(result) == 1 ? 1 : 0;
+            floating_expected += tier0_stack(result) == 2 ? 1 : 0;
+            const uint64_t value = 0;
+            const uint32_t first = 0;
+            const SymbolId target = indirect ? 0 : 1;
+            Tier0Function function;
+            memset(&function, 0, sizeof(function));
+            function.kinds = &kind;
+            function.classes = &result;
+            function.values = &value;
+            function.count = 1;
+            function.call_targets = &target;
+            function.call_first = &first;
+            function.call_argument_counts = &arguments;
+            function.argument_classes = argument_classes;
+            function.call_count = 1;
+            int32_t integer = 0;
+            int32_t floating = 0;
+            tier0_raw_effects(&function, 0, &integer, &floating);
+            wrong = wrong == UINT32_MAX && (integer != integer_expected || floating != floating_expected) ? round * 1000 + arguments : wrong;
+        }
+    }
+    tier0_test_expect(tally, wrong == UINT32_MAX, "call effects", "round %u, %u arguments: a call's effects aren't its arguments' and result's stacks", wrong / 1000,
+                      wrong % 1000);
+}
+
 // The records with a VEX twin from a forward table's window (x86_vex_find, #2874) against the table itself: every value
 // of a record's form (each row, with each segment override, the fixup flag or neither), 32 records a block, in Tier 0's
 // table and Tier 1's, the records' other fields arbitrary; and a block's live records alone, at every count to 32, also
@@ -6832,6 +6888,13 @@ static int run_tier0_tests(int argc, char** argv)
                 Tier0TestTally tally = { 0, 0 };
                 tier0_test_vex_window(&tally);
                 tier0_test_report("VEX window", tally);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_call_effects(&tally);
+                tier0_test_report("call effects", tally);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

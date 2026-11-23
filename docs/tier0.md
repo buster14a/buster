@@ -1626,9 +1626,11 @@ homes, and whether its four cases' words differ in the template alone (uniform).
 
 1. **Selection** gathers each entry's word from its slot's (`vpgatherdq`, from the slot table's 32,768 words). The
    depth checks are masks, the depths each stack reaches lane maxima, the kept templates' words are ORed together
-   (their fixed rdx) and the unsupported lanes collected, so that a block takes no branch but on a deferred entry,
-   whose touches (a call's saves, division's fixed registers) are taken an entry at a time. The first unsupported
-   entry is looked for only when there is one, in a compile that fails.
+   (their fixed rdx) and the unsupported lanes collected, and the deferred entries are listed (`vpcompressd`), so
+   that a block takes no branch. The listed entries' touches (a call's saves, division's fixed registers) are then
+   taken an entry at a time, in a loop of their own: inside the blocks' loop, its end at each block's last deferred
+   lane mispredicted, and the blocks behind it waited (#2874). The first unsupported entry is looked for only when
+   there is one, in a compile that fails.
 2. **Homes:** the references' count takes the referring entries of 64 at a time as a mask (`vpshufbitqmb` of their
    kinds in the four kinds' bitset), then a count per set bit, without a branch per entry. The greedy loop gives the k-th local of
    a kind that takes a register (not in one yet, its address not taken, referenced) the k-th free register of its
@@ -1656,8 +1658,11 @@ homes, and whether its four cases' words differ in the template alone (uniform).
 3. **Measuring** resolves a home-dependent word to its homes' case. Which of up to 64 locals are in registers is one
    mask, of which a lane's case is a shift (`vpsrlvq`); past 64 locals, a local's home comes from four registers by
    `vpermt2q` for up to 32 locals, or by a gather past that. A uniform slot's case is added to the template; another's
-   word is gathered. The lengths come from the words, or a deferred entry's from its count, and the positions are
-   their prefix sum in registers.
+   word is gathered. A template's length comes from its word, and the deferred entries are listed, in a loop with no
+   branch on its words. Then each listed entry's length comes from the thread's table of calls or its count, in a loop
+   of its own, and the positions are the lengths' prefix sum in registers, in a third (#2874). Splitting measuring and
+   selection so, with the calls' effects on the stacks counted 64 argument classes at a time in fusion, took `tier0`
+   0.33 ms less on `sqlite3.c` (the 9700X, the same objects).
 4. **Emission** computes the hole blocks of 8 entries in vectors. K, the scale and the locals of A and B come from a
    `vpermt2q` over this block's values and the last block's; A and B from the homes' registers; the registers around
    each depth from two 32-entry windows by `vpermt2d`. Four `vpermt2q` interleave them into four registers of two

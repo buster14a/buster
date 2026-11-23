@@ -4038,6 +4038,8 @@ struct Tier0Entries
     // emission reads, or BUSTER_TIER0_CALL_MEMO_NONE; 0 for a function whose calls don't take the table
     // (tier0_call_memo_function).
     uint32_t* call_slots;
+    // The vector path's deferred entries, in order, which its measuring lists from their words and then counts (#2874).
+    uint32_t* deferred_entries;
 };
 
 // A deep entry's flags (Tier0Entries.deep, tier0_select_deep's): the stacks whose values it reads from their deep slots
@@ -4139,10 +4141,28 @@ static void tier0_raw_effects(const Tier0Function* function, uint32_t i, int32_t
     {
         const uint32_t call = (uint32_t)function->values[i];
         const uint32_t first = function->call_first[call];
-        for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
+        const uint32_t arguments = function->call_argument_counts[call];
+        // Its arguments' stacks (tier0_stack's: F32 and F64 the floating one, VOID and MASK none, any other class the
+        // integer one) counted 64 classes at a time, with no branch on a class (#2874), as selection counts a call's
+        // floating arguments (#892).
+        uint32_t floating_arguments = 0;
+        uint32_t stackless = 0;
+        uint32_t a = 0;
+        do
         {
-            counts[tier0_stack(function->argument_classes[first + a])] -= 1;
-        }
+            const uint32_t left = arguments - a < 64 ? arguments - a : 64;
+            const __mmask64 live = (__mmask64)_bzhi_u64(~(uint64_t)0, left);
+            const __m512i argument_classes = _mm512_maskz_loadu_epi8(live, function->argument_classes + first + a);
+            const uint64_t floating = _mm512_mask_cmpeq_epi8_mask(live, argument_classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_F32)) |
+                                      _mm512_mask_cmpeq_epi8_mask(live, argument_classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_F64));
+            const uint64_t none = _mm512_mask_cmpeq_epi8_mask(live, argument_classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_VOID)) |
+                                  _mm512_mask_cmpeq_epi8_mask(live, argument_classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_MASK));
+            floating_arguments += (uint32_t)__builtin_popcountll(floating);
+            stackless += (uint32_t)__builtin_popcountll(none);
+            a += 64;
+        } while (a < arguments);
+        counts[1] -= (int32_t)(arguments - floating_arguments - stackless);
+        counts[2] -= (int32_t)floating_arguments;
         counts[1] -= function->call_targets[call] == 0 ? 1 : 0;
         counts[tier0_stack(class)] += 1;
     }
@@ -11595,6 +11615,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->lengths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->positions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, padded);
+    entries->deferred_entries = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, padded);
     entries->deep = 0;
     entries->deep_depths = 0;
     entries->deep_floating_depths = 0;
@@ -11608,7 +11629,7 @@ static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t c
     entries->call_slots = 0;
     return entries->words != 0 && entries->key_kinds != 0 && entries->key_classes != 0 && entries->variants != 0 && entries->absorbed != 0 && entries->integer_effects != 0 &&
            entries->floating_effects != 0 && entries->depths != 0 && entries->floating_depths != 0 && entries->templates != 0 && entries->lengths != 0 &&
-           entries->positions != 0;
+           entries->positions != 0 && entries->deferred_entries != 0;
 }
 
 static uint32_t tier0_select_vector(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error);
@@ -14394,8 +14415,9 @@ static __m512i tier0_value_back(__m512i previous, __m512i current, __m512i offse
 
 // Selection for the vector path, 8 entries at a time: each entry's word gathered from its slot's (an absorbed entry's
 // ABSORBED), the depth checks (a template whose fixed registers need another depth is deferred), the depths each stack
-// reaches and the fixed clobbers, as masks and lane maxima; the deferred entries' touches an entry at a time, as
-// tier0_select's, and `memory` and `realigned` as tier0_select_entries's.
+// reaches and the fixed clobbers, as masks and lane maxima, and the deferred entries listed (Tier0Entries.
+// deferred_entries); then the deferred entries' touches an entry at a time, as tier0_select's, and `memory` and
+// `realigned` as tier0_select_entries's.
 static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entries(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame,
                                                                                   Tier0Error* error, bool memory, bool realigned)
 {
@@ -14407,6 +14429,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     const uint8_t* depths = entries->depths;
     const uint8_t* floating_depths = entries->floating_depths;
     uint64_t* words = entries->words;
+    uint32_t* listed = entries->deferred_entries;
+    uint32_t deferred_count = 0;
+    const __m256i lane_numbers = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
     uint32_t unsupported = count;
     __m512i integer_top = _mm512_set1_epi64(-1);
     __m512i floating_top = _mm512_set1_epi64(-1);
@@ -14451,92 +14476,95 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
         floating_top = _mm512_mask_max_epi64(floating_top, floating_reaches, floating_top, _mm512_sub_epi64(_mm512_add_epi64(floating, floating_reach), three));
         kept_words = _mm512_mask_or_epi64(kept_words, kept, kept_words, word);
         any_unsupported |= lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_UNSUPPORTED));
-        // The deferred entries' touches, as the scalar selection has them.
-        uint32_t deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
-        while (deferred != 0)
+        // The deferred entries, listed for their touches after the blocks (the list has room for 8 past its last entry).
+        const __mmask8 deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
+        _mm256_storeu_si256((__m256i*)(listed + deferred_count), _mm256_maskz_compress_epi32(deferred, _mm256_add_epi32(_mm256_set1_epi32((int32_t)first), lane_numbers)));
+        deferred_count += (uint32_t)__builtin_popcount(deferred);
+    }
+    // The deferred entries' touches, as the scalar selection has them, in order: a loop of their own, which the blocks'
+    // loop doesn't wait on at a block's last deferred lane (#2874).
+    for (uint32_t k = 0; k < deferred_count; k += 1)
+    {
+        const uint32_t i = listed[k];
+        const int32_t entry_depth = depths[i];
+        const int32_t entry_floating = floating_depths[i];
+        if (function->kinds[i] == BUSTER_TYPED_CALL)
         {
-            const uint32_t i = first + (uint32_t)__builtin_ctz(deferred);
-            deferred &= deferred - 1;
-            const int32_t entry_depth = depths[i];
-            const int32_t entry_floating = floating_depths[i];
-            if (function->kinds[i] == BUSTER_TYPED_CALL)
+            const uint32_t call = (uint32_t)function->values[i];
+            const uint32_t call_first = function->call_first[call];
+            const uint32_t argument_count = function->call_argument_counts[call];
+            // Its floating arguments (tier0_class_floating's F32 and F64) counted 64 classes at a time, the first 64
+            // whatever the call's number (#892): a class at a time, the loop's end was missed at a quarter of the calls on
+            // the 9700X.
+            uint32_t floating_arguments = 0;
+            uint32_t a = 0;
+            do
             {
-                const uint32_t call = (uint32_t)function->values[i];
-                const uint32_t call_first = function->call_first[call];
-                const uint32_t argument_count = function->call_argument_counts[call];
-                // Its floating arguments (tier0_class_floating's F32 and F64) counted 64 classes at a time, the first 64
-                // whatever the call's number (#892): a class at a time, the loop's end was missed at a quarter of the calls on
-                // the 9700X.
-                uint32_t floating_arguments = 0;
-                uint32_t a = 0;
-                do
-                {
-                    const uint32_t left = argument_count - a < 64 ? argument_count - a : 64;
-                    const __mmask64 live = (__mmask64)_bzhi_u64(~(uint64_t)0, left);
-                    const __m512i classes = _mm512_maskz_loadu_epi8(live, function->argument_classes + call_first + a);
-                    const uint64_t floating = _mm512_mask_cmpeq_epi8_mask(live, classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_F32)) |
-                                              _mm512_mask_cmpeq_epi8_mask(live, classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_F64));
-                    floating_arguments += (uint32_t)__builtin_popcountll(floating);
-                    a += 64;
-                } while (a < argument_count);
-                const uint32_t integer_arguments = argument_count - floating_arguments;
-                const int32_t below = entry_depth - (int32_t)integer_arguments - (function->call_targets[call] == 0 ? 1 : 0);
-                const int32_t floating_below = entry_floating - (int32_t)floating_arguments;
-                const uint32_t saved = tier0_call_saved(function, call, (uint32_t)below);
-                const uint32_t slots = saved + (uint32_t)floating_below;
-                save_slots = slots > save_slots ? slots : save_slots;
-                const uint32_t result = tier0_stack(function->classes[i]);
-                deferred_integer_top = result == 1 && below > deferred_integer_top ? below : deferred_integer_top;
-                deferred_floating_top = result == 2 && floating_below > deferred_floating_top ? floating_below : deferred_floating_top;
-                const Tier0AsmBody* body = tier0_call_body(function, call);
-                clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL | (body != 0 ? body->touched : 0);
-                calls = true;
-            }
-            else if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
-            {
-                clobbers |= tier0_tail_clobbers(function, i);
-            }
-            else if (function->kinds[i] == BUSTER_TYPED_FENCE || function->kinds[i] == BUSTER_TYPED_ATOMIC_RMW)
-            {
-                // No register past its operands', as the scalar selection has it.
-            }
-            else if (function->kinds[i] == BUSTER_TYPED_COPY)
-            {
-                const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
-                const int32_t reach = (int32_t)entry_floating + (int32_t)tier0_copy_reach(function, i);
-                deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
-                deferred_floating_top = wide && reach > deferred_floating_top ? reach : deferred_floating_top;
-            }
-            else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
-            {
-                deferred_integer_top = entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
-            }
-            else if (tier0_moves_stack(function->kinds[i]))
-            {
-                const bool leaf = function->kinds[i] == BUSTER_TYPED_STACK_SAVE || function->kinds[i] == BUSTER_TYPED_FRAME_ADDRESS;
-                deferred_integer_top = leaf && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
-                moves = true;
-            }
-            else if (memory && tier0_vector_entry(entries, i))
-            {
-                tier0_vector_tops(function, entries, i, &deferred_integer_top, &deferred_floating_top, &slot_top);
-            }
-            else if (memory && tier0_memory_entry(entries, i))
-            {
-                tier0_memory_tops(function, entries, i, &deferred_integer_top, &deferred_floating_top, &slot_top, &clobbers, &fixed);
-            }
-            else if (function->kinds[i] == BUSTER_TYPED_CONVERT)
-            {
-                Tier0Tops tops = { deferred_integer_top, deferred_floating_top };
-                tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, entry_depth, entry_floating, realigned, &tops, convert_scratch);
-                deferred_integer_top = tops.integer;
-                deferred_floating_top = tops.floating;
-            }
-            else
-            {
-                clobbers |= 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX;
-                fixed = true;
-            }
+                const uint32_t left = argument_count - a < 64 ? argument_count - a : 64;
+                const __mmask64 live = (__mmask64)_bzhi_u64(~(uint64_t)0, left);
+                const __m512i classes = _mm512_maskz_loadu_epi8(live, function->argument_classes + call_first + a);
+                const uint64_t floating = _mm512_mask_cmpeq_epi8_mask(live, classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_F32)) |
+                                          _mm512_mask_cmpeq_epi8_mask(live, classes, _mm512_set1_epi8((char)BUSTER_TYPED_CLASS_F64));
+                floating_arguments += (uint32_t)__builtin_popcountll(floating);
+                a += 64;
+            } while (a < argument_count);
+            const uint32_t integer_arguments = argument_count - floating_arguments;
+            const int32_t below = entry_depth - (int32_t)integer_arguments - (function->call_targets[call] == 0 ? 1 : 0);
+            const int32_t floating_below = entry_floating - (int32_t)floating_arguments;
+            const uint32_t saved = tier0_call_saved(function, call, (uint32_t)below);
+            const uint32_t slots = saved + (uint32_t)floating_below;
+            save_slots = slots > save_slots ? slots : save_slots;
+            const uint32_t result = tier0_stack(function->classes[i]);
+            deferred_integer_top = result == 1 && below > deferred_integer_top ? below : deferred_integer_top;
+            deferred_floating_top = result == 2 && floating_below > deferred_floating_top ? floating_below : deferred_floating_top;
+            const Tier0AsmBody* body = tier0_call_body(function, call);
+            clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL | (body != 0 ? body->touched : 0);
+            calls = true;
+        }
+        else if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
+        {
+            clobbers |= tier0_tail_clobbers(function, i);
+        }
+        else if (function->kinds[i] == BUSTER_TYPED_FENCE || function->kinds[i] == BUSTER_TYPED_ATOMIC_RMW)
+        {
+            // No register past its operands', as the scalar selection has it.
+        }
+        else if (function->kinds[i] == BUSTER_TYPED_COPY)
+        {
+            const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
+            const int32_t reach = (int32_t)entry_floating + (int32_t)tier0_copy_reach(function, i);
+            deferred_integer_top = !wide && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
+            deferred_floating_top = wide && reach > deferred_floating_top ? reach : deferred_floating_top;
+        }
+        else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
+        {
+            deferred_integer_top = entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
+        }
+        else if (tier0_moves_stack(function->kinds[i]))
+        {
+            const bool leaf = function->kinds[i] == BUSTER_TYPED_STACK_SAVE || function->kinds[i] == BUSTER_TYPED_FRAME_ADDRESS;
+            deferred_integer_top = leaf && entry_depth > deferred_integer_top ? entry_depth : deferred_integer_top;
+            moves = true;
+        }
+        else if (memory && tier0_vector_entry(entries, i))
+        {
+            tier0_vector_tops(function, entries, i, &deferred_integer_top, &deferred_floating_top, &slot_top);
+        }
+        else if (memory && tier0_memory_entry(entries, i))
+        {
+            tier0_memory_tops(function, entries, i, &deferred_integer_top, &deferred_floating_top, &slot_top, &clobbers, &fixed);
+        }
+        else if (function->kinds[i] == BUSTER_TYPED_CONVERT)
+        {
+            Tier0Tops tops = { deferred_integer_top, deferred_floating_top };
+            tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, entry_depth, entry_floating, realigned, &tops, convert_scratch);
+            deferred_integer_top = tops.integer;
+            deferred_floating_top = tops.floating;
+        }
+        else
+        {
+            clobbers |= 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX;
+            fixed = true;
         }
     }
     // The first unsupported entry, rare: a compile that fails.
@@ -14833,15 +14861,18 @@ static void tier0_call_memo_write(const Tier0Function* function, const Tier0Fram
     writer->count += count;
 }
 
-// Measuring for the vector path, 8 words at a time, from the prologue's length on:
-// - a home-dependent entry's word is resolved to its homes' case: for a uniform slot, the case added to the template;
-//   otherwise, the case's word gathered;
-// - each entry's length comes from its word, or for a deferred one from tier0_count_deferred (an entry at a time: they
-//   are few);
-// - the positions are the lengths' prefix sums, in registers;
-// - the branch records', references' and choice requests' counts come from popcounts.
-// The last block's words and positions are stored whole, past the entries: emission expands every lane of a block, and a
-// lane past the entries has template 0 and the end's position, which the epilogue overwrites. `memory` is
+// Measuring for the vector path, from the prologue's length on, in three loops (#2874):
+// - 8 words at a time: a home-dependent entry's word is resolved to its homes' case (for a uniform slot, the case added
+//   to the template; otherwise, the case's word gathered), a template's length is its word's, and the deferred entries
+//   are listed (Tier0Entries.deferred_entries); the branch records', references' and choice requests' counts come from
+//   popcounts;
+// - the listed entries, in order: each one's length from the thread's table of calls (tier0_call_memo_find) or from
+//   tier0_count_deferred;
+// - the positions, the lengths' prefix sums, 8 at a time in registers.
+// The first loop has no branch on its words and the second none on the blocks, so that neither the gathers nor the
+// calls' table lookups wait for each other's guards (a loop over the deferred lanes of each block mispredicted at its
+// end). The last block's words and positions are stored whole, past the entries: emission expands every lane of a block,
+// and a lane past the entries has template 0 and the end's position, which the epilogue overwrites. `memory` is
 // Tier0Frame.memory and `deep` whether the function has deep entries (tier0_select_deep's): constants at each of
 // tier0_measure_vector's four uses, as tier0_select_entries's are.
 static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_entries(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes,
@@ -14851,6 +14882,8 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
     const uint64_t* values = function->values;
     uint64_t* words = entries->words;
     uint32_t* positions = entries->positions;
+    uint32_t* lengths = entries->lengths;
+    uint32_t* listed = entries->deferred_entries;
     const Tier0HomeTable table = tier0_home_table(homes, function->local_count);
     Tier0Counts counts = { 0, 0, 0 };
     const __m512i seven = _mm512_set1_epi64(7);
@@ -14866,7 +14899,8 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
     }
     const __m512i register_bits = _mm512_set1_epi64((int64_t)registers);
     const __m512i one = _mm512_set1_epi64(1);
-    __m512i carry = _mm512_set1_epi64(prologue);
+    const __m256i lane_numbers = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+    uint32_t deferred_count = 0;
     __m512i previous = zero;
     for (uint32_t first = 0; first < count; first += 8)
     {
@@ -14909,38 +14943,45 @@ static inline __attribute__((always_inline)) Tier0Counts tier0_measure_vector_en
         _mm512_storeu_si512(words + first, word);
         const __mmask8 deferred = lanes & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_DEFERRED));
         const __mmask8 template = lanes & _mm512_testn_epi64_mask(word, _mm512_set1_epi64((int64_t)(BUSTER_TIER0_WORD_DEFERRED | BUSTER_TIER0_WORD_ABSORBED)));
-        __m512i length = _mm512_maskz_and_epi64(template, _mm512_srli_epi64(word, BUSTER_TIER0_WORD_LENGTH_SHIFT), seven);
-        uint32_t rest = deferred;
-        while (rest != 0)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctz(rest);
-            rest &= rest - 1;
-            const uint32_t i = first + lane;
-            // A call the thread's table gives (tier0_call_memo_find): its records' count, and its entry for emission.
-            uint32_t records = 0;
-            const uint32_t found = entries->call_slots != 0 && entries->key_kinds[i] == BUSTER_TYPED_CALL ?
-                                       tier0_call_memo_find(function, entries, homes, i, &records, &counts.references) :
-                                       BUSTER_TIER0_CALL_MEMO_NONE;
-            if (entries->call_slots != 0)
-            {
-                entries->call_slots[i] = found;
-            }
-            if (found == BUSTER_TIER0_CALL_MEMO_NONE)
-            {
-                records = deep && entries->deep[i] != 0 ? tier0_count_deep(function, entries, homes, i, &counts)
-                                                        : tier0_count_deferred(function, entries, i, memory, &counts.references, &counts.branches);
-            }
-            length = _mm512_mask_set1_epi64(length, (__mmask8)(1u << lane), (int64_t)records);
-        }
+        const __m512i length = _mm512_maskz_and_epi64(template, _mm512_srli_epi64(word, BUSTER_TIER0_WORD_LENGTH_SHIFT), seven);
+        _mm256_storeu_si256((__m256i*)(lengths + first), _mm512_cvtepi64_epi32(length));
+        // The list has room for 8 past its last entry: the compressed store writes 8.
+        _mm256_storeu_si256((__m256i*)(listed + deferred_count), _mm256_maskz_compress_epi32(deferred, _mm256_add_epi32(_mm256_set1_epi32((int32_t)first), lane_numbers)));
+        deferred_count += (uint32_t)__builtin_popcount(deferred);
         counts.branches += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_BRANCH)));
         counts.references += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_FIXUP)));
         counts.choices += (uint32_t)__builtin_popcount(template & _mm512_test_epi64_mask(word, _mm512_set1_epi64((int64_t)BUSTER_TIER0_WORD_CHOICE)));
+        previous = current;
+    }
+    for (uint32_t k = 0; k < deferred_count; k += 1)
+    {
+        const uint32_t i = listed[k];
+        // A call the thread's table gives (tier0_call_memo_find): its records' count, and its entry for emission.
+        uint32_t records = 0;
+        const uint32_t found = entries->call_slots != 0 && entries->key_kinds[i] == BUSTER_TYPED_CALL ?
+                                   tier0_call_memo_find(function, entries, homes, i, &records, &counts.references) :
+                                   BUSTER_TIER0_CALL_MEMO_NONE;
+        if (entries->call_slots != 0)
+        {
+            entries->call_slots[i] = found;
+        }
+        if (found == BUSTER_TIER0_CALL_MEMO_NONE)
+        {
+            records = deep && entries->deep[i] != 0 ? tier0_count_deep(function, entries, homes, i, &counts)
+                                                    : tier0_count_deferred(function, entries, i, memory, &counts.references, &counts.branches);
+        }
+        lengths[i] = records;
+    }
+    __m512i carry = _mm512_set1_epi64(prologue);
+    for (uint32_t first = 0; first < count; first += 8)
+    {
+        const __mmask8 lanes = (__mmask8)tier0_lanes(first, count);
+        const __m512i length = _mm512_cvtepu32_epi64(_mm256_maskz_loadu_epi32(lanes, lengths + first));
         __m512i sum = _mm512_add_epi64(length, _mm512_alignr_epi64(length, zero, 7));
         sum = _mm512_add_epi64(sum, _mm512_alignr_epi64(sum, zero, 6));
         sum = _mm512_add_epi64(sum, _mm512_alignr_epi64(sum, zero, 4));
         _mm256_storeu_si256((__m256i*)(positions + first), _mm512_cvtepi64_epi32(_mm512_add_epi64(carry, _mm512_sub_epi64(sum, length))));
         carry = _mm512_add_epi64(carry, _mm512_permutexvar_epi64(seven, sum));
-        previous = current;
     }
     entries->record_count = (uint64_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(carry));
     positions[count] = (uint32_t)entries->record_count;
