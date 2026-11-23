@@ -2140,8 +2140,8 @@ static uint32_t executable_eh_frame_walk(const Link* link, AtomId atom, int32_t*
 // The FDEs of an .eh_frame atom that is a CIE then FDEs pointing back to it, and perhaps a terminator, each FDE with
 // its pc_begin a PC32 fixup's field (of an addend in the column) and nothing else fixed up: their count, or UINT32_MAX
 // for an atom that isn't, which the exact walk then reads. 16 fixups at a time, each a candidate FDE 8 bytes before its
-// field: the candidates' lengths and CIE pointers are loaded, 8 bytes each by scalar loads that don't wait on each other
-// (gathers cost more on Zen 5), then compared 16 at a time: each must start where the one before it ends (the first
+// field: the candidates' lengths and CIE pointers are gathered, 8 bytes each from those inside the atom, then compared
+// 16 at a time: each must start where the one before it ends (the first
 // where the CIE does, the one before a group's first in the last group's last lane), point back to the CIE, and be long
 // enough for pc_begin and the range; and the last must end at the atom's end or its terminator's start, so none ends
 // past it: the one after an FDE that did would start past its field's candidate.
@@ -2172,16 +2172,11 @@ static uint32_t executable_eh_frame_fdes(const Link* link, AtomId atom)
         const __mmask16 inside = _mm512_mask_cmpge_epu32_mask(lanes, offsets, _mm512_set1_epi32(8)) &
                                  _mm512_mask_cmple_epu32_mask(lanes, _mm512_add_epi32(offsets, _mm512_set1_epi32(4)), size_vector);
         valid = inside == lanes && _mm512_mask_cmpneq_epi32_mask(lanes, kinds, _mm512_set1_epi32(BUSTER_LINK_FIXUP_PC32)) == 0;
-        uint32_t start_of[16];
-        uint64_t head_of[16] = { 0 };
-        _mm512_storeu_si512(start_of, starts);
-        for (uint32_t j = 0; valid && j < n; j += 1)
-        {
-            memcpy(&head_of[j], bytes + start_of[j], sizeof(head_of[j]));
-        }
+        // The heads, gathered from the candidates inside the atom: a group's few loads don't wait on stores to the stack
+        // and a vector load of them that can't forward.
+        const __m512i heads_low = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)inside, _mm512_castsi512_si256(starts), bytes, 1);
+        const __m512i heads_high = _mm512_mask_i32gather_epi64(_mm512_setzero_si512(), (__mmask8)(inside >> 8), _mm512_extracti64x4_epi64(starts, 1), bytes, 1);
         // The lengths are the heads' low halves, the CIE pointers their high ones.
-        const __m512i heads_low = _mm512_loadu_si512(head_of);
-        const __m512i heads_high = _mm512_loadu_si512(head_of + 8);
         const __m512i lengths = _mm512_permutex2var_epi32(heads_low, evens, heads_high);
         const __m512i pointers = _mm512_permutex2var_epi32(heads_low, odds, heads_high);
         // Lengths within the atom first, so that the ends fit 32 bits.
