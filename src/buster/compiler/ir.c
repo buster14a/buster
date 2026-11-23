@@ -2833,6 +2833,24 @@ static uint32_t ir_successor(const IrFunction* f, uint32_t i, uint32_t edge)
     return result;
 }
 
+// Whether some edge of a verified function goes to a block at or before its source (#2719): every cycle has one, so a
+// function without one has no loop, and Tier 1's LICM policy passes it over before any analysis. One terminator a block,
+// read as ir_build_cfg reads it.
+static __attribute__((unused)) bool ir_function_cyclic(const IrFunction* f)
+{
+    bool found = false;
+    for (uint32_t block = 0; !found && block < f->block_count; block += 1)
+    {
+        const uint32_t last = f->block_offsets[block + 1] - 1;
+        const uint32_t count = ir_successor_count(f, last);
+        for (uint32_t edge = 0; !found && edge < count; edge += 1)
+        {
+            found = ir_successor(f, last, edge) <= block;
+        }
+    }
+    return found;
+}
+
 // Internal version also permits arena==scratch for the verifier, which discards the entire graph at its end.
 // Public callers use disjoint arenas; their graph excludes the marks/cursors and survives scratch restoration.
 static __attribute__((noinline, aligned(64))) IrError ir_cfg_validated(const IrFunction* f, Arena* arena, Arena* scratch, IrCfg* result)

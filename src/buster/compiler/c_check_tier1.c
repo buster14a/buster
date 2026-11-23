@@ -470,7 +470,9 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     // built again at each use otherwise; the general registers' values, whose longer ranges the allocator spills
     // (#2719), stay as they are. One scan of the types and operations decides, so that a function without such values
     // pays that scan alone.
-    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && ir_function_has_simd(input->function);
+    // #2719's pressure policy for LICM takes the functions without such values alone, so the same scan decides it too.
+    const bool simd = (on & (BUSTER_CHECK_TIER1_PASS_VECTORS | BUSTER_CHECK_TIER1_PASS_HOIST)) != 0 && ir_function_has_simd(input->function);
+    const bool vectors = (on & BUSTER_CHECK_TIER1_PASS_VECTORS) != 0 && simd;
     // The solver's, in steps[7], before promotion as --tier1-gvn's is. A function it refuses or finds past its limits
     // goes on as it was; any other error is the function's.
     IrGvnResult shared = { 0 };
@@ -686,17 +688,47 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         passes->table_values = stage == CHECK_TIER1_COMPILED ? switched.values : NULL;
         passes->tables_converted = stage == CHECK_TIER1_COMPILED ? switched.converted : 0;
     }
+    // --tier1-passes=+numbering (#2719's measurement): the solver on the promoted function under the pressure policy
+    // (IrGvnOptions.pressure), in steps[13], after if-conversion and before LICM, where it sees the values promotion made
+    // of the locals' loads and stores. A function where nothing merges goes on as it was, borrowed; one it refuses or finds
+    // past its limits too; any other error is the function's.
+    if (stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_NUMBERING) != 0)
+    {
+        if (!check_tier1_lane_reserve(lane, 6))
+        {
+            outcome = check_tier1_step(CHECK_TIER1_RESOURCE, CHECK_TIER1_CAUSE_ARENA, BUSTER_CHECK_TIER1_ARENA_RESERVE, BUSTER_IR_NONE, 0, NULL);
+        }
+        else
+        {
+            IrGvnOptions options = ir_gvn_options();
+            options.scalar = scalar;
+            options.pressure = true;
+            IrGvnResult numbered_ssa = { 0 };
+            const IrCheck check = ir_optimize_gvn(&wide.function, &lane->steps[13], scratch, options, &numbered_ssa);
+            const IrError error = check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT ? IR_OK : check.error;
+            outcome = check_tier1_step(CHECK_TIER1_VALUE_NUMBERING, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
+            outcome.dominance_checked = check.dominance_checked;
+            outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
+            wide.function = outcome.stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? numbered_ssa.function : wide.function;
+            passes->gvn_removed += check.error == IR_OK ? numbered_ssa.removed : 0;
+        }
+        stage = outcome.stage;
+    }
     // Loop-invariant motion, in steps[9], before the optimizer, whose dead-code removal, CFG cleanup and final
     // verification then take its result: every value's with --tier1-passes=+licm (#139's measurement), or #2781's, the
-    // vector and mask values' and their operands', in a function that has such values. A function it refuses
-    // (IR_ERROR_UNSUPPORTED: the constructs ir_optimize_licm.c names) goes on as it was; any other error is the
-    // function's.
+    // vector and mask values' and their operands', in a function that has such values, or with --tier1-passes=+hoist
+    // #2719's pressure policy in a function that has a loop and no such value (IrLicmOptions.pressure: what pays for the
+    // register it holds, in loops without calls). A
+    // function it refuses (IR_ERROR_UNSUPPORTED: the constructs ir_optimize_licm.c names) goes on as it was; any other
+    // error is the function's.
     const bool everywhere = (on & BUSTER_CHECK_TIER1_PASS_LICM) != 0;
-    if (stage == CHECK_TIER1_COMPILED && (everywhere || vectors))
+    const bool hoist = stage == CHECK_TIER1_COMPILED && !everywhere && !simd && (on & BUSTER_CHECK_TIER1_PASS_HOIST) != 0 && ir_function_cyclic(&wide.function);
+    if (stage == CHECK_TIER1_COMPILED && (everywhere || vectors || hoist))
     {
         IrLicmOptions options = ir_licm_options();
         options.scalar = scalar;
-        options.vectors = !everywhere;
+        options.vectors = !everywhere && vectors;
+        options.pressure = hoist;
         IrLicmResult moved = { 0 };
         if (!everywhere && !check_tier1_lane_reserve(lane, 2))
         {

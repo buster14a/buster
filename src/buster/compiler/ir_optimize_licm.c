@@ -20,7 +20,33 @@ struct IrLicmOptions
     // in place of the walk of the loop's own blocks (ir_licm_loop_walk), whose exact oracle it is; with `vectors`, keep
     // the vectors' candidates after (ir_licm_keep_vectors).
     bool whole;
+    // Move what pays for the register it holds through the loop (#2719, Tier 1's policy for functions without vector or
+    // mask values; ir_licm_loop_pressure). Every value moved stays live from the preheader through the whole loop, which
+    // Tier 1's allocation then spills where its registers run out:
+    // - a loop that holds a call moves nothing: across a call a value needs one of the five callee-saved registers, and
+    //   the values the loop already keeps across its calls hold them (Lua's interpreter loop: +305% instructions);
+    // - a free value (BUSTER_IR_LICM_FREE: a constant, a symbol's or a frame object's address, a cast of no bits, or
+    //   arithmetic of free values of the loop alone) moves only as the operand of a costly value that moves: at its
+    //   users, selection folds it into an immediate or an address, or it costs nothing;
+    // - a truth value stays: a branch tests its comparison's flags, where a hoisted one takes a register and a setcc;
+    // - a loop moves at most BUSTER_IR_LICM_REGISTERS costly general-register values, less the ones live through it.
+    // A function where nothing moves is returned as it was given, as with `vectors`. It has no whole-function form:
+    // `whole` is ignored with it, and `vectors` takes precedence over it.
+    bool pressure;
 };
+
+// IrLicmOptions.pressure's register budget: the general registers Tier 1 allocates past rsp, rbp and its scratch ones,
+// less two for the loop's own temporaries.
+#define BUSTER_IR_LICM_REGISTERS 12
+// ir_licm_classify's `free` kinds: 1, a value at no cost where it is used (a constant, an address, a cast of no bits); 2,
+// arithmetic that is free where its operands are free values of the loop (a constant's sum or an address's offset).
+#define BUSTER_IR_LICM_FREE 1
+#define BUSTER_IR_LICM_FREE_ARITHMETIC 2
+// IrLicmWork.candidate's states under IrLicmOptions.pressure: a costly movable value moves; a free one is pending until
+// a moving value reads it (ir_licm_loop_pressure's closure), then kept.
+#define BUSTER_IR_LICM_MOVES 1
+#define BUSTER_IR_LICM_KEPT 2
+#define BUSTER_IR_LICM_PENDING 3
 
 typedef struct IrLicmResult IrLicmResult;
 struct IrLicmResult
@@ -29,6 +55,8 @@ struct IrLicmResult
     uint32_t moved;
     uint32_t eligible_loops;
     uint32_t skipped_loops;
+    // IrLicmOptions.pressure: the eligible loops passed over because they hold a call.
+    uint32_t called_loops;
     uint64_t sweeps;
     uint64_t visits;
     uint64_t scratch_bytes;
@@ -45,6 +73,10 @@ struct IrLicmWork
     uint8_t* safe;
     uint8_t* tainted;
     uint8_t* candidate;
+    // IrLicmOptions.pressure: each value's BUSTER_IR_LICM_FREE kind (0 costly), and the loop walk's stamps of the values
+    // outside a loop it has counted live through it.
+    uint8_t* free_kinds;
+    uint32_t* counted;
     // The values sent to a preheader so far.
     uint32_t moves;
     IrLicmResult statistics;
@@ -55,6 +87,24 @@ static __attribute__((unused)) IrLicmOptions ir_licm_options(void)
     const IrLicmOptions options = { .sweep_limit = 64 };
     return options;
 }
+
+// IrLicmOptions.pressure's free kinds by operation (BUSTER_IR_LICM_FREE and _ARITHMETIC): a truncation and the pointer
+// and bit casts change no bits a register holds.
+static const uint8_t ir_licm_free[BUSTER_IR_OP_TABLE] = {
+    [IR_CONST] = BUSTER_IR_LICM_FREE,
+    [IR_SYMBOL_ADDR] = BUSTER_IR_LICM_FREE,
+    [IR_STACK_ADDR] = BUSTER_IR_LICM_FREE,
+    [IR_INTTOPTR] = BUSTER_IR_LICM_FREE,
+    [IR_PTRTOINT] = BUSTER_IR_LICM_FREE,
+    [IR_BITCAST] = BUSTER_IR_LICM_FREE,
+    [IR_COPY] = BUSTER_IR_LICM_FREE,
+    [IR_TRUNC] = BUSTER_IR_LICM_FREE,
+    [IR_ADD] = BUSTER_IR_LICM_FREE_ARITHMETIC,
+    [IR_SUB] = BUSTER_IR_LICM_FREE_ARITHMETIC,
+    [IR_MUL] = BUSTER_IR_LICM_FREE_ARITHMETIC,
+    [IR_NEG] = BUSTER_IR_LICM_FREE_ARITHMETIC,
+    [IR_ADDRESS] = BUSTER_IR_LICM_FREE_ARITHMETIC,
+};
 
 static void ir_licm_classify(IrLicmWork* work)
 {
@@ -130,6 +180,11 @@ static void ir_licm_classify(IrLicmWork* work)
                                                                            _mm512_cmpeq_epi32_mask(discriminators, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_PAIRWISE)));
         const __mmask16 eligible = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | integer_compare | vector_shift | splat) & _mm_cmpeq_epi8_mask(tainted, _mm_setzero_si128());
         _mm_mask_storeu_epi8(work->safe + first, valid, _mm_maskz_set1_epi8(eligible, 1));
+        if (work->free_kinds != NULL)
+        {
+            const __m128i free_kinds = _mm512_castsi512_si128(_mm512_permutex2var_epi8(_mm512_loadu_si512(ir_licm_free), _mm512_zextsi128_si512(operations), _mm512_loadu_si512(ir_licm_free + 64)));
+            _mm_mask_storeu_epi8(work->free_kinds + first, valid, free_kinds);
+        }
     }
 }
 
@@ -297,8 +352,10 @@ static void ir_licm_keep_vectors(IrLicmWork* work)
 // of the loop whose operands are each a movable value of the loop or a value whose block dominates the preheader.
 // `candidate` is the walk's state (1 movable), current for the values `available` stamps with this walk's `epoch`: a
 // value the walk hasn't stamped doesn't move, whatever another loop's walk left there. Returns the reverse-postorder
-// index past the loop's last block, and in *found the movable values of vector or mask type.
-static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint32_t* found)
+// index past the loop's last block, and in *found the movable values of vector or mask type. With `budget`
+// (IrLicmOptions.pressure), a truth value doesn't move, a free value is BUSTER_IR_LICM_PENDING, and a costly
+// general-register value moves while *budget lasts, each taking one: in reverse postorder, so the header's come first.
+static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch, uint32_t* found, uint32_t* budget)
 {
     const IrFunction* f = work->ir.function;
     const Dominators* loops = &work->loops;
@@ -318,6 +375,8 @@ static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preh
             bool movable = work->safe[i] != 0 && dominators_loop_contains(loops, loop, work->destination[i]);
             const uint32_t mask = movable ? ir_value_mask3(f, i) : 0;
             const uint32_t operands[3] = { f->a[i], f->b[i], (mask & 4) != 0 ? ir_value_third(f, i) : BUSTER_IR_NONE };
+            // Whether every operand is a free value of the loop (IrLicmOptions.pressure's free arithmetic).
+            bool free_operands = mask != 0;
             for (uint32_t k = 0; k < 3; k += 1)
             {
                 if (((mask >> k) & 1) != 0)
@@ -325,10 +384,21 @@ static uint32_t ir_licm_loop_walk(IrLicmWork* work, uint32_t loop, uint32_t preh
                     const uint32_t operand = operands[k];
                     const bool inside = dominators_loop_contains(loops, loop, work->destination[operand]);
                     movable = movable && (inside ? work->available[operand] == epoch && work->candidate[operand] != 0 : dominators_dominates(loops, work->destination[operand], preheader));
+                    free_operands = free_operands && inside && work->candidate[operand] == BUSTER_IR_LICM_PENDING;
                 }
             }
+            uint8_t state = movable;
+            if (budget != NULL)
+            {
+                const bool costless = work->free_kinds[i] == BUSTER_IR_LICM_FREE || (work->free_kinds[i] == BUSTER_IR_LICM_FREE_ARITHMETIC && free_operands);
+                const bool general = (f->type[i] >= IR_I8 && f->type[i] <= IR_I64) || f->type[i] == IR_PTR;
+                const bool charged = movable && !costless && general;
+                movable = movable && f->type[i] != IR_I1 && (!charged || *budget != 0);
+                *budget -= charged && movable;
+                state = !movable ? 0 : costless ? BUSTER_IR_LICM_PENDING : BUSTER_IR_LICM_MOVES;
+            }
             work->available[i] = epoch;
-            work->candidate[i] = movable;
+            work->candidate[i] = state;
             *found += movable && f->type[i] >= IR_V4I32;
         }
         work->statistics.visits += member ? f->block_offsets[(uint64_t)block + 1] - f->block_offsets[block] : 0;
@@ -346,7 +416,7 @@ static void ir_licm_loop_vectors(IrLicmWork* work, uint32_t loop, uint32_t prehe
     const uint32_t* rpo = work->ir.dominators.rpo;
     const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
     uint32_t found = 0;
-    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
+    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found, NULL);
     for (uint32_t r = end; found != 0 && r != first; r -= 1)
     {
         const uint32_t block = rpo[r - 1];
@@ -385,7 +455,7 @@ static void ir_licm_loop_all(IrLicmWork* work, uint32_t loop, uint32_t preheader
     const uint32_t* rpo = work->ir.dominators.rpo;
     const uint32_t first = work->ir.dominators.rpo_index[loops->loop_header[loop]];
     uint32_t found = 0;
-    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found);
+    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found, NULL);
     for (uint32_t r = first; r < end; r += 1)
     {
         const uint32_t block = rpo[r];
@@ -395,6 +465,75 @@ static void ir_licm_loop_all(IrLicmWork* work, uint32_t loop, uint32_t preheader
             if (work->available[i] == epoch && work->candidate[i] != 0)
             {
                 work->destination[i] = preheader;
+                work->moves += 1;
+            }
+        }
+    }
+}
+
+// IrLicmOptions.pressure's motion of one loop that holds no call (#2719). First the general-register values live through
+// it, each counted once: its header's phis and the costly values from outside that its instructions read (a phi's
+// incoming values aside, which live only to the header; the extra values of the few operations with more than three
+// operands aren't counted). What is left of BUSTER_IR_LICM_REGISTERS is the walk's budget (ir_licm_loop_walk). Then one
+// pass backward keeps each free value that a moving or kept value reads, before it reaches it (a value comes after its
+// operands), and every moving or kept value goes to the preheader; the other free values stay at their users.
+static void ir_licm_loop_pressure(IrLicmWork* work, uint32_t loop, uint32_t preheader, uint32_t epoch)
+{
+    const IrFunction* f = work->ir.function;
+    const Dominators* loops = &work->loops;
+    const uint32_t* rpo = work->ir.dominators.rpo;
+    const uint32_t header = loops->loop_header[loop];
+    const uint32_t first = work->ir.dominators.rpo_index[header];
+    uint32_t through = 0;
+    for (uint32_t r = first, left = loops->loop_size[loop]; left != 0 && r < work->ir.dominators.reachable_count; r += 1)
+    {
+        const uint32_t block = rpo[r];
+        const bool member = dominators_loop_contains(loops, loop, block);
+        left -= member;
+        for (uint32_t i = f->block_offsets[block]; member && i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+        {
+            const bool phi = f->op[i] == IR_PHI;
+            through += phi && block == header && ((f->type[i] >= IR_I8 && f->type[i] <= IR_I64) || f->type[i] == IR_PTR);
+            const uint32_t mask = phi ? 0 : ir_value_mask3(f, i);
+            const uint32_t operands[3] = { f->a[i], f->b[i], (mask & 4) != 0 ? ir_value_third(f, i) : BUSTER_IR_NONE };
+            for (uint32_t k = 0; k < 3; k += 1)
+            {
+                const uint32_t operand = operands[k];
+                const bool read = ((mask >> k) & 1) != 0;
+                const bool counts = read && work->free_kinds[operand] != BUSTER_IR_LICM_FREE && work->counted[operand] != epoch &&
+                                    ((f->type[operand] >= IR_I8 && f->type[operand] <= IR_I64) || f->type[operand] == IR_PTR) &&
+                                    !dominators_loop_contains(loops, loop, work->destination[operand]);
+                if (counts)
+                {
+                    work->counted[operand] = epoch;
+                }
+                through += counts;
+            }
+        }
+    }
+    uint32_t budget = through < BUSTER_IR_LICM_REGISTERS ? BUSTER_IR_LICM_REGISTERS - through : 0;
+    uint32_t found = 0;
+    const uint32_t end = ir_licm_loop_walk(work, loop, preheader, epoch, &found, &budget);
+    for (uint32_t r = end; r != first; r -= 1)
+    {
+        const uint32_t block = rpo[r - 1];
+        const bool member = dominators_loop_contains(loops, loop, block);
+        for (uint32_t i = f->block_offsets[(uint64_t)block + 1]; member && i != f->block_offsets[block]; i -= 1)
+        {
+            const uint32_t value = i - 1;
+            const uint8_t state = work->available[value] == epoch ? work->candidate[value] : 0;
+            if (state == BUSTER_IR_LICM_MOVES || state == BUSTER_IR_LICM_KEPT)
+            {
+                const uint32_t mask = ir_value_mask3(f, value);
+                const uint32_t operands[3] = { f->a[value], f->b[value], (mask & 4) != 0 ? ir_value_third(f, value) : BUSTER_IR_NONE };
+                for (uint32_t k = 0; k < 3; k += 1)
+                {
+                    if (((mask >> k) & 1) != 0 && work->available[operands[k]] == epoch && work->candidate[operands[k]] == BUSTER_IR_LICM_PENDING)
+                    {
+                        work->candidate[operands[k]] = BUSTER_IR_LICM_KEPT;
+                    }
+                }
+                work->destination[value] = preheader;
                 work->moves += 1;
             }
         }
@@ -414,6 +553,23 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
         if (work->safe[i] != 0 && work->ir.function->type[i] >= IR_V4I32)
         {
             holders[work->destination[i] / 64] |= UINT64_C(1) << (work->destination[i] % 64);
+        }
+    }
+    // IrLicmOptions.pressure: the blocks that hold a call, 64 operations at a time. A loop whose body has one moves
+    // nothing, and its instructions are not walked.
+    const bool pressure = options.pressure && !options.vectors;
+    uint64_t* callers = pressure ? ir_allocate(scratch, words, sizeof(uint64_t), &ok) : 0;
+    for (uint64_t first = 0; ok && pressure && first < work->ir.function->instruction_count; first += 64)
+    {
+        const uint64_t count = work->ir.function->instruction_count - first < 64 ? work->ir.function->instruction_count - first : 64;
+        const __mmask64 valid = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i operations = _mm512_maskz_loadu_epi8(valid, work->ir.function->op + first);
+        __mmask64 calls = _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_CALL)) | _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_CALL_INDIRECT));
+        while (calls != 0)
+        {
+            const uint32_t block = work->destination[first + (uint64_t)__builtin_ctzll(calls)];
+            callers[block / 64] |= UINT64_C(1) << (block % 64);
+            calls &= calls - 1;
         }
     }
     for (uint32_t loop = 0; ok && loop < work->loops.loop_count; loop += 1)
@@ -444,7 +600,20 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
             {
                 held = (body[word] & holders[word]) != 0;
             }
-            if (held && options.vectors && !options.whole)
+            bool called = false;
+            for (uint64_t word = 0; pressure && word < words; word += 1)
+            {
+                called = called || (body[word] & callers[word]) != 0;
+            }
+            work->statistics.called_loops += called;
+            if (pressure)
+            {
+                if (!called)
+                {
+                    ir_licm_loop_pressure(work, loop, preheader, at + 1);
+                }
+            }
+            else if (held && options.vectors && !options.whole)
             {
                 ir_licm_loop_vectors(work, loop, preheader, at + 1, holders);
             }
@@ -667,28 +836,20 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
     const uint64_t sm = scratch->length;
     IrLicmWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+    // The natural loops come with the preparation's dominator tree, from one analysis (#2719). A function past the loop
+    // analysis' limits is refused (IR_ERROR_UNSUPPORTED), and goes on as it was.
+    work.ir.dominator_outputs = BUSTER_DOMINATOR_LOOPS;
     if (output != scratch)
     {
         check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
     }
     if (check.error == IR_OK)
     {
-        const DominatorCfg cfg = {
-            .block_count = work.ir.cfg.block_count,
-            .edge_count = work.ir.cfg.edge_count,
-            .entry = function->block_count == 0 ? BUSTER_DOMINATOR_NONE : 0,
-            .successor_offsets = work.ir.cfg.successor_offsets,
-            .successors = work.ir.cfg.successors,
-            .predecessor_offsets = work.ir.cfg.predecessor_offsets,
-            .predecessors = work.ir.cfg.predecessors,
-        };
-        DominatorOptions dom = dominators_options();
-        dom.outputs = BUSTER_DOMINATOR_LOOPS;
-        const DominatorStatus status = dominators_analyze(scratch, output, &cfg, dom, &work.loops);
-        check.error = status == DOMINATOR_OK ? IR_OK : status == DOMINATOR_NO_MEMORY ? IR_ERROR_MEMORY : IR_ERROR_DOMINANCE;
+        work.loops = work.ir.dominators;
     }
-    // IrLicmOptions.vectors: a function without loops moves nothing, and isn't classified.
-    const bool looped = check.error == IR_OK && (!options.vectors || work.loops.loop_count != 0);
+    // IrLicmOptions.vectors and .pressure: a function without loops moves nothing, and isn't classified.
+    const bool restricted = options.vectors || options.pressure;
+    const bool looped = check.error == IR_OK && (!restricted || work.loops.loop_count != 0);
     if (looped)
     {
         bool ok = true;
@@ -698,6 +859,8 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
         work.safe = ir_allocate(scratch, n, 1, &ok);
         work.tainted = ir_allocate(scratch, n, 1, &ok);
         work.candidate = ir_allocate(scratch, n, 1, &ok);
+        work.free_kinds = options.pressure && !options.vectors ? ir_allocate(scratch, n, 1, &ok) : NULL;
+        work.counted = options.pressure && !options.vectors ? ir_allocate(scratch, n, 4, &ok) : NULL;
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
     if (looped && check.error == IR_OK)
@@ -705,8 +868,8 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
         ir_licm_classify(&work);
         check.error = ir_licm_analyze(&work, scratch, options);
     }
-    // IrLicmOptions.vectors: a function where nothing moves stays the caller's, unwritten.
-    const bool rewritten = check.error == IR_OK && (!options.vectors || work.moves != 0);
+    // IrLicmOptions.vectors and .pressure: a function where nothing moves stays the caller's, unwritten.
+    const bool rewritten = check.error == IR_OK && (!restricted || work.moves != 0);
     IrFunction view = { 0 };
     if (rewritten)
     {

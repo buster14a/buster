@@ -135,6 +135,22 @@ per-loop/whole-function LICM oracle, scalar neutrality and nested loops;
 `test-checker-driver` checks the default and `-vectors` reports and native
 output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
 
+## Pressure-aware LICM and value numbering (#2719)
+
+`IrLicmOptions.pressure` (Tier 1's `+hoist` item, off by default, in functions
+with a loop and no vector or mask value) moves only what pays for the register it
+holds through the loop: nothing out of a loop that holds a call, free values
+(constants, addresses, casts of no bits) only as operands of a costly value
+that moves, no truth value, and at most a budget of costly general-register
+values. `IrGvnOptions.pressure` (`+numbering`, off by default, on the promoted
+function) never merges a free value and merges a truth value only within its
+block. `test-ir-optimize`'s `licm-pressure`, `licm-pressure-call`,
+`licm-pressure-budget` and `gvn-pressure` pairs and `test-ir-licm`'s budget
+on random invariant chains check them; `test-checker-driver`'s passes fixture
+checks that `+hoist` and `+numbering` reach their passes. The rules and their
+measurements are in [the loop motion guide](../../docs/ir-loop-motion.md#the-pressure-policy-2719)
+and [the value numbering guide](../../docs/ir-value-numbering.md#the-pressure-policy-2719).
+
 ## Loop unrolling (#2755)
 
 `ir_optimize_unroll.c` is the unroller `--tier1-passes=+unroll` runs after

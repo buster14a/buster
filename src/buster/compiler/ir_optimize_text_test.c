@@ -26,6 +26,9 @@ typedef enum IrOptimizeTextPass
     IR_OPTIMIZE_TEXT_UNROLL,
     // SROA with #3311's widening of a slot of mixed widths into its eightbytes (and `flagged`, which it needs).
     IR_OPTIMIZE_TEXT_SROA_WIDEN,
+    // LICM and GVN under #2719's pressure policy (IrLicmOptions.pressure, IrGvnOptions.pressure).
+    IR_OPTIMIZE_TEXT_LICM_PRESSURE,
+    IR_OPTIMIZE_TEXT_GVN_PRESSURE,
 } IrOptimizeTextPass;
 
 typedef struct IrOptimizeTextFixture IrOptimizeTextFixture;
@@ -60,6 +63,13 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "memory-symbols", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "unroll-loops", .pass = IR_OPTIMIZE_TEXT_UNROLL, .effects = true },
     { .name = "sroa-widen", .pass = IR_OPTIMIZE_TEXT_SROA_WIDEN, .effects = false },
+    // #2719: free values stay at their users unless a moving value reads them, a truth value stays, a costly value
+    // moves; a loop that holds a call moves nothing; a loop whose live values fill the budget moves nothing.
+    { .name = "licm-pressure", .pass = IR_OPTIMIZE_TEXT_LICM_PRESSURE, .effects = true },
+    { .name = "licm-pressure-call", .pass = IR_OPTIMIZE_TEXT_LICM_PRESSURE, .effects = true },
+    { .name = "licm-pressure-budget", .pass = IR_OPTIMIZE_TEXT_LICM_PRESSURE, .effects = true },
+    // #2719: a free value is never merged, a truth value only within its block, a costly one across blocks.
+    { .name = "gvn-pressure", .pass = IR_OPTIMIZE_TEXT_GVN_PRESSURE, .effects = true },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
@@ -139,19 +149,21 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     IrCheck check;
     IrFunction result = { 0 };
     uint64_t changed = 0;
-    if (fixture->pass == IR_OPTIMIZE_TEXT_GVN)
+    if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
     {
         IrGvnOptions options = ir_gvn_options();
         options.scalar = scalar;
+        options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE;
         IrGvnResult pass = { 0 };
         check = ir_optimize_gvn(input, output, scratch, options, &pass);
         result = pass.function;
         changed = pass.removed;
     }
-    else if (fixture->pass == IR_OPTIMIZE_TEXT_LICM)
+    else if (fixture->pass == IR_OPTIMIZE_TEXT_LICM || fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
     {
         IrLicmOptions options = ir_licm_options();
         options.scalar = scalar;
+        options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE;
         IrLicmResult pass = { 0 };
         check = ir_optimize_licm(input, output, scratch, options, &pass);
         result = pass.function;
@@ -321,7 +333,7 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
             uint64_t scalar_change = 0;
             const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, &scalar, &scalar_change);
             ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
-            if (fixture->pass == IR_OPTIMIZE_TEXT_GVN)
+            if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
             {
                 // GVN's scalar twin is the available-expression oracle: it may find fewer congruences than the vector
                 // partition refinement, and always finds no more of them.

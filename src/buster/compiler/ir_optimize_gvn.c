@@ -29,6 +29,28 @@ struct IrGvnOptions
     // tables vector code shares, without the general registers' longer live ranges (#2719). The congruences are
     // computed as without it; every other value stays its own, a forwarded copy included.
     bool vectors;
+    // Apply only the congruences that pay for the live range they make (#2719, for promoted SSA): never a free value's
+    // (ir_gvn_free: a constant, an address, a cast), which selection folds into each user or recomputes at no
+    // cost, and whose merged copy would hold a register across blocks; and a truth value's only within its block, since a
+    // branch tests a comparison's flags where a merged one takes a register and a setcc. The congruences are computed as
+    // without it. A function where nothing merges is returned as it was given: *result's function is the input's, and
+    // nothing is written to the output.
+    bool pressure;
+};
+
+// IrGvnOptions.pressure's free values by operation: each copy costs nothing at its user.
+static const uint8_t ir_gvn_free[BUSTER_IR_OP_TABLE] = {
+    [IR_CONST] = 1,
+    [IR_SYMBOL_ADDR] = 1,
+    [IR_STACK_ADDR] = 1,
+    [IR_ADDRESS] = 1,
+    [IR_INTTOPTR] = 1,
+    [IR_PTRTOINT] = 1,
+    [IR_BITCAST] = 1,
+    [IR_COPY] = 1,
+    [IR_TRUNC] = 1,
+    [IR_ZEXT] = 1,
+    [IR_SEXT] = 1,
 };
 
 typedef struct IrGvnResult IrGvnResult;
@@ -82,6 +104,9 @@ struct IrGvnWork
     uint8_t* awaited;
     uint32_t probes;
     IrGvnResult statistics;
+    // IrGvnOptions.pressure, which ir_gvn_available applies, and the congruences it applied.
+    bool pressure;
+    uint32_t merged;
 };
 
 static __attribute__((unused)) IrGvnOptions ir_gvn_options(void)
@@ -832,6 +857,12 @@ static IrError ir_gvn_available(IrGvnWork* work, Arena* scratch, bool scalar)
                         {
                             match = previous[match];
                         }
+                        // IrGvnOptions.pressure: a free value stays its own, and a truth value too where its class's
+                        // representative is another block's. It is the representative of what it dominates instead.
+                        const bool refused = work->pressure && match != BUSTER_IR_NONE &&
+                                             (ir_gvn_free[f->op[i]] != 0 || (f->type[i] == IR_I1 && work->ir.cfg.instruction_blocks[match] != frame->block));
+                        match = refused ? BUSTER_IR_NONE : match;
+                        work->merged += match != BUSTER_IR_NONE;
                         if (match != BUSTER_IR_NONE)
                         {
                             work->alias[i] = match;
@@ -1048,6 +1079,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
         work.tainted = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
         work.awaited = ir_allocate(scratch, n, sizeof(uint8_t), &ok);
         work.probes = options.probes;
+        work.pressure = options.pressure;
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
     }
     if (check.error == IR_OK)
@@ -1075,12 +1107,14 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
             ir_gvn_keep_vectors(&work, options.scalar);
         }
     }
+    // IrGvnOptions.pressure: a function where nothing merges stays the caller's, unwritten.
+    const bool rewritten = check.error == IR_OK && (!options.pressure || work.merged != 0);
     IrFunction view = { 0 };
-    if (check.error == IR_OK)
+    if (rewritten)
     {
         check.error = ir_gvn_alias_view(&work, scratch, &view);
     }
-    if (check.error == IR_OK)
+    if (rewritten && check.error == IR_OK)
     {
         work.ir.function = &view;
         for (uint32_t block = 0; block < function->block_count; block += 1)
@@ -1101,12 +1135,13 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
         rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
-    if (check.error == IR_OK)
+    if (rewritten && check.error == IR_OK)
     {
         check = ir_optimize_verify_result(&work.statistics.function, output, scratch);
     }
     if (check.error == IR_OK)
     {
+        work.statistics.function = rewritten ? work.statistics.function : *function;
         work.statistics.removed = function->instruction_count - work.statistics.function.instruction_count;
         work.statistics.scratch_bytes = scratch->length - scratch_mark;
         *result = work.statistics;

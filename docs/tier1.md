@@ -181,16 +181,20 @@ LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
 unrolling](tier1-loop-unrolling.md)), `tables` (#3298's switches of
 constants as loads of their jump tables' values, [the optimization
 guide](ir-optimization.md#switches-of-constants-3298)), `storemotion` (#3309's
-[loop store motion](tier1-store-motion.md), before promotion), `gvn` (as
-`--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or `all`. The
-default is SCCP, dead-code removal, CFG cleanup, its merges, the inlining,
-`vectors` and `tables`. The restricted
-value numbering runs before promotion; LICM runs after if-conversion, before
-the optimizer, which cleans up after it, then the loop vectorizer, then the
-unroller. Explicit `+gvn` or `+licm` runs that pass on every value instead of
-its restricted counterpart. A function that value numbering, LICM, SROA or the
-loop vectorizer refuses goes on as it was, and so does one past the unroller's
-loop analysis.
+[loop store motion](tier1-store-motion.md), before promotion), `hoist`
+(#2719's LICM under its pressure policy, in a function that has a loop and no
+vector or mask value: [the loop motion guide](ir-loop-motion.md#the-pressure-policy-2719)),
+`numbering` (#2719's value numbering on the promoted function under the same
+policy: [the value numbering guide](ir-value-numbering.md#the-pressure-policy-2719)),
+`gvn` (as `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or
+`all`. The default is SCCP, dead-code removal, CFG cleanup, its merges, the
+inlining, `vectors` and `tables`. The restricted
+value numbering runs before promotion, `numbering` after the switches of
+constants; LICM runs after it, before the optimizer, which cleans up after it,
+then the loop vectorizer, then the unroller. Explicit `+gvn` or `+licm` runs
+that pass on every value instead of its restricted counterparts. A function
+that value numbering, LICM, SROA or the loop vectorizer refuses goes on as it
+was, and so does one past the unroller's loop analysis.
 The summaries the unit's inlining builds run the same passes but the
 unroller, which their callers run on what they expand (a summary's size is
 the loop's own, and an expanded loop is unrolled once); a candidate whose

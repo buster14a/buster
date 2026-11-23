@@ -512,8 +512,10 @@ struct CheckEmitGrowth
 // only where an option runs the pass: step 7 #866's solver's (--tier1-gvn), 8 SROA's, 9 LICM's, 10 the loop vectorizer's
 // and 11 the unroller's (--tier1-passes=). #2781's passes on vector and mask values take steps 7 and 9 too, reserved at
 // the lane's first function that has such values (check_tier1_lane_reserve), so that a unit without any maps neither;
-// and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol.
-#define BUSTER_CHECK_TIER1_STEPS 13
+// and step 12 is loop store motion's (#3309), reserved at the lane's first function that names a listed symbol. LICM's
+// pressure policy (--tier1-passes=+hoist, #2719) takes step 9 too, reserved at the lane's first function that has a loop,
+// and step 13 is the value numbering's on promoted SSA under the same policy (--tier1-passes=+numbering).
+#define BUSTER_CHECK_TIER1_STEPS 14
 #define BUSTER_CHECK_TIER1_STEPS_ALWAYS 7
 // --tier1-schedule's variants (#172): none, each block's records after allocation (c_check_tier1_schedule.c), or each
 // block's IR instructions before selection and allocation (tier1_schedule_ir.c).
@@ -528,7 +530,7 @@ struct CheckEmitGrowth
 // value numbering with memory's maps to its BUSTER_IR_OPTIMIZE_MEMORY. #866's solver and the inlining keep their own
 // options (--tier1-gvn, --tier1-no-inline), which the option's list sets too. VECTORS (#2781, on by default) is the
 // solver and LICM on vector and mask values alone, in the functions that have such values and where the option doesn't
-// run the pass on every value.
+// run the pass on every value; HOIST (#2719, off by default) is LICM under its pressure policy in the other functions.
 #define BUSTER_CHECK_TIER1_PASS_SCCP 1u
 #define BUSTER_CHECK_TIER1_PASS_DCE 2u
 #define BUSTER_CHECK_TIER1_PASS_CFG 4u
@@ -546,6 +548,15 @@ struct CheckEmitGrowth
 // #3298's switches whose arms only give constants, as loads of their jump tables' values (ir_switch_table.c), on by
 // default.
 #define BUSTER_CHECK_TIER1_PASS_TABLES 4096u
+// LICM under #2719's pressure policy (ir_optimize_licm.c's IrLicmOptions.pressure), off by default: in a function without
+// vector or mask values (VECTORS' policy takes those) that has a loop, where LICM doesn't run on every value. On the 9700X
+// it takes 6.2% of the loop kernels' cycles, and none of speedtest1's or Lua's beyond code placement's, for 3.4% of
+// sqlite3.c's --tier1 compile (docs/ir-loop-motion.md's "The pressure policy").
+#define BUSTER_CHECK_TIER1_PASS_HOIST 16384u
+// #866's solver under #2719's pressure policy (ir_optimize_gvn.c's IrGvnOptions.pressure), on promoted SSA after
+// if-conversion and before LICM, off by default: on the 9700X it takes none of speedtest1's or Lua's cycles beyond code
+// placement's, for 16.2% of sqlite3.c's --tier1 compile.
+#define BUSTER_CHECK_TIER1_PASS_NUMBERING 32768u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT                                                                                                                              \
     (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \
      BUSTER_CHECK_TIER1_PASS_TABLES)
@@ -555,7 +566,7 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_PASS_STORE_MOTION 8192u
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
-     BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION)
+     BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION | BUSTER_CHECK_TIER1_PASS_HOIST | BUSTER_CHECK_TIER1_PASS_NUMBERING)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
 // IrVectorizeRefusal.
