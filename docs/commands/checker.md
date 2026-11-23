@@ -84,6 +84,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
+  --float-precision-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
@@ -148,6 +149,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   typedef and qualifier spelling, and valid scalar/record/atomic-lvalue controls. The
   atomic conditional controls also compile, link and execute selections of integer,
   floating, pointer and aligned values through Clang and all three Buster routes.
+  `--float-precision-only` runs `c_check_float_precision_driver_test.c` (#1875):
+  `-Wimplicit-float-conversion`'s and `-Wliteral-range`'s floating comparisons
+  against clang's complete output, with their controls and policies
+  ([the c-checker section](../c-checker.md#floating-precision-and-floating-comparisons-1875)).
   `--unused-comparison-only` runs `c_check_unused_comparison_driver_test.c`
   and the original `tests/driver/unused_comparison*.c` sources (#2906).
   It compares complete Clang diagnostics for discarded comparisons, eligible
@@ -911,6 +916,14 @@ for a condition on an lvalue at an absolute address (#3028).
 `initializer-comma` is: `buster-fixtures v1 checker-warnings`, then FILE,
 WARNINGS, ERRORS, NOTES and NAME a row), each unit's whole output and status
 compared with clang's in every policy, mode, lane request and reader.
+
+`tests/checker/designator-recovery` (#1842) is a warning catalog of
+`test-checker-driver`'s, beside `initializer-comma` (its parts' unused-result
+section and `--semantic-recovery-only`), in the same format: the
+lists after a designator that names no member, each unit's whole output and
+status compared with clang's in every policy, mode, lane request and reader
+([the checker guide](../c-checker.md)'s "A designator that names no member
+(#1842)").
 
 `tests/checker/cfg-pruning` (#2990) is one too: conditions clang's CFG builder
 decides by its heuristics (`x * 0`, `x | 1`, `(x & 8) == 4`, `x == 1 && x == 2`,

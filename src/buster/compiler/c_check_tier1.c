@@ -185,7 +185,7 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
 }
 
 _Static_assert(BUSTER_CHECK_TIER1_VECTORIZE_COUNTS == 7 + IR_VECTORIZE_REFUSALS, "the report keeps every vectorizer count");
-_Static_assert(BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS == IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_COUNT + 3, "the report keeps every store motion count");
+_Static_assert(BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS == IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_COUNT + 3 + IR_STORE_MOTION_SINK_COUNT + 1, "the report keeps every store motion count");
 _Static_assert(BUSTER_CHECK_TIER1_PASS_SCCP == BUSTER_IR_OPTIMIZE_SCCP && BUSTER_CHECK_TIER1_PASS_DCE == BUSTER_IR_OPTIMIZE_DCE &&
                    BUSTER_CHECK_TIER1_PASS_CFG == BUSTER_IR_OPTIMIZE_CFG && BUSTER_CHECK_TIER1_PASS_MERGE == BUSTER_IR_OPTIMIZE_MERGE,
                "--tier1-passes= passes the optimizer's own bits");
@@ -563,6 +563,11 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         passes->store_motion[at++] = moved ? motion.loads : 0;
         passes->store_motion[at++] = moved ? motion.stores : 0;
         passes->store_motion[at++] = moved ? motion.added : 0;
+        for (uint32_t k = 0; k < IR_STORE_MOTION_SINK_COUNT; k += 1)
+        {
+            passes->store_motion[at++] = moved ? motion.sinks[k] : 0;
+        }
+        passes->store_motion[at++] = moved ? motion.write_backs : 0;
         // An expansion promotion refuses or finds past its limits keeps the function's calls: the lowering is promoted
         // instead, so that inlining is never a refusal. Any other error is the expansion's.
         passes->unexpanded = input->unexpanded != NULL && (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT);
@@ -854,14 +859,24 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     const IrSwitchTable* tables = stage == CHECK_TIER1_COMPILED && (on & BUSTER_CHECK_TIER1_PASS_TABLES) != 0 ?
                                       check_tier1_switch_tables(lane->lowered, lane->emitting_body, function, scratch, &table_count, &table_first) :
                                       NULL;
-    const bool own = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
-                     check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
+    const bool ready = stage == CHECK_TIER1_COMPILED && member && !function->calls_returns_twice && !sources && !gvn && !sroa && fault == NULL &&
+                       check_tier1_inline_own(lane, (uint32_t)body, scalar, certify, &passes, &inlined_calls);
     // A candidate whose callers should expand every call of it makes no code now (#2541 step 2, check_tier1_inline_held):
     // it waits for the emission's last pass, which makes it where some emitted code still refers to it.
-    if (own && check_tier1_inline_held(lane, (uint32_t)body, target))
+    if (ready && check_tier1_inline_held(lane, (uint32_t)body, target))
     {
         outcome = (CheckTier1Outcome){ .held = true };
         stage = CHECK_TIER1_STAGE_COUNT;
+    }
+    // But one that takes, returns or passes a by-value aggregate (#3311: its own ABI records, or its calls' aggregates'
+    // metadata) makes its code by the whole pipeline: its summary keeps those aggregates for its callers' expansions, and
+    // its own code passes them as scalars (ir_sroa_scalarize, ir_sroa_scalarize_calls), which only the own pipeline runs.
+    const bool aggregates = ir_typed_own_records(function) || function->argument_sizes != NULL || function->call_result_objects != NULL;
+    const bool own = ready && !aggregates;
+    if (ready && !own)
+    {
+        passes = (CheckTier1Passes){ 0 };
+        inlined_calls = 0;
     }
     if (stage == CHECK_TIER1_COMPILED && !own)
     {
@@ -892,7 +907,22 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     // #3311: a function that takes or returns an aggregate by value (its own ABI records) that no expansion took: SROA
     // with its widening, in steps[5] (the expansion's SROA's, unused without one), so that its register-class
     // aggregates' eightbytes stay out of memory. A body it refuses goes on as it was; any other error is the body's.
-    if (stage == CHECK_TIER1_COMPILED && !own && !expanding && !sroa && lowered.parameter_passed != 0)
+    // Its calls' register-class aggregate arguments as their parts' scalars first (#3311, ir_sroa_scalarize_calls), so
+    // that the objects they passed no longer escape and SROA takes them, even where the expansion ran it already.
+    uint32_t scalar_arguments = 0;
+    if (stage == CHECK_TIER1_COMPILED && !own && lowered.abi_call_count != 0)
+    {
+        IrFunction calls = { 0 };
+        const IrError error = ir_sroa_scalarize_calls(&lowered, &lane->steps[5], scratch, &calls, &scalar_arguments);
+        outcome = check_tier1_step(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_IR, error, BUSTER_IR_NONE, 0, NULL);
+        stage = outcome.stage;
+        if (error == IR_OK && scalar_arguments != 0)
+        {
+            lowered = calls;
+            lowered_verified = false;
+        }
+    }
+    if (stage == CHECK_TIER1_COMPILED && !own && !sroa && ((!expanding && lowered.parameter_passed != 0) || scalar_arguments != 0))
     {
         IrSroaOptions options = ir_sroa_options();
         options.scalar = scalar;
@@ -1421,6 +1451,13 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             fprintf(stream, "\tkey.%s=%" PRIu64, ir_store_motion_key_names[k], report->store_motion[IR_STORE_MOTION_OUTCOME_COUNT + k]);
         }
         const uint32_t tail = IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_COUNT;
-        fprintf(stream, "\tloads=%" PRIu64 "\tstores=%" PRIu64 "\tadded=%" PRIu64 "\n", report->store_motion[tail], report->store_motion[tail + 1], report->store_motion[tail + 2]);
+        fprintf(stream, "\tloads=%" PRIu64 "\tstores=%" PRIu64 "\tadded=%" PRIu64, report->store_motion[tail], report->store_motion[tail + 1], report->store_motion[tail + 2]);
+        // #3346: the moved keys whose stores sank, those whose stores stayed by why, and the sunk keys' write-backs.
+        fprintf(stream, "\tsunk=%" PRIu64, report->store_motion[tail + 3 + IR_STORE_MOTION_SINK_SUNK]);
+        for (uint32_t k = 1; k < IR_STORE_MOTION_SINK_COUNT; k += 1)
+        {
+            fprintf(stream, "\tsink.%s=%" PRIu64, ir_store_motion_sink_names[k], report->store_motion[tail + 3 + k]);
+        }
+        fprintf(stream, "\twrite-backs=%" PRIu64 "\n", report->store_motion[tail + 3 + IR_STORE_MOTION_SINK_COUNT]);
     }
 }

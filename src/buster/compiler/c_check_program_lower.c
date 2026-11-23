@@ -22384,6 +22384,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         function->vectors = writer->vectors;
         function->masks = writer->masks;
+        // A target with AVX (#3335): Tier 0's legacy SSE records become their VEX twins, and a vzeroupper clears a dirty upper
+        // state on the way out.
+        function->avx = (writer->target.features & BUSTER_X86_FEATURE(AVX)) != 0;
         if (writer->vectors)
         {
             const uint64_t evex = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512VL);

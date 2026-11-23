@@ -7,10 +7,10 @@
 //   - a unit of every piece the sink prints (calls to a local and an undefined function, RIP-relative data with
 //     addends, a GOT load, absolute immediates and displacements, a rel32 branch, branches to the code's end, a symbol
 //     in a function's middle, data with every data fixup it spells, a string pool with quotes and escapes, runs of
-//     zeros, zero-fill data, weak, hidden and local symbols, a name GNU as reads only quoted), and the text of a small
-//     unit compared whole with its expected text;
-//   - the refusals, each by its reason (thread-local storage, section groups, a common symbol, code without records,
-//     two symbols of one name, a name of the sink's prefix, a relocation in a record GNU as encodes otherwise: an MPX
+//     zeros, zero-fill data, a common definition, weak, hidden and local symbols, a name GNU as reads only quoted),
+//     and the text of a small unit compared whole with its expected text;
+//   - the refusals, each by its reason (thread-local storage, section groups, unsupported common bindings and aliases,
+//     code without records, two symbols of one name, a name of the sink's prefix, a relocation GNU as encodes otherwise: an MPX
 //     bnd call), and the views that contradict themselves (records that
 //     aren't their atom's bytes, a symbol inside an instruction, a branch without a target);
 //   - the guarded tails: an output arena too small for the text, at every length short of it, and a scratch arena too
@@ -255,7 +255,7 @@ static void assembly_fixture_program(AssemblyTest* test, AssemblyFixture* fixtur
     const uint32_t counter_bytes[2] = { 7, 0 };
     const AtomId data = assembly_fixture_data(test, fixture, BUSTER_LINK_CLASS_DATA, 3, counter_bytes, sizeof(counter_bytes));
     assembly_fixture_define(fixture, "counter", global_object, data, 0, sizeof(counter_bytes));
-    uint8_t pointers[40] = { 0 };
+    uint8_t pointers[48] = { 0 };
     pointers[32] = 0x5a;
     const AtomId pointer_atom = assembly_fixture_data(test, fixture, BUSTER_LINK_CLASS_DATA, 3, pointers, sizeof(pointers));
     assembly_fixture_define(fixture, "pointers", local_object, pointer_atom, 0, sizeof(pointers));
@@ -264,6 +264,7 @@ static void assembly_fixture_program(AssemblyTest* test, AssemblyFixture* fixtur
     assembly_fixture_fixup(fixture, pointer_atom, 16, BUSTER_LINK_FIXUP_PC32, "helper", 4);
     assembly_fixture_fixup(fixture, pointer_atom, 20, BUSTER_LINK_FIXUP_ABS32, "counter", 0);
     assembly_fixture_fixup(fixture, pointer_atom, 24, BUSTER_LINK_FIXUP_ABS64, "weak_undefined", -8);
+    assembly_fixture_fixup(fixture, pointer_atom, 40, BUSTER_LINK_FIXUP_ABS64, "common buffer", 3);
     uint8_t table[64] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 };
     table[63] = 0xff;
     const AtomId table_atom = assembly_fixture_data(test, fixture, BUSTER_LINK_CLASS_RODATA, 4, table, sizeof(table));
@@ -274,6 +275,8 @@ static void assembly_fixture_program(AssemblyTest* test, AssemblyFixture* fixtur
     assembly_fixture_define(fixture, "message", BUSTER_LINK_SYMBOL_LOCAL, string_atom, 0, sizeof(message));
     const AtomId buffer_atom = assembly_fixture_data(test, fixture, BUSTER_LINK_CLASS_BSS, 5, 0, 96);
     assembly_fixture_define(fixture, "buffer", local_object, buffer_atom, 0, 96);
+    const AtomId common_atom = assembly_fixture_data(test, fixture, BUSTER_LINK_CLASS_BSS, 6, 0, 19);
+    assembly_fixture_define(fixture, "common buffer", BUSTER_LINK_SYMBOL_COMMON | BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_HIDDEN, common_atom, 0, 19);
     const uint64_t answer = 42;
     const AtomId relro = assembly_fixture_data(test, fixture, BUSTER_LINK_CLASS_DATA_RELRO, 3, &answer, sizeof(answer));
     assembly_fixture_define(fixture, "hidden answer", global_object | BUSTER_LINK_SYMBOL_HIDDEN, relro, 0, sizeof(answer));
@@ -473,6 +476,8 @@ static void assembly_test_program(AssemblyTest* test)
         "\t.string \"hello \\\"world\\\"\\\\\\012\\011\\001\\377\"\n",
         "\t.zero 23\n\t.byte 0xff\n",
         "\t.zero 96\n",
+        "\t.hidden \"common buffer\"\n\t.comm \"common buffer\", 19, 64\n",
+        "\t.quad \"common buffer\"+3\n",
         "\t.globl \"hidden answer\"\n\t.hidden \"hidden answer\"\n",
         "\t.weak weak_definition\n",
         "\t.weak weak_undefined\n",
@@ -587,7 +592,8 @@ enum
 {
     ASSEMBLY_TEST_TLS,
     ASSEMBLY_TEST_GROUP,
-    ASSEMBLY_TEST_COMMON,
+    ASSEMBLY_TEST_WEAK_COMMON,
+    ASSEMBLY_TEST_ALIASED_COMMON,
     ASSEMBLY_TEST_UNCODED,
     ASSEMBLY_TEST_DUPLICATE,
     ASSEMBLY_TEST_PREFIX,
@@ -607,8 +613,18 @@ static void assembly_test_refusal(AssemblyTest* test, uint32_t change, AssemblyE
     const AtomId function = assembly_fixture_function(test, &fixture, "f", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, 4, "mov eax, 1\nadd eax, 2\nret\n");
     const uint32_t word = 5;
     const AtomId data = assembly_fixture_data(test, &fixture, change == ASSEMBLY_TEST_TLS ? BUSTER_LINK_CLASS_TDATA : BUSTER_LINK_CLASS_DATA, 2, &word, sizeof(word));
-    const uint8_t type = change == ASSEMBLY_TEST_COMMON ? BUSTER_LINK_SYMBOL_COMMON : change == ASSEMBLY_TEST_TLS ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
+    const uint8_t type = change == ASSEMBLY_TEST_TLS ? BUSTER_LINK_SYMBOL_TLS : BUSTER_LINK_SYMBOL_OBJECT;
     assembly_fixture_define(&fixture, "v", BUSTER_LINK_SYMBOL_GLOBAL | type, data, 0, sizeof(word));
+    if (change == ASSEMBLY_TEST_WEAK_COMMON || change == ASSEMBLY_TEST_ALIASED_COMMON)
+    {
+        const AtomId common_atom = assembly_fixture_data(test, &fixture, BUSTER_LINK_CLASS_BSS, 2, 0, sizeof(word));
+        const uint8_t binding = change == ASSEMBLY_TEST_WEAK_COMMON ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL;
+        assembly_fixture_define(&fixture, "common", BUSTER_LINK_SYMBOL_COMMON | binding, common_atom, 0, sizeof(word));
+        if (change == ASSEMBLY_TEST_ALIASED_COMMON)
+        {
+            assembly_fixture_define(&fixture, "alias", BUSTER_LINK_SYMBOL_OBJECT | BUSTER_LINK_SYMBOL_GLOBAL, common_atom, 0, sizeof(word));
+        }
+    }
     uint32_t group_atoms[BUSTER_ASSEMBLY_TEST_ATOMS] = { 0 };
     const LinkGroup groups[2] = { { 0 }, { .unit = 0, .flags = BUSTER_LINK_GROUP_COMDAT } };
     if (change == ASSEMBLY_TEST_GROUP)
@@ -1206,7 +1222,8 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_program(&test);
         assembly_test_refusal(&test, ASSEMBLY_TEST_TLS, ASSEMBLY_UNSUPPORTED, "thread-local storage");
         assembly_test_refusal(&test, ASSEMBLY_TEST_GROUP, ASSEMBLY_UNSUPPORTED, "section groups");
-        assembly_test_refusal(&test, ASSEMBLY_TEST_COMMON, ASSEMBLY_UNSUPPORTED, "common symbols");
+        assembly_test_refusal(&test, ASSEMBLY_TEST_WEAK_COMMON, ASSEMBLY_UNSUPPORTED, "a non-global common definition");
+        assembly_test_refusal(&test, ASSEMBLY_TEST_ALIASED_COMMON, ASSEMBLY_UNSUPPORTED, "sharing an atom");
         assembly_test_refusal(&test, ASSEMBLY_TEST_UNCODED, ASSEMBLY_UNSUPPORTED, "without instruction records");
         assembly_test_refusal(&test, ASSEMBLY_TEST_DUPLICATE, ASSEMBLY_UNSUPPORTED, "two symbols of the same name");
         assembly_test_refusal(&test, ASSEMBLY_TEST_PREFIX, ASSEMBLY_UNSUPPORTED, BUSTER_ASSEMBLY_PREFIX);

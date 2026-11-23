@@ -174,6 +174,14 @@ struct CheckDebugValues
     uint32_t event_count;
     uint32_t* root_ends;
     uint32_t root_count;
+    // The lists' memo (check_debug_value_range_clipped, #2542): the measuring pass writes each list it computes into
+    // `memo`, in `memo_arena` (its length, four bytes, then its bytes), and the writing pass copies them in the same
+    // order from `memo_read` on, rather than walking the spans again. `memo_failed` where there was no room.
+    Arena* memo_arena;
+    uint8_t* memo;
+    uint64_t memo_size;
+    uint64_t memo_read;
+    bool memo_failed;
 };
 
 static String8 check_debug_name(const CheckDebugValues* values, uint32_t identifier)
@@ -691,20 +699,54 @@ static void check_debug_value_range_clipped(CheckDebugValues* values, uint32_t b
 {
     const CheckDebugBody* source = values->rows->values + body;
     DebugWriter* out = expression != NULL ? &values->locations : &values->ranges;
-    if (values->span_breaks != NULL && values->span_body != body)
+    if (out->bytes == NULL)
     {
-        values->span_body = body;
-        values->span_leaves = check_debug_value_index(source->spans, source->span_count, values->span_breaks, values->span_segments, values->span_tree,
-                                                      &values->span_segment_count);
-    }
-    if (values->span_breaks != NULL)
-    {
-        check_debug_value_range_indexed_clipped(source, values->span_breaks, values->span_segments, values->span_segment_count, values->span_tree, values->span_leaves,
-                                                out, values->address_indices[body], first, last, expression, bytes, clip);
+        // The measuring pass: the list into the memo, at most a pair per span and one more, each an entry's code, two
+        // offsets and the expression with its length, and the list's base and end.
+        const uint64_t mark = values->memo_arena->length;
+        const uint64_t bound = 4 + 7 + ((uint64_t)source->span_count + 1) * (16 + (uint64_t)bytes);
+        uint8_t* record = arena_push(values->memo_arena, bound, 1);
+        values->memo = values->memo == NULL ? record : values->memo;
+        const bool room = record != NULL && record == values->memo + values->memo_size;
+        values->memo_failed = values->memo_failed || !room;
+        DebugWriter list = { .bytes = room ? record + 4 : NULL };
+        if (values->span_breaks != NULL && values->span_body != body)
+        {
+            values->span_body = body;
+            values->span_leaves = check_debug_value_index(source->spans, source->span_count, values->span_breaks, values->span_segments, values->span_tree,
+                                                          &values->span_segment_count);
+        }
+        if (values->span_breaks != NULL)
+        {
+            check_debug_value_range_indexed_clipped(source, values->span_breaks, values->span_segments, values->span_segment_count, values->span_tree,
+                                                    values->span_leaves, &list, values->address_indices[body], first, last, expression, bytes, clip);
+        }
+        else
+        {
+            check_debug_value_range_scan_clipped(source, &list, values->address_indices[body], first, last, expression, bytes, clip);
+        }
+        if (room)
+        {
+            const uint32_t length = (uint32_t)list.size;
+            memcpy(record, &length, sizeof(length));
+            arena_pop_to(values->memo_arena, mark + sizeof(length) + list.size);
+            values->memo_size += sizeof(length) + list.size;
+        }
+        debug_bytes(out, NULL, list.size);
     }
     else
     {
-        check_debug_value_range_scan_clipped(source, out, values->address_indices[body], first, last, expression, bytes, clip);
+        // The writing pass: the measuring pass's list, the next in the memo.
+        uint32_t length = 0;
+        const bool held = !values->memo_failed && values->memo_read + sizeof(length) <= values->memo_size;
+        if (held)
+        {
+            memcpy(&length, values->memo + values->memo_read, sizeof(length));
+        }
+        const bool whole = held && values->memo_read + sizeof(length) + length <= values->memo_size;
+        values->memo_failed = values->memo_failed || !whole;
+        debug_bytes(out, whole ? values->memo + values->memo_read + sizeof(length) : NULL, whole ? length : 0);
+        values->memo_read += whole ? sizeof(length) + length : 0;
     }
 }
 
@@ -1521,7 +1563,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
     const TypeTable* table = program->types;
     const uint64_t room = (uint64_t)table->types.count << BUSTER_TYPE_INDEX_SHIFT;
     const uint32_t tokens = input->token_count;
-    CheckDebugValues values = { .program = program, .rows = rows, .parser = parser, .original = debug };
+    CheckDebugValues values = { .program = program, .rows = rows, .parser = parser, .original = debug, .memo_arena = scratch };
     values.type_offsets = room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, room) : NULL;
     values.types = room <= UINT32_MAX ? BUSTER_ARENA_PUSH_ARRAY(scratch, TypeId, room) : NULL;
     values.enum_definitions = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, table->types.count);
@@ -1702,7 +1744,7 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
             }
         }
         check_debug_values_write(&values);
-        valid = !values.ends_failed && values.info.size < BUSTER_DEBUG_DWARF32_LIMIT && values.ranges.size < BUSTER_DEBUG_DWARF32_LIMIT && values.locations.size < BUSTER_DEBUG_DWARF32_LIMIT;
+        valid = !values.ends_failed && !values.memo_failed && values.info.size < BUSTER_DEBUG_DWARF32_LIMIT && values.ranges.size < BUSTER_DEBUG_DWARF32_LIMIT && values.locations.size < BUSTER_DEBUG_DWARF32_LIMIT;
     }
     const uint64_t info_size = values.info.size;
     const uint64_t range_size = values.ranges.size;
@@ -1728,7 +1770,8 @@ static bool check_debug_values(CheckDebug* debug, const CheckProgram* program, c
         values.field_count = 0;
         values.address_count = 0;
         check_debug_values_write(&values);
-        valid = values.info.size == info_size && values.ranges.size == range_size && values.locations.size == location_size && values.field_count == fields && values.address_count == addresses;
+        valid = values.info.size == info_size && values.ranges.size == range_size && values.locations.size == location_size && values.field_count == fields && values.address_count == addresses &&
+                !values.memo_failed && values.memo_read == values.memo_size;
     }
     if (valid)
     {

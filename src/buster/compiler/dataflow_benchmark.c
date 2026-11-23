@@ -84,7 +84,8 @@ struct DataflowBenchmarkWorkload
     uint32_t values;
     uint32_t shape;
     // Seed 1's digest of the solved rows and sweep count, which main's scalar twin and AVX-512 solver gave alike before
-    // #2924 (buster-performance scalar-paths-removal-2924-2026-11-17, c-dataflow-gate and dataflow-2950/exp2).
+    // #2924 (buster-performance scalar-paths-removal-2924-2026-11-17, c-dataflow-gate and dataflow-2950/exp2). #2995's
+    // backward order, which a solve builds only after BUSTER_DATAFLOW_POSTORDER_SWEEPS, kept every digest and count.
     uint64_t digest;
     uint64_t iterations;
 };
@@ -433,7 +434,13 @@ static bool dataflow_benchmark_workload(const DataflowBenchmarkWorkload* workloa
     {
         iterations = dataflow_benchmark_solve(&flow);
         valid = dataflow_benchmark_equations(&flow);
-        valid = valid && (seed != 1 || (dataflow_benchmark_digest(&flow) == workload->digest && iterations == workload->iterations));
+        const bool frozen = seed != 1 || (dataflow_benchmark_digest(&flow) == workload->digest && iterations == workload->iterations);
+        if (!frozen)
+        {
+            fprintf(stderr, "dataflow benchmark %s: seed 1 solved to digest %016" PRIx64 " in %" PRIu64 " sweeps, frozen %016" PRIx64 " in %" PRIu64 "\n",
+                    workload->name, dataflow_benchmark_digest(&flow), iterations, workload->digest, workload->iterations);
+        }
+        valid = valid && frozen;
     }
 
     uint64_t repeats = 1;

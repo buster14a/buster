@@ -87,6 +87,11 @@ requirements. [Command index](README.md).
   guide](../../docs/tier1-selection.md)). `measure-mask-spills` times a mask's spill and
   reload, to memory against to a general register (`mask_spill_measure.c`, #179's
   measured choice; the 9700X job runs it, `test-mask-spills` checks its programs).
+  A function whose code names ymm0 to zmm15 gets a `vzeroupper` before its
+  calls and its returns' epilogues, and at an AVX target the legacy SSE records
+  become their VEX twins (#2830, [the Tier 1 guide](../tier1.md)'s "The upper
+  vector state"). `test-tier1-emit` runs each twin against its legacy record
+  natively, and `test-tier1-masks` checks the placement.
   `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](../../docs/tier1.md)
