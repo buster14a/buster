@@ -2288,9 +2288,13 @@ static void check_input_expressions_coded_range(CheckInputReader* reader, uint32
     // the scratch and its report, with a bit a node the graph has room for, in the output's arena.
     // (--node-bodies, BUSTER_NODE_READER_BODIES: a unit with a reason of its own to take no body has no front. Nothing of
     // the machine is made for it, and the walk acts as without the option, node_producer_unit.)
-    const bool fronts = coded && begin == 0 && stop == count &&
-                        ((reader->pp->options.node_reader & BUSTER_NODE_READER_BODIES) == 0 || reader->pp->options.node_front == 0 || node_producer_unit(reader) == 0);
-    const uint8_t fronted = fronts ? reader->pp->options.node_front : 0;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    const bool reasoned = coded && begin == 0 && stop == count && (reader->pp->options.node_reader & BUSTER_NODE_READER_BODIES) != 0 &&
+                          reader->pp->options.node_front != 0 && node_producer_unit(reader) != 0;
+#else
+    const bool reasoned = false;
+#endif
+    const uint8_t fronted = coded && begin == 0 && stop == count && !reasoned ? reader->pp->options.node_front : 0;
     NodeFront* front = fronted != 0 ? arena_push_array(reader->scratch, 1, sizeof(NodeFront), 64) : NULL;
     if (front != NULL && (fronted & BUSTER_NODE_FRONT_WARM) != 0)
     {
