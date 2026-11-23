@@ -310,25 +310,38 @@ static bool check_program_emit_makes_name(const CheckInput* input, uint32_t decl
 }
 
 // The symbols' passes over their declarations (check_program_emit_timed's names and symbols) read columns at each
-// symbol's declaration, a token anywhere in the unit's: each pass prefetches a symbol's declaration 16 symbols ahead and
-// what it reads at its declaration 8 ahead, so that the misses of several symbols are in flight at once (#3393).
-#define BUSTER_CHECK_EMIT_SYMBOL_AHEAD 8u
-static void check_program_emit_prefetch_symbol(const CheckProgram* program, const Parser* parser, uint32_t s)
+// symbol's declaration, a token anywhere in the unit's, and through them the declaration's body's sparse block and its
+// identifier's spelling: each pass prefetches a symbol's declaration 16 symbols ahead, its columns 8 ahead, and the
+// loads they lead to 4 ahead, so that several symbols' misses are in flight at once (#3393).
+#define BUSTER_CHECK_EMIT_SYMBOL_AHEAD 4u
+static void check_program_emit_prefetch_symbol(const CheckProgram* program, const Parser* parser, const InternTable* identifiers, uint32_t s)
 {
-    const uint32_t far = s + 2 * BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
+    const CheckInput* input = program->input;
+    const uint32_t far = s + 4 * BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
+    const uint32_t middle = s + 2 * BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
     const uint32_t near = s + BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
     if (far < program->symbol_count)
     {
         __builtin_prefetch(program->object_declarations + program->symbol_objects[far]);
     }
-    const uint32_t declaration = near < program->symbol_count ? program->object_declarations[program->symbol_objects[near]] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = middle < program->symbol_count ? program->object_declarations[program->symbol_objects[middle]] : BUSTER_CHECK_NONE;
     if (declaration != BUSTER_CHECK_NONE)
     {
-        const CheckInput* input = program->input;
         __builtin_prefetch(input->declaration_bits + declaration);
         __builtin_prefetch(input->declaration_kinds + declaration);
         __builtin_prefetch(parser->tokens.names + declaration);
         __builtin_prefetch(input->declaration_bodies.directory + (declaration >> BUSTER_CHECK_SPARSE_SHIFT));
+        if (input->function_flags != NULL)
+        {
+            __builtin_prefetch(input->function_flags + declaration);
+        }
+    }
+    const uint32_t close = near < program->symbol_count ? program->object_declarations[program->symbol_objects[near]] : BUSTER_CHECK_NONE;
+    if (close != BUSTER_CHECK_NONE)
+    {
+        const uint32_t block = input->declaration_bodies.directory[close >> BUSTER_CHECK_SPARSE_SHIFT] & ~BUSTER_CHECK_SPARSE_CLAIMED;
+        __builtin_prefetch(input->declaration_bodies.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT) + (close & (BUSTER_CHECK_SPARSE_TOKENS - 1)));
+        __builtin_prefetch(identifiers->spans + parser->tokens.names[close]);
     }
 }
 
@@ -5387,7 +5400,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t given_count = 0;
     for (uint32_t s = 0; valid && s < named_symbols; s += 1)
     {
-        check_program_emit_prefetch_symbol(program, parser, s);
+        check_program_emit_prefetch_symbol(program, parser, identifiers, s);
         const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
         const String8 renamed = symbol_names[s + 1];
         const bool named = declaration != BUSTER_CHECK_NONE;
@@ -5442,7 +5455,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
     {
-        check_program_emit_prefetch_symbol(program, parser, s);
+        check_program_emit_prefetch_symbol(program, parser, identifiers, s);
         const uint32_t object = program->symbol_objects[s];
         const uint32_t declaration = program->object_declarations[object];
         NameId name = 0;
