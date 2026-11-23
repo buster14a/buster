@@ -1988,11 +1988,11 @@ static __attribute__((unused)) bool tier1_emit_place_literals(const Tier1EmitRes
 // Rewrites a function's legacy SSE records as their VEX twins (x86_vex_forms, #2830), for a target that allows
 // them, but in a function with an asm body, whose records are the program's own; each rewritten record's Zen 5 case
 // again. One record for one, so that every index into the records (branches, references, origins, the frame's events
-// and the debug definitions) stays. Sixteen records a step: their forms gathered, each one's entry gathered from the
-// table by its row (its number less its segment override's rows, FS's and GS's, which every row has), the records with
-// an entry rewritten one by one. Before the code's certificate and the debug definitions, which read each twin as its
-// legacy record (x86_vex_canonical): each twin computes its legacy form's low 128 bits (test-tier1-emit runs each
-// pair natively).
+// and the debug definitions) stays. Thirty-two records a step: their forms read four records a load, each one's entry
+// from the table's window in registers (x86_vex_find: its row, its number less its segment override's rows, FS's and
+// GS's, which every row has), the records with an entry rewritten one by one. Before the code's certificate and the
+// debug definitions, which read each twin as its legacy record (x86_vex_canonical): each twin computes its legacy form's
+// low 128 bits (test-tier1-emit runs each pair natively).
 static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, Tier1SelectCode* code)
 {
     const bool avx = x86_target_form_allowed(allowed_forms, X86_FORM_VADDSS_X_X_XM32) && x86_target_form_allowed(allowed_forms, X86_FORM_VMOVQ_X_RM64);
@@ -2001,9 +2001,10 @@ static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_f
     {
         body = body || tier1_select_body_call(plan->function, node);
     }
-    for (uint32_t first = 0; avx && !body && first < code->count; first += 16)
+    const X86VexWindow window = x86_vex_window(x86_vex_forms);
+    for (uint32_t first = 0; avx && !body && first < code->count; first += 32)
     {
-        uint32_t found = x86_vex_lookup(code->records + first, code->count - first, x86_vex_forms);
+        uint32_t found = x86_vex_find(code->records + first, code->count - first, &window);
         while (found != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(found);

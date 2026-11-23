@@ -120,9 +120,10 @@ static __attribute__((unused)) X86Instruction x86_vex_record(X86Instruction reco
     return twin;
 }
 
-// The records of `records[0, count)`, at most 16, whose forms have an entry in `table` (x86_vex_forms or
-// x86_vex_legacy, one entry past the forms): their forms gathered, each one's entry gathered by its row (its number
-// less its segment override's rows, FS's and GS's, which every row has; an SS override, past them, has none).
+// The records of `records[0, count)`, at most 16, whose forms have an entry in `table` (x86_vex_legacy, one entry past
+// the forms, whose twins' rows span more than x86_vex_find's window): their forms gathered, each one's entry gathered by
+// its row (its number less its segment override's rows, FS's and GS's, which every row has; an SS override, past them,
+// has none). The forward tables' records are x86_vex_find's.
 static __attribute__((unused)) __mmask16 x86_vex_lookup(const X86Instruction* records, uint32_t count, const uint16_t* table)
 {
     const __m512i lanes = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
@@ -177,6 +178,75 @@ static __attribute__((unused)) X86Instruction x86_vex_canonical(X86Instruction r
 #define BUSTER_X86_VEX_FORWARD(legacy, twin, three) [X86_FORM_##legacy] = (uint16_t)(X86_FORM_##twin | (three)),
 static __attribute__((unused)) const uint16_t x86_vex_forms_tier0[X86_FORM_COUNT + 1] = { BUSTER_X86_VEX_TWINS(BUSTER_X86_VEX_FORWARD) BUSTER_X86_VEX_TWINS_TIER0(BUSTER_X86_VEX_FORWARD) };
 #undef BUSTER_X86_VEX_FORWARD
+
+// Every legacy form with a twin is one of the 192 rows from movss's (#2874): a forward table's entries there
+// (x86_vex_forms', x86_vex_forms_tier0's) fit in six registers, from which x86_vex_find reads a record's entry with no
+// gather. The assertions keep each pair's legacy form inside.
+#define BUSTER_X86_VEX_FIRST X86_FORM_MOVSS_X_XM32
+#define BUSTER_X86_VEX_ROWS 192
+_Static_assert(BUSTER_X86_VEX_FIRST > 0 && BUSTER_X86_VEX_FIRST + BUSTER_X86_VEX_ROWS <= X86_FORM_COUNT, "the window is inside the tables, past form 0's row and below an SS form's");
+#define BUSTER_X86_VEX_INSIDE(legacy, twin, three) \
+    _Static_assert(X86_FORM_##legacy >= BUSTER_X86_VEX_FIRST && X86_FORM_##legacy < BUSTER_X86_VEX_FIRST + BUSTER_X86_VEX_ROWS, "x86_vex_find's window has " #legacy);
+BUSTER_X86_VEX_TWINS(BUSTER_X86_VEX_INSIDE)
+BUSTER_X86_VEX_TWINS_TIER0(BUSTER_X86_VEX_INSIDE)
+#undef BUSTER_X86_VEX_INSIDE
+
+// A forward table's window: its entries of rows BUSTER_X86_VEX_FIRST to BUSTER_X86_VEX_FIRST + 191, 32 a register.
+typedef struct X86VexWindow X86VexWindow;
+struct X86VexWindow
+{
+    __m512i entries[BUSTER_X86_VEX_ROWS / 32];
+};
+
+static __attribute__((unused)) X86VexWindow x86_vex_window(const uint16_t* table)
+{
+    X86VexWindow window;
+    for (uint32_t k = 0; k < BUSTER_X86_VEX_ROWS / 32; k += 1)
+    {
+        window.entries[k] = _mm512_loadu_si512(table + BUSTER_X86_VEX_FIRST + 32 * k);
+    }
+    return window;
+}
+
+// The records of `records[0, count)`, at most 32, whose forms have an entry in a forward table, from its window: the
+// forms read four records a load (a form is a record's word 6 of 8) and put together by vpermt2w, each one's row (its
+// number less its segment override's rows, FS's and GS's, which every row has; an SS override, past them, has none: its
+// row is then X86_FORM_COUNT or more, past the window), and its row's entry from the window's three pairs of registers by
+// vpermt2w. A record past `count` reads as zero, form 0's row, below the window. Gathering both, two gathers every 16
+// records (x86_vex_lookup's way), cost -c sqlite3.c's Tier 0 0.15 ms more on the 9700X (#2874).
+static __attribute__((unused)) __mmask32 x86_vex_find(const X86Instruction* records, uint32_t count, const X86VexWindow* window)
+{
+    _Static_assert(sizeof(X86Instruction) == 16 && offsetof(X86Instruction, form) == 12, "a record's form is its word 6 of 8");
+    const uint32_t live = count >= 32 ? UINT32_MAX : _bzhi_u32(UINT32_MAX, count);
+    // Two quadwords a record: each load's eight from its four records' bits.
+    const uint64_t quadwords = _pdep_u64(live, 0x5555555555555555ull) * 3;
+    // Word j of a pair of loads, j below 8, is record j's form: word 8j + 6 of the pair.
+    const __m512i pick = _mm512_set_epi16(62, 54, 46, 38, 30, 22, 14, 6, 62, 54, 46, 38, 30, 22, 14, 6, 62, 54, 46, 38, 30, 22, 14, 6, 62, 54, 46, 38, 30, 22, 14, 6);
+    __m512i pairs[4];
+    for (uint32_t p = 0; p < 4; p += 1)
+    {
+        const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)(quadwords >> (16 * p)), records + 8 * p);
+        const __m512i high = _mm512_maskz_loadu_epi64((__mmask8)(quadwords >> (16 * p + 8)), records + 8 * p + 4);
+        pairs[p] = _mm512_permutex2var_epi16(low, pick, high);
+    }
+    // Pair p's eight forms in words 8p to 8p + 7.
+    const __m512i halves = _mm512_mask_blend_epi16(0xff00ff00u, pairs[0], pairs[1]);
+    const __m512i others = _mm512_mask_blend_epi16(0xff00ff00u, pairs[2], pairs[3]);
+    const __m512i forms = _mm512_mask_blend_epi16(0xffff0000u, halves, others);
+    const __m512i number = _mm512_and_si512(forms, _mm512_set1_epi16(BUSTER_X86_FORM_NUMBER));
+    const __m512i rows = _mm512_set1_epi16(X86_FORM_COUNT);
+    __m512i row = _mm512_mask_sub_epi16(number, _mm512_cmpge_epu16_mask(number, rows), number, rows);
+    row = _mm512_mask_sub_epi16(row, _mm512_cmpge_epu16_mask(row, rows), row, rows);
+    // A row below the window wraps past it.
+    const __m512i at = _mm512_sub_epi16(row, _mm512_set1_epi16(BUSTER_X86_VEX_FIRST));
+    const __mmask32 inside = _mm512_cmplt_epu16_mask(at, _mm512_set1_epi16(BUSTER_X86_VEX_ROWS));
+    const __m512i first = _mm512_permutex2var_epi16(window->entries[0], at, window->entries[1]);
+    const __m512i second = _mm512_permutex2var_epi16(window->entries[2], at, window->entries[3]);
+    const __m512i third = _mm512_permutex2var_epi16(window->entries[4], at, window->entries[5]);
+    const __m512i low_entry = _mm512_mask_blend_epi16(_mm512_test_epi16_mask(at, _mm512_set1_epi16(64)), first, second);
+    const __m512i entry = _mm512_mask_blend_epi16(_mm512_test_epi16_mask(at, _mm512_set1_epi16(128)), low_entry, third);
+    return _mm512_test_epi16_mask(entry, entry) & inside;
+}
 
 // Whether `records` name ymm0 to ymm15 or zmm0 to zmm15 (#2830): the upper state they leave dirty, which a legacy SSE
 // instruction after them (a caller's, glibc's, or another compiler's) then runs in, waiting for its destination's old
