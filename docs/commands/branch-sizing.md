@@ -73,6 +73,11 @@ record, and be long exactly where a rel8 can't reach:
   which take a round per link: up to `BUSTER_BRANCH_SIZING_ROUNDS`, then the
   worklist, which evaluates each link left once (each growth puts only the
   next link out of range);
+- small functions: every count up to 96 records past the 512 below which the
+  ranks' table is built in registers, a branch every 1 to 4 records with far
+  targets, so that most of them grow: each must be the reference's, through
+  the register build's passes of 8 branches, the direct ranks of up to 16, the
+  byte map past 511 records and the write's passes (#2946);
 - page edges: the records, the branch columns and the offsets each ending at a
   `PROT_NONE` page, for every count up to 70 records at every branch density
   and every branch count up to 40, checked by the columns' check and sized,

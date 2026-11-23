@@ -176,8 +176,27 @@ The ranks are computed only once a branch has grown in the first round: most
 small functions settle there, with every displacement D0. The table has an
 entry per 32 records, their branch bits in the low half and the number of
 branches before them in the high half, so a rank is an entry's count plus a
-popcount of its bits below the target's. It builds the bits from a byte map with `vptestmb` (64 records at a time), gathers each target's entry
-as a qword (8 at a time) and counts with `vpopcntd`.
+popcount of its bits below the target's. The offsets phase reads it too.
+
+- **Functions of fewer than 512 records** have at most 16 entries, a
+  register's dwords, and build them in registers without memory, 8 branches a
+  pass (`branch_sizing_ranks_direct` and `branch_sizing_ranks_register`).
+  - **The bits:** a branch broadcast, less each entry's first record, is its
+    bit's position in its own entry and 32 or more (unsigned) in every other,
+    where `vpsllvd` gives 0, so ORing the shifts sets its bit alone.
+  - **The counts and the store:** the counts are the bits' exclusive prefix
+    sums. The table goes to memory once, for the offsets phase.
+  - **Up to 16 branches:** each rank is counted directly, a compare and a
+    subtraction per branch, so the rounds' gathers don't wait for the table.
+  - **More branches:** a rank is two `vpermd` lookups in the table.
+- **Larger functions** build the bits from a byte map with `vptestmb` (64
+  records at a time), gather each target's entry as a qword (8 at a time) and
+  count with `vpopcntd` (`branch_sizing_ranks_table`).
+
+Before #2946 every function took the byte map: a `memset`, a store per branch
+and a 64-byte load of those stores, then gathers of the table just stored. On
+functions of 40 records that cost 5.1 to 5.9 cycles per branch, against the
+removed scalar path's 2.7 and 3.4.
 
 ### Offsets
 
@@ -188,6 +207,35 @@ before them come from the table, the branches among them before each record
 from a `vpopcntd` of their branch bits masked per lane (at most 15), and a
 `vpermd` looks each one's P up among the 16 from there. No step waits for the
 one before.
+
+### What a small function stores
+
+The benchmark times a phase as the difference between a run through it and a
+run that stops before it. A phase then pays for every store before it that
+hasn't reached the cache, so the last one, the write, measured 2.5 to 3 times
+the removed scalar path's cycles on functions of 40 records with the same code.
+Most of those functions settle in the first round (#2946).
+
+- **Setup:** it stores what a function whose branches all fit needs, D0, and
+  a 16-bit mask of the jmps per 16 branches. Before #2946 it stored six
+  columns per 16 branches, two of them across a cache line.
+- **Once a branch grows:** `branch_sizing_first_vector` makes the
+  growth-if-long column from the mask, and the first round's growths and
+  their prefix sums.
+- **With no round:** the offsets are `x86_measure`'s and the forms the
+  records'. `branch_sizing_write_short` stores the displacements alone.
+- **The write:** it takes 8 branches a pass. Their records' addresses come
+  from a vector of their indices. The lanes past the last branch aim at 8
+  sink records in the columns, one each, so no lane's form waits for another
+  lane's store.
+- **The loop it replaced:** a store per branch ended at a branch the
+  predictor missed 0.64 times per function of 40 records, since their branch
+  counts vary.
+- **What is left:** on 40-record functions the write still costs 3.5 to 3.6
+  cycles per branch, against the removed scalar path's 2.0 to 3.0. With an
+  `mfence` closing every run, so that each phase pays only for its own stores,
+  it costs 3.6 to 3.9: the gap is the write's own passes of 8 stores, not the
+  stores before it. #2946 keeps it open.
 
 ### Lengths and memory
 
