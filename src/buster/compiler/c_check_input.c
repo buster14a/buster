@@ -1265,6 +1265,10 @@ struct CheckInput
     // Under PPOptions.node_front alone, the node machine's front's report (c_check_node_machine_front.c, #2524): null in
     // every other run.
     struct NodeFrontShadow* node_front;
+    // --node-bodies (#2850): the mask in `deferred_tokens` is the producer's. A masked body is still the unit's: the
+    // program keeps it with no control of its own, and the lowering writes its function from what `node_front` keeps of
+    // it (its controls, each control's root's tape and what is beside it).
+    bool node_bodies;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -10126,7 +10130,7 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
     }
 }
 
-static bool check_input_fallthrough_noreturn_object(const CheckInputReader* reader, uint32_t declaration);
+static bool check_input_fallthrough_noreturn_object(const CheckInput* input, const Parser* parser, uint32_t declaration);
 
 // A completed record's member `index` (#1844), declared at `token` of type `type`: recorded in CheckInput.noreturn_members
 // where its type is a function pointer's (or an array's of them) that GNU's noreturn marks: on the member's own declaration
@@ -10142,7 +10146,7 @@ static void check_input_noreturn_member_add(CheckInputReader* reader, uint32_t i
     const bool pointer = type_kind(types, level) == BUSTER_TYPE_KIND_POINTER &&
                          type_kind(types, type_strip_aligned(types, type_element(types, level))) == BUSTER_TYPE_KIND_FUNCTION;
     CheckInput* input = reader->output;
-    if (pointer && (marked || (token < reader->parser->tokens.count && check_input_fallthrough_noreturn_object(reader, token))) && !input->resource)
+    if (pointer && (marked || (token < reader->parser->tokens.count && check_input_fallthrough_noreturn_object(reader->output, reader->parser, token))) && !input->resource)
     {
         if (input->noreturn_member_count == input->noreturn_member_capacity)
         {
@@ -11067,11 +11071,20 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
         if (query < parser->tokens.count && parser->tokens.names[query] == C_NAME_SIZEOF && !check_input_warning_unevaluated(reader, query))
         {
             const uint32_t at = check_input_vla_initializer_element(reader, query);
-            if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource)
+            // Once per initializer element: an earlier runtime-sized query of the same element recovered its report.
+            const CheckInput* output = reader->output;
+            const bool reported = output->recovered_count != 0 && output->recovered_reports[output->recovered_count - 1].token == at &&
+                                  output->recovered_reports[output->recovered_count - 1].message == CHECK_INPUT_CONSTANT_INITIALIZER;
+            if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource && !reported)
             {
                 check_input_report(reader, at, CHECK_INPUT_CONSTANT_INITIALIZER);
             }
-            result = 0;
+            // clang goes on past the error (#2252): the query reads as an int's size, so the initializer's later commas
+            // and the unit's later declarations keep their diagnostics.
+            const bool eligible = reported || (reader->output->report_count == 1 && reader->output->reports[0].token == at);
+            check_input_lane_refuse(reader, eligible && reader->lane, "an invalid initializer's later diagnostics are in source order");
+            const bool recovered = eligible && !reader->lane && (reported || check_input_recover_reports(reader, 0));
+            result = recovered ? BUSTER_TYPE_INT : 0;
         }
     }
     return result;

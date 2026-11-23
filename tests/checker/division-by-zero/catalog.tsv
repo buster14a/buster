@@ -1,3 +1,6 @@
 buster-fixtures v1 checker-warnings
 compound.c	12	0	0	integer division and remainder assignments diagnose evaluated zero divisors
 widths.c	4	0	0	compound assignments use the value type and all bits of the divisor
+assigned-conditions.c	16	0	6	an assignment's value is no constant condition, past a comma's right operand and a statement expression's last value (#2264)
+assigned-condition-warnings.c	15	0	8	arms of an assignment's condition keep their unsequenced, bounds, shift, conversion and return-type warnings (#2264)
+discarded-modifications.c	6	0	0	a discarded or short-circuited modification leaves its condition constant (#2264)

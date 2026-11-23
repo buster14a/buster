@@ -2929,6 +2929,28 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
     {
         return valid;
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    // #2850's producer against the diagnostics (BUSTER_TEST_NODE_BODIES_LOG): a warning's place among the diagnostics may
+    // be the unit's end, so its event's token and its notes' say where it is.
+    for (uint32_t i = 0; __builtin_expect(node_bodies_checking, 0) && i < view->count; i += 1)
+    {
+        const CheckWarningEvent* event = view->events + i;
+        char named[48];
+        snprintf(named, sizeof(named), "event id %u kind %u", event->id, event->kind);
+        if (event->token < parser->tokens.count)
+        {
+            node_bodies_check_token(parse_origin(parser, event->token), "a-warning's-event", named);
+        }
+        for (uint32_t n = 0; n < event->note_count && event->note_first + n < view->note_count; n += 1)
+        {
+            const uint32_t note_token = view->notes[event->note_first + n].token;
+            if (note_token < parser->tokens.count)
+            {
+                node_bodies_check_token(parse_origin(parser, note_token), "a-warning's-note", named);
+            }
+        }
+    }
+#endif
     // Only these facts render a type (#992, and #147's function-type attributes); a pass of typeless messages, pragmas or
     // notes needs no spelling rows at all.
     bool renders = false;
