@@ -1659,11 +1659,13 @@ homes, and whether its four cases' words differ in the template alone (uniform).
 3. **Measuring** resolves a home-dependent word to its homes' case. Which of up to 64 locals are in registers is one
    mask, of which a lane's case is a shift (`vpsrlvq`); past 64 locals, a local's home comes from four registers by
    `vpermt2q` for up to 32 locals, or by a gather past that. A uniform slot's case is added to the template; another's
-   word is gathered. A template's length comes from its word, and the deferred entries are listed, in a loop with no
-   branch on its words. Then each listed entry's length comes from the thread's table of calls or its count, in a loop
-   of its own, and the positions are the lengths' prefix sum in registers, in a third (#2874). Splitting measuring and
-   selection so, with the calls' effects on the stacks counted 64 argument classes at a time in fusion, took `tier0`
-   0.33 ms less on `sqlite3.c` (the 9700X, the same objects).
+   word is gathered. Each deferred entry's length comes first, from the thread's table of calls or its count, in a
+   loop of its own over selection's list of them; then a template's length comes from its word, and the positions are
+   the lengths' prefix sums in registers, a block at a time from a carry, in a loop with no branch on its words (#2874).
+   A function with deep entries, which selection's list lacks, lists them in the words' loop, counts them after it and
+   sums the positions in a third loop. Splitting measuring and selection so, with the calls' effects on the stacks
+   counted 64 argument classes at a time in fusion, took `tier0` 0.33 ms less on `sqlite3.c` (the 9700X, the same
+   objects); taking selection's list and the positions in the words' loop, 0.065 ms more.
 4. **Emission** computes the hole blocks of 8 entries in vectors. K, the scale and the locals of A and B come from a
    `vpermt2q` over this block's values and the last block's; A and B from the homes' registers; the registers around
    each depth from two 32-entry windows by `vpermt2d`. Four `vpermt2q` interleave them into four registers of two
