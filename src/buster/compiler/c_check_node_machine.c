@@ -75,6 +75,8 @@
 
 // The most records an expression the machine takes has (docs/node-machine.md, "The records and the tapes").
 #define BUSTER_NODE_MACHINE_MOST 4096u
+// The target features with which the lowering fuses a product and a sum (check_lower_contract_plan's): NodeMachine.fuses.
+#define BUSTER_NODE_MACHINE_FUSED (BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F))
 // The most entries one record's row writes: its own and its conversion's (BUSTER_CHECK_LOWER_TEMPLATE_MOST).
 #define BUSTER_NODE_MACHINE_ROW_MOST 8u
 // The most entries a segment after a record's row writes (node_machine_hook): a test of its value and a branch.
@@ -474,6 +476,13 @@ struct NodeMachine
     // output at its end, CheckInput.enum_definitions): node_producer_begin's, for node_machine_root_loud. None otherwise.
     const CheckInputEnumDefinition* reader_enums;
     uint32_t reader_enum_count;
+    // Whether the unit's target, or one of its functions' own, fuses a product and a sum (FMA or AVX-512F): the lowering
+    // contracts a floating sum with its product operand there (check_lower_contract_plan), for which C has no template,
+    // so C refuses a sum or a compound sum of a float's or a double's class there, whatever its operands are
+    // (node_machine_classify, node_machine_update_plan), and the window's C lists every sum and every update
+    // (node_contexts_window_loop). At reader time, where no attribute's target is read, it is the options' target's, or
+    // true in a unit with a function of a target of its own, whatever that names (node_machine_reader_targeted).
+    bool fuses;
     uint32_t* reader_declarations;
     uint8_t* reader_facts;
     uint32_t reader_objects;
@@ -649,6 +658,12 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
         .declaration_bits = program->input->declaration_bits,
         .object_count = program->object_count,
     };
+    uint64_t features = program->target.features;
+    for (uint32_t t = 0; t < program->target_count; t += 1)
+    {
+        features |= program->targets[t].features;
+    }
+    machine->fuses = (features & BUSTER_NODE_MACHINE_FUSED) != 0;
     const bool room = node_machine_setup(machine, (TypeTable*)program->types, &program->input->graph, program->types->types.count, scalar, verify, arena);
     machine->overloads = node_machine_overloads(program->input, &program->input->graph);
     machine->renames = node_machine_renames(program->input);

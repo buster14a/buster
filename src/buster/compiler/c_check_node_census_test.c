@@ -2013,14 +2013,24 @@ static const char node_producer_test_members_text[] = "struct M { int n; int gon
 static const char node_producer_test_counted_text[] = "struct C { int n; int *p __attribute__((counted_by(n))); };\nint counted(struct C *c) { return c->n; }\n";
 static const char node_producer_test_linkage_text[] = "__attribute__((internal_linkage)) int inner(void);\nint linked(void) { return 1; }\n";
 // A function's attribute of its code, one a unit: a target, its clones, an interrupt's, a processor's own version, a
-// dispatch among them. `bodies` is the unit's lowered bodies.
+// dispatch among them. `bodies` is the unit's lowered bodies. The second's target fuses a product and a sum, which its
+// function and the one beside it have: the machine before the walk takes neither's sum (NodeMachine.fuses), where the
+// lowering fuses the first's alone.
 static const struct { const char* text; uint32_t bodies; } node_producer_test_code_units[] = {
     { "__attribute__((target(\"avx2\"))) int t(void) { return 1; }\n", 1 },
+    { "__attribute__((target(\"fma\"))) double tf(double a, double b, double c) { return a * b + c; }\n"
+      "double plain(double a, double b, double c) { return a * b + c; }\n", 2 },
     { "__attribute__((target_clones(\"avx2\",\"default\"))) int tc(void) { return 1; }\n", 2 },
     { "struct interrupt_frame;\n__attribute__((interrupt)) void isr(struct interrupt_frame *frame) { (void)frame; }\nint plain(void) { return 1; }\n", 2 },
     { "__attribute__((cpu_specific(generic))) int s1(void) { return 1; }\nint plain(void) { return 1; }\n", 2 },
     { "__attribute__((cpu_dispatch(generic))) int d(void);\nint plain(void) { return 1; }\n", 1 },
 };
+// A floating sum, a compound one whose destination is an integer's, and a product beside them: taken where the target
+// fuses none, and the sums' bodies left where it does (-mfma: C has no template for a float's or a double's sum there,
+// NodeMachine.fuses), the product's taken all the same.
+static const char node_producer_test_fused_text[] = "double summed(double a, double b, double c) { return a * b + c; }\n"
+                                                    "int stepped(int i, double a, double b) { i -= a * b; return i; }\n"
+                                                    "double multiplied(double a, double b) { return a * b; }\n";
 static const char node_producer_test_results_text[] = "typedef int W __attribute__((warn_unused_result));\nW w(void);\nint result(void) { return 1; }\n";
 
 static bool node_producer_test_fixture(const char* directory, const char* text, uint64_t length, char** options, uint32_t option_count, bool lean,
@@ -3384,6 +3394,19 @@ static const char node_contexts_test_source[] =
     BUSTER_NODE_CONTEXTS_TEST_BLOCK("    if (a && (b || (wide && local))) local++;\n")
     "    return local + (int)wide + narrow + flag + (int)real + (ptr != 0) + rooted + sunk_root + (int)wide_root + root_and + (int)root_or + root_flag + text[0];\n"
     "}\n";
+
+// Sums and updates for a target that fuses a product and a sum (-mfma): a double's sum of a product, an integer's
+// compound difference of a double's product, a float's compound sum of one and its difference of another, an integer's
+// compound sum, and a float's sum of a conversion. A product, a quotient, a shift and a negation alone are decided on
+// either target.
+static const char node_contexts_test_fused_source[] =
+    "double summed(double a, double b, double c) { return a * b + c; }\n"
+    "int stepped(int i, double a, double b) { i -= a * b; return i; }\n"
+    "double multiplied(double a, double b) { return a * b; }\n"
+    "float mixed(float x, float y, float z, int k) { float s = x; s += y * z; s = s - x * y; k += 2; return s + (float)k; }\n"
+    "double halved(double a) { return a / 2.0; }\n"
+    "int shifted(int a) { return a << 1; }\n"
+    "int negated(int a) { return -a; }\n";
 
 // C on the window's fixture for a unit with a type in a space of its own (TypeTable.extended: here `__seg_gs`'s and
 // `__seg_fs`'s): the loop asks the space of the destination of each update its masks take, a record at a time, and
@@ -7408,6 +7431,29 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     check_test_expect(test, ready && node_contexts_test_fixture(directory, "spaced.c", node_contexts_test_spaced_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &spaced_expected),
                       "node-contexts: in a unit with a type in a space of its own, C on the window lists an update whose destination is in a segment's and takes the others");
+    // Where the unit's target fuses a product and a sum (NodeMachine.fuses), C has no template for a float's or a
+    // double's sum or compound sum, and the window lists every sum and every update for it to ask: the fixture's three
+    // sums and three updates, a float's, a double's and an integer's among each, of which no other target lists any.
+    static const NodeContextsExpected unfused_expected = {
+        .expressions = 12,
+        .decided = 12,
+        .updates = 3,
+        .updates_taken = 3,
+    };
+    static const NodeContextsExpected fused_expected = {
+        .expressions = 12,
+        .decided = 6,
+        .updates = 3,
+        .listed = {
+            [BUSTER_NODE_CONTEXTS_REASON_UPDATE] = 3,
+            [BUSTER_NODE_CONTEXTS_REASON_OPERATOR] = 3,
+        },
+    };
+    char* fusing[] = { "-nostdinc", "-mfma" };
+    check_test_expect(test, ready && node_contexts_test_fixture(directory, "unfused.c", node_contexts_test_fused_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &unfused_expected),
+                      "node-contexts: C on the window decides a sum and an update of any class where the target fuses no product with a sum");
+    check_test_expect(test, ready && node_contexts_test_fixture(directory, "fused.c", node_contexts_test_fused_source, fusing, BUSTER_ARRAY_LENGTH(fusing), &fused_expected),
+                      "node-contexts: C on the window lists every sum and every update where the target fuses a product with a sum");
     // X's rows on the window: its tables; its own fixture's counts, a line a shape; and C's fixture's, each of C's
     // rules' records.
     check_test_expect(test, node_rows_test_tables(), "node-rows: each shape's row has its length's entries, and no class's source where the rows' write resolves none");
@@ -7825,6 +7871,15 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_linkage_text, sizeof(node_producer_test_linkage_text) - 1, quiet,
                                                                  BUSTER_ARRAY_LENGTH(quiet), false, &produced_linkage),
                       "node-producer: a unit with a function of internal linkage by its attribute takes no body");
+    const NodeProducerExpected produced_unfused = { .reasons = { [NODE_PRODUCER_TAKEN] = 3 } };
+    const NodeProducerExpected produced_fused = { .reasons = { [NODE_PRODUCER_TAKEN] = 1, [NODE_PRODUCER_MACHINE] = 2 } };
+    char* fused[] = { "-nostdinc", "-mfma" };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_fused_text, sizeof(node_producer_test_fused_text) - 1, quiet,
+                                                                 BUSTER_ARRAY_LENGTH(quiet), false, &produced_unfused),
+                      "node-producer: a floating sum and a compound one are taken where the target fuses none with a product");
+    check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_fused_text, sizeof(node_producer_test_fused_text) - 1, fused,
+                                                                 BUSTER_ARRAY_LENGTH(fused), false, &produced_fused),
+                      "node-producer: a floating sum and a compound one are left where the target fuses one with a product");
     for (uint32_t unit = 0; unit < BUSTER_ARRAY_LENGTH(node_producer_test_code_units); unit += 1)
     {
         const NodeProducerExpected produced_code = { .reasons = { [NODE_PRODUCER_UNIT] = node_producer_test_code_units[unit].bodies }, .unit = BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES };
