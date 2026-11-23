@@ -125,7 +125,7 @@ The scalar twin (eight-lane rows, the class register and the rank sort replaced
 by scalar loops and the radix sort, and a scalar layout scan) went in #2924. On
 the 9700X, replaying every real frame of `--tier1 -c` of sqlite3.c, Lua and
 musl once a pass through both paths (21 passes, CPU 2), the vector path took
-@@REPLAY@@ of the twin's ticks in every bin of frame sizes from 0 to over 128
+0.31 to 0.96 of the twin's ticks in every bin of frame sizes from 0 to over 128
 objects; the record is buster-performance's
 `docs/measurements/scalar-paths-removal-2924-2026-11-17/tier1-frame/`. The
 objects of all three corpora were identical on both paths.

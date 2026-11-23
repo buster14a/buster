@@ -20,7 +20,7 @@
 // compared with eight others at a time (tier1_frame_rank). Larger inputs (a ninth class, more events) sort by stable
 // radix passes over the key bytes that differ (tier1_frame_sort); both sorts give one order. One ordered, branch-free
 // pass then colors (tier1_frame_color): a class's free colors are a stack, so each class uses exactly its maximum live
-// pressure. The scalar twin went in #2924, after the vector path read 0.33 to 0.92 of its time at every frame size of
+// pressure. The scalar twin went in #2924, after the vector path read 0.31 to 0.96 of its time at every frame size of
 // sqlite3.c's, Lua's and musl's real frames on the 9700X. The tests check each plan independently, preparation's order
 // by its definition, the colors against pointer jumping's, and the default run's plans against a frozen digest.
 // Preparation, sorting, coloring and layout are all charged to the benchmark. There is no claim that a synthetic
