@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 // Source return-warning facts for a structurally and semantically checked graph. Ordinary direct declarations return
-// unless their retained contract proves otherwise. Indirect/overloaded calls, library policy not retained here and
-// semantic queries remain conservative. These facts affect only the warning walk, never emission or graph validity.
+// unless their retained contract proves otherwise, and a call through an object's name unless its function type is
+// noreturn (#1393). Overloaded calls, library policy not retained here and other indirect callees remain conservative. These facts affect only the warning walk, never emission or graph validity.
 
 #define BUSTER_CHECK_RETURN_STOPS 1u
 #define BUSTER_CHECK_RETURN_UNKNOWN 2u
@@ -113,6 +113,29 @@ static uint8_t* check_program_return_library_names(const InternTable* identifier
     return names;
 }
 
+// A call through callee expression `node` that names no function (#1393): whether it returns (0), never does
+// (BUSTER_CHECK_RETURN_STOPS) or is unknown, as clang's CFG reads the callee's type's noreturn (CFGBuilder::VisitCallExpr,
+// getFunctionExtInfo of the callee's type). An object's name: GNU's noreturn on its declaration or the
+// typedefs and typeofs its specifiers name (check_input_fallthrough_noreturn_object), which the node machine's lines
+// answer the same (node_tests_window_returns). Any other callee (`*p`, a member, an element, a conditional, a comma, a
+// cast, a call's result) stays unknown, as the node machine's window can't answer its type yet (#2850): no warning clang
+// wouldn't give is given.
+static uint8_t check_program_return_indirect(const CheckProgram* program, uint32_t node, const uint32_t* unknowns)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const uint32_t at = node;
+    const uint32_t token = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? graph->tokens[at] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
+                                 input->declarations[token] : BUSTER_CHECK_NONE;
+    const bool object = declaration < input->token_count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_OBJECT;
+    // (An object an analyzer_noreturn or an ignored noreturn leaves unknown from a declaration on, as a function.)
+    const uint32_t number = object ? check_stream_object(program->stream, at) : 0;
+    const bool known = object && (unknowns == NULL || number >= program->object_count || unknowns[number] >= token);
+    return !known ? BUSTER_CHECK_RETURN_UNKNOWN : check_input_fallthrough_noreturn_object(input, parser, declaration) ? BUSTER_CHECK_RETURN_STOPS : 0;
+}
+
 static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node, const uint32_t* unknowns, const uint8_t* names)
 {
     const CheckInput* input = program->input;
@@ -134,6 +157,11 @@ static uint8_t check_program_return_call(const CheckProgram* program, uint32_t n
         const uint32_t name = program->parser->tokens.names[declaration];
         result = names != NULL && name < program->identifiers->count ? names[name] : check_program_return_library_search(program->identifiers, name);
     }
+    else if (overload == BUSTER_CHECK_NONE && object == 0)
+    {
+        // No function is named: the callee's type decides (#1393).
+        result = check_program_return_indirect(program, program->input->graph.operand0[node], unknowns);
+    }
     return result;
 }
 
@@ -151,8 +179,7 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const CheckOp op = graph->ops[node];
-    uint8_t result = op == CHECK_OP_CALL ? check_program_return_call(program, node, unknowns, names) :
-                     op == CHECK_OP_BUILTIN_QUERY ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
+    uint8_t result = op == CHECK_OP_CALL ? check_program_return_call(program, node, unknowns, names) : 0;
     if (op == CHECK_OP_BUILTIN_MISC)
     {
         const uint32_t index = check_program_builtin_index(stream->misc, stream->misc_count, sizeof(CheckBuiltinMiscEffect), node);
@@ -210,10 +237,15 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
                                           check_program_builtin_index(stream->floating, stream->floating_count, sizeof(CheckBuiltinFloatEffect), node) :
                                           BUSTER_CHECK_NONE;
             const uint32_t definite = floating != BUSTER_CHECK_NONE ? stream->floating[floating].definite_operands : arguments;
-            for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
+            // A query returns (#1393), as clang's CFG takes a builtin's call. __builtin_constant_p's operand is visited
+            // whatever its runtime plan, so a call in it that doesn't return ends the edge; the object size queries'
+            // operands are left out (VisitCallExpr's OmitArguments).
+            const bool constant = op == CHECK_OP_BUILTIN_QUERY && graph->members[node] == CBUILTIN_CONSTANT_P;
+            const bool omitted = op == CHECK_OP_BUILTIN_QUERY && !constant;
+            for (uint32_t a = 0; !omitted && a < graph->argument_counts[node]; a += 1)
             {
                 const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                const bool all = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86;
+                const bool all = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || constant;
                 const bool evaluated = all || (a < 32 && (arguments & (1u << a)) != 0);
                 const bool guaranteed = all || (a < 32 && (definite & (1u << a)) != 0);
                 const uint8_t fact = evaluated ? check_program_return_fact(facts, node, argument) : 0;
@@ -223,10 +255,7 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
             }
         }
     }
-    // Query runtime plans and Clang's source-warning CFG do not share an execution contract here. Even a
-    // child's proven stop cannot turn the retained conservative query boundary into a guaranteed stop.
-    const uint8_t fact = op == CHECK_OP_BUILTIN_QUERY ? BUSTER_CHECK_RETURN_UNKNOWN : result;
-    return fact;
+    return result;
 }
 
 // Walk [first, end) in topological order. Only a source, a node whose own contract may be a stop or unknown (a call, a

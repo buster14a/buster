@@ -61,6 +61,7 @@
     ENTRY(LOCATION_LIMIT, "--location-limit") \
     ENTRY(LOWER_ALL, "--lower-all") \
     ENTRY(NO_DEFERRED_BODIES, "--no-deferred-bodies") \
+    ENTRY(NODE_BODIES, "--node-bodies") \
     ENTRY(NODE_WINDOW, "--node-window") \
     ENTRY(NODE_WINDOW_ASSIGNMENTS, "--node-window-assignments") \
     ENTRY(NODE_WINDOW_CONSTANTS, "--node-window-constants") \

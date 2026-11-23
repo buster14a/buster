@@ -49,8 +49,9 @@
 #       fails, as no test does, if its new runner doesn't qualify: rerunning the failed jobs draws again.
 #   vector-draw.sh product CONFIGURATION
 #       An item other than its configuration's first, after its setup: waits for the product that the holder of the
-#       configuration's item 1 publishes (in the attempt that holder last ran in), and writes its artifact's name and
-#       SHA-256 to GITHUB_OUTPUT (`name`, `digest`). Polls every 30 s. Fails, without waiting further, when no candidate
+#       configuration's item 1 publishes (in the attempt that holder last ran in), confirms that the download's own
+#       lookup serves it (#3301), and writes its artifact's name and SHA-256 to GITHUB_OUTPUT (`name`, `digest`).
+#       Polls every 30 s. Fails, without waiting further, when no candidate
 #       can hold item 1 any more, when its holder ended without one, or when the attempt has two; at most 90 minutes.
 #   vector-draw.sh verdict RECORDS
 #       The row's verdict over the downloaded artifacts (a directory per artifact): exactly one passing qualified
@@ -114,6 +115,9 @@ product_limit=${VECTOR_DRAW_PRODUCT_LIMIT:-5400}
 # An item polls for its product less often than a draw for its assignment: it waits for a build, minutes. A failed
 # listing backs off as a draw's does.
 product_poll=${VECTOR_DRAW_PRODUCT_POLL:-30}
+# Once the listing names the product: how often and how long its download's lookup is asked until it serves it.
+served_poll=${VECTOR_DRAW_SERVED_POLL:-2}
+served_limit=${VECTOR_DRAW_SERVED_LIMIT:-180}
 levels=${VECTOR_DRAW_LEVELS:-4}
 
 # On standard error, which the runner reads workflow commands from too.
@@ -577,6 +581,26 @@ probe()
     printf 'BUSTER_VECTOR_PROBE=%s\n' "$draw/probe" >> "$GITHUB_ENV"
 }
 
+# Wait until the download's own lookup (ListArtifacts by name, the helper's `find`) serves the artifact $1, which the
+# run's listing names, for configuration $2's product. The listing named a finalized product about a second before the
+# lookup served it, and download-artifact asks once (#3301). Polled every $served_poll s, at most $served_limit s;
+# an artifact the lookup never serves fails here, closed, as the download would.
+served()
+{
+    local name=$1 configuration=$2 start=$SECONDS lookups=0 found
+    while true; do
+        lookups=$((lookups + 1))
+        if found=$("$VECTOR_ARTIFACT_NODE" "$VECTOR_ARTIFACT_HELPER" find "$name"); then
+            if [ -n "$found" ]; then
+                [ "$lookups" -eq 1 ] || summary "the download's lookup served $configuration's product after $((SECONDS - start)) s ($lookups lookups)"
+                return 0
+            fi
+        fi
+        [ $((SECONDS - start)) -lt "$served_limit" ] || die "the run's artifacts list $name, but the download's lookup of it found none in $served_limit s ($lookups lookups)"
+        sleep "$served_poll"
+    done
+}
+
 product()
 {
     local configuration=$1 builder start=$SECONDS polls=0 names latest holder level job jobs run_attempt=1 status=unknown conclusion=unknown name found
@@ -629,6 +653,7 @@ product()
             found=$(grep -E "^$product_prefix-$selected_attempt-$configuration-[0-9a-f]{64}\$" <<< "$names" || true)
             [ "$(grep -c . <<< "$found" || true)" -le 1 ] || die "attempt $selected_attempt has $(grep -c . <<< "$found") products of $configuration: $(tr '\n' ' ' <<< "$found")"
             if [ "$selected_attempt" -gt 0 ] && [ -n "$found" ]; then
+                served "$found" "$configuration"
                 printf 'name=%s\ndigest=%s\n' "$found" "${found##*-}" >> "$GITHUB_OUTPUT"
                 summary "the product of $configuration: $found, built by draw ${holder% *}'s candidate ${holder#* } in attempt $selected_attempt, after $((SECONDS - start)) s ($polls polls)"
                 return 0
