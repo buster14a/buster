@@ -332,6 +332,34 @@ static void check_program_emit_prefetch_symbol(const CheckProgram* program, cons
     }
 }
 
+// The decimal digits of `number` at `at`, as "%u" writes them: how many (#3393: the symbols' names of the literals,
+// tables and cases, thousands in a unit, took snprintf's hundred cycles each).
+static uint32_t check_program_emit_decimal(char* at, uint32_t number)
+{
+    char reversed[10];
+    uint32_t count = 0;
+    uint32_t rest = number;
+    do
+    {
+        reversed[count] = (char)('0' + rest % 10);
+        rest /= 10;
+        count += 1;
+    } while (rest != 0);
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        at[i] = reversed[count - 1 - i];
+    }
+    return count;
+}
+
+// `prefix` (a literal's `length` bytes) and `number`'s digits in `spelling`: its length.
+static uint32_t check_program_emit_numbered(char* spelling, const char* prefix, uint32_t length, uint32_t number)
+{
+    memcpy(spelling, prefix, length);
+    return length + check_program_emit_decimal(spelling + length, number);
+}
+#define BUSTER_CHECK_EMIT_NUMBERED(spelling, prefix, number) check_program_emit_numbered((spelling), (prefix), (uint32_t)sizeof(prefix) - 1, (number))
+
 // Adds `base`, or the first of its ".N" spellings no name of `names` has, to the link's names: its NameId, or 0 when the
 // link or scratch has no room.
 static NameId check_program_emit_made_name(Link* link, CheckProgramNames* names, const uint8_t* base, uint32_t base_length, Arena* scratch)
@@ -3937,7 +3965,7 @@ static bool check_program_emit_tls_symbols(Link* link, const CheckProgram* progr
         if (made[v] != 0)
         {
             char spelling[48];
-            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_tls_%u", index);
+            const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_tls_", index);
             const NameId name = link_add_name(link, (const uint8_t*)spelling, (uint32_t)length);
             const SymbolId symbol = name != 0 ? link_add_symbol(link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_FUNCTION,
                                                                  binding ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) : 0;
@@ -5526,7 +5554,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // builtin of a name points to (__builtin_FILE's and its kin's, #148), which clang makes a private constant as
             // it makes a literal's.
             char spelling[48];
-            const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
+            const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_string_", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (program->cfstring_class_own && object == program->cfstring_class)
@@ -5543,7 +5571,8 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             // clang's .L_unnamed_cfstring_ and its characters' constant are.
             char spelling[48];
             const bool record = parser->tree.roles[object - 1] == PARSE_ROLE_CLOSE_CALL;
-            const int length = snprintf(spelling, sizeof(spelling), record ? ".Lbuster_cfstring_%u" : ".Lbuster_string_%u", parse_origin(parser, object - 1) + 1);
+            const uint32_t length = record ? BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_cfstring_", parse_origin(parser, object - 1) + 1) :
+                                            BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_string_", parse_origin(parser, object - 1) + 1);
             name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         }
         else if (object == 0)
@@ -5587,7 +5616,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t p = 0; valid && p < pools->count; p += 1)
     {
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_initializer_%u", p);
+        const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_initializer_", p);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_OBJECT,
                                             BUSTER_LINK_SOURCE_NONE) == pools->symbol_base + p;
@@ -5613,7 +5642,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     {
         const bool table = k < result->lowered.table_count;
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), table ? ".Lbuster_switch_%u" : ".Lbuster_case_%u", table ? k : k - result->lowered.table_count);
+        const uint32_t length = table ? BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_switch_", k) : BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_case_", k - result->lowered.table_count);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         const uint8_t flags = BUSTER_LINK_SYMBOL_LOCAL | (table ? BUSTER_LINK_SYMBOL_OBJECT : BUSTER_LINK_SYMBOL_NOTYPE);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, flags, BUSTER_LINK_SOURCE_NONE) == result->lowered.case_symbol_base + k;
@@ -5680,7 +5709,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t k = 0; valid && k < patched; k += 1)
     {
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_patchable_%u", k);
+        const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_patchable_", k);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE,
                                             binding != NULL ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == result->patchable_symbol_base + k;
@@ -5718,7 +5747,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     for (uint32_t u = 0; valid && u < literals.count; u += 1)
     {
         char spelling[48];
-        const int length = snprintf(spelling, sizeof(spelling), ".Lbuster_literal_%u", u);
+        const uint32_t length = BUSTER_CHECK_EMIT_NUMBERED(spelling, ".Lbuster_literal_", u);
         const NameId name = link_add_name(&result->link, (const uint8_t*)spelling, (uint32_t)length);
         valid = name != 0 && link_add_symbol(&result->link, name, 0, 0, 0, BUSTER_LINK_SYMBOL_LOCAL | BUSTER_LINK_SYMBOL_NOTYPE,
                                             binding != NULL ? BUSTER_LINK_SOURCE_PROGRAM : BUSTER_LINK_SOURCE_NONE) == literals.symbol_base + u;
