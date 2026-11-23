@@ -291,103 +291,90 @@ static uint64_t x86_zen5_nanoseconds(void)
     return (uint64_t)now.tv_sec * 1000000000 + now.tv_nsec;
 }
 
+static volatile uint64_t x86_zen5_benchmark_sink;
+
+// --after-scalar: scalar work, an FNV-1a hash of the IDs, one dependent multiply a byte, for at least `milliseconds`,
+// untimed, before each sample: the state a compiler's vector phases run in after lighter ones (#199; dataflow_benchmark.c's
+// conditioning). Before #2924 this ran the lookup's scalar twin.
+static void x86_zen5_benchmark_after_scalar(const uint8_t* ids, uint64_t count, uint64_t milliseconds)
+{
+    const uint64_t until = x86_zen5_nanoseconds() + milliseconds * 1000000;
+    uint64_t hash = 0xcbf29ce484222325ull;
+    while (x86_zen5_nanoseconds() < until)
+    {
+        for (uint64_t i = 0; i < count; i += 1)
+        {
+            hash = (hash ^ ids[i]) * 0x100000001b3ull;
+        }
+        x86_zen5_benchmark_sink = hash;
+    }
+}
+
 static int run_x86_zen5_benchmark(int argc, char** argv)
 {
     enum { count = 65536, repeats = 1024, passes = 21 };
     static uint8_t ids[count];
-    static uint16_t scalar[count];
     static uint16_t vector[count];
-    uint64_t times[2][passes];
-    uint64_t core_cycles[2][passes];
+    uint64_t times[passes];
+    uint64_t core_cycles[passes];
     X86CostCounters counters = { .fd = { -1, -1, -1, -1, -1 } };
     bool valid = x86_zen5_initialize();
     uint64_t conditioning = 0;
-    int only = -1;
     for (int i = 0; valid && i < argc; i += 1)
     {
         if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
         {
             valid = x86_zen5_number(argv[++i], 1, 1000, &conditioning);
         }
-        else if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            only = strcmp(argv[i], "scalar") == 0 ? 0 : strcmp(argv[i], "vector") == 0 ? 1 : -1;
-            valid = only >= 0;
-        }
         else
         {
             valid = false;
         }
     }
-    // IDs over every row, as a selection's records would carry them.
+    // IDs over every row, as a selection's records would carry them; each output the column's entry for its ID.
     for (uint32_t i = 0; i < count; i += 1)
     {
         ids[i] = (uint8_t)((i * 37u + i / 17) % x86_zen5_id_count);
     }
-    x86_zen5_lookup_scalar(ids, count, X86_COST_THROUGHPUT, scalar);
     x86_zen5_lookup(ids, count, X86_COST_THROUGHPUT, vector);
-    valid &= memcmp(scalar, vector, sizeof(scalar)) == 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        valid &= vector[i] == x86_zen5_columns[X86_COST_THROUGHPUT][ids[i]];
+    }
     if (valid)
     {
         valid = x86_zen5_counters(&counters);
         for (uint32_t pass = 0; valid && pass < passes; pass += 1)
         {
-            for (uint32_t j = 0; valid && j < 2; j += 1)
+            x86_zen5_benchmark_after_scalar(ids, count, conditioning);
+            valid = ioctl(counters.fd[0], PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP) == 0;
+            valid &= ioctl(counters.fd[0], PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP) == 0;
+            const uint64_t start = x86_zen5_nanoseconds();
+            for (uint32_t repeat = 0; repeat < repeats; repeat += 1)
             {
-                const uint32_t implementation = (pass + j) & 1;
-                if (only >= 0 && implementation != (uint32_t)only)
-                {
-                    continue;
-                }
-                const uint64_t until = x86_zen5_nanoseconds() + conditioning * 1000000;
-                while (x86_zen5_nanoseconds() < until)
-                {
-                    x86_zen5_lookup_scalar(ids, count, X86_COST_THROUGHPUT, scalar);
-                    __asm__ volatile("" : : "m"(scalar) : "memory");
-                }
-                valid = ioctl(counters.fd[0], PERF_EVENT_IOC_RESET, PERF_IOC_FLAG_GROUP) == 0;
-                valid &= ioctl(counters.fd[0], PERF_EVENT_IOC_ENABLE, PERF_IOC_FLAG_GROUP) == 0;
-                const uint64_t start = x86_zen5_nanoseconds();
-                for (uint32_t repeat = 0; repeat < repeats; repeat += 1)
-                {
-                    if (implementation == 0)
-                    {
-                        x86_zen5_lookup_scalar(ids, count, X86_COST_THROUGHPUT, scalar);
-                    }
-                    else
-                    {
-                        x86_zen5_lookup(ids, count, X86_COST_THROUGHPUT, vector);
-                    }
-                    __asm__ volatile("" : : "m"(scalar), "m"(vector) : "memory");
-                }
-                times[implementation][pass] = x86_zen5_nanoseconds() - start;
-                X86CostSample sample = { 0 };
-                valid &= ioctl(counters.fd[0], PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP) == 0;
-                valid &= read(counters.fd[0], &sample, sizeof(sample)) == sizeof(sample);
-                valid &= sample.count == BUSTER_X86_COST_COUNTERS && sample.running != 0 && sample.enabled == sample.running && sample.values[0] != 0;
-                core_cycles[implementation][pass] = sample.values[0];
+                x86_zen5_lookup(ids, count, X86_COST_THROUGHPUT, vector);
+                __asm__ volatile("" : : "m"(vector) : "memory");
             }
+            times[pass] = x86_zen5_nanoseconds() - start;
+            X86CostSample sample = { 0 };
+            valid &= ioctl(counters.fd[0], PERF_EVENT_IOC_DISABLE, PERF_IOC_FLAG_GROUP) == 0;
+            valid &= read(counters.fd[0], &sample, sizeof(sample)) == sizeof(sample);
+            valid &= sample.count == BUSTER_X86_COST_COUNTERS && sample.running != 0 && sample.enabled == sample.running && sample.values[0] != 0;
+            core_cycles[pass] = sample.values[0];
         }
-        for (uint32_t implementation = 0; valid && implementation < 2; implementation += 1)
+        if (valid)
         {
-            if (only >= 0 && implementation != (uint32_t)only)
-            {
-                continue;
-            }
-            const uint64_t median = x86_zen5_median(times[implementation], passes);
-            const uint64_t cycles = x86_zen5_median(core_cycles[implementation], passes);
+            const uint64_t median = x86_zen5_median(times, passes);
+            const uint64_t cycles = x86_zen5_median(core_cycles, passes);
             const double denominator = (double)count * repeats;
-            printf("Zen 5 %s lookup: %.4f ns/ID [%.4f, %.4f], %.4f cycles/ID, %u passes, after-scalar %lu ms; excludes record-to-ID resolution\n",
-                   implementation == 0 ? "scalar" : "AVX-512", median / denominator, times[implementation][0] / denominator,
-                   times[implementation][passes - 1] / denominator, cycles / denominator, passes, conditioning);
+            printf("Zen 5 AVX-512 lookup: %.4f ns/ID [%.4f, %.4f], %.4f cycles/ID, %u passes, after-scalar %lu ms; excludes record-to-ID resolution\n",
+                   median / denominator, times[0] / denominator, times[passes - 1] / denominator, cycles / denominator, passes, conditioning);
         }
-        valid &= memcmp(scalar, vector, sizeof(scalar)) == 0;
     }
     x86_zen5_counters_close(&counters);
     if (!valid)
     {
-        fprintf(stderr, "benchmark-x86-zen5 failed: check options, lookup agreement and perf counters\n");
+        fprintf(stderr, "benchmark-x86-zen5 failed: check options, the lookup against its column and perf counters\n");
     }
     return valid ? 0 : 1;
 }
