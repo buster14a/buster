@@ -4301,6 +4301,161 @@ static void check_test_driver_tier1_wide(CheckTest* test, const char* clang, con
                                   NULL, true, 12);
 }
 
+// The 128-bit integers' fixture (#3299): __int128 and unsigned __int128 values passed and returned in rdi:rsi and
+// rax:rdx, on the stack where one register is left, and kept in a loop's phis, through every operation Tier 1 splits
+// into halves (additions and subtractions whose carries and borrows cross the 64-bit boundary, products, shifts by
+// constants and variable counts, signed and unsigned comparisons, negations, logic and extensions) and libgcc's
+// divisions, remainders and conversions, signed and unsigned, over edge values. Each crosses between this unit (Tier
+// 1's) and the other (clang -O2's) both ways, as arguments and results.
+static const char check_test_tier1_int128_header[] =
+    "#include <stdio.h>\n"
+    "typedef unsigned __int128 U;\n"
+    "typedef __int128 S;\n"
+    "U b_mix(U a, unsigned long k, U b);\n"
+    "S b_smix(S a, S b, int k);\n"
+    "U b_stack(long r1, long r2, long r3, long r4, long r5, U a, U b);\n"
+    "unsigned long b_back(U a, S b);\n"
+    "U a_ops(U a, U b, unsigned k);\n"
+    "S a_sops(S a, S b, unsigned k);\n"
+    "U a_stack(long r1, long r2, long r3, long r4, long r5, U a, U b);\n"
+    "U a_chain(U t, unsigned long n);\n"
+    "unsigned long a_loop(unsigned long n);\n";
+
+static const char check_test_tier1_int128_other_source[] =
+    "#include \"tier1-int128.h\"\n"
+    "U b_mix(U a, unsigned long k, U b) { return a * k + (b ^ (b >> 7)); }\n"
+    "S b_smix(S a, S b, int k) { return (S)((U)(a >> (k & 127)) - (U)b); }\n"
+    "U b_stack(long r1, long r2, long r3, long r4, long r5, U a, U b) { return a + b * (U)(r1 + r2 * 3 + r3 * 5 + r4 * 7 + r5 * 11); }\n"
+    "unsigned long b_back(U a, S b)\n"
+    "{\n"
+    "    U r = a_ops(a, (U)b, 7) ^ a_stack(1, 2, 3, 4, 5, a, (U)b) ^ (U)a_sops((S)a, b, 9) ^ a_chain(a, 5);\n"
+    "    return (unsigned long)r ^ (unsigned long)(r >> 64);\n"
+    "}\n";
+
+static const char check_test_tier1_int128_source[] =
+    "#include \"tier1-int128.h\"\n"
+    "#define H(x) (h = h * 0x9e3779b97f4a7c15ull + (U)(x) + (h >> 61))\n"
+    "U a_ops(U a, U b, unsigned k)\n"
+    "{\n"
+    "    U h = 1;\n"
+    "    H(a + b); H(a - b); H(b - a); H(a * b); H(-a); H(~a); H(a & b); H(a | b); H(a ^ b);\n"
+    "    H(a + 1); H(a - 1); H(a + 0xffffffffffffffffull); H(a * (((U)1 << 64) + 1));\n"
+    "    H(a << (k & 127)); H(a >> (k & 127)); H(a << 1); H(a >> 1); H(a << 63); H(a >> 63); H(a << 64); H(a >> 64);\n"
+    "    H(a << 65); H(a >> 65); H(a << 127); H(a >> 127); H(a >> 3); H((a << 3) | (b >> 125));\n"
+    "    H(a < b); H(a <= b); H(a > b); H(a >= b); H(a == b); H(a != b); H(a < ((U)1 << 64));\n"
+    "    H((U)(unsigned long)a * (unsigned long)b); H((U)(unsigned long)a * (unsigned long)(b >> 64));\n"
+    "    H((unsigned)a); H((unsigned long)(a >> 64)); H((U)(unsigned long)(a >> 32));\n"
+    "    if (b != 0) { H(a / b); H(a % b); }\n"
+    "    H(a / 10); H(a % 1000000007u);\n"
+    "    H((U)(double)(a >> 75)); H((unsigned long)((double)a / 1e30));\n"
+    "    H(b_mix(a, (unsigned long)b, b));\n"
+    "    return h;\n"
+    "}\n"
+    "S a_sops(S a, S b, unsigned k)\n"
+    "{\n"
+    "    U h = 2;\n"
+    "    const S min = (S)((U)1 << 127);\n"
+    "    H(a >> (k & 127)); H(a >> 1); H(a >> 63); H(a >> 64); H(a >> 65); H(a >> 127);\n"
+    "    H(a < b); H(a <= b); H(a > b); H(a >= b); H(a < 0); H(a > -1); H(a == b);\n"
+    "    H((S)(long)a * (long)b); H((S)(long)a * (S)(unsigned long)b); H((S)(int)a); H((S)(long)(a >> 64));\n"
+    "    if (b != 0 && !(a == min && b == -1)) { H(a / b); H(a % b); }\n"
+    "    H(a / 7); H(a % -9); H(a / -1000000000000000000l);\n"
+    "    H((S)(double)(a >> 70)); H((long)((double)a / 1e25));\n"
+    "    H(b_smix(a, b, (int)k));\n"
+    "    return (S)h;\n"
+    "}\n"
+    "U a_stack(long r1, long r2, long r3, long r4, long r5, U a, U b) { return b_stack(r1, r2, r3, r4, r5, a ^ b, b + (U)r5) * 3 + a - (U)r1; }\n"
+    "__attribute__((noinline)) static U a_step(U a, unsigned long b) { return a * b + (a >> 3); }\n"
+    "U a_chain(U t, unsigned long n) { for (unsigned long i = 0; i < n; i += 1) t = a_step(t, i | 1); return t; }\n"
+    "unsigned long a_loop(unsigned long n)\n"
+    "{\n"
+    "    U t = 1;\n"
+    "    U s = 0;\n"
+    "    for (unsigned long i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        t = t + (t << 7) + (t >> 3) + i;\n"
+    "        s = (s ^ t) - (s >> 70);\n"
+    "    }\n"
+    "    return (unsigned long)(t ^ s) ^ (unsigned long)((t ^ s) >> 64);\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    static const unsigned long halves[][2] = {\n"
+    "        { 0, 0 }, { 1, 0 }, { 2, 0 }, { 0xffffffffffffffffull, 0 }, { 0, 1 }, { 1, 1 }, { 0xffffffffffffffffull, 0xffffffffffffffffull },\n"
+    "        { 0xfffffffffffffffeull, 0xffffffffffffffffull }, { 0, 0x8000000000000000ull }, { 0xffffffffffffffffull, 0x7fffffffffffffffull },\n"
+    "        { 0xfedcba9876543210ull, 0x0123456789abcdefull }, { 0x8000000000000000ull, 0x8000000000000000ull }, { 7, 0xffffffffffffffffull },\n"
+    "    };\n"
+    "    static const unsigned counts[] = { 0, 1, 3, 63, 64, 65, 100, 127 };\n"
+    "    const unsigned n = sizeof(halves) / sizeof(halves[0]);\n"
+    "    U total = 0;\n"
+    "    for (unsigned i = 0; i < n; i += 1)\n"
+    "    {\n"
+    "        const U a = (U)halves[i][1] << 64 | halves[i][0];\n"
+    "        for (unsigned j = 0; j < n; j += 1)\n"
+    "        {\n"
+    "            const U b = (U)halves[j][1] << 64 | halves[j][0];\n"
+    "            for (unsigned c = 0; c < sizeof(counts) / sizeof(counts[0]); c += 1)\n"
+    "            {\n"
+    "                total = total * 31 + a_ops(a, b, counts[c]) + (U)a_sops((S)a, (S)b, counts[c]);\n"
+    "            }\n"
+    "            total ^= a_stack((long)i, (long)j, 3, 4, (long)(i * j), a, b) + b_back(a, (S)b);\n"
+    "        }\n"
+    "        printf(\"%u %016lx%016lx\\n\", i, (unsigned long)(total >> 64), (unsigned long)total);\n"
+    "    }\n"
+    "    const U chain = a_chain(1, 1000);\n"
+    "    printf(\"%016lx%016lx %lx\\n\", (unsigned long)(chain >> 64), (unsigned long)chain, a_loop(1000));\n"
+    "    return 0;\n"
+    "}\n";
+
+// The 128-bit integers' fixture (#3299): both units' output is clang's, and a loop of 128-bit values computed within
+// one function keeps them in registers: a_loop (additions, subtractions, shifts and xors, no product, whose mul would
+// save rax and rdx in the red zone) addresses nothing from rsp, where each value's 16-byte frame object took stores and
+// loads around every operation before.
+static void check_test_driver_tier1_int128(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    enum
+    {
+        CHECK_TEST_TIER1_INT128_RECORDS = 1024,
+    };
+    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-int128", "128-bit integers'", check_test_tier1_int128_header, check_test_tier1_int128_source,
+                                  check_test_tier1_int128_other_source, NULL, true, 0);
+    char header[512];
+    char source[512];
+    snprintf(header, sizeof(header), "%s/tier1-int128.h", directory);
+    snprintf(source, sizeof(source), "%s/tier1-int128-loop.c", directory);
+    const bool written = parse_test_write(header, check_test_tier1_int128_header, sizeof(check_test_tier1_int128_header) - 1) &&
+                         parse_test_write(source, check_test_tier1_int128_source, sizeof(check_test_tier1_int128_source) - 1);
+    X86Decoded* records = calloc(CHECK_TEST_TIER1_INT128_RECORDS, sizeof(X86Decoded));
+    uint32_t* offsets = calloc(CHECK_TEST_TIER1_INT128_RECORDS, sizeof(uint32_t));
+    uint32_t* types = calloc(CHECK_TEST_TIER1_INT128_RECORDS, sizeof(uint32_t));
+    const bool ready = written && records != NULL && offsets != NULL && types != NULL && x86_disassembler_initialize();
+    static const char* const names[] = { "a_loop" };
+    for (uint32_t path = 0; ready && path < 2; path += 1)
+    {
+        char object[512];
+        snprintf(object, sizeof(object), "%s/tier1-int128-loop-%u.o", directory, path);
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build_names(executable, source, names, 1, object, true, path != 0, true, false, NULL, &build);
+        uint32_t relocations = 0;
+        const uint32_t count = compiled ? check_test_tier1_function(object, "a_loop", records, CHECK_TEST_TIER1_INT128_RECORDS, offsets, types, &relocations) : 0;
+        uint32_t stacked = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const X86Instruction* instruction = &records[i].instruction;
+            const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
+            stacked += instruction->mode != BUSTER_X86_REGISTER_DIRECT && instruction->rm == X86_REGISTER_RSP && form != X86_FORM_PUSH_R64 && form != X86_FORM_POP_R64;
+        }
+        check_test_expect(test, count != 0 && stacked == 0, "a_loop keeps its 128-bit values' halves in registers, addressing nothing from rsp");
+        printf("  Tier 1's 128-bit loop (#3299), %s path: %u instructions, %u of them addressing from rsp\n", path == 0 ? "vector" : "scalar", count, stacked);
+        unlink(object);
+    }
+    free(records);
+    free(offsets);
+    free(types);
+    unlink(header);
+    unlink(source);
+}
+
 // Stack-passed vectors' alignment (#1204's review). A call whose 32- or 64-byte vector argument goes on the stack (its
 // eight vector registers already taken by doubles) needs rsp aligned to 32 or 64 bytes at the call, past the ABI's 16:
 // Tier 1's frame realigns itself to it, in a fixed frame and in one with an alloca, whose allocations and calls' areas

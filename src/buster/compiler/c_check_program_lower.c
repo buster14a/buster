@@ -965,6 +965,8 @@ struct CheckLowerWriter
     bool segments;
     // Whether the function has a LOAD, STORE or SET with a segment's override (Tier0Function.segments).
     bool segment_entries;
+    // Whether the function has a LOAD, STORE or SET of a volatile lvalue (#3310, Tier0Function.volatiles).
+    bool volatile_entries;
     // A function whose result is a 128-bit integer returns it from this frame object's 16 bytes (Tier0Function.result_size,
     // as a struct of two INTEGER eightbytes returns), BUSTER_CHECK_NONE for any other.
     uint32_t result_object;
@@ -1312,15 +1314,32 @@ static uint64_t check_lower_segment_override(const TypeTable* types, TypeId type
     return segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
 }
 
+// Whether an access of a class's value at an object of `type` is a volatile one the typed stream marks (#3310,
+// BUSTER_TYPED_ACCESS_VOLATILE): a volatile-qualified lvalue's, of a scalar class (not a vector's or a mask's, whose
+// value is its bytes).
+static bool check_lower_volatile(uint8_t class, TypeId type)
+{
+    return (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0 && class != BUSTER_TYPED_CLASS_VECTOR && class != BUSTER_TYPED_CLASS_MASK;
+}
+
+// A volatile access's mark (check_lower_volatile), which marks the function (CheckLowerWriter.volatile_entries); 0 for any
+// other access.
+static uint64_t check_lower_volatile_mark(CheckLowerWriter* writer, uint8_t class, TypeId type)
+{
+    const bool marked = check_lower_volatile(class, type);
+    writer->volatile_entries = writer->volatile_entries || marked;
+    return marked ? BUSTER_TYPED_ACCESS_VOLATILE : 0;
+}
+
 // The value of a LOAD, STORE or SET of a class's value at an object of `type` (an lvalue's type, with its address space):
-// check_lower_access_value's, and in a unit with a segment's space its override (check_lower_segment_override), which
-// marks the function (CheckLowerWriter.segment_entries).
+// check_lower_access_value's, in a unit with a segment's space its override (check_lower_segment_override), which marks
+// the function (CheckLowerWriter.segment_entries), and a volatile lvalue's mark (check_lower_volatile_mark).
 static uint64_t check_lower_access(CheckLowerWriter* writer, uint8_t class, TypeId type)
 {
     const TypeTable* types = writer->program->types;
     const uint64_t segment = __builtin_expect(writer->segments, 0) ? check_lower_segment_override(types, type) : 0;
     writer->segment_entries = writer->segment_entries || segment != 0;
-    return check_lower_access_value(types, class, type) | segment;
+    return check_lower_access_value(types, class, type) | segment | check_lower_volatile_mark(writer, class, type);
 }
 
 // A vector's element's segment override (#1447): where `node` is an element of a vector lvalue in %fs or %gs, which its
@@ -3676,7 +3695,7 @@ static bool check_lower_copy_forward_volatile(CheckLowerWriter* writer, uint32_t
             else if (op == CHECK_OP_CONDITIONAL)
             {
                 bool truth = false;
-                if (check_program_runtime_truth(program, at, graph->operand0[at], &truth))
+                if (check_program_emission_truth(program, at, graph->operand0[at], &truth))
                 {
                     next = truth ? graph->operand1[at] : graph->operand2[at];
                 }
@@ -3958,6 +3977,8 @@ struct CheckLowerBitField
     // Its record's segment override (#1447, BUSTER_TYPED_SEGMENT_FS or _GS; 0 for none), which its unit's LOADs and SETs
     // take (check_lower_bit_unit, check_lower_bit_store).
     uint8_t segment;
+    // Whether it is a volatile lvalue's (#3310), whose unit's LOADs and SETs are volatile accesses (check_lower_bit_override).
+    bool is_volatile;
 };
 
 // The place of a bit-field of `width` bits and type `type` at bit `offset`; false for one that has no integer class or
@@ -3975,6 +3996,7 @@ static bool check_lower_bit_place(const TypeTable* types, uint64_t offset, uint3
     field->class = check_lower_type_class(types, type);
     field->is_signed = sign && bits != 1;
     field->segment = 0;
+    field->is_volatile = false;
     return integer && width != 0 && width <= bits && width <= 64 && field->class < BUSTER_TYPED_CLASSES && field->class != BUSTER_TYPED_CLASS_VOID;
 }
 
@@ -4090,6 +4112,7 @@ static bool check_lower_bit_member(const CheckLowerWriter* writer, uint32_t node
         check_lower_bit_unit_place(writer, node, field);
     }
     field->segment = placed && __builtin_expect(writer->segments, 0) ? (uint8_t)(check_lower_segment_override(program->types, type) >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT) : 0;
+    field->is_volatile = placed && (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0;
     return placed;
 }
 
@@ -4124,12 +4147,12 @@ static void check_lower_bit_constant_address(CheckLowerWriter* writer, uint32_t 
 }
 
 // A place in a task's `type`: the shift in bits 0 to 5, the width less one in bits 6 to 11, the class in bits 12 to 15,
-// the sign in bit 16, the segment in bits 17 and 18 and the unit's bytes less one (0 to 8) in bits 19 to 22. Its unit's
-// first byte is in the address the task finds.
+// the sign in bit 16, the segment in bits 17 and 18, the unit's bytes less one (0 to 8) in bits 19 to 22 and whether it
+// is volatile in bit 23. Its unit's first byte is in the address the task finds.
 static uint32_t check_lower_bit_pack(const CheckLowerBitField* field)
 {
     return field->shift | (field->width - 1) << 6 | (uint32_t)field->class << 12 | (uint32_t)field->is_signed << 16 | (uint32_t)field->segment << 17 |
-           (field->bytes - 1) << 19;
+           (field->bytes - 1) << 19 | (uint32_t)field->is_volatile << 23;
 }
 
 static CheckLowerBitField check_lower_bit_unpack(uint32_t packed)
@@ -4141,16 +4164,25 @@ static CheckLowerBitField check_lower_bit_unpack(uint32_t packed)
         .class = (uint8_t)(packed >> 12 & 15),
         .is_signed = (packed >> 16 & 1) != 0,
         .segment = (uint8_t)(packed >> 17 & 3),
+        .is_volatile = (packed >> 23 & 1) != 0,
     };
 }
 
-// A bit-field's unit from the address of its first byte on top of the stack: each of its `bytes` bytes' pieces loaded,
-// widened and put in place, as a U64, with its record's segment override (`segment`, #1447). More than one piece reads
-// the address from a temporary.
-static void check_lower_bit_unit(CheckLowerWriter* writer, uint32_t bytes, uint32_t segment)
+// The value of each LOAD and SET of a bit-field's unit: its record's segment override (#1447) and a volatile field's mark
+// (#3310, BUSTER_TYPED_ACCESS_VOLATILE), each of which marks the function (CheckLowerWriter.segment_entries,
+// .volatile_entries).
+static uint64_t check_lower_bit_override(CheckLowerWriter* writer, const CheckLowerBitField* field)
 {
-    const uint64_t override = (uint64_t)segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
-    writer->segment_entries = writer->segment_entries || segment != 0;
+    writer->segment_entries = writer->segment_entries || field->segment != 0;
+    writer->volatile_entries = writer->volatile_entries || field->is_volatile;
+    return (uint64_t)field->segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT | (field->is_volatile ? BUSTER_TYPED_ACCESS_VOLATILE : 0);
+}
+
+// A bit-field's unit from the address of its first byte on top of the stack: each of its `bytes` bytes' pieces loaded,
+// widened and put in place, as a U64, each LOAD's value `override` (check_lower_bit_override). More than one piece reads
+// the address from a temporary.
+static void check_lower_bit_unit(CheckLowerWriter* writer, uint32_t bytes, uint64_t override)
+{
     const bool whole = (bytes & (bytes - 1)) == 0;
     const uint32_t address = whole ? BUSTER_CHECK_NONE : check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     if (!whole)
@@ -4216,11 +4248,10 @@ static void check_lower_bit_extract(CheckLowerWriter* writer, const CheckLowerBi
 // now reads it unless `discard`. Out of line: a few bit-fields of a few packed records take it.
 static __attribute__((noinline)) void check_lower_bit_wide(CheckLowerWriter* writer, const CheckLowerBitField* field, uint32_t address, bool store, bool discard)
 {
-    const uint64_t override = (uint64_t)field->segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
+    const uint64_t override = check_lower_bit_override(writer, field);
     const uint64_t mask = field->width == 64 ? UINT64_MAX : (UINT64_C(1) << field->width) - 1;
     const uint32_t low = 64 - field->shift;
     const uint32_t first = store ? address : check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
-    writer->segment_entries = writer->segment_entries || field->segment != 0;
     if (!store)
     {
         check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, first);
@@ -4295,7 +4326,7 @@ static void check_lower_bit_read(CheckLowerWriter* writer, uint32_t packed)
     }
     else
     {
-        check_lower_bit_unit(writer, field.bytes, field.segment);
+        check_lower_bit_unit(writer, field.bytes, check_lower_bit_override(writer, &field));
         check_lower_bit_extract(writer, &field, field.shift);
     }
 }
@@ -4310,7 +4341,7 @@ static inline __attribute__((always_inline)) void check_lower_bit_store(CheckLow
     const uint32_t bytes = field.bytes;
     const bool whole = (bytes & (bytes - 1)) == 0;
     const uint64_t mask = field.width == 64 ? UINT64_MAX : (UINT64_C(1) << field.width) - 1;
-    const uint64_t override = (uint64_t)field.segment << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT;
+    const uint64_t override = check_lower_bit_override(writer, &field);
     const uint32_t value = check_lower_temporary(writer, BUSTER_TYPED_CLASS_U64);
     if (field.class != BUSTER_TYPED_CLASS_U64)
     {
@@ -4328,7 +4359,7 @@ static inline __attribute__((always_inline)) void check_lower_bit_store(CheckLow
         check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
     }
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, address);
-    check_lower_bit_unit(writer, bytes, field.segment);
+    check_lower_bit_unit(writer, bytes, override);
     check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, ~(mask << field.shift));
     check_lower_emit(writer, BUSTER_TYPED_AND, BUSTER_TYPED_CLASS_U64, 0);
     check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, value);
@@ -8743,7 +8774,9 @@ static void check_lower_update(CheckLowerWriter* writer, uint32_t node)
     // A global of a memory class goes through its address, as memory does (a local's object takes LOCAL and STORE_LOCAL),
     // and a postfix one's old value through a temporary, a frame object of its own.
     // So does a global in a segment's space (#1447), whose accesses take its override (check_lower_access).
-    const bool memory = check_lower_memory_class(stored_class) || (__builtin_expect(writer->segments, 0) && check_lower_segment_override(program->types, stored) != 0);
+    // And so does a volatile one (#3310), whose accesses take its mark.
+    const bool memory = check_lower_memory_class(stored_class) || (__builtin_expect(writer->segments, 0) && check_lower_segment_override(program->types, stored) != 0) ||
+                        check_lower_volatile(stored_class, stored);
     const bool direct = local != BUSTER_CHECK_NONE || (!memory && symbol != 0);
     const uint8_t get = local != BUSTER_CHECK_NONE ? BUSTER_TYPED_LOCAL : BUSTER_TYPED_GLOBAL;
     const uint64_t destination = local != BUSTER_CHECK_NONE ? local : symbol;
@@ -12453,7 +12486,7 @@ static bool check_lower_branch_operator(const CheckProgram* program, uint32_t no
                               (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0;
         bool truth = false;
         result = !constant && value.category == CHECK_RVALUE && (op == CHECK_OP_CONDITION || type_unqualified(value.type) == BUSTER_TYPE_INT) &&
-                 (!logical || !check_program_runtime_truth(program, node, graph->operand0[node], &truth));
+                 (!logical || !check_program_emission_truth(program, node, graph->operand0[node], &truth));
     }
     return result;
 }
@@ -12568,7 +12601,7 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
 {
     const bool reuse = op == CHECK_OP_CONDITIONAL && a == b;
     bool truth = false;
-    const bool known = check_program_runtime_truth(program, node, a, &truth);
+    const CheckEmissionTruth known = check_program_emission_truth(program, node, a, &truth);
     const bool conditional = op == CHECK_OP_CONDITIONAL;
     const bool decided = known && !conditional && (op == CHECK_OP_LOGICAL_OR) == truth;
     // Whether the task under this node's EXPRESSION is its consumer's conversion (check_lower_convert_operand's, tagged
@@ -12596,7 +12629,7 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
             check_lower_truth(writer, type_b, false);
             check_lower_operand(writer, node, 1, false, type_b);
         }
-        if ((!reuse || !truth) && check_program_runtime_effects(program, a))
+        if (known == CHECK_EMISSION_CHECKED && (!reuse || !truth) && check_program_runtime_effects(program, a))
         {
             check_lower_operand(writer, node, 0, false, BUSTER_TYPE_VOID);
         }
@@ -16200,11 +16233,12 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
             // A global register variable's read (#1846): its register's value.
         }
         else if (value->category == CHECK_LVALUE && object != 0 && object < program->object_count &&
-                 (check_lower_memory_class(class) || (__builtin_expect(writer->segments, 0) && check_lower_segment_override(types, value->type) != 0)) &&
+                 (check_lower_memory_class(class) || (__builtin_expect(writer->segments, 0) && check_lower_segment_override(types, value->type) != 0) ||
+                  check_lower_volatile(class, value->type)) &&
                  check_lower_local_of(writer, object) == BUSTER_CHECK_NONE)
         {
-            // A global of a memory class, or in a segment's space (#1447), through its address (a local's object takes LOCAL
-            // below).
+            // A global of a memory class, in a segment's space (#1447) or volatile (#3310), through its address (a local's
+            // object takes LOCAL below).
             check_lower_address(writer, object, value->offset);
             check_lower_emit(writer, BUSTER_TYPED_LOAD, class, check_lower_access(writer, class, value->type));
         }
@@ -16684,7 +16718,9 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         // A global of a memory class is stored through its address, which goes first (check_lower_memory_class), and so is
         // one in a segment's space (#1447), whose store takes its override (check_lower_access).
         const TypeId target = op == CHECK_OP_ASSIGN ? check_stream_type(stream, a) : value->type;
-        const bool memory = check_lower_memory_class(class) || (__builtin_expect(writer->segments, 0) && check_lower_segment_override(types, target) != 0);
+        // So is a volatile one (#3310), whose store takes its mark.
+        const bool memory = check_lower_memory_class(class) || (__builtin_expect(writer->segments, 0) && check_lower_segment_override(types, target) != 0) ||
+                            (op == CHECK_OP_ASSIGN && check_lower_volatile(class, target));
         if (local != BUSTER_CHECK_NONE || (!memory && symbol != 0))
         {
             check_lower_instruction(writer, local != BUSTER_CHECK_NONE ? BUSTER_TYPED_STORE_LOCAL : BUSTER_TYPED_STORE_GLOBAL, class,
@@ -16693,7 +16729,7 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
         }
         else if (op == CHECK_OP_ASSIGN)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value->type) | (check_lower_access(writer, class, target) & BUSTER_TYPED_ACCESS_SEGMENT) |
+            check_lower_instruction(writer, BUSTER_TYPED_STORE, class, check_lower_access_value(types, class, value->type) | (check_lower_access(writer, class, target) & (BUSTER_TYPED_ACCESS_SEGMENT | BUSTER_TYPED_ACCESS_VOLATILE)) |
                                                                           check_lower_element_segment(writer, a));
             check_lower_operand(writer, node, 1, false, value->type);
             check_lower_operand(writer, node, 0, true, 0);
@@ -18814,6 +18850,14 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
     }
     else
     {
+        // An empty template's "memory" clobber (#3310) is a compiler barrier, `asm("" ::: "memory")`: a signal fence of
+        // seq_cst, which no access to memory moves across and no load takes an earlier access's value past (a general
+        // memory write to value numbering with memory), and for which no code is emitted. Pushed first, it comes after the
+        // statement's operands.
+        if (statement->memory_clobber)
+        {
+            check_lower_instruction(writer, BUSTER_TYPED_FENCE, BUSTER_TYPED_CLASS_VOID, BUSTER_TYPED_FENCE_SEQ_CST | BUSTER_TYPED_FENCE_SIGNAL);
+        }
         // Each output a matching input sets keeps its address in a temporary till the input's value comes.
         uint32_t addresses[BUSTER_CHECK_ASM_OPERANDS];
         for (uint32_t k = 0; k < count; k += 1)
@@ -20982,6 +21026,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->x87 = check_lower_x87(writer, result);
         writer->int128 = false;
         writer->segment_entries = false;
+        writer->volatile_entries = false;
         writer->unwind_init = false;
         writer->returns_twice = false;
         writer->calls_returns_twice = false;
@@ -21525,6 +21570,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         }
         function->int128 = writer->int128;
         function->segments = writer->segment_entries;
+        function->volatiles = writer->volatile_entries;
         function->unwind_init = writer->unwind_init;
         function->returns_twice = writer->returns_twice;
         function->calls_returns_twice = writer->calls_returns_twice;

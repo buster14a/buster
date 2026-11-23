@@ -17711,7 +17711,8 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
                                        fp_contract == BUSTER_PREDEFINES_CONTRACT_FAST ? BUSTER_CHECK_FP_CONTRACT_FAST : 0;
     input->graph.recorded_pure = valid ? recorded_pure : NULL;
     input->graph.extensions = check_input_expression_extensions(parser);
-    if (pp->options.statement_controls && valid && fresh_output && complete_translation_unit && deferred == NULL && attested == NULL && count >= 8192)
+    if (pp->options.statement_controls && valid && (fresh_output || pp->options.statement_controls_anywhere) && complete_translation_unit && deferred == NULL &&
+        attested == NULL && count >= 8192)
     {
         const uint64_t words = (graph_capacity + 63) / 64;
         input->discard_roots = BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, words);

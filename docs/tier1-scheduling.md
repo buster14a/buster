@@ -363,8 +363,8 @@ which no link order varies), not spills it removes, and `closures` holds most of
 it. That is not the uniform gain that would
 justify the compile time on every function, so neither variant is enabled; the
 breaking of false dependencies the issue lists is already Tier 1's selection's
-for conversions from integers (`xorps` before `cvtsi2s*`), and a resize's
-(`cvtss2sd`, `cvtsd2ss`) still merges.
+for conversions from integers (`xorps` before `cvtsi2s*`), and since #3308 for
+a resize (`cvtss2sd`, `cvtsd2ss`) into another register than its operand's.
 
 ## Boundary audit #298
 

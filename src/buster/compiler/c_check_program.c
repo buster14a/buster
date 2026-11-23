@@ -1378,7 +1378,7 @@ static bool check_program_switch_type(const TypeTable* types, TypeId type)
 // A case's value at `node`, converted to the switch's type `target`, into `result`: for a _BitInt past 128 bits (#2220),
 // its low 128 bits, and its limbs into `wide` (which may be null for no other type), converted as clang converts a case's
 // value (check_wide_convert); null there for every other type.
-static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result, const uint64_t** wide)
+static bool check_program_case_integer(const CheckProgram* program, const CheckValue* initialized, uint32_t node, TypeId target, unsigned __int128* result, const uint64_t** wide)
 {
     uint32_t width = 0;
     uint32_t source_width = 0;
@@ -1393,7 +1393,7 @@ static bool check_program_case_value(const CheckProgram* program, uint32_t node,
     }
     if (valid)
     {
-        CheckValue converted = check_graph_context_value(program->types, &program->input->graph, program->stream, node);
+        CheckValue converted = initialized != NULL ? *initialized : check_graph_context_value(program->types, &program->input->graph, program->stream, node);
         const CheckValue* value = &converted;
         valid = value->constant_kind == CHECK_CONSTANT_INTEGER && value->fault == CHECK_FAULT_NONE && (value->flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
                 (check_action_integer_type(program->types, value->type, &source_width, &source_sign) ||
@@ -1420,6 +1420,11 @@ static bool check_program_case_value(const CheckProgram* program, uint32_t node,
         }
     }
     return valid;
+}
+
+static bool check_program_case_value(const CheckProgram* program, uint32_t node, TypeId target, unsigned __int128* result, const uint64_t** wide)
+{
+    return check_program_case_integer(program, NULL, node, target, result, wide);
 }
 
 static unsigned __int128 check_program_case_order(const CheckProgram* program, const CheckProgramCase* item, bool upper)
@@ -2349,6 +2354,8 @@ static bool check_control_foldable(const CheckControlWriter* writer, uint32_t ex
     }
     return foldable;
 }
+
+static bool check_program_labeled(const CheckProgram* program, uint32_t root, uint32_t tag, uint32_t* nodes, uint32_t* stack, uint32_t capacity);
 
 #include "c_check_program_fold.c"
 
@@ -3778,29 +3785,35 @@ static uint32_t check_program_reference_roots(CheckProgram* program, const Check
     return reference_count;
 }
 
-// Whether `root`'s code holds a label — a statement expression's whose block does — which code generation emits even
-// where a constant condition leaves the operand out (clang's ContainsLabel: a label is a statement's, so an operand
-// can hold one only through a statement expression, or a case of a switch outside it). The scan is syntactic: a
-// `sizeof` or `_Alignof` operand counts too, as it does for ContainsLabel, though code generation evaluates neither.
-// The scan's marks in `nodes` are
-// `tag`, disjoint from the run's epochs, so they don't hide a node the run hasn't pushed; `stack`/`depth` start where
-// the run's does and return to it.
-static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t tag, uint32_t* nodes, uint32_t* stack, uint32_t depth)
+// A source label inside an operand, including one in a statement expression or a case owned by an outer switch.
+// Reference selection supplies a mark column and scratch for the graph. Emission's initializer proof can also
+// ask with bounded local scratch, preserving both arms when it runs out.
+static bool check_program_labeled(const CheckProgram* program, uint32_t root, uint32_t tag, uint32_t* nodes, uint32_t* stack, uint32_t capacity)
 {
     const CheckInput* input = program->input;
     const CheckGraph* graph = &input->graph;
     const Parser* parser = program->parser;
     uint32_t count = 0;
     bool labeled = false;
-    if (root < graph->count && nodes[root] != tag)
+    if (root < graph->count && (nodes == NULL || nodes[root] != tag))
     {
-        nodes[root] = tag;
-        stack[depth + count++] = root;
+        if (nodes != NULL)
+        {
+            nodes[root] = tag;
+        }
+        stack[count++] = root;
     }
     // The scan runs out: a mark means the node's subtree was explored whole, so later queries skip it soundly.
-    while (count != 0)
+    uint32_t visits = 0;
+    bool room = true;
+    while (room && count != 0)
     {
-        const uint32_t node = stack[depth + --count];
+        const uint32_t node = stack[--count];
+        if (nodes == NULL && ++visits > capacity)
+        {
+            labeled = true;
+            break;
+        }
         const CheckOp op = graph->ops[node];
         if (op == CHECK_OP_STATEMENT_VALUE)
         {
@@ -3820,29 +3833,27 @@ static bool check_program_labeled(CheckProgram* program, uint32_t root, uint32_t
         else
         {
             const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
+            const uint32_t arguments = check_graph_has_arguments(op) ? graph->argument_counts[node] : 0;
+            for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands) + arguments; k += 1)
             {
-                if (operands[k] < graph->count && nodes[operands[k]] != tag)
+                const uint32_t child = k < BUSTER_ARRAY_LENGTH(operands) ? operands[k] : graph->argument_nodes[graph->argument_offsets[node] + k - 3];
+                if (child < graph->count && (nodes == NULL || nodes[child] != tag))
                 {
-                    nodes[operands[k]] = tag;
-                    stack[depth + count++] = operands[k];
-                }
-            }
-            if (check_graph_has_arguments(op))
-            {
-                for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
-                {
-                    const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                    if (nodes[argument] != tag)
+                    room = count < capacity;
+                    if (!room)
                     {
-                        nodes[argument] = tag;
-                        stack[depth + count++] = argument;
+                        break;
                     }
+                    if (nodes != NULL)
+                    {
+                        nodes[child] = tag;
+                    }
+                    stack[count++] = child;
                 }
             }
         }
     }
-    return labeled;
+    return labeled || !room;
 }
 
 // A builtin's size or value argument whose value the code may take as a constant, as ordinary constant emission's proof
@@ -4086,8 +4097,9 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 }
             }
             bool truth = false;
-            if ((op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL) && !program->unselected_operands &&
-                check_program_runtime_truth(program, node, operands[0], &truth))
+            const bool conditional = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL;
+            const CheckEmissionTruth known = conditional && !program->unselected_operands ? check_program_emission_truth(program, node, operands[0], &truth) : CHECK_EMISSION_UNKNOWN;
+            if (known != CHECK_EMISSION_UNKNOWN)
             {
                 // The operand a constant condition leaves out still emits — and so refers — where it holds a label
                 // (check_program_labeled): a statement expression's block's, or a case of a switch outside it — which
@@ -4095,10 +4107,14 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 // ConstantFoldsToSimpleInteger from folding it, so then the operand emits whatever it holds.
                 const uint32_t dropped = op == CHECK_OP_CONDITIONAL ? (truth ? 2 : 1) : 1;
                 const bool leaves = op == CHECK_OP_CONDITIONAL || (op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth);
-                if (leaves && (!regions || !(check_program_labeled(program, operands[0], epoch | UINT32_C(0x20000000), nodes, stack, depth) ||
-                                             check_program_labeled(program, operands[dropped], epoch | UINT32_C(0x40000000), nodes, stack, depth))))
+                if (leaves && (!regions || !(check_program_labeled(program, operands[0], epoch | UINT32_C(0x20000000), nodes, stack + depth, graph->count) ||
+                                             check_program_labeled(program, operands[dropped], epoch | UINT32_C(0x40000000), nodes, stack + depth, graph->count))))
                 {
                     operands[dropped] = BUSTER_CHECK_NONE;
+                }
+                if (known == CHECK_EMISSION_INITIALIZER)
+                {
+                    operands[0] = BUSTER_CHECK_NONE;
                 }
             }
             for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
@@ -5292,10 +5308,15 @@ static void check_program_census_prune(const CheckProgram* program, uint32_t nod
     {
         drop[0] = check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
     }
-    else if (!program->unselected_operands && operands[0] < graph->count && check_program_runtime_truth(program, node, operands[0], &truth))
+    else if (!program->unselected_operands && operands[0] < graph->count)
     {
-        const uint32_t dropped = op == CHECK_OP_CONDITIONAL ? (truth ? 2 : 1) : 1;
-        drop[dropped] = op == CHECK_OP_CONDITIONAL || (op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth);
+        const CheckEmissionTruth known = check_program_emission_truth(program, node, operands[0], &truth);
+        if (known != CHECK_EMISSION_UNKNOWN)
+        {
+            const uint32_t dropped = op == CHECK_OP_CONDITIONAL ? (truth ? 2 : 1) : 1;
+            drop[dropped] = op == CHECK_OP_CONDITIONAL || (op == CHECK_OP_LOGICAL_AND && !truth) || (op == CHECK_OP_LOGICAL_OR && truth);
+            drop[0] = known == CHECK_EMISSION_INITIALIZER && !(op == CHECK_OP_CONDITIONAL && truth && operands[0] == operands[1]);
+        }
     }
     uint32_t depth = 0;
     for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(operands); k += 1)
@@ -5611,10 +5632,9 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
         // left-out operand, for which the walk keeps it, isn't looked for: the census's missing references would say so.
         memset(dead, 0, dead_words * sizeof(uint64_t));
         // Of the calls, only one the reader marked (BUSTER_CHECK_LIBRARY_CALL in its member) can be computed. Of &&, || and
-        // ?:, only one whose condition is a constant or a builtin's query has a truth (check_program_runtime_truth): their
-        // nodes, compressed into `pending` as the scan finds them, have their conditions' constant kinds and ops gathered
-        // 16 at a time (a kind's byte column read as dwords where 3 bytes past are the column's), and only those, a dense
-        // stream's and one near the column's end take check_program_census_prune. The marks are a union, in any order.
+        // ?:, a checked constant, builtin query or const initializer can decide the condition. Gather the kinds and
+        // operators of 16 conditions together. Where a unit has initializer receipts, a computed integer condition
+        // can also be decided by its operands. The marks are a union, in any order.
         const CheckStream* stream = program->stream;
         uint32_t pending[128 + 16];
         uint32_t pending_count = 0;
@@ -5658,7 +5678,8 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
                 const __m512i operations = _mm512_mask_i32gather_epi32(zero, inside, conditions, graph->ops, 4);
                 const __mmask16 constant = _mm512_cmpneq_epi32_mask(kinds, _mm512_set1_epi32(CHECK_CONSTANT_NONE));
                 const __mmask16 query = _mm512_cmpeq_epi32_mask(operations, _mm512_set1_epi32(CHECK_OP_BUILTIN_QUERY));
-                for (uint32_t lanes = inside & ((safe & constant) | (__mmask16)~safe | query); lanes != 0; lanes &= lanes - 1)
+                const __mmask16 initializers = graph->const_values != NULL && (graph->const_values->count != 0 || graph->const_values->prefix != NULL) ? inside : 0;
+                for (uint32_t lanes = inside & ((safe & constant) | (__mmask16)~safe | query | initializers); lanes != 0; lanes &= lanes - 1)
                 {
                     check_program_census_prune(program, pending[i + (uint32_t)__builtin_ctz(lanes)], dead, walk);
                 }

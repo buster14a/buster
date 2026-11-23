@@ -14,9 +14,14 @@ static bool pp_test_source_feature_matrix(void)
     static const char* const attributes[] = {
         "alias", "aligned", "cleanup", "common", "constructor", "destructor", "ext_vector_type", "fallthrough", "gnu_inline", "ifunc", "mode", "naked",
         "nocommon", "overloadable", "packed", "retain", "section", "target", "transparent_union", "used", "vector_size", "visibility", "weak", "weakref",
+        // #3306: consumed since #806 froze the list (Tier 0's inlining, the return flow, -Wformat, the use warnings and
+        // errors, -Wunused-variable, -Wunused-result and the ignored-result warning of const and pure functions).
+        "always_inline", "noinline", "noreturn", "format", "deprecated", "unavailable", "unused", "warn_unused_result", "const", "pure",
     };
+    // Accepted with no consumer, or (nodiscard, maybe_unused) no GNU spelling, as in clang.
     static const char* const refused[] = {
-        "always_inline", "noinline", "format", "unused", "noreturn", "nodiscard", "maybe_unused", "deprecated", "not_an_attribute",
+        "nodiscard", "maybe_unused", "not_an_attribute", "cold", "hot", "artificial", "alloc_align", "alloc_size", "returns_nonnull", "nonnull",
+        "sentinel", "format_arg", "error", "warning", "flatten", "malloc", "nothrow", "leaf",
     };
     static const struct { const char* name; uint32_t value; } c_attributes[] = {
         { "fallthrough", 201910 }, { "gnu::aligned", 1 }, { "gnu::packed", 1 }, { "gnu::vector_size", 1 },
@@ -26,6 +31,9 @@ static bool pp_test_source_feature_matrix(void)
         { "nodiscard", 202003 },
         { "maybe_unused", 202106 },
         { "deprecated", 201904 },
+        { "noreturn", 202202 }, { "_Noreturn", 202202 }, { "gnu::always_inline", 1 }, { "gnu::noinline", 1 }, { "gnu::noreturn", 1 },
+        { "gnu::format", 1 }, { "gnu::deprecated", 1 }, { "gnu::unused", 1 }, { "gnu::warn_unused_result", 1 }, { "gnu::const", 1 },
+        { "gnu::pure", 1 }, { "gnu::cold", 0 }, { "gnu::nonnull", 0 },
         { "other::aligned", 0 }, { "aligned", 0 }, { "gnu::packed_typo", 0 }, { "gnu::overloadable", 0 },
     };
     // Independent of the admission table: these exact calls have ordinary checked signatures and Tier 0 consumers.
@@ -49,6 +57,15 @@ static bool pp_test_source_feature_matrix(void)
                 const uint8_t* name = (const uint8_t*)features[i].name;
                 const uint32_t length = (uint32_t)strlen(features[i].name);
                 result &= pp_feature(&options, PP_BUILTIN_HAS_FEATURE, name, length) == (standards[mode] >= features[i].standard);
+                result &= pp_feature(&options, PP_BUILTIN_HAS_EXTENSION, name, length) == 1;
+            }
+            // #3306: the deprecated and unavailable uses' diagnostics print the attribute's message.
+            static const char* const message_features[] = { "attribute_deprecated_with_message", "attribute_unavailable_with_message" };
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(message_features); i += 1)
+            {
+                const uint8_t* name = (const uint8_t*)message_features[i];
+                const uint32_t length = (uint32_t)strlen(message_features[i]);
+                result &= pp_feature(&options, PP_BUILTIN_HAS_FEATURE, name, length) == 1;
                 result &= pp_feature(&options, PP_BUILTIN_HAS_EXTENSION, name, length) == 1;
             }
             for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(attributes); i += 1)
