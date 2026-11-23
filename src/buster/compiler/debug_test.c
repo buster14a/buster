@@ -282,6 +282,19 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
+#define BUSTER_DEBUG_TEST_UNITS_DIGEST 0xf5a9298721066e18ull
+
+// FNV-1a over `size` bytes, from `digest`.
+static uint64_t debug_test_digest(uint64_t digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* data = bytes;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        digest = (digest ^ data[i]) * 0x100000001b3ull;
+    }
+    return digest;
+}
+
 static bool debug_test_units(void)
 {
     bool valid = true;
@@ -324,6 +337,10 @@ static bool debug_test_units(void)
         .lines = lines,
     };
     valid &= a_bytes != 0 && b_bytes != 0;
+    // The sections' bytes, sizes, fields and line addresses of every case below, before the addresses are patched: a
+    // digest frozen on 2026-11-23 while the vector path and its exact twin wrote the same bytes for every case. Each row's
+    // meaning is checked independently by debug_test_decode; the digest holds the encoding (#2924).
+    uint64_t digest = 0xcbf29ce484222325ull;
     // Every count with each row in its function's file, then with rows in other files (DebugUnit.row_files, #2541): runs of
     // three and four, so that a change falls at every place of a vector group and on the body's row.
     // One dense sequence also makes file switches and the prologue marker coincide with duplicate addresses.
@@ -356,6 +373,13 @@ static bool debug_test_units(void)
         DebugPlan plan;
         valid &= debug_write(&unit, &a, true) == DEBUG_OK && debug_prepare(&unit, b.bases, &plan, false) == DEBUG_OK && debug_emit(&plan, &b) == DEBUG_OK;
         valid &= memcmp(a_addresses, b_addresses, sizeof(a_addresses)) == 0 && memcmp(a.fields, b.fields, sizeof(a.fields)) == 0;
+        digest = debug_test_digest(digest, b_addresses, sizeof(b_addresses));
+        digest = debug_test_digest(digest, b.fields, sizeof(b.fields));
+        for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            digest = debug_test_digest(digest, &b.sections[section].size, sizeof(b.sections[section].size));
+            digest = debug_test_digest(digest, b.sections[section].bytes, b.sections[section].size);
+        }
         for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
             valid &= a.sections[section].size == b.sections[section].size && memcmp(a.sections[section].bytes, b.sections[section].bytes, a.sections[section].size) == 0;
@@ -385,6 +409,11 @@ static bool debug_test_units(void)
         const uint64_t moved[] = { 0x701000, 0x804000, 0x200000000ull };
         valid &= debug_finalize(&unit, &a, moved) == DEBUG_OK && debug_test_decode(&unit, &a, moved);
         valid &= memcmp(a.sections[DEBUG_SECTION_INFO].bytes, b.sections[DEBUG_SECTION_INFO].bytes, a.sections[DEBUG_SECTION_INFO].size) == 0;
+    }
+    if (valid && digest != BUSTER_DEBUG_TEST_UNITS_DIGEST)
+    {
+        printf("  debug units: digest %016llx, frozen %016llx\n", (unsigned long long)digest, (unsigned long long)BUSTER_DEBUG_TEST_UNITS_DIGEST);
+        valid = false;
     }
     DebugOutput output = debug_test_output(b_bytes, b_addresses, 3);
     if (valid)
